@@ -3,17 +3,18 @@
 import type { ActorRef, Issue, IssueActivity, IssueColumn, IssueStage } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
-import { and, asc, eq, inArray, max, min, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lt, max, ne, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { AppDeps } from "./context";
 import { notFound } from "./http";
 import { notify } from "./notifications";
 import { reindex } from "./search-index";
 
-const { issues, boardColumns, issueTimeline, debates, messages, channels } = schema;
+const { issues, boardColumns, issueTimeline, debates, messages, channels, members, agents, files } = schema;
 export type IssueRow = typeof issues.$inferSelect;
 type ColumnRow = typeof boardColumns.$inferSelect;
 type TimelineValues = typeof issueTimeline.$inferInsert;
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
 export const STAGES = [
   "todo",
@@ -240,9 +241,183 @@ interface NewIssue {
 }
 
 /**
- * Creates the issue with the workspace's next number, on top of its column. The number and the position are
- * read and written under the workspace's lock (one transaction), so issues created at the same time get
- * numbers one after another, without a repeat or a hole; a creation that fails takes no number.
+ * The board's lock of a workspace: every creation (the number and the position) and every change of where an issue
+ * sits (its column or its position) takes it first, before any row lock, so they happen one after another and the
+ * lock order is always the same.
+ */
+const lockBoard = (tx: Tx, workspaceId: string) =>
+  tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`issue-board:${workspaceId}`}))`);
+
+/** What an issue points to by id: each one has to be of the issue's workspace. */
+interface Links {
+  columnId?: string;
+  channelId?: string | null;
+  parentId?: string | null;
+  assignee?: ActorRef | null;
+  source?: Issue["source"];
+  fileIds?: string[];
+}
+
+/**
+ * Checks, in the transaction that writes, that every id the issue points to is of its workspace: the column, the
+ * channel, the parent issue, the assignee (a member, or an agent that isn't archived), what it came from and its
+ * files. One that isn't answers "not found" for its kind, the same as an id that doesn't exist anywhere.
+ */
+async function checkLinks(tx: Tx, workspaceId: string, links: Links): Promise<void> {
+  const one = async (found: Promise<unknown[]>, what: string) => {
+    if ((await found).length === 0) throw notFound(`${what} not found`);
+  };
+  if (links.columnId !== undefined)
+    await one(
+      tx
+        .select({ id: boardColumns.id })
+        .from(boardColumns)
+        .where(and(eq(boardColumns.id, links.columnId), eq(boardColumns.workspaceId, workspaceId))),
+      "Column",
+    );
+  if (links.channelId)
+    await one(
+      tx
+        .select({ id: channels.id })
+        .from(channels)
+        .where(and(eq(channels.id, links.channelId), eq(channels.workspaceId, workspaceId))),
+      "Channel",
+    );
+  if (links.parentId)
+    await one(
+      tx
+        .select({ id: issues.id })
+        .from(issues)
+        .where(and(eq(issues.id, links.parentId), eq(issues.workspaceId, workspaceId))),
+      "Issue",
+    );
+  const a = links.assignee;
+  if (a?.type === "person")
+    await one(
+      tx
+        .select({ id: members.userId })
+        .from(members)
+        .where(and(eq(members.workspaceId, workspaceId), eq(members.userId, a.id))),
+      "Member",
+    );
+  if (a?.type === "agent")
+    await one(
+      tx
+        .select({ id: agents.id })
+        .from(agents)
+        .where(and(eq(agents.id, a.id), eq(agents.workspaceId, workspaceId), isNull(agents.archivedAt))),
+      "Agent",
+    );
+  const src = links.source;
+  if (src?.id && src.kind === "agent")
+    await one(
+      tx
+        .select({ id: agents.id })
+        .from(agents)
+        .where(and(eq(agents.id, src.id), eq(agents.workspaceId, workspaceId))),
+      "Agent",
+    );
+  if (src?.id && src.kind === "debate")
+    await one(
+      tx
+        .select({ id: debates.id })
+        .from(debates)
+        .where(and(eq(debates.id, src.id), eq(debates.workspaceId, workspaceId))),
+      "Debate",
+    );
+  if (src?.id && src.kind === "message")
+    await one(
+      tx
+        .select({ id: messages.id })
+        .from(messages)
+        .where(and(eq(messages.id, src.id), eq(messages.workspaceId, workspaceId))),
+      "Message",
+    );
+  const wanted = [...new Set(links.fileIds ?? [])];
+  if (wanted.length > 0) {
+    const found = await tx
+      .select({ id: files.id })
+      .from(files)
+      .where(and(inArray(files.id, wanted), eq(files.workspaceId, workspaceId), isNull(files.deletedAt)));
+    if (found.length !== wanted.length) throw notFound("File not found");
+  }
+}
+
+/** Where in a column: right under another issue of it (`after`, null = on top) or at a position asked for. */
+type Spot = { after: string | null } | { position: number };
+
+/**
+ * Where an issue lands in a column, under the board's lock. Without a spot it goes on top. With `after` it goes
+ * right under that issue; with a position, right before the first other card at or past it. Only the two cards
+ * around the spot are read. When the gap between them is used up (the position would equal a neighbor's: the
+ * halves ran out of precision), the column is renumbered 0, 1, 2... in its order with the issue in its slot, in one
+ * statement. Every creation and move goes through here under the same lock, so positions in a column stay unique.
+ */
+async function placeIn(tx: Tx, columnId: string, issueId: string | null, spot?: Spot): Promise<number> {
+  const inColumn = and(eq(issues.columnId, columnId), issueId ? ne(issues.id, issueId) : undefined);
+  const card = { id: issues.id, position: issues.boardPosition };
+  const first = (where: ReturnType<typeof and>) =>
+    tx
+      .select(card)
+      .from(issues)
+      .where(where)
+      .orderBy(asc(issues.boardPosition), desc(issues.number))
+      .limit(1);
+  let lo: { id: string; position: number } | undefined;
+  let hi: { id: string; position: number } | undefined;
+  let asked: number | undefined;
+  if (spot && "position" in spot && Number.isFinite(spot.position)) {
+    asked = spot.position;
+    [hi] = await first(and(inColumn, gte(issues.boardPosition, asked)));
+    [lo] = await tx
+      .select(card)
+      .from(issues)
+      .where(and(inColumn, lt(issues.boardPosition, asked)))
+      .orderBy(desc(issues.boardPosition), asc(issues.number))
+      .limit(1);
+  } else if (spot && "after" in spot && spot.after !== null) {
+    [lo] = await tx
+      .select(card)
+      .from(issues)
+      .where(and(inColumn, eq(issues.id, spot.after)));
+    if (!lo) throw notFound("Issue not found");
+    [hi] = await first(and(inColumn, sql`${issues.boardPosition} > ${lo.position}`));
+  } else {
+    [hi] = await first(inColumn);
+  }
+  const between = (p: number) => (!lo || p > lo.position) && (!hi || p < hi.position);
+  const candidate =
+    asked !== undefined && between(asked)
+      ? asked
+      : lo && hi
+        ? lo.position + (hi.position - lo.position) / 2
+        : lo
+          ? lo.position + 1
+          : hi
+            ? hi.position - 1
+            : 0;
+  if (between(candidate)) return candidate;
+  const others = await tx
+    .select(card)
+    .from(issues)
+    .where(inColumn)
+    .orderBy(asc(issues.boardPosition), desc(issues.number));
+  const at = hi ? others.findIndex((o) => o.id === hi.id) : others.length;
+  const renumbered = others.flatMap((o, i) => {
+    const next = i < at ? i : i + 1;
+    return o.position === next ? [] : [sql`(${o.id}, ${next}::double precision)`];
+  });
+  if (renumbered.length > 0)
+    await tx.execute(
+      sql`update ${issues} set "board_position" = v.p from (values ${sql.join(renumbered, sql`, `)}) as v(id, p) where ${issues.id} = v.id`,
+    );
+  return at;
+}
+
+/**
+ * Creates the issue with the workspace's next number, on top of its column. The number and the position are read
+ * and written under the board's lock (one transaction), so issues created at the same time get numbers one after
+ * another, without a repeat or a hole, and positions that don't repeat; a creation that fails takes no number.
  */
 export async function createIssue(deps: AppDeps, input: NewIssue): Promise<IssueRow> {
   const { db } = deps;
@@ -253,15 +428,19 @@ export async function createIssue(deps: AppDeps, input: NewIssue): Promise<Issue
   if (!column) throw notFound("Column not found");
   const at = deps.now();
   const row = await db.transaction(async (tx) => {
-    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`issue-number:${input.workspaceId}`}))`);
+    await lockBoard(tx, input.workspaceId);
     const [top] = await tx
       .select({ n: max(issues.number) })
       .from(issues)
       .where(eq(issues.workspaceId, input.workspaceId));
-    const [first] = await tx
-      .select({ p: min(issues.boardPosition) })
-      .from(issues)
-      .where(eq(issues.columnId, column.id));
+    await checkLinks(tx, input.workspaceId, {
+      columnId: column.id,
+      channelId: input.channelId,
+      parentId: input.parentId,
+      assignee: input.assignee,
+      source: input.source,
+    });
+    const position = await placeIn(tx, column.id, null);
     const [inserted] = await tx
       .insert(issues)
       .values({
@@ -272,7 +451,7 @@ export async function createIssue(deps: AppDeps, input: NewIssue): Promise<Issue
         description: input.description ?? "",
         criteria: (input.criteria ?? []).map((text) => ({ id: newId("crit"), text, done: false })),
         columnId: column.id,
-        boardPosition: (first?.p ?? 1) - 1,
+        boardPosition: position,
         priority: input.priority ?? "none",
         assignee: input.assignee ?? null,
         createdBy: input.author,
@@ -357,7 +536,10 @@ export interface IssueChange {
   title?: string;
   description?: string;
   columnId?: string;
+  /** A position asked for in the column (ties go before the card already there). */
   boardPosition?: number;
+  /** Right under this issue of the column (null: on top); the server works out the position. */
+  after?: string | null;
   assignee?: ActorRef | null;
   priority?: IssueRow["priority"];
   dueDate?: string | null;
@@ -374,7 +556,9 @@ const sameActor = (a: ActorRef | null | undefined, b: ActorRef | null | undefine
  * read again under its lock in the same transaction as the write and the events, so two changes at the same
  * time are compared each with the issue as the other one left it (a move from "todo" then from "in progress",
  * never two moves from "todo"). `row` only names the issue. The lock is FOR NO KEY UPDATE: a comment going into
- * the timeline at the same time (a foreign key to the issue) doesn't wait for it.
+ * the timeline at the same time (a foreign key to the issue) doesn't wait for it. A change of column or position
+ * takes the board's lock before it and places the issue in its column there (`placeIn`); every id the change
+ * points to is checked against the workspace in the same transaction.
  */
 export async function updateIssue(
   deps: AppDeps,
@@ -384,19 +568,35 @@ export async function updateIssue(
 ): Promise<IssueRow> {
   const { db } = deps;
   const cols = await columnsOf(db, row.workspaceId);
-  const target = change.columnId ?? row.columnId;
-  if (!cols.some((c) => c.id === target)) throw notFound("Column not found");
   const at = deps.now();
+  const { after, ...fields } = change;
+  const places = change.columnId !== undefined || change.boardPosition !== undefined || after !== undefined;
   const { before, updated, progress } = await db.transaction(async (tx) => {
+    if (places) await lockBoard(tx, row.workspaceId);
     const [current] = await tx
       .select()
       .from(issues)
       .where(and(eq(issues.id, row.id), eq(issues.workspaceId, row.workspaceId)))
       .for("no key update");
     if (!current) throw notFound("Issue not found");
+    await checkLinks(tx, current.workspaceId, {
+      columnId: change.columnId,
+      assignee: change.assignee,
+      fileIds: change.fileIds,
+    });
+    const columnId = change.columnId ?? current.columnId;
+    const spot: Spot | undefined =
+      after !== undefined
+        ? { after }
+        : change.boardPosition !== undefined
+          ? { position: change.boardPosition }
+          : undefined;
+    const staysPut = columnId === current.columnId && spot === undefined;
+    const boardPosition =
+      places && !staysPut ? await placeIn(tx, columnId, current.id, spot) : current.boardPosition;
     const [next] = await tx
       .update(issues)
-      .set({ ...change, updatedAt: at })
+      .set({ ...fields, columnId, boardPosition, updatedAt: at })
       .where(eq(issues.id, current.id))
       .returning();
     if (!next) throw notFound("Issue not found");

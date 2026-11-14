@@ -49,6 +49,23 @@ async function freshWorkspace(name: string) {
   return { owner, ...(await seedWorkspace(server, owner, name)) };
 }
 
+async function newAgent(ws: string, handle: string, archived = false): Promise<string> {
+  const id = newId("agt");
+  await server.deps.db.insert(schema.agents).values({
+    id,
+    workspaceId: ws,
+    name: handle,
+    handle,
+    role: "support",
+    instructions: "",
+    model: "claude-haiku-5-5",
+    ownerUserId: ana.user.id,
+    appearance: { color: "blue", eyes: "dot", adornment: "none" },
+    archivedAt: archived ? new Date() : null,
+  });
+  return id;
+}
+
 const timeline = (issueId: string) =>
   server.deps.db
     .select()
@@ -195,7 +212,7 @@ describe("creating an issue", () => {
     const agents = await createIssue(server.deps, {
       workspaceId,
       title: "The agent's",
-      assignee: { type: "agent", id: "agt_x" },
+      assignee: { type: "agent", id: await newAgent(workspaceId, "rex") },
       author: person(ana),
     });
     expect(await noticesOf(ana.user.id, `issue_ownership:${mine.id}`)).toEqual([]);
@@ -462,5 +479,206 @@ describe("the end of an agent's work", () => {
     await set(working.id, { state: "working", reason: null, runId: null, messageId: m1 });
     await settleIssueWork(server.deps.db, ws, [m1], { state: "idle", reason: null, runId: "run_2" });
     expect((await work(working.id))?.state).toBe("working");
+  });
+});
+
+/** The error's status, code and message (the message names the kind that wasn't found). */
+const notFoundOf = async (p: Promise<unknown>) => {
+  try {
+    await p;
+  } catch (err) {
+    if (err instanceof HttpError) return { status: err.status, code: err.code, message: err.message };
+    throw err;
+  }
+  throw new Error("expected an HttpError");
+};
+
+describe("what an issue points to", () => {
+  test("creating with a channel, parent, column, assignee or source of another workspace is not found, and takes no number", async () => {
+    const { owner: other, workspaceId: away, general: awayGeneral } = await freshWorkspace("Away2");
+    const foreignIssue = await createIssue(server.deps, {
+      workspaceId: away,
+      title: "Theirs",
+      author: person(other),
+    });
+    const [foreignColumn] = await columnsOf(server.deps.db, away);
+    const foreignAgent = await newAgent(away, "theirs");
+    const archived = await newAgent(workspaceId, "retired", true);
+    const foreignDebate = newId("deb");
+    await server.deps.db
+      .insert(debates)
+      .values({ id: foreignDebate, workspaceId: away, title: "Theirs", goal: "", createdBy: person(other) });
+    const foreignMessage = newId("msg");
+    await server.deps.db.insert(messages).values({
+      id: foreignMessage,
+      workspaceId: away,
+      channelId: awayGeneral,
+      authorKind: "person",
+      authorId: other.user.id,
+      body: "hi",
+    });
+    const base = { workspaceId, title: "Linked", author: person(ana) };
+    const before = await createIssue(server.deps, { ...base, title: "Before" });
+    const cases: [Parameters<typeof createIssue>[1], string][] = [
+      [{ ...base, channelId: awayGeneral }, "Channel not found"],
+      [{ ...base, parentId: foreignIssue.id }, "Issue not found"],
+      [{ ...base, columnId: foreignColumn?.id }, "Column not found"],
+      [{ ...base, assignee: person(other) }, "Member not found"],
+      [{ ...base, assignee: { type: "agent", id: foreignAgent } }, "Agent not found"],
+      [{ ...base, assignee: { type: "agent", id: archived } }, "Agent not found"],
+      [{ ...base, assignee: { type: "agent", id: "agt_missing" } }, "Agent not found"],
+      [{ ...base, source: { kind: "debate", id: foreignDebate } }, "Debate not found"],
+      [{ ...base, source: { kind: "message", id: foreignMessage } }, "Message not found"],
+      [{ ...base, source: { kind: "agent", id: foreignAgent } }, "Agent not found"],
+    ];
+    for (const [input, message] of cases)
+      expect(await notFoundOf(createIssue(server.deps, input))).toEqual({
+        status: 404,
+        code: "not_found",
+        message,
+      });
+    // Nothing was written: the next issue takes the number right after the one before the attempts.
+    const after = await createIssue(server.deps, { ...base, title: "After" });
+    expect(after.number).toBe(before.number + 1);
+    // The same links inside the workspace are taken.
+    const own = await createIssue(server.deps, {
+      ...base,
+      channelId: general,
+      parentId: before.id,
+      assignee: { type: "agent", id: await newAgent(workspaceId, "own") },
+      source: { kind: "message", id: await ownMessage() },
+    });
+    expect([own.channelId, own.parentId]).toEqual([general, before.id]);
+  });
+
+  test("changing to a column, assignee or file of another workspace is not found and changes nothing", async () => {
+    const { owner: other, workspaceId: away } = await freshWorkspace("Away3");
+    const [foreignColumn] = await columnsOf(server.deps.db, away);
+    const file = async (ws: string, deleted = false) => {
+      const id = newId("file");
+      await server.deps.db.insert(schema.files).values({
+        id,
+        workspaceId: ws,
+        title: "Notes",
+        kind: "document",
+        createdBy: person(ana),
+        updatedBy: person(ana),
+        deletedAt: deleted ? new Date() : null,
+      });
+      return id;
+    };
+    const row = await createIssue(server.deps, { workspaceId, title: "Edited", author: person(ana) });
+    const cases: [Parameters<typeof updateIssue>[2], string][] = [
+      [{ columnId: foreignColumn?.id }, "Column not found"],
+      [{ assignee: person(other) }, "Member not found"],
+      [{ assignee: { type: "agent", id: await newAgent(away, "far") } }, "Agent not found"],
+      [{ assignee: { type: "agent", id: await newAgent(workspaceId, "gone", true) } }, "Agent not found"],
+      [{ fileIds: [await file(workspaceId), await file(away)] }, "File not found"],
+      [{ fileIds: [await file(workspaceId, true)] }, "File not found"],
+    ];
+    for (const [change, message] of cases)
+      expect(
+        await notFoundOf(updateIssue(server.deps, row, { title: "Changed", ...change }, person(ana))),
+      ).toEqual({
+        status: 404,
+        code: "not_found",
+        message,
+      });
+    const same = await issueById(server.deps.db, workspaceId, row.id);
+    expect([same.title, same.columnId, same.assignee, same.fileIds]).toEqual([
+      "Edited",
+      row.columnId,
+      null,
+      [],
+    ]);
+    expect((await timeline(row.id)).length).toBe(1);
+    const mine = await file(workspaceId);
+    expect(
+      (await updateIssue(server.deps, row, { fileIds: [mine], assignee: person(beto) }, person(ana))).fileIds,
+    ).toEqual([mine]);
+  });
+});
+
+async function ownMessage(): Promise<string> {
+  const id = newId("msg");
+  await server.deps.db.insert(messages).values({
+    id,
+    workspaceId,
+    channelId: general,
+    authorKind: "person",
+    authorId: ana.user.id,
+    body: "make it an issue",
+  });
+  return id;
+}
+
+describe("positions on the board", () => {
+  /** The column's issues from top to bottom, and whether their positions are all different. */
+  const columnOf = async (columnId: string) => {
+    const rows = await server.deps.db
+      .select({ title: issues.title, position: issues.boardPosition })
+      .from(issues)
+      .where(eq(issues.columnId, columnId))
+      .orderBy(asc(issues.boardPosition));
+    return {
+      titles: rows.map((r) => r.title),
+      unique: new Set(rows.map((r) => r.position)).size === rows.length,
+    };
+  };
+
+  test("a move into a full column goes on top, at the end or between two, and no position repeats", async () => {
+    const { owner, workspaceId: ws } = await freshWorkspace("Moves");
+    const cols = await columnsOf(server.deps.db, ws);
+    const done = cols.find((c) => c.stage === "done")?.id ?? "";
+    const by = person(owner);
+    const make = (title: string, columnId?: string) =>
+      createIssue(server.deps, { workspaceId: ws, title, columnId, author: by });
+    // In "done", top to bottom: C, B, A (each new one goes on top).
+    const a = await make("A", done);
+    const b = await make("B", done);
+    await make("C", done);
+    const top = await make("Top");
+    await updateIssue(server.deps, top, { columnId: done }, by);
+    expect(await columnOf(done)).toEqual({ titles: ["Top", "C", "B", "A"], unique: true });
+    const end = await make("End");
+    await updateIssue(server.deps, end, { columnId: done, boardPosition: a.boardPosition + 1 }, by);
+    expect(await columnOf(done)).toEqual({ titles: ["Top", "C", "B", "A", "End"], unique: true });
+    const mid = await make("Mid");
+    await updateIssue(
+      server.deps,
+      mid,
+      { columnId: done, boardPosition: (a.boardPosition + b.boardPosition) / 2 },
+      by,
+    );
+    expect(await columnOf(done)).toEqual({ titles: ["Top", "C", "B", "Mid", "A", "End"], unique: true });
+    // Asking for a neighbor's exact position puts it right before that neighbor.
+    const same = await make("Same");
+    await updateIssue(server.deps, same, { columnId: done, boardPosition: b.boardPosition }, by);
+    expect(await columnOf(done)).toEqual({
+      titles: ["Top", "C", "Same", "B", "Mid", "A", "End"],
+      unique: true,
+    });
+    // Moving inside the column (no column change) follows the same rule.
+    await updateIssue(server.deps, top, { boardPosition: a.boardPosition + 0.5 }, by);
+    expect((await columnOf(done)).titles).toEqual(["C", "Same", "B", "Mid", "A", "Top", "End"]);
+    // Or by the card it goes under: between two, at the end, back on top; an issue that isn't in the column isn't found.
+    const under = await make("Under");
+    await updateIssue(server.deps, under, { columnId: done, after: b.id }, by);
+    const last = await make("Last");
+    const end2 = await issueById(server.deps.db, ws, end.id);
+    await updateIssue(server.deps, last, { columnId: done, after: end2.id }, by);
+    await updateIssue(server.deps, top, { after: null }, by);
+    expect(await columnOf(done)).toEqual({
+      titles: ["Top", "C", "Same", "B", "Under", "Mid", "A", "End", "Last"],
+      unique: true,
+    });
+    const stray = await make("Stray");
+    expect(
+      await notFoundOf(updateIssue(server.deps, stray, { columnId: done, after: stray.id }, by)),
+    ).toEqual({
+      status: 404,
+      code: "not_found",
+      message: "Issue not found",
+    });
   });
 });

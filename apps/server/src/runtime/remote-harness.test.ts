@@ -3,6 +3,7 @@
 // answers through the hub as the runner socket does). The transcript, the turn's frame, the streamed text, the
 // result checked at the edge, the runner's errors and the notice are what the runtime will see.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { getEventListeners } from "node:events";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import type { ModelEvent, ModelMessage, ModelRequest } from "@vanr/engine/models/types";
@@ -83,7 +84,10 @@ interface Request {
   args: Record<string, unknown>;
 }
 
-/** A paired runner (its row) connected to the hub; `next` resolves with the next request the server sends. */
+/**
+ * A paired runner (its row) connected to the hub; `next` resolves with the next request the server sends and
+ * `nextCancel` with the next cancel, in the order they arrived.
+ */
 async function pairedRunner() {
   const [row] = await server.deps.db
     .insert(schema.runners)
@@ -97,15 +101,19 @@ async function pairedRunner() {
     })
     .returning();
   if (!row) throw new Error("no runner");
-  const waiting: ((r: Request) => void)[] = [];
-  const received: Request[] = [];
+  const queues = new Map<string, { waiting: ((r: Request) => void)[]; received: Request[] }>();
+  const queue = (type: string) => {
+    const q = queues.get(type) ?? { waiting: [], received: [] };
+    queues.set(type, q);
+    return q;
+  };
   const client = new WebSocket(`ws://localhost:${ws.port}/?r=${row.id}`);
   client.addEventListener("message", (ev) => {
     const frame: Request = JSON.parse(String(ev.data));
-    if (frame.type !== "request") return;
-    const w = waiting.shift();
+    const q = queue(frame.type);
+    const w = q.waiting.shift();
     if (w) w(frame);
-    else received.push(frame);
+    else q.received.push(frame);
   });
   const registered = new Promise<void>((resolve) => {
     const check = () => (sockets.get(row.id)?.readyState === 1 ? resolve() : setTimeout(check, 1));
@@ -114,15 +122,18 @@ async function pairedRunner() {
   await registered;
   const socket = sockets.get(row.id);
   if (!socket) throw new Error("no socket");
+  const nextOf = (type: string) =>
+    new Promise<Request>((resolve) => {
+      const q = queue(type);
+      const r = q.received.shift();
+      if (r) resolve(r);
+      else q.waiting.push(resolve);
+    });
   return {
     row,
     socket,
-    next: () =>
-      new Promise<Request>((resolve) => {
-        const r = received.shift();
-        if (r) resolve(r);
-        else waiting.push(resolve);
-      }),
+    next: () => nextOf("request"),
+    nextCancel: () => nextOf("cancel"),
     close: () => client.close(),
   };
 }
@@ -389,6 +400,86 @@ describe("a turn on the runner", () => {
     );
     const { error } = await drain(provider.stream(request([say("user", "Hi")])));
     expect(error).toMatchObject({ code: "offline", runnerId: runner.row.id });
+  });
+});
+
+describe("a canceled turn", () => {
+  const provider = (runner: Awaited<ReturnType<typeof pairedRunner>>, runId: string) =>
+    remoteProvider(
+      { ...server.deps, runners: hub },
+      {
+        runId,
+        agent: { id: agentId, handle: "lia" },
+        harness: harnessOf(runner.row),
+        invoke: async () => ({ content: "", isError: false }),
+      },
+    );
+  const answer = (runner: Awaited<ReturnType<typeof pairedRunner>>, id: string, text: string) =>
+    hub.onResult(runner.socket, {
+      id,
+      ok: true,
+      data: { text, usage: { inputTokens: 1, outputTokens: 1, cachedTokens: 0 }, model: null },
+    });
+
+  test("a signal aborted before the turn goes out sends nothing and ends as canceled", async () => {
+    const runner = await pairedRunner();
+    const abort = new AbortController();
+    abort.abort();
+    const { events, error } = await drain(
+      provider(runner, "run_c1").stream(request([say("user", "Hi")], abort.signal)),
+    );
+    expect(events).toEqual([]);
+    expect(error).toBeInstanceOf(RunnerCallError);
+    expect(error).toMatchObject({ code: "canceled" });
+    // The next request the runner sees is a later turn's: the aborted one never went out.
+    const later = drain(provider(runner, "run_c2").stream(request([say("user", "Again")])));
+    const turn = await runner.next();
+    expect(turn.args.runId).toBe("run_c2");
+    answer(runner, turn.id, "ok");
+    expect((await later).error).toBeNull();
+    expect(getEventListeners(abort.signal, "abort").length).toBe(0);
+    runner.close();
+  });
+
+  test("an abort while the runner works tells it to stop, ends at once and drops the late answer", async () => {
+    const runner = await pairedRunner();
+    const abort = new AbortController();
+    const done = drain(provider(runner, "run_c3").stream(request([say("user", "Hi")], abort.signal)));
+    const turn = await runner.next();
+    hub.onHarnessEvent(runner.socket, { id: turn.id, event: { kind: "text", text: "half" } });
+    abort.abort();
+    const cancel = await runner.nextCancel();
+    expect(cancel.id).toBe(turn.id);
+    const { events, error } = await done;
+    expect(error).toMatchObject({ code: "canceled" });
+    expect(events.some((e) => e.type === "turn")).toBe(false);
+    // The answer that comes after the abort finds no request: nothing more happens and no listener is left.
+    answer(runner, turn.id, "accepted after abort");
+    expect(getEventListeners(abort.signal, "abort").length).toBe(0);
+    runner.close();
+  });
+
+  test("an abort in the same instant as the answer, either one first, ends as canceled without the turn", async () => {
+    const runner = await pairedRunner();
+    for (const order of ["abort first", "answer first"] as const) {
+      const abort = new AbortController();
+      const done = drain(
+        provider(runner, `run_${order[1]}`).stream(request([say("user", "Hi")], abort.signal)),
+      );
+      const turn = await runner.next();
+      if (order === "abort first") {
+        abort.abort();
+        answer(runner, turn.id, "too late");
+      } else {
+        answer(runner, turn.id, "just in time");
+        abort.abort();
+      }
+      const { events, error } = await done;
+      expect(error).toMatchObject({ code: "canceled" });
+      expect(events).toEqual([]);
+      expect(getEventListeners(abort.signal, "abort").length).toBe(0);
+    }
+    runner.close();
   });
 });
 

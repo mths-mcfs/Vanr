@@ -129,6 +129,32 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("issues and consolidations at onc
     });
   }, 60_000);
 
+  test("forced: two issues moved to the top of one column at once wait on the board's lock and get different positions", async () => {
+    await withServer("iss_place", async (server, admin, { workspaceId, userId }) => {
+      const cols = await columnsOf(server.deps.db, workspaceId);
+      const done = cols.find((c) => c.stage === "done")?.id ?? "";
+      const by = { type: "person" as const, id: userId };
+      await createIssue(server.deps, { workspaceId, title: "Already there", columnId: done, author: by });
+      const p = await createIssue(server.deps, { workspaceId, title: "P", author: by });
+      const q = await createIssue(server.deps, { workspaceId, title: "Q", author: by });
+      // A holds right after writing its issue's new position. With the lock B waits for A and goes above it;
+      // without it, B reads the column without A's card and takes the same position.
+      const run = await forcedPair(admin, "issue-place", "update", (side, hooks) =>
+        updateIssue(withDb(server.deps, hooks), side === "A" ? p : q, { columnId: done }, by),
+      );
+      expect(run.aPids[0]).not.toBe(run.bPids[0]);
+      const rows = await server.deps.db
+        .select({ title: schema.issues.title, position: schema.issues.boardPosition })
+        .from(schema.issues)
+        .where(eq(schema.issues.columnId, done))
+        .orderBy(asc(schema.issues.boardPosition));
+      const got = { distinct: new Set(rows.map((r) => r.position)).size, order: rows.map((r) => r.title) };
+      const want = { distinct: 3, order: ["Q", "P", "Already there"] };
+      outcome("issue-place", got, want);
+      expect(got).toEqual(want);
+    });
+  }, 60_000);
+
   test("forced: the second apply of one consolidation waits on its lock and finds it applied", async () => {
     await withServer("mcn_apply", async (server, admin, { workspaceId, userId }) => {
       const { db } = server.deps;

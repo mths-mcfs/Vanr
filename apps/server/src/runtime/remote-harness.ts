@@ -97,7 +97,9 @@ const turnResult = z.object({
 /**
  * The provider that thinks on the runner. `invoke` runs the agent's tools on the server. A turn goes out once:
  * it isn't idempotent (the CLI may already have called tools), so a failure or the deadline ends the turn with
- * the error instead of asking again.
+ * the error instead of asking again. A turn whose signal is aborted ends as `canceled` (the runner's own error):
+ * before it goes out nothing is sent; while it runs the runner is told to stop and what it answers later is
+ * dropped, even an answer that lands in the same instant as the abort.
  */
 export function remoteProvider(
   deps: AppDeps,
@@ -125,6 +127,8 @@ export function remoteProvider(
         wake?.();
       };
       // The harness only reaches its own CLI's domain; the mode goes along because the runner has a single proxy.
+      const canceled = () => new RunnerCallError("canceled", "Canceled before the turn ended");
+      if (req.signal.aborted) throw canceled();
       const network = await networkPolicyFor(deps, harness.runner.workspaceId, input.agent.id);
       void deps.runners
         .call<"harness.turn", unknown>(
@@ -171,6 +175,7 @@ export function remoteProvider(
       for (;;) {
         const next = queue.shift();
         if (next) {
+          if (req.signal.aborted) break;
           yield next;
           continue;
         }
@@ -180,6 +185,7 @@ export function remoteProvider(
         });
         wake = null;
       }
+      if (req.signal.aborted) throw canceled();
       if (end.failure) throw end.failure;
       const done = end.result;
       if (!done)
