@@ -71,8 +71,9 @@ export function s3Blobs(cfg: S3Settings): BlobStore {
 export async function testS3(
   cfg: S3Settings,
   probeId: string,
+  /** The store the probe goes through (the server passes its wrapper with deadlines; default: the raw one). */
+  store: BlobStore = s3Blobs(cfg),
 ): Promise<{ ok: boolean; steps: { step: S3Step; ok: boolean; error?: string }[] }> {
-  const store = s3Blobs(cfg);
   const key = `.${PRODUCT.slug}-probe-${probeId}`;
   const body = new TextEncoder().encode(`probe ${probeId}`);
   const steps: { step: S3Step; ok: boolean; error?: string }[] = [];
@@ -82,7 +83,16 @@ export async function testS3(
       steps.push({ step, ok: true });
       return true;
     } catch (err) {
-      steps.push({ step, ok: false, error: err instanceof Error ? err.message.slice(0, 300) : String(err) });
+      // A wrapped error keeps what the bucket answered in `reason`: that is what the person needs to see.
+      const shown =
+        typeof err === "object" && err !== null && "reason" in err && err.reason instanceof Error
+          ? err.reason
+          : err;
+      steps.push({
+        step,
+        ok: false,
+        error: shown instanceof Error ? shown.message.slice(0, 300) : String(shown),
+      });
       return false;
     }
   };

@@ -138,7 +138,13 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   const db = opened.db;
   const localBlobs = config.dataDir === "memory" ? memoryBlobs() : diskBlobs(join(config.dataDir, "blobs"));
   // Drive files go to the workspace's S3 when it configured one; everything else stays local.
-  const blobs = routedBlobs(localBlobs, () => ({ db, authSecret: effective.authSecret }));
+  // A bucket call that ends after its deadline is undone as background work (the stop waits for it).
+  const blobs = routedBlobs(localBlobs, () => ({
+    db,
+    authSecret: effective.authSecret,
+    track: (work, what) => deps.runtime.track(work, what),
+    now,
+  }));
   const now = opts.now ?? (() => new Date());
   // Closed sign-up still accepts the installation's first user and whoever has a pending invite. The first
   // user's place (signup-queue.ts) lets one sign-up section at a time become it; an invite doesn't need it.

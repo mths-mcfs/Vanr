@@ -5,7 +5,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { schema } from "@vanr/engine/db";
 import { eq } from "drizzle-orm";
 import { extractPending } from "../src/drive-extract";
-import { bucketDeadlines, saveStorage } from "../src/integrations/storage";
+import { BUCKET_CHECK_MS, bucketDeadlines, saveStorage, testStorage } from "../src/integrations/storage";
 import type { RunningServer } from "../src/server";
 import { type FakeS3, startFakeS3 } from "./fake-s3";
 import { makePng } from "./files";
@@ -112,7 +112,7 @@ describe("a bucket that is gone", () => {
 
 describe("deadlines and rejected connections", () => {
   test("a call that never ends counts as unavailable, in each operation", async () => {
-    Object.assign(bucketDeadlines, { callMs: 200, writeMs: 200, pieceMs: 200 });
+    Object.assign(bucketDeadlines, { callMs: 200, writeMs: 200, pieceMs: 200, lateMs: 200 });
     const { workspaceId, ana } = await team();
     const file = await uploaded(ana, workspaceId, "slow", "slow.txt");
     const cases: [string, (req: { method: string; list: boolean }) => boolean, () => Promise<Response>][] = [
@@ -255,5 +255,145 @@ describe("healthy downloads", () => {
     // The fake sees its response stream cancelled: the connection to the bucket was closed.
     await bucketSawClose;
     expect(served).toBeLessThanOrEqual(8);
+  });
+});
+
+/** A PUT the fake holds until the test releases it; the object only exists once released. */
+function holdPuts(on: (key: string) => boolean) {
+  const held: { key: string; release: () => void }[] = [];
+  s3.override = (req) =>
+    req.method === "PUT" && on(req.key)
+      ? new Promise<Response>((resolve) =>
+          held.push({
+            key: req.key,
+            release: () => {
+              s3.objects.set(req.key, { bytes: new TextEncoder().encode("late"), type: "text/plain" });
+              resolve(new Response(null, { status: 200, headers: { etag: '"x"' } }));
+            },
+          }),
+        )
+      : null;
+  return held;
+}
+const objectsOf = (prefix: string) => [...s3.objects.keys()].filter((k) => k.startsWith(`${prefix}/`));
+
+describe("a write that ends after its deadline", () => {
+  test("the upload answered 503 and left no row; when the late PUT lands, its object is deleted", async () => {
+    Object.assign(bucketDeadlines, { writeMs: 100 });
+    const { workspaceId, ana, prefix } = await team();
+    const held = holdPuts(() => true);
+    const form = new FormData();
+    form.set("file", new File(["late"], "late.txt"));
+    const res = await ana.browser.fetch(`${W(workspaceId)}/files/files`, { method: "POST", body: form });
+    expect([res.status, (await failure(res)).code]).toEqual([503, "storage.unavailable"]);
+    expect(held).toHaveLength(1);
+    s3.override = null;
+    for (const h of held) h.release();
+    // The undo is background work: settling it (what the server's stop waits for) is enough, no sleep.
+    await server.deps.runtime.settle();
+    expect(objectsOf(prefix)).toEqual([]);
+    const rows = await server.deps.db
+      .select()
+      .from(schema.files)
+      .where(eq(schema.files.workspaceId, workspaceId));
+    expect(rows).toEqual([]);
+  });
+
+  test("a late thumbnail is deleted too; the retry leaves only the file and its one thumbnail", async () => {
+    const { workspaceId, ana, prefix } = await team();
+    const img = await uploaded(ana, workspaceId, await makePng(200, 100), "photo.png");
+    Object.assign(bucketDeadlines, { writeMs: 100 });
+    const held = holdPuts((key) => key.includes(".thumb-"));
+    await extractPending(server.deps, { batch: 50 });
+    expect(await versionOf(img.id)).toMatchObject({ extractStatus: "working", extractAttempts: 0 });
+    s3.override = null;
+    for (const h of held) h.release();
+    await server.deps.runtime.settle();
+    expect(objectsOf(prefix).filter((k) => k.includes(".thumb-"))).toEqual([]);
+    skew = 2 * 60_000;
+    await extractPending(server.deps, { batch: 50 });
+    const v = await versionOf(img.id);
+    expect(v.extractStatus).toBe("ready");
+    expect(objectsOf(prefix).filter((k) => k.includes(img.id))).toHaveLength(2);
+    expect(objectsOf(prefix).some((k) => v.thumbKey !== null && k.endsWith(v.thumbKey))).toBe(true);
+  });
+
+  test("the connection test's write has the short deadline, and its late object is deleted", async () => {
+    Object.assign(bucketDeadlines, { callMs: 100 });
+    const { workspaceId } = await team();
+    const held = holdPuts((key) => key.includes("-probe-"));
+    const result = await testStorage(server.deps, workspaceId, destination(s3, "probe"));
+    expect(result.ok).toBe(false);
+    expect(result.steps).toEqual([expect.objectContaining({ step: "write", ok: false })]);
+    expect(result.steps[0]?.error).toContain("took longer than 100 ms");
+    s3.override = null;
+    for (const h of held) h.release();
+    await server.deps.runtime.settle();
+    expect(objectsOf("probe")).toEqual([]);
+  });
+
+  test("a write that never lands is given up after the late wait, so the server's stop doesn't hang", async () => {
+    Object.assign(bucketDeadlines, { writeMs: 100, lateMs: 200 });
+    const { workspaceId, ana } = await team();
+    s3.override = (req) => (req.method === "PUT" ? never() : null);
+    const form = new FormData();
+    form.set("file", new File(["never"], "never.txt"));
+    expect(
+      (await ana.browser.fetch(`${W(workspaceId)}/files/files`, { method: "POST", body: form })).status,
+    ).toBe(503);
+    await server.deps.runtime.settle();
+  });
+});
+
+describe("the bucket check behind an object's 404", () => {
+  test("keys that may read but not list: a missing object is 404, with one listing for many reads", async () => {
+    const { workspaceId, ana, prefix } = await team();
+    const file = await uploaded(ana, workspaceId, "gone soon", "gone.txt");
+    let lists = 0;
+    s3.override = (req) => {
+      if (!req.list) return null;
+      lists++;
+      return new Response("<Error><Code>AccessDenied</Code></Error>", { status: 403 });
+    };
+    for (const key of objectsOf(prefix)) s3.objects.delete(key);
+    const statuses: number[] = [];
+    for (let i = 0; i < 10; i++) {
+      const res = await ana.browser.fetch(`${W(workspaceId)}/files/${file.id}/blob`);
+      statuses.push(res.status);
+      await res.arrayBuffer();
+    }
+    expect(statuses).toEqual(Array(10).fill(404));
+    expect(lists).toBe(1);
+    // Past the kept time (injected clock) the bucket is asked again.
+    skew = BUCKET_CHECK_MS + 1000;
+    await (await ana.browser.fetch(`${W(workspaceId)}/files/${file.id}/blob`)).arrayBuffer();
+    expect(lists).toBe(2);
+  });
+
+  test("keys the bucket doesn't recognize, and a missing bucket, are unavailable; a bucket that comes back is seen within the kept time", async () => {
+    const { workspaceId, ana, prefix } = await team();
+    const file = await uploaded(ana, workspaceId, "here", "here.txt");
+    const blob = () => ana.browser.fetch(`${W(workspaceId)}/files/${file.id}/blob`);
+    for (const code of ["InvalidAccessKeyId", "SignatureDoesNotMatch", "NoSuchBucket"]) {
+      skew += BUCKET_CHECK_MS + 1000;
+      s3.override = (req) =>
+        req.method === "HEAD" || req.list
+          ? new Response(`<Error><Code>${code}</Code></Error>`, {
+              status: code === "NoSuchBucket" ? 404 : 403,
+            })
+          : null;
+      const res = await blob();
+      expect([code, res.status, (await failure(res)).code]).toEqual([code, 503, "storage.unavailable"]);
+    }
+    // The bucket is back: within the kept time the answer may still be the old one, never past it.
+    s3.override = null;
+    skew += BUCKET_CHECK_MS + 1000;
+    const back = await blob();
+    expect([back.status, await back.text()]).toEqual([200, "here"]);
+    // And a clock that went back doesn't keep an old answer either.
+    s3.override = (req) => (req.method === "HEAD" ? new Response(null, { status: 404 }) : null);
+    for (const key of objectsOf(prefix)) s3.objects.delete(key);
+    skew -= 10 * BUCKET_CHECK_MS;
+    expect((await blob()).status).toBe(404);
   });
 });
