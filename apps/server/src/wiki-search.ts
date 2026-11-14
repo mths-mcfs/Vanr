@@ -2,7 +2,7 @@
 // reindexes the page. The page belongs to the whole workspace, so the scope is `workspace` (per-page permission comes later).
 import type { ChunkInput } from "@vanr/engine/search";
 import { codeRanges } from "@vanr/engine/wiki/links";
-import type { WikiRow } from "./forward-types";
+import type { WikiRow } from "./wiki";
 
 const CHUNK = 1500;
 const MAX_CHUNKS = 400;

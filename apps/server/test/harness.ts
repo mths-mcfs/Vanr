@@ -4,9 +4,9 @@ import { loadConfig } from "../src/config";
 import { type BootSteps, type RunningServer, startServer } from "../src/server";
 import type { SignupQueueLimits } from "../src/signup-queue";
 
-// Later slices add here what they unlock: the real Postgres option (`postgres`, S2), the live wiki timings
-// (S3), the assignment engine and the model provider options (S5, S6), the typed API client (`apiFor`,
-// `apiError`, `memberOf`, `toolResults`, with the client package) and `holdNextIndexWrite` (search-index, S2).
+// Later slices add here what they unlock: the real Postgres option (`postgres`, S2), the assignment engine
+// and the model provider options (S5, S6) and the typed API client (`apiFor`, `apiError`, `memberOf`,
+// `toolResults`, with the client package).
 
 export interface TestServerOptions {
   /** Shorter limits for the closed sign-up queue. */
@@ -21,6 +21,9 @@ export interface TestServerOptions {
   realModels?: boolean;
   /** The inactivity limit of every request, in seconds (Bun's default is 10). */
   idleTimeoutSeconds?: number;
+  /** The live wiki: the quiet before the draft publishes itself and the autosave debounce. */
+  wikiIdlePublishMs?: number;
+  wikiDebounceMs?: number;
 }
 
 /**
@@ -50,7 +53,38 @@ export async function startTestServer(opts: TestServerOptions = {}): Promise<Run
     steps: opts.steps,
     signupQueue: opts.signupQueue,
     idleTimeoutSeconds: opts.idleTimeoutSeconds,
+    wikiIdlePublishMs: opts.wikiIdlePublishMs,
+    wikiDebounceMs: opts.wikiDebounceMs,
   });
+}
+
+/**
+ * Holds the next write to the search index until `release`: `begun` resolves once it started. It is the
+ * window of a slow save, to race it against another write (the trash, a person typing).
+ */
+export function holdNextIndexWrite(server: RunningServer): { begun: Promise<void>; release: () => void } {
+  const index = server.deps.search;
+  const withDb = index.withDb.bind(index);
+  let started!: () => void;
+  let release!: () => void;
+  const begun = new Promise<void>((r) => {
+    started = r;
+  });
+  const until = new Promise<void>((r) => {
+    release = r;
+  });
+  index.withDb = (db) => {
+    const inner = withDb(db);
+    const upsert = inner.upsert.bind(inner);
+    inner.upsert = async (source, chunks) => {
+      index.withDb = withDb;
+      started();
+      await until;
+      return upsert(source, chunks);
+    };
+    return inner;
+  };
+  return { begun, release };
 }
 
 /** Tests don't go out to the network: whoever needs GitHub passes a fake fetch. */

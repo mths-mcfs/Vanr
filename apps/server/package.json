@@ -6,6 +6,7 @@
   "license": "AGPL-3.0-only",
   "dependencies": {
     "@dbos-inc/dbos-sdk": "5.3.0",
+    "@hocuspocus/server": "4.7.1",
     "@milkdown/kit": "7.22.3",
     "@vanr/contract": "workspace:*",
     "@vanr/engine": "workspace:*",
@@ -25,11 +26,15 @@
     "unpdf": "1.9.1",
     "web-push": "3.6.7",
     "y-prosemirror": "1.3.7",
+    "y-protocols": "1.0.7",
     "yjs": "13.6.33",
     "zod": "4.6.7"
   },
   "scripts": {
     "dev": "bun --watch src/index.ts",
     "start": "bun src/index.ts"
+  },
+  "devDependencies": {
+    "@hocuspocus/provider": "4.7.1"
   }
 }

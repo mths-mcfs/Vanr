@@ -206,6 +206,41 @@ jobs:
           grep -q ' 3 fail' <<< "$none"
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # The wiki on a real Postgres: saves on the same parent version; a member's save, move or trash that
+      # comes while a lock holds the page waits for the page's row lock and is rejected; two saves that link
+      # to each other both commit. The next two runs swap the row lock in the test (no lock, then the old FOR
+      # UPDATE) and must fail by the result, so the first run can't pass without the lock it has.
+      - run: bun test apps/server/test/wiki.test.ts --test-name-pattern "on Postgres"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      - name: The wiki lock race test fails without the row lock
+        run: |
+          if out=$(bun test apps/server/test/wiki.test.ts --test-name-pattern "on Postgres" 2>&1); then
+            echo "$out"
+            echo "::error::the wiki lock race test passed without the row lock"
+            exit 1
+          fi
+          echo "$out"
+          # It must fail for the race (each member write was accepted), not for anything else.
+          grep -q '"save 200"' <<< "$out"
+          grep -q '"move 200"' <<< "$out"
+          grep -q '"trash 200"' <<< "$out"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_WIKI_UNLOCKED: "1"
+      - name: The wiki links test deadlocks with the old FOR UPDATE row lock
+        run: |
+          if out=$(bun test apps/server/test/wiki.test.ts --test-name-pattern "on Postgres" 2>&1); then
+            echo "$out"
+            echo "::error::the linked saves test passed with FOR UPDATE"
+            exit 1
+          fi
+          echo "$out"
+          # It must fail for the deadlock (one save answered wiki.busy), not for a deadline.
+          grep -q '"409 wiki.busy"' <<< "$out"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_WIKI_FOR_UPDATE: "1"
 
   sandbox:
     # The runner's real sandbox (bubblewrap + socat): the attack tests of the isolation of the agent's
