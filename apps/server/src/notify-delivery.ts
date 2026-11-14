@@ -344,7 +344,9 @@ async function sendEmail(
     // not sent twice.
     idempotencyKey: `notification-delivery/${deliveryId}`,
   });
-  if (sent.ok) return { status: "sent" };
+  // A provider that already had this key with another payload sent the first attempt: no second email.
+  if (sent.ok)
+    return sent.alreadyAccepted ? { status: "sent", note: "email_already_accepted" } : { status: "sent" };
   // A rejection worth retrying goes back to the queue with the same growing wait as a push; a final one is
   // recorded as failed with its reason.
   return sent.retry

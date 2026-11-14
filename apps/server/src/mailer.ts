@@ -22,7 +22,7 @@ export interface Mail {
  * failure, the deadline or the provider still running an attempt with the same idempotency key; any other
  * 4xx is final (the message itself is wrong for the provider).
  */
-export type SendResult = { ok: true } | { ok: false; retry: boolean; reason: string };
+export type SendResult = { ok: true; alreadyAccepted?: true } | { ok: false; retry: boolean; reason: string };
 
 export interface Mailer {
   send(mail: Mail): Promise<SendResult>;
@@ -83,9 +83,15 @@ export function resendMailer(
         await res.body?.cancel().catch(() => {});
         return { ok: true };
       }
+      const name = res.status === 409 ? await errorName(res) : null;
+      // 409 `invalid_idempotent_request`: Resend already sent an email with this key, with another payload
+      // (the notification changed between attempts). The first attempt was accepted: this one is done.
+      if (name === "invalid_idempotent_request" && mail.idempotencyKey) {
+        log.warn("mail.already_accepted", { kind: mail.kind });
+        return { ok: true, alreadyAccepted: true };
+      }
       // 409 `concurrent_idempotent_requests`: an attempt with the same key is still running there.
-      const concurrent = res.status === 409 && (await errorName(res)) === "concurrent_idempotent_requests";
-      const retry = res.status === 429 || res.status >= 500 || concurrent;
+      const retry = res.status === 429 || res.status >= 500 || name === "concurrent_idempotent_requests";
       log.error("mail.send_failed", { status: res.status, kind: mail.kind, retry });
       return { ok: false, retry, reason: `http_${res.status}` };
     },
