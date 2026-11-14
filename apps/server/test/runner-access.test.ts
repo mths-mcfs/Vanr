@@ -1385,6 +1385,19 @@ describe("a connection doesn't outlive the right that opened it", () => {
   );
 });
 
+/** One character of each UTF-8 width: 1, 2, 3 and 4 bytes. */
+const WIDTHS = ["x", "é", "€", "😀"] as const;
+
+/** `frame` as JSON with a `pad` field that brings it to exactly `bytes` bytes in UTF-8, mostly of `char`. */
+function sizedFrame(frame: Record<string, unknown>, bytes: number, char: string): string {
+  const head = JSON.stringify({ ...frame, pad: "" }).slice(0, -2);
+  const room = bytes - Buffer.byteLength(head) - 2;
+  const width = Buffer.byteLength(char);
+  const out = `${head}${char.repeat(Math.floor(room / width))}${"x".repeat(room % width)}"}`;
+  if (Buffer.byteLength(out) !== bytes) throw new Error("sizedFrame: wrong size");
+  return out;
+}
+
 describe("frames, limits and the hello's waits", () => {
   test(
     "a frame of each type that the protocol doesn't accept changes and forwards nothing, and the runner stays",
@@ -1517,27 +1530,27 @@ describe("frames, limits and the hello's waits", () => {
   );
 
   test(
-    "the runner frame limit is 4 MB: just under is taken, just over closes that connection (1009)",
+    "the runner frame limit is 4 MB in bytes: with 1 to 4 bytes a character, exactly 4 MB is taken and one byte more closes (1009)",
     async () => {
       const t = await team();
-      const a = await online(await pairOverHttp(t, t.ana));
-      const frame = (size: number, paused: boolean) => {
-        const head = JSON.stringify({ type: "runner.state", paused, pad: "" });
-        return `${head.slice(0, -2)}${"x".repeat(size - head.length)}"}`;
-      };
-      const paused = async () =>
-        (
-          await server.deps.db
-            .select({ p: schema.runners.paused })
-            .from(schema.runners)
-            .where(eq(schema.runners.id, a.runnerId))
-        )[0]?.p;
-      a.send(frame(4 * 1024 * 1024, true));
-      for (let i = 0; i < 400 && !(await paused()); i++) await new Promise((r) => setTimeout(r, 10));
-      expect(await paused()).toBe(true);
-      a.send(frame(4 * 1024 * 1024 + 1, false));
-      expect((await a.closed).code).toBe(1009);
-      expect(await paused()).toBe(true);
+      for (const char of WIDTHS) {
+        const a = await online(await pairOverHttp(t, t.ana));
+        const paused = async () =>
+          (
+            await server.deps.db
+              .select({ p: schema.runners.paused })
+              .from(schema.runners)
+              .where(eq(schema.runners.id, a.runnerId))
+          )[0]?.p;
+        const atLimit = sizedFrame({ type: "runner.state", paused: true }, 4 * 1024 * 1024, char);
+        expect(Buffer.byteLength(atLimit)).toBe(4 * 1024 * 1024);
+        a.send(atLimit);
+        for (let i = 0; i < 400 && !(await paused()); i++) await new Promise((r) => setTimeout(r, 10));
+        expect({ char, paused: await paused() }).toEqual({ char, paused: true });
+        a.send(sizedFrame({ type: "runner.state", paused: false }, 4 * 1024 * 1024 + 1, char));
+        expect({ char, code: (await a.closed).code }).toEqual({ char, code: 1009 });
+        expect(await paused()).toBe(true);
+      }
     },
     SERVER_TEST_MS,
   );
@@ -1550,14 +1563,24 @@ describe("frames, limits and the hello's waits", () => {
       const runner = await online(paired, { browser: true });
       await lend(t.lia.id, paired.runnerId);
       const ana = await TestSocket.open(t.ana.browser, t.workspaceId);
-      const sized = (size: number) => {
-        const head = JSON.stringify({ type: "ping", pad: "" });
-        return `${head.slice(0, -2)}${"x".repeat(size - head.length)}"}`;
-      };
-      ana.ws.send(sized(64 * 1024));
-      expect(await ana.next((f) => f.type === "pong" || f.type === "error")).toMatchObject({ type: "pong" });
-      ana.ws.send(sized(64 * 1024 + 1));
-      expect(await ana.next((f) => f.type === "error")).toMatchObject({ code: "frame_too_large" });
+      // The limit is in bytes on the wire: with 1 to 4 bytes a character, exactly 64 KB is taken, one more isn't.
+      for (const char of WIDTHS) {
+        ana.ws.send(sizedFrame({ type: "ping" }, 64 * 1024, char));
+        expect({
+          char,
+          reply: (await ana.next((f) => f.type === "pong" || f.type === "error")).type,
+        }).toEqual({
+          char,
+          reply: "pong",
+        });
+        ana.ws.send(sizedFrame({ type: "ping" }, 64 * 1024 + 1, char));
+        expect({ char, reply: await ana.next((f) => f.type === "pong" || f.type === "error") }).toMatchObject(
+          {
+            char,
+            reply: { code: "frame_too_large" },
+          },
+        );
+      }
       ana.send({ type: "live_view.subscribe", agentId: t.lia.id });
       await runner.request("live_view.start");
       expect(
@@ -1733,6 +1756,123 @@ describe("frames, limits and the hello's waits", () => {
       }
     },
     SERVER_TEST_MS,
+  );
+});
+
+describe("a replaced connection's close", () => {
+  test(
+    "the old socket's close finishing at any wait of the new hello, or after its welcome, leaves the runner online",
+    async () => {
+      const t = await team();
+      const paired = await pairOverHttp(t, t.ana);
+      const db = server.deps.db;
+      const toWorkspace = server.deps.hub.toWorkspace.bind(server.deps.hub);
+      try {
+        // k: the new hello's database step at which the old close is let go; -1: after the new welcome.
+        for (let k = 0; ; k++) {
+          const old = await online(paired);
+          const presence: boolean[] = [];
+          server.deps.hub.toWorkspace = (id, event) => {
+            if (event.type === "runner.presence_changed" && event.runnerId === old.runnerId)
+              presence.push(event.online === true);
+            return toWorkspace(id, event);
+          };
+          // The old close's write of the disconnection waits until it is let go.
+          let closeHeld!: () => void;
+          const closeHolding = new Promise<void>((r) => {
+            closeHeld = r;
+          });
+          let letClose!: () => void;
+          const closeLetGo = new Promise<void>((r) => {
+            letClose = r;
+          });
+          let closeDone!: () => void;
+          const closeFinished = new Promise<void>((r) => {
+            closeDone = r;
+          });
+          // The new hello's k-th step holds until the old close finished.
+          let helloSteps = 0;
+          let helloArmed = false;
+          let helloReached = false;
+          server.deps.db = new Proxy(db, {
+            get(target, prop) {
+              const value = Reflect.get(target, prop, target);
+              if (!["select", "update", "insert", "delete"].includes(String(prop)))
+                return typeof value === "function" ? value.bind(target) : value;
+              return (...args: unknown[]) => {
+                const query = value.apply(target, args);
+                if (prop === "update" && args[0] === schema.runners) {
+                  const set = query.set.bind(query);
+                  query.set = (values: Record<string, unknown>) => {
+                    const built = set(values);
+                    if (!("disconnectedAt" in values) || values.disconnectedAt === null) return built;
+                    const where = built.where.bind(built);
+                    // The close writes with `.returning()`: that is where it waits to be let go.
+                    built.where = (...w: unknown[]) => {
+                      const q = where(...w);
+                      return Object.assign(Object.create(q), {
+                        returning: (...r: unknown[]) =>
+                          (async () => {
+                            closeHeld();
+                            await closeLetGo;
+                            try {
+                              return await q.returning(...r);
+                            } finally {
+                              closeDone();
+                            }
+                          })(),
+                      });
+                    };
+                    return built;
+                  };
+                  return query;
+                }
+                return wrapQuery(query, async () => {
+                  if (!helloArmed || helloSteps++ !== k) return;
+                  helloReached = true;
+                  letClose();
+                  await closeFinished;
+                });
+              };
+            },
+          });
+          await old.close();
+          await closeHolding;
+          const minted = await mintSession(server.url, paired.credential);
+          paired.credential = minted.body.credential;
+          helloArmed = true;
+          const fresh = await connectProtocolRunner(server.url, minted.body.session);
+          open.push(fresh);
+          helloArmed = false;
+          const afterWelcome = !helloReached;
+          if (afterWelcome) {
+            letClose();
+            await closeFinished;
+          }
+          server.deps.db = db;
+          const [row] = await db.select().from(schema.runners).where(eq(schema.runners.id, fresh.runnerId));
+          expect({
+            k,
+            online: server.deps.runners.isOnline(fresh.runnerId),
+            gone: row?.disconnectedAt ?? null,
+          }).toEqual({
+            k,
+            online: true,
+            gone: null,
+          });
+          expect({ k, last: presence.at(-1) }).toEqual({ k, last: true });
+          await fresh.close();
+          if (afterWelcome) {
+            expect(k).toBeGreaterThan(3);
+            break;
+          }
+        }
+      } finally {
+        server.deps.db = db;
+        server.deps.hub.toWorkspace = toWorkspace;
+      }
+    },
+    2 * SERVER_TEST_MS,
   );
 });
 

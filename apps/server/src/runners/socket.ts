@@ -13,7 +13,7 @@ import {
   runnerFrame,
   type ServerFrame,
 } from "@vanr/engine/runner-protocol";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { AppDeps } from "../context";
 import { log } from "../logger";
 import { onLiveViewFrame, onLiveViewStreamEnded } from "./browser-live";
@@ -25,6 +25,7 @@ import { offeredUpdate } from "./update";
 
 const { runners } = schema;
 const HELLO_TIMEOUT_MS = 10_000;
+/** The biggest frame a runner may send, in bytes as it came on the wire (UTF-8). */
 const MAX_FRAME = 4 * 1024 * 1024;
 
 export const runnerSocketData = (): RunnerSocketData => ({
@@ -35,6 +36,7 @@ export const runnerSocketData = (): RunnerSocketData => ({
   helloTimer: null,
   pingTimer: null,
   closed: false,
+  onlineAt: null,
 });
 
 /** Every frame the server sends a runner is built from the protocol's types. */
@@ -58,8 +60,10 @@ export function runnerOpen(_deps: AppDeps, ws: RunnerSocket) {
 
 export async function runnerMessage(deps: AppDeps, ws: RunnerSocket, raw: string | Buffer) {
   ws.data.lastFrameAt = Date.now();
+  // The size on the wire, before decoding: a text frame arrives as a string, its UTF-8 length is the bytes sent.
+  const bytes = typeof raw === "string" ? Buffer.byteLength(raw, "utf8") : raw.byteLength;
+  if (bytes > MAX_FRAME) return ws.close(1009, "frame too large");
   const text = typeof raw === "string" ? raw : raw.toString("utf8");
-  if (text.length > MAX_FRAME) return ws.close(1009, "frame too large");
   let frame: RunnerFrame;
   try {
     frame = runnerFrame.parse(JSON.parse(text));
@@ -172,6 +176,8 @@ async function hello(deps: AppDeps, ws: RunnerSocket, frame: HelloFrame) {
   if (!now || now.revokedAt || now.removedAt)
     return reject(ws, "revoked", "This runner's access was revoked; pair it again");
   const accessChanged = JSON.stringify(row.access) !== JSON.stringify(frame.access);
+  const onlineAt = deps.now();
+  ws.data.onlineAt = onlineAt;
   await deps.db
     .update(runners)
     .set({
@@ -187,7 +193,7 @@ async function hello(deps: AppDeps, ws: RunnerSocket, frame: HelloFrame) {
       browser: frame.browser && frame.features.includes(BROWSER_GUARD_FEATURE),
       paused: frame.paused,
       sandbox: frame.sandbox,
-      lastOnlineAt: deps.now(),
+      lastOnlineAt: onlineAt,
       disconnectedAt: null,
       updatedAt: deps.now(),
     })
@@ -241,11 +247,18 @@ export async function runnerClose(deps: AppDeps, ws: RunnerSocket) {
   if (ws.data.pingTimer) clearInterval(ws.data.pingTimer);
   if (!deps.runners.unregister(ws)) return;
   const runnerId = ws.data.runnerId as string;
+  const onlineAt = ws.data.onlineAt;
+  if (!onlineAt) return;
   const now = deps.now();
-  await deps.db
+  // Only while the row still carries this connection's stamp: a newer connection's hello wrote its own, and the
+  // close of the replaced one then writes nothing and says nothing (the check is in the database: there are
+  // waits between the two).
+  const [left] = await deps.db
     .update(runners)
     .set({ lastOnlineAt: now, disconnectedAt: now })
-    .where(eq(runners.id, runnerId));
+    .where(and(eq(runners.id, runnerId), eq(runners.lastOnlineAt, onlineAt), isNull(runners.disconnectedAt)))
+    .returning({ id: runners.id });
+  if (!left) return;
   deps.hub.toWorkspace(ws.data.workspaceId as string, {
     type: "runner.presence_changed",
     runnerId,

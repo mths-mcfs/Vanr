@@ -19,6 +19,7 @@ import type { BrowserSocket, BrowserSocketData } from "./hub";
 /** A typing notice goes away on its own after this; the client sends one at most every 3 s. */
 const TYPING_TTL_MS = 6000;
 const TYPING_MIN_GAP_MS = 2000;
+/** The biggest frame a browser may send, in bytes as it came on the wire (UTF-8). */
 const MAX_FRAME = 64 * 1024;
 
 const ClientFrame = z.discriminatedUnion("type", [
@@ -146,8 +147,10 @@ export function browserClose(deps: AppDeps, ws: BrowserSocket) {
 }
 
 export async function browserMessage(deps: AppDeps, ws: BrowserSocket, raw: string | Buffer) {
+  // The size on the wire, before decoding: a text frame arrives as a string, its UTF-8 length is the bytes sent.
+  const bytes = typeof raw === "string" ? Buffer.byteLength(raw, "utf8") : raw.byteLength;
+  if (bytes > MAX_FRAME) return reply(ws, { type: "error", code: "frame_too_large" });
   const text = typeof raw === "string" ? raw : raw.toString("utf8");
-  if (text.length > MAX_FRAME) return reply(ws, { type: "error", code: "frame_too_large" });
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);

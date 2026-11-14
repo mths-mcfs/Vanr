@@ -24,6 +24,11 @@ export interface RunnerSocketData {
   pingTimer: ReturnType<typeof setInterval> | null;
   /** The close handler ran: an `hello` still awaiting must not register it nor arm a timer. */
   closed: boolean;
+  /**
+   * The `lastOnlineAt` this connection's hello wrote: the row still carries it only while this is the runner's
+   * current connection, so the close writes the disconnection (and says the runner left) only then.
+   */
+  onlineAt: Date | null;
 }
 
 export type RunnerSocket = ServerWebSocket<RunnerSocketData>;
