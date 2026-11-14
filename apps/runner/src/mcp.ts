@@ -9,8 +9,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { PRODUCT } from "@vanr/product";
+import { z } from "zod";
 import { ensureDir } from "./config";
-import { parseRecord, record } from "./json";
+import { maybe, parseLine } from "./lines";
 
 export const MCP_SERVER_NAME = "agent";
 const ENV_PREFIX = PRODUCT.slug.toUpperCase();
@@ -37,6 +38,37 @@ interface Turn {
   /** Connections of this turn's MCP server; they close with the turn. */
   sockets: Set<Socket>;
 }
+
+/** What the MCP server process sends the runner over the socket: the token first, then `list` and `call`. */
+const bridgeRequest = z.object({
+  token: maybe.string,
+  id: z.unknown().optional(),
+  op: z.unknown().optional(),
+  name: maybe.string,
+  input: z.unknown().optional(),
+});
+
+/** The runner's answers on the socket (`{ ok: true }` first, then one per request id). */
+const bridgeReply = z.object({
+  id: z.unknown().optional(),
+  tools: z.unknown().optional(),
+  content: z.unknown().optional(),
+  isError: z.unknown().optional(),
+});
+type BridgeReply = z.output<typeof bridgeReply>;
+
+/** A JSON-RPC line from the CLI; a notification has no id (ids are strings or numbers). */
+const rpcRequest = z.object({
+  id: z.union([z.string(), z.number()]).optional().catch(undefined),
+  method: z.unknown().optional(),
+  params: z
+    .object({
+      protocolVersion: maybe.string,
+      name: z.unknown().optional(),
+      arguments: z.unknown().optional(),
+    })
+    .catch({ name: undefined, arguments: undefined }),
+});
 
 const digestOf = (token: string) => createHash("sha256").update(token).digest();
 
@@ -112,7 +144,7 @@ export class McpBridge {
     };
     const lines = createInterface({ input: socket });
     lines.on("line", (line) => {
-      const msg = parseRecord(line);
+      const msg = parseLine(bridgeRequest, line);
       if (!msg) {
         socket.destroy();
         return;
@@ -181,7 +213,7 @@ export async function runMcpStdio(env: Record<string, string | undefined> = proc
     return 2;
   }
   const socket = createConnection(path);
-  const pending = new Map<number, (msg: Record<string, unknown>) => void>();
+  const pending = new Map<number, (msg: BridgeReply) => void>();
   let seq = 0;
   const closed = new Promise<number>((resolve) => {
     socket.on("close", () => resolve(0));
@@ -192,7 +224,7 @@ export async function runMcpStdio(env: Record<string, string | undefined> = proc
     void closed.then(() => resolve(false));
     let first = true;
     createInterface({ input: socket }).on("line", (line) => {
-      const msg = parseRecord(line);
+      const msg = parseLine(bridgeReply, line);
       if (!msg) return;
       if (first) {
         first = false;
@@ -209,7 +241,7 @@ export async function runMcpStdio(env: Record<string, string | undefined> = proc
     return 1;
   }
   const ask = (msg: Record<string, unknown>) =>
-    new Promise<Record<string, unknown>>((resolve) => {
+    new Promise<BridgeReply>((resolve) => {
       const id = ++seq;
       pending.set(id, resolve);
       socket.write(`${JSON.stringify({ ...msg, id })}\n`);
@@ -217,17 +249,15 @@ export async function runMcpStdio(env: Record<string, string | undefined> = proc
   const out = (obj: unknown) => process.stdout.write(`${JSON.stringify(obj)}\n`);
   const rl = createInterface({ input: process.stdin });
   rl.on("line", async (line) => {
-    const req = parseRecord(line);
-    if (!req) return;
-    // A notification (e.g. notifications/initialized) has no id; JSON-RPC ids are strings or numbers.
-    const id = req.id;
-    if (typeof id !== "string" && typeof id !== "number") return;
-    const params = record(req.params);
+    const req = parseLine(rpcRequest, line);
+    // A notification (e.g. notifications/initialized) has no id.
+    if (req?.id === undefined) return;
+    const { id, params } = req;
     const ok = (result: unknown) => out({ jsonrpc: "2.0", id, result });
     switch (req.method) {
       case "initialize":
         ok({
-          protocolVersion: typeof params.protocolVersion === "string" ? params.protocolVersion : "2025-06-18",
+          protocolVersion: params.protocolVersion ?? "2025-06-18",
           capabilities: { tools: {} },
           serverInfo: { name: `${PRODUCT.slug}-agent`, version: "1" },
         });

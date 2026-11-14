@@ -54,7 +54,7 @@
     "packages/engine/src/models/catalog.test.ts": 10,
     "packages/engine/src/models/anthropic-stream.test.ts": 150,
     "apps/runner/src/access.test.ts": 5,
-    "apps/runner/src/browser-guard.test.ts": 40000,
+    "apps/runner/src/browser-guard.test.ts": 35000,
     "apps/runner/src/cdp.test.ts": 4400,
     "apps/runner/src/cli.test.ts": 5,
     "apps/runner/src/frame-gate.test.ts": 5,

@@ -155,6 +155,36 @@ const hostOf = (url: string) => {
 
 type InspectAction = OpArgs<"browser.inspect">["action"];
 
+const targetInfo = z.object({ targetId: z.string(), type: z.string(), url: z.string(), title: z.string() });
+const maybeString = z.string().optional().catch(undefined);
+
+/**
+ * The Chrome events the runner reads, with the fields it reads. A frame of the live view is checked as a
+ * whole too: `data` is only checked to be a string (the JPEG is not decoded here).
+ */
+const CDP_EVENTS = {
+  "Fetch.requestPaused": z.object({
+    requestId: z.string(),
+    request: z.object({ url: z.string() }),
+    frameId: z.string().optional(),
+  }),
+  "Page.javascriptDialogOpening": z.object({ type: maybeString, url: maybeString, message: maybeString }),
+  "Target.attachedToTarget": z.object({
+    sessionId: z.string(),
+    targetInfo,
+    waitingForDebugger: z.boolean().optional().catch(undefined),
+  }),
+  "Target.detachedFromTarget": z.object({ sessionId: z.string() }),
+  "Target.targetDestroyed": z.object({ targetId: z.string() }),
+  "Target.targetInfoChanged": z.object({ targetInfo: targetInfo.omit({ type: true }) }),
+  "Page.frameNavigated": z.object({ frame: z.object({ id: z.string(), parentId: z.string().optional() }) }),
+  "Page.screencastFrame": z.object({
+    sessionId: z.number(),
+    data: z.string(),
+    metadata: z.object({ deviceWidth: z.number(), deviceHeight: z.number() }),
+  }),
+} as const;
+
 const personDriving = () => new RunnerError("person_driving", "A person has control of this browser");
 
 export interface CdpBrowserOptions {
@@ -474,9 +504,8 @@ export class CdpBrowser implements BrowserDriver {
    * An attached tab or iframe. Fetch goes on before anything else and only then the target proceeds: one that could not
    * turn Fetch on is closed, instead of navigating without a rule.
    */
-  private async attached(s: Session, params: Record<string, unknown>) {
-    const sessionId = params.sessionId as string;
-    const info = params.targetInfo as { targetId: string; type: string; url: string; title: string };
+  private async attached(s: Session, params: z.output<(typeof CDP_EVENTS)["Target.attachedToTarget"]>) {
+    const { sessionId, targetInfo: info } = params;
     const waiting = params.waitingForDebugger === true;
     const kind = info.type === "page" ? "page" : info.type === "iframe" ? "iframe" : null;
     try {
@@ -523,9 +552,13 @@ export class CdpBrowser implements BrowserDriver {
   }
 
   /** Before a document request goes out: the origin rule decides. */
-  private paused(s: Session, params: Record<string, unknown>, sessionId: string | undefined) {
-    const requestId = params.requestId as string;
-    const url = (params.request as { url: string }).url;
+  private paused(
+    s: Session,
+    params: z.output<(typeof CDP_EVENTS)["Fetch.requestPaused"]>,
+    sessionId: string | undefined,
+  ) {
+    const { requestId } = params;
+    const { url } = params.request;
     const frame = sessionId ? s.frames.get(sessionId) : undefined;
     const main = frame?.kind === "page" && params.frameId === frame.targetId;
     const shown = main && s.pages.some((p) => p.sessionId === sessionId && p.shown);
@@ -571,17 +604,21 @@ export class CdpBrowser implements BrowserDriver {
    * alert and the leave warning, cancels confirm and prompt (the agent does not confirm what it did not see) and tells
    * the agent what the dialog said. From a sensitive site, without the text.
    */
-  private dialog(s: Session, params: Record<string, unknown>, sessionId: string | undefined) {
-    const type = String(params.type ?? "alert");
+  private dialog(
+    s: Session,
+    params: z.output<(typeof CDP_EVENTS)["Page.javascriptDialogOpening"]>,
+    sessionId: string | undefined,
+  ) {
+    const type = params.type ?? "alert";
     void s.cdp
       .send("Page.handleJavaScriptDialog", { accept: type === "alert" || type === "beforeunload" }, sessionId)
       .catch(() => {});
     if (s.dialogs.length >= DIALOGS_MAX) return;
     let host = "";
     try {
-      host = new URL(String(params.url ?? "")).hostname;
+      host = new URL(params.url ?? "").hostname;
     } catch {}
-    const message = sensitiveCategory(host) ? "" : String(params.message ?? "").slice(0, 300);
+    const message = sensitiveCategory(host) ? "" : (params.message ?? "").slice(0, 300);
     s.dialogs.push({ type, message });
   }
 
@@ -591,32 +628,68 @@ export class CdpBrowser implements BrowserDriver {
     params: Record<string, unknown>,
     sessionId: string | undefined,
   ) {
-    if (method === "Fetch.requestPaused") this.paused(s, params, sessionId);
-    else if (method === "Page.javascriptDialogOpening") this.dialog(s, params, sessionId);
-    else if (method === "Target.attachedToTarget") void this.attached(s, params);
-    else if (method === "Target.detachedFromTarget") this.detached(s, params.sessionId as string);
-    else if (method === "Target.targetDestroyed") {
-      const p = s.pages.find((x) => x.targetId === params.targetId);
-      if (p) this.detached(s, p.sessionId);
-    } else if (method === "Target.targetInfoChanged") {
-      const info = params.targetInfo as { targetId: string; url: string; title: string };
-      const p = s.pages.find((x) => x.targetId === info.targetId);
-      if (p) {
-        p.url = info.url;
-        p.title = info.title;
+    switch (method) {
+      case "Fetch.requestPaused": {
+        // An invalid one stays paused: the request never goes out without the origin rule.
+        const e = CDP_EVENTS[method].safeParse(params);
+        if (e.success) this.paused(s, e.data, sessionId);
+        return;
       }
-    } else if (method === "Page.frameNavigated") {
-      const frame = params.frame as { id: string; parentId?: string };
-      const p = frame.parentId ? undefined : s.pages.find((x) => x.sessionId === sessionId);
-      if (p && frame.id === p.targetId) p.shown = true;
-    } else if (method === "Page.screencastFrame" && s.stream && sessionId === s.stream.sessionId) {
-      void s.cdp.send("Page.screencastFrameAck", { sessionId: params.sessionId }, sessionId).catch(() => {});
-      const meta = params.metadata as { deviceWidth: number; deviceHeight: number };
-      s.stream.gate.offer({
-        data: params.data as string,
-        width: Math.round(meta.deviceWidth),
-        height: Math.round(meta.deviceHeight),
-      });
+      case "Page.javascriptDialogOpening": {
+        const e = CDP_EVENTS[method].safeParse(params);
+        if (e.success) this.dialog(s, e.data, sessionId);
+        return;
+      }
+      case "Target.attachedToTarget": {
+        const e = CDP_EVENTS[method].safeParse(params);
+        if (e.success) void this.attached(s, e.data);
+        return;
+      }
+      case "Target.detachedFromTarget": {
+        const e = CDP_EVENTS[method].safeParse(params);
+        if (e.success) this.detached(s, e.data.sessionId);
+        return;
+      }
+      case "Target.targetDestroyed": {
+        const e = CDP_EVENTS[method].safeParse(params);
+        const p = e.success ? s.pages.find((x) => x.targetId === e.data.targetId) : undefined;
+        if (p) this.detached(s, p.sessionId);
+        return;
+      }
+      case "Target.targetInfoChanged": {
+        const e = CDP_EVENTS[method].safeParse(params);
+        if (!e.success) return;
+        const info = e.data.targetInfo;
+        const p = s.pages.find((x) => x.targetId === info.targetId);
+        if (p) {
+          p.url = info.url;
+          p.title = info.title;
+        }
+        return;
+      }
+      case "Page.frameNavigated": {
+        const e = CDP_EVENTS[method].safeParse(params);
+        if (!e.success) return;
+        const { frame } = e.data;
+        const p = frame.parentId ? undefined : s.pages.find((x) => x.sessionId === sessionId);
+        if (p && frame.id === p.targetId) p.shown = true;
+        return;
+      }
+      case "Page.screencastFrame": {
+        if (!s.stream || sessionId !== s.stream.sessionId) return;
+        const e = CDP_EVENTS[method].safeParse(params);
+        if (!e.success) return;
+        const { metadata } = e.data;
+        void s.cdp
+          .send("Page.screencastFrameAck", { sessionId: e.data.sessionId }, sessionId)
+          .catch(() => {});
+        s.stream.gate.offer({
+          data: e.data.data,
+          width: Math.round(metadata.deviceWidth),
+          height: Math.round(metadata.deviceHeight),
+        });
+        return;
+      }
     }
   }
 

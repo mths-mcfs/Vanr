@@ -8,11 +8,11 @@ import { spawn } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { AgentRef, HarnessEvent, HarnessTurnResult, opArgs } from "@vanr/engine/runner-protocol";
-import type { z } from "zod";
+import { z } from "zod";
 import { type Access, inside, RunnerError } from "./access";
 import { type CliBins, type CliWatch, cliEnv } from "./cli";
 import { ensureDir, writePrivate } from "./config";
-import { parseRecord, record } from "./json";
+import { maybe, parseLine } from "./lines";
 import { MCP_SERVER_NAME, MCP_SOCKET_ENV, MCP_TOKEN_ENV, type McpBridge, type ToolOutcome } from "./mcp";
 import { sandboxed } from "./ops";
 import {
@@ -154,8 +154,48 @@ const newState = (): StreamState => ({
   lastError: "",
 });
 
-const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
-const str = (v: unknown) => (typeof v === "string" ? v : "");
+const claudeUsage = z
+  .object({
+    input_tokens: maybe.number,
+    output_tokens: maybe.number,
+    cache_read_input_tokens: maybe.number,
+    cache_creation_input_tokens: maybe.number,
+  })
+  .optional()
+  .catch(undefined);
+
+/** The lines of `claude -p --output-format stream-json` the harness reads. */
+const claudeEvent = z.object({
+  type: maybe.string,
+  subtype: z.unknown().optional(),
+  apiKeySource: maybe.string,
+  model: maybe.string,
+  error: maybe.string,
+  parent_tool_use_id: z.unknown().optional(),
+  event: z
+    .object({
+      type: maybe.string,
+      delta: z.object({ type: maybe.string, text: maybe.text }).optional().catch(undefined),
+    })
+    .optional()
+    .catch(undefined),
+  usage: claudeUsage,
+  is_error: maybe.boolean,
+  errors: z.array(z.unknown()).optional().catch(undefined),
+  result: maybe.text,
+});
+
+/** The lines of `codex exec --json` the harness reads. */
+const codexEvent = z.object({
+  type: maybe.string,
+  item: z.object({ type: maybe.string, text: maybe.text }).optional().catch(undefined),
+  usage: z
+    .object({ input_tokens: maybe.number, cached_input_tokens: maybe.number, output_tokens: maybe.number })
+    .optional()
+    .catch(undefined),
+  error: z.object({ message: maybe.text }).optional().catch(undefined),
+  message: maybe.text,
+});
 
 /** A CLI error: plan limit, login, or something else. */
 export function classifyHarnessError(message: string, authFailed = false): RunnerError {
@@ -174,17 +214,17 @@ export function classifyHarnessError(message: string, authFailed = false): Runne
 
 /** A line of `claude -p --output-format stream-json`. Returns the new text to show. */
 function claudeLine(state: StreamState, raw: string): string | null {
-  const obj = parseRecord(raw);
+  const obj = parseLine(claudeEvent, raw);
   if (!obj) return null;
   if (obj.type === "system" && obj.subtype === "init") {
     // `none` is the subscription login; any other source is an API key and the turn stops here.
     const source = obj.apiKeySource;
-    if (typeof source === "string" && source !== "none")
+    if (source !== undefined && source !== "none")
       state.error = new RunnerError(
         "not_logged_in",
         `Claude Code in this environment would use ${source} instead of your plan`,
       );
-    if (typeof obj.model === "string") state.model = obj.model.slice(0, 100);
+    if (obj.model !== undefined) state.model = obj.model.slice(0, 100);
     return null;
   }
   if (obj.type === "system" && obj.subtype === "api_retry") {
@@ -192,24 +232,24 @@ function claudeLine(state: StreamState, raw: string): string | null {
     return null;
   }
   if (obj.type === "stream_event" && obj.parent_tool_use_id == null) {
-    const ev = record(obj.event);
-    const delta = record(ev.delta);
-    if (ev.type === "content_block_delta" && delta.type === "text_delta" && str(delta.text))
-      return str(delta.text);
+    const delta = obj.event?.delta;
+    if (obj.event?.type === "content_block_delta" && delta?.type === "text_delta" && delta.text)
+      return delta.text;
     return null;
   }
   if (obj.type === "result") {
-    const u = record(obj.usage);
+    const u = obj.usage;
     state.usage = {
-      inputTokens: num(u.input_tokens) + num(u.cache_creation_input_tokens),
-      outputTokens: num(u.output_tokens),
-      cachedTokens: num(u.cache_read_input_tokens),
+      inputTokens: (u?.input_tokens ?? 0) + (u?.cache_creation_input_tokens ?? 0),
+      outputTokens: u?.output_tokens ?? 0,
+      cachedTokens: u?.cache_read_input_tokens ?? 0,
     };
     if (obj.is_error === true || (obj.subtype && obj.subtype !== "success")) {
-      const errors = Array.isArray(obj.errors) ? obj.errors.map(String).join("; ") : "";
-      state.error ??= classifyHarnessError(str(obj.result) || errors || str(obj.subtype), state.authFailed);
+      const errors = obj.errors ? obj.errors.map(String).join("; ") : "";
+      const subtype = typeof obj.subtype === "string" ? obj.subtype : "";
+      state.error ??= classifyHarnessError(obj.result || errors || subtype, state.authFailed);
     } else {
-      state.final = str(obj.result);
+      state.final = obj.result;
       state.done = true;
     }
   }
@@ -218,30 +258,29 @@ function claudeLine(state: StreamState, raw: string): string | null {
 
 /** A line of `codex exec --json`. Returns the new text to show. */
 function codexLine(state: StreamState, raw: string): string | null {
-  const obj = parseRecord(raw);
+  const obj = parseLine(codexEvent, raw);
   if (!obj) return null;
-  const item = record(obj.item);
-  const text = str(item.text);
-  if (obj.type === "item.completed" && item.type === "agent_message" && text) {
+  const text = obj.item?.text ?? "";
+  if (obj.type === "item.completed" && obj.item?.type === "agent_message" && text) {
     state.final = text;
     return text;
   }
   if (obj.type === "turn.completed") {
-    const u = record(obj.usage);
+    const u = obj.usage;
     state.usage = {
-      inputTokens: num(u.input_tokens) - num(u.cached_input_tokens),
-      outputTokens: num(u.output_tokens),
-      cachedTokens: num(u.cached_input_tokens),
+      inputTokens: (u?.input_tokens ?? 0) - (u?.cached_input_tokens ?? 0),
+      outputTokens: u?.output_tokens ?? 0,
+      cachedTokens: u?.cached_input_tokens ?? 0,
     };
     state.done = true;
     return null;
   }
   if (obj.type === "turn.failed") {
-    state.error ??= classifyHarnessError(str(record(obj.error).message) || state.lastError);
+    state.error ??= classifyHarnessError(obj.error?.message || state.lastError);
     return null;
   }
   // A loose `error` may be a reconnection notice; it only counts if the turn does not finish.
-  if (obj.type === "error") state.lastError = str(obj.message);
+  if (obj.type === "error") state.lastError = obj.message;
   return null;
 }
 

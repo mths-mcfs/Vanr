@@ -26,7 +26,7 @@ import { z } from "zod";
 import { type Access, inside, RunnerError } from "./access";
 import { type CliWatch, noPlanEnv } from "./cli";
 import { ensureDir, writePrivate } from "./config";
-import { record } from "./json";
+import { maybe } from "./lines";
 import { agentEnv, domainsFor, sandboxed } from "./ops";
 import { CLI_DOMAINS, type CommandSandbox, cliPaths, type PolicyContext, shellLine } from "./sandbox";
 import { maskSecrets, type SecretStore } from "./secrets";
@@ -130,6 +130,60 @@ function executorCommand(
   return { cmd: bins.codex, args, stdin: input.prompt };
 }
 
+const tokenCounts = z
+  .object({
+    input_tokens: maybe.number,
+    output_tokens: maybe.number,
+    cached_input_tokens: maybe.number,
+    cache_read_input_tokens: maybe.number,
+    cache_creation_input_tokens: maybe.number,
+  })
+  .catch({
+    input_tokens: 0,
+    output_tokens: 0,
+    cached_input_tokens: 0,
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+  });
+
+/** A line of the Claude Code (`stream-json`) or Codex (`exec --json`) output, with the fields read below. */
+const executorEvent = z.object({
+  type: z.unknown().optional(),
+  subtype: z.unknown().optional(),
+  result: maybe.string,
+  session_id: maybe.string,
+  thread_id: maybe.string,
+  apiKeySource: maybe.string,
+  model: maybe.string,
+  total_cost_usd: z.number().optional().catch(undefined),
+  usage: z.unknown().optional(),
+  modelUsage: z.record(z.string(), z.unknown()).optional().catch(undefined),
+  permission_denials: z
+    .array(
+      z
+        .object({
+          tool_name: z.unknown().optional(),
+          tool_input: z.object({ command: z.unknown().optional() }).catch({ command: undefined }),
+        })
+        .catch({ tool_name: undefined, tool_input: { command: undefined } }),
+    )
+    .catch([]),
+  message: z
+    .object({
+      content: z
+        .array(
+          z
+            .object({ type: z.unknown().optional(), text: maybe.string, name: z.unknown().optional() })
+            .catch({ type: undefined, name: undefined }),
+        )
+        .catch([]),
+    })
+    .catch({ content: [] }),
+  item: z
+    .object({ type: z.unknown().optional(), text: maybe.string, command: z.unknown().optional() })
+    .catch({ type: undefined, command: undefined }),
+});
+
 /** Reads a line of the executor's output: text to show, final result and session (to resume). */
 export function parseExecutorLine(
   executor: "claude_code" | "codex" | "shell",
@@ -144,34 +198,30 @@ export function parseExecutorLine(
   usage?: Omit<JobUsage, "model">;
 } {
   if (executor === "shell") return { text: raw };
-  let parsed: unknown;
+  let value: unknown;
   try {
-    parsed = JSON.parse(raw);
+    value = JSON.parse(raw);
   } catch {
     return { text: raw };
   }
-  const obj = record(parsed);
-  const str = (v: unknown) => (typeof v === "string" ? v : undefined);
-  const int = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.round(v) : 0);
+  const parsed = executorEvent.safeParse(value);
+  // JSON that is not an object (a number, a list) carries nothing the runner reads.
+  if (!parsed.success) return {};
+  const obj = parsed.data;
+  const int = (v: number) => (Number.isFinite(v) && v >= 0 ? Math.round(v) : 0);
   if (executor === "claude_code") {
     if (obj.type === "result") {
       // Commands the permission blocked: `permission_denials: [{ tool_name, tool_input: { command } }]`.
-      const denials = Array.isArray(obj.permission_denials) ? obj.permission_denials : [];
-      const denied = denials
-        .map((d: unknown) => {
-          const denial = record(d);
-          const command = record(denial.tool_input).command;
-          return command ? command : denial.tool_name;
-        })
+      const denied = obj.permission_denials
+        .map((d) => (d.tool_input.command ? d.tool_input.command : d.tool_name))
         .filter((c: unknown): c is string => typeof c === "string");
       // Usage at the end (`usage` and `total_cost_usd`): it runs on the plan of whoever paired, so it is only a measure.
-      const u = obj.usage ? record(obj.usage) : undefined;
-      const cost =
-        typeof obj.total_cost_usd === "number" && obj.total_cost_usd >= 0 ? obj.total_cost_usd : null;
-      const model = Object.keys(record(obj.modelUsage))[0];
+      const u = obj.usage ? tokenCounts.parse(obj.usage) : undefined;
+      const cost = obj.total_cost_usd !== undefined && obj.total_cost_usd >= 0 ? obj.total_cost_usd : null;
+      const model = Object.keys(obj.modelUsage ?? {})[0];
       return {
-        result: str(obj.result) ?? "",
-        session: str(obj.session_id),
+        result: obj.result ?? "",
+        session: obj.session_id,
         ...(denied.length ? { denied } : {}),
         ...(model ? { model } : {}),
         ...(u
@@ -188,33 +238,29 @@ export function parseExecutorLine(
       };
     }
     if (obj.type === "assistant") {
-      const content = record(obj.message).content;
-      const parts = (Array.isArray(content) ? content : [])
-        .map((raw: unknown) => {
-          const c = record(raw);
-          return c.type === "text" ? str(c.text) : c.type === "tool_use" ? `→ ${c.name}` : undefined;
-        })
+      const parts = obj.message.content
+        .map((c) => (c.type === "text" ? c.text : c.type === "tool_use" ? `→ ${c.name}` : undefined))
         .filter(Boolean);
       return parts.length ? { text: parts.join(" ") } : {};
     }
     if (obj.type === "system" && obj.subtype === "init") {
       // An `apiKeySource` other than `none`: Claude Code would bill an API key, not the plan.
-      const source = str(obj.apiKeySource);
+      const source = obj.apiKeySource;
       return {
-        ...(str(obj.session_id) ? { session: str(obj.session_id) } : {}),
+        ...(obj.session_id ? { session: obj.session_id } : {}),
         ...(source && source !== "none" ? { apiKey: source } : {}),
-        ...(str(obj.model) ? { model: str(obj.model) } : {}),
+        ...(obj.model ? { model: obj.model } : {}),
       };
     }
-    if (obj.type === "system" && str(obj.session_id)) return { session: str(obj.session_id) };
+    if (obj.type === "system" && obj.session_id) return { session: obj.session_id };
     return {};
   }
   // codex exec --json: events with `item` (agent message, command) and the thread id.
-  const item = record(obj.item);
-  if (str(obj.thread_id)) return { session: str(obj.thread_id) };
+  const { item } = obj;
+  if (obj.thread_id) return { session: obj.thread_id };
   // End of each Codex turn: `turn.completed` with the usage (summed at the end of the job; Codex sends no cost).
   if (obj.type === "turn.completed" && obj.usage && typeof obj.usage === "object") {
-    const u = record(obj.usage);
+    const u = tokenCounts.parse(obj.usage);
     return {
       usage: {
         inputTokens: int(u.input_tokens),
@@ -225,8 +271,7 @@ export function parseExecutorLine(
       },
     };
   }
-  const text = str(item.text);
-  if (item.type === "agent_message" && text) return { text, result: text };
+  if (item.type === "agent_message" && item.text) return { text: item.text, result: item.text };
   if (item.type === "command_execution" && item.command) return { text: `$ ${item.command}` };
   return {};
 }
