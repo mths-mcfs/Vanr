@@ -1,24 +1,78 @@
-// Invitations and notices at the same time on a real Postgres: the server's pool runs the requests on several
-// connections at once, so the invitee's lock (pg_advisory_xact_lock) and the group's row lock (FOR UPDATE) are
-// what keeps one pending invitation per email and every notice counted. These run only in the CI postgres job.
+// Invitations and notices at the same time on a real Postgres. The server's pool runs transactions on several
+// connections, so what keeps one pending invitation per email is the invitee's lock (pg_advisory_xact_lock)
+// and what keeps the actors and the latest message of a notice is the group's row lock (FOR UPDATE).
+//
+// The two "forced" tests don't count on the scheduler: a double of the database, injected only here, holds the
+// first transaction at the point where the lock matters until the second one is seen waiting on that lock (in
+// pg_locks) or done; each transaction records its pg_backend_pid(), so two real connections took part.
+// With VANR_TEST_DROP_LOCKS=1 the same double leaves the lock out (no advisory lock, no FOR UPDATE): the CI
+// postgres job runs that mode too and expects these tests to fail, which proves they catch a missing lock.
+// These run only in the CI postgres job.
 import { describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { sha256Hex } from "@vanr/engine/ids";
 import { and, eq } from "drizzle-orm";
+import { Hono } from "hono";
+import postgres from "postgres";
+import type { AppDeps, AppEnv } from "../src/context";
+import { errorBody, HttpError } from "../src/http";
 import { createWorkspace, joinWorkspace } from "../src/members";
 import { notify } from "../src/notifications";
+import { registerInvitations } from "../src/routes/invitations";
+import type { RunningServer } from "../src/server";
 import { Browser, body, signedIn, startTestServer } from "./harness";
+import { instrumented } from "./lock-double";
 import { NO_POSTGRES, TEST_POSTGRES_URL, testDatabaseUrl } from "./postgres";
 
 const onPostgres = (name: string) => (TEST_POSTGRES_URL ? name : `${name} (skipped: ${NO_POSTGRES})`);
 const N = 20;
 
+/** Resolves when `check` is true, polling; fails after 15 s. */
+async function until(check: () => Promise<boolean> | boolean, what: string) {
+  const deadline = Date.now() + 15_000;
+  while (!(await check())) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await Bun.sleep(20);
+  }
+}
+
+/** A gate the first transaction waits on. */
+function gate() {
+  let open!: () => void;
+  const opened = new Promise<void>((r) => {
+    open = r;
+  });
+  return { open, opened };
+}
+
+async function withServer(
+  prefix: string,
+  run: (server: RunningServer, admin: postgres.Sql) => Promise<void>,
+) {
+  const url = await testDatabaseUrl(prefix);
+  const server = await startTestServer({ env: { DATABASE_URL: url } });
+  const admin = postgres(url, { max: 1, onnotice: () => {} });
+  try {
+    await run(server, admin);
+  } finally {
+    await server.stop();
+    await admin.end({ timeout: 5 });
+  }
+}
+
+/** Locks of this database that some transaction waits for. */
+async function waitingLocks(admin: postgres.Sql, locktype?: string) {
+  const rows = await admin<{ n: number }[]>`
+    select count(*)::int as n from pg_locks l join pg_database d on d.oid = l.database
+    where not l.granted and d.datname = current_database() and (${locktype ?? null}::text is null or l.locktype = ${locktype ?? null})`;
+  return rows[0]?.n ?? 0;
+}
+
 describe.skipIf(!TEST_POSTGRES_URL)(
   onPostgres("the same invitee and the same group at once on Postgres"),
   () => {
     test("N invitations to one email: one pending and only its link works; N notices of one group: count N", async () => {
-      const server = await startTestServer({ env: { DATABASE_URL: await testDatabaseUrl("same") } });
-      try {
+      await withServer("same", async (server) => {
         const ana = await signedIn(server, "Ana", "ana@same.test");
         const { workspaceId } = await createWorkspace(server.deps.db, {
           name: "Same",
@@ -57,39 +111,166 @@ describe.skipIf(!TEST_POSTGRES_URL)(
         }
         expect(alive.length).toBe(1);
         expect(sha256Hex(alive[0] ?? "")).toBe(pending[0]?.tokenHash ?? "");
+      });
+    }, 60_000);
 
-        const beto = await signedIn(server, "Beto", "beto@same.test");
+    test("forced: the second invitation of one email waits on the invitee's lock, so one stays pending", async () => {
+      await withServer("inv", async (server, admin) => {
+        const ana = await signedIn(server, "Ana", "ana@forced.test");
+        const { workspaceId } = await createWorkspace(server.deps.db, {
+          name: "Forced",
+          context: "",
+          user: ana.user,
+        });
+        const appWith = (deps: AppDeps) => {
+          const app = new Hono<AppEnv>();
+          app.onError((err, c) =>
+            err instanceof HttpError ? c.json(errorBody(err.code, err.message), err.status) : c.json({}, 500),
+          );
+          app.use("*", async (c, next) => {
+            c.set("deps", deps);
+            c.set("user", ana.user);
+            c.set("member", { workspaceId, userId: ana.user.id, role: "owner", handle: "ana" });
+            await next();
+          });
+          registerInvitations(app);
+          return app;
+        };
+        const post = async (deps: AppDeps, role: string): Promise<Response> =>
+          appWith(deps).request(`/api/v1/workspaces/${workspaceId}/invitations`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ email: "pia@forced.test", role }),
+          });
+        const pids = new Set<number>();
+        const held = gate();
+        const release = gate();
+        // A holds right after revoking the pending ones, before inserting its own.
+        const a = post(
+          {
+            ...server.deps,
+            db: instrumented(server.deps.db, {
+              pids,
+              after: {
+                kind: "update",
+                run: async () => {
+                  held.open();
+                  await release.opened;
+                },
+              },
+            }),
+          },
+          "member",
+        );
+        await held.opened;
+        let bDone = false;
+        const b = post({ ...server.deps, db: instrumented(server.deps.db, { pids }) }, "admin").then((r) => {
+          bDone = true;
+          return r;
+        });
+        // With the lock B waits on it; without it, B revokes nothing, inserts and commits before A inserts.
+        await until(async () => bDone || (await waitingLocks(admin, "advisory")) > 0, "B to wait or finish");
+        release.open();
+        const [ra, rb] = await Promise.all([a, b]);
+        expect([ra.status, rb.status]).toEqual([201, 201]);
+        expect(pids.size).toBe(2);
+        const pending = await server.deps.db
+          .select()
+          .from(schema.invitations)
+          .where(
+            and(eq(schema.invitations.email, "pia@forced.test"), eq(schema.invitations.status, "pending")),
+          );
+        expect(pending.map((r) => r.role)).toEqual(["admin"]);
+      });
+    }, 60_000);
+
+    test("forced: the second notice of one group waits on the row lock, so no actor or message is lost", async () => {
+      await withServer("ntf", async (server, admin) => {
+        const ana = await signedIn(server, "Ana", "ana@group.test");
+        const beto = await signedIn(server, "Beto", "beto@group.test");
+        const caio = await signedIn(server, "Caio", "caio@group.test");
+        const { workspaceId } = await createWorkspace(server.deps.db, {
+          name: "Group",
+          context: "",
+          user: ana.user,
+        });
         await joinWorkspace(server.deps.db, {
           workspaceId,
           userId: beto.user.id,
           name: "Beto",
           role: "member",
         });
-        await Promise.all(
-          Array.from({ length: N }, (_, i) =>
-            notify(server.deps, {
-              workspaceId,
-              userId: beto.user.id,
-              kind: "dm",
-              groupKey: "dm:same",
-              actor: { type: "person", id: ana.user.id },
-              source: {},
-              latest: { text: `message ${i}` },
+        const from = (deps: AppDeps, actorId: string, text: string) =>
+          notify(deps, {
+            workspaceId,
+            userId: beto.user.id,
+            kind: "dm",
+            groupKey: "dm:forced",
+            actor: { type: "person", id: actorId },
+            source: {},
+            latest: { text },
+          });
+        // The group's row exists: both notices take the read-merge-write path.
+        await from(server.deps, beto.user.id, "first");
+        const pids = new Set<number>();
+        const held = gate();
+        const release = gate();
+        let bRead = false;
+        const a = from(
+          {
+            ...server.deps,
+            db: instrumented(server.deps.db, {
+              pids,
+              after: {
+                kind: "select",
+                run: async () => {
+                  held.open();
+                  await release.opened;
+                },
+              },
             }),
-          ),
+          },
+          ana.user.id,
+          "from ana",
         );
+        await held.opened;
+        const b = from(
+          {
+            ...server.deps,
+            db: instrumented(server.deps.db, {
+              pids,
+              after: {
+                kind: "select",
+                run: async () => {
+                  bRead = true;
+                },
+              },
+            }),
+          },
+          caio.user.id,
+          "from caio",
+        );
+        // With FOR UPDATE, B waits for A's row; without it, B reads the row as it was before A.
+        await until(async () => bRead || (await waitingLocks(admin)) > 0, "B to wait or read");
+        release.open();
+        await Promise.all([a, b]);
         await server.deps.runtime.settle();
-        const rows = await server.deps.db
+        expect(pids.size).toBe(2);
+        const [row, ...rest] = await server.deps.db
           .select()
           .from(schema.notifications)
           .where(
-            and(eq(schema.notifications.userId, beto.user.id), eq(schema.notifications.groupKey, "dm:same")),
+            and(
+              eq(schema.notifications.userId, beto.user.id),
+              eq(schema.notifications.groupKey, "dm:forced"),
+            ),
           );
-        expect(rows.length).toBe(1);
-        expect(rows[0]?.count).toBe(N);
-      } finally {
-        await server.stop();
-      }
+        expect(rest).toEqual([]);
+        // Serially: first, then Ana's, then Caio's (who waited for Ana).
+        expect(row?.count).toBe(3);
+        expect(row?.actors.map((x) => x.id)).toEqual([caio.user.id, ana.user.id, beto.user.id]);
+        expect(row?.latest.text).toBe("from caio");
+      });
     }, 60_000);
   },
 );

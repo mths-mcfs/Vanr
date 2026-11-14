@@ -10,7 +10,7 @@ import { type Db, schema } from "@vanr/engine/db";
 import { newId, newToken, sha256Hex } from "@vanr/engine/ids";
 import { ROLES } from "@vanr/engine/roles";
 import { PRODUCT } from "@vanr/product";
-import { and, desc, eq, gt, isNull, lt, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, lte, or, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { setCookie } from "hono/cookie";
 import { z } from "zod";
@@ -489,7 +489,7 @@ export function registerInvitations(app: Hono<AppEnv>) {
           eq(invitations.id, row.id),
           or(
             isNull(invitations.requestedNewAt),
-            lt(invitations.requestedNewAt, new Date(now.getTime() - 3600_000)),
+            lte(invitations.requestedNewAt, new Date(now.getTime() - 3600_000)),
           ),
         ),
       )

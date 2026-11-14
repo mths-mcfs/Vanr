@@ -93,6 +93,27 @@ jobs:
       - run: bun test apps/server/test/concurrency-postgres.test.ts
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # The same forced tests with the locks left out by the test's own double: both must fail, or they
+      # would pass without the locks too and prove nothing.
+      - name: The forced lock tests fail without the locks
+        run: |
+          set +e
+          bun test apps/server/test/concurrency-postgres.test.ts --test-name-pattern forced > forced.log 2>&1
+          status=$?
+          cat forced.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the forced lock tests passed without the locks"
+            exit 1
+          fi
+          for name in "the invitee's lock" "the row lock"; do
+            if ! grep -F "(fail)" forced.log | grep -qF "$name"; then
+              echo "::error::the forced test of $name did not fail without the lock"
+              exit 1
+            fi
+          done
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_DROP_LOCKS: "1"
 
   sandbox:
     # The runner's real sandbox (bubblewrap + socat): the attack tests of the isolation of the agent's
