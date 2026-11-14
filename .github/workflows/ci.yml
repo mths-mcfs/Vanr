@@ -53,6 +53,8 @@ jobs:
         env:
           SHARD: ${{ matrix.shard }}
           SHARDS: ${{ strategy.job-total }}
+          # TEMPORARY: per-step times of the slow browser-guard test, to find what it waits for.
+          VANR_TEST_TIMING: "1"
 
   postgres:
     # The migration against a real Postgres (with pgvector, as in production); PGlite covers the rest.
@@ -95,10 +97,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
-      - name: Install bubblewrap and socat
+      # What @anthropic-ai/sandbox-runtime checks on Linux (ripgrep, bubblewrap, socat), plus git and curl,
+      # which the attack tests use.
+      - name: Install the sandbox dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bubblewrap socat
+          sudo apt-get install -y --no-install-recommends bubblewrap socat ripgrep git curl
       - name: Allow unprivileged user namespaces
         # Ubuntu 23.10+ restricts them through AppArmor and bubblewrap cannot start without them.
         run: |

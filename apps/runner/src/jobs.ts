@@ -29,7 +29,7 @@ import { ensureDir, writePrivate } from "./config";
 import { maybe } from "./lines";
 import { agentEnv, domainsFor, sandboxed } from "./ops";
 import { CLI_DOMAINS, type CommandSandbox, cliPaths, type PolicyContext, shellLine } from "./sandbox";
-import { maskSecrets, type SecretStore } from "./secrets";
+import { maskSecrets, type SecretStore, StreamMasker } from "./secrets";
 
 const LINE_EVERY_MS = 2000;
 const PROGRESS_EVERY_MS = 30_000;
@@ -274,6 +274,45 @@ export function parseExecutorLine(
   if (item.type === "agent_message" && item.text) return { text: item.text, result: item.text };
   if (item.type === "command_execution" && item.command) return { text: `$ ${item.command}` };
   return {};
+}
+
+/**
+ * The output of a job, masked before it is split into lines: a secret of several lines (a PEM key) is
+ * replaced whole even when it arrives in pieces, instead of going out one line at a time. The lines that
+ * come out are what the executor parser reads, and `end` releases what the mask and the last line held.
+ */
+export class JobOutput {
+  private buffer = "";
+  private readonly mask: StreamMasker;
+
+  constructor(
+    masks: [string, string][],
+    private readonly onLine: (line: string) => void,
+  ) {
+    this.mask = new StreamMasker(masks);
+  }
+
+  push(chunk: string): void {
+    this.buffer += this.mask.push(chunk);
+    this.lines();
+  }
+
+  end(): void {
+    this.buffer += this.mask.end();
+    this.lines();
+    if (this.buffer.trim()) this.onLine(this.buffer.trim());
+    this.buffer = "";
+  }
+
+  private lines() {
+    let i = this.buffer.indexOf("\n");
+    while (i >= 0) {
+      const line = this.buffer.slice(0, i).trimEnd();
+      this.buffer = this.buffer.slice(i + 1);
+      if (line) this.onLine(line);
+      i = this.buffer.indexOf("\n");
+    }
+  }
 }
 
 /** Cuts in the middle, keeping the start and the end. */
@@ -605,7 +644,6 @@ export class Jobs {
     let canceled = false;
     let timedOut = false;
     let rejected: string | null = null;
-    let buffer = "";
     let model: string | null = null;
     let usage: Omit<JobUsage, "model"> | null = null;
     const at = () => new Date().toISOString();
@@ -644,18 +682,9 @@ export class Jobs {
         this.opts.send({ type: "job.event", jobId: args.jobId, kind: "line", line: text, at: at() });
       }
     };
-    const onData = (s: string) => {
-      buffer += s;
-      let i = buffer.indexOf("\n");
-      while (i >= 0) {
-        const line = buffer.slice(0, i).trimEnd();
-        buffer = buffer.slice(i + 1);
-        if (line) onLine(line);
-        i = buffer.indexOf("\n");
-      }
-    };
-    child.stdout?.setEncoding("utf8").on("data", onData);
-    child.stderr?.setEncoding("utf8").on("data", onData);
+    const output = new JobOutput(secrets.masks, onLine);
+    child.stdout?.setEncoding("utf8").on("data", (s: string) => output.push(s));
+    child.stderr?.setEncoding("utf8").on("data", (s: string) => output.push(s));
     const kill = (signal: NodeJS.Signals) => {
       try {
         if (child.pid && process.platform !== "win32") process.kill(-child.pid, signal);
@@ -695,7 +724,7 @@ export class Jobs {
     }, PROGRESS_EVERY_MS);
     child.on("error", (e) => onLine(`error: ${e.message}`));
     child.on("close", (code) => {
-      if (buffer.trim()) onLine(buffer.trim());
+      output.end();
       clearTimeout(timer);
       clearInterval(progress);
       this.running.delete(args.jobId);

@@ -66,6 +66,8 @@
     "apps/runner/src/update.test.ts": 24,
     "apps/runner/src/secrets.test.ts": 300,
     "apps/runner/src/ops.test.ts": 400,
-    "apps/runner/src/jobs-start.test.ts": 100
+    "apps/runner/src/jobs-start.test.ts": 100,
+    "apps/runner/src/jobs-output.test.ts": 300,
+    "apps/runner/src/jobs-pem.test.ts": 600
   }
 }

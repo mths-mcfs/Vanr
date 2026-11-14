@@ -93,7 +93,13 @@ test.skipIf(!chrome)(
     for (const [i, target] of targets.entries())
       sites.page("site.test", `/r${i}`, () => Response.redirect(target, 302));
     for (let i = 0; i < targets.length; i++) {
+      const t0 = Date.now();
       const r = await open(a, sites.http("site.test", `/r${i}`));
+      // TEMPORARY diagnostics (CI run with VANR_TEST_TIMING=1).
+      if (process.env.VANR_TEST_TIMING === "1")
+        console.error(
+          `[timing] target ${targets[i]}: ${Date.now() - t0} ms, blocked ${JSON.stringify(r.blocked)}`,
+        );
       expect([targets[i], r.blocked?.[0]?.reason]).toEqual([targets[i], "private_network"]);
     }
     expect(sites.victimHits).toEqual([]);

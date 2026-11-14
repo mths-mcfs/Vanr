@@ -187,6 +187,12 @@ const CDP_EVENTS = {
   }),
 } as const;
 
+// TEMPORARY diagnostics (CI run with VANR_TEST_TIMING=1): time of each step of browser.open.
+const TIMING = process.env.VANR_TEST_TIMING === "1";
+const timing = (step: string, since: number) => {
+  if (TIMING) console.error(`[timing] ${step} ${Date.now() - since} ms`);
+};
+
 const personDriving = () => new RunnerError("person_driving", "A person has control of this browser");
 
 export interface CdpBrowserOptions {
@@ -266,7 +272,9 @@ export class CdpBrowser implements BrowserDriver {
       case "browser.act": {
         const a = args as OpArgs<"browser.open"> | OpArgs<"browser.act">;
         const policy: BrowserPolicy = { ...a.policy, driver: "agent" };
+        const t0 = Date.now();
         const s = await this.session(agent, send, policy);
+        timing(`${op} session`, t0);
         const run = s.lock.then(async () => {
           // The person took over after the server checked: the action does not happen (the server waits for them to hand it back).
           if (s.policy.driver === "person") throw personDriving();
@@ -279,9 +287,17 @@ export class CdpBrowser implements BrowserDriver {
               op === "browser.open"
                 ? this.open(s, (a as OpArgs<"browser.open">).url)
                 : this.act(s, a as OpArgs<"browser.act">);
+            const t1 = Date.now();
             const r = await within(work, this.opts.opTimeoutMs ?? OP_TIMEOUT_MS);
+            timing(`${op} work`, t1);
             if (!r) throw new RunnerError("timeout", "The page did not answer in time");
-            return await this.forAgent(s, await this.withEvidence(s, r));
+            const t2 = Date.now();
+            const evidence = await this.withEvidence(s, r);
+            timing(`${op} evidence (thumbnail)`, t2);
+            const t3 = Date.now();
+            const out = await this.forAgent(s, evidence);
+            timing(`${op} mask`, t3);
+            return out;
           } finally {
             s.op = null;
           }
@@ -502,7 +518,9 @@ export class CdpBrowser implements BrowserDriver {
       }
       return false;
     };
-    if (await ready(3000)) return;
+    const t0 = Date.now();
+    if (await ready(3000)) return timing("first page (auto-attached)", t0);
+    timing("first page: none auto-attached, creating one", t0);
     await s.cdp.send("Target.createTarget", { url: "about:blank" });
     if (!(await ready(5000))) throw new RunnerError("browser_unavailable", "The browser has no page open");
   }
@@ -828,11 +846,13 @@ export class CdpBrowser implements BrowserDriver {
     const site = siteAccess(policyOf(s), url);
     if (site.kind === "blocked")
       throw new RunnerError("not_allowed", blockMessage(site.reason, hostOf(url), site.category));
+    const t0 = Date.now();
     const r = await s.cdp.send<{ errorText?: string; loaderId?: string }>(
       "Page.navigate",
       { url },
       this.page(s).sessionId,
     );
+    timing(`navigate (errorText=${r.errorText ?? "none"})`, t0);
     if (r.errorText) {
       const why = s.blocked.findLast((b) => !b.before);
       return {
@@ -845,9 +865,16 @@ export class CdpBrowser implements BrowserDriver {
       };
     }
     const wait = this.opts.documentWaitMs ?? DOCUMENT_WAIT_MS;
+    const t1 = Date.now();
     if (r.loaderId) await this.committed(s, r.loaderId, wait);
+    timing("committed", t1);
+    const t2 = Date.now();
     await this.settle(s, wait);
-    return this.readable(s);
+    timing("settle", t2);
+    const t3 = Date.now();
+    const read = await this.readable(s);
+    timing("readable", t3);
+    return read;
   }
 
   /**
