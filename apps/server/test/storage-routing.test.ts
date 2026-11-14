@@ -320,7 +320,12 @@ describe("a bucket that fails", () => {
       s3.failOn.clear();
     }
     const [stuck] = await server.deps.db.select().from(schema.fileVersions).where(where);
-    expect(stuck).toMatchObject({ extractStatus: "working", extractError: null });
+    // The outage gives the attempt back and waits (1 min first) instead of failing the file.
+    expect(stuck).toMatchObject({
+      extractStatus: "working",
+      extractError: "storage unavailable (wait 1)",
+      extractAttempts: 0,
+    });
     // Stale after 10 min, the queue claims it again.
     await server.deps.db
       .update(schema.fileVersions)
