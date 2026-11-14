@@ -16,7 +16,8 @@ export interface S3Settings {
 
 export type S3Step = "write" | "read" | "list" | "delete";
 
-function client(cfg: S3Settings) {
+/** The bucket client for these settings (the storage router also asks it bucket-level questions). */
+export function client(cfg: S3Settings) {
   return new Bun.S3Client({
     endpoint: cfg.endpoint,
     region: cfg.region || "auto",
