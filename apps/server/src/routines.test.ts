@@ -629,11 +629,11 @@ describe("what the screen sees", () => {
   );
 
   test(
-    "a saved trigger or target that doesn't pass its schema is refused, not trusted",
+    "a saved trigger or target that doesn't pass its schema is rejected, not trusted",
     async () => {
       const bad = await newRoutine({ trigger: { kind: "schedule", rule: { freq: "secondly" } } });
       await expect(toRoutines(server.deps, [bad])).rejects.toThrow("invalid trigger");
-      const target = await newRoutine({ target: { kind: "artifact" } });
+      const target = await newRoutine({ target: { kind: "spreadsheet" } });
       await expect(toRoutines(server.deps, [target])).rejects.toThrow("invalid target");
     },
     SERVER_TEST_MS,

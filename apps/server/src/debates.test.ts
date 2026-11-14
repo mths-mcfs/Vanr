@@ -657,15 +657,15 @@ describe("who sees a debate", () => {
       let n = 0;
       for (const channelId of channels)
         for (const requester of [null, cy])
-          for (const seated of [[], [dee]] as Person[][])
+          for (const speaking of [[], [dee]] as Person[][])
             for (const agentIds of [[], [agentIn.id]]) {
               const row = await openDebate(server.deps, {
                 workspaceId,
                 title: `Visible ${n++}`,
                 goal: "Who sees",
                 agentIds,
-                userIds: seated.map((p) => p.user.id),
-                speakers: seated.map(person),
+                userIds: speaking.map((p) => p.user.id),
+                speakers: speaking.map(person),
                 createdBy: { type: "agent", id: agentIn.id },
                 requesterUserId: requester?.user.id ?? null,
                 channelId,
