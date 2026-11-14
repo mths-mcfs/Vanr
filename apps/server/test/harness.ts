@@ -15,6 +15,8 @@ export interface TestServerOptions {
   now?: () => Date;
   fetchExternal?: typeof fetch;
   sql?: SqlConnector;
+  /** No forcing of the fake provider: the production rule of the lookup applies (production tests). */
+  realModels?: boolean;
 }
 
 /** Starts the real server on a free port, with an in-memory PGlite and in-memory email. */
@@ -34,6 +36,7 @@ export async function startTestServer(opts: TestServerOptions = {}): Promise<Run
     now: opts.now,
     fetchExternal: opts.fetchExternal ?? noNetwork,
     sql: opts.sql,
+    forceFakeModels: opts.realModels !== true,
     steps: opts.steps,
   });
 }
@@ -105,4 +108,9 @@ export async function signedIn(server: RunningServer, name: string, email: strin
   if (!me.ok) throw new Error("no session after sign-up");
   const { user }: Me = await body(me);
   return { browser, user };
+}
+
+/** Waits until the server's background work ended (the notification queue and, later, runs and routines). */
+export function settle(server: RunningServer): Promise<void> {
+  return server.deps.runtime.settle();
 }

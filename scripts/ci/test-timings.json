@@ -22,12 +22,12 @@
     "apps/runner/src/secrets.test.ts": 300,
     "apps/runner/src/update.test.ts": 24,
     "apps/server/src/members.test.ts": 2631,
-    "apps/server/src/realtime/hub.test.ts": 188,
-    "apps/server/src/runners/hub.test.ts": 218,
+    "apps/server/src/realtime/hub.test.ts": 176,
+    "apps/server/src/runners/hub.test.ts": 292,
     "apps/server/src/runtime/preview.test.ts": 123,
     "apps/server/src/runtime/route.test.ts": 13,
-    "apps/server/test/base.test.ts": 7314,
-    "apps/server/test/boot.test.ts": 9039,
+    "apps/server/test/base.test.ts": 14183,
+    "apps/server/test/boot.test.ts": 22025,
     "apps/server/test/config.test.ts": 51,
     "apps/server/test/mail-protocols.test.ts": 41,
     "apps/server/test/notify-text.test.ts": 10,
@@ -91,6 +91,8 @@
     "packages/engine/src/wiki/props-vault.test.ts": 3,
     "packages/engine/src/work-state.test.ts": 1,
     "scripts/ci/gate.test.ts": 21,
-    "scripts/typecheck.test.ts": 10
+    "scripts/typecheck.test.ts": 10,
+    "apps/server/src/runtime/background.test.ts": 97,
+    "apps/server/test/runtime-port.test.ts": 7994
   }
 }

@@ -8,14 +8,17 @@ import { count } from "drizzle-orm";
 import { createApp } from "./app";
 import { createAuth } from "./auth";
 import type { Config } from "./config";
-import type { AppDeps } from "./context";
+import type { AppDeps, RuntimePort } from "./context";
+import { HttpError } from "./http";
 import { holdInstanceLock } from "./instance-lock";
 import { guardedFetch } from "./integrations/net";
 import { log } from "./logger";
 import { createMailer, type Mailer } from "./mailer";
+import { testModelCheck } from "./models";
 import { loadVapid, webPushSender } from "./push";
 import { Hub } from "./realtime/hub";
 import { RunnerHub } from "./runners/hub";
+import { BackgroundWork } from "./runtime/background";
 import { postgresLedger } from "./usage-ledger";
 
 interface StartOptions {
@@ -28,6 +31,8 @@ interface StartOptions {
   fetchExternal?: typeof fetch;
   /** Tests: the workspaces' databases on a PGlite. */
   sql?: SqlConnector;
+  /** Tests: every agent uses the fake provider, even with a credential saved. */
+  forceFakeModels?: boolean;
   /** The single-instance lock's connection dropped with the server up (index.ts ends the process). */
   onInstanceLockLost?: () => void;
   /** Tests: replaces a step of the boot that touches the outside, to break it or hold it. */
@@ -139,7 +144,10 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   };
   const origins = [publicUrl, ...(opts.extraOrigins ?? [])];
   const auth = createAuth({ db, config: effective, mailer, trustedOrigins: origins, signupAllowed });
-  // Slice S6 (runtime/runtime) creates the AgentRuntime here (it reads the deps when used).
+  // Background work (the notification queue today); stopping waits for what is running. Slice S6
+  // (runtime/runtime) creates the AgentRuntime here instead, which takes this work over.
+  const background = new BackgroundWork();
+  undo.push(() => background.stop());
   const ledger = postgresLedger(db, PRICES);
   const deps: AppDeps = {
     config: effective,
@@ -160,12 +168,14 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     // Push goes only to known push service hosts (push.ts), without redirects: it doesn't go through
     // guardedFetch, which would resolve DNS to check for a private network.
     push: webPushSender(await steps.loadVapid(effective), opts.fetchExternal ?? fetch),
-    // Slice S6 (runtime/runtime) adds `runtime` and `testModelFor`, S3 (wiki-collab) adds `wikiLive` and
-    // S5 (assignments/motor, assignments/verify) adds `assignmentEngine` and `assignmentVerifier`.
+    runtime: runtimePort(background),
+    testModelFor: (workspaceId) => testModelCheck(deps, workspaceId, opts.forceFakeModels === true),
+    // S3 (wiki-collab) adds `wikiLive` and S5 (assignments/motor, assignments/verify) adds
+    // `assignmentEngine` and `assignmentVerifier`.
   };
-  // Here, in this order: the undo of stopRecalcs (S2, bases/write), runtime.stop (S6) and the assignment
-  // engine's stop (S5); the provider lookup (S6); search.ensureVector (S2, search-index); runtime.start (S6),
-  // the engine's start (S5) and resumeRecalcs (S2), all before the app takes requests.
+  // Here, in this order: the undo of stopRecalcs (S2, bases/write) and of the assignment engine's stop
+  // (S5); the provider lookup (S6); search.ensureVector (S2, search-index); runtime.start (S6), the
+  // engine's start (S5) and resumeRecalcs (S2), all before the app takes requests.
   const app = createApp(deps);
   handler = (req) => app.fetch(req);
   log.info("server.started", { url: publicUrl, db: opened.kind });
@@ -191,4 +201,44 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
  */
 async function hasPendingInvite(_email: string, _headers: Headers | null): Promise<boolean> {
   return false;
+}
+
+/** A runtime method the server doesn't have yet (slice S6 brings the agent runtime). */
+export class NotAvailable extends HttpError {
+  constructor(readonly method: keyof RuntimePort) {
+    super(503, "not_available", `The agent runtime is not available yet (${method})`, { method });
+    this.name = "NotAvailable";
+  }
+}
+
+/**
+ * The runtime port until slice S6: `track` and `settle` are the background work, and every other method is
+ * declared absent (it throws `NotAvailable`, with no behavior of its own). No route of this slice reaches
+ * one of them; a later route that can is rejected at its entry, before any write.
+ */
+function runtimePort(background: BackgroundWork): RuntimePort {
+  const absent = (method: keyof RuntimePort) => () => {
+    throw new NotAvailable(method);
+  };
+  return {
+    track: (work, what) => background.track(work, what),
+    settle: () => background.settle(),
+    complete: absent("complete"),
+    runFor: absent("runFor"),
+    activeRun: absent("activeRun"),
+    activeRuns: absent("activeRuns"),
+    liveRun: absent("liveRun"),
+    liveInfo: absent("liveInfo"),
+    cancel: absent("cancel"),
+    onRunEnd: absent("onRunEnd"),
+    onPersonMessage: absent("onPersonMessage"),
+    providerForWorkspace: absent("providerForWorkspace"),
+    isBusy: absent("isBusy"),
+    busyAgents: absent("busyAgents"),
+    awaitsApproval: absent("awaitsApproval"),
+    resolveApproval: absent("resolveApproval"),
+    reviseApproval: absent("reviseApproval"),
+    answerQuestion: absent("answerQuestion"),
+    wakeAt: absent("wakeAt"),
+  };
 }
