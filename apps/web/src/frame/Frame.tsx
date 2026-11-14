@@ -1,14 +1,13 @@
 // The frame of a workspace: sidebar, header, the connection banner and the open area's screen.
 // It owns the one real-time connection and the data the sidebar shows; areas render inside it.
 
-import { useQueryClient } from "@tanstack/react-query";
 import { Outlet, useParams } from "@tanstack/react-router";
+import { useApiQuery } from "@vanr/client/react";
 import type { Me, WorkspaceSummary } from "@vanr/contract";
 import { AgentSigil, Banner, Button, Drawer, DrawerContent, Icon, Kbd } from "@vanr/ui";
 import { Menu, PanelLeft, Search } from "lucide-react";
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { z } from "zod";
-import { useApiQuery } from "../api/index.ts";
 import { useRuntime } from "../app/context.tsx";
 import { AppLink, useGo } from "../app/navigation.tsx";
 import { StandalonePage } from "../app/Standalone.tsx";
@@ -16,13 +15,14 @@ import { ScreenLoading, TitleScopeProvider } from "../app/screens.tsx";
 import { useLookup, useMessages } from "../i18n/react.tsx";
 import { readStored, STORAGE_KEYS, writeStored } from "../platform/storage.ts";
 import {
-  RealtimeProvider,
   useInvalidateOn,
-  useRealtimeRetry,
   useRealtimeStatus,
+  useReconnectNow,
+  WorkspaceRealtime,
 } from "../realtime/react.tsx";
 import { useSession } from "../session/react.tsx";
 import { rememberWorkspace } from "../session/session.ts";
+import { agentsAtWork } from "./at-work.ts";
 import {
   DOCKED_SIDEBAR_QUERY,
   useCommandKey,
@@ -44,23 +44,14 @@ export function Frame() {
   const params: Record<string, unknown> = useParams({ strict: false });
   const workspaceId = typeof params.workspaceId === "string" ? params.workspaceId : "";
   const { me } = useSession();
-  const runtime = useRuntime();
-  const queryClient = useQueryClient();
-  const onReconnected = useCallback(() => void queryClient.invalidateQueries(), [queryClient]);
-  const onAccessEnded = useCallback(() => runtime.gate.ended(), [runtime]);
   // The guard already sent a visitor to sign in; while the session is being dropped there is nothing to draw.
   if (me === undefined || me === null) return null;
   const workspace = me.workspaces.find((candidate) => candidate.id === workspaceId);
   if (workspace === undefined) return <NoAccess />;
   return (
-    <RealtimeProvider
-      workspaceId={workspace.id}
-      open={runtime.openSocket}
-      onReconnected={onReconnected}
-      onAccessEnded={onAccessEnded}
-    >
+    <WorkspaceRealtime workspaceId={workspace.id}>
       <FrameBody me={me} workspace={workspace} />
-    </RealtimeProvider>
+    </WorkspaceRealtime>
   );
 }
 
@@ -80,8 +71,8 @@ function NoAccess() {
 function ConnectionBanner() {
   const t = useMessages("shell");
   const status = useRealtimeStatus();
-  const retry = useRealtimeRetry();
-  if (status !== "lost") return null;
+  const retry = useReconnectNow();
+  if (status !== "reconnecting") return null;
   return (
     <Banner
       tone="warning"
@@ -112,11 +103,14 @@ function FrameBody({ me, workspace }: { me: Me; workspace: WorkspaceSummary }) {
   const content = useRef<HTMLElement>(null);
 
   const agents = useApiQuery("listAgents", scope, { staleTime: AGENTS_FRESH_MS });
+  const runs = useApiQuery("listActiveRuns", scope, { staleTime: OVERVIEW_FRESH_MS });
   const overview = useApiQuery("getOverview", scope, { staleTime: OVERVIEW_FRESH_MS });
   const notices = useApiQuery("listNotificationCounts", scope, { staleTime: OVERVIEW_FRESH_MS });
-  useInvalidateOn(["run.status_changed", "run.completed", "run.stopped", "run.idle"], "listAgents", scope);
-  useInvalidateOn(["approval.requested", "approval.resolved"], "getOverview", scope);
-  useInvalidateOn("notification.counts_updated", "listNotificationCounts", scope);
+  // Run events refetch the active runs and the notice count through the client's invalidation
+  // table. The count of approvals waiting comes with the overview, which the table does not tie to
+  // the approval events.
+  useInvalidateOn("approval.requested", { method: "getOverview", args: scope });
+  useInvalidateOn("approval.resolved", { method: "getOverview", args: scope });
 
   useEffect(() => rememberWorkspace(store, workspaceId), [store, workspaceId]);
   useOnNavigate(() => setDrawerOpen(false));
@@ -125,18 +119,22 @@ function FrameBody({ me, workspace }: { me: Me; workspace: WorkspaceSummary }) {
   const routeId = useCurrentRouteId();
   const title = routeId === undefined ? undefined : titles(`route.${routeId}`);
 
-  const working = agents.isPending
-    ? "loading"
-    : agents.isError
-      ? "failed"
-      : agents.data.agents.filter((agent) => agent.busy && agent.archivedAt === null);
+  const working =
+    agents.isPending || runs.isPending
+      ? "loading"
+      : agents.isError || runs.isError
+        ? "failed"
+        : agentsAtWork(agents.data, runs.data);
   const sidebar = (
     <Sidebar
       me={me}
       workspace={workspace}
       counts={{ notifications: notices.data?.badge ?? 0, approvals: overview.data?.myApprovalQueue ?? 0 }}
       working={working}
-      onRetryWorking={() => void agents.refetch()}
+      onRetryWorking={() => {
+        void agents.refetch();
+        void runs.refetch();
+      }}
     />
   );
   const sidebarOutOfSight = !docked || hidden;

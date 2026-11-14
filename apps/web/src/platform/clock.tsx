@@ -1,20 +1,9 @@
-// Time, injected. Nothing in the web calls setTimeout or Date.now directly, so tests move the
-// clock themselves and never wait.
+// Time, injected. The web uses the client's Clock everywhere (deadlines, reconnection and the
+// countdowns on screen run on the same one), so tests move it by hand and never wait.
+import { type Clock, systemClock } from "@vanr/client";
 import { createContext, type ReactNode, useContext, useEffect, useState } from "react";
 
-export type Clock = {
-  now: () => number;
-  /** Runs `run` after `ms`. Returns the cancel function. */
-  after: (ms: number, run: () => void) => () => void;
-};
-
-export const systemClock: Clock = {
-  now: () => Date.now(),
-  after: (ms, run) => {
-    const id = setTimeout(run, ms);
-    return () => clearTimeout(id);
-  },
-};
+export { type Clock, systemClock };
 
 const ClockContext = createContext<Clock>(systemClock);
 
@@ -43,7 +32,7 @@ export function useSecondsUntil(until: number | undefined): number {
     const tick = () => {
       const remaining = Math.max(0, Math.ceil((until - clock.now()) / 1000));
       setSeconds(remaining);
-      if (remaining > 0) cancel = clock.after(1000, tick);
+      if (remaining > 0) cancel = clock.setTimer(tick, 1000);
     };
     tick();
     return () => cancel();

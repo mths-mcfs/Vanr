@@ -2,6 +2,7 @@
 // the fake server, then assert what a person sees and does, by role and label.
 import { describe, expect, test } from "bun:test";
 import { act, screen, waitFor, within } from "@testing-library/react";
+import { QUERY_RETRIES } from "@vanr/client/react";
 import { newServer, renderApp } from "../../../test/app.tsx";
 
 const PATH = "/workspace/workspace_birchwood/agents";
@@ -32,7 +33,8 @@ describe("the agents of a workspace", () => {
 
   test("failed: what could not be loaded, why, and a retry that works", async () => {
     const server = newServer();
-    server.force("listAgents", { kind: "error", status: 500, code: "internal" }, 3);
+    // A failure worth retrying is tried again by the client: the first call and its three retries.
+    server.force("listAgents", { kind: "error", status: 500, code: "internal" }, 1 + QUERY_RETRIES);
     const app = await renderApp({ path: PATH, signedInAs: "usr_ana", server });
     const alert = await within(screen.getByRole("main")).findByRole("alert");
     expect(alert.textContent).toContain("The agents could not be loaded");
@@ -52,7 +54,7 @@ describe("the agents of a workspace", () => {
 
   test("empty: what belongs here and how to add it", async () => {
     const server = newServer();
-    server.state.agents = [];
+    server.agents = [];
     const app = await renderApp({ path: PATH, signedInAs: "usr_ana", server });
     expect(await screen.findByText("No agents in this workspace")).toBeDefined();
     expect(

@@ -1,7 +1,8 @@
+import { isApiError } from "@vanr/client";
+import { useApiQuery, useVanrClient } from "@vanr/client/react";
 import type { InvitationPreview, Me } from "@vanr/contract";
 import { Button, Callout, Skeleton } from "@vanr/ui";
 import { useState } from "react";
-import { isApiError, useApi, useApiQuery } from "../../api/index.ts";
 import { AppLink, useGo, useRouteParams } from "../../app/navigation.tsx";
 import { useErrorMessage } from "../../app/screens.tsx";
 import { useLocale, useMessages } from "../../i18n/react.tsx";
@@ -41,9 +42,9 @@ export function InvitationScreen() {
     );
   }
   if (invitation.isError) {
-    if (invitation.error.code === "invitation.used")
+    if (invitation.error.rawCode === "invitation.used") {
       return <Used hasSession={me !== null && me !== undefined} />;
-    if (invitation.error.status === 404) return <Gone token={token} />;
+    }
     return (
       <AccountPage title={t("invite.failed.title")}>
         <p role="alert">{describe(invitation.error)}</p>
@@ -55,6 +56,8 @@ export function InvitationScreen() {
       </AccountPage>
     );
   }
+  // The client answers null for an invitation that does not exist, has expired or was withdrawn.
+  if (invitation.data === null) return <Gone token={token} />;
   return <Open token={token} invitation={invitation.data} me={me} />;
 }
 
@@ -97,7 +100,7 @@ function Open({
   me: Me | null | undefined;
 }) {
   const t = useMessages("account");
-  const api = useApi();
+  const { api } = useVanrClient();
   const go = useGo();
   const signOut = useSignOut();
   const completeSignIn = useCompleteSignIn();
@@ -126,7 +129,7 @@ function Open({
     me !== undefined &&
     !member &&
     ((invitation.email !== null && invitation.email !== me.user.email.toLowerCase()) ||
-      accept.error?.code === "invitation.wrong_email");
+      (isApiError(accept.error) && accept.error.rawCode === "invitation.wrong_email"));
 
   return (
     <AccountPage title={t("invite.title", { workspace: invitation.workspaceName })}>
@@ -199,7 +202,7 @@ function Open({
 /** Expired, withdrawn or unknown: the person can ask whoever invited them for another. */
 function Gone({ token }: { token: string }) {
   const t = useMessages("account");
-  const api = useApi();
+  const { api } = useVanrClient();
   const [asked, setAsked] = useState(false);
   const ask = useSubmit(async () => {
     await api.requestInvitationNew({ invitationId: token });

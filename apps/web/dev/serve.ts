@@ -7,13 +7,11 @@
 // with a POST to /__fake (see Control below), e.g.
 //   curl -X POST localhost:4319/__fake -d '{"action":"force","method":"signUp","status":503,"code":"signup_busy","retryAfter":5}'
 import { join, normalize, resolve } from "node:path";
+import type { SocketLike } from "@vanr/client";
 import { z } from "zod";
-import { API_METHODS } from "../src/api/methods.ts";
-import type { SocketHandle } from "../src/realtime/connection.ts";
-import { FakeOffline, FakeServer, type SeedName } from "./fake-server.ts";
+import { FAKE_METHODS, FakeServer, type SeedName } from "./fake-server.ts";
 
 const COOKIE = "vanr.session_token";
-const VERBS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 
 const args = process.argv.slice(2);
 const option = (name: string) => {
@@ -26,10 +24,11 @@ const seed = z.enum(["team", "closed", "empty"]).catch("team").parse(option("--s
 
 const server = new FakeServer({ seed, sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)) });
 
-const Method = z.enum(API_METHODS as [string, ...string[]]).transform((name) => {
-  const method = API_METHODS.find((candidate) => candidate === name);
-  if (method === undefined) throw new Error(`unknown method ${name}`);
-  return method;
+const Method = z.string().transform((name, context) => {
+  const method = FAKE_METHODS.find((candidate) => candidate === name);
+  if (method !== undefined) return method;
+  context.addIssue({ code: "custom", message: `unknown method ${name}` });
+  return z.NEVER;
 });
 
 /** What a POST to /__fake may ask for. */
@@ -41,7 +40,7 @@ const Control = z.discriminatedUnion("action", [
     status: z.number().int(),
     code: z.string(),
     message: z.string().optional(),
-    retryAfter: z.number().int().optional(),
+    retryAfter: z.union([z.number().int(), z.string()]).optional(),
     envelope: z.boolean().optional(),
     times: z.number().int().positive().optional(),
   }),
@@ -108,35 +107,23 @@ async function control(request: Request): Promise<Response> {
 }
 
 async function api(request: Request, url: URL): Promise<Response> {
-  const verb = VERBS.find((candidate) => candidate === request.method);
-  if (verb === undefined) return new Response(null, { status: 405 });
+  // One jar per request, filled from the browser's cookie; what the server sets goes back as one.
+  const before = sessionOf(request);
+  const jar = { session: before };
   const text = await request.text();
-  let body: unknown;
   try {
-    body = text.trim() === "" ? undefined : JSON.parse(text);
-  } catch {
-    return Response.json(
-      { error: { code: "invalid_request", message: "Body is not valid JSON" } },
-      { status: 400 },
-    );
-  }
-  try {
-    const answer = await server.handle({
-      verb,
-      path: url.pathname,
-      query: Object.fromEntries(url.searchParams),
-      body,
-      session: sessionOf(request),
+    const answer = await server.fetch(jar)(`${url.pathname}${url.search}`, {
+      method: request.method,
+      headers: request.headers,
+      ...(text !== "" && { body: text }),
     });
-    const headers = new Headers();
-    if (answer.retryAfter !== undefined) headers.set("retry-after", String(answer.retryAfter));
-    if (answer.setSession !== undefined) headers.set("set-cookie", cookie(answer.setSession));
-    if (answer.status === 204 || answer.body === null)
-      return new Response(null, { status: answer.status, headers });
-    return Response.json(answer.body, { status: answer.status, headers });
+    if (jar.session === before) return answer;
+    const headers = new Headers(answer.headers);
+    headers.set("set-cookie", cookie(jar.session ?? null));
+    return new Response(answer.body, { status: answer.status, headers });
   } catch (cause) {
-    if (cause instanceof FakeOffline)
-      return new Response(null, { status: 599, statusText: "forced offline" });
+    // A forced "offline": the nearest a server can get to not answering.
+    if (cause instanceof TypeError) return new Response(null, { status: 599, statusText: "forced offline" });
     throw cause;
   }
 }
@@ -152,7 +139,7 @@ async function file(pathname: string): Promise<Response> {
   );
 }
 
-type SocketData = { workspaceId: string; session: string | undefined; handle?: SocketHandle };
+type SocketData = { url: string; session: string | undefined; served?: SocketLike };
 
 Bun.serve<SocketData>({
   hostname: "127.0.0.1",
@@ -160,10 +147,7 @@ Bun.serve<SocketData>({
   fetch(request, bun) {
     const url = new URL(request.url);
     if (url.pathname === "/api/v1/realtime") {
-      const data: SocketData = {
-        workspaceId: url.searchParams.get("workspaceId") ?? "",
-        session: sessionOf(request),
-      };
+      const data: SocketData = { url: request.url, session: sessionOf(request) };
       return bun.upgrade(request, { data }) ? undefined : new Response("Use WebSocket", { status: 426 });
     }
     if (url.pathname === "/__fake" && request.method === "POST") return control(request);
@@ -172,19 +156,19 @@ Bun.serve<SocketData>({
   },
   websocket: {
     open(socket) {
-      socket.data.handle = server.connect(socket.data.workspaceId, socket.data.session, {
-        open: () => {},
-        message: (data) => {
-          if (typeof data === "string") socket.send(data);
-        },
-        close: (code) => socket.close(code === 1006 ? 1011 : code, "closed by the fake server"),
-      });
+      // The fake server's side of the socket, wired to the real one.
+      const served = server.socketFactory({ session: socket.data.session })(socket.data.url);
+      served.onmessage = ({ data }) => {
+        if (typeof data === "string") socket.send(data);
+      };
+      served.onclose = ({ code }) => socket.close(code === 1006 ? 1011 : code, "closed by the fake server");
+      socket.data.served = served;
     },
     message(socket, message) {
-      if (typeof message === "string") socket.data.handle?.send(message);
+      if (typeof message === "string") socket.data.served?.send(message);
     },
-    close(socket) {
-      socket.data.handle?.close();
+    close(socket, code) {
+      socket.data.served?.close(code);
     },
   },
 });

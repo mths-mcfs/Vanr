@@ -1,13 +1,13 @@
 import { Button, Spinner } from "@vanr/ui";
 import { useState } from "react";
 import { z } from "zod";
-import { useApi } from "../../api/index.ts";
+import { useAuth } from "../../api/index.ts";
 import { useRuntime } from "../../app/context.tsx";
 import { AppLink, useSearch } from "../../app/navigation.tsx";
 import { useMessages } from "../../i18n/react.tsx";
 import { href } from "../../routes.ts";
 import { useSession } from "../../session/react.tsx";
-import { AccountPage, ServerProblem, useAttempt, useSubmit } from "./shared.tsx";
+import { AccountPage, ServerProblem, useOnce, useSubmit } from "./shared.tsx";
 
 const Search = z.object({ token: z.string().optional(), error: z.string().optional() });
 const NO_SEARCH: z.infer<typeof Search> = {};
@@ -19,10 +19,13 @@ const NO_SEARCH: z.infer<typeof Search> = {};
 export function VerifyEmailScreen() {
   const t = useMessages("account");
   const search = useSearch(Search, NO_SEARCH);
-  const verification = useAttempt("verifyEmail", { token: search.token ?? "" }, search.token !== undefined);
-  const failed = search.token === undefined ? search.error !== undefined : verification.isError;
+  const auth = useAuth();
+  const verification = useOnce(search.token ?? "", search.token !== undefined, () =>
+    auth.verifyEmail({ query: { token: search.token ?? "" } }),
+  );
+  const failed = search.token === undefined ? search.error !== undefined : verification === "failed";
   if (failed) return <LinkFailed />;
-  if (search.token !== undefined && verification.isPending) {
+  if (verification === "working") {
     return (
       <AccountPage title={t("verify.working")}>
         <Spinner size="lg" label={t("verify.working")} />
@@ -42,15 +45,14 @@ export function VerifyEmailScreen() {
 
 function LinkFailed() {
   const t = useMessages("account");
-  const api = useApi();
+  const auth = useAuth();
   const { origin } = useRuntime();
   const { me } = useSession();
   const [sentTo, setSentTo] = useState<string | undefined>();
   const resend = useSubmit(async () => {
     if (me === null || me === undefined) return;
-    await api.sendVerificationEmail({
-      email: me.user.email,
-      callbackURL: `${origin}${href("verifyEmail", {})}`,
+    await auth.sendVerificationEmail({
+      body: { email: me.user.email, callbackURL: `${origin}${href("verifyEmail", {})}` },
     });
     setSentTo(me.user.email);
   });

@@ -1,7 +1,8 @@
+import { useApiQuery } from "@vanr/client/react";
 import { can } from "@vanr/contract";
-import { useApiQuery } from "../../api/index.ts";
 import { AppLink, useRouteParams } from "../../app/navigation.tsx";
 import { ScreenError, ScreenLoading, useDocumentTitle } from "../../app/screens.tsx";
+import { agentsAtWork } from "../../frame/at-work.ts";
 import { useLocale, useMessages } from "../../i18n/react.tsx";
 import { useSession } from "../../session/react.tsx";
 
@@ -16,14 +17,16 @@ export function HomeScreen() {
   const { me } = useSession();
   const overview = useApiQuery("getOverview", { workspaceId });
   const agents = useApiQuery("listAgents", { workspaceId });
+  const runs = useApiQuery("listActiveRuns", { workspaceId });
   const workspace = me?.workspaces.find((candidate) => candidate.id === workspaceId);
   useDocumentTitle(t("route.home"));
 
-  if (overview.isPending || agents.isPending) return <ScreenLoading />;
+  if (overview.isPending || agents.isPending || runs.isPending) return <ScreenLoading />;
   if (overview.isError) return <ScreenError error={overview.error} onRetry={() => void overview.refetch()} />;
   if (agents.isError) return <ScreenError error={agents.error} onRetry={() => void agents.refetch()} />;
+  if (runs.isError) return <ScreenError error={runs.error} onRetry={() => void runs.refetch()} />;
 
-  const working = agents.data.agents.filter((agent) => agent.busy && agent.archivedAt === null);
+  const working = agentsAtWork(agents.data, runs.data);
   const names = new Intl.ListFormat(locale, { type: "conjunction" }).format(
     working.map((agent) => agent.name),
   );

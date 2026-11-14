@@ -1,10 +1,11 @@
-// Who is signed in. The answer lives in the query cache under the key of `getMe`, as the person
-// or null, and this module is the only reader of that operation: screens use `useSession()`.
+// Who is signed in. The answer is the client's `getMe` (the person, or null when nobody is) and
+// lives in the query cache under that call's own key; screens read it with `useSession()`.
 
 import type { QueryClient } from "@tanstack/react-query";
+import type { VanrClient } from "@vanr/client";
+import { queryKey } from "@vanr/client/react";
 import type { Me } from "@vanr/contract";
 import { z } from "zod";
-import { type Api, isApiError, queryKey } from "../api/index.ts";
 import { type KeyValueStore, readStored, STORAGE_KEYS, writeStored } from "../platform/storage.ts";
 import { href } from "../routes.ts";
 import type { SessionGate } from "./gate.ts";
@@ -27,22 +28,20 @@ export type Session = {
   dropCachedData: () => void;
 };
 
-export function createSession(deps: { api: Api; queryClient: QueryClient; gate: SessionGate }): Session {
-  const key = queryKey("getMe");
+export function createSession(deps: {
+  client: VanrClient;
+  queryClient: QueryClient;
+  gate: SessionGate;
+}): Session {
+  const key = queryKey(deps.client, "getMe");
   const queryFn = async (): Promise<Me | null> => {
-    try {
-      const me = await deps.api.getMe();
-      deps.gate.established(me.user.id);
-      return me;
-    } catch (cause) {
-      // Nobody is signed in: an answer, not a failure.
-      if (isApiError(cause) && cause.status === 401) return null;
-      throw cause;
-    }
+    const me = await deps.client.call("getMe", undefined);
+    if (me !== null) deps.gate.established(me.user.id);
+    return me;
   };
   const options = { queryKey: key, queryFn, staleTime: SESSION_FRESH_MS };
   const dropCachedData = () =>
-    deps.queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== key[0] });
+    deps.queryClient.removeQueries({ predicate: (query) => query.queryKey[2] !== key[2] });
   return {
     options,
     load: (fresh = false) =>

@@ -2,11 +2,11 @@
 // builds it over the browser; tests build it over the fake server.
 import { QueryClient } from "@tanstack/react-query";
 import type { RouterHistory } from "@tanstack/react-router";
-import { type Api, type ApiError, createApi, type Transport } from "../api/index.ts";
+import { createWebApi, type WebApi, type WebTransport } from "../api/index.ts";
 import { detectLocale, type Locale } from "../i18n/locales.ts";
 import type { Clock } from "../platform/clock.tsx";
 import type { KeyValueStore } from "../platform/storage.ts";
-import type { SocketOpener } from "../realtime/connection.ts";
+import type { SocketSource } from "../realtime/connection.ts";
 import { href } from "../routes.ts";
 import { createDraftStore, type DraftStore } from "../session/drafts.ts";
 import { createSessionGate, type SessionGate } from "../session/gate.ts";
@@ -15,13 +15,15 @@ import { createSession, type Session } from "../session/session.ts";
 import { type AppRouter, createAppRouter } from "./router.tsx";
 
 export type AppRuntime = {
-  api: Api;
+  /** The shared client and the sign-in calls (see src/api). */
+  api: WebApi;
   queryClient: QueryClient;
   session: Session;
   gate: SessionGate;
   drafts: DraftStore;
   router: AppRouter;
-  openSocket: SocketOpener;
+  /** Where the real-time connection of a workspace opens its socket. */
+  openSocket: SocketSource;
   clock: Clock;
   /** Choices that outlive the tab: language, theme, sidebar, last workspace. */
   store: KeyValueStore;
@@ -33,44 +35,39 @@ export type AppRuntime = {
 
 export type RuntimeOptions = {
   /** Builds the wire. It receives the current language, to send with every call. */
-  transport: (locale: () => Locale) => Transport;
+  transport: (locale: () => Locale) => WebTransport;
   history: RouterHistory;
   store: KeyValueStore;
   /** Where drafts are kept: they last as long as the tab. */
   tabStore: KeyValueStore;
-  openSocket: SocketOpener;
+  openSocket: SocketSource;
   clock: Clock;
   languages: readonly string[];
   origin: string;
+  /** Wait before a failed query is tried again. Left out, the wait grows with each try. */
+  retryDelayMs?: number;
 };
-
-/** Failures worth a second try: no answer, a timeout or a server error. Never a 4xx. */
-export function shouldRetryQuery(failureCount: number, error: ApiError): boolean {
-  return error.retryable && error.status !== 429 && failureCount < MAX_QUERY_RETRIES;
-}
-export const MAX_QUERY_RETRIES = 2;
 
 export function createRuntime(options: RuntimeOptions): AppRuntime {
   const language = { current: detectLocale({ store: options.store, languages: options.languages }) };
+  // Which queries are retried, and how often, is the client's rule (see `shouldRetry`).
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: {
-        retry: (failureCount, error) => shouldRetryQuery(failureCount, error as ApiError),
-        retryDelay: 0,
         refetchOnWindowFocus: false,
+        ...(options.retryDelayMs !== undefined && { retryDelay: options.retryDelayMs }),
       },
-      mutations: { retry: false },
     },
   });
   const drafts = createDraftStore(options.tabStore);
   // The gate is built before the router it navigates with.
   let sendToSignIn = () => {};
   const gate = createSessionGate({ drafts, onEnded: () => sendToSignIn() });
-  const api = createApi(
+  const api = createWebApi(
     options.transport(() => language.current),
-    { onSessionEnded: () => gate.ended() },
+    { onUnauthorized: () => gate.ended(), clock: options.clock },
   );
-  const session = createSession({ api, queryClient, gate });
+  const session = createSession({ client: api.client, queryClient, gate });
   const router = createAppRouter({ session, store: options.store, language }, options.history);
   sendToSignIn = () => {
     const from = router.state.location;

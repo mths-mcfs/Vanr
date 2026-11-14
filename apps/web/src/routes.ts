@@ -4,7 +4,7 @@
  * The shell owns this file, the router, the session, the real-time connection, the message loader,
  * `apps/web/package.json`, the `web` CI job and the exports of `@vanr/ui`. An area owns its folder
  * and its messages, and nothing else. An area never adds a top-level route, opens a socket, handles
- * a 401 or calls `fetch`.
+ * a 401, calls `fetch` or declares a method of the server.
  *
  * How an area plugs in
  * --------------------
@@ -28,28 +28,33 @@
  * 3. Loading. The router imports `areas/<area>/module.ts` on the first visit to any of the area's
  *    routes, so each area is its own chunk. Split further inside the area with `lazy()` if needed.
  *
- * 4. Data. Call the server through `useApi()`, `useApiQuery(method, params)` and
- *    `useApiMutation(method)` from `src/api`. Method names and parameters follow the server's
- *    operation ids. Results are validated before they reach a screen, and every failure is an
- *    `ApiError` with `status`, `code`, `message` and `retryable`. Cache keys come from
- *    `queryKey(method, params)` and from nowhere else; invalidate with `useInvalidate()`.
- *    A method the area needs is added to `src/api/methods.ts` with its schema.
+ * 4. Data. The server is called through `@vanr/client`, and only through it. Read with
+ *    `useApiQuery("listAgents", { workspaceId })`, write with `useApiMutation("createAgent")`, both
+ *    from `@vanr/client/react`; a one-off call is `useVanrClient().api.<method>(args)`. Names,
+ *    arguments (`{ ...pathParams, body?, query? }`) and results are the client's: an answer is
+ *    checked against the contract before a screen sees it, and every failure is the client's
+ *    `ApiError`. To refetch after a write, name what it changed:
+ *    `useApiMutation("createAgent", { invalidates: (args) => [{ method: "listAgents", args: { workspaceId: args.workspaceId } }] })`.
+ *    An area never calls `fetch` and never writes a path, a schema or a cache key. A method the
+ *    client lacks is added to `packages/client`, not here.
  *
- * 5. Session. Nothing to do. A 401 on any call, or the real-time connection closing with 4401,
- *    sends the person to sign in and brings them back to the same address. A form that should
- *    survive that keeps its text in `useDraft(id)`; drafts are dropped when someone else signs in.
- *    Never keep a password or a secret in a draft.
+ * 5. Session. Nothing to do, and never look at a 401. A 401 on any call, or the real-time
+ *    connection closing with 4401, sends the person to sign in and brings them back to the same
+ *    address. A form that should survive that keeps its text in `useDraft(id)`; drafts are dropped
+ *    when someone else signs in. Never keep a password or a secret in a draft.
  *
- * 6. Real time. The shell holds the one connection of the open workspace. Listen with
- *    `useRealtimeEvent("message.posted", handler)`, refetch with
- *    `useInvalidateOn(["run.completed"], "listAgents", { workspaceId })`, follow a channel with
- *    `useChannelSubscription(channelId)`. After a reconnect every query is refetched: an event is
- *    only a signal, never the source of truth.
+ * 6. Real time. The shell holds the one connection of the open workspace; an area never opens a
+ *    socket. Events already refetch what they change (the client's `INVALIDATION` table) and a
+ *    reconnect refetches everything, so most screens need no real-time code. To act on an event,
+ *    `useRealtimeEvent("message.posted", handler)` from `@vanr/client/react`. From
+ *    `src/realtime/react.tsx`: `useChannelSubscription(channelId)` follows a channel, and
+ *    `useInvalidateOn("approval.resolved", { method: "getOverview", args: { workspaceId } })`
+ *    refetches on a pair the table lacks. An event is only a signal, never the source of truth.
  *
  * 7. Messages. One namespace per area, named after the area: `src/messages/<area>/en.ts` and
  *    `pt-BR.ts`, loaded on demand by `useMessages("<area>")`. No interface text is written in a
  *    component. The parity test fails when a key or a placeholder exists in one language only.
- *    Server errors are shown with `useErrorMessage()`, which looks the `code` up in `errors`.
+ *    A failed call is shown with `useErrorMessage()`, which looks the error's code up in `errors`.
  *
  * 8. States. A screen that loads data shows `<ScreenLoading />` while pending, `<ScreenError />`
  *    (what failed and a retry) on failure, and an `<EmptyState />` that says what belongs there

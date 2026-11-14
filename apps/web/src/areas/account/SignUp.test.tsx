@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { screen } from "@testing-library/react";
-import { type App, renderApp, WIRES } from "../../../test/app.tsx";
+import { type App, renderApp } from "../../../test/app.tsx";
 import { invitationTokenIn } from "./SignUp.tsx";
 import { emailProblem, newPasswordProblem, PASSWORD_MAX, PASSWORD_MIN } from "./shared.tsx";
 
@@ -14,150 +14,141 @@ const submit = (app: App) => app.user.click(screen.getByRole("button", { name: "
 const signUps = (app: App) => app.server.calls.filter((call) => call.method === "signUp");
 const NEW = { name: "Mel Okafor", email: "mel@elsewhere.example", password: "tar-and-birch" };
 
-for (const wire of WIRES) {
-  describe(`create account (${wire} wire)`, () => {
-    test("idle, open sign-up: the reason says what an account is", async () => {
-      await renderApp({ path: "/signup", wire });
-      await screen.findByRole("heading", { level: 1, name: "Create your account" });
-      expect(screen.getByText("One account works in every workspace you join.")).toBeDefined();
-      expect(screen.getByText("8 characters or more.")).toBeDefined();
-    });
-
-    test("idle, first run: the reason says this account owns the installation", async () => {
-      await renderApp({ path: "/signup", seed: "empty", wire });
-      expect(
-        await screen.findByText("You are the first one here. This account will own the installation."),
-      ).toBeDefined();
-    });
-
-    test("field errors: each field says what is missing and nothing is sent", async () => {
-      const app = await renderApp({ path: "/signup", wire });
-      await fill(app, { password: "seven77" });
-      await submit(app);
-      expect(screen.getByText("Enter your name.")).toBeDefined();
-      expect(screen.getByText("Enter your email.")).toBeDefined();
-      expect(screen.getByText("Use at least 8 characters.")).toBeDefined();
-      // The error says the rule, so the hint steps aside instead of saying it twice.
-      expect(screen.queryByText("8 characters or more.")).toBeNull();
-      expect(signUps(app)).toEqual([]);
-      await app.user.type(screen.getByLabelText("Password"), "7");
-      expect(screen.queryByText("Use at least 8 characters.")).toBeNull();
-      expect(screen.getByText("8 characters or more.")).toBeDefined();
-    });
-
-    test("sending: the button is busy until the server answers", async () => {
-      const app = await renderApp({ path: "/signup", wire });
-      const held = app.server.hold("signUp");
-      await fill(app, NEW);
-      await submit(app);
-      expect(screen.getByRole("button", { name: "Create my account" }).getAttribute("aria-busy")).toBe(
-        "true",
-      );
-      await submit(app);
-      expect(signUps(app)).toHaveLength(1);
-      held.release();
-      await screen.findByRole("heading", { level: 1, name: "Name your workspace" });
-    });
-
-    test("server error: the email already has an account", async () => {
-      const app = await renderApp({ path: "/signup", wire });
-      await fill(app, { ...NEW, email: "ana@birchwood.example" });
-      await submit(app);
-      expect((await screen.findByRole("alert")).textContent).toBe(
-        "There is already an account with this email. Sign in instead.",
-      );
-    });
-
-    test("server error: sign-up closed while the form was open", async () => {
-      const app = await renderApp({ path: "/signup", wire });
-      await fill(app, NEW);
-      app.server.state.signupOpen = false;
-      await submit(app);
-      expect((await screen.findByRole("alert")).textContent).toBe(
-        "Sign-up is by invitation here. Ask a workspace admin for one.",
-      );
-    });
-
-    test.each([
-      ["the queue's answer", { envelope: true, code: "signup_busy" }],
-      ["the sign-in service's answer", { envelope: false, code: "signup_busy" }],
-    ])(
-      "busy server (%s): 503 with Retry-After counts down, then lets the person retry",
-      async (_name, shape) => {
-        const app = await renderApp({ path: "/signup", seed: "empty", wire });
-        app.server.force("signUp", { kind: "error", status: 503, retryAfter: 5, ...shape });
-        await fill(app, NEW);
-        await submit(app);
-        expect((await screen.findByRole("alert")).textContent).toContain(
-          "Another sign-up is creating the first account. Try again in 5 seconds.",
-        );
-        expect(screen.getByRole<HTMLButtonElement>("button", { name: "Retry" }).disabled).toBe(true);
-        await app.advance(5000);
-        await app.user.click(screen.getByRole("button", { name: "Retry" }));
-        await screen.findByRole("heading", { level: 1, name: "Name your workspace" });
-        expect(signUps(app)).toHaveLength(2);
-      },
-    );
-
-    test("success: the first account goes on to name its workspace", async () => {
-      const app = await renderApp({ path: "/signup", seed: "empty", wire });
-      await fill(app, NEW);
-      await submit(app);
-      await screen.findByRole("heading", { level: 1, name: "Name your workspace" });
-      expect(app.address()).toBe("/onboarding");
-      expect(app.server.mail.at(-1)).toMatchObject({ to: NEW.email, kind: "verify" });
-    });
-
-    test("closed sign-up without an invitation offers the waitlist: every state", async () => {
-      const app = await renderApp({ path: "/signup", seed: "closed", wire });
-      await screen.findByRole("heading", { level: 1, name: "Sign-up is by invitation" });
-      const join = () => app.user.click(screen.getByRole("button", { name: "Join the waitlist" }));
-      await join();
-      expect(screen.getByText("Enter your email.")).toBeDefined();
-      await app.user.type(screen.getByLabelText("Email"), "curious@elsewhere.example");
-      app.server.force("createWaitlist", { kind: "error", status: 500, code: "internal" });
-      await join();
-      expect((await screen.findByRole("alert")).textContent).toBe(
-        "The server ran into a problem. Try again.",
-      );
-      const held = app.server.hold("createWaitlist");
-      await join();
-      expect(screen.getByRole("button", { name: "Join the waitlist" }).getAttribute("aria-busy")).toBe(
-        "true",
-      );
-      held.release();
-      await screen.findByRole("heading", { level: 1, name: "You are on the list" });
-      expect(
-        screen.getByText("We sent a link to curious@elsewhere.example. Open it to confirm your place."),
-      ).toBeDefined();
-      expect(app.server.calls.at(-1)?.params).toEqual({ email: "curious@elsewhere.example", locale: "en" });
-    });
-
-    test("closed sign-up with an invitation keeps the form, names the workspace and fills the email", async () => {
-      const app = await renderApp({
-        path: "/signup?redirect=%2Finvite%2Finv-mel-pending",
-        seed: "closed",
-        wire,
-      });
-      expect(
-        await screen.findByText("You were invited to Birchwood Labs. Create an account to join."),
-      ).toBeDefined();
-      expect(screen.getByLabelText<HTMLInputElement>("Email").value).toBe("mel@birchwood.example");
-      await fill(app, { name: "Mel Okafor", password: "tar-and-birch" });
-      await submit(app);
-      await screen.findByRole("heading", { level: 1, name: "You are invited to Birchwood Labs" });
-      await app.user.click(screen.getByRole("button", { name: "Accept invitation" }));
-      await screen.findByRole("heading", { level: 1, name: "Birchwood Labs" });
-      expect(app.address()).toBe("/workspace/workspace_birchwood");
-    });
+describe("create account", () => {
+  test("idle, open sign-up: the reason says what an account is", async () => {
+    await renderApp({ path: "/signup" });
+    await screen.findByRole("heading", { level: 1, name: "Create your account" });
+    expect(screen.getByText("One account works in every workspace you join.")).toBeDefined();
+    expect(screen.getByText("8 characters or more.")).toBeDefined();
   });
-}
+
+  test("idle, first run: the reason says this account owns the installation", async () => {
+    await renderApp({ path: "/signup", seed: "empty" });
+    expect(
+      await screen.findByText("You are the first one here. This account will own the installation."),
+    ).toBeDefined();
+  });
+
+  test("field errors: each field says what is missing and nothing is sent", async () => {
+    const app = await renderApp({ path: "/signup" });
+    await fill(app, { password: "seven77" });
+    await submit(app);
+    expect(screen.getByText("Enter your name.")).toBeDefined();
+    expect(screen.getByText("Enter your email.")).toBeDefined();
+    expect(screen.getByText("Use at least 8 characters.")).toBeDefined();
+    // The error says the rule, so the hint steps aside instead of saying it twice.
+    expect(screen.queryByText("8 characters or more.")).toBeNull();
+    expect(signUps(app)).toEqual([]);
+    await app.user.type(screen.getByLabelText("Password"), "7");
+    expect(screen.queryByText("Use at least 8 characters.")).toBeNull();
+    expect(screen.getByText("8 characters or more.")).toBeDefined();
+  });
+
+  test("sending: the button is busy until the server answers", async () => {
+    const app = await renderApp({ path: "/signup" });
+    const held = app.server.hold("signUp");
+    await fill(app, NEW);
+    await submit(app);
+    expect(screen.getByRole("button", { name: "Create my account" }).getAttribute("aria-busy")).toBe("true");
+    await submit(app);
+    expect(signUps(app)).toHaveLength(1);
+    held.release();
+    await screen.findByRole("heading", { level: 1, name: "Name your workspace" });
+  });
+
+  test("server error: the email already has an account", async () => {
+    const app = await renderApp({ path: "/signup" });
+    await fill(app, { ...NEW, email: "ana@birchwood.example" });
+    await submit(app);
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "There is already an account with this email. Sign in instead.",
+    );
+  });
+
+  test("server error: sign-up closed while the form was open", async () => {
+    const app = await renderApp({ path: "/signup" });
+    await fill(app, NEW);
+    app.server.signupOpen = false;
+    await submit(app);
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Sign-up is by invitation here. Ask a workspace admin for one.",
+    );
+  });
+
+  test.each([
+    ["the queue's answer", { envelope: true, code: "signup_busy" }],
+    ["the sign-in service's answer", { envelope: false, code: "signup_busy" }],
+  ])(
+    "busy server (%s): 503 with Retry-After counts down, then lets the person retry",
+    async (_name, shape) => {
+      const app = await renderApp({ path: "/signup", seed: "empty" });
+      app.server.force("signUp", { kind: "error", status: 503, retryAfter: 5, ...shape });
+      await fill(app, NEW);
+      await submit(app);
+      expect((await screen.findByRole("alert")).textContent).toContain(
+        "Another sign-up is creating the first account. Try again in 5 seconds.",
+      );
+      expect(screen.getByRole<HTMLButtonElement>("button", { name: "Retry" }).disabled).toBe(true);
+      await app.advance(5000);
+      await app.user.click(screen.getByRole("button", { name: "Retry" }));
+      await screen.findByRole("heading", { level: 1, name: "Name your workspace" });
+      expect(signUps(app)).toHaveLength(2);
+    },
+  );
+
+  test("success: the first account goes on to name its workspace", async () => {
+    const app = await renderApp({ path: "/signup", seed: "empty" });
+    await fill(app, NEW);
+    await submit(app);
+    await screen.findByRole("heading", { level: 1, name: "Name your workspace" });
+    expect(app.address()).toBe("/onboarding");
+    expect(app.server.mail.at(-1)).toMatchObject({ to: NEW.email, kind: "verify" });
+  });
+
+  test("closed sign-up without an invitation offers the waitlist: every state", async () => {
+    const app = await renderApp({ path: "/signup", seed: "closed" });
+    await screen.findByRole("heading", { level: 1, name: "Sign-up is by invitation" });
+    const join = () => app.user.click(screen.getByRole("button", { name: "Join the waitlist" }));
+    await join();
+    expect(screen.getByText("Enter your email.")).toBeDefined();
+    await app.user.type(screen.getByLabelText("Email"), "curious@elsewhere.example");
+    app.server.force("createWaitlist", { kind: "error", status: 500, code: "internal" });
+    await join();
+    expect((await screen.findByRole("alert")).textContent).toBe("The server ran into a problem. Try again.");
+    const held = app.server.hold("createWaitlist");
+    await join();
+    expect(screen.getByRole("button", { name: "Join the waitlist" }).getAttribute("aria-busy")).toBe("true");
+    held.release();
+    await screen.findByRole("heading", { level: 1, name: "You are on the list" });
+    expect(
+      screen.getByText("We sent a link to curious@elsewhere.example. Open it to confirm your place."),
+    ).toBeDefined();
+    expect(app.server.calls.at(-1)?.params).toEqual({ email: "curious@elsewhere.example", locale: "en" });
+  });
+
+  test("closed sign-up with an invitation keeps the form, names the workspace and fills the email", async () => {
+    const app = await renderApp({
+      path: "/signup?redirect=%2Finvite%2Finv-mel-pending",
+      seed: "closed",
+    });
+    expect(
+      await screen.findByText("You were invited to Birchwood Labs. Create an account to join."),
+    ).toBeDefined();
+    expect(screen.getByLabelText<HTMLInputElement>("Email").value).toBe("mel@birchwood.example");
+    await fill(app, { name: "Mel Okafor", password: "tar-and-birch" });
+    await submit(app);
+    await screen.findByRole("heading", { level: 1, name: "You are invited to Birchwood Labs" });
+    await app.user.click(screen.getByRole("button", { name: "Accept invitation" }));
+    await screen.findByRole("heading", { level: 1, name: "Birchwood Labs" });
+    expect(app.address()).toBe("/workspace/workspace_birchwood");
+  });
+});
 
 describe("the waitlist link", () => {
   test("confirms the place", async () => {
     const app = await renderApp({ path: "/?confirm=waitlist-token-patient" });
     await screen.findByRole("heading", { level: 1, name: "Your place is confirmed" });
-    expect(app.server.state.waitlist[0]?.confirmed).toBe(true);
+    expect(app.server.waitlist[0]?.confirmed).toBe(true);
   });
 
   test("a link that does not match says so and offers the way back in", async () => {

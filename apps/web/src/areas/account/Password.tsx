@@ -1,7 +1,8 @@
+import { isApiError } from "@vanr/client";
 import { Button, Field, Input } from "@vanr/ui";
 import { useState } from "react";
 import { z } from "zod";
-import { useApi } from "../../api/index.ts";
+import { useAuth } from "../../api/index.ts";
 import { useRuntime } from "../../app/context.tsx";
 import { AppLink, useGo, useSearch } from "../../app/navigation.tsx";
 import { useMessages } from "../../i18n/react.tsx";
@@ -22,7 +23,7 @@ const NO_FORGOT: z.infer<typeof ForgotSearch> = {};
 /** Asks for the email that gets the reset link. The answer is the same whether or not an account uses it. */
 export function ForgotPasswordScreen() {
   const t = useMessages("account");
-  const api = useApi();
+  const auth = useAuth();
   const { origin } = useRuntime();
   const search = useSearch(ForgotSearch, NO_FORGOT);
   const [email, setEmail] = useState(search.email ?? "");
@@ -30,9 +31,8 @@ export function ForgotPasswordScreen() {
   const [sentTo, setSentTo] = useState<string | undefined>();
   const emailError = emailProblem(email);
   const submit = useSubmit(async () => {
-    await api.requestPasswordReset({
-      email: email.trim(),
-      redirectTo: `${origin}${href("resetPassword", {})}`,
+    await auth.requestPasswordReset({
+      body: { email: email.trim(), redirectTo: `${origin}${href("resetPassword", {})}` },
     });
     setSentTo(email.trim());
   });
@@ -93,7 +93,7 @@ const NO_RESET: z.infer<typeof ResetSearch> = {};
 /** Where the reset link ends: the token arrives in the address, or `error` when the link is spent. */
 export function ResetPasswordScreen() {
   const t = useMessages("account");
-  const api = useApi();
+  const auth = useAuth();
   const go = useGo();
   const search = useSearch(ResetSearch, NO_RESET);
   const token = search.error === undefined ? search.token : undefined;
@@ -101,10 +101,11 @@ export function ResetPasswordScreen() {
   const [checked, setChecked] = useState(false);
   const passwordError = newPasswordProblem(password);
   const submit = useSubmit(async () => {
-    await api.resetPassword({ token: token ?? "", newPassword: password });
+    await auth.resetPassword({ body: { token: token ?? "", newPassword: password } });
     await go("login", {}, { search: { reason: "password_changed" }, replace: true });
   });
-  if (token === undefined || submit.error?.code === "invalid_token") {
+  const spent = isApiError(submit.error) && submit.error.rawCode === "invalid_token";
+  if (token === undefined || spent) {
     return (
       <AccountPage title={t("reset.invalid.title")} why={t("reset.invalid.body")}>
         <p>

@@ -1,6 +1,6 @@
+import { useVanrClient } from "@vanr/client/react";
 import { Button, Field, Input, Textarea } from "@vanr/ui";
 import { useState } from "react";
-import { useApi } from "../../api/index.ts";
 import { useGo } from "../../app/navigation.tsx";
 import { useMessages } from "../../i18n/react.tsx";
 import { useCompleteSignIn, useDraft, useSession, useSignOut } from "../../session/react.tsx";
@@ -21,7 +21,7 @@ function browserTimeZone(): string {
  */
 export function NewWorkspaceScreen() {
   const t = useMessages("account");
-  const api = useApi();
+  const { api } = useVanrClient();
   const go = useGo();
   const { me } = useSession();
   const signOut = useSignOut();
@@ -33,9 +33,11 @@ export function NewWorkspaceScreen() {
 
   const submit = useSubmit(async () => {
     const { workspace } = await api.createWorkspace({
-      name: name.trim(),
-      ...(context.trim() !== "" && { context: context.trim() }),
-      timezone: browserTimeZone(),
+      body: {
+        name: name.trim(),
+        ...(context.trim() !== "" && { context: context.trim() }),
+        timezone: browserTimeZone(),
+      },
     });
     discardName();
     discardContext();

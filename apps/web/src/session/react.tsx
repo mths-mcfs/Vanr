@@ -3,7 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 import type { Me } from "@vanr/contract";
 import { useCallback, useState } from "react";
-import { useApi } from "../api/index.ts";
+import { useAuth } from "../api/index.ts";
 import { useRuntime } from "../app/context.tsx";
 import { useGo } from "../app/navigation.tsx";
 
@@ -41,13 +41,13 @@ export function useCompleteSignIn(): () => Promise<Me | null> {
  * what the sign-in screen receives; without it, the "you signed out" notice.
  */
 export function useSignOut(): (search?: Record<string, string>) => Promise<void> {
-  const api = useApi();
+  const auth = useAuth();
   const { session, gate } = useRuntime();
   const go = useGo();
   return useCallback(
     async (search?: Record<string, string>) => {
       try {
-        await api.signOut();
+        await auth.signOut();
       } catch {
         // Without an answer the cookie may live on; the screens still forget the person.
       }
@@ -55,7 +55,7 @@ export function useSignOut(): (search?: Record<string, string>) => Promise<void>
       session.forget();
       await go("login", {}, { search: search ?? { reason: "signed_out" } });
     },
-    [api, session, gate, go],
+    [auth, session, gate, go],
   );
 }
 

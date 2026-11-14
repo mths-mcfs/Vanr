@@ -1,7 +1,8 @@
+import { useApiQuery } from "@vanr/client/react";
 import { Button, Callout, Field, Input } from "@vanr/ui";
 import { useEffect, useState } from "react";
 import { z } from "zod";
-import { useApi, useApiQuery } from "../../api/index.ts";
+import { useAuth } from "../../api/index.ts";
 import { useRuntime } from "../../app/context.tsx";
 import { AppLink, useGo, useGoToAddress, useSearch } from "../../app/navigation.tsx";
 import { useMessages } from "../../i18n/react.tsx";
@@ -25,7 +26,7 @@ const NOTICE = {
 
 export function SignInScreen() {
   const t = useMessages("account");
-  const api = useApi();
+  const auth = useAuth();
   const { store } = useRuntime();
   const search = useSearch(Search, NO_SEARCH);
   const go = useGo();
@@ -45,7 +46,7 @@ export function SignInScreen() {
   }, [firstRun, go]);
 
   const submit = useSubmit(async () => {
-    await api.signIn({ email: email.trim(), password });
+    await auth.signIn({ body: { email: email.trim(), password } });
     const me = await completeSignIn();
     if (me === null) throw new Error("signed in, but the server sees no session");
     await goToAddress(safeRedirect(search.redirect) ?? startAddress(store, me), { replace: true });

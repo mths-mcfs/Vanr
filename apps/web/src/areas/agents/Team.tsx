@@ -1,12 +1,13 @@
-// The worked example of an area's screen: the reserved route, data through the API layer, the
-// three states (loading, failed, empty), text from the area's own messages, a real-time refresh
-// and typed links. Team.test.tsx beside it is the test to copy.
+// The worked example of an area's screen: the reserved route, data through the client's hooks, the
+// three states (loading, failed, empty), text from the area's own messages and typed links. It has
+// no real-time code: the run events refetch `listActiveRuns` through the client's invalidation
+// table. Team.test.tsx beside it is the test to copy.
+
+import { useApiQuery } from "@vanr/client/react";
 import { AgentSigil, Button, EmptyState } from "@vanr/ui";
-import { useApiQuery } from "../../api/index.ts";
 import { AppLink, useGo, useRouteParams } from "../../app/navigation.tsx";
 import { ScreenError, ScreenLoading, useDocumentTitle } from "../../app/screens.tsx";
 import { useMessages } from "../../i18n/react.tsx";
-import { useInvalidateOn } from "../../realtime/react.tsx";
 
 export function TeamScreen() {
   const t = useMessages("agents");
@@ -14,22 +15,23 @@ export function TeamScreen() {
   const go = useGo();
   const { workspaceId } = useRouteParams("agents");
   const agents = useApiQuery("listAgents", { workspaceId });
-  // An agent starting or finishing a run changes who is working.
-  useInvalidateOn(["run.status_changed", "run.completed"], "listAgents", { workspaceId });
+  const runs = useApiQuery("listActiveRuns", { workspaceId });
   useDocumentTitle(shell("route.agents"));
 
-  if (agents.isPending) return <ScreenLoading />;
-  if (agents.isError) {
+  if (agents.isPending || runs.isPending) return <ScreenLoading />;
+  if (agents.isError || runs.isError) {
+    const failed = agents.isError ? agents : runs;
     return (
       <ScreenError
         title={t("team.failed")}
-        error={agents.error}
-        onRetry={() => void agents.refetch()}
+        error={failed.error}
+        onRetry={() => void failed.refetch()}
         namespace="agents"
       />
     );
   }
-  const active = agents.data.agents.filter((agent) => agent.archivedAt === null);
+  const active = agents.data.filter((agent) => agent.archivedAt === null);
+  const atWork = new Set(runs.data.map((run) => run.agentId));
   return (
     <div className="page">
       <h1 className="page__title">{shell("route.agents")}</h1>
@@ -50,7 +52,7 @@ export function TeamScreen() {
           <ul className="listing" aria-label={t("team.list")}>
             {active.map((agent) => (
               <li key={agent.id} className="listing__row">
-                <AgentSigil agentId={agent.id} name="" aria-hidden="true" working={agent.busy} />
+                <AgentSigil agentId={agent.id} name="" aria-hidden="true" working={atWork.has(agent.id)} />
                 <AppLink
                   className="app-link listing__name"
                   route="agent"
@@ -59,7 +61,9 @@ export function TeamScreen() {
                   {agent.name}
                 </AppLink>
                 <span className="listing__handle">@{agent.handle}</span>
-                <span className="listing__state">{t(agent.busy ? "team.working" : "team.idle")}</span>
+                <span className="listing__state">
+                  {t(atWork.has(agent.id) ? "team.working" : "team.idle")}
+                </span>
               </li>
             ))}
           </ul>

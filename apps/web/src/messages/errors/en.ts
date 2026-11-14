@@ -6,9 +6,9 @@ import type { Catalog } from "../../i18n/format.ts";
  */
 export default {
   fallback: "That did not work. Try again.",
-  "network.unreachable": "Vanr could not be reached. Check your connection and try again.",
-  "response.malformed": "The server answered in a way this version does not understand. Reload the page.",
-  "client.unexpected": "Something went wrong on this page. Try again.",
+  network: "Vanr could not be reached. Check your connection and try again.",
+  timeout: "The server took too long to answer. Try again.",
+  invalid_response: "The server answered in a way this version does not understand. Reload the page.",
   unauthorized: "Your session ended. Sign in again.",
   forbidden: "You don't have permission to do that.",
   not_found: "That no longer exists.",

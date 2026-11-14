@@ -1,16 +1,8 @@
 // What the account screens share: the open column, the language and theme controls, the form
 // pieces and the rules of each field.
-import { useQuery } from "@tanstack/react-query";
+import { isApiError } from "@vanr/client";
 import { Button, Callout, ErrorState } from "@vanr/ui";
-import { type FormEvent, type ReactNode, useRef, useState } from "react";
-import {
-  type ApiError,
-  type ApiMethod,
-  type ParamsOf,
-  queryKey,
-  toApiError,
-  useApi,
-} from "../../api/index.ts";
+import { type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { StandalonePage } from "../../app/Standalone.tsx";
 import { useErrorMessage } from "../../app/screens.tsx";
 import { useMessages } from "../../i18n/react.tsx";
@@ -59,6 +51,12 @@ export function AccountForm({ onSubmit, children }: { onSubmit: () => void; chil
   );
 }
 
+/** The seconds a failed call was told to wait (the sign-in calls carry a Retry-After this way). */
+function retryAfterOf(error: unknown): number | undefined {
+  const seconds = isApiError(error) ? error.params?.retryAfterSeconds : undefined;
+  return typeof seconds === "number" ? seconds : undefined;
+}
+
 /**
  * What the server said about a failed submit. A busy server (503 with Retry-After) shows the wait
  * counting down and offers the retry when it is over; anything else shows the error's text.
@@ -68,7 +66,8 @@ export function ServerProblem({
   failureTime,
   onRetry,
 }: {
-  error: ApiError | null;
+  /** What the submit rejected with, or null when it did not fail. */
+  error: unknown;
   /** The clock time of the failure, to count the server's wait from. */
   failureTime: number | undefined;
   onRetry: () => void;
@@ -76,13 +75,11 @@ export function ServerProblem({
   const t = useMessages("account");
   const common = useMessages("common");
   const describe = useErrorMessage();
-  const waitUntil =
-    error?.retryAfterSeconds === undefined || failureTime === undefined
-      ? undefined
-      : failureTime + error.retryAfterSeconds * 1000;
-  const seconds = useSecondsUntil(waitUntil);
+  const wait = retryAfterOf(error);
+  const busy = isApiError(error) && error.status === 503 && wait !== undefined;
+  const seconds = useSecondsUntil(busy && failureTime !== undefined ? failureTime + wait * 1000 : undefined);
   if (error === null) return null;
-  if (error.status === 503 && error.retryAfterSeconds !== undefined) {
+  if (busy) {
     return (
       <Callout
         tone="warning"
@@ -111,11 +108,7 @@ export function ServerProblem({
  */
 export function useSubmit(action: () => Promise<void>) {
   const clock = useClock();
-  const [state, setState] = useState<{
-    busy: boolean;
-    error: ApiError | null;
-    failureTime: number | undefined;
-  }>({
+  const [state, setState] = useState<{ busy: boolean; error: unknown; failureTime: number | undefined }>({
     busy: false,
     error: null,
     failureTime: undefined,
@@ -129,7 +122,7 @@ export function useSubmit(action: () => Promise<void>) {
       await action();
       setState({ busy: false, error: null, failureTime: undefined });
     } catch (cause) {
-      setState({ busy: false, error: toApiError(cause), failureTime: clock.now() });
+      setState({ busy: false, error: cause ?? new Error("failed"), failureTime: clock.now() });
     } finally {
       running.current = false;
     }
@@ -159,19 +152,27 @@ export function LoadFailed({
 }
 
 /**
- * Runs an operation whose answer carries nothing (confirming a link) once per set of parameters
- * and reports how it went. The cache needs a value, so success is recorded as `true`.
+ * Runs a call that confirms a link (an email, a place on the waitlist) once per `key` while
+ * `enabled`, and reports how it went. Once, even when the screen mounts twice: confirming is a
+ * write, and a link is spent by its first use.
  */
-export function useAttempt<M extends ApiMethod>(method: M, params: ParamsOf<M>, enabled: boolean) {
-  const api = useApi();
-  return useQuery<true, ApiError>({
-    queryKey: queryKey(method, params),
-    queryFn: async (): Promise<true> => {
-      await api.call(method, params);
-      return true;
-    },
-    enabled,
-    retry: false,
-    staleTime: Number.POSITIVE_INFINITY,
-  });
+export function useOnce(
+  key: string,
+  enabled: boolean,
+  run: () => Promise<unknown>,
+): "idle" | "working" | "done" | "failed" {
+  const [outcome, setOutcome] = useState<{ key: string; status: "done" | "failed" } | null>(null);
+  const started = useRef<string | null>(null);
+  const latest = useRef(run);
+  latest.current = run;
+  useEffect(() => {
+    if (!enabled || started.current === key) return;
+    started.current = key;
+    latest.current().then(
+      () => setOutcome({ key, status: "done" }),
+      () => setOutcome({ key, status: "failed" }),
+    );
+  }, [key, enabled]);
+  if (!enabled) return "idle";
+  return outcome?.key === key ? outcome.status : "working";
 }

@@ -1,7 +1,8 @@
+import { useApiQuery } from "@vanr/client/react";
 import { Button, Field, Input, Spinner } from "@vanr/ui";
 import { useState } from "react";
 import { z } from "zod";
-import { useApi, useApiQuery } from "../../api/index.ts";
+import { useAuth } from "../../api/index.ts";
 import { useRuntime } from "../../app/context.tsx";
 import { AppLink, useGoToAddress, useSearch } from "../../app/navigation.tsx";
 import { useMessages } from "../../i18n/react.tsx";
@@ -34,11 +35,11 @@ export function SignUpScreen() {
   const search = useSearch(Search, NO_SEARCH);
   const config = useApiQuery("getAuthConfig", undefined, { staleTime: 60_000 });
   const token = invitationTokenIn(search.redirect);
-  const invitation = useApiQuery(
-    "getInvitation",
-    { invitationId: token ?? "" },
-    { enabled: token !== undefined, retry: false, staleTime: 60_000 },
-  );
+  const invitation = useApiQuery("getInvitation", token === undefined ? undefined : { invitationId: token }, {
+    enabled: token !== undefined,
+    retry: false,
+    staleTime: 60_000,
+  });
 
   if (config.isPending || (token !== undefined && invitation.isPending)) {
     return (
@@ -54,7 +55,8 @@ export function SignUpScreen() {
       </AccountPage>
     );
   }
-  const invited = invitation.data;
+  // null: the invitation is gone, so the person is treated like anyone else.
+  const invited = invitation.data ?? undefined;
   if (invited === undefined && !config.data.signupOpen && !config.data.firstRun) {
     return <WaitlistForm email={search.email} redirect={search.redirect} />;
   }
@@ -77,7 +79,7 @@ function SignUpForm({
   redirect: string | undefined;
 }) {
   const t = useMessages("account");
-  const api = useApi();
+  const auth = useAuth();
   const { store } = useRuntime();
   const goToAddress = useGoToAddress();
   const completeSignIn = useCompleteSignIn();
@@ -90,7 +92,7 @@ function SignUpForm({
   const passwordError = newPasswordProblem(password);
 
   const submit = useSubmit(async () => {
-    await api.signUp({ name: name.trim(), email: email.trim(), password });
+    await auth.signUp({ body: { name: name.trim(), email: email.trim(), password } });
     const me = await completeSignIn();
     if (me === null) throw new Error("signed up, but the server sees no session");
     await goToAddress(safeRedirect(redirect) ?? startAddress(store, me), { replace: true });

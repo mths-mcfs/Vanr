@@ -1,25 +1,19 @@
-// The API layer's public surface, and the ONE place where the wire is chosen. When the shared
-// client package is on main, replace `createFetchTransport(...)` below with an adapter over it;
-// no screen, hook or test outside this folder changes.
-import { type Api, type ApiOptions, createApi } from "./api.ts";
-import { createFetchTransport, type FetchTransportOptions } from "./transport.ts";
-
-export function createWebApi(options: ApiOptions & FetchTransportOptions = {}): Api {
-  const { onSessionEnded, ...wire } = options;
-  return createApi(createFetchTransport(wire), onSessionEnded === undefined ? {} : { onSessionEnded });
-}
-
-export { type Api, type ApiOptions, type CallOptions, createApi } from "./api.ts";
-export { ApiError, isApiError, toApiError } from "./error.ts";
-export { methodKey, type QueryKey, queryKey } from "./keys.ts";
+// The web's API layer is the shared client: screens call the server with the hooks of
+// `@vanr/client/react` and nothing in this folder declares a method, a path or a schema of the
+// server's table. What lives here is the little the client does not have:
+//
+// - wire.ts: the fetch every call leaves through (cookie, language);
+// - web-api.ts: the client built over it, and the one place a 401 is noticed;
+// - auth.ts: the sign-in service's seven calls, which are not in the server's table;
+// - provider.tsx: the provider that hands both to the screens.
 export {
-  type AgentSummary,
-  API_METHODS,
-  type ApiMethod,
-  type AuthConfig,
-  METHODS,
-  type ParamsOf,
-  type ResultOf,
-} from "./methods.ts";
-export { ApiProvider, useApi, useApiMutation, useApiQuery, useInvalidate } from "./react.tsx";
-export { createFetchTransport, type Transport, type TransportRequest, type Verb } from "./transport.ts";
+  AUTH_PREFIX,
+  AUTH_ROUTES,
+  type AuthApi,
+  type AuthMethod,
+  authError,
+  parseRetryAfter,
+} from "./auth.ts";
+export { ApiProvider, useAuth } from "./provider.tsx";
+export { createWebApi, type WebApi, watchSession } from "./web-api.ts";
+export { createFetchTransport, type FetchTransportOptions, type WebTransport } from "./wire.ts";

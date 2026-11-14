@@ -275,7 +275,7 @@ describe("a lost connection", () => {
     const banner = (await screen.findByText("Connection lost. Reconnecting.")).closest('[role="status"]');
     expect(banner).not.toBeNull();
     // Changed while the web could not hear about it.
-    for (const agent of app.server.state.agents) if (agent.id === "agt_tally") agent.busy = true;
+    app.server.setAgentBusy("agt_tally", true, false);
     app.server.blockConnections(false);
     const before = calls(app, "listAgents");
     await app.user.click(screen.getByRole("button", { name: "Reconnect now" }));

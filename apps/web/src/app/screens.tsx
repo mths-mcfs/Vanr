@@ -1,8 +1,9 @@
 // The states every screen shares: loading, failed, and "this area is not built yet". An area's
 // screen uses these instead of drawing its own.
+
+import { isApiError } from "@vanr/client";
 import { Button, ErrorState, Skeleton } from "@vanr/ui";
 import { createContext, type ReactNode, useContext, useEffect } from "react";
-import { type ApiError, toApiError } from "../api/index.ts";
 import type { Namespace } from "../i18n/catalogs.ts";
 import { useLookup, useMessages } from "../i18n/react.tsx";
 import { ROUTES, type RouteId } from "../routes.ts";
@@ -26,17 +27,22 @@ export function useDocumentTitle(title: string | undefined): void {
 }
 
 /**
- * The text of an error for a person. It looks the code up as `error.<code>` in the area's own
- * namespace, then in the shared `errors`, and falls back to the server's message.
+ * The text of an error for a person. An error from the server is looked up by the code it sent:
+ * as `error.<code>` in the area's own namespace, then in the shared `errors`; then by what the
+ * client made of it (`network`, `timeout`, `http_503`); then the server's own message.
  */
 export function useErrorMessage(namespace?: Namespace): (error: unknown) => string {
   const own = useLookup(namespace ?? "errors");
   const shared = useLookup("errors");
   return (cause) => {
-    const error: ApiError = toApiError(cause);
-    const fromArea = namespace === undefined ? undefined : own(`error.${error.code}`);
+    if (!isApiError(cause)) return shared("fallback") ?? "";
+    const fromArea = namespace === undefined ? undefined : own(`error.${cause.rawCode}`);
     return (
-      fromArea ?? shared(error.code) ?? (error.message !== "" ? error.message : shared("fallback")) ?? ""
+      fromArea ??
+      shared(cause.rawCode) ??
+      shared(cause.code) ??
+      (cause.message !== "" ? cause.message : shared("fallback")) ??
+      ""
     );
   };
 }

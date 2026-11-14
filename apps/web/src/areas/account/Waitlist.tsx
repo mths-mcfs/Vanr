@@ -1,10 +1,10 @@
+import { useVanrClient } from "@vanr/client/react";
 import { Button, Field, Input, Spinner } from "@vanr/ui";
 import { useState } from "react";
 import { z } from "zod";
-import { useApi } from "../../api/index.ts";
 import { AppLink, useSearch } from "../../app/navigation.tsx";
 import { useLocale, useMessages } from "../../i18n/react.tsx";
-import { AccountForm, AccountPage, emailProblem, ServerProblem, useAttempt, useSubmit } from "./shared.tsx";
+import { AccountForm, AccountPage, emailProblem, ServerProblem, useOnce, useSubmit } from "./shared.tsx";
 
 /** Sign-up is closed and the person has no invitation: they can leave an email. */
 export function WaitlistForm({
@@ -15,7 +15,7 @@ export function WaitlistForm({
   redirect: string | undefined;
 }) {
   const t = useMessages("account");
-  const api = useApi();
+  const { api } = useVanrClient();
   const { locale } = useLocale();
   const [email, setEmail] = useState(startEmail ?? "");
   const [checked, setChecked] = useState(false);
@@ -23,7 +23,7 @@ export function WaitlistForm({
   const emailError = emailProblem(email);
 
   const submit = useSubmit(async () => {
-    await api.createWaitlist({ email: email.trim(), locale });
+    await api.createWaitlist({ body: { email: email.trim(), locale } });
     setJoined(email.trim());
   });
 
@@ -94,11 +94,14 @@ const NO_SEARCH: z.infer<typeof ConfirmSearch> = {};
 export function WaitlistConfirmScreen() {
   const t = useMessages("account");
   const { confirm } = useSearch(ConfirmSearch, NO_SEARCH);
-  const confirmation = useAttempt("confirmWaitlist", { token: confirm ?? "" }, confirm !== undefined);
-  if (confirmation.isSuccess) {
+  const { api } = useVanrClient();
+  const confirmation = useOnce(confirm ?? "", confirm !== undefined, () =>
+    api.confirmWaitlist({ body: { token: confirm ?? "" } }),
+  );
+  if (confirmation === "done") {
     return <AccountPage title={t("waitlist.confirm.done.title")} why={t("waitlist.confirm.done.body")} />;
   }
-  if (confirmation.isError || confirm === undefined) {
+  if (confirmation === "failed" || confirmation === "idle") {
     return (
       <AccountPage title={t("waitlist.confirm.failed.title")} why={t("waitlist.confirm.failed.body")}>
         <p>

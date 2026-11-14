@@ -1,114 +1,119 @@
-// Real time for components: the provider the frame mounts and the hooks areas use.
+// Real time for a workspace. The frame mounts <WorkspaceRealtime>, which owns the one connection
+// (the client's RealtimeClient) and hands it to the client's own provider: every event refetches
+// what the client's invalidation table says it made stale, and a reconnect refetches everything.
+//
+// Areas listen with `useRealtimeEvent` from `@vanr/client/react`. What this file adds is what the
+// client leaves to the app: the connection's status, a reconnect on request, counted channel
+// subscriptions, and refetching a call the invalidation table does not tie to an event.
+
+import { useQueryClient } from "@tanstack/react-query";
 import {
-  createContext,
-  type ReactNode,
-  useContext,
-  useEffect,
-  useRef,
-  useState,
-  useSyncExternalStore,
-} from "react";
-import { type ApiMethod, type ParamsOf, useInvalidate } from "../api/index.ts";
-import { useClock } from "../platform/clock.tsx";
-import {
-  openRealtime,
-  type RealtimeConnection,
-  type RealtimeEvent,
+  type BrowserEventName,
+  createRealtime,
+  type RealtimeClient,
   type RealtimeStatus,
-  type SocketOpener,
-} from "./connection.ts";
+} from "@vanr/client";
+import {
+  type KeyPrefix,
+  prefixKey,
+  useRealtime,
+  useRealtimeEvent,
+  useVanrClient,
+  VanrProvider,
+} from "@vanr/client/react";
+import { type ReactNode, useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
+import { useRuntime } from "../app/context.tsx";
 
-const RealtimeContext = createContext<RealtimeConnection | null>(null);
-
-export function RealtimeProvider({
-  workspaceId,
-  open,
-  onReconnected,
-  onAccessEnded,
-  children,
-}: {
-  workspaceId: string;
-  open: SocketOpener;
-  onReconnected: () => void;
-  onAccessEnded: () => void;
-  children: ReactNode;
-}) {
-  const clock = useClock();
-  const [connection, setConnection] = useState<RealtimeConnection | null>(null);
-  // The latest callbacks, without reopening the socket when a parent re-renders.
-  const callbacks = useRef({ onReconnected, onAccessEnded });
-  callbacks.current = { onReconnected, onAccessEnded };
-  useEffect(() => {
-    const opened = openRealtime({
-      workspaceId,
-      open,
-      clock,
-      onReconnected: () => callbacks.current.onReconnected(),
-      onAccessEnded: () => callbacks.current.onAccessEnded(),
-    });
-    setConnection(opened);
-    return () => {
-      opened.close();
-      setConnection(null);
-    };
-  }, [workspaceId, open, clock]);
-  return <RealtimeContext.Provider value={connection}>{children}</RealtimeContext.Provider>;
-}
-
-const noSubscription = () => () => {};
-
-/** The connection's status; `connecting` before the frame has opened it. */
-export function useRealtimeStatus(): RealtimeStatus {
-  const connection = useContext(RealtimeContext);
-  return useSyncExternalStore(
-    connection?.onStatus ?? noSubscription,
-    () => connection?.status() ?? "connecting",
-    () => "connecting",
+/** Opens the workspace's connection while mounted and stops it on the way out. */
+export function WorkspaceRealtime({ workspaceId, children }: { workspaceId: string; children: ReactNode }) {
+  const client = useVanrClient();
+  const { openSocket, clock, gate, session } = useRuntime();
+  const realtime = useMemo(
+    () =>
+      createRealtime({
+        workspaceId,
+        baseUrl: openSocket.baseUrl,
+        clock,
+        ...(openSocket.createSocket !== undefined && { createSocket: openSocket.createSocket }),
+        ...(openSocket.random !== undefined && { random: openSocket.random }),
+        onEnded: (why) => {
+          // The session is over: the same road as a 401. Removed from the workspace: ask again who
+          // the person is, and the frame shows they are no longer a member.
+          if (why === "signed_out") gate.ended();
+          else void session.load(true);
+        },
+      }),
+    [workspaceId, openSocket, clock, gate, session],
+  );
+  return (
+    <VanrProvider client={client} realtime={realtime}>
+      {children}
+    </VanrProvider>
   );
 }
 
-/** Asks for a reconnect attempt right away. */
-export function useRealtimeRetry(): () => void {
-  const connection = useContext(RealtimeContext);
-  return () => connection?.retryNow();
+const never = () => () => {};
+
+/** The connection's status; `stopped` outside a workspace. */
+export function useRealtimeStatus(): RealtimeStatus {
+  const realtime = useRealtime();
+  const subscribe = useCallback(
+    (notify: () => void) => (realtime === null ? never() : realtime.onStatus(notify)),
+    [realtime],
+  );
+  return useSyncExternalStore(
+    subscribe,
+    () => realtime?.status ?? "stopped",
+    () => "stopped",
+  );
 }
 
-/** Runs `handler` for every event with one of these names while the component is mounted. */
-export function useRealtimeEvent(types: string | readonly string[], handler: (event: RealtimeEvent) => void) {
-  const connection = useContext(RealtimeContext);
-  const latest = useRef(handler);
-  latest.current = handler;
-  const names = typeof types === "string" ? types : types.join("\n");
+/** Tries to connect right away instead of waiting out the current reconnection delay. */
+export function useReconnectNow(): () => void {
+  const realtime = useRealtime();
+  return useCallback(() => {
+    if (realtime === null || realtime.status !== "reconnecting") return;
+    // The client has no "retry now": stopping and starting drops the wait and keeps the subscriptions.
+    realtime.stop();
+    realtime.start();
+  }, [realtime]);
+}
+
+// How many mounted components follow each channel of each connection.
+const followers = new WeakMap<RealtimeClient, Map<string, number>>();
+
+/** Follows a channel's events while mounted. Two components on the same channel share one subscription. */
+export function useChannelSubscription(channelId: string | undefined): void {
+  const realtime = useRealtime();
   useEffect(() => {
-    if (connection === null) return;
-    const offs = names.split("\n").map((type) => connection.on(type, (event) => latest.current(event)));
+    if (realtime === null || channelId === undefined) return;
+    const counts = followers.get(realtime) ?? new Map<string, number>();
+    followers.set(realtime, counts);
+    const before = counts.get(channelId) ?? 0;
+    counts.set(channelId, before + 1);
+    if (before === 0) realtime.subscribe(channelId);
     return () => {
-      for (const off of offs) off();
+      const left = (counts.get(channelId) ?? 1) - 1;
+      if (left > 0) counts.set(channelId, left);
+      else {
+        counts.delete(channelId);
+        realtime.unsubscribe(channelId);
+      }
     };
-  }, [connection, names]);
+  }, [realtime, channelId]);
 }
 
-/** Refetches one cached call whenever one of these events arrives. */
-export function useInvalidateOn<M extends ApiMethod>(
-  types: string | readonly string[],
-  method: M,
-  params?: ParamsOf<M>,
-) {
-  const invalidate = useInvalidate();
-  useRealtimeEvent(types, () => void invalidate(method, params));
-}
-
-/** Follows a channel's events while the component is mounted. */
-export function useChannelSubscription(channelId: string | undefined) {
-  const connection = useContext(RealtimeContext);
-  useEffect(() => {
-    if (connection === null || channelId === undefined) return;
-    return connection.followChannel(channelId);
-  }, [connection, channelId]);
-}
-
-/** Sends an area's own frame over the shared connection. */
-export function useRealtimeSend(): RealtimeConnection["send"] {
-  const connection = useContext(RealtimeContext);
-  return (frame) => connection?.send(frame);
+/**
+ * Refetches a call when an event arrives, for the few pairs the client's invalidation table does
+ * not have. Check the table first (`INVALIDATION` in `@vanr/client/react`): most events already
+ * refetch what they change.
+ */
+export function useInvalidateOn(type: BrowserEventName, prefix: KeyPrefix): void {
+  const queryClient = useQueryClient();
+  const client = useVanrClient();
+  const key = JSON.stringify(prefixKey(client, prefix));
+  useRealtimeEvent(type, () => {
+    const queryKey: unknown = JSON.parse(key);
+    if (Array.isArray(queryKey)) void queryClient.invalidateQueries({ queryKey });
+  });
 }

@@ -3,9 +3,9 @@ import type en from "./en.ts";
 
 export default {
   fallback: "Isso não funcionou. Tente de novo.",
-  "network.unreachable": "Não foi possível falar com o Vanr. Confira sua conexão e tente de novo.",
-  "response.malformed": "O servidor respondeu de um jeito que esta versão não entende. Recarregue a página.",
-  "client.unexpected": "Algo deu errado nesta página. Tente de novo.",
+  network: "Não foi possível falar com o Vanr. Confira sua conexão e tente de novo.",
+  timeout: "O servidor demorou demais para responder. Tente de novo.",
+  invalid_response: "O servidor respondeu de um jeito que esta versão não entende. Recarregue a página.",
   unauthorized: "Sua sessão terminou. Entre de novo.",
   forbidden: "Você não tem permissão para fazer isso.",
   not_found: "Isso não existe mais.",

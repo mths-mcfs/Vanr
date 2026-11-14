@@ -1,7 +1,7 @@
 // The sidebar: one column in three ruled bands. Place (the workspace and its areas), channels,
 // and now (the agents at work, then you). Navigation is text; the only shapes are agents (square)
 // and people (round), and an agent at work has its square lit.
-import type { Me, WorkspaceSummary } from "@vanr/contract";
+import type { Agent, Me, WorkspaceSummary } from "@vanr/contract";
 import {
   AgentSigil,
   Avatar,
@@ -18,7 +18,6 @@ import {
 } from "@vanr/ui";
 import { ChevronsUpDown, Ellipsis } from "lucide-react";
 import { type ComponentType, Suspense, use } from "react";
-import type { AgentSummary } from "../api/index.ts";
 import { loadSidebarChannels } from "../app/areas.ts";
 import { AppLink, useGo } from "../app/navigation.tsx";
 import { isTheme, THEMES, useTheme } from "../app/theme.tsx";
@@ -43,7 +42,7 @@ export type SidebarProps = {
   /** Counts shown beside an area, when there is something waiting. */
   counts: Partial<Record<NavigationId, number>>;
   /** The agents in the middle of a run; "loading" and "failed" while that is not known. */
-  working: AgentSummary[] | "loading" | "failed";
+  working: Agent[] | "loading" | "failed";
   onRetryWorking: () => void;
 };
 
