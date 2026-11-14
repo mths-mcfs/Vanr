@@ -104,11 +104,20 @@ jobs:
           tar -xzf gitleaks.tar.gz -C bin gitleaks
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       # On a PR, scan the commits the PR adds; on main, scan the whole history.
+      # --diff-merges=first-parent makes git log show what each merge commit
+      # changes, which it hides by default, so a secret added in a merge is found.
       - run: |
           if [ "$EVENT" = pull_request ]; then
-            gitleaks git --no-banner --redact --log-opts="$BASE_SHA..$HEAD_SHA" .
+            # An unknown SHA makes git log fail and gitleaks scan nothing yet exit 0.
+            for sha in "$BASE_SHA" "$HEAD_SHA"; do
+              if ! git rev-parse --verify --quiet "${sha}^{commit}" > /dev/null; then
+                echo "::error::commit not found: '${sha}'"
+                exit 1
+              fi
+            done
+            gitleaks git --no-banner --redact --log-opts="--diff-merges=first-parent $BASE_SHA..$HEAD_SHA" .
           else
-            gitleaks git --no-banner --redact .
+            gitleaks git --no-banner --redact --log-opts="--diff-merges=first-parent --full-history --all --diff-filter=tuxdb" .
           fi
         env:
           EVENT: ${{ github.event_name }}

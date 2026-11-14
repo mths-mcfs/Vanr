@@ -1,6 +1,7 @@
 {
   "version": 1,
   "files": {
-    "scripts/ci/gate.test.ts": 25
+    "scripts/typecheck.test.ts": 50,
+    "scripts/ci/gate.test.ts": 24
   }
 }
