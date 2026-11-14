@@ -32,6 +32,7 @@ import {
   type SaveOrigin,
   savePage,
   type WikiRow,
+  writeTx,
 } from "./wiki";
 import { type WikiMarkdown, wikiMarkdown, YFRAGMENT } from "./wiki-md";
 
@@ -69,7 +70,10 @@ const CLOSE = {
   revoked: [4403, "access-revoked"],
   readOnly: [4409, "reconnect-read-only"],
   malformed: [4400, "malformed-message"],
-  tooLarge: [4413, "message-too-large"],
+  // The client contract for 4413 and 4412: the local document diverged from the server's (an update of it
+  // was rejected), so the client drops its local document and loads the page again from the server.
+  tooLarge: [4413, "content-too-large"],
+  outOfSync: [4412, "out-of-sync"],
 } as const satisfies Record<string, readonly [number, string]>;
 
 export interface WikiLive {
@@ -432,8 +436,19 @@ export function createWikiCollab(
 
   // ---- Who may stay connected, and who may have their edits saved.
 
-  async function verdict(p: Peer, opts: { force?: boolean } = {}): Promise<Verdict> {
-    if (stopped) return "revoked";
+  /** Right reads in flight: a stop waits for them, and none starts once it began. */
+  const reading = new Set<Promise<Verdict>>();
+  let closing = false;
+
+  function verdict(p: Peer, opts: { force?: boolean } = {}): Promise<Verdict> {
+    if (closing || stopped) return Promise.resolve("revoked");
+    const job = readRight(p, opts);
+    reading.add(job);
+    void job.finally(() => reading.delete(job)).catch(() => undefined);
+    return job;
+  }
+
+  async function readRight(p: Peer, opts: { force?: boolean }): Promise<Verdict> {
     const { db, now } = getDeps();
     const at = now().getTime();
     const fresh = p.rightReadAt !== null && at - p.rightReadAt < RIGHT_TTL_MS;
@@ -443,6 +458,7 @@ export function createWikiCollab(
       .select({ expiresAt: authSessions.expiresAt })
       .from(authSessions)
       .where(and(eq(authSessions.id, sessionId), eq(authSessions.userId, userId)));
+    if (closing) return "revoked";
     if (!sess || sess.expiresAt.getTime() <= at) return "session_ended";
     // The session may have been extended since the upgrade: the clock checks against the stored expiry.
     p.data.sessionExpiresAt = sess.expiresAt.getTime();
@@ -450,7 +466,7 @@ export function createWikiCollab(
       .select({ role: members.role })
       .from(members)
       .where(and(eq(members.workspaceId, workspaceId), eq(members.userId, userId)));
-    if (!m) return "revoked";
+    if (closing || !m) return "revoked";
     if (!p.docs.size) {
       p.rightReadAt = at;
       return "ok";
@@ -464,6 +480,7 @@ export function createWikiCollab(
       })
       .from(knowledgePages)
       .where(and(eq(knowledgePages.workspaceId, workspaceId), inArray(knowledgePages.slug, slugs)));
+    if (closing) return "revoked";
     for (const doc of p.docs.values()) {
       const page = pages.find((x) => x.slug === doc.slug);
       if (!page || page.deletedAt) return "revoked";
@@ -505,7 +522,7 @@ export function createWikiCollab(
       editedAt: s.editedAt,
       updatedAt: deps.now(),
     };
-    await deps.db.transaction(async (tx) => {
+    await writeTx(deps.db, async (tx) => {
       const page = await pageLock.row(tx, s.pageId);
       if (!page || page.deletedAt) throw new DraftRejected("gone");
       await extra?.(tx, page);
@@ -614,16 +631,20 @@ export function createWikiCollab(
       });
     const deciders: ActorRef[] = opts.automatic ? s.editors : [by];
     if (text === page.body) {
-      s.dirty = false;
-      s.editors = [];
-      s.parentVersion = page.version;
-      s.baseBody = page.body;
-      s.conflictVersion = null;
-      // Nothing to publish, but the draft is saved: by someone who may write the page when it commits.
-      await persist(s, doc, async (tx, locked) => {
+      // Nothing to publish, but the draft is saved clean: by someone who may write the page, checked in the
+      // save's transaction; only once it committed does the session take the new state.
+      const clean = {
+        dirty: false,
+        editors: [],
+        parentVersion: page.version,
+        baseBody: page.body,
+        conflictVersion: null,
+      };
+      await persist({ ...s, ...clean }, doc, async (tx, locked) => {
         if (locked.locked && !(opts.canBypassLock && (await anyBypasses(tx, locked.workspaceId, deciders))))
           throw new HttpError(403, "wiki.page_locked", "This page is locked");
       });
+      Object.assign(s, clean);
       return page;
     }
     const saved = await savePage(deps, {
@@ -815,7 +836,13 @@ export function createWikiCollab(
       if (!s || !document) return p.close(CLOSE.revoked);
       const size = await sizeAfter(s, document, update);
       if (size === null) return p.close(CLOSE.malformed);
-      if (size > MAX_BODY) return p.sendNow(syncStatus(head.rawKey, false));
+      // Rejected: the client's document now differs from the server's and every later update of it depends
+      // on this one, so the connection closes after the rejection instead of acknowledging what can't apply.
+      if (size > MAX_BODY) {
+        p.sendNow(syncStatus(head.rawKey, false));
+        return p.close(CLOSE.tooLarge);
+      }
+      const pendingBefore = hasPending(document);
       const acked = new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, ACK_MS);
         p.acks.set(head.rawKey, () => {
@@ -826,8 +853,17 @@ export function createWikiCollab(
       });
       conn.handleMessage(bytes);
       await acked;
+      // An update that depends on something the server never got stays pending: it was not applied, so the
+      // positive answer still in this connection's queue is dropped with the connection, after a negative one.
+      if (!pendingBefore && hasPending(document)) {
+        p.sendNow(syncStatus(head.rawKey, false));
+        p.close(CLOSE.outOfSync);
+      }
     });
   }
+
+  /** Whether the document holds updates Yjs couldn't apply yet (they miss what they depend on). */
+  const hasPending = (doc: Y.Doc) => doc.store.pendingStructs !== null || doc.store.pendingDs !== null;
 
   /** The document's session once it loaded (an update waits for it, to be checked against it); null if it didn't. */
   function whenLoaded(name: string): Promise<Session | null> {
@@ -864,17 +900,19 @@ export function createWikiCollab(
   async function withDocument<T>(
     row: Pick<WikiRow, "id" | "workspaceId" | "slug">,
     fn: (s: Session, doc: Y.Doc, live: Document | null) => Promise<T>,
-    extra?: (tx: Tx, page: WikiRow) => Promise<void>,
+    opts: { persist?: boolean } = {},
   ): Promise<T | null> {
+    const save = opts.persist ?? true;
     const name = docName(row.workspaceId, row.slug);
     const loaded = hocuspocus.documents.get(name);
     const s = sessions.get(name);
     if (loaded && s) {
       const result = await fn(s, loaded, loaded);
-      await persist(s, loaded, extra).catch((err) => {
-        if (err instanceof DraftRejected) abandon(name, s, err);
-        throw err;
-      });
+      if (save)
+        await persist(s, loaded).catch((err) => {
+          if (err instanceof DraftRejected) abandon(name, s, err);
+          throw err;
+        });
       return result;
     }
     // No open session: works on the saved state, if the page already had a session.
@@ -899,7 +937,7 @@ export function createWikiCollab(
     };
     try {
       const result = await fn(offline, doc, null);
-      await persist(offline, doc, extra);
+      if (save) await persist(offline, doc);
       return result;
     } finally {
       doc.destroy();
@@ -980,22 +1018,33 @@ export function createWikiCollab(
         withDocument(
           row,
           async (s, doc) => {
+            // The reset is built on a copy and saved under the transaction that authorizes it (the lock, by
+            // the role read there); only once that committed does the shared document change and hear of it.
             const m = await markdown();
-            m.replaceYContent(doc, row.body, "wiki-server");
-            Object.assign(s, {
-              parentVersion: row.version,
-              baseBody: row.body,
-              dirty: false,
-              editors: [],
-              conflictVersion: null,
-            });
+            const copy = new Y.Doc();
+            try {
+              Y.applyUpdate(copy, Y.encodeStateAsUpdate(doc));
+              m.replaceYContent(copy, row.body, "wiki-server");
+              const reset = {
+                parentVersion: row.version,
+                baseBody: row.body,
+                dirty: false,
+                editors: [],
+                conflictVersion: null,
+              };
+              await persist({ ...s, ...reset }, copy, async (tx, page) => {
+                if (page.locked && !(canBypassLock && (await bypassesLock(tx, page.workspaceId, by))))
+                  throw new HttpError(403, "wiki.page_locked", "This page is locked");
+              });
+              m.replaceYContent(doc, row.body, "wiki-server");
+              Object.assign(s, reset);
+            } finally {
+              copy.destroy();
+            }
             clearTimeout(s.idle);
             broadcast(docName(row.workspaceId, row.slug), { type: "discarded", version: row.version });
           },
-          async (tx, page) => {
-            if (page.locked && !(canBypassLock && (await bypassesLock(tx, page.workspaceId, by))))
-              throw new HttpError(403, "wiki.page_locked", "This page is locked");
-          },
+          { persist: false },
         ),
       ).catch((err) => {
         throw toHttp(err);
@@ -1009,17 +1058,23 @@ export function createWikiCollab(
     },
     async close() {
       if (stopped) return;
+      // No new right read starts; the ones in flight, the draft saves and the publishes are waited for (the
+      // database closes right after), the sessions saving their drafts on the way out.
+      closing = true;
       hocuspocus.closeConnections();
+      for (const p of peers) p.close(CLOSE.revoked);
+      let warned = false;
       const end = Date.now() + CLOSE_MS;
-      while ((hocuspocus.documents.size || queues.size) && Date.now() < end) {
-        await live.settled();
+      while (hocuspocus.documents.size || queues.size || applying.size || reading.size) {
+        await Promise.allSettled([...queues.values(), ...applying.values(), ...reading.values()]);
+        if (!warned && Date.now() > end) {
+          warned = true;
+          log.error("wiki.close_slow", { documents: hocuspocus.documents.size, queues: queues.size });
+        }
         await Bun.sleep(10);
       }
-      if (hocuspocus.documents.size || queues.size)
-        log.error("wiki.close_timed_out", { documents: hocuspocus.documents.size, queues: queues.size });
-      // From here nothing touches the database (it closes next): a late job is dropped.
+      // From here nothing touches the database: a late job is dropped.
       stopped = true;
-      for (const p of peers) p.close(CLOSE.revoked);
     },
   };
 

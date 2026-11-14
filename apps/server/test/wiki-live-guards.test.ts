@@ -139,9 +139,11 @@ describe("a connection doesn't outlive the right that opened it", () => {
     const b = connect(server, beto.browser, workspaceId, docName(workspaceId, page.slug));
     await b.synced;
     await removeMember(server, workspaceId, beto.user.id);
+    const t0 = server.deps.now().getTime();
     await server.deps.wikiLive.recheckUser(workspaceId, beto.user.id);
     await until(() => b.closeCodes.length > 0);
     expect(b.closeCodes[0]).toBe(4403);
+    expect(server.deps.now().getTime() - t0).toBeLessThan(RIGHT_TTL_MS);
     b.close();
   });
 
@@ -150,9 +152,12 @@ describe("a connection doesn't outlive the right that opened it", () => {
     const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Sign out", body: BODY });
     const b = connect(server, beto.browser, workspaceId, docName(workspaceId, page.slug));
     await b.synced;
+    const t0 = server.deps.now().getTime();
     expect((await beto.browser.json("/api/auth/sign-out", "POST")).status).toBe(200);
     await until(() => b.closeCodes.length > 0);
     expect(b.closeCodes[0]).toBe(4401);
+    // At once: well inside the window after which a stale right would be read again anyway.
+    expect(server.deps.now().getTime() - t0).toBeLessThan(RIGHT_TTL_MS);
     b.close();
   });
 
@@ -334,7 +339,7 @@ describe("the shared draft credits who edited, even someone who left", () => {
 
 describe("the live draft's limits", () => {
   test(
-    "an update past MAX_BODY gets SyncStatus false and is neither applied, relayed nor stored",
+    "an update past MAX_BODY gets SyncStatus false, closes its sender (4413) and is neither applied, relayed nor stored",
     async () => {
       const { workspaceId, ana, beto } = await team();
       const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Too long", body: "Short.\n" });
@@ -344,7 +349,12 @@ describe("the live draft's limits", () => {
       await Promise.all([a.synced, b.synced]);
       await a.edit(() => "x".repeat(MAX_BODY + 1));
       await until(() => a.syncStatus.includes(false));
-      // Then a small edit goes through, and arrives alone.
+      // The sender's document diverged: its connection closes (it must reload), and only positive answers
+      // the server gave before the rejection exist.
+      await until(() => a.closeCodes.length > 0);
+      expect(a.closeCodes[0]).toBe(4413);
+      expect(a.syncStatus.at(-1)).toBe(false);
+      // Then another editor's small edit goes through, and arrives alone.
       await b.edit((md) => md.replace("Short.", "Short, still."));
       await until(
         async () =>
@@ -353,7 +363,6 @@ describe("the live draft's limits", () => {
       expect((await b.md()).length).toBeLessThan(100);
       await server.deps.wikiLive.settled();
       expect((await storedDraft(server, workspaceId, page.slug))?.text.length).toBeLessThan(100);
-      expect(a.closeCodes).toEqual([]);
       a.close();
       b.close();
     },
@@ -513,6 +522,31 @@ function paragraphUpdate(text: string): Uint8Array {
 }
 
 describe("what a client shouldn't send", () => {
+  test("an update that depends on one the server never got is not acknowledged: SyncStatus false and the socket closes (4412)", async () => {
+    const { workspaceId, ana } = await team();
+    const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Pending", body: BODY });
+    const name = docName(workspaceId, page.slug);
+    // Two edits of one client; only the second goes to the server, so it can't be applied.
+    const local = new Y.Doc();
+    const para = new Y.XmlElement("paragraph");
+    para.insert(0, [new Y.XmlText("first")]);
+    local.getXmlFragment(YFRAGMENT).push([para]);
+    const before = Y.encodeStateVector(local);
+    (para.get(0) as Y.XmlText).insert(5, " and second");
+    const second = Y.encodeStateAsUpdate(local, before);
+    const raw = await rawSocket(server, ana.browser, workspaceId);
+    raw.ws.send(authMessage(name));
+    expect(await raw.authenticated(name)).toBe(true);
+    raw.ws.send(updateMessage(name, second));
+    expect(await raw.closed).toBe(4412);
+    const statuses = raw.received
+      .filter((m) => startsWith(m, [...varString(name), 8]))
+      .map((m) => m[varString(name).length + 1]);
+    expect(statuses).toEqual([0]);
+    await server.deps.wikiLive.settled();
+    expect((await storedDraft(server, workspaceId, page.slug))?.text).not.toContain("second");
+  });
+
   test("a malformed message closes that socket; the page and the other editors go on", async () => {
     const { workspaceId, ana } = await team();
     const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Malformed", body: BODY });
@@ -620,7 +654,119 @@ describe("what a client shouldn't send", () => {
   });
 });
 
+describe("an operation changes the shared document only after its transaction authorized it", () => {
+  test("a discard that a lock rejects in its transaction leaves the draft and tells nobody", async () => {
+    const { workspaceId, ana, beto } = await team();
+    const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Discard race", body: BODY });
+    const a = connect(server, ana.browser, workspaceId, docName(workspaceId, page.slug));
+    await a.synced;
+    await a.edit((md) => md.replace("One.", "One, accepted in the draft."));
+    await until(() => !a.provider.hasUnsyncedChanges);
+    await until(async () => (await storedDraft(server, workspaceId, page.slug))?.dirty === true);
+    // The member's discard passes the route's check; the lock lands before its transaction.
+    const { db } = server.deps;
+    const original = db.transaction.bind(db);
+    let begun!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((r) => {
+      begun = r;
+    });
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    db.transaction = (async (...args: Parameters<typeof original>) => {
+      db.transaction = original;
+      begun();
+      await gate;
+      return original(...args);
+    }) as typeof original;
+    const discarding = apiError(beto.api.wiki.deleteWikiPageDraft(workspaceId, page.slug));
+    await started;
+    await ana.api.wiki.lockWikiPage(workspaceId, page.slug, true);
+    release();
+    const err = await discarding;
+    expect([err.status, err.code]).toEqual([403, "wiki.page_locked"]);
+    await server.deps.wikiLive.settled();
+    expect(await a.md()).toContain("One, accepted in the draft.");
+    expect(a.stateless.some((m) => m.type === "discarded")).toBe(false);
+    expect((await storedDraft(server, workspaceId, page.slug))?.text).toContain("accepted in the draft");
+    a.close();
+  });
+});
+
 describe("stopping the server", () => {
+  test(
+    "a right read in flight when the stop begins: the stop waits for it and nothing reads the database after",
+    async () => {
+      const srv = await startTestServer();
+      const { db } = srv.deps;
+      const select = db.select.bind(db);
+      let afterStop = 0;
+      let stopped = false;
+      let release = () => {};
+      try {
+        const { workspaceId, ana } = await team(srv);
+        const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Stop read", body: BODY });
+        // A bare socket with no page open: only its right read can hold the stop.
+        const raw = await rawSocket(srv, ana.browser, workspaceId);
+        let begun!: () => void;
+        const started = new Promise<void>((r) => {
+          begun = r;
+        });
+        const gate = new Promise<void>((r) => {
+          release = r;
+        });
+        // The next read of a session row is held after it ran, before its rows come back.
+        db.select = ((...args: Parameters<typeof select>) => {
+          if (stopped) afterStop++;
+          const query = select(...args);
+          const from = query.from.bind(query);
+          query.from = ((table: unknown) => {
+            const built = from(table as never);
+            if (table === schema.sessions) {
+              const where = built.where.bind(built);
+              built.where = ((...params: Parameters<typeof where>) => {
+                const result = where(...params);
+                const then = result.then.bind(result);
+                // biome-ignore lint/suspicious/noThenProperty: the query is a thenable; this holds its rows until released
+                result.then = ((ok: (v: unknown) => unknown, ko: (e: unknown) => unknown) =>
+                  then(async (rows: unknown) => {
+                    begun();
+                    await gate;
+                    return rows;
+                  }).then(ok, ko)) as typeof result.then;
+                return result;
+              }) as typeof built.where;
+            }
+            return built;
+          }) as typeof query.from;
+          return query;
+        }) as typeof db.select;
+        // Its first message reads the right.
+        raw.ws.send(authMessage(docName(workspaceId, page.slug)));
+        await started;
+        let returned = false;
+        const stopping = srv.stop().then(() => {
+          returned = true;
+        });
+        // The stop can't end while the read is held: given time to (a bounded wait for something that must
+        // not happen), it is still running, and the listener and the database are still up.
+        await until(() => returned, 2000).catch(() => undefined);
+        expect(returned).toBe(false);
+        release();
+        await stopping;
+        stopped = true;
+        expect(afterStop).toBe(0);
+        raw.ws.close();
+      } finally {
+        release();
+        db.select = select;
+        await srv.stop();
+      }
+    },
+    SERVER_TEST_MS * 2,
+  );
+
   test(
     "with a draft that can't be published (conflict) and a save pending, the draft is saved; a second stop is a no-op",
     async () => {

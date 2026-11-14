@@ -1131,6 +1131,60 @@ describe("a write decides on the page it reads locked in its own transaction", (
 });
 
 const UNLOCKED = process.env.VANR_TEST_WIKI_UNLOCKED === "1";
+const FOR_UPDATE = process.env.VANR_TEST_WIKI_FOR_UPDATE === "1";
+
+type RowRead = typeof pageLock.row;
+type Tx = Parameters<RowRead>[0];
+/** The page read with no row lock at all (a double of `pageLock.row`). */
+const unlockedRead: RowRead = async (tx: Tx, id: string) => {
+  const [row] = await tx.select().from(schema.knowledgePages).where(eq(schema.knowledgePages.id, id));
+  return row ?? null;
+};
+/** The page read with the old FOR UPDATE, which conflicts with the key share a new link row takes. */
+const forUpdateRead: RowRead = async (tx: Tx, id: string) => {
+  const [row] = await tx
+    .select()
+    .from(schema.knowledgePages)
+    .where(eq(schema.knowledgePages.id, id))
+    .for("update");
+  return row ?? null;
+};
+
+/** A row read whose first call holds its transaction, right after the read, until `release`. */
+function holdFirstRead(read: RowRead) {
+  let reached!: () => void;
+  let release!: () => void;
+  const reachedP = new Promise<void>((r) => {
+    reached = r;
+  });
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  let held = false;
+  const row: RowRead = async (tx, id) => {
+    const found = await read(tx, id);
+    if (!held) {
+      held = true;
+      reached();
+      await gate;
+    }
+    return found;
+  };
+  return { row, reached: reachedP, release };
+}
+
+/** Resolves once a session of this database waits for a lock; fails with `why` past a short deadline. */
+async function waitingForLock(pg: RunningServer, why: string) {
+  const deadline = Date.now() + 15_000;
+  for (;;) {
+    const rows = await pg.deps.db.execute(
+      sql`select pid from pg_stat_activity where wait_event_type = 'Lock' and datname = current_database()`,
+    );
+    if (Array.isArray(rows) && rows.length) return;
+    if (Date.now() > deadline) throw new Error(why);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
 const onPostgres = (name: string) => (TEST_POSTGRES_URL ? name : `${name} (skipped: ${NO_POSTGRES})`);
 
 describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki saves on Postgres"), () => {
@@ -1162,7 +1216,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki saves on Postgres"), () => 
     },
     SERVER_TEST_MS,
   );
-  test("a member's save that comes while a lock holds the page waits for it and is then rejected", async () => {
+  test("a member's save, move or trash that comes while a lock holds the page waits for it and is then rejected", async () => {
     const url = await testDatabaseUrl("wikilock");
     const pg = await startTestServer({ env: { DATABASE_URL: url } });
     const locked = pageLock.row;
@@ -1170,66 +1224,83 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki saves on Postgres"), () => 
       const ana = withApi(await signedIn(pg, "Ana", email("ana")));
       const { workspaceId } = await seedWorkspace(pg, ana, "Postgres lock");
       const beto = withApi(await memberOf(pg, workspaceId, "Beto", email("beto")));
-      const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Lock race", body: "Original" });
-      // VANR_TEST_WIKI_UNLOCKED=1: the same read without FOR UPDATE (the CI runs it and expects a failure).
-      const read: typeof locked = UNLOCKED
-        ? async (tx, id) => {
-            const [row] = await tx
-              .select()
-              .from(schema.knowledgePages)
-              .where(eq(schema.knowledgePages.id, id));
-            return row ?? null;
-          }
-        : locked;
-      let reached!: () => void;
-      let release!: () => void;
-      const holding = new Promise<void>((r) => {
-        reached = r;
-      });
-      const gate = new Promise<void>((r) => {
-        release = r;
-      });
-      let held = false;
-      // The lock's transaction reads the page and holds it there, uncommitted.
-      pageLock.row = async (tx, id) => {
-        const row = await read(tx, id);
-        if (!held) {
-          held = true;
-          reached();
-          await gate;
-        }
-        return row;
-      };
-      const locking = ana.api.wiki.lockWikiPage(workspaceId, page.slug, true);
-      await holding;
-      const saving = beto.api.wiki
-        .replaceWikiPage(workspaceId, page.slug, { body: "MEMBER DURING LOCK", parentVersion: 1 })
-        .then(
+      // VANR_TEST_WIKI_UNLOCKED=1: the same read without the row lock (the CI runs it and expects a failure).
+      const read: typeof locked = UNLOCKED ? unlockedRead : locked;
+      const writes: [string, (slug: string) => Promise<unknown>][] = [
+        [
+          "save",
+          (slug) =>
+            beto.api.wiki.replaceWikiPage(workspaceId, slug, { body: "DURING LOCK", parentVersion: 1 }),
+        ],
+        ["move", (slug) => beto.api.wiki.moveWikiPage(workspaceId, slug, "during-lock")],
+        ["trash", (slug) => beto.api.wiki.deleteWikiPage(workspaceId, slug)],
+      ];
+      const outcomes: string[] = [];
+      const states: unknown[][] = [];
+      for (const [what, write] of writes) {
+        // Beto created it: the lock alone decides whether he may write it.
+        const page = await beto.api.wiki.createWikiPage(workspaceId, {
+          title: `Lock race ${what}`,
+          body: "Original",
+        });
+        const hold = holdFirstRead(read);
+        pageLock.row = hold.row;
+        const locking = ana.api.wiki.lockWikiPage(workspaceId, page.slug, true);
+        await hold.reached;
+        const writing = write(page.slug).then(
           () => 200,
           (e: { status?: number }) => e.status ?? 0,
         );
-      // Release the lock once the save waits for the page's row lock (or already ended without one).
-      const waitingForLock = async () => {
-        const deadline = Date.now() + 15_000;
-        for (;;) {
-          const rows = await pg.deps.db.execute(
-            sql`select pid from pg_stat_activity where wait_event_type = 'Lock' and datname = current_database()`,
-          );
-          if (Array.isArray(rows) && rows.length) return;
-          if (Date.now() > deadline) throw new Error("the save never waited for the page's lock");
-          await new Promise((r) => setTimeout(r, 20));
-        }
-      };
-      await Promise.race([saving, waitingForLock()]);
-      release();
-      await locking;
-      const status = await saving;
-      const now = await ana.api.wiki.getWikiPage(workspaceId, page.slug);
-      // The save read the page after the lock committed: rejected (unlocked, it read it before and saved).
-      expect(status).toBe(403);
-      expect({ locked: now.locked, body: now.body }).toEqual({ locked: true, body: "Original" });
+        // Release the lock once the write waits for the page's row lock (or already ended without one).
+        await Promise.race([writing, waitingForLock(pg, "the write never waited for the page's lock")]);
+        hold.release();
+        await locking;
+        outcomes.push(`${what} ${await writing}`);
+        const now = await ana.api.wiki.getWikiPage(workspaceId, page.slug).catch(() => null);
+        states.push([what, now?.locked, now?.body, now?.folder]);
+      }
+      // Each write read the page after the lock committed: rejected (unlocked, it read it before and wrote).
+      expect(outcomes).toEqual(["save 403", "move 403", "trash 403"]);
+      expect(states).toEqual(writes.map(([what]) => [what, true, "Original", ""]));
     } finally {
       pageLock.row = locked;
+      await pg.stop();
+    }
+  }, 60_000);
+
+  test("two saves that link to each other, interleaved, both commit (no deadlock between the row lock and the link's key share)", async () => {
+    const url = await testDatabaseUrl("wikideadlock");
+    const pg = await startTestServer({ env: { DATABASE_URL: url } });
+    const lock = pageLock.row;
+    try {
+      const ana = withApi(await signedIn(pg, "Ana", email("ana")));
+      const { workspaceId } = await seedWorkspace(pg, ana, "Postgres deadlock");
+      const a = await ana.api.wiki.createWikiPage(workspaceId, { title: "Alpha", body: "a" });
+      const b = await ana.api.wiki.createWikiPage(workspaceId, { title: "Beta", body: "b" });
+      // VANR_TEST_WIKI_FOR_UPDATE=1: the old FOR UPDATE row lock (the CI runs it and expects the deadlock).
+      const read: typeof lock = FOR_UPDATE ? forUpdateRead : lock;
+      const hold = holdFirstRead(read);
+      pageLock.row = hold.row;
+      const outcome = (p: Promise<unknown>) =>
+        p.then(
+          () => "200",
+          (e: { status?: number; code?: string }) => `${e.status} ${e.code}`,
+        );
+      // Alpha's save locks Alpha and holds; Beta's save locks Beta and links to Alpha meanwhile.
+      const savingA = outcome(
+        ana.api.wiki.replaceWikiPage(workspaceId, a.slug, { body: "see [[Beta]]", parentVersion: 1 }),
+      );
+      await hold.reached;
+      const savingB = outcome(
+        ana.api.wiki.replaceWikiPage(workspaceId, b.slug, { body: "see [[Alpha]]", parentVersion: 1 }),
+      );
+      await Promise.race([savingB, waitingForLock(pg, "Beta's save neither ended nor waited")]);
+      hold.release();
+      expect([await savingA, await savingB]).toEqual(["200", "200"]);
+      const panel = await ana.api.wiki.getWikiPagePanel(workspaceId, a.slug);
+      expect(panel.inboundLinks.map((l) => l.slug)).toEqual([b.slug]);
+    } finally {
+      pageLock.row = lock;
       await pg.stop();
     }
   }, 60_000);

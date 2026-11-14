@@ -9,6 +9,7 @@ import { applyProps, type PropDef, type PropError, type Props } from "@vanr/engi
 import { slugify } from "@vanr/engine/wiki/links";
 import { and, asc, desc, eq, isNotNull, isNull, lte, ne, sql } from "drizzle-orm";
 import type { AppDeps, WorkspaceMember } from "./context";
+import { pgCode } from "./db-errors";
 import { forbidden, HttpError, notFound } from "./http";
 import { reindex, unindex } from "./search-index";
 import { namesOf, reresolveLinks, syncLinks } from "./wiki-links";
@@ -241,7 +242,7 @@ export async function createPage(
   const slug = await freeSlug(deps.db, input.workspaceId, input.title);
   const id = newId("wiki");
   const body = input.body ?? "";
-  const row = await deps.db.transaction(async (tx) => {
+  const row = await writeTx(deps.db, async (tx) => {
     const [created] = await tx
       .insert(knowledgePages)
       .values({
@@ -284,15 +285,44 @@ type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
 /**
  * The page's row read for a write: locked until the write's transaction ends, so a lock, a trash or another
- * save that lands meanwhile waits and the write decides on the state it read here. A mutable seam: the
- * Postgres race test swaps it for an unlocked read (VANR_TEST_WIKI_UNLOCKED) to prove it depends on it.
+ * save that lands meanwhile waits and the write decides on the state it read here. FOR NO KEY UPDATE: no
+ * write but the delete changes the page's key, and that lock doesn't conflict with the key-share lock a new
+ * [[link]] row takes on the page it points to (so two saves that link to each other don't deadlock).
+ * `forDelete` is the strong lock of the delete for good. Each write locks one page; a write that ever
+ * needs more must lock them all first, in id order. A mutable seam: the Postgres race tests swap `row` for
+ * an unlocked read (VANR_TEST_WIKI_UNLOCKED) and for the old FOR UPDATE (VANR_TEST_WIKI_FOR_UPDATE).
  */
 export const pageLock = {
   row: async (tx: Tx, id: string): Promise<WikiRow | null> => {
+    const [row] = await tx
+      .select()
+      .from(knowledgePages)
+      .where(eq(knowledgePages.id, id))
+      .for("no key update");
+    return row ?? null;
+  },
+  forDelete: async (tx: Tx, id: string): Promise<WikiRow | null> => {
     const [row] = await tx.select().from(knowledgePages).where(eq(knowledgePages.id, id)).for("update");
     return row ?? null;
   },
 };
+
+/**
+ * A wiki write's transaction. A deadlock or a serialization failure Postgres aborted becomes `wiki.busy`
+ * (409, nothing was written), which the client may repeat, never a 500.
+ */
+export async function writeTx<T>(db: Db, fn: (tx: Tx) => Promise<T>): Promise<T> {
+  try {
+    return await db.transaction(fn);
+  } catch (err) {
+    const code = pgCode(err);
+    if (code === "40P01" || code === "40001")
+      throw new HttpError(409, "wiki.busy", "The page is busy with another change; try again", {
+        retry: true,
+      });
+    throw err;
+  }
+}
 
 /** A person's role in the workspace read inside the write's transaction (null: not a member any more). */
 async function roleIn(tx: Tx, workspaceId: string, userId: string) {
@@ -363,7 +393,7 @@ export async function savePage(
 ): Promise<WikiRow> {
   if (input.title !== undefined && input.title !== input.row.title) checkTitle(input.title);
   const at = deps.now();
-  const result = await deps.db.transaction(async (tx) => {
+  const result = await writeTx(deps.db, async (tx) => {
     const row = await livePage(tx, input.row.id);
     if (!input.attributionOnly) await requireWriter(tx, row.workspaceId, input.author);
     const deciders = input.lockBypassBy ?? [input.author];
@@ -429,7 +459,7 @@ export async function patchPage(
   guard?: (tx: Tx, page: WikiRow) => Promise<void>,
 ) {
   const at = deps.now();
-  const updated = await deps.db.transaction(async (tx) => {
+  const updated = await writeTx(deps.db, async (tx) => {
     const page = await livePage(tx, row.id);
     await guard?.(tx, page);
     const [changed] = await tx
@@ -499,8 +529,14 @@ export async function requireDeleter(db: Db, row: WikiRow, me: WorkspaceMember) 
 }
 
 /** The page of a trash write, re-read locked, and the rule checked on it with the role read in `tx`. */
-async function deletablePage(tx: Tx, id: string, me: WorkspaceMember, trashed: boolean): Promise<WikiRow> {
-  const row = await pageLock.row(tx, id);
+async function deletablePage(
+  tx: Tx,
+  id: string,
+  me: WorkspaceMember,
+  trashed: boolean,
+  lock: (tx: Tx, id: string) => Promise<WikiRow | null> = pageLock.row,
+): Promise<WikiRow> {
+  const row = await lock(tx, id);
   if (!row || !!row.deletedAt !== trashed) throw notFound("Page not found");
   await deleterCheck(tx, row, me.userId, await roleIn(tx, row.workspaceId, me.userId));
   return row;
@@ -510,7 +546,7 @@ async function deletablePage(tx: Tx, id: string, me: WorkspaceMember, trashed: b
 export async function trashPage(deps: AppDeps, row: WikiRow, me: WorkspaceMember): Promise<WikiRow> {
   const at = deps.now();
   // Leaves the search in the same commit that puts it in the trash (seam 5).
-  const trashed = await deps.db.transaction(async (tx) => {
+  const trashed = await writeTx(deps.db, async (tx) => {
     await deletablePage(tx, row.id, me, false);
     const [r] = await tx
       .update(knowledgePages)
@@ -532,7 +568,7 @@ export async function trashPage(deps: AppDeps, row: WikiRow, me: WorkspaceMember
 }
 
 export async function untrashPage(deps: AppDeps, row: WikiRow, me: WorkspaceMember): Promise<WikiRow> {
-  const restored = await deps.db.transaction(async (tx) => {
+  const restored = await writeTx(deps.db, async (tx) => {
     await deletablePage(tx, row.id, me, true);
     const [r] = await tx
       .update(knowledgePages)
@@ -552,10 +588,10 @@ export async function untrashPage(deps: AppDeps, row: WikiRow, me: WorkspaceMemb
  * be allowed when it commits; the trash tick passes none and checks the page is still due.
  */
 export async function purgePage(deps: AppDeps, row: WikiRow, me?: WorkspaceMember) {
-  const gone = await deps.db.transaction(async (tx) => {
-    if (me) await deletablePage(tx, row.id, me, true);
+  const gone = await writeTx(deps.db, async (tx) => {
+    if (me) await deletablePage(tx, row.id, me, true, pageLock.forDelete);
     else {
-      const page = await pageLock.row(tx, row.id);
+      const page = await pageLock.forDelete(tx, row.id);
       if (!page?.deletedAt || !page.expungeAt || page.expungeAt > deps.now()) return false;
     }
     await tx.delete(knowledgePages).where(eq(knowledgePages.id, row.id));
