@@ -214,24 +214,23 @@ describe("changing the destination never makes a file unreadable", () => {
     expect(await read(ana, workspaceId, remote.id)).toBe("remote");
   });
 
-  test("a saved bucket without files of the workspace can be changed; one that can't be listed can't", async () => {
+  test("a saved bucket without files of the workspace can be changed; the database decides, not the bucket", async () => {
     const empty = await team();
     await saveStorage(server.deps, empty.workspaceId, { kind: "s3", s3: input("unused-a") });
     await saveStorage(server.deps, empty.workspaceId, { kind: "builtin" });
     const moved = await saveStorage(server.deps, empty.workspaceId, { kind: "s3", s3: input("unused-b") });
     expect(moved.s3).toMatchObject({ prefix: "unused-b" });
 
+    // An object in the bucket that no row points to (left by someone else) doesn't hold the destination.
     const { workspaceId } = await team();
-    await saveStorage(server.deps, workspaceId, { kind: "s3", s3: input("listed") });
-    s3.failOn.add("LIST");
-    try {
-      await expect(
-        saveStorage(server.deps, workspaceId, { kind: "s3", s3: input("other") }),
-      ).rejects.toMatchObject({ status: 503, code: "storage.unavailable" });
-    } finally {
-      s3.failOn.clear();
-    }
-    expect((await storageRow(server.deps.db, workspaceId))?.s3).toMatchObject({ prefix: "listed" });
+    await saveStorage(server.deps, workspaceId, { kind: "s3", s3: input("orphaned") });
+    s3.objects.set(`orphaned/files/${workspaceId}/file_gone/1-x`, {
+      bytes: new Uint8Array([1]),
+      type: "text/plain",
+    });
+    const changed = await saveStorage(server.deps, workspaceId, { kind: "s3", s3: input("other") });
+    expect(changed.s3).toMatchObject({ prefix: "other" });
+    expect((await storageRow(server.deps.db, workspaceId))?.s3).toMatchObject({ prefix: "other" });
   });
 });
 

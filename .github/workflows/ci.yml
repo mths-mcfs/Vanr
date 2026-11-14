@@ -93,6 +93,25 @@ jobs:
       - run: bun test apps/server/test/search-postgres.test.ts --test-name-pattern "on Postgres"
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # A Drive write and a storage destination change from two connections: the change waits for the
+      # write's row lock and is rejected. The second run takes the locks out (a double in the test) and must
+      # fail, so the first one can't pass without them.
+      - run: bun test apps/server/test/storage-postgres.test.ts --test-name-pattern "on Postgres"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      - name: The storage race test fails without the row locks
+        run: |
+          if out=$(bun test apps/server/test/storage-postgres.test.ts --test-name-pattern "on Postgres" 2>&1); then
+            echo "$out"
+            echo "::error::the storage race test passed without the row locks"
+            exit 1
+          fi
+          echo "$out"
+          # It must fail for the race (the change was accepted), not for anything else.
+          grep -q 'Received: "accepted"' <<< "$out"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_STORAGE_UNLOCKED: "1"
 
   sandbox:
     # The runner's real sandbox (bubblewrap + socat): the attack tests of the isolation of the agent's
