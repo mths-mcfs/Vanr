@@ -113,34 +113,34 @@ export function App() {
   }, []);
 
   return (
-    <ToastProvider label={t.toast.region} closeLabel={t.toast.close}>
+    <ToastProvider label={t.notifications.regionName} closeLabel={t.notifications.dismissButton}>
       <header className="g-bar">
         <div className="g-bar__brand">
           <Wordmark />
-          <span className="g-bar__title">{t.galleryTitle}</span>
+          <span className="g-bar__title">{t.chrome.kitName}</span>
         </div>
-        <nav className="g-bar__nav" aria-label={t.galleryTitle}>
+        <nav className="g-bar__nav" aria-label={t.chrome.kitName}>
           <a href="#components" aria-current={page === "components" ? "page" : undefined}>
-            {t.pages.components}
+            {t.chrome.pageNames.components}
           </a>
           <a href="#states" aria-current={page === "states" ? "page" : undefined}>
-            {t.pages.states}
+            {t.chrome.pageNames.states}
           </a>
         </nav>
         <div className="g-bar__controls">
           <Select
             size="sm"
-            aria-label={t.theme.label}
+            aria-label={t.chrome.themePicker.label}
             value={theme}
             onValueChange={(value) => setTheme(value as Theme)}
           >
-            <SelectItem value="light">{t.theme.light}</SelectItem>
-            <SelectItem value="dark">{t.theme.dark}</SelectItem>
-            <SelectItem value="system">{t.theme.system}</SelectItem>
+            <SelectItem value="light">{t.chrome.themePicker.birch}</SelectItem>
+            <SelectItem value="dark">{t.chrome.themePicker.tar}</SelectItem>
+            <SelectItem value="system">{t.chrome.themePicker.followOs}</SelectItem>
           </Select>
           <Select
             size="sm"
-            aria-label={t.language}
+            aria-label={t.chrome.languagePicker}
             value={locale}
             onValueChange={(value) => setLocale(value as Locale)}
           >
@@ -156,8 +156,8 @@ export function App() {
   );
 }
 
-function Section({ id, t, children }: { id: keyof Copy["sections"]; t: Copy; children: ReactNode }) {
-  const section = t.sections[id];
+function Section({ id, t, children }: { id: keyof Copy["sectionHeads"]; t: Copy; children: ReactNode }) {
+  const section = t.sectionHeads[id];
   return (
     <section className="g-section" id={id} aria-labelledby={`${id}-title`}>
       <div className="g-section__head">
@@ -173,8 +173,8 @@ function ComponentsPage({ t }: { t: Copy }) {
   return (
     <>
       <div className="g-intro">
-        <h1>{t.pages.components}</h1>
-        <p>{t.intro}</p>
+        <h1>{t.chrome.pageNames.components}</h1>
+        <p>{t.chrome.pageIntro}</p>
       </div>
       <TypeSection t={t} />
       <ButtonsSection t={t} />
@@ -196,11 +196,11 @@ function TypeSection({ t }: { t: Copy }) {
   return (
     <Section id="type" t={t}>
       <div className="g-type">
-        <p className="g-type__title">{t.typeSamples.title}</p>
-        <p className="g-type__lead">{t.typeSamples.body}</p>
-        <p>{t.typeSamples.body}</p>
-        <p className="g-type__small">{t.typeSamples.body}</p>
-        <code className="g-type__mono">{t.typeSamples.mono}</code>
+        <p className="g-type__title">{t.typeSpecimen.headline}</p>
+        <p className="g-type__lead">{t.typeSpecimen.paragraph}</p>
+        <p>{t.typeSpecimen.paragraph}</p>
+        <p className="g-type__small">{t.typeSpecimen.paragraph}</p>
+        <code className="g-type__mono">{t.typeSpecimen.logLine}</code>
       </div>
     </Section>
   );
@@ -211,35 +211,45 @@ function ButtonsSection({ t }: { t: Copy }) {
     <Section id="buttons" t={t}>
       <div className="g-row">
         <Button variant="primary" icon={<Icon icon={Send} />}>
-          {t.actions.send}
+          {t.buttonLabels.sendMessage}
         </Button>
-        <Button>{t.actions.cancel}</Button>
+        <Button>{t.buttonLabels.cancel}</Button>
         <Button variant="ghost" icon={<Icon icon={Archive} />}>
-          {t.actions.archive}
+          {t.buttonLabels.archiveThread}
         </Button>
         <Button variant="danger" icon={<Icon icon={Trash} />}>
-          {t.actions.delete}
+          {t.buttonLabels.deleteRoutine}
         </Button>
       </div>
       <div className="g-row">
         <Button variant="primary" size="sm">
-          {t.actions.approve}
+          {t.buttonLabels.approveRequest}
         </Button>
-        <Button variant="primary">{t.actions.approve}</Button>
+        <Button variant="primary">{t.buttonLabels.approveRequest}</Button>
         <Button variant="primary" size="lg">
-          {t.actions.approve}
+          {t.buttonLabels.approveRequest}
         </Button>
         <Button variant="secondary" loading>
-          {t.actions.save}
+          {t.buttonLabels.saveEdits}
         </Button>
         <Button variant="primary" disabled>
-          {t.actions.save}
+          {t.buttonLabels.saveEdits}
         </Button>
       </div>
       <div className="g-row">
-        <Button size="sm" variant="ghost" icon={<Icon icon={Ellipsis} />} aria-label={t.actions.more} />
-        <Button icon={<Icon icon={Search} />} aria-label={t.actions.search} />
-        <Button size="lg" variant="primary" icon={<Icon icon={Plus} />} aria-label={t.actions.newTask} />
+        <Button
+          size="sm"
+          variant="ghost"
+          icon={<Icon icon={Ellipsis} />}
+          aria-label={t.buttonLabels.overflowMenuName}
+        />
+        <Button icon={<Icon icon={Search} />} aria-label={t.buttonLabels.searchIconName} />
+        <Button
+          size="lg"
+          variant="primary"
+          icon={<Icon icon={Plus} />}
+          aria-label={t.buttonLabels.createTask}
+        />
         <span className="g-hint">
           <Kbd>Ctrl</Kbd> <Kbd>K</Kbd>
         </span>
@@ -252,11 +262,16 @@ function FieldsSection({ t }: { t: Copy }) {
   return (
     <Section id="fields" t={t}>
       <div className="g-grid">
-        <Field label={t.fields.name} hint={t.fields.nameHint} required requiredLabel={t.fields.required}>
-          <Input placeholder={t.fields.namePlaceholder} />
+        <Field
+          label={t.agentForm.nameLabel}
+          hint={t.agentForm.nameShownInChat}
+          required
+          requiredLabel={t.agentForm.requiredMark}
+        >
+          <Input placeholder={t.agentForm.nameExample} />
         </Field>
-        <Field label={t.fields.model}>
-          <Select placeholder={t.fields.modelPlaceholder}>
+        <Field label={t.agentForm.modelPickerLabel}>
+          <Select placeholder={t.agentForm.modelPrompt}>
             <SelectItem value="haiku">claude-haiku-5-5</SelectItem>
             <SelectItem value="opus">claude-opus-5-5</SelectItem>
             <SelectItem value="local" disabled>
@@ -264,13 +279,13 @@ function FieldsSection({ t }: { t: Copy }) {
             </SelectItem>
           </Select>
         </Field>
-        <Field label={t.fields.instructions} error={t.fields.instructionsError}>
-          <Textarea placeholder={t.fields.instructionsPlaceholder} />
+        <Field label={t.agentForm.promptLabel} error={t.agentForm.promptMissing}>
+          <Textarea placeholder={t.agentForm.promptExample} />
         </Field>
-        <Field label={t.fields.agentId} disabled>
+        <Field label={t.agentForm.idLabel} disabled>
           <Input mono defaultValue="agt_01JD7Z3K9M" />
         </Field>
-        <Field label={t.fields.long} error={t.fields.longError}>
+        <Field label={t.agentForm.digestChannelLabel} error={t.agentForm.digestChannelGone}>
           <Input defaultValue="#resumo-semanal-antigo" />
         </Field>
       </div>
@@ -283,18 +298,26 @@ function ChoicesSection({ t }: { t: Copy }) {
     <Section id="choices" t={t}>
       <div className="g-grid">
         <div className="g-stack">
-          <Checkbox label={t.choices.notify} hint={t.choices.notifyHint} defaultChecked />
-          <Checkbox label={t.choices.archived} checked="indeterminate" />
-          <Checkbox label={t.choices.archived} disabled />
-          <Switch label={t.choices.autoApprove} hint={t.choices.autoApproveHint} defaultChecked />
-          <Switch label={t.choices.notify} />
-          <Switch label={t.choices.notify} disabled defaultChecked />
+          <Checkbox
+            label={t.agentSettings.notifyWhenDone}
+            hint={t.agentSettings.notifyWhenDoneHelp}
+            defaultChecked
+          />
+          <Checkbox label={t.agentSettings.shelvedRoutinesOption} checked="indeterminate" />
+          <Checkbox label={t.agentSettings.shelvedRoutinesOption} disabled />
+          <Switch
+            label={t.agentSettings.approveEditsAlone}
+            hint={t.agentSettings.approveEditsAloneHelp}
+            defaultChecked
+          />
+          <Switch label={t.agentSettings.notifyWhenDone} />
+          <Switch label={t.agentSettings.notifyWhenDone} disabled defaultChecked />
         </div>
-        <Field label={t.choices.schedule}>
+        <Field label={t.agentSettings.runCadence}>
           <RadioGroup defaultValue="daily">
-            <Radio value="hourly" label={t.choices.hourly} />
-            <Radio value="daily" label={t.choices.daily} />
-            <Radio value="manual" label={t.choices.manual} disabled />
+            <Radio value="hourly" label={t.agentSettings.everyHourOption} />
+            <Radio value="daily" label={t.agentSettings.everyMorningOption} />
+            <Radio value="manual" label={t.agentSettings.byHandOption} disabled />
           </RadioGroup>
         </Field>
       </div>
@@ -305,17 +328,17 @@ function ChoicesSection({ t }: { t: Copy }) {
 function ThreadMenuItems({ t }: { t: Copy }) {
   return (
     <>
-      <MenuLabel>{t.menu.label}</MenuLabel>
+      <MenuLabel>{t.threadMenu.groupName}</MenuLabel>
       <MenuItem icon={<Icon icon={Pencil} />} shortcut={<Kbd>F2</Kbd>}>
-        {t.menu.rename}
+        {t.threadMenu.renameThread}
       </MenuItem>
-      <MenuItem icon={<Icon icon={CopyIcon} />}>{t.menu.duplicate}</MenuItem>
+      <MenuItem icon={<Icon icon={CopyIcon} />}>{t.threadMenu.duplicateThread}</MenuItem>
       <MenuItem icon={<Icon icon={Pin} />} disabled>
-        {t.menu.pin}
+        {t.threadMenu.pinThread}
       </MenuItem>
       <MenuSeparator />
       <MenuItem icon={<Icon icon={Trash} />} tone="danger">
-        {t.menu.delete}
+        {t.threadMenu.deleteThread}
       </MenuItem>
     </>
   );
@@ -329,24 +352,24 @@ function OverlaysSection({ t }: { t: Copy }) {
       <div className="g-row">
         <Dialog>
           <DialogTrigger asChild>
-            <Button icon={<Icon icon={Pencil} />}>{t.dialog.open}</Button>
+            <Button icon={<Icon icon={Pencil} />}>{t.renameDialog.trigger}</Button>
           </DialogTrigger>
           <DialogContent
-            title={t.dialog.title}
-            description={t.dialog.description}
-            closeLabel={t.dialog.close}
+            title={t.renameDialog.heading}
+            description={t.renameDialog.explanation}
+            closeLabel={t.renameDialog.closeButton}
             footer={
               <>
                 <DialogClose asChild>
-                  <Button>{t.actions.cancel}</Button>
+                  <Button>{t.buttonLabels.cancel}</Button>
                 </DialogClose>
                 <DialogClose asChild>
-                  <Button variant="primary">{t.actions.save}</Button>
+                  <Button variant="primary">{t.buttonLabels.saveEdits}</Button>
                 </DialogClose>
               </>
             }
           >
-            <Field label={t.fields.name} hint={t.fields.nameHint}>
+            <Field label={t.agentForm.nameLabel} hint={t.agentForm.nameShownInChat}>
               <Input defaultValue="Scout" />
             </Field>
           </DialogContent>
@@ -354,14 +377,14 @@ function OverlaysSection({ t }: { t: Copy }) {
         <ConfirmDialog
           trigger={
             <Button variant="danger" icon={<Icon icon={Trash} />}>
-              {t.dialog.confirmOpen}
+              {t.deleteDialog.trigger}
             </Button>
           }
           tone="danger"
-          title={t.dialog.confirmTitle}
-          description={t.dialog.confirmDescription}
-          confirmLabel={t.dialog.confirm}
-          cancelLabel={t.actions.cancel}
+          title={t.deleteDialog.question}
+          description={t.deleteDialog.consequence}
+          confirmLabel={t.deleteDialog.confirmButton}
+          cancelLabel={t.buttonLabels.cancel}
           confirming={confirming}
           onConfirm={() => setConfirming(true)}
           onOpenChange={(open) => {
@@ -370,49 +393,49 @@ function OverlaysSection({ t }: { t: Copy }) {
         />
         <Menu modal={!all} {...(all && { open: true })}>
           <MenuTrigger asChild>
-            <Button icon={<Icon icon={Ellipsis} />}>{t.menu.open}</Button>
+            <Button icon={<Icon icon={Ellipsis} />}>{t.threadMenu.trigger}</Button>
           </MenuTrigger>
           <MenuContent>
             <ThreadMenuItems t={t} />
           </MenuContent>
         </Menu>
-        <Tooltip content={t.tooltip.text} {...(all && { open: true })} side="bottom">
-          <Button variant="ghost" icon={<Icon icon={CopyIcon} />} aria-label={t.tooltip.trigger} />
+        <Tooltip content={t.copyIdTooltip.hint} {...(all && { open: true })} side="bottom">
+          <Button variant="ghost" icon={<Icon icon={CopyIcon} />} aria-label={t.copyIdTooltip.buttonName} />
         </Tooltip>
       </div>
       <ContextMenu>
         <ContextMenuTrigger asChild>
-          <div className="g-context">{t.menu.contextArea}</div>
+          <div className="g-context">{t.threadMenu.rightClickTarget}</div>
         </ContextMenuTrigger>
         <ContextMenuContent>
-          <ContextMenuItem icon={<Icon icon={Pencil} />}>{t.menu.rename}</ContextMenuItem>
-          <ContextMenuItem icon={<Icon icon={CopyIcon} />}>{t.menu.duplicate}</ContextMenuItem>
+          <ContextMenuItem icon={<Icon icon={Pencil} />}>{t.threadMenu.renameThread}</ContextMenuItem>
+          <ContextMenuItem icon={<Icon icon={CopyIcon} />}>{t.threadMenu.duplicateThread}</ContextMenuItem>
           <ContextMenuSeparator />
           <ContextMenuItem icon={<Icon icon={Trash} />} tone="danger">
-            {t.menu.delete}
+            {t.threadMenu.deleteThread}
           </ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>
-      <Switch label={t.menu.showAll} checked={all} onCheckedChange={setAll} />
+      <Switch label={t.threadMenu.openEveryOverlay} checked={all} onCheckedChange={setAll} />
     </Section>
   );
 }
 
 function TabsSection({ t }: { t: Copy }) {
-  const tabs = ["chat", "tasks", "routines", "wiki"] as const;
+  const tabs = ["chat", "tasks", "schedules", "knowledgeBase"] as const;
   return (
     <Section id="tabs" t={t}>
       <Tabs defaultValue="chat">
-        <TabsList aria-label={t.sections.tabs.title}>
+        <TabsList aria-label={t.sectionHeads.tabs.title}>
           {tabs.map((tab) => (
-            <TabsTrigger key={tab} value={tab} disabled={tab === "wiki"}>
-              {t.tabs[tab]}
+            <TabsTrigger key={tab} value={tab} disabled={tab === "knowledgeBase"}>
+              {t.workspaceTabs.labels[tab]}
             </TabsTrigger>
           ))}
         </TabsList>
         {tabs.map((tab) => (
           <TabsContent key={tab} value={tab}>
-            {t.tabs.body[tab]}
+            {t.workspaceTabs.panels[tab]}
           </TabsContent>
         ))}
       </Tabs>
@@ -425,9 +448,13 @@ function FeedbackSection({ t }: { t: Copy }) {
   const show = (tone: Tone) =>
     toast.push({
       tone,
-      ...t.toast.items[tone],
+      ...t.notifications.samples[tone],
       ...(tone === "success" && {
-        action: { label: t.toast.undo, altText: t.toast.undoAlt, onAction: () => undefined },
+        action: {
+          label: t.notifications.undoButton,
+          altText: t.notifications.undoExplanation,
+          onAction: () => undefined,
+        },
       }),
     });
   return (
@@ -437,27 +464,27 @@ function FeedbackSection({ t }: { t: Copy }) {
           <Callout
             key={tone}
             tone={tone}
-            title={t.callouts[tone].title}
+            title={t.noticeSamples[tone].title}
             {...(tone === "danger" && {
               actions: (
                 <Button size="sm" icon={<Icon icon={RotateCw} />}>
-                  {t.actions.retry}
+                  {t.buttonLabels.retryRun}
                 </Button>
               ),
             })}
           >
-            {t.callouts[tone].body}
+            {t.noticeSamples[tone].body}
           </Callout>
         ))}
       </div>
       <div className="g-row">
         {TONES.map((tone) => (
           <Button key={tone} size="sm" onClick={() => show(tone)}>
-            {t.toast.push}: {t.toast.items[tone].title}
+            {t.notifications.showPrefix}: {t.notifications.samples[tone].title}
           </Button>
         ))}
         <Button size="sm" variant="primary" onClick={() => TONES.forEach(show)}>
-          {t.toast.queue}
+          {t.notifications.queueFour}
         </Button>
       </div>
     </Section>
@@ -503,24 +530,31 @@ function IdentitySection({ t }: { t: Copy }) {
 }
 
 function StatusSection({ t }: { t: Copy }) {
-  const [selected, setSelected] = useState<Record<string, boolean>>({ mine: true });
-  const [chips, setChips] = useState([t.chips.design, t.chips.urgent, t.chips.long]);
-  useEffect(() => setChips([t.chips.design, t.chips.urgent, t.chips.long]), [t]);
+  const [selected, setSelected] = useState<Record<string, boolean>>({ assignedToMe: true });
+  const [chips, setChips] = useState([
+    t.filterTags.designTopic,
+    t.filterTags.highPriority,
+    t.filterTags.longCustomerTopic,
+  ]);
+  useEffect(
+    () => setChips([t.filterTags.designTopic, t.filterTags.highPriority, t.filterTags.longCustomerTopic]),
+    [t],
+  );
   return (
     <Section id="status" t={t}>
       <div className="g-row">
         {WORK_STATUSES.map((status) => (
-          <StatusBadge key={status} status={status} label={t.status[status]} />
+          <StatusBadge key={status} status={status} label={t.statusLabels[status]} />
         ))}
       </div>
       <div className="g-row">
-        {(["mine", "urgent"] as const).map((key) => (
+        {(["assignedToMe", "highPriority"] as const).map((key) => (
           <Chip
             key={key}
             selected={selected[key] ?? false}
             onSelectedChange={(value) => setSelected((s) => ({ ...s, [key]: value }))}
           >
-            {t.chips[key]}
+            {t.filterTags[key]}
           </Chip>
         ))}
         {chips.map((label) => (
@@ -528,7 +562,7 @@ function StatusSection({ t }: { t: Copy }) {
             key={label}
             icon={<Icon icon={Workflow} size="sm" />}
             onRemove={() => setChips((c) => c.filter((x) => x !== label))}
-            removeLabel={t.chips.remove(label)}
+            removeLabel={t.filterTags.removeButtonName(label)}
           >
             {label}
           </Chip>
@@ -545,13 +579,13 @@ function SurfacesSection({ t }: { t: Copy }) {
         <Surface variant="card" as="article">
           <div className="g-card-head">
             <AgentSigil agentId="agt_01JD7Z5R8T" name="Tally" size="sm" />
-            <strong>{t.surfaces.card}</strong>
-            <StatusBadge status="running" label={t.status.running} />
+            <strong>{t.surfaceSamples.digestName}</strong>
+            <StatusBadge status="running" label={t.statusLabels.running} />
           </div>
-          <p className="g-muted">{t.surfaces.cardBody}</p>
+          <p className="g-muted">{t.surfaceSamples.digestCadence}</p>
         </Surface>
         <Surface variant="panel">
-          <p className="g-panel-title">{t.surfaces.panel}</p>
+          <p className="g-panel-title">{t.surfaceSamples.runLogHeading}</p>
           <pre className="g-log">
             {
               "09:14:02  fetch  github.com/vanr/issues\n09:14:03  parse  38 issues\n09:14:04  write  tasks 12 new"
@@ -560,13 +594,13 @@ function SurfacesSection({ t }: { t: Copy }) {
         </Surface>
       </div>
       <ul className="g-list">
-        {t.surfaces.rows.map((row, index) => (
+        {t.surfaceSamples.taskTitles.map((row, index) => (
           <Surface key={row} variant="row" as="li" interactive selected={index === 1}>
             <AgentSigil agentId={AGENTS[index]?.id ?? "agt"} name={AGENTS[index]?.name ?? ""} size="sm" />
             <span className="g-grow">{row}</span>
             <StatusBadge
               status={(["done", "awaiting-approval", "paused"] as const)[index] ?? "done"}
-              label={t.status[(["done", "awaiting-approval", "paused"] as const)[index] ?? "done"]}
+              label={t.statusLabels[(["done", "awaiting-approval", "paused"] as const)[index] ?? "done"]}
             />
           </Surface>
         ))}
@@ -581,10 +615,10 @@ function LoadingSection({ t }: { t: Copy }) {
       <div className="g-row">
         <Spinner size="sm" />
         <Spinner />
-        <Spinner size="lg" label={t.loading.label} />
+        <Spinner size="lg" label={t.loadingSample.threadsLoading} />
       </div>
       <div className="g-skeleton" aria-busy="true">
-        <span className="vr-visually-hidden">{t.loading.label}</span>
+        <span className="vr-visually-hidden">{t.loadingSample.threadsLoading}</span>
         <Skeleton shape="circle" />
         <div className="g-stack g-grow">
           <Skeleton style={{ width: "40%" }} />
@@ -601,11 +635,11 @@ function EmptySection({ t }: { t: Copy }) {
     <Section id="empty" t={t}>
       <EmptyState
         icon={<Icon icon={Workflow} size="lg" />}
-        title={t.empty.title}
-        description={t.empty.description}
+        title={t.emptyRoutines.heading}
+        description={t.emptyRoutines.explanation}
         action={
           <Button variant="primary" icon={<Icon icon={Plus} />}>
-            {t.empty.action}
+            {t.emptyRoutines.createButton}
           </Button>
         }
       />
@@ -615,7 +649,7 @@ function EmptySection({ t }: { t: Copy }) {
 
 /* States page: one row per control, one column per state, all drawn by the package's own CSS. */
 
-type Column = keyof Copy["states"]["columns"];
+type Column = keyof Copy["stateMatrix"]["columnNames"];
 const COLUMNS: Column[] = ["default", "hover", "focus", "active", "disabled", "loading", "error"];
 
 type Row = { name: string; render: (state: Column) => ReactNode | null };
@@ -635,7 +669,7 @@ function StatesPage({ t }: { t: Copy }) {
           disabled={state === "disabled"}
           loading={state === "loading"}
         >
-          {t.actions.save}
+          {t.buttonLabels.saveEdits}
         </Button>
       ),
   });
@@ -651,7 +685,7 @@ function StatesPage({ t }: { t: Copy }) {
         state === "error" ? null : (
           <Button
             icon={<Icon icon={Search} />}
-            aria-label={t.actions.search}
+            aria-label={t.buttonLabels.searchIconName}
             {...pointer(state)}
             disabled={state === "disabled"}
             loading={state === "loading"}
@@ -663,8 +697,8 @@ function StatesPage({ t }: { t: Copy }) {
       render: (state) =>
         state === "loading" || state === "active" ? null : (
           <Input
-            aria-label={t.fields.name}
-            placeholder={t.fields.namePlaceholder}
+            aria-label={t.agentForm.nameLabel}
+            placeholder={t.agentForm.nameExample}
             {...pointer(state)}
             disabled={state === "disabled"}
             aria-invalid={state === "error" || undefined}
@@ -676,9 +710,9 @@ function StatesPage({ t }: { t: Copy }) {
       render: (state) =>
         state === "loading" || state === "active" ? null : (
           <Textarea
-            aria-label={t.fields.instructions}
+            aria-label={t.agentForm.promptLabel}
             rows={2}
-            defaultValue={t.typeSamples.body}
+            defaultValue={t.typeSpecimen.paragraph}
             {...pointer(state)}
             disabled={state === "disabled"}
             aria-invalid={state === "error" || undefined}
@@ -690,8 +724,8 @@ function StatesPage({ t }: { t: Copy }) {
       render: (state) =>
         state === "loading" || state === "active" ? null : (
           <Select
-            aria-label={t.fields.model}
-            placeholder={t.fields.modelPlaceholder}
+            aria-label={t.agentForm.modelPickerLabel}
+            placeholder={t.agentForm.modelPrompt}
             {...pointer(state)}
             disabled={state === "disabled"}
             aria-invalid={state === "error" || undefined}
@@ -700,42 +734,46 @@ function StatesPage({ t }: { t: Copy }) {
           </Select>
         ),
     },
-    {
-      name: "Checkbox",
-      render: (state) =>
-        state === "loading" || state === "active" ? null : (
-          <Checkbox
-            label={t.choices.notify}
-            defaultChecked={state !== "default"}
-            {...pointer(state)}
-            disabled={state === "disabled"}
-            aria-invalid={state === "error" || undefined}
-          />
-        ),
-    },
-    {
-      name: "Switch",
-      render: (state) =>
-        state === "loading" || state === "active" || state === "error" ? null : (
-          <Switch
-            label={t.choices.notify}
-            defaultChecked={state !== "default"}
-            {...pointer(state)}
-            disabled={state === "disabled"}
-          />
-        ),
-    },
+    ...([false, true] as const).map(
+      (checked): Row => ({
+        name: checked ? "Checkbox checked" : "Checkbox unchecked",
+        render: (state) =>
+          state === "loading" || state === "active" ? null : (
+            <Checkbox
+              label={t.agentSettings.notifyWhenDone}
+              defaultChecked={checked}
+              {...pointer(state)}
+              disabled={state === "disabled"}
+              aria-invalid={state === "error" || undefined}
+            />
+          ),
+      }),
+    ),
+    ...([false, true] as const).map(
+      (checked): Row => ({
+        name: checked ? "Switch on" : "Switch off",
+        render: (state) =>
+          state === "loading" || state === "active" || state === "error" ? null : (
+            <Switch
+              label={t.agentSettings.notifyWhenDone}
+              defaultChecked={checked}
+              {...pointer(state)}
+              disabled={state === "disabled"}
+            />
+          ),
+      }),
+    ),
     {
       name: "Radio",
       render: (state) =>
         state === "loading" || state === "active" ? null : (
           <RadioGroup
-            aria-label={t.choices.schedule}
+            aria-label={t.agentSettings.runCadence}
             defaultValue="daily"
             disabled={state === "disabled"}
             aria-invalid={state === "error" || undefined}
           >
-            <Radio value="daily" label={t.choices.daily} {...pointer(state)} />
+            <Radio value="daily" label={t.agentSettings.everyMorningOption} {...pointer(state)} />
           </RadioGroup>
         ),
     },
@@ -749,7 +787,7 @@ function StatesPage({ t }: { t: Copy }) {
             {...pointer(state)}
             disabled={state === "disabled"}
           >
-            {t.chips.mine}
+            {t.filterTags.assignedToMe}
           </Chip>
         ),
     },
@@ -763,7 +801,7 @@ function StatesPage({ t }: { t: Copy }) {
             {...pointer(state)}
             disabled={state === "disabled"}
           >
-            {t.chips.mine}
+            {t.filterTags.assignedToMe}
           </Chip>
         ),
     },
@@ -773,11 +811,11 @@ function StatesPage({ t }: { t: Copy }) {
         state === "loading" || state === "error" || state === "active" ? null : (
           <Chip
             onRemove={() => undefined}
-            removeLabel={t.chips.remove(t.chips.design)}
+            removeLabel={t.filterTags.removeButtonName(t.filterTags.designTopic)}
             disabled={state === "disabled"}
             {...pointer(state)}
           >
-            {t.chips.design}
+            {t.filterTags.designTopic}
           </Chip>
         ),
     },
@@ -786,7 +824,7 @@ function StatesPage({ t }: { t: Copy }) {
       render: (state) =>
         state === "default" || state === "hover" ? (
           <Surface variant="row" interactive {...pointer(state)}>
-            {t.surfaces.rows[0]}
+            {t.surfaceSamples.taskTitles[0]}
           </Surface>
         ) : null,
     },
@@ -795,7 +833,7 @@ function StatesPage({ t }: { t: Copy }) {
       render: (state) =>
         state === "default" || state === "hover" ? (
           <Surface variant="row" interactive selected {...pointer(state)}>
-            {t.surfaces.rows[0]}
+            {t.surfaceSamples.taskTitles[0]}
           </Surface>
         ) : null,
     },
@@ -804,9 +842,9 @@ function StatesPage({ t }: { t: Copy }) {
       render: (state) =>
         state === "loading" || state === "error" || state === "active" ? null : (
           <Tabs defaultValue={state === "default" ? "chat" : "other"}>
-            <TabsList aria-label={t.sections.tabs.title}>
+            <TabsList aria-label={t.sectionHeads.tabs.title}>
               <TabsTrigger value="chat" {...pointer(state)} disabled={state === "disabled"}>
-                {t.tabs.chat}
+                {t.workspaceTabs.labels.chat}
               </TabsTrigger>
             </TabsList>
           </Tabs>
@@ -817,19 +855,19 @@ function StatesPage({ t }: { t: Copy }) {
   return (
     <>
       <div className="g-intro">
-        <h1>{t.pages.states}</h1>
-        <p>{t.intro}</p>
+        <h1>{t.chrome.pageNames.states}</h1>
+        <p>{t.chrome.pageIntro}</p>
       </div>
       <div className="g-matrix-wrap">
         <table className="g-matrix">
           <thead>
             <tr>
               <th scope="col">
-                <span className="vr-visually-hidden">{t.pages.components}</span>
+                <span className="vr-visually-hidden">{t.chrome.pageNames.components}</span>
               </th>
               {COLUMNS.map((column) => (
                 <th key={column} scope="col">
-                  {t.states.columns[column]}
+                  {t.stateMatrix.columnNames[column]}
                 </th>
               ))}
             </tr>
@@ -842,7 +880,11 @@ function StatesPage({ t }: { t: Copy }) {
                 </th>
                 {COLUMNS.map((column) => {
                   const cell = row.render(column);
-                  return <td key={column}>{cell ?? <span className="g-none">{t.states.none}</span>}</td>;
+                  return (
+                    <td key={column}>
+                      {cell ?? <span className="g-none">{t.stateMatrix.notApplicable}</span>}
+                    </td>
+                  );
                 })}
               </tr>
             ))}
@@ -852,25 +894,32 @@ function StatesPage({ t }: { t: Copy }) {
 
       <section className="g-section" aria-labelledby="long-title">
         <div className="g-section__head">
-          <h2 id="long-title">{t.states.longTitle}</h2>
+          <h2 id="long-title">{t.stateMatrix.longTextHeading}</h2>
         </div>
         <div className="g-section__body">
           <div className="g-narrow">
-            <Button variant="primary">{t.states.longBody}</Button>
-            <Chip onRemove={() => undefined} removeLabel={t.chips.remove(t.states.longBody)}>
-              {t.states.longBody}
+            <Button variant="primary">{t.stateMatrix.longSampleText}</Button>
+            <Chip
+              onRemove={() => undefined}
+              removeLabel={t.filterTags.removeButtonName(t.stateMatrix.longSampleText)}
+            >
+              {t.stateMatrix.longSampleText}
             </Chip>
-            <StatusBadge status="awaiting-approval" label={t.status["awaiting-approval"]} />
-            <Field label={t.fields.long} hint={t.states.longBody} error={t.fields.longError}>
-              <Input defaultValue={t.states.longBody} />
+            <StatusBadge status="awaiting-approval" label={t.statusLabels["awaiting-approval"]} />
+            <Field
+              label={t.agentForm.digestChannelLabel}
+              hint={t.stateMatrix.longSampleText}
+              error={t.agentForm.digestChannelGone}
+            >
+              <Input defaultValue={t.stateMatrix.longSampleText} />
             </Field>
-            <Callout tone="warning" title={t.states.longBody}>
-              {t.fields.longError}
+            <Callout tone="warning" title={t.stateMatrix.longSampleText}>
+              {t.agentForm.digestChannelGone}
             </Callout>
             <Surface variant="row" interactive>
               <Avatar name={PEOPLE[3] ?? ""} size="sm" />
-              <span className="g-grow g-ellipsis">{t.states.longBody}</span>
-              <StatusBadge status="failed" label={t.status.failed} />
+              <span className="g-grow g-ellipsis">{t.stateMatrix.longSampleText}</span>
+              <StatusBadge status="failed" label={t.statusLabels.failed} />
             </Surface>
           </div>
         </div>
@@ -878,23 +927,23 @@ function StatesPage({ t }: { t: Copy }) {
 
       <section className="g-section" aria-labelledby="tones-title">
         <div className="g-section__head">
-          <h2 id="tones-title">{t.sections.status.title}</h2>
-          <p>{t.sections.status.note}</p>
+          <h2 id="tones-title">{t.sectionHeads.status.title}</h2>
+          <p>{t.sectionHeads.status.note}</p>
         </div>
         <div className="g-section__body">
           <div className="g-row">
             {WORK_STATUSES.map((status) => (
-              <StatusBadge key={status} status={status} label={t.status[status]} />
+              <StatusBadge key={status} status={status} label={t.statusLabels[status]} />
             ))}
           </div>
           <div className="g-grid">
             {TONES.map((tone) => (
-              <Callout key={tone} tone={tone} title={t.callouts[tone].title}>
-                {t.callouts[tone].body}
+              <Callout key={tone} tone={tone} title={t.noticeSamples[tone].title}>
+                {t.noticeSamples[tone].body}
               </Callout>
             ))}
           </div>
-          <EmptyState title={t.empty.title} description={t.empty.description} />
+          <EmptyState title={t.emptyRoutines.heading} description={t.emptyRoutines.explanation} />
         </div>
       </section>
     </>

@@ -1,13 +1,23 @@
 import type { Copy } from "./types.ts";
 
 export const ptBR: Copy = {
-  galleryTitle: "Kit de interface",
-  pages: { components: "Componentes", states: "Estados" },
-  theme: { label: "Tema", light: "Bétula", dark: "Alcatrão", system: "Sistema" },
-  language: "Idioma",
-  intro:
-    "Todas as peças com que as telas do Vanr são montadas, nos dois temas. Nada aqui conversa com um servidor.",
-  sections: {
+  chrome: {
+    kitName: "Kit de interface",
+    pageNames: {
+      components: "Componentes",
+      states: "Estados",
+    },
+    themePicker: {
+      label: "Tema",
+      birch: "Bétula",
+      tar: "Alcatrão",
+      followOs: "Sistema",
+    },
+    languagePicker: "Idioma",
+    pageIntro:
+      "Todas as peças com que as telas do Vanr são montadas, nos dois temas. Nada aqui conversa com um servidor.",
+  },
+  sectionHeads: {
     type: {
       title: "Tipografia",
       note: "Sans de interface para o trabalho, mono para ids e logs, a serifada só em títulos.",
@@ -16,7 +26,10 @@ export const ptBR: Copy = {
       title: "Botões",
       note: "Uma ação principal por tela. Perigo é para o que não tem volta.",
     },
-    fields: { title: "Campos", note: "Rótulo, dica e erro ficam ligados ao controle." },
+    fields: {
+      title: "Campos",
+      note: "Rótulo, dica e erro ficam ligados ao controle.",
+    },
     choices: {
       title: "Escolhas",
       note: "Caixa de seleção, interruptor e opção única, cada um com o rótulo ao lado.",
@@ -25,8 +38,14 @@ export const ptBR: Copy = {
       title: "Camadas",
       note: "Diálogos, menus, dicas e listas de seleção abrem por cima da página.",
     },
-    tabs: { title: "Abas", note: "As setas do teclado passam de uma aba para a outra." },
-    feedback: { title: "Avisos", note: "Os avisos fixos ficam na página; as notificações vêm e vão." },
+    tabs: {
+      title: "Abas",
+      note: "As setas do teclado passam de uma aba para a outra.",
+    },
+    feedback: {
+      title: "Avisos",
+      note: "Os avisos fixos ficam na página; as notificações vêm e vão.",
+    },
     identity: {
       title: "Pessoas e agentes",
       note: "Pessoas são redondas. Agentes levam um sigilo desenhado a partir do id.",
@@ -48,92 +67,102 @@ export const ptBR: Copy = {
       note: "Uma tela vazia diz o que entra ali e como adicionar.",
     },
   },
-  typeSamples: {
-    title: "Planejamento trimestral",
-    body: "O Scout redigiu as notas de versão a partir dos pull requests mesclados e está esperando a sua revisão.",
-    mono: "09:14:02  run_01JD8Q2W4X  saída 0 em 2,4 s",
+  typeSpecimen: {
+    headline: "Planejamento trimestral",
+    paragraph:
+      "O Scout redigiu as notas de versão a partir dos pull requests mesclados e está esperando a sua revisão.",
+    logLine: "09:14:02  run_01JD8Q2W4X  saída 0 em 2,4 s",
   },
-  actions: {
-    send: "Enviar",
-    save: "Salvar alterações",
+  buttonLabels: {
+    sendMessage: "Enviar",
+    saveEdits: "Salvar alterações",
     cancel: "Cancelar",
-    archive: "Arquivar",
-    delete: "Excluir rotina",
-    retry: "Tentar de novo",
-    approve: "Aprovar",
-    newTask: "Nova tarefa",
-    more: "Mais ações",
-    search: "Buscar",
-    saving: "Salvando",
+    archiveThread: "Arquivar",
+    deleteRoutine: "Excluir rotina",
+    retryRun: "Tentar de novo",
+    approveRequest: "Aprovar",
+    createTask: "Nova tarefa",
+    overflowMenuName: "Mais ações",
+    searchIconName: "Buscar",
   },
-  fields: {
-    name: "Nome do agente",
-    namePlaceholder: "ex.: Batedor de versões",
-    nameHint: "Aparece no chat ao lado do sigilo do agente.",
-    instructions: "Instruções",
-    instructionsPlaceholder: "O que este agente deve fazer?",
-    instructionsError: "Adicione pelo menos uma instrução antes de salvar.",
-    model: "Modelo",
-    modelPlaceholder: "Escolha um modelo",
-    agentId: "Id do agente",
-    required: "obrigatório",
-    long: "Para onde deve ir o resumo semanal das tarefas concluídas pela equipe",
-    longError:
+  agentForm: {
+    nameLabel: "Nome do agente",
+    nameExample: "ex.: Batedor de versões",
+    nameShownInChat: "Aparece no chat ao lado do sigilo do agente.",
+    promptLabel: "Instruções",
+    promptExample: "O que este agente deve fazer?",
+    promptMissing: "Adicione pelo menos uma instrução antes de salvar.",
+    modelPickerLabel: "Modelo",
+    modelPrompt: "Escolha um modelo",
+    idLabel: "Id do agente",
+    requiredMark: "obrigatório",
+    digestChannelLabel: "Para onde deve ir o resumo semanal das tarefas concluídas pela equipe",
+    digestChannelGone:
       "Este canal não existe mais ou você perdeu o acesso a ele. Escolha outro canal da lista ou peça acesso ao responsável.",
   },
-  choices: {
-    notify: "Me avise quando terminar",
-    notifyHint: "Envia uma mensagem na conversa.",
-    autoApprove: "Aprovar edições de arquivo automaticamente",
-    autoApproveHint: "Comandos de terminal continuam pedindo antes.",
-    schedule: "Agenda de execução",
-    hourly: "A cada hora",
-    daily: "Todo dia às 9h",
-    manual: "Só quando iniciada manualmente",
-    archived: "Rotinas arquivadas",
+  agentSettings: {
+    notifyWhenDone: "Me avise quando terminar",
+    notifyWhenDoneHelp: "Envia uma mensagem na conversa.",
+    approveEditsAlone: "Aprovar edições de arquivo automaticamente",
+    approveEditsAloneHelp: "Comandos de terminal continuam pedindo antes.",
+    runCadence: "Agenda de execução",
+    everyHourOption: "A cada hora",
+    everyMorningOption: "Todo dia às 9h",
+    byHandOption: "Só quando iniciada manualmente",
+    shelvedRoutinesOption: "Rotinas arquivadas",
   },
-  dialog: {
-    open: "Renomear agente",
-    title: "Renomear agente",
-    description: "O novo nome aparece em todo lugar onde o agente aparece.",
-    close: "Fechar",
-    confirmOpen: "Excluir rotina",
-    confirmTitle: "Excluir a rotina “Resumo semanal”?",
-    confirmDescription: "O histórico de execuções vai junto. Não dá para desfazer.",
-    confirm: "Excluir rotina",
+  renameDialog: {
+    trigger: "Renomear agente",
+    heading: "Renomear agente",
+    explanation: "O novo nome aparece em todo lugar onde o agente aparece.",
+    closeButton: "Fechar",
   },
-  menu: {
-    open: "Ações da conversa",
-    label: "Conversa",
-    rename: "Renomear",
-    duplicate: "Duplicar",
-    pin: "Fixar na barra lateral",
-    delete: "Excluir conversa",
-    contextArea: "Clique com o botão direito nesta mensagem para ver o menu",
-    showAll: "Abrir todas as camadas de uma vez",
+  deleteDialog: {
+    trigger: "Excluir rotina",
+    question: "Excluir a rotina “Resumo semanal”?",
+    consequence: "O histórico de execuções vai junto. Não dá para desfazer.",
+    confirmButton: "Excluir rotina",
   },
-  tooltip: { trigger: "Copiar id da execução", text: "Copia run_01JD8Q2W4X" },
-  tabs: {
-    chat: "Chat",
-    tasks: "Tarefas",
-    routines: "Rotinas",
-    wiki: "Wiki",
-    body: {
+  threadMenu: {
+    trigger: "Ações da conversa",
+    groupName: "Conversa",
+    renameThread: "Renomear",
+    duplicateThread: "Duplicar",
+    pinThread: "Fixar na barra lateral",
+    deleteThread: "Excluir conversa",
+    rightClickTarget: "Clique com o botão direito nesta mensagem para ver o menu",
+    openEveryOverlay: "Abrir todas as camadas de uma vez",
+  },
+  copyIdTooltip: {
+    buttonName: "Copiar id da execução",
+    hint: "Copia run_01JD8Q2W4X",
+  },
+  workspaceTabs: {
+    labels: {
+      chat: "Chat",
+      tasks: "Tarefas",
+      schedules: "Rotinas",
+      knowledgeBase: "Wiki",
+    },
+    panels: {
       chat: "Conversas com pessoas e agentes.",
       tasks: "Trabalho atribuído a você ou a um agente.",
-      routines: "Trabalhos que rodam numa agenda.",
-      wiki: "Páginas que o espaço de trabalho inteiro pode editar.",
+      schedules: "Trabalhos que rodam numa agenda.",
+      knowledgeBase: "Páginas que o espaço de trabalho inteiro pode editar.",
     },
   },
-  toast: {
-    region: "Notificações",
-    close: "Dispensar",
-    push: "Mostrar",
-    queue: "Enfileirar quatro",
-    undo: "Desfazer",
-    undoAlt: "Desfazer o arquivamento da conversa",
-    items: {
-      info: { title: "O Scout pegou a tarefa", description: "Costuma levar alguns minutos." },
+  notifications: {
+    regionName: "Notificações",
+    dismissButton: "Dispensar",
+    showPrefix: "Mostrar",
+    queueFour: "Enfileirar quatro",
+    undoButton: "Desfazer",
+    undoExplanation: "Desfazer o arquivamento da conversa",
+    samples: {
+      info: {
+        title: "O Scout pegou a tarefa",
+        description: "Costuma levar alguns minutos.",
+      },
       success: {
         title: "Alterações salvas",
         description: "Todo mundo no espaço de trabalho já vê o novo nome.",
@@ -148,7 +177,7 @@ export const ptBR: Copy = {
       },
     },
   },
-  callouts: {
+  noticeSamples: {
     info: {
       title: "Os agentes podem ler esta página",
       body: "Tudo o que for escrito aqui fica disponível para todos os agentes do espaço de trabalho.",
@@ -166,7 +195,7 @@ export const ptBR: Copy = {
       body: "Três execuções seguidas falharam. Corrija as credenciais e retome a rotina.",
     },
   },
-  status: {
+  statusLabels: {
     running: "Rodando",
     "awaiting-approval": "Precisa de aprovação",
     "awaiting-reply": "Esperando resposta",
@@ -174,27 +203,33 @@ export const ptBR: Copy = {
     done: "Concluído",
     paused: "Pausado",
   },
-  chips: {
-    design: "Design",
-    urgent: "Urgente",
-    mine: "Atribuídas a mim",
-    remove: (label) => `Remover ${label}`,
-    long: "Integração e migração de clientes corporativos",
+  filterTags: {
+    designTopic: "Design",
+    highPriority: "Urgente",
+    assignedToMe: "Atribuídas a mim",
+    removeButtonName: (label) => `Remover ${label}`,
+    longCustomerTopic: "Integração e migração de clientes corporativos",
   },
-  surfaces: {
-    card: "Resumo semanal",
-    cardBody: "Roda toda segunda às 9h e publica em #equipe.",
-    panel: "Log da execução",
-    rows: ["Redigir notas de versão", "Fazer a triagem das issues novas", "Conciliar as faturas do mês"],
+  surfaceSamples: {
+    digestName: "Resumo semanal",
+    digestCadence: "Roda toda segunda às 9h e publica em #equipe.",
+    runLogHeading: "Log da execução",
+    taskTitles: [
+      "Redigir notas de versão",
+      "Fazer a triagem das issues novas",
+      "Conciliar as faturas do mês",
+    ],
   },
-  empty: {
-    title: "Nenhuma rotina ainda",
-    description: "Rotinas rodam um agente numa agenda, como um resumo diário das tarefas em aberto.",
-    action: "Nova rotina",
+  emptyRoutines: {
+    heading: "Nenhuma rotina ainda",
+    explanation: "Rotinas rodam um agente numa agenda, como um resumo diário das tarefas em aberto.",
+    createButton: "Nova rotina",
   },
-  loading: { label: "Carregando conversas" },
-  states: {
-    columns: {
+  loadingSample: {
+    threadsLoading: "Carregando conversas",
+  },
+  stateMatrix: {
+    columnNames: {
       default: "Padrão",
       hover: "Sob o cursor",
       focus: "Foco",
@@ -203,9 +238,9 @@ export const ptBR: Copy = {
       loading: "Carregando",
       error: "Erro",
     },
-    none: "n/a",
-    longTitle: "Texto longo",
-    longBody:
+    notApplicable: "n/a",
+    longTextHeading: "Texto longo",
+    longSampleText:
       "Responsabilidades, configurações e acompanhamento das notificações automáticas de reconciliação intercompanhias",
   },
 };
