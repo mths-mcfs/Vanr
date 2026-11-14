@@ -21,6 +21,7 @@ beforeAll(() => {
         lastFrameAt: 0,
         helloTimer: null,
         pingTimer: null,
+        closed: false,
       };
       if (srv.upgrade(req, { data })) return undefined;
       return new Response("upgrade", { status: 426 });

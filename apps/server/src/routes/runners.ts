@@ -4,7 +4,7 @@ import type { EnvironmentTarget, MoveAgentsResult, SandboxSettings } from "@vanr
 import { schema } from "@vanr/engine/db";
 import { RUNNER_PROTOCOL } from "@vanr/engine/runner-protocol";
 import { PRODUCT } from "@vanr/product";
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
 import { agentInWorkspace, requireAgentEditor } from "../agents";
@@ -317,18 +317,18 @@ export function registerRunners(app: Hono<AppEnv>) {
       .from(agents)
       .where(and(eq(agents.environmentId, from.id), isNull(agents.archivedAt)));
     const wanted = input.agentIds ? new Set(input.agentIds) : null;
-    const moved: string[] = [];
-    const skipped: string[] = [];
-    for (const a of candidates) {
-      if (wanted && !wanted.has(a.id)) continue;
-      moved.push(a.id);
-    }
-    for (const id of wanted ?? []) if (!moved.includes(id)) skipped.push(id);
-    if (moved.length)
-      await deps.db
-        .update(agents)
-        .set({ environmentId: to.id, updatedAt: deps.now() })
-        .where(inArray(agents.id, moved));
+    const picked = candidates.filter((a) => !wanted || wanted.has(a.id)).map((a) => a.id);
+    // Moved only while still on this runner: an agent another change took elsewhere meanwhile stays there.
+    const moved = picked.length
+      ? (
+          await deps.db
+            .update(agents)
+            .set({ environmentId: to.id, updatedAt: deps.now() })
+            .where(and(inArray(agents.id, picked), eq(agents.environmentId, from.id)))
+            .returning({ id: agents.id })
+        ).map((a) => a.id)
+      : [];
+    const skipped = [...(wanted ?? [])].filter((id) => !moved.includes(id));
     const queued = (
       await deps.db
         .select({ id: runnerJobs.id })
@@ -533,20 +533,29 @@ export function registerRunners(app: Hono<AppEnv>) {
       }),
     );
     // An empty workspace list in `allowlist` mode holds: the commands reach only what was allowed per agent.
-    const current = await sandboxOf(deps, me.workspaceId);
-    const next = { ...current, ...input };
-    const values = {
-      enabled: next.enabled,
-      network: next.network,
-      permittedDomains: next.permittedDomains,
-      minutesPerDay: next.minutesPerDay,
-      commandTimeoutSec: next.commandTimeoutSec,
-      requireApproval: next.requireApproval,
-    };
-    await deps.db
-      .insert(sandboxPolicies)
-      .values({ workspaceId: me.workspaceId, ...values })
-      .onConflictDoUpdate({ target: sandboxPolicies.workspaceId, set: { ...values, updatedAt: deps.now() } });
+    // A partial change merges with the row as it is now, under the workspace's lock: two changes at once keep both.
+    await deps.db.transaction(async (tx) => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`sandbox:${me.workspaceId}`}, 0))`,
+      );
+      const current = await sandboxOf({ ...deps, db: tx }, me.workspaceId);
+      const next = { ...current, ...input };
+      const values = {
+        enabled: next.enabled,
+        network: next.network,
+        permittedDomains: next.permittedDomains,
+        minutesPerDay: next.minutesPerDay,
+        commandTimeoutSec: next.commandTimeoutSec,
+        requireApproval: next.requireApproval,
+      };
+      await tx
+        .insert(sandboxPolicies)
+        .values({ workspaceId: me.workspaceId, ...values })
+        .onConflictDoUpdate({
+          target: sandboxPolicies.workspaceId,
+          set: { ...values, updatedAt: deps.now() },
+        });
+    });
     return c.json(await sandboxOf(deps, me.workspaceId));
   });
 }

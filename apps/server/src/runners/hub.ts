@@ -22,6 +22,8 @@ export interface RunnerSocketData {
   lastFrameAt: number;
   helloTimer: ReturnType<typeof setTimeout> | null;
   pingTimer: ReturnType<typeof setInterval> | null;
+  /** The close handler ran: an `hello` still awaiting must not register it nor arm a timer. */
+  closed: boolean;
 }
 
 export type RunnerSocket = ServerWebSocket<RunnerSocketData>;

@@ -34,6 +34,7 @@ export const runnerSocketData = (): RunnerSocketData => ({
   lastFrameAt: Date.now(),
   helloTimer: null,
   pingTimer: null,
+  closed: false,
 });
 
 /** Every frame the server sends a runner is built from the protocol's types. */
@@ -147,6 +148,13 @@ async function hello(deps: AppDeps, ws: RunnerSocket, frame: HelloFrame) {
   if (frame.protocol !== RUNNER_PROTOCOL)
     return reject(ws, "outdated", "This runner is out of date; install it again");
   const row = frame.session ? await consumeSession(deps, frame.session) : null;
+  // After each wait the socket may have closed (the close handler already ran): nothing is registered or armed.
+  const gone = () => {
+    if (!ws.data.closed && ws.readyState === 1) return false;
+    log.info("runner.hello_abandoned", { runnerId: row?.id ?? null });
+    return true;
+  };
+  if (gone()) return;
   if (!row) return reject(ws, "invalid_token", "This session is not valid; the runner gets a new one");
   if (row.removedAt) return reject(ws, "revoked", "This runner was removed from the workspace");
   if (row.revokedAt) return reject(ws, "revoked", "This runner's access was revoked; pair it again");
@@ -160,6 +168,7 @@ async function hello(deps: AppDeps, ws: RunnerSocket, frame: HelloFrame) {
     .select({ revokedAt: runners.revokedAt, removedAt: runners.removedAt })
     .from(runners)
     .where(eq(runners.id, row.id));
+  if (gone()) return;
   if (!now || now.revokedAt || now.removedAt)
     return reject(ws, "revoked", "This runner's access was revoked; pair it again");
   const accessChanged = JSON.stringify(row.access) !== JSON.stringify(frame.access);
@@ -183,7 +192,10 @@ async function hello(deps: AppDeps, ws: RunnerSocket, frame: HelloFrame) {
       updatedAt: deps.now(),
     })
     .where(eq(runners.id, row.id));
+  if (gone()) return;
   const agents = await agentsUsing(deps.db, [row.id]);
+  const update = await offeredUpdate(deps, frame.version);
+  if (gone() || !deps.runners.isCurrent(ws)) return;
   sendFrame(ws, {
     type: "welcome",
     runnerId: row.id,
@@ -191,7 +203,7 @@ async function hello(deps: AppDeps, ws: RunnerSocket, frame: HelloFrame) {
     heartbeatMs: HEARTBEAT_MS,
     storeKey: runnerSealer(deps).open(row.storeKey),
     agents: agents.map((a) => ({ id: a.id, handle: a.handle, name: a.name })),
-    ...(await offeredUpdate(deps, frame.version)),
+    ...update,
   });
   const openedAt = Date.now();
   ws.data.pingTimer = setInterval(() => {
@@ -224,6 +236,7 @@ async function hello(deps: AppDeps, ws: RunnerSocket, frame: HelloFrame) {
 }
 
 export async function runnerClose(deps: AppDeps, ws: RunnerSocket) {
+  ws.data.closed = true;
   if (ws.data.helloTimer) clearTimeout(ws.data.helloTimer);
   if (ws.data.pingTimer) clearInterval(ws.data.pingTimer);
   if (!deps.runners.unregister(ws)) return;

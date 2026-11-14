@@ -10,7 +10,7 @@ import {
   SITES_MAX,
   siteRule,
 } from "@vanr/engine/browser-policy";
-import { schema } from "@vanr/engine/db";
+import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Hono } from "hono";
@@ -53,6 +53,16 @@ const {
   agents,
   runs,
 } = schema;
+
+/**
+ * The agent's browser policy is read and written under the agent's lock: two changes at once (the sites, the
+ * level and private ranges) apply one after the other, each on the row as the other left it.
+ */
+const underAgentPolicyLock = <T>(deps: AppDeps, agentId: string, fn: (tx: Db) => Promise<T>) =>
+  deps.db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`browser-policy:${agentId}`}, 0))`);
+    return fn(tx);
+  });
 
 const isEditor = (me: WorkspaceMember, agent: AgentRow) => {
   try {
@@ -318,16 +328,20 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
       }),
     );
     const unique = [...new Set(permittedDomains)];
-    const before = await browserSettingsOf(deps.db, agent.id);
-    const readDomains = (before?.readDomains ?? []).filter((d) => !unique.includes(d));
-    const [row] = await deps.db
-      .insert(browserPolicies)
-      .values({ agentId: agent.id, workspaceId: me.workspaceId, permittedDomains: unique, readDomains })
-      .onConflictDoUpdate({
-        target: browserPolicies.agentId,
-        set: { permittedDomains: unique, readDomains, updatedAt: deps.now() },
-      })
-      .returning();
+    // The read list kept comes from the row as it is now: two changes at once apply one after the other.
+    const row = await underAgentPolicyLock(deps, agent.id, async (tx) => {
+      const before = await browserSettingsOf(tx, agent.id);
+      const readDomains = (before?.readDomains ?? []).filter((d) => !unique.includes(d));
+      const [saved] = await tx
+        .insert(browserPolicies)
+        .values({ agentId: agent.id, workspaceId: me.workspaceId, permittedDomains: unique, readDomains })
+        .onConflictDoUpdate({
+          target: browserPolicies.agentId,
+          set: { permittedDomains: unique, readDomains, updatedAt: deps.now() },
+        })
+        .returning();
+      return saved;
+    });
     await pushPolicy(deps, agent.id);
     return c.json(toBrowserSettings(row));
   });
@@ -359,60 +373,63 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
       throw new HttpError(400, "invalid_request", `Up to ${SITES_MAX} sites in each list`, {
         field: "sites",
       });
-    const before = await browserSettingsOf(deps.db, agent.id);
-    let ranges = {
-      privateRanges: before?.privateRanges ?? [],
-      privateRangesRunnerId: before?.privateRangesRunnerId ?? null,
-    };
-    if (body.privateRanges) {
-      const list = [...new Set(body.privateRanges)];
-      const checked = checkRanges(list);
-      if (!checked.ok)
-        throw new HttpError(400, "browser.bad_range", `Not a private network range: ${checked.bad}`, {
-          field: "privateRanges",
-        });
-      const runnerId = list.length > 0 ? agent.environmentId : null;
-      const changed =
-        JSON.stringify(list) !== JSON.stringify(ranges.privateRanges) ||
-        runnerId !== ranges.privateRangesRunnerId;
-      if (changed) {
-        if (list.length > 0 && !runnerId)
-          throw conflict("browser.no_environment", "This agent has no runner");
-        // Closing needs no special permission; opening or changing does (on the current runner).
-        if (list.length > 0) {
-          const [runner] = await deps.db
-            .select()
-            .from(runners)
-            .where(and(eq(runners.id, runnerId as string), eq(runners.workspaceId, me.workspaceId)));
-          if (!runner || !canManageRunner(me, runner))
-            throw forbidden(
-              "Only an admin or the person who paired this runner can open its private network",
-            );
+    const row = await underAgentPolicyLock(deps, agent.id, async (tx) => {
+      const before = await browserSettingsOf(tx, agent.id);
+      let ranges = {
+        privateRanges: before?.privateRanges ?? [],
+        privateRangesRunnerId: before?.privateRangesRunnerId ?? null,
+      };
+      if (body.privateRanges) {
+        const list = [...new Set(body.privateRanges)];
+        const checked = checkRanges(list);
+        if (!checked.ok)
+          throw new HttpError(400, "browser.bad_range", `Not a private network range: ${checked.bad}`, {
+            field: "privateRanges",
+          });
+        const runnerId = list.length > 0 ? agent.environmentId : null;
+        const changed =
+          JSON.stringify(list) !== JSON.stringify(ranges.privateRanges) ||
+          runnerId !== ranges.privateRangesRunnerId;
+        if (changed) {
+          if (list.length > 0 && !runnerId)
+            throw conflict("browser.no_environment", "This agent has no runner");
+          // Closing needs no special permission; opening or changing does (on the current runner).
+          if (list.length > 0) {
+            const [runner] = await tx
+              .select()
+              .from(runners)
+              .where(and(eq(runners.id, runnerId as string), eq(runners.workspaceId, me.workspaceId)));
+            if (!runner || !canManageRunner(me, runner))
+              throw forbidden(
+                "Only an admin or the person who paired this runner can open its private network",
+              );
+          }
+          ranges = { privateRanges: list, privateRangesRunnerId: runnerId };
         }
-        ranges = { privateRanges: list, privateRangesRunnerId: runnerId };
       }
-    }
-    const [row] = await deps.db
-      .insert(browserPolicies)
-      .values({
-        agentId: agent.id,
-        workspaceId: me.workspaceId,
-        permittedDomains: write,
-        readDomains: read,
-        level: body.level,
-        ...ranges,
-      })
-      .onConflictDoUpdate({
-        target: browserPolicies.agentId,
-        set: {
+      const [saved] = await tx
+        .insert(browserPolicies)
+        .values({
+          agentId: agent.id,
+          workspaceId: me.workspaceId,
           permittedDomains: write,
           readDomains: read,
           level: body.level,
           ...ranges,
-          updatedAt: deps.now(),
-        },
-      })
-      .returning();
+        })
+        .onConflictDoUpdate({
+          target: browserPolicies.agentId,
+          set: {
+            permittedDomains: write,
+            readDomains: read,
+            level: body.level,
+            ...ranges,
+            updatedAt: deps.now(),
+          },
+        })
+        .returning();
+      return saved;
+    });
     await pushPolicy(deps, agent.id);
     return c.json(toBrowserSettings(row));
   });

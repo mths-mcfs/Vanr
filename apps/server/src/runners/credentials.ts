@@ -90,8 +90,16 @@ export async function mintSession(
       credentialRotatedAt: now,
       updatedAt: now,
     })
-    // Two sessions at once with the same credential: only one rotates.
-    .where(and(eq(runners.id, row.id), eq(runners.tokenHash, row.tokenHash), isNull(runners.revokedAt)))
+    // Two sessions at once with the same credential: only one rotates (the pending one is part of the state read,
+    // or both would pass when the current one doesn't change, and the runner would keep a credential nobody holds).
+    .where(
+      and(
+        eq(runners.id, row.id),
+        eq(runners.tokenHash, row.tokenHash),
+        sql`${runners.tokenPendingHash} is not distinct from ${row.tokenPendingHash}`,
+        isNull(runners.revokedAt),
+      ),
+    )
     .returning({ id: runners.id });
   if (updated.length === 0) throw new HttpError(409, "runner.busy", "Try again in a moment");
   const session = newSession();

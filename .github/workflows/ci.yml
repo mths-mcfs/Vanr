@@ -126,6 +126,31 @@ jobs:
       - run: bun test apps/server/test/runners-postgres.test.ts
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      - name: The forced runner lock tests fail without the locks
+        run: |
+          set +e
+          bun test apps/server/test/runners-postgres.test.ts --test-name-pattern forced > forced-runners.log 2>&1
+          status=$?
+          cat forced-runners.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the forced runner lock tests passed without the locks"
+            exit 1
+          fi
+          for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -qF "$broken" forced-runners.log; then
+              echo "::error::the forced runner lock tests broke ($broken) instead of failing on their outcome"
+              exit 1
+            fi
+          done
+          for label in job-done job-tail intervention-start sandbox browser-policy; do
+            if ! grep -qF "LOCK_OUTCOME_MISMATCH($label)" forced-runners.log; then
+              echo "::error::the forced $label test did not fail on its outcome without the lock"
+              exit 1
+            fi
+          done
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_DROP_LOCKS: "1"
 
   sandbox:
     # The runner's real sandbox (bubblewrap + socat): the attack tests of the isolation of the agent's

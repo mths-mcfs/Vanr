@@ -182,6 +182,11 @@ async function handle(deps: AppDeps, ws: BrowserSocket, frame: ClientFrame) {
       if (!ws.data.channels.has(frame.channelId)) {
         return reply(ws, { type: "error", code: "not_subscribed", channelId: frame.channelId });
       }
+      // Still able to read it now (a person who left a private channel doesn't type in it until the sweep).
+      if (!(await canReadChannel(deps.db, { workspaceId, userId, channelId: frame.channelId }))) {
+        deps.hub.unsubscribe(ws, frame.channelId);
+        return reply(ws, { type: "error", code: "forbidden", channelId: frame.channelId });
+      }
       const at = deps.now().getTime();
       const last = ws.data.lastTypingAt.get(frame.channelId) ?? 0;
       if (at - last < TYPING_MIN_GAP_MS) return;

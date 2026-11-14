@@ -3,7 +3,7 @@
 // name. A browser intervention waits for the person to take over, do it and hand the control back.
 import type { BrowserIntervention, SecretRequest } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
-import { and, eq, inArray, lte } from "drizzle-orm";
+import { and, eq, inArray, lte, sql } from "drizzle-orm";
 import type { AppDeps } from "../context";
 import { closeNotifications, notify } from "../notifications";
 import { pushPolicy } from "./browser-guard";
@@ -48,14 +48,12 @@ export async function publishSecret(
   type: "secret_request.created" | "secret_request.updated",
 ) {
   const secretRequest = toSecretRequest(row);
-  if (row.messageId) {
-    const [msg] = await deps.db.select().from(messages).where(eq(messages.id, row.messageId));
-    if (msg)
-      await deps.db
-        .update(messages)
-        .set({ meta: { ...msg.meta, secretRequest } })
-        .where(eq(messages.id, msg.id));
-  }
+  // One statement merges the request into the card's meta: what else the meta holds stays.
+  if (row.messageId)
+    await deps.db
+      .update(messages)
+      .set({ meta: sql`${messages.meta} || ${JSON.stringify({ secretRequest })}::jsonb` })
+      .where(eq(messages.id, row.messageId));
   if (row.channelId) deps.hub.toChannel(row.channelId, { type, secretRequest, messageId: row.messageId });
   else if (row.targetUserId) deps.hub.toUser(row.workspaceId, row.targetUserId, { type, secretRequest });
   const groupKey = `secret:${row.id}`;

@@ -7,11 +7,13 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { and, eq, inArray } from "drizzle-orm";
+import { log } from "../src/logger";
 import { createWorkspace, joinWorkspace } from "../src/members";
 import { revalidateBrowsers } from "../src/realtime/browser-socket";
 import { publishIntervention, publishSecret } from "../src/runners/requests";
 import type { RunningServer } from "../src/server";
 import { Browser, body, SERVER_TEST_MS, signedIn, startTestServer, TestSocket } from "./harness";
+import { wrapQuery } from "./lock-double";
 import { connectProtocolRunner, mintSession, type ProtocolRunner } from "./protocol-runner";
 
 let server: RunningServer;
@@ -1378,6 +1380,393 @@ describe("a connection doesn't outlive the right that opened it", () => {
       expect(ana.frames.some((f) => f.type === "live_view.frame")).toBe(false);
       for (const r of [a, b, again]) expect(r.invalid).toEqual([]);
       ana.close();
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("frames, limits and the hello's waits", () => {
+  test(
+    "a frame of each type that the protocol doesn't accept changes and forwards nothing, and the runner stays",
+    async () => {
+      const t = await team();
+      const paired = await pairOverHttp(t, t.ana);
+      const a = await online(paired, {
+        browser: true,
+        answer: (req) =>
+          req.op === "exec" || req.op === "harness.turn" ? new Promise(() => {}) : { ok: true, data: {} },
+      });
+      await lend(t.lia.id, paired.runnerId);
+      const [before] = await server.deps.db
+        .select()
+        .from(schema.runners)
+        .where(eq(schema.runners.id, a.runnerId));
+      const jobId = newId("job");
+      await server.deps.db.insert(schema.runnerJobs).values({
+        id: jobId,
+        workspaceId: t.workspaceId,
+        runnerId: a.runnerId,
+        agentId: t.lia.id,
+        title: "Build",
+        executor: "shell",
+        prompt: "make",
+        status: "running",
+      });
+      const ana = await TestSocket.open(t.ana.browser, t.workspaceId);
+      ana.send({ type: "live_view.subscribe", agentId: t.lia.id });
+      await a.request("live_view.start");
+      const chunks: string[] = [];
+      const call = server.deps.runners.call(
+        a.runnerId,
+        "exec",
+        { command: "ls" },
+        {
+          onOutput: (_s, chunk) => chunks.push(chunk),
+          timeoutMs: 15_000,
+        },
+      );
+      const req = await a.request("exec");
+      const events: unknown[] = [];
+      const tools: string[] = [];
+      const turn = server.deps.runners.call(
+        a.runnerId,
+        "harness.turn",
+        { runId: "run_12345678", executor: "claude_code", system: "", prompt: "hi", tools: [] },
+        {
+          onHarnessEvent: (e) => events.push(e),
+          onHarnessTool: async (name) => {
+            tools.push(name);
+            return { content: "ok", isError: false };
+          },
+          timeoutMs: 15_000,
+        },
+      );
+      const turnReq = await a.request("harness.turn");
+      const bad: unknown[] = [
+        "{not json",
+        { type: "teleport" },
+        { type: "result", id: req.id, ok: "yes", data: { forged: true } },
+        { type: "result", id: req.id, ok: false, error: { code: "no_such_code", message: "x" } },
+        { type: "output", id: req.id, stream: "stdin", chunk: "forged" },
+        { type: "output", id: req.id, stream: "stdout" },
+        { type: "job.event", jobId, kind: "line", line: "forged" },
+        { type: "job.event", jobId, kind: "shout", line: "forged", at: "now" },
+        {
+          type: "job.done",
+          job: {
+            jobId,
+            status: "exploded",
+            exitCode: 0,
+            result: "x",
+            session: null,
+            files: [],
+            denied: [],
+            blocked: [],
+            startedAt: null,
+            endedAt: null,
+          },
+        },
+        { type: "runner.state", paused: "yes" },
+        { type: "cli.changed", cli: "everything" },
+        { type: "access.changed", access: { tools: "all" } },
+        { type: "sandbox.changed", sandbox: { state: "weird" } },
+        { type: "harness.event", id: turnReq.id, event: { kind: "image", text: "forged" } },
+        { type: "harness.tool", id: turnReq.id, callId: "x", name: 5, input: {} },
+        { type: "live_view.frame", agentId: t.lia.id, data: 5, width: "wide", height: 1 },
+        { type: "live_view.stream_ended", agentId: t.lia.id, reason: "boom" },
+        { type: "pong", at: "noon" },
+      ];
+      for (const frame of bad) a.send(frame);
+      // The connection stays, and a valid frame after the bad ones still takes effect.
+      a.send({ type: "output", id: req.id, stream: "stdout", chunk: "real" });
+      a.send({ type: "result", id: req.id, ok: true, data: { real: true } });
+      expect(await call).toEqual({ real: true });
+      expect(chunks).toEqual(["real"]);
+      a.send({ type: "result", id: turnReq.id, ok: true, data: {} });
+      await turn;
+      expect(events).toEqual([]);
+      expect(tools).toEqual([]);
+      const [after] = await server.deps.db
+        .select()
+        .from(schema.runners)
+        .where(eq(schema.runners.id, a.runnerId));
+      expect({
+        paused: after?.paused,
+        cli: after?.cli,
+        access: after?.access,
+        sandbox: after?.sandbox,
+      }).toEqual({
+        paused: before?.paused,
+        cli: before?.cli,
+        access: before?.access,
+        sandbox: before?.sandbox,
+      });
+      const [job] = await server.deps.db
+        .select()
+        .from(schema.runnerJobs)
+        .where(eq(schema.runnerJobs.id, jobId));
+      expect(job).toMatchObject({ status: "running", outputTail: [], tailLine: null });
+      expect(ana.frames.some((f) => f.type === "live_view.frame" || f.type === "live_view.ended")).toBe(
+        false,
+      );
+      expect(server.deps.runners.isOnline(a.runnerId)).toBe(true);
+      expect(a.invalid).toEqual([]);
+      ana.close();
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "the runner frame limit is 4 MB: just under is taken, just over closes that connection (1009)",
+    async () => {
+      const t = await team();
+      const a = await online(await pairOverHttp(t, t.ana));
+      const frame = (size: number, paused: boolean) => {
+        const head = JSON.stringify({ type: "runner.state", paused, pad: "" });
+        return `${head.slice(0, -2)}${"x".repeat(size - head.length)}"}`;
+      };
+      const paused = async () =>
+        (
+          await server.deps.db
+            .select({ p: schema.runners.paused })
+            .from(schema.runners)
+            .where(eq(schema.runners.id, a.runnerId))
+        )[0]?.p;
+      a.send(frame(4 * 1024 * 1024, true));
+      for (let i = 0; i < 400 && !(await paused()); i++) await new Promise((r) => setTimeout(r, 10));
+      expect(await paused()).toBe(true);
+      a.send(frame(4 * 1024 * 1024 + 1, false));
+      expect((await a.closed).code).toBe(1009);
+      expect(await paused()).toBe(true);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "the browser frame limit is 64 KB and a live view input carries at most 100 events",
+    async () => {
+      const t = await team();
+      const paired = await pairOverHttp(t, t.ana);
+      const runner = await online(paired, { browser: true });
+      await lend(t.lia.id, paired.runnerId);
+      const ana = await TestSocket.open(t.ana.browser, t.workspaceId);
+      const sized = (size: number) => {
+        const head = JSON.stringify({ type: "ping", pad: "" });
+        return `${head.slice(0, -2)}${"x".repeat(size - head.length)}"}`;
+      };
+      ana.ws.send(sized(64 * 1024));
+      expect(await ana.next((f) => f.type === "pong" || f.type === "error")).toMatchObject({ type: "pong" });
+      ana.ws.send(sized(64 * 1024 + 1));
+      expect(await ana.next((f) => f.type === "error")).toMatchObject({ code: "frame_too_large" });
+      ana.send({ type: "live_view.subscribe", agentId: t.lia.id });
+      await runner.request("live_view.start");
+      expect(
+        (await api(t.ana.browser, "POST", `${t.ws}/agents/${t.lia.id}/browser/interventions/start`, {}))
+          .status,
+      ).toBe(200);
+      await ana.next((f) => f.type === "live_view.status" && f.mode === "control");
+      const events = (n: number) => Array.from({ length: n }, (_, i) => ({ type: "move", x: i }));
+      ana.send({ type: "live_view.input", agentId: t.lia.id, events: events(100) });
+      expect((await runner.request("live_view.input")).args).toEqual({ events: events(100) });
+      ana.send({ type: "live_view.input", agentId: t.lia.id, events: events(101) });
+      expect(await ana.next((f) => f.type === "error")).toMatchObject({ code: "invalid_frame" });
+      ana.send({ type: "ping" });
+      await ana.next((f) => f.type === "pong");
+      expect(runner.frames.some((f) => f.type === "request" && f.op === "live_view.input")).toBe(false);
+      ana.close();
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "typing in a private channel the person left is turned away at once, before any sweep",
+    async () => {
+      const t = await team();
+      const board = newId("ch");
+      await server.deps.db.insert(schema.channels).values({
+        id: board,
+        workspaceId: t.workspaceId,
+        name: "board2",
+        topic: "",
+        visibility: "private",
+        createdBy: t.ana.user.id,
+      });
+      await server.deps.db.insert(schema.channelMemberships).values([
+        { channelId: board, memberType: "person", memberId: t.ana.user.id },
+        { channelId: board, memberType: "person", memberId: t.beto.user.id },
+      ]);
+      const ana = await TestSocket.open(t.ana.browser, t.workspaceId);
+      const beto = await TestSocket.open(t.beto.browser, t.workspaceId);
+      await ana.subscribe(board);
+      await beto.subscribe(board);
+      await server.deps.db
+        .delete(schema.channelMemberships)
+        .where(
+          and(
+            eq(schema.channelMemberships.channelId, board),
+            eq(schema.channelMemberships.memberId, t.beto.user.id),
+          ),
+        );
+      beto.send({ type: "typing", channelId: board });
+      expect(await beto.next((f) => f.type === "error")).toMatchObject({
+        code: "forbidden",
+        channelId: board,
+      });
+      ana.send({ type: "ping" });
+      await ana.next((f) => f.type === "pong");
+      expect(ana.frames.some((f) => f.type === "event")).toBe(false);
+      ana.close();
+      beto.close();
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a runner that closes at any wait of its hello is left neither online nor with a timer",
+    async () => {
+      const t = await team();
+      const paired = await pairOverHttp(t, t.ana);
+      const db = server.deps.db;
+      const info = log.info;
+      try {
+        for (let k = 0; ; k++) {
+          const minted = await mintSession(server.url, paired.credential);
+          paired.credential = minted.body.credential;
+          // The k-th database step of the hello holds until the socket is closed and its close handler ran.
+          let steps = 0;
+          let held = false;
+          let release!: () => void;
+          const released = new Promise<void>((r) => {
+            release = r;
+          });
+          let hold!: () => void;
+          const holding = new Promise<void>((r) => {
+            hold = r;
+          });
+          let armed = false;
+          server.deps.db = new Proxy(db, {
+            get(target, prop) {
+              const value = Reflect.get(target, prop, target);
+              if (!["select", "update", "insert", "delete"].includes(String(prop)))
+                return typeof value === "function" ? value.bind(target) : value;
+              return (...args: unknown[]) =>
+                wrapQuery(value.apply(target, args), async () => {
+                  if (!armed || steps++ !== k) return;
+                  held = true;
+                  hold();
+                  await released;
+                });
+            },
+          });
+          let ended!: (how: string) => void;
+          const end = new Promise<string>((r) => {
+            ended = r;
+          });
+          log.info = (msg: string, fields?: Record<string, unknown>) => {
+            if (msg === "runner.connected" || msg === "runner.hello_abandoned") ended(msg);
+            info(msg, fields);
+          };
+          const unregister = server.deps.runners.unregister.bind(server.deps.runners);
+          let closedHandler!: () => void;
+          const handlerRan = new Promise<void>((r) => {
+            closedHandler = r;
+          });
+          let registered: { data: { pingTimer: unknown } } | null = null;
+          const register = server.deps.runners.register.bind(server.deps.runners);
+          server.deps.runners.register = (id, ws) => {
+            registered = ws;
+            return register(id, ws);
+          };
+          server.deps.runners.unregister = (ws) => {
+            const out = unregister(ws);
+            closedHandler();
+            return out;
+          };
+          const ws = new WebSocket(`${server.url.replace(/^http/, "ws")}/api/v1/runners/connect`);
+          const closed = new Promise((r) => ws.addEventListener("close", r));
+          await new Promise((r) => ws.addEventListener("open", r, { once: true }));
+          armed = true;
+          ws.send(
+            JSON.stringify({
+              type: "hello",
+              session: minted.body.session,
+              version: "0.2.0",
+              protocol: 2,
+              os: "linux",
+              arch: "x64",
+              hostname: "h",
+              workDir: null,
+              paused: false,
+              access: { folders: [], tools: { browser: false, claude: false, codex: false, commands: true } },
+              browser: false,
+              executors: [],
+              cli: {},
+              jobs: [],
+              features: [],
+            }),
+          );
+          const first = await Promise.race([holding.then(() => "held"), end]);
+          server.deps.runners.register = register;
+          if (first !== "held") {
+            // No step k: every wait of the hello was covered.
+            expect(k).toBeGreaterThan(3);
+            ws.close();
+            await closed;
+            server.deps.db = db;
+            server.deps.runners.unregister = unregister;
+            break;
+          }
+          ws.close();
+          await closed;
+          await handlerRan;
+          release();
+          expect(await end).toBe("runner.hello_abandoned");
+          expect(held).toBe(true);
+          expect(server.deps.runners.isOnline(paired.runnerId)).toBe(false);
+          expect((registered as { data: { pingTimer: unknown } } | null)?.data.pingTimer ?? null).toBeNull();
+          server.deps.db = db;
+          server.deps.runners.unregister = unregister;
+        }
+      } finally {
+        server.deps.db = db;
+        log.info = info;
+      }
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("partial changes at once", () => {
+  test(
+    "two partial sandbox changes at once keep both; two site lists at once leave no site on the read list",
+    async () => {
+      const t = await team();
+      await Promise.all([
+        api(t.ana.browser, "PUT", `${t.ws}/sandbox-settings`, { minutesPerDay: 10 }),
+        api(t.ana.browser, "PUT", `${t.ws}/sandbox-settings`, { commandTimeoutSec: 30 }),
+        api(t.ana.browser, "PUT", `${t.ws}/sandbox-settings`, { requireApproval: true }),
+      ]);
+      expect((await api(t.ana.browser, "GET", `${t.ws}/sandbox-settings`)).body).toMatchObject({
+        minutesPerDay: 10,
+        commandTimeoutSec: 30,
+        requireApproval: true,
+      });
+      await server.deps.db.insert(schema.browserPolicies).values({
+        agentId: t.lia.id,
+        workspaceId: t.workspaceId,
+        permittedDomains: [],
+        readDomains: ["a.example.com", "b.example.com"],
+      });
+      const browser = `${t.ws}/agents/${t.lia.id}/browser`;
+      await Promise.all([
+        api(t.ana.browser, "PUT", browser, { permittedDomains: ["a.example.com"] }),
+        api(t.ana.browser, "PUT", browser, { permittedDomains: ["b.example.com"] }),
+      ]);
+      const [row] = await server.deps.db
+        .select()
+        .from(schema.browserPolicies)
+        .where(eq(schema.browserPolicies.agentId, t.lia.id));
+      expect(row?.readDomains).toEqual([]);
     },
     SERVER_TEST_MS,
   );

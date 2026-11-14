@@ -95,12 +95,20 @@ export async function pollPairing(deps: AppDeps, deviceCode: string): Promise<Po
   if (row.status === "denied") return { status: 400, body: { error: "access_denied" } };
   if (row.status === "pending") {
     const tooSoon =
-      row.lastPollAt && now.getTime() - row.lastPollAt.getTime() < (row.intervalSeconds - 1) * 1000;
-    await deps.db
+      !!row.lastPollAt && now.getTime() - row.lastPollAt.getTime() < (row.intervalSeconds - 1) * 1000;
+    // Decided on the poll as read: a poll that another one beat to the row (they came at once) is too soon too.
+    const [polled] = await deps.db
       .update(runnerPairings)
       .set({ lastPollAt: now, ...(tooSoon ? { intervalSeconds: row.intervalSeconds + 5 } : {}) })
-      .where(eq(runnerPairings.userCode, row.userCode));
-    return { status: 400, body: { error: tooSoon ? "slow_down" : "authorization_pending" } };
+      .where(
+        and(
+          eq(runnerPairings.userCode, row.userCode),
+          eq(runnerPairings.status, "pending"),
+          row.lastPollAt ? eq(runnerPairings.lastPollAt, row.lastPollAt) : isNull(runnerPairings.lastPollAt),
+        ),
+      )
+      .returning({ userCode: runnerPairings.userCode });
+    return { status: 400, body: { error: tooSoon || !polled ? "slow_down" : "authorization_pending" } };
   }
   // approved: handed over once only.
   const [claimed] = await deps.db
