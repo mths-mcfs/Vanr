@@ -70,7 +70,8 @@
     "apps/runner/src/jobs-pem.test.ts": 600,
     "apps/runner/src/browser-network.test.ts": 20930,
     "apps/runner/src/browser-actions.test.ts": 26640,
-    "apps/runner/src/jobs-diff.test.ts": 300,
-    "apps/runner/src/jobs-names.test.ts": 200
+    "apps/runner/src/jobs-diff.test.ts": 3000,
+    "apps/runner/src/jobs-names.test.ts": 200,
+    "apps/runner/src/jobs-json.test.ts": 300
   }
 }

@@ -40,12 +40,13 @@ test("without secrets the text goes out at once; what was held goes out at the e
 describe("edge cases", () => {
   test("the end of the stream releases what is held, masked or in clear, and nothing stays held", () => {
     const m = new StreamMasker([["abcdEFGH", "[S]"]]);
-    // It holds the longest secret minus one character: " abcdEF" could still become one.
-    expect(m.push("xx abcdEF")).toBe("xx");
-    expect(m.end()).toBe(" abcdEF");
+    // It holds only where a secret could still start: "abcdEF" could still become one.
+    expect(m.push("xx abcdEF")).toBe("xx ");
+    expect(m.end()).toBe("abcdEF");
     expect(m.end()).toBe("");
-    expect(m.push("abcdEFGH")).toBe("");
-    expect(m.end()).toBe("[S]");
+    // A whole secret goes out at once, masked: nothing to wait for.
+    expect(m.push("abcdEFGH")).toBe("[S]");
+    expect(m.end()).toBe("");
   });
 
   test("a secret that is the prefix of another: each one is masked, the longer one whole", () => {
@@ -65,8 +66,8 @@ describe("edge cases", () => {
     ];
     const masker = new StreamMasker(m);
     expect(masker.push("aqz")).toBe("a[Q]");
-    expect(masker.push("z!")).toBe("[Z]");
-    expect(masker.end()).toBe("!");
+    expect(masker.push("z!")).toBe("[Z]!");
+    expect(masker.end()).toBe("");
   });
 
   test("several secrets in one piece and across pieces", () => {
@@ -92,7 +93,7 @@ test("property: for any cut of the output into pieces, the stream equals the mas
   );
   let seed = 12345;
   const rand = (n: number) => {
-    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff;
     return seed % n;
   };
   const alphabet = [
@@ -128,6 +129,55 @@ test("property: for any cut of the output into pieces, the stream equals the mas
         cuts++;
       }
       expect([text, stream(chunks, secrets)]).toEqual([text, expected]);
+    }
+  }
+  expect(cuts).toBeGreaterThan(5000);
+});
+
+test("property: what is held between two pieces never passes the longest secret minus one, even when secrets overlap themselves", () => {
+  const sets: [string, string][][] = [
+    [["abab", "[K]"]],
+    [
+      ["aa", "[A]"],
+      ["aaa", "[B]"],
+    ],
+    [
+      ["aba", "[X]"],
+      ["bab", "[Y]"],
+      ["abab", "[Z]"],
+    ],
+    [
+      ["ab\ncd", "[N]"],
+      ["b\nc", "[M]"],
+    ],
+  ];
+  let seed = 99;
+  const rand = (n: number) => {
+    seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff;
+    return seed % n;
+  };
+  const alphabet = ["a", "b", "c", "d", "\n", "\r", "ab", "abab", "aa"];
+  let cuts = 0;
+  for (const secrets of sets) {
+    const longest = Math.max(...secrets.map(([v]) => v.replace(/\n/g, "\r\n").length));
+    for (let round = 0; round < 400; round++) {
+      let text = "";
+      for (let i = 0, n = 3 + rand(30); i < n; i++) text += alphabet[rand(alphabet.length)];
+      const masker = new StreamMasker(secrets);
+      let out = "";
+      let at = 0;
+      while (at < text.length) {
+        const len = 1 + rand(6);
+        const piece = text.slice(at, at + len);
+        out += masker.push(piece);
+        at += len;
+        cuts++;
+        // What is held is exactly what came in and did not go out yet (labels aside): bounded.
+        const held = (masker as unknown as { held: string }).held;
+        expect(held.length).toBeLessThanOrEqual(longest - 1);
+      }
+      out += masker.end();
+      expect([text, out]).toEqual([text, maskSecrets(text, secrets)]);
     }
   }
   expect(cuts).toBeGreaterThan(5000);

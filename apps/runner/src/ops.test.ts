@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { Access } from "./access";
 import { execOp, listOp, type OpContext, readOp } from "./ops";
 import { defaultPolicyContext, sandboxOff } from "./sandbox";
-import type { SecretStore } from "./secrets";
+import { maskBytes, type SecretStore } from "./secrets";
 
 // The mask of a command's output is the last barrier before the model: a secret cut between two pieces of
 // the stream, or by the cap of the captured output, never shows up, not even in part.
@@ -83,4 +83,44 @@ test("a file name that carries a secret's value is masked in the listing", async
   const names = (await listOp(c, { path: "." })).entries.map((e) => e.name);
   expect(names).toContain("[secret:S].txt");
   expect(names.join(" ")).not.toContain(SECRET);
+});
+
+test("a read that would come back as base64 (a NUL byte, a cut inside a character) is masked in its bytes", async () => {
+  const c = ctx([]);
+  const root = c.access.agentRoot(c.agent);
+  writeFileSync(join(root, "nul.bin"), `\0${SECRET}`);
+  const nul = await readOp(c, { path: "nul.bin" });
+  expect(nul.encoding).toBe("base64");
+  expect(Buffer.from(nul.content, "base64").toString("utf8")).toBe("\0[secret:S]");
+  writeFileSync(join(root, "cut.txt"), `${SECRET}é`);
+  const cut = await readOp(c, { path: "cut.txt", maxBytes: 9 });
+  const bytes = cut.encoding === "base64" ? Buffer.from(cut.content, "base64") : Buffer.from(cut.content);
+  expect(bytes.toString("latin1")).not.toContain("abcd");
+});
+
+test("property: what a read returns is the file's bytes masked, then cut, for any content and cut", async () => {
+  const c = ctx([]);
+  const root = c.access.agentRoot(c.agent);
+  let seed = 5;
+  const rand = (n: number) => {
+    seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff;
+    return seed % n;
+  };
+  const pieces = [SECRET, "abcd", "EFGH", "é", "\0", "x", "\n", "ab", "cdEF", "\u00ff"];
+  let cases = 0;
+  for (let round = 0; round < 600; round++) {
+    const text = Array.from({ length: rand(12) }, () => pieces[rand(pieces.length)] ?? "").join("");
+    if (!text) continue;
+    const file = Buffer.from(text, "utf8");
+    writeFileSync(join(root, "p.dat"), file);
+    const maxBytes = 1 + rand(file.byteLength + 4);
+    const r = await readOp(c, { path: "p.dat", maxBytes });
+    const got = r.encoding === "base64" ? Buffer.from(r.content, "base64") : Buffer.from(r.content, "utf8");
+    const expected = maskBytes(file, [[SECRET, "[secret:S]"]]).subarray(0, maxBytes);
+    if (r.encoding === "base64") expect(got.equals(expected)).toBe(true);
+    else expect(r.content).toBe(expected.toString("utf8"));
+    expect(got.toString("latin1")).not.toContain(SECRET);
+    cases++;
+  }
+  expect(cases).toBeGreaterThan(500);
 });

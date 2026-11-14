@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Access, RunnerError } from "./access";
@@ -15,7 +15,7 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }));
 const agent = { id: "agt_0000000012345678", handle: "lia" };
 let n = 0;
 
-function setup(opts: { max: number; failSecrets?: () => boolean }) {
+function setup(opts: { max: number; failSecrets?: () => boolean; waitSecrets?: () => Promise<void> }) {
   const home = join(dir, `home-${++n}`);
   const done: JobEvent[] = [];
   const waiters: (() => void)[] = [];
@@ -23,7 +23,7 @@ function setup(opts: { max: number; failSecrets?: () => boolean }) {
   const secrets = {
     secretFiles: () => [],
     materialize: async () => {
-      await Promise.resolve();
+      await (opts.waitSecrets?.() ?? Promise.resolve());
       if (opts.failSecrets?.()) throw new RunnerError("internal", "Secrets are locked");
       return { env: {}, masks: [], release: () => {} };
     },
@@ -102,5 +102,26 @@ test("a start that fails while preparing gives the id and the slot back", async 
   fail = false;
   await jobs.start(agent, shell("job_00000001", mark));
   await untilDone(1);
+  expect(readFileSync(mark, "utf8")).toBe("ran");
+});
+
+test("a job canceled while it prepares runs nothing, ends as canceled and gives its slot back", async () => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  const { jobs, done, untilDone, mark } = setup({ max: 1, waitSecrets: () => gate });
+  const start = jobs.start(agent, shell("job_00000001", mark));
+  expect(jobs.cancel("job_00000001")).toEqual({ canceled: true });
+  release();
+  await start;
+  await untilDone(1);
+  const end = done[0];
+  expect(end?.type === "job.done" && end.job.status).toBe("canceled");
+  await Bun.sleep(200);
+  expect(existsSync(mark)).toBe(false);
+  // The slot is free again.
+  await jobs.start(agent, shell("job_00000002", mark));
+  await untilDone(2);
   expect(readFileSync(mark, "utf8")).toBe("ran");
 });

@@ -302,56 +302,90 @@ export class SecretStore {
   }
 }
 
-/** Replaces each secret value with its name (longest first). */
-export function maskSecrets(text: string, masks: [string, string][]): string {
-  let out = text;
-  for (const [value, label] of masks) out = out.split(value).join(label);
-  return out;
+/**
+ * The masks as the scan uses them: no empty value, and a value with line breaks also in its `\r\n` form
+ * (what a terminal sends back), under the same label.
+ */
+function prepare(masks: readonly [string, string][]): [string, string][] {
+  const crlf = masks
+    .filter(([v]) => v.includes("\n"))
+    .map(([v, label]): [string, string] => [v.replace(/\r?\n/g, "\r\n"), label]);
+  return [...masks, ...crlf].filter(([v]) => v.length > 0);
 }
 
 /**
- * Mask for output that arrives in pieces (the stream of a command, the capture that cuts it). A piece can end
- * in the middle of a secret, so the end of each piece (the longest secret minus one) is held until the next one,
- * and an occurrence that crosses that point is held whole. A secret with line breaks is also masked in its
- * `\r\n` form (what a terminal sends back). `end` releases what is held, masked.
+ * One pass over `text`: at each position, the longest secret that starts there is replaced by its label and
+ * the scan goes on after it (leftmost match, no overlap). Not `final`: the scan stops at the first position
+ * where a secret could still start with more input, and returns the rest to be held.
+ */
+function scan(
+  text: string,
+  masks: readonly [string, string][],
+  final: boolean,
+): { out: string; rest: string } {
+  let out = "";
+  let plain = 0;
+  let i = 0;
+  while (i < text.length) {
+    let match: [string, string] | null = null;
+    let open = false;
+    for (const m of masks) {
+      const [v] = m;
+      if (text.startsWith(v, i)) {
+        if (!match || v.length > match[0].length) match = m;
+      } else if (!final && text.length - i < v.length && v.startsWith(text.slice(i))) open = true;
+    }
+    // A longer secret could still match here: wait for the next piece before deciding.
+    if (open) break;
+    if (match) {
+      out += text.slice(plain, i) + match[1];
+      i += match[0].length;
+      plain = i;
+    } else i++;
+  }
+  return { out: out + text.slice(plain, i), rest: text.slice(i) };
+}
+
+/** Replaces each secret value with its label: leftmost match first, the longest one there, no overlap. */
+export function maskSecrets(text: string, masks: [string, string][]): string {
+  const prepared = prepare(masks);
+  return prepared.length ? scan(text, prepared, true).out : text;
+}
+
+/**
+ * Mask for output that arrives in pieces (the stream of a command, the capture that cuts it). What it
+ * returns, concatenated, is `maskSecrets` of the whole output. It holds only the end of the text where a
+ * secret could still start, so at most the longest secret minus one character; `end` releases it, masked.
  */
 export class StreamMasker {
   private held = "";
   private readonly masks: [string, string][];
-  private readonly keep: number;
 
   constructor(masks: [string, string][]) {
-    const crlf = masks
-      .filter(([v]) => v.includes("\n"))
-      .map(([v, label]): [string, string] => [v.replace(/\r?\n/g, "\r\n"), label]);
-    this.masks = [...masks, ...crlf].filter(([v]) => v.length > 0).sort((a, b) => b[0].length - a[0].length);
-    this.keep = Math.max(0, ...this.masks.map(([v]) => v.length - 1));
+    this.masks = prepare(masks);
   }
 
   push(chunk: string): string {
-    const text = this.held + chunk;
-    let cut = Math.max(0, text.length - this.keep);
-    // A whole occurrence that crosses the cut moves the cut back to its start.
-    for (let moved = true; moved && cut > 0; ) {
-      moved = false;
-      for (const [v] of this.masks) {
-        const from = Math.max(0, cut - v.length + 1);
-        const at = text.indexOf(v, from);
-        if (at >= 0 && at < cut && at + v.length > cut) {
-          cut = at;
-          moved = true;
-        }
-      }
-    }
-    this.held = text.slice(cut);
-    return maskSecrets(text.slice(0, cut), this.masks);
+    if (!this.masks.length) return chunk;
+    const { out, rest } = scan(this.held + chunk, this.masks, false);
+    this.held = rest;
+    return out;
   }
 
   end(): string {
-    const rest = maskSecrets(this.held, this.masks);
+    const rest = this.masks.length ? scan(this.held, this.masks, true).out : this.held;
     this.held = "";
     return rest;
   }
+}
+
+/** `maskSecrets` over bytes: each UTF-8 occurrence of a secret becomes the bytes of its label. */
+export function maskBytes(data: Uint8Array, masks: [string, string][]): Buffer {
+  if (!masks.length) return Buffer.from(data);
+  // One latin1 character per byte: the same scan, byte for byte.
+  const bytes = (s: string) => Buffer.from(s, "utf8").toString("latin1");
+  const asBytes = masks.map(([v, label]): [string, string] => [bytes(v), bytes(label)]);
+  return Buffer.from(maskSecrets(Buffer.from(data).toString("latin1"), asBytes), "latin1");
 }
 
 const escapeRe = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

@@ -29,7 +29,7 @@ import {
   SESSION_ENV,
   type Wrapped,
 } from "./sandbox";
-import { maskSecrets, type SecretStore, StreamMasker } from "./secrets";
+import { maskBytes, maskSecrets, type SecretStore, StreamMasker } from "./secrets";
 
 const OUTPUT_MAX = 2_000_000;
 const STREAM_EVERY_MS = 100;
@@ -295,28 +295,21 @@ export async function readOp(ctx: OpContext, args: { path: string; maxBytes?: nu
   if (!st.isFile()) throw new RunnerError("bad_request", `${args.path} is not a file`);
   const max = Math.min(args.maxBytes ?? READ_MAX, READ_MAX);
   const all = readFileSync(path);
-  const buf = all.subarray(0, max);
-  const binary = looksBinary(buf);
-  const masks = binary ? [] : await masksOf(ctx);
-  if (!masks.length)
-    return {
-      path: args.path,
-      content: binary ? buf.toString("base64") : buf.toString("utf8"),
-      encoding: binary ? "base64" : "utf8",
-      size: st.size,
-      truncated: st.size > max,
-    };
-  // Text the agent wrote may hold a secret's value: it is masked before the cut, like command output, over a
-  // window a little past the cut so a secret across it is replaced whole.
-  const longest = Math.max(...masks.map(([v]) => Buffer.byteLength(v)));
+  const masks = await masksOf(ctx);
+  // The bytes are masked before the cut, over a window a little past it, so a secret across the cut is
+  // replaced whole. Text and binary alike: what goes out as base64 (a cut inside a character, a NUL byte)
+  // is masked too, so a real binary that holds a secret comes back changed.
+  const longest = Math.max(0, ...masks.map(([v]) => Buffer.byteLength(v)));
   const window = all.subarray(0, max + longest);
-  const masked = Buffer.from(maskSecrets(window.toString("utf8"), masks), "utf8");
+  const masked = masks.length ? maskBytes(window, masks) : window;
+  const buf = masked.subarray(0, max);
+  const binary = looksBinary(buf);
   return {
     path: args.path,
-    content: masked.subarray(0, max).toString("utf8"),
-    encoding: "utf8",
+    content: binary ? buf.toString("base64") : buf.toString("utf8"),
+    encoding: binary ? "base64" : "utf8",
     size: st.size,
-    truncated: masked.byteLength > max || st.size > window.byteLength,
+    truncated: masks.length ? masked.byteLength > max || st.size > window.byteLength : st.size > max,
   };
 }
 
