@@ -103,3 +103,9 @@ test("review: a directive with a list, a directive cut in the middle, empty outp
     "Looked for a free slot: 23/10 13:00 UTC → 23/10 14:00 UTC.",
   );
 });
+
+test("a tool named like an inherited object property gets the generic speech", () => {
+  expect(aboutToUse(["constructor"])).toBe("I'll use constructor.");
+  expect(afterTool("toString", {}, "done", false)).toBe("Used toString: done.");
+  expect(afterTool("__proto__", {}, "boom", true)).toBe("I couldn't use __proto__: boom.");
+});

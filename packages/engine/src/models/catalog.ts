@@ -36,9 +36,10 @@ export const DEFAULT_MODEL = "claude-haiku-5-5";
  * Haiku executes and Opus advises. Sonnet stays in the catalog for whoever picks it for an agent, but
  * never enters a pair. Opus has no advisor: the only model more capable than it is outside the catalog.
  */
-export const ADVISOR_PAIRS: Readonly<Record<string, readonly string[]>> = {
-  "claude-haiku-5-5": ["claude-opus-5-5"],
-};
+export const ADVISOR_PAIRS: Readonly<Record<string, readonly string[] | undefined>> = Object.assign(
+  Object.create(null),
+  { "claude-haiku-5-5": ["claude-opus-5-5"] },
+);
 /** Ceiling of advisor calls in one request. */
 export const ADVISOR_MAX_USES = 5;
 /** Output of each advisor call (the advice is short: a plan, a change of course). */

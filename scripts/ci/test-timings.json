@@ -48,6 +48,9 @@
     "packages/engine/src/usage.test.ts": 800,
     "packages/engine/src/models/models.test.ts": 200,
     "packages/engine/src/models/fake-speech.test.ts": 15,
-    "packages/engine/src/search-query.test.ts": 15
+    "packages/engine/src/search-query.test.ts": 15,
+    "packages/engine/src/embeddings.test.ts": 20,
+    "packages/engine/src/models/anthropic.test.ts": 60,
+    "packages/engine/src/models/catalog.test.ts": 10
   }
 }

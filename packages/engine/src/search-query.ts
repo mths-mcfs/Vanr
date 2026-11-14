@@ -44,10 +44,12 @@ const KIND_WORDS_BY_LANGUAGE: Readonly<Record<"en" | "pt-BR", Readonly<Record<st
   },
 };
 
-/** Every language's words at once: the query is read the same whatever the interface language. */
-const KIND_WORDS: Readonly<Record<string, SourceKind>> = Object.assign(
-  {},
-  ...Object.values(KIND_WORDS_BY_LANGUAGE),
+/**
+ * Every language's words at once: the query is read the same whatever the interface language. A `Map`,
+ * so a word typed in the query only finds the table's own entries (`constructor` is not a kind).
+ */
+const KIND_WORDS: ReadonlyMap<string, SourceKind> = new Map(
+  Object.values(KIND_WORDS_BY_LANGUAGE).flatMap((words) => Object.entries(words)),
 );
 
 /** The query as read: free text (words, phrases and exclusions) and the operators still to resolve. */
@@ -152,7 +154,7 @@ export function parseQuery(input: string): ParsedQuery {
         continue;
       }
       if (name === "is" || name === "type") {
-        const kind = KIND_WORDS[v];
+        const kind = KIND_WORDS.get(v);
         if (kind) q.kinds.push(kind);
         else if (name === "is" && (IS_FACETS as readonly string[]).includes(v)) q.is.push(v as IsFacet);
         else q.warnings.push(`${name}:${value}`);

@@ -164,6 +164,20 @@ describe("search in SQL: beyond the contract", () => {
     expect((await index.search(u1, "planejamneto trimestral")).map((h) => h.source.id)).toEqual(["f1"]);
   });
 
+  test("a NUL character, which Postgres text cannot hold, breaks neither a filter nor an indexed chunk", async () => {
+    const index = new PgSearchIndex(await pglite(), { access: worldAccess(world) });
+    await index.upsert({ kind: "message", id: "n1" }, [
+      chunk({ title: "No\u0000ta", text: "deploy\u0000 hoje" }),
+    ]);
+    const u1: Viewer = { workspaceId: "o", userId: "u1" };
+    expect((await index.search(u1, "deploy")).map((h) => h.source.id)).toEqual(["n1"]);
+    const filtered = await index.search(u1, "deploy", {
+      filters: { channelIds: ["pub", "x\u0000"], authors: [] },
+    });
+    expect(filtered.map((h) => h.source.id)).toEqual(["n1"]);
+    expect(await index.search(u1, "deploy", { filters: { channelIds: ["\u0000"] } })).toEqual([]);
+  });
+
   test("without pgvector the index stays lexical, and the queue, visibility and purge statements run", async () => {
     const db = await pglite();
     const embedder = fakeEmbedder();

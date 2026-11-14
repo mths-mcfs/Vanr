@@ -59,11 +59,29 @@ export function fakeEmbedder(): Embedder & { calls: number } {
   return self;
 }
 
+const count = z.number().int().nonnegative();
+
 /** The body of a Voyage embeddings response, as far as this module reads it. */
 const VoyageResponse = z.object({
-  data: z.array(z.object({ embedding: z.array(z.number()), index: z.number() })),
-  usage: z.object({ total_tokens: z.number().optional() }).optional(),
+  data: z.array(z.object({ embedding: z.array(z.number().finite()).length(EMBED_DIMS), index: count })),
+  usage: z.object({ total_tokens: count.optional() }).optional(),
 });
+
+/**
+ * The response as vectors in the order of the texts: exactly one per text, with unique indices covering
+ * 0..n-1. Anything else is an error, so a vector never lands on the wrong text.
+ */
+function parseVoyage(json: unknown, texts: number): EmbedResult {
+  const body = VoyageResponse.safeParse(json);
+  if (!body.success) throw new Error("voyage: unexpected response");
+  const vectors: number[][] = new Array(texts);
+  for (const d of body.data.data) {
+    if (d.index >= texts || vectors[d.index]) throw new Error("voyage: vectors do not match the texts");
+    vectors[d.index] = d.embedding;
+  }
+  if (body.data.data.length !== texts) throw new Error("voyage: vectors do not match the texts");
+  return { vectors, tokens: body.data.usage?.total_tokens ?? 0 };
+}
 
 /** Voyage AI (https://docs.voyageai.com/reference/embeddings-api). Without a key in the environment: unused. */
 export function voyageEmbedder(opts: { apiKey: string; model?: string; fetch?: typeof fetch }): Embedder {
@@ -78,12 +96,7 @@ export function voyageEmbedder(opts: { apiKey: string; model?: string; fetch?: t
         body: JSON.stringify({ input: texts, model, input_type: kind, output_dimension: EMBED_DIMS }),
       });
       if (!res.ok) throw new Error(`voyage ${res.status}: ${(await res.text()).slice(0, 200)}`);
-      const body = VoyageResponse.safeParse(await res.json());
-      if (!body.success || body.data.data.length !== texts.length)
-        throw new Error("voyage: unexpected response");
-      const vectors = [...body.data.data].sort((a, b) => a.index - b.index).map((d) => d.embedding);
-      if (vectors.some((v) => v.length !== EMBED_DIMS)) throw new Error("voyage: wrong dimensions");
-      return { vectors, tokens: body.data.usage?.total_tokens ?? 0 };
+      return parseVoyage(await res.json(), texts.length);
     },
   };
 }

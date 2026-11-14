@@ -81,8 +81,19 @@ function rowsOf(result: unknown): Row[] {
 
 const hashText = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 32);
 
+/** Postgres text cannot hold NUL: a stored value never has one, so text loses it before it is stored. */
+const NUL = "\u0000";
+const storable = (s: string) => s.replaceAll(NUL, "");
+
+/**
+ * A text[] literal. An element with NUL (a filter id typed in the query) cannot equal any stored value,
+ * so it is left out instead of failing the whole statement.
+ */
 const textArray = (xs: readonly string[]) =>
-  sql`${`{${xs.map((x) => `"${x.replace(/(["\\])/g, "\\$1")}"`).join(",")}}`}::text[]`;
+  sql`${`{${xs
+    .filter((x) => !x.includes(NUL))
+    .map((x) => `"${x.replace(/(["\\])/g, "\\$1")}"`)
+    .join(",")}}`}::text[]`;
 
 const vectorLiteral = (v: readonly number[]) => `[${v.map((x) => (Number.isFinite(x) ? x : 0)).join(",")}]`;
 
@@ -172,11 +183,10 @@ export class PgSearchIndex implements SearchIndex {
   async upsert(source: SourceRef, chunks: readonly ChunkInput[]): Promise<void> {
     const vector = await this.vectorOn();
     const prepared = await Promise.all(
-      chunks.map(async (c) => ({
-        c,
-        hash: hashText(`${c.title}\n${c.text}`),
-        embed: await this.eligible(c),
-      })),
+      chunks.map(async (raw) => {
+        const c = { ...raw, title: storable(raw.title), text: storable(raw.text) };
+        return { c, hash: hashText(`${c.title}\n${c.text}`), embed: await this.eligible(c) };
+      }),
     );
     await this.db.transaction(async (tx) => {
       // The vector of an unchanged chunk (same hash) stays: editing a page does not send it all again.

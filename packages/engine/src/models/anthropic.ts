@@ -1,5 +1,6 @@
 // Anthropic provider: the Messages API streamed, with tools and caching of the prefix (tools + system).
 import Anthropic from "@anthropic-ai/sdk";
+import { z } from "zod";
 import { TOOL_SEARCH_TOOL } from "./tool-tokens";
 import {
   type AdvisorSpec,
@@ -79,64 +80,131 @@ function stopOf(reason: Anthropic.Message["stop_reason"]): StopReason {
   }
 }
 
+// The response is outside data: it is checked here, once, and converted to the runtime's types. What
+// does not fit is an invalid response (the turn fails with a ModelError), never a guess.
+
+/** A token count: a non-negative integer. A negative one would turn a call into credit. */
+const tokenCount = z.number().int().nonnegative();
+const optionalCount = tokenCount.nullish();
+
+const ApiCitation = z.object({
+  search_result_index: tokenCount,
+  source: z.string(),
+  title: z.string().nullish(),
+  cited_text: z.string(),
+});
+const ApiText = z.object({
+  text: z.string(),
+  citations: z.array(z.looseObject({ type: z.string() })).nullish(),
+});
+/** A tool block needs an id: without it the result cannot be matched back to the call. */
+const ApiToolUse = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  input: z.unknown().optional(),
+});
+
+const ApiUsage = z.object({
+  input_tokens: tokenCount,
+  output_tokens: tokenCount,
+  cache_read_input_tokens: optionalCount,
+  cache_creation_input_tokens: optionalCount,
+  cache_creation: z
+    .object({ ephemeral_5m_input_tokens: optionalCount, ephemeral_1h_input_tokens: optionalCount })
+    .nullish(),
+  speed: z.enum(["standard", "fast"]).nullish(),
+  inference_geo: z.string().nullish(),
+  service_tier: z.string().nullish(),
+  iterations: z.unknown().optional(),
+});
+
+const isNumber = z.custom<number>((v) => typeof v === "number");
+/** Has the shape of an iteration (a type and the two counts); anything else in the list is dropped. */
+const IterationShape = z.object({ type: z.string(), input_tokens: isNumber, output_tokens: isNumber });
+/** An iteration with that shape whose counts are valid; invalid counts are an invalid response. */
+const ApiIteration = z.object({
+  type: z.string(),
+  model: z.unknown().optional(),
+  input_tokens: tokenCount,
+  output_tokens: tokenCount,
+  cache_read_input_tokens: optionalCount,
+  cache_creation_input_tokens: optionalCount,
+});
+
+function invalid(what: string, error: z.ZodError): ModelError {
+  const issue = error.issues[0];
+  return new ModelError(
+    "invalid_tool_input",
+    `Invalid ${what} in the response: ${issue?.path.join(".")} ${issue?.message}`,
+  );
+}
+
+function parse<T>(schema: z.ZodType<T>, value: unknown, what: string): T {
+  const r = schema.safeParse(value);
+  if (!r.success) throw invalid(what, r.error);
+  return r.data;
+}
+
 function contentOf(message: Anthropic.Message): ModelContent[] {
   const out: ModelContent[] = [];
   for (const block of message.content) {
     if (block.type === "text") {
+      const text = parse(ApiText, block, "text block");
       const citations: Citation[] = [];
-      for (const c of block.citations ?? [])
-        if (c.type === "search_result_location")
-          citations.push({
-            searchResultIndex: c.search_result_index,
-            source: c.source,
-            title: c.title ?? null,
-            citedText: c.cited_text,
-          });
+      for (const c of text.citations ?? []) {
+        if (c.type !== "search_result_location") continue;
+        const cite = parse(ApiCitation, c, "citation");
+        citations.push({
+          searchResultIndex: cite.search_result_index,
+          source: cite.source,
+          title: cite.title ?? null,
+          citedText: cite.cited_text,
+        });
+      }
       out.push(
-        citations.length ? { type: "text", text: block.text, citations } : { type: "text", text: block.text },
+        citations.length ? { type: "text", text: text.text, citations } : { type: "text", text: text.text },
       );
-    } else if (block.type === "tool_use")
-      out.push({ type: "tool_use", id: block.id, name: block.name, input: block.input });
+    } else if (block.type === "tool_use") {
+      const tool = parse(ApiToolUse, block, "tool block");
+      out.push({ type: "tool_use", id: tool.id, name: tool.name, input: tool.input });
+    }
   }
   return out;
 }
 
-/** A raw `usage.iterations` entry (advisor, compaction, fallback); the stable SDK does not type it. */
-interface RawIteration {
-  type?: unknown;
-  model?: unknown;
-  input_tokens?: unknown;
-  output_tokens?: unknown;
-  cache_read_input_tokens?: unknown;
-  cache_creation_input_tokens?: unknown;
+/** The iterations of `usage.iterations` (advisor, compaction, fallback), which the stable SDK does not type. */
+function iterationsOf(raw: unknown): UsageIteration[] {
+  if (!Array.isArray(raw)) return [];
+  const out: UsageIteration[] = [];
+  for (const item of raw) {
+    if (!IterationShape.safeParse(item).success) continue;
+    const it = parse(ApiIteration, item, "usage iteration");
+    out.push({
+      type: it.type,
+      ...(typeof it.model === "string" ? { model: it.model } : {}),
+      inputTokens: it.input_tokens,
+      cachedTokens: it.cache_read_input_tokens ?? 0,
+      cacheWriteTokens: it.cache_creation_input_tokens ?? 0,
+      outputTokens: it.output_tokens,
+    });
+  }
+  return out;
 }
 
-const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
-
-/** Each field is read with a type check below; a non-object entry reads as an empty one. */
-const rawIteration = (v: unknown): RawIteration => (typeof v === "object" && v !== null ? v : {});
-
-/** The response usage in the runtime's format: 1 h cache, speed, region and each iteration. */
-export function usageOf(u: Anthropic.Usage): Usage {
-  const raw: unknown = Reflect.get(u, "iterations");
-  const iterations: UsageIteration[] = Array.isArray(raw)
-    ? raw.map(rawIteration).map((it) => ({
-        type: typeof it.type === "string" ? it.type : "message",
-        ...(typeof it.model === "string" ? { model: it.model } : {}),
-        inputTokens: num(it.input_tokens),
-        cachedTokens: num(it.cache_read_input_tokens),
-        cacheWriteTokens: num(it.cache_creation_input_tokens),
-        outputTokens: num(it.output_tokens),
-      }))
-    : [];
+/**
+ * The response usage in the runtime's format: 1 h cache, speed, region and each iteration. With no
+ * well-formed iteration, the top-level usage is the whole call.
+ */
+export function usageOf(raw: Anthropic.Usage): Usage {
+  const u = parse(ApiUsage, raw, "usage");
+  const iterations = iterationsOf(u.iterations);
+  const write1h = u.cache_creation?.ephemeral_1h_input_tokens;
   return {
     inputTokens: u.input_tokens,
     cachedTokens: u.cache_read_input_tokens ?? 0,
     cacheWriteTokens: u.cache_creation_input_tokens ?? 0,
     outputTokens: u.output_tokens,
-    ...(u.cache_creation?.ephemeral_1h_input_tokens
-      ? { cacheWrite1hTokens: u.cache_creation.ephemeral_1h_input_tokens }
-      : {}),
+    ...(write1h ? { cacheWrite1hTokens: write1h } : {}),
     ...(u.speed ? { speed: u.speed } : {}),
     ...(u.inference_geo ? { inferenceGeo: u.inference_geo } : {}),
     ...(u.service_tier ? { serviceTier: u.service_tier } : {}),

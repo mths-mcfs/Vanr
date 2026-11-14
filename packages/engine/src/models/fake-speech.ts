@@ -98,7 +98,9 @@ const SPEECH: Readonly<Record<string, readonly [doing: string, done: string, det
   propose_assignment: ["propose the assignment", "Proposed the assignment", "title"],
 };
 
-const speechOf = (tool: string) => SPEECH[tool] ?? ([`use ${tool}`, `Used ${tool}`, "="] as const);
+/** The tool name comes from the model: only the table's own entries count (`toString` is not one). */
+const speechOf = (tool: string) =>
+  (Object.hasOwn(SPEECH, tool) ? SPEECH[tool] : undefined) ?? ([`use ${tool}`, `Used ${tool}`, "="] as const);
 
 /** A note from whoever helped in the browser, in parentheses and without the final period (the sentence ends with one). */
 const note = (text: string | undefined) => (text?.trim() ? ` (${text.trim().replace(/[.!]+$/, "")})` : "");

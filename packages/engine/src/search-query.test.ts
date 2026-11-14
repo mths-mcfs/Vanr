@@ -30,3 +30,17 @@ describe("kind operators", () => {
     expect(q.terms).toEqual(["plano"]);
   });
 });
+
+describe("kind words from the query", () => {
+  test("names inherited by every object are unknown words, not kinds", () => {
+    for (const word of ["constructor", "__proto__", "toString", "hasOwnProperty", "valueOf"]) {
+      for (const op of ["is", "type"]) {
+        const q = parseQuery(`deploy ${op}:${word}`);
+        expect(q.kinds).toEqual([]);
+        expect(q.is).toEqual([]);
+        expect(q.warnings).toEqual([`${op}:${word}`]);
+        expect(q.terms).toEqual(["deploy"]);
+      }
+    }
+  });
+});
