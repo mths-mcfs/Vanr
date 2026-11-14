@@ -311,7 +311,7 @@ function remoteStore(cfg: S3ConfigRow, keys: S3Keys): RemoteStore {
   /**
    * The object is missing (its HEAD answered 404): a 404 without a body can't tell a missing object from a
    * missing bucket, so the bucket is asked directly (a listing of at most one key, the cheapest bucket-level
-   * call the client has). A bucket that is gone or refuses makes the read unavailable, not "no file".
+   * call the client has). A bucket that is gone or rejects the call makes the read unavailable, not "no file".
    */
   const missing = async (key: string) => {
     await bucket("check the bucket", key, () =>

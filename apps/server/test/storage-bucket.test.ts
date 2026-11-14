@@ -1,5 +1,5 @@
 // The bucket itself, beyond one object: a bucket that is gone (its 404 says nothing about the object), a call
-// that never ends, a connection refused, an empty file, ranges of a healthy download, and a client that leaves
+// that never ends, a rejected connection, an empty file, ranges of a healthy download, and a client that leaves
 // in the middle of one (the bucket's stream is closed too).
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
@@ -110,7 +110,7 @@ describe("a bucket that is gone", () => {
   });
 });
 
-describe("deadlines and refused connections", () => {
+describe("deadlines and rejected connections", () => {
   test("a call that never ends counts as unavailable, in each operation", async () => {
     Object.assign(bucketDeadlines, { callMs: 200, writeMs: 200, pieceMs: 200 });
     const { workspaceId, ana } = await team();
@@ -152,7 +152,7 @@ describe("deadlines and refused connections", () => {
     expect([checked.status, (await failure(checked)).code]).toEqual([503, "storage.unavailable"]);
   });
 
-  test("a bucket that refuses connections is unavailable for reads, writes and deletes", async () => {
+  test("a bucket that rejects connections is unavailable for reads, writes and deletes", async () => {
     const gone = startFakeS3("workshop");
     const { workspaceId, ana } = await team(gone);
     const file = await uploaded(ana, workspaceId, "remote", "remote.txt");
