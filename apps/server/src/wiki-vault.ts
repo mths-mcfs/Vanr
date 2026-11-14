@@ -8,12 +8,22 @@ import { formatFrontmatter, splitFrontmatter, vaultMeta } from "@vanr/engine/wik
 import { bodyTags } from "@vanr/engine/wiki/links";
 import { frontmatterToProps, propsToFrontmatter } from "@vanr/engine/wiki/props-vault";
 import { and, eq, isNull } from "drizzle-orm";
-import { Unzip, UnzipInflate, zipSync } from "fflate";
+import { Unzip, UnzipInflate, Zip, ZipDeflate } from "fflate";
 import type { AppDeps } from "./context";
 import { createFile, MAX_UPLOAD_BYTES } from "./drive";
 import { HttpError } from "./http";
 import { log } from "./logger";
-import { allPages, createPage, MAX_BODY, normalizeFolder, propSchemaOf, TITLE_BREAKS_LINK } from "./wiki";
+import {
+  allPages,
+  createPages,
+  MAX_BODY,
+  type NewPage,
+  normalizeFolder,
+  propSchemaOf,
+  rejectNul,
+  TITLE_BREAKS_LINK,
+} from "./wiki";
+import { checkLinks } from "./wiki-links";
 
 const { wikiAttachments, fileVersions, files } = schema;
 
@@ -65,9 +75,21 @@ export function unzipVault(zip: Uint8Array): {
   const failed: { path: string; error: string }[] = [];
   let count = 0;
   let total = 0;
+  /** What the headers say the files unpack to: past the cap the import stops before inflating more. */
+  let declared = 0;
   let fatal: HttpError | null = null;
+  const tooLarge = () =>
+    new HttpError(413, "wiki.import.too_large", "The vault is too large once unpacked", {
+      maxBytes: VAULT_LIMITS.totalBytes,
+    });
   const uz = new Unzip((file) => {
-    if (fatal || file.name.endsWith("/")) return;
+    if (fatal) return;
+    // A NUL in a name is rejected for the whole vault, like any text of the wiki.
+    if (file.name.includes("\0")) {
+      fatal = new HttpError(400, "wiki.invalid_text", "A file name in the vault contains a NUL character");
+      return;
+    }
+    if (file.name.endsWith("/")) return;
     if (++count > VAULT_LIMITS.entries) {
       fatal = new HttpError(413, "wiki.import.too_many_files", "The vault has too many files", {
         max: VAULT_LIMITS.entries,
@@ -85,6 +107,11 @@ export function unzipVault(zip: Uint8Array): {
       failed.push({ path, error: "wiki.import.too_large" });
       return;
     }
+    declared += file.originalSize ?? 0;
+    if (declared > VAULT_LIMITS.totalBytes) {
+      fatal = tooLarge();
+      return;
+    }
     const chunks: Uint8Array[] = [];
     let size = 0;
     let done = false;
@@ -99,9 +126,8 @@ export function unzipVault(zip: Uint8Array): {
       total += chunk.byteLength;
       if (total > VAULT_LIMITS.totalBytes) {
         done = true;
-        fatal = new HttpError(413, "wiki.import.too_large", "The vault is too large once unpacked", {
-          maxBytes: VAULT_LIMITS.totalBytes,
-        });
+        file.terminate();
+        fatal = tooLarge();
         return;
       }
       if (size > max) {
@@ -183,18 +209,27 @@ export async function importVault(
     propsCreated: [],
     failed: [...(input.failed ?? [])],
   };
+  // The folder as a whole is checked before the first note is written: then every note goes in one
+  // transaction, so a rejected import leaves nothing behind.
+  rejectNul([input.folder, input.files.map((f) => f.path)]);
   const existing = await allPages(deps.db, input.workspaceId);
   const key = (f: string, t: string) => `${f}\u0000${t.toLowerCase()}`;
   const taken = new Set(existing.map((p) => key(p.folder, p.title)));
-  let { defs, version } = await propSchemaOf(deps.db, input.workspaceId);
+  const schemaNow = await propSchemaOf(deps.db, input.workspaceId);
+  let defs = schemaNow.defs;
   const decoder = new TextDecoder("utf-8", { fatal: false });
   const notes = input.files.filter((f) => /\.md$/i.test(f.path));
   const others = input.files.filter((f) => !/\.md$/i.test(f.path));
+  const pages: NewPage[] = [];
 
   for (const file of notes) {
     const parts = file.path.split("/").filter(Boolean);
     const base = (parts.pop() ?? "").replace(/\.md$/i, "").trim();
-    const text = decoder.decode(file.bytes).replace(/^﻿/, "");
+    const text = decoder.decode(file.bytes).replace(/^\uFEFF/, "");
+    if (text.includes("\0"))
+      throw new HttpError(400, "wiki.invalid_text", "A note can't contain a NUL character", {
+        path: file.path,
+      });
     const fm = splitFrontmatter(text);
     const meta = vaultMeta(fm.data);
     const title = (meta.title ?? base)
@@ -214,8 +249,19 @@ export async function importVault(
       result.skipped++;
       continue;
     }
+    try {
+      checkLinks(fm.body);
+    } catch (err) {
+      if (err instanceof HttpError)
+        throw new HttpError(err.status, err.code, err.message, { ...err.params, path: file.path });
+      throw err;
+    }
     const props = frontmatterToProps(defs, meta.rest);
-    await createPage(deps, {
+    defs = props.defs;
+    for (const name of props.created) if (!result.propsCreated.includes(name)) result.propsCreated.push(name);
+    // Past the property route's caps the property isn't created: the note goes in without it.
+    if (props.overLimit.length) result.failed.push({ path: file.path, error: "wiki.import.too_many_props" });
+    pages.push({
       workspaceId: input.workspaceId,
       title,
       folder,
@@ -226,13 +272,19 @@ export async function importVault(
       author: input.author,
       sourceType: "obsidian",
       note: "import",
-      propSchema: { defs: props.defs, version },
     });
-    defs = props.defs;
-    version++;
-    for (const name of props.created) if (!result.propsCreated.includes(name)) result.propsCreated.push(name);
     taken.add(key(folder, title));
-    result.created++;
+  }
+  if (pages.length) {
+    const changed = JSON.stringify(defs) !== JSON.stringify(schemaNow.defs);
+    await createPages(
+      deps,
+      input.workspaceId,
+      input.author,
+      pages,
+      changed ? { defs, version: schemaNow.version } : undefined,
+    );
+    result.created = pages.length;
   }
 
   const liveAttachments = new Set(
@@ -298,46 +350,79 @@ const fileSafe = (s: string) =>
     .join("")
     .trim() || "page";
 
-/** The whole vault as a zip: one note per page (front matter with tags, alternate titles and properties). */
-export async function exportVault(deps: AppDeps, workspaceId: string): Promise<Uint8Array> {
+/**
+ * The whole vault as a zip, streamed: one note per page (front matter with tags, alternate titles and
+ * properties) and the imported attachments, each read and compressed only when the reader asks for more.
+ */
+export async function exportVault(deps: AppDeps, workspaceId: string): Promise<ReadableStream<Uint8Array>> {
   const pages = await allPages(deps.db, workspaceId);
   const { defs } = await propSchemaOf(deps.db, workspaceId);
-  const out: Record<string, Uint8Array> = {};
   const enc = new TextEncoder();
   const used = new Set<string>();
+  const entries: { path: string; bytes: () => Promise<Uint8Array | null> }[] = [];
   for (const p of pages) {
     const dir = `wiki/${p.folder ? `${p.folder.split("/").map(fileSafe).join("/")}/` : ""}`;
     let path = `${dir}${fileSafe(p.title)}.md`;
     for (let i = 2; used.has(path.toLowerCase()); i++) path = `${dir}${fileSafe(p.title)} (${i}).md`;
     used.add(path.toLowerCase());
-    const data = {
-      ...(p.aliases.length ? { aliases: p.aliases } : {}),
-      ...(p.tags.length ? { tags: p.tags } : {}),
-      ...Object.fromEntries(
-        Object.entries(propsToFrontmatter(defs, p.props)).filter(([key]) => key.toLowerCase() !== "title"),
-      ),
-      title: p.title,
-    };
-    // A body that starts with a divider (`---`) would be read as front matter on the way back: it gets an
-    // empty block in front so it stays body.
-    const head = formatFrontmatter(data) || (splitFrontmatter(p.body).body !== p.body ? "---\n---\n" : "");
-    out[path] = enc.encode(`${head}${p.body}`);
+    entries.push({
+      path,
+      bytes: async () => {
+        const data = {
+          ...(p.aliases.length ? { aliases: p.aliases } : {}),
+          ...(p.tags.length ? { tags: p.tags } : {}),
+          ...Object.fromEntries(
+            Object.entries(propsToFrontmatter(defs, p.props)).filter(
+              ([key]) => key.toLowerCase() !== "title",
+            ),
+          ),
+          title: p.title,
+        };
+        // A body that starts with a divider (`---`) would be read as front matter on the way back: it gets an
+        // empty block in front so it stays body.
+        const head =
+          formatFrontmatter(data) || (splitFrontmatter(p.body).body !== p.body ? "---\n---\n" : "");
+        return enc.encode(`${head}${p.body}`);
+      },
+    });
   }
   for (const a of await attachmentsOf(deps, workspaceId)) {
     const path = `wiki/${a.path.split("/").map(fileSafe).join("/")}`;
     if (used.has(path.toLowerCase())) continue;
-    const [v] = await deps.db
-      .select({ blobKey: fileVersions.blobKey })
-      .from(fileVersions)
-      .innerJoin(files, eq(files.id, fileVersions.fileId))
-      .where(and(eq(fileVersions.fileId, a.fileId), eq(fileVersions.version, files.version)));
-    const blob = v?.blobKey ? await deps.blobs.get(v.blobKey).catch(() => null) : null;
-    if (!blob) {
-      log.warn("wiki.export_attachment_missing", { fileId: a.fileId });
-      continue;
-    }
     used.add(path.toLowerCase());
-    out[path] = blob.bytes;
+    entries.push({
+      path,
+      bytes: async () => {
+        const [v] = await deps.db
+          .select({ blobKey: fileVersions.blobKey })
+          .from(fileVersions)
+          .innerJoin(files, eq(files.id, fileVersions.fileId))
+          .where(and(eq(fileVersions.fileId, a.fileId), eq(fileVersions.version, files.version)));
+        const blob = v?.blobKey ? await deps.blobs.get(v.blobKey).catch(() => null) : null;
+        if (!blob) log.warn("wiki.export_attachment_missing", { fileId: a.fileId });
+        return blob?.bytes ?? null;
+      },
+    });
   }
-  return zipSync(out, { level: 6 });
+  const zip = new Zip();
+  let next = 0;
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      zip.ondata = (err, chunk, final) => {
+        if (err) return controller.error(err);
+        controller.enqueue(chunk);
+        if (final) controller.close();
+      };
+    },
+    // One file per pull: the stream asks again only when its reader took what was there.
+    async pull() {
+      const entry = entries[next++];
+      if (!entry) return zip.end();
+      const bytes = await entry.bytes();
+      if (!bytes) return;
+      const file = new ZipDeflate(entry.path, { level: 6 });
+      zip.add(file);
+      file.push(bytes, true);
+    },
+  });
 }

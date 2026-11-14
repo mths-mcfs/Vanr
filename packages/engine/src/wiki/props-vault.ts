@@ -13,6 +13,9 @@ import {
 } from "../props";
 import type { FrontmatterData } from "./frontmatter";
 
+/** The caps of the wiki's property route: definitions in the schema, options in one definition. */
+export const WIKI_PROP_LIMITS = { defs: 100, options: 200 } as const;
+
 // The same format the typed properties accept: a date, or a date and time with an offset.
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2}))?$/;
 
@@ -64,20 +67,27 @@ const scalar = (v: unknown): string | null =>
 /**
  * Front matter → property write. Returns the list of definitions (with the new ones and the new options),
  * the write `{ [propId]: value }` and the names of the properties created. A value that does not fit the
- * type of a property that already exists goes to `rejected` and is not written.
+ * type of a property that already exists goes to `rejected` and is not written, and so does one that would
+ * need a definition or an option past WIKI_PROP_LIMITS (also listed in `overLimit`).
  */
 export function frontmatterToProps(
   defs: readonly PropDef[],
   data: FrontmatterData,
-): { defs: PropDef[]; write: Props; created: string[]; rejected: string[] } {
+): { defs: PropDef[]; write: Props; created: string[]; rejected: string[]; overLimit: string[] } {
   const next: PropDef[] = defs.map((d) => (d.options ? { ...d, options: [...d.options] } : { ...d }));
   const write: Props = {};
   const created: string[] = [];
   const rejected: string[] = [];
+  const overLimit: string[] = [];
   for (const [key, raw] of Object.entries(data)) {
     if (raw === null || raw === undefined || raw === "") continue;
     let found = next.find((d) => d.name.toLowerCase() === key.toLowerCase());
     if (!found) {
+      if (next.length >= WIKI_PROP_LIMITS.defs) {
+        rejected.push(key);
+        overLimit.push(key);
+        continue;
+      }
       found = { id: newId("prop"), name: key.slice(0, 80), type: inferType(raw) };
       if (found.type === "multi_select") found.options = [];
       next.push(found);
@@ -85,9 +95,14 @@ export function frontmatterToProps(
     }
     const def: PropDef = found;
     if (COMPUTED_TYPES.has(def.type)) continue;
-    const option = (name: string): string => {
+    let full = false;
+    const option = (name: string): string | undefined => {
       const hit = def.options?.find((o) => o.name.toLowerCase() === name.toLowerCase());
       if (hit) return hit.id;
+      if ((def.options?.length ?? 0) >= WIKI_PROP_LIMITS.options) {
+        full = true;
+        return undefined;
+      }
       const opt: PropOption = { id: newId("opt"), name: name.slice(0, 100) };
       def.options = [...(def.options ?? []), opt];
       return opt.id;
@@ -125,14 +140,16 @@ export function frontmatterToProps(
         const list = (Array.isArray(raw) ? raw : String(raw).split(","))
           .map(scalar)
           .filter((x): x is string => !!x);
-        value = list.slice(0, 100).map(option);
+        const ids = list.slice(0, 100).map(option);
+        value = full ? undefined : (ids as string[]);
         break;
       }
       default:
         value = undefined;
     }
+    if (full) overLimit.push(key);
     if (value === undefined) rejected.push(key);
     else write[def.id] = value;
   }
-  return { defs: next, write, created, rejected };
+  return { defs: next, write, created, rejected, overLimit };
 }

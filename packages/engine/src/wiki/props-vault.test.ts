@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { applyProps, type PropDef } from "../props";
-import { frontmatterToProps, propsToFrontmatter } from "./props-vault";
+import { frontmatterToProps, propsToFrontmatter, WIKI_PROP_LIMITS } from "./props-vault";
 
 describe("front matter ↔ properties", () => {
   test("creates definitions with the inferred type, as Obsidian does", () => {
@@ -66,5 +66,39 @@ describe("front matter ↔ properties", () => {
     const again = frontmatterToProps(first.defs, yaml);
     expect(again.write).toEqual(first.write);
     expect(again.created).toEqual([]);
+  });
+});
+
+describe("the property route's caps", () => {
+  const many = (n: number, from = 0) =>
+    Object.fromEntries(Array.from({ length: n }, (_, i) => [`p${from + i}`, "x"]));
+
+  test("past the definitions' cap a new property is rejected, not created; the ones that exist still take values", () => {
+    const first = frontmatterToProps([], many(WIKI_PROP_LIMITS.defs - 1));
+    const r = frontmatterToProps(first.defs, { ...many(3, 1000), p0: "kept" });
+    expect(r.defs).toHaveLength(WIKI_PROP_LIMITS.defs);
+    expect(r.created).toEqual(["p1000"]);
+    expect(r.overLimit).toEqual(["p1001", "p1002"]);
+    expect(r.rejected).toEqual(["p1001", "p1002"]);
+    const p0 = r.defs.find((d) => d.name === "p0");
+    expect(p0 && r.write[p0.id]).toBe("kept");
+  });
+
+  test("past the options' cap a value that needs a new option is rejected; a known option still goes in", () => {
+    const def: PropDef = {
+      id: "prop_s",
+      name: "Stage",
+      type: "select",
+      options: Array.from({ length: WIKI_PROP_LIMITS.options }, (_, i) => ({
+        id: `opt_${i}`,
+        name: `o${i}`,
+      })),
+    };
+    const tags: PropDef = { id: "prop_m", name: "Tags", type: "multi_select", options: def.options };
+    const r = frontmatterToProps([def, tags], { Stage: "brand new", Tags: ["o1", "another new"] });
+    expect(r.overLimit).toEqual(["Stage", "Tags"]);
+    expect(r.write).toEqual({});
+    expect(r.defs.every((d) => (d.options?.length ?? 0) <= WIKI_PROP_LIMITS.options)).toBe(true);
+    expect(frontmatterToProps([def], { Stage: "o7" }).write).toEqual({ prop_s: "opt_7" });
   });
 });

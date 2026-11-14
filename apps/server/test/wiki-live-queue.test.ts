@@ -18,6 +18,7 @@ import { apiError, wikiApi } from "./wiki-api";
 import {
   authMessage,
   connect,
+  holdNextTransaction,
   paragraphUpdate,
   rawSocket,
   unloaded,
@@ -56,46 +57,6 @@ async function storedDraft(srv: RunningServer, workspaceId: string, slug: string
   Y.applyUpdate(doc, new Uint8Array(Buffer.from(d.state, "base64")));
   const md = await wikiMarkdown();
   return { ...d, text: md.serialize(md.fromYDoc(doc)) };
-}
-
-/**
- * Holds the server's next database transaction until `release`: `before` it starts, or `after` its callback
- * ran (still open, before the commit), or `committed` (after the commit, before the caller goes on).
- */
-function holdNextTransaction(srv: RunningServer, when: "before" | "after" | "committed") {
-  const { db } = srv.deps;
-  const original = db.transaction.bind(db);
-  let begun!: () => void;
-  let release!: () => void;
-  const started = new Promise<void>((r) => {
-    begun = r;
-  });
-  const gate = new Promise<void>((r) => {
-    release = r;
-  });
-  db.transaction = (async (fn: Parameters<typeof original>[0], ...rest: unknown[]) => {
-    db.transaction = original;
-    if (when === "before") {
-      begun();
-      await gate;
-      return original(fn, ...(rest as []));
-    }
-    if (when === "after")
-      return original(
-        async (tx) => {
-          const result = await fn(tx);
-          begun();
-          await gate;
-          return result;
-        },
-        ...(rest as []),
-      );
-    const result = await original(fn, ...(rest as []));
-    begun();
-    await gate;
-    return result;
-  }) as typeof original;
-  return { started, release, restore: () => (db.transaction = original) };
 }
 
 /** The next `count` transactions fail the way Postgres aborts a deadlock (SQLSTATE 40P01). */
@@ -144,7 +105,7 @@ describe("the page's queue", () => {
     ["before", "removed paragraph"],
     ["committed", "removed paragraph"],
   ] as const)(
-    "a concurrent edit waits for discard (%s its commit, %s), then is applied or explicitly refused",
+    "a concurrent edit waits for discard (%s its commit, %s), then is applied or explicitly rejected",
     async (when, edit) => {
       const { workspaceId, ana, beto } = await team();
       const page = await ana.api.wiki.createWikiPage(workspaceId, {

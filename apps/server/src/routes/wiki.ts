@@ -7,13 +7,14 @@ import { can } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { PROP_TYPES, propText } from "@vanr/engine/props";
 import { diffText } from "@vanr/engine/wiki/diff";
+import { WIKI_PROP_LIMITS } from "@vanr/engine/wiki/props-vault";
 import { and, desc, eq, gte, ilike, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Hono } from "hono";
 import { z } from "zod";
 import type { AppEnv, Ctx, WorkspaceMember } from "../context";
 import { type Form, readFormFile } from "../drive";
-import { forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
+import { badRequest, forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
 import {
   adminOnly,
   allPages,
@@ -26,6 +27,7 @@ import {
   patchPage,
   propSchemaOf,
   purgePage,
+  rejectNul,
   requireDeleter,
   savePage,
   savePropSchema,
@@ -48,6 +50,35 @@ const tags = z.array(z.string().max(60)).max(40);
 const altTitles = z.array(z.string().max(200)).max(20);
 const folder = z.string().max(300);
 const isAdmin = (me: WorkspaceMember) => can(me.role, "configure");
+/** Versions and other numbers of the routes are Postgres integers: past 32 bits they are rejected here. */
+const INT32_MAX = 2_147_483_647;
+const version = z.number().int().min(1).max(INT32_MAX);
+/** The largest JSON body a wiki route reads: room for an import of many notes at the page's cap. */
+export const WIKI_JSON_BYTES = 32 * 1024 * 1024;
+
+/** The request's body, read up to `max` bytes (413 past it, also when it comes without a length). */
+async function cappedText(req: Request, max: number): Promise<string> {
+  const tooLarge = () =>
+    new HttpError(413, "payload_too_large", "The request is too large", { maxBytes: max });
+  if (Number(req.headers.get("content-length") ?? 0) > max) throw tooLarge();
+  if (!req.body) return "";
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for await (const chunk of req.body) {
+    size += chunk.byteLength;
+    if (size > max) throw tooLarge();
+    chunks.push(chunk);
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
+}
+
+const decoded = (s: string) => {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+};
 
 const propDef = z
   .object({
@@ -64,7 +95,7 @@ const propDef = z
           })
           .strict(),
       )
-      .max(200)
+      .max(WIKI_PROP_LIMITS.options)
       .optional(),
     groups: z
       .object({ todo: z.array(z.string()), inProgress: z.array(z.string()), done: z.array(z.string()) })
@@ -82,6 +113,7 @@ async function page(c: Ctx, me: WorkspaceMember) {
 
 async function versionRow(c: Ctx, row: WikiRow, version: number) {
   if (!Number.isInteger(version) || version < 1) throw notFound("Version not found");
+  if (version > INT32_MAX) throw badRequest("Invalid version");
   const [v] = await c
     .get("deps")
     .db.select()
@@ -92,6 +124,26 @@ async function versionRow(c: Ctx, row: WikiRow, version: number) {
 }
 
 export function registerWiki(app: Hono<AppEnv>) {
+  // At the border of every wiki route: no NUL in the path, the query or the JSON body (Postgres text can't
+  // hold it), and no JSON body past WIKI_JSON_BYTES. The body read here is the one the route reads after.
+  app.use(`${WORKSPACE}/wiki/*`, async (c, next) => {
+    const url = new URL(c.req.url);
+    rejectNul([decoded(url.pathname), [...url.searchParams].flat()]);
+    const type = c.req.header("content-type") ?? "";
+    if (c.req.method !== "GET" && c.req.method !== "HEAD" && !type.startsWith("multipart/form-data")) {
+      const text = await cappedText(c.req.raw, WIKI_JSON_BYTES);
+      c.req.bodyCache.text = text;
+      let body: unknown = null;
+      try {
+        body = JSON.parse(text);
+      } catch {
+        // Not JSON: the route's own reading says so.
+      }
+      rejectNul(body);
+    }
+    await next();
+  });
+
   app.get(`${WORKSPACE}/wiki/pages`, async (c) => {
     const me = requireMember(c);
     const pages = await allPages(c.get("deps").db, me.workspaceId);
@@ -174,7 +226,7 @@ export function registerWiki(app: Hono<AppEnv>) {
       z
         .object({
           body: z.string().max(MAX_BODY),
-          parentVersion: z.number().int().min(1),
+          parentVersion: version,
           folder: folder.optional(),
           tags: tags.optional(),
           note: z.string().trim().max(300).optional(),
@@ -199,7 +251,7 @@ export function registerWiki(app: Hono<AppEnv>) {
       c,
       z
         .object({
-          parentVersion: z.number().int().min(1),
+          parentVersion: version,
           props: z.record(z.string(), z.unknown()).optional(),
           altTitles: altTitles.optional(),
           tags: tags.optional(),
@@ -396,8 +448,8 @@ export function registerWiki(app: Hono<AppEnv>) {
     const q = readQuery(
       c,
       z.object({
-        from: z.coerce.number().int().min(1).optional(),
-        to: z.coerce.number().int().min(1).optional(),
+        from: z.coerce.number().int().min(1).max(INT32_MAX).optional(),
+        to: z.coerce.number().int().min(1).max(INT32_MAX).optional(),
       }),
     );
     const toV = q.to ?? row.version;
@@ -436,10 +488,7 @@ export function registerWiki(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const row = await page(c, me);
     const v = await versionRow(c, row, Number(param(c, "versionId")));
-    const { parentVersion } = await readJson(
-      c,
-      z.object({ parentVersion: z.number().int().min(1) }).strict(),
-    );
+    const { parentVersion } = await readJson(c, z.object({ parentVersion: version }).strict());
     const saved = await savePage(deps, {
       row,
       author: me$(me),
@@ -488,7 +537,12 @@ export function registerWiki(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const input = await readJson(
       c,
-      z.object({ defs: z.array(propDef).max(100), parentVersion: z.number().int().min(0) }).strict(),
+      z
+        .object({
+          defs: z.array(propDef).max(WIKI_PROP_LIMITS.defs),
+          parentVersion: z.number().int().min(0).max(INT32_MAX),
+        })
+        .strict(),
     );
     const ids = new Set(input.defs.map((d) => d.id));
     const names = new Set(input.defs.map((d) => d.name.toLowerCase()));
@@ -610,7 +664,6 @@ export function registerWiki(app: Hono<AppEnv>) {
       headers: {
         "Content-Type": "application/zip",
         "Content-Disposition": `attachment; filename="wiki.zip"`,
-        "Content-Length": String(zip.byteLength),
         "Cache-Control": "private, no-store",
       },
     });

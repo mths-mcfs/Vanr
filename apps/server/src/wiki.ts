@@ -12,7 +12,7 @@ import type { AppDeps, WorkspaceMember } from "./context";
 import { pgCode } from "./db-errors";
 import { forbidden, HttpError, notFound } from "./http";
 import { reindex, unindex } from "./search-index";
-import { namesOf, reresolveLinks, syncLinks } from "./wiki-links";
+import { checkLinks, namesOf, reresolveLinks, syncLinks } from "./wiki-links";
 
 const { knowledgePages, pageRevisions, wikiPageViews, pageLinks, wikiPageDocs, wikiPropSchemas, members } =
   schema;
@@ -22,6 +22,22 @@ export type Author = ActorRef & { actingFor?: string };
 export const MAX_BODY = 500_000;
 /** Characters that break a [[link]] by title (Obsidian rejects them too; the vault import strips them). */
 export const TITLE_BREAKS_LINK = /[[\]|#^]/;
+
+/**
+ * Text with a NUL character anywhere (Postgres text can't hold it): rejected at the border with 400, in a
+ * value or a key, however deep.
+ */
+export function rejectNul(value: unknown): void {
+  const has = (v: unknown): boolean =>
+    typeof v === "string"
+      ? v.includes("\0")
+      : Array.isArray(v)
+        ? v.some(has)
+        : v !== null && typeof v === "object"
+          ? Object.entries(v).some(([k, x]) => k.includes("\0") || has(x))
+          : false;
+  if (has(value)) throw new HttpError(400, "wiki.invalid_text", "Text can't contain a NUL character");
+}
 
 function checkTitle(title: string) {
   if (TITLE_BREAKS_LINK.test(title))
@@ -197,7 +213,7 @@ export async function toPage(db: Db, row: WikiRow, me: WorkspaceMember | null): 
   };
 }
 
-async function freeSlug(db: Db, workspaceId: string, title: string): Promise<string> {
+async function freeSlug(db: Db | Tx, workspaceId: string, title: string): Promise<string> {
   const base = slugify(title);
   const taken = new Set(
     (
@@ -222,67 +238,95 @@ async function afterWrite(deps: AppDeps, row: WikiRow, origin: SaveOrigin) {
 /** Where the write came from: the live session doesn't get back what it published itself. */
 export type SaveOrigin = "api" | "live";
 
+/** A new page's fields. */
+export interface NewPage {
+  workspaceId: string;
+  title: string;
+  folder?: string;
+  body?: string;
+  tags?: string[];
+  aliases?: string[];
+  props?: Props;
+  author: Author;
+  sourceType?: "obsidian";
+  note?: string | null;
+}
+
 export async function createPage(
   deps: AppDeps,
-  input: {
-    workspaceId: string;
-    title: string;
-    folder?: string;
-    body?: string;
-    tags?: string[];
-    aliases?: string[];
-    props?: Props;
-    author: Author;
-    sourceType?: "obsidian";
-    note?: string | null;
-    propSchema?: { defs: PropDef[]; version: number };
-  },
+  input: NewPage & { propSchema?: { defs: PropDef[]; version: number } },
 ): Promise<WikiRow> {
-  checkTitle(input.title);
+  const [row] = await createPages(deps, input.workspaceId, input.author, [input], input.propSchema);
+  if (!row) throw new Error("wiki insert failed");
+  return row;
+}
+
+/**
+ * New pages (and the property schema they need) in one transaction: all of them or none. Each one is
+ * checked (title, text, links) before anything is written.
+ */
+export async function createPages(
+  deps: AppDeps,
+  workspaceId: string,
+  author: Author,
+  inputs: readonly NewPage[],
+  propSchema?: { defs: PropDef[]; version: number },
+): Promise<WikiRow[]> {
+  for (const input of inputs) {
+    checkTitle(input.title);
+    rejectNul(input);
+    checkLinks(input.body ?? "");
+  }
+  if (propSchema) rejectNul(propSchema.defs);
   const at = deps.now();
-  const slug = await freeSlug(deps.db, input.workspaceId, input.title);
+  const rows = await writeTx(deps.db, async (tx) => {
+    await requireWriter(tx, workspaceId, author);
+    if (propSchema) await writePropSchema(tx, workspaceId, propSchema.defs, propSchema.version, at);
+    const out: WikiRow[] = [];
+    for (const input of inputs) out.push(await insertPage(tx, { ...input, workspaceId }, at));
+    return out;
+  });
+  for (const row of rows) await afterWrite(deps, row, "api");
+  return rows;
+}
+
+async function insertPage(tx: Tx, input: NewPage, at: Date): Promise<WikiRow> {
+  const slug = await freeSlug(tx, input.workspaceId, input.title);
   const id = newId("wiki");
   const body = input.body ?? "";
-  const row = await writeTx(deps.db, async (tx) => {
-    await requireWriter(tx, input.workspaceId, input.author);
-    if (input.propSchema)
-      await writePropSchema(tx, input.workspaceId, input.propSchema.defs, input.propSchema.version, at);
-    const [created] = await tx
-      .insert(knowledgePages)
-      .values({
-        id,
-        workspaceId: input.workspaceId,
-        slug,
-        title: input.title,
-        folder: normalizeFolder(input.folder),
-        tags: normalizeTags(input.tags),
-        aliases: normalizeAltTitles(input.aliases, input.title),
-        props: input.props ?? {},
-        body,
-        version: 1,
-        sourceType: input.sourceType ?? null,
-        updatedBy: input.author,
-        createdAt: at,
-        updatedAt: at,
-      })
-      .returning();
-    if (!created) throw new Error("wiki insert failed");
-    await tx.insert(pageRevisions).values({
-      pageId: id,
-      version: 1,
+  const [created] = await tx
+    .insert(knowledgePages)
+    .values({
+      id,
+      workspaceId: input.workspaceId,
+      slug,
       title: input.title,
+      folder: normalizeFolder(input.folder),
+      tags: normalizeTags(input.tags),
+      aliases: normalizeAltTitles(input.aliases, input.title),
+      props: input.props ?? {},
       body,
-      props: created.props,
-      author: input.author,
-      note: input.note ?? null,
+      version: 1,
+      sourceType: input.sourceType ?? null,
+      updatedBy: input.author,
       createdAt: at,
-    });
-    await syncLinks(tx, created);
-    await reresolveLinks(tx, created.workspaceId, namesOf(created));
-    return created;
+      updatedAt: at,
+    })
+    .returning();
+  if (!created) throw new Error("wiki insert failed");
+  await tx.insert(pageRevisions).values({
+    pageId: id,
+    version: 1,
+    title: input.title,
+    body,
+    props: created.props,
+    author: input.author,
+    note: input.note ?? null,
+    createdAt: at,
   });
-  await afterWrite(deps, row, "api");
-  return row;
+  await syncLinks(tx, created);
+  await reresolveLinks(tx, created.workspaceId, namesOf(created));
+  return created;
 }
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -396,6 +440,8 @@ export async function savePage(
   },
 ): Promise<WikiRow> {
   if (input.title !== undefined && input.title !== input.row.title) checkTitle(input.title);
+  rejectNul([input.body, input.title, input.folder, input.tags, input.aliases, input.props, input.note]);
+  if (input.body !== undefined) checkLinks(input.body);
   const at = deps.now();
   const result = await writeTx(deps.db, async (tx) => {
     const row = await livePage(tx, input.row.id);
@@ -462,6 +508,7 @@ export async function patchPage(
   set: Partial<typeof knowledgePages.$inferInsert>,
   guard?: (tx: Tx, page: WikiRow) => Promise<void>,
 ) {
+  rejectNul(set);
   const at = deps.now();
   const updated = await writeTx(deps.db, async (tx) => {
     const page = await livePage(tx, row.id);

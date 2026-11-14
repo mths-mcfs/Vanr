@@ -19,9 +19,35 @@ export const INLINE_RAW =
 
 /**
  * A whole paragraph that is a raw block: $$ math $$, a multi-line %% comment %%, or a paragraph with an
- * HTML tag split over more than one line (the indentation of the inner lines would be lost).
+ * HTML tag split over more than one line (the indentation of the inner lines would be lost). The same
+ * as `/^(?:\$\$[\s\S]*?\$\$|%%[\s\S]*?%%)\s*$|<[A-Za-z][\w-]*\s[^<>]*\n[^<>]*>/`, in one pass: that
+ * expression backtracks over every line break of an unclosed tag (quadratic in the paragraph).
  */
-const BLOCK_RAW = /^(?:\$\$[\s\S]*?\$\$|%%[\s\S]*?%%)\s*$|<[A-Za-z][\w-]*\s[^<>]*\n[^<>]*>/;
+export function isBlockRaw(text: string): boolean {
+  const trimmed = text.trimEnd();
+  for (const fence of ["$$", "%%"])
+    if (trimmed.length >= 4 && trimmed.startsWith(fence) && trimmed.endsWith(fence)) return true;
+  // `<tag` then one space; then up to the first `<` or `>`: a `>` there with a line break before it.
+  const word = /[\w-]/;
+  for (let i = text.indexOf("<"); i >= 0; ) {
+    let j = i + 1;
+    if (!/[A-Za-z]/.test(text[j] ?? "")) {
+      i = text.indexOf("<", j);
+      continue;
+    }
+    j++;
+    while (j < text.length && word.test(text[j] as string)) j++;
+    if (!/\s/.test(text[j] ?? "")) {
+      i = text.indexOf("<", j);
+      continue;
+    }
+    let broken = false;
+    for (j++; j < text.length && text[j] !== "<" && text[j] !== ">"; j++) if (text[j] === "\n") broken = true;
+    if (text[j] === ">" && broken) return true;
+    i = text.indexOf("<", j);
+  }
+  return false;
+}
 
 export function rawKind(raw: string): RawKind | "link" {
   if (raw.startsWith("[[") || raw.startsWith("![[")) return "link";
@@ -62,7 +88,7 @@ export function remarkWikiSyntax() {
         const b = child.position?.end.offset;
         const slice = a !== undefined && b !== undefined ? src.slice(a, b) : null;
         if (slice !== null) {
-          if (child.type === "paragraph" && BLOCK_RAW.test(slice)) {
+          if (child.type === "paragraph" && isBlockRaw(slice)) {
             out.push({ type: "paragraph", children: [{ type: "wikiRaw", value: slice.trimEnd() }] });
             continue;
           }
