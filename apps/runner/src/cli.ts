@@ -39,7 +39,7 @@ export function cliEnv(
 }
 
 /**
- * An agent command (`run_code`, a shell job): the `claude` and `codex` called from inside it find an
+ * An agent command (`execute_code`, a shell job): the `claude` and `codex` called from inside it find an
  * empty config folder, not the login of whoever paired. It does not stop someone who wants around it (the
  * command runs as the runner's user and can read the person's folder); it avoids using the plan by accident.
  */
