@@ -28,6 +28,17 @@ const BATCH = 50;
  */
 const STUCK_MS = 5 * 60_000;
 const MAX_ATTEMPTS = 3;
+/**
+ * A new attempt of an email goes out only while the provider still keeps its idempotency key (Resend keeps
+ * it 24 hours): past this age the attempt could send a second email, so the delivery ends failed with
+ * `email_outcome_unknown` instead. An email a day late is worth less than the risk of sending it twice. The
+ * age counts from the delivery's `createdAt`, an upper bound of the first attempt (the exact time of the
+ * first attempt needs a column, for when the schema opens): after a very long postponement (quiet hours, do
+ * not disturb) a retry of a first attempt that failed in a retryable way is dropped, and the person goes
+ * without that email (the notification stays in the app). The first attempt is never refused for its age.
+ * The hour of margin covers the backoff between attempts and the clocks.
+ */
+const EMAIL_RETRY_MAX_AGE_MS = 23 * 3600_000;
 /** A subscription that fails this many times in a row (other than 404/410) is removed. */
 const MAX_SUB_FAILURES = 5;
 
@@ -238,7 +249,7 @@ async function deliver(deps: AppDeps, d: Delivery): Promise<Outcome> {
   } as Pick<AppNotification, "reason" | "latest" | "source">;
   return d.channel === "push"
     ? sendPush(deps, row, settings, who, n)
-    : sendEmail(deps, row, settings, who, n, d.id);
+    : sendEmail(deps, row, settings, who, n, d);
 }
 
 async function actorName(deps: AppDeps, row: Row): Promise<string> {
@@ -316,8 +327,11 @@ async function sendEmail(
   settings: NotificationSettings,
   who: string,
   n: Pick<AppNotification, "reason" | "latest" | "source">,
-  deliveryId: string,
+  d: Delivery,
 ): Promise<Outcome> {
+  // `attempts` already counts this one (the claim adds it; a postponement gives it back).
+  if (d.attempts > 1 && deps.now().getTime() - d.createdAt.getTime() >= EMAIL_RETRY_MAX_AGE_MS)
+    return { status: "failed", note: "email_outcome_unknown" };
   const [user] = await deps.db.select({ email: users.email }).from(users).where(eq(users.id, row.userId));
   if (!user) return { status: "skipped", note: "no_user" };
   const [workspace] = await deps.db
@@ -342,7 +356,7 @@ async function sendEmail(
     link,
     // Every attempt of this delivery carries the same key, so an accepted attempt that timed out here is
     // not sent twice.
-    idempotencyKey: `notification-delivery/${deliveryId}`,
+    idempotencyKey: `notification-delivery/${d.id}`,
   });
   // A provider that already had this key with another payload sent the first attempt: no second email.
   if (sent.ok)

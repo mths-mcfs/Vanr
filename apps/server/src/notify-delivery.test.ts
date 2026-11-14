@@ -154,10 +154,12 @@ describe("email delivery of a notification", () => {
 function resendWithKeys() {
   const kept = new Map<string, string>();
   const sentBodies: string[] = [];
+  const keys: string[] = [];
   let lose = true;
   const fetchFn: typeof fetch = Object.assign(
     async (_url: string | URL | Request, init?: RequestInit) => {
       const key = new Headers(init?.headers).get("idempotency-key") ?? "";
+      keys.push(key);
       const body = String(init?.body);
       const old = kept.get(key);
       if (old !== undefined)
@@ -174,7 +176,14 @@ function resendWithKeys() {
     },
     { preconnect: () => {} },
   );
-  return { fetchFn, sentBodies };
+  return {
+    fetchFn,
+    sentBodies,
+    keys,
+    loseNone: () => {
+      lose = false;
+    },
+  };
 }
 
 describe("email delivery against the provider's idempotency keys", () => {
@@ -207,6 +216,54 @@ describe("email delivery against the provider's idempotency keys", () => {
       clock = later(5);
       await drainDeliveries(server.deps);
       expect(provider.sentBodies.length).toBe(1);
+    } finally {
+      server.deps.mailer = mailer;
+    }
+  });
+
+  const hours = (h: number, m = 0) => (h * 60 + m) * 60_000;
+
+  for (const [age, resent] of [
+    [hours(22, 59), true],
+    [hours(23, 1), false],
+  ] as const) {
+    test(`a retry ${resent ? "22 h 59 min" : "23 h 01 min"} after the delivery was created ${resent ? "goes out with the same key" : "ends email_outcome_unknown without calling the provider"}`, async () => {
+      const provider = resendWithKeys();
+      const mailer = server.deps.mailer;
+      server.deps.mailer = resendMailer("k", "n@example.com", { fetch: provider.fetchFn });
+      const created = clock;
+      try {
+        expect(await drainDeliveries(server.deps)).toBe(0);
+        expect(await row()).toMatchObject({ status: "pending", attempts: 1, note: "email_timeout" });
+        clock = new Date(created.getTime() + age);
+        await drainDeliveries(server.deps);
+        if (resent) {
+          expect(await row()).toMatchObject({ status: "sent", attempts: 2 });
+          expect(provider.keys).toEqual([
+            `notification-delivery/${delivery}`,
+            `notification-delivery/${delivery}`,
+          ]);
+        } else {
+          expect(await row()).toMatchObject({ status: "failed", attempts: 2, note: "email_outcome_unknown" });
+          expect(provider.keys).toEqual([`notification-delivery/${delivery}`]);
+        }
+        expect(provider.sentBodies.length).toBe(1);
+      } finally {
+        server.deps.mailer = mailer;
+      }
+    });
+  }
+
+  test("a first attempt 30 h after the delivery was created (postponed) goes out", async () => {
+    const provider = resendWithKeys();
+    provider.loseNone();
+    const mailer = server.deps.mailer;
+    server.deps.mailer = resendMailer("k", "n@example.com", { fetch: provider.fetchFn });
+    try {
+      clock = new Date(clock.getTime() + hours(30));
+      expect(await drainDeliveries(server.deps)).toBe(1);
+      expect(await row()).toMatchObject({ status: "sent", attempts: 1 });
+      expect(provider.keys).toEqual([`notification-delivery/${delivery}`]);
     } finally {
       server.deps.mailer = mailer;
     }
