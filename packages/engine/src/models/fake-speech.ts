@@ -8,16 +8,16 @@
  */
 const SPEECH: Readonly<Record<string, readonly [doing: string, done: string, detail?: string]>> = {
   remember: ["save to memory", "Saved to memory", "text"],
-  update_memory: ["update the memory", "Updated the memory", "text"],
+  edit_memory: ["edit the memory", "Edited the memory", "text"],
   forget: ["remove from memory", "Removed from memory"],
   search: ["search", "Searched", "query"],
   react: ["react", "Reacted", "emoji"],
   schedule_reminder: ["set a reminder", "Set the reminder", "text"],
   list_reminders: ["check the reminders", "Checked the reminders", "="],
-  cancel_reminder: ["cancel the reminder", "Canceled the reminder"],
-  load_skill: ["open the skill", "Opened the skill", "name"],
-  read_skill_file: ["read the skill file", "Read the skill file", "path"],
-  ask_agent: ["ask another agent", "Asked another agent, and the answer was", "="],
+  delete_reminder: ["delete the reminder", "Deleted the reminder"],
+  use_skill: ["use the skill", "Used the skill", "name"],
+  open_skill_file: ["open the skill file", "Opened the skill file", "path"],
+  delegate_to_agent: ["hand this to another agent", "Handed it to another agent, and the answer was", "="],
   post_message: ["post in the channel", "Posted in the channel", "channel"],
   ask_user: ["ask you", "Asked, and the answer was", "="],
   propose_instruction_change: [
@@ -31,8 +31,8 @@ const SPEECH: Readonly<Record<string, readonly [doing: string, done: string, det
   create_drive_file: ["create the file", "Created the file", "title"],
   update_drive_file: ["save the file", "Saved a new version of the file"],
   share_drive_file: ["show the file here", "Showed the file here"],
-  read_wiki_page: ["read the wiki page", "Read the wiki page", "slug"],
-  create_wiki_page: ["create the wiki page", "Created the wiki page", "title"],
+  open_wiki_page: ["open the wiki page", "Opened the wiki page", "slug"],
+  add_wiki_page: ["add the page to the wiki", "Added the page to the wiki", "title"],
   update_wiki_page: ["update the wiki page", "Updated the wiki page", "slug"],
   link_to_wiki: ["link the wiki pages", "Linked the wiki pages"],
   list_issues: ["look at the issues", "Looked at the issues"],
@@ -40,15 +40,15 @@ const SPEECH: Readonly<Record<string, readonly [doing: string, done: string, det
   update_issue: ["update the issue", "Updated the issue"],
   comment_issue: ["comment on the issue", "Commented on the issue", "text"],
   list_events: ["check the calendar", "Checked the calendar", "="],
-  find_free_time: ["look for a free slot", "Looked for a free slot", "="],
-  propose_event: ["propose the event", "Proposed the event", "title"],
-  create_routine: ["create the routine", "Created the routine", "schedule"],
+  find_available_time: ["look for an available time", "Looked for an available time", "="],
+  propose_calendar_event: ["propose the calendar event", "Proposed the calendar event", "title"],
+  schedule_routine: ["schedule the routine", "Scheduled the routine", "schedule"],
   list_routines: ["look at the routines", "Looked at the routines"],
   update_routine: ["update the routine", "Updated the routine"],
   open_debate: ["open the debate", "Opened the debate", "title"],
   read_debate: ["read the debate", "Read the debate"],
   post_in_debate: ["write in the debate", "Wrote in the debate", "body"],
-  run_code: ["run the command", "Ran the command", "="],
+  execute_code: ["run the command", "Ran the command", "="],
   read_file: ["read the file", "Read the file", "path"],
   write_file: ["write the file", "Wrote the file", "path"],
   list_files: ["list the folder", "Listed the folder", "path"],
@@ -58,7 +58,7 @@ const SPEECH: Readonly<Record<string, readonly [doing: string, done: string, det
   environment_start: ["start the environment", "Started the environment"],
   environment_stop: ["stop the environment", "Stopped the environment"],
   request_secret: ["ask for a secret", "Asked for the secret", "name"],
-  browser_open: ["open the site", "Opened the site", "^"],
+  browser_navigate: ["go to the site", "Went to the site", "^"],
   browser_read: ["read the page", "Read the page", "^"],
   browser_click: ["click on the page", "Clicked on the page", "^"],
   browser_fill: ["fill in the field", "Filled in the field", "^"],
@@ -68,7 +68,7 @@ const SPEECH: Readonly<Record<string, readonly [doing: string, done: string, det
   browser_scroll: ["scroll the page", "Scrolled the page", "^"],
   browser_back: ["go back a page", "Went back a page", "^"],
   browser_wait: ["wait for the page", "Waited for the page", "^"],
-  browser_tabs: ["look at the tabs", "Looked at the tabs"],
+  browser_list_tabs: ["list the tabs", "Listed the tabs"],
   browser_upload: ["upload the file through the site", "Uploaded the file through the site", "path"],
   browser_type_secret: ["type the secret", "Typed the secret", "name"],
   browser_screenshot: ["take a screenshot of the page", "Took a screenshot of the page"],
@@ -107,7 +107,7 @@ const note = (text: string | undefined) => (text?.trim() ? ` (${text.trim().repl
 
 /** Known tool answers (written for the model) in the words of whoever reads them. */
 const KNOWN_RESULTS: readonly [RegExp, (m: RegExpMatchArray) => string][] = [
-  // `run_code` output: what the command printed, or the exit code and the error.
+  // `execute_code` output: what the command printed, or the exit code and the error.
   // The text arrives trimmed: output with only whitespace leaves the marker (`stdout:`) with no newline after it.
   [
     /^exit code: (\S+)(?:\nstdout:(?:\n([\s\S]*?))?)?(?:\nstderr:(?:\n([\s\S]*?))?)?(?:\n\(output truncated on the environment\))?$/,
