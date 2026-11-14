@@ -27,7 +27,7 @@ export const PRICE_TABLE: readonly DatedPrice[] = [
       usGeo: 1.1,
     },
   },
-  { model: "claude-sonnet-5-5", from: FIRST, price: { ...tokens(2, 10, 0.2), usGeo: 1.1 } },
+  { model: "claude-sonnet-5-5", from: FIRST, price: { ...tokens(2, 10, 0.1), usGeo: 1.1 } },
   { model: "claude-opus-5-5", from: FIRST, price: { ...tokens(4, 20, 0.2), fast: 2, usGeo: 1.1 } },
   // Search embeddings (Voyage): input only. https://www.mongodb.com/docs/voyageai/management/billing/
   { model: "voyage-4", from: FIRST, price: tokens(0.06, 0, 0) },

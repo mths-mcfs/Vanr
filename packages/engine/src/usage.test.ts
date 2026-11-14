@@ -50,6 +50,17 @@ describe("price per call", () => {
     );
   });
 
+  test("Sonnet 5.5 is priced at 2 in, 10 out and 0.10 per million cache reads", () => {
+    const u = {
+      inputTokens: 1_000_000,
+      outputTokens: 1_000_000,
+      cachedTokens: 1_000_000,
+      cacheWriteTokens: 0,
+    };
+    expect(costUsd(PRICES, { model: "claude-sonnet-5-5", usage: u, at })).toBeCloseTo(12.1, 6);
+    expect(PRICES.at("claude-sonnet-5-5", at)).toMatchObject({ input: 2, output: 10, cacheRead: 0.1 });
+  });
+
   test("the environment's plan costs nothing", () => {
     expect(
       costUsd(PRICES, { model: "claude-opus-5-5", usage: usage(1_000_000), at, keySource: "plan" }),

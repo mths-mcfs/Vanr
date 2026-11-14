@@ -11,20 +11,44 @@ export type HasFacet = (typeof HAS_FACETS)[number];
 const IS_FACETS = ["thread", "dm", "pinned", "agent", "mine"] as const;
 export type IsFacet = (typeof IS_FACETS)[number];
 
-/** `is:` and `type:` words that pick the source kind. */
-const KIND_WORDS: Record<string, SourceKind> = {
-  message: "message",
-  messages: "message",
-  wiki: "wiki",
-  page: "wiki",
-  file: "file",
-  files: "file",
-  issue: "issue",
-  issues: "issue",
-  debate: "debate",
-  row: "db_row",
-  event: "event",
+/**
+ * `is:` and `type:` words that pick the source kind, by interface language. People type them in the
+ * search box, so they are interface text: each language adds its own words for the same kinds.
+ */
+const KIND_WORDS_BY_LANGUAGE: Readonly<Record<"en" | "pt-BR", Readonly<Record<string, SourceKind>>>> = {
+  en: {
+    message: "message",
+    messages: "message",
+    wiki: "wiki",
+    page: "wiki",
+    file: "file",
+    files: "file",
+    issue: "issue",
+    issues: "issue",
+    debate: "debate",
+    row: "db_row",
+    event: "event",
+  },
+  "pt-BR": {
+    mensagem: "message",
+    mensagens: "message",
+    pagina: "wiki",
+    arquivo: "file",
+    arquivos: "file",
+    tarefa: "issue",
+    tarefas: "issue",
+    topico: "debate",
+    linha: "db_row",
+    evento: "event",
+    eventos: "event",
+  },
 };
+
+/** Every language's words at once: the query is read the same whatever the interface language. */
+const KIND_WORDS: Readonly<Record<string, SourceKind>> = Object.assign(
+  {},
+  ...Object.values(KIND_WORDS_BY_LANGUAGE),
+);
 
 /** The query as read: free text (words, phrases and exclusions) and the operators still to resolve. */
 export interface ParsedQuery {

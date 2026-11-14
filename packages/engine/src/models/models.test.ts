@@ -118,6 +118,9 @@ describe("cost", () => {
     const u = { inputTokens: 1_000_000, cachedTokens: 0, cacheWriteTokens: 0, outputTokens: 1_000_000 };
     expect(callCostUsd("claude-opus-5-5", u)).toBeCloseTo(24);
     expect(callCostUsd("claude-sonnet-5-5", u)).toBeCloseTo(12);
+    // Sonnet cache reads at the official 0.10/M: 1M read + 1M written (2 × 1.25) = 0.10 + 2.50.
+    const cache = { inputTokens: 0, cachedTokens: 1_000_000, cacheWriteTokens: 1_000_000, outputTokens: 0 };
+    expect(callCostUsd("claude-sonnet-5-5", cache)).toBeCloseTo(2.6, 6);
     // A 1M prompt is over 100k: the upper tier.
     expect(callCostUsd("claude-haiku-5-5", u)).toBeCloseTo(3);
     const small = { inputTokens: 50_000, cachedTokens: 40_000, cacheWriteTokens: 8_000, outputTokens: 1_000 };
@@ -238,9 +241,10 @@ function sseWithAdvisor(): string {
 }
 
 describe("advisor", () => {
-  test("valid pairs: Haiku and Sonnet consult Opus; Opus and an inverted pair do not", () => {
+  test("valid pairs: Haiku consults Opus; Sonnet, Opus and an inverted pair do not", () => {
     expect(advisorPairOk("claude-haiku-5-5", "claude-opus-5-5")).toBe(true);
-    expect(advisorPairOk("claude-sonnet-5-5", "claude-opus-5-5")).toBe(true);
+    expect(advisorPairOk("claude-haiku-5-5", "claude-sonnet-5-5")).toBe(false);
+    expect(advisorPairOk("claude-sonnet-5-5", "claude-opus-5-5")).toBe(false);
     expect(advisorPairOk("claude-opus-5-5", "claude-opus-5-5")).toBe(false);
     expect(advisorPairOk("claude-opus-5-5", "claude-haiku-5-5")).toBe(false);
     expect(advisorPairOk("claude-sonnet-5-5", "claude-haiku-5-5")).toBe(false);

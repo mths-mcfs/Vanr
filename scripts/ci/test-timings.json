@@ -47,6 +47,7 @@
     "packages/engine/src/search-pg.test.ts": 7500,
     "packages/engine/src/usage.test.ts": 800,
     "packages/engine/src/models/models.test.ts": 200,
-    "packages/engine/src/models/fake-speech.test.ts": 15
+    "packages/engine/src/models/fake-speech.test.ts": 15,
+    "packages/engine/src/search-query.test.ts": 15
   }
 }

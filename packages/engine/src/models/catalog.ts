@@ -25,20 +25,19 @@ export const MODELS: readonly CatalogModel[] = [
     longPrompt: { above: 100_000, price: { input: 0.5, output: 2.5, cacheRead: 0.05 } },
     recommended: true,
   },
-  { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5", price: { input: 2, output: 10, cacheRead: 0.2 } },
+  { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5", price: { input: 2, output: 10, cacheRead: 0.1 } },
   { id: "claude-opus-5-5", label: "Claude Opus 5.5", price: { input: 4, output: 20, cacheRead: 0.2 } },
 ];
 
 export const DEFAULT_MODEL = "claude-haiku-5-5";
 
 /**
- * Advisors each executor accepts, within the catalog (the API's pair table, October 2026). The advisor
- * has to be at least as capable as the executor; an equal pair does not help and is left out. Opus has
- * no advisor here: the only model more capable than it is outside the catalog.
+ * Advisors each executor accepts. The product picks the pair itself, so it follows the model rule:
+ * Haiku executes and Opus advises. Sonnet stays in the catalog for whoever picks it for an agent, but
+ * never enters a pair. Opus has no advisor: the only model more capable than it is outside the catalog.
  */
 export const ADVISOR_PAIRS: Readonly<Record<string, readonly string[]>> = {
-  "claude-haiku-5-5": ["claude-opus-5-5", "claude-sonnet-5-5"],
-  "claude-sonnet-5-5": ["claude-opus-5-5"],
+  "claude-haiku-5-5": ["claude-opus-5-5"],
 };
 /** Ceiling of advisor calls in one request. */
 export const ADVISOR_MAX_USES = 5;
