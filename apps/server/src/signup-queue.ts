@@ -22,13 +22,17 @@ export interface SignupQueueLimits {
   sectionMs: number;
   /** Requests that may wait at once; past it, 503 with Retry-After without waiting. */
   maxWaiting: number;
-  /** When a turn's deadline passes (tests replace it with a clock of their own). */
+  /** When a body's, a wait's and a turn's deadline pass (tests replace them with clocks of their own). */
+  bodyDeadline: (ms: number) => Deadline;
+  waitDeadline: (ms: number) => Deadline;
   sectionDeadline: (ms: number) => Deadline;
   /**
    * How long the first user's creation may wait for the database before the server reports it: past it,
    * an error is logged once per period and the health check says sign-up waits for the database.
    */
   stuckInsertMs: number;
+  /** Runs `check` every `ms` until the returned stop is called (tests tick it themselves). */
+  every: (ms: number, check: () => void) => () => void;
 }
 
 /** A deadline that resolves when it passes, unless cancelled before. */
@@ -51,8 +55,15 @@ export const SIGNUP_QUEUE_LIMITS: SignupQueueLimits = {
   waitMs: 10_000,
   sectionMs: 15_000,
   maxWaiting: 32,
+  bodyDeadline: realDeadline,
+  waitDeadline: realDeadline,
   sectionDeadline: realDeadline,
   stuckInsertMs: 60_000,
+  every: (ms, check) => {
+    const timer = setInterval(check, ms);
+    timer.unref();
+    return () => clearInterval(timer);
+  },
 };
 
 const RETRY_AFTER_S = 5;
@@ -190,10 +201,8 @@ async function readBody(req: Request, limits: SignupQueueLimits): Promise<Uint8A
   const reader = req.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const late = new Promise<"late">((resolve) => {
-    timer = setTimeout(() => resolve("late"), limits.bodyMs);
-  });
+  const deadline = limits.bodyDeadline(limits.bodyMs);
+  const late = deadline.passed.then(() => "late" as const);
   try {
     for (;;) {
       const next = await Promise.race([reader.read(), late]);
@@ -204,7 +213,7 @@ async function readBody(req: Request, limits: SignupQueueLimits): Promise<Uint8A
       chunks.push(next.value);
     }
   } finally {
-    clearTimeout(timer);
+    deadline.cancel();
     reader.cancel().catch(() => {});
   }
   const body = new Uint8Array(size);
@@ -259,21 +268,23 @@ function oneAtATime(limits: SignupQueueLimits) {
     if (!running) return runNow(task);
     if (waiting.length >= limits.maxWaiting) return Promise.resolve(busy());
     return new Promise<Response>((resolve) => {
-      let timer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = limits.waitDeadline(limits.waitMs);
       const leave = (answer: Response) => {
         const i = waiting.indexOf(turn);
         if (i >= 0) waiting.splice(i, 1);
-        clearTimeout(timer);
+        deadline.cancel();
         signal.removeEventListener("abort", gaveUp);
         resolve(answer);
       };
       const gaveUp = () => leave(new Response(null, { status: 499 }));
       const turn = () => {
-        clearTimeout(timer);
+        deadline.cancel();
         signal.removeEventListener("abort", gaveUp);
         resolve(runNow(task));
       };
-      timer = setTimeout(() => leave(busy()), limits.waitMs);
+      deadline.passed.then(() => {
+        if (waiting.includes(turn)) leave(busy());
+      });
       signal.addEventListener("abort", gaveUp, { once: true });
       waiting.push(turn);
     });

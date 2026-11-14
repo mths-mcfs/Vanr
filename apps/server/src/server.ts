@@ -212,7 +212,7 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   };
   // An INSERT of the first user that the database never answers holds the place: the server doesn't make
   // a way out, but it says so, once per period, and the health check reports it.
-  const stuckWatch = setInterval(() => {
+  const stopWatch = signupLimits.every(signupLimits.stuckInsertMs, () => {
     const ms = firstUser.insertingForMs();
     if (ms !== null && ms > signupLimits.stuckInsertMs)
       log.error("signup.first_user_insert_waiting", {
@@ -221,9 +221,8 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
           "The first user's account is waiting for the database to answer its INSERT; sign-up stays closed " +
           "until it does. Restarting the server releases the place.",
       });
-  }, signupLimits.stuckInsertMs);
-  stuckWatch.unref();
-  undo.push(() => clearInterval(stuckWatch));
+  });
+  undo.push(() => stopWatch());
   origins = [publicUrl, ...(opts.extraOrigins ?? [])];
   const auth = createAuth({
     db,

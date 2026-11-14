@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type RunnerFrame, runnerFrame } from "@vanr/engine/runner-protocol";
@@ -464,4 +464,207 @@ test("a request that arrives before the secrets are read waits for the read, and
   });
   await reading;
   expect(sent).toMatchObject([{ type: "result", id: "req_1", ok: false, error: { code: "internal" } }]);
+});
+
+test("property: reads of the secrets that end in any order never take a mask out (the list only grows)", async () => {
+  const r = seeded(4040);
+  const values = ["SECRET-A-0001", "SECRET-B-0002", "SECRET-C-0003", "SECRET-D-0004"];
+  for (let round = 0; round < 300; round++) {
+    const reads: { masks: [string, string][]; done: (m: [string, string][]) => void }[] = [];
+    const { c, call } = fakeClient({
+      maskState: { kind: "empty" },
+      agents: [agent],
+      secrets: {
+        masks: () =>
+          new Promise<[string, string][]>((done) => {
+            const masks = values
+              .filter(() => r.int(2, "has"))
+              .map((v): [string, string] => [v, `[secret:${v}]`]);
+            reads.push({ masks, done });
+          }),
+        lock: () => {},
+      },
+    });
+    const n = 2 + r.int(4, "reads");
+    const pending = Array.from({ length: n }, () => call("refreshMasks"));
+    // The reads end in an order the generator picks; each one, as it ends, may only add.
+    const order = reads.map((_, i) => i).sort(() => r.int(3) - 1);
+    const expected = new Set<string>();
+    for (const i of order) {
+      const read = reads[i];
+      if (!read) continue;
+      read.done(read.masks);
+      await pending[i];
+      for (const [v] of read.masks) expected.add(v);
+      const state = Reflect.get(c, "maskState") as { kind: string; all?: [string, string][] };
+      expect(new Set((state.all ?? []).map(([v]) => v))).toEqual(expected);
+    }
+  }
+});
+
+test("property: a request aborted at any point of waiting has no effect and no answer (write, exec, job.start)", async () => {
+  const home = mkdtempSync(join(tmpdir(), "runner-abort-"));
+  try {
+    const work = join(home, "ws");
+    const { Access } = await import("./access");
+    const { defaultPolicyContext } = await import("./sandbox");
+    const tools = { claude: false, codex: false, commands: true, browser: false };
+    const access = new Access(() => ({ access: { folders: [], tools }, workDir: work, paused: false }));
+    const root = access.agentRoot(agent);
+    let points = 0;
+    let abortAt = -1;
+    let abort: () => void = () => {};
+    // Each async step of the secrets is a point where the request can be aborted (the connection drops).
+    const gate = async <T>(value: T): Promise<T> => {
+      const k = points++;
+      await Promise.resolve();
+      if (k === abortAt) abort();
+      return value;
+    };
+    const secrets = {
+      masks: () => gate([] as [string, string][]),
+      materialize: () => gate({ env: {}, masks: [] as [string, string][], release: () => {} }),
+      secretFiles: () => [],
+      lock: () => {},
+    };
+    const policy = defaultPolicyContext(home);
+    const cases = [
+      {
+        op: "write",
+        args: (n: number) => ({ path: `w${n}.txt`, content: "x" }),
+        effect: (n: number) => existsSync(join(root, `w${n}.txt`)),
+      },
+      {
+        op: "exec",
+        args: (n: number) => ({ command: `touch '${join(home, `e${n}`)}'` }),
+        effect: (n: number) => existsSync(join(home, `e${n}`)),
+      },
+      {
+        op: "job.start",
+        args: (n: number) => ({
+          jobId: `job_${String(n).padStart(8, "0")}`,
+          executor: "shell",
+          title: "t",
+          prompt: "true",
+        }),
+        effect: (n: number, jobs?: Jobs) =>
+          (jobs?.pending() ?? []).some((j) => j.jobId === `job_${String(n).padStart(8, "0")}`),
+      },
+    ];
+    let n = 0;
+    const tried: Record<string, number> = {};
+    for (const kase of cases) {
+      for (let at = -1; ; at++) {
+        n++;
+        points = 0;
+        abortAt = at;
+        const jobs = new Jobs({
+          home: join(home, `h${n}`),
+          access,
+          secrets: secrets as never,
+          cli: {} as never,
+          maxConcurrent: () => 5,
+          maxSeconds: () => 30,
+          send: () => true,
+          bins: { claude: "claude", codex: "codex" },
+          sandbox: sandboxOff(),
+          policy,
+        } as never);
+        const { c, sent, call } = fakeClient({
+          maskState: { kind: "unknown" },
+          agents: [agent],
+          secrets,
+          access,
+          sandbox: sandboxOff(),
+          policy,
+          jobs,
+          opts: { log: () => {}, backoffBaseMs: 60_000 },
+        });
+        abort = () => (Reflect.get(c, "inflight") as Map<string, AbortController>).get("req_1")?.abort();
+        const reading = call("refreshMasks");
+        await call("onRequest", {
+          type: "request",
+          id: "req_1",
+          op: kase.op,
+          agent,
+          stream: false,
+          args: kase.args(n),
+        });
+        await reading;
+        clearTimeout(Reflect.get(c, "readRetry") as ReturnType<typeof setTimeout>);
+        const effect = kase.effect(n, jobs);
+        const answered = sent.some((f) => f.type === "result");
+        if (at === -1) {
+          // Not aborted: the op happens and answers (the check is not vacuous).
+          expect([kase.op, effect, answered]).toEqual([kase.op, true, true]);
+          continue;
+        }
+        if (at >= points) break;
+        expect([kase.op, at, effect, answered]).toEqual([kase.op, at, false, false]);
+        tried[kase.op] = (tried[kase.op] ?? 0) + 1;
+      }
+    }
+    console.log(`[abort] aborted at every waiting point: ${JSON.stringify(tried)}`);
+    expect(Object.keys(tried).sort()).toEqual(["exec", "job.start", "write"]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("property: however many reconnections fail to read the secrets, each pending job is held once", async () => {
+  const home = mkdtempSync(join(tmpdir(), "runner-held-"));
+  try {
+    mkdirSync(join(home, "jobs"));
+    const job = (i: number) => ({
+      jobId: `job_${String(i).padStart(8, "0")}`,
+      status: "done",
+      exitCode: 0,
+      result: "ok",
+      files: [],
+      session: null,
+      startedAt: null,
+      endedAt: null,
+      denied: [],
+      blocked: [],
+      diff: "x".repeat(50_000),
+      agent,
+      executor: "shell",
+      delivered: false,
+    });
+    const journal = [job(1), job(2), job(3)];
+    writeFileSync(join(home, "jobs", "journal.json"), JSON.stringify(journal));
+    let client: { call: (name: string, ...a: unknown[]) => unknown } | undefined;
+    const jobs = new Jobs({
+      home,
+      send: (e: RunnerFrame) => client?.call("send", e),
+    } as unknown as ConstructorParameters<typeof Jobs>[0]);
+    const made = fakeClient({
+      maskState: { kind: "unknown" },
+      jobs,
+      agents: [agent],
+      opts: { log: () => {}, backoffBaseMs: 60_000 },
+      secrets: { masks: async () => Promise.reject(new Error("cannot decrypt")), lock: () => {} },
+    });
+    client = made;
+    const held = () => Reflect.get(made.c, "heldFrames") as { frame: RunnerFrame }[];
+    const sizes: number[] = [];
+    for (let i = 0; i < 300; i++) {
+      jobs.redeliver();
+      await made.call("refreshMasks");
+      sizes.push(held().length);
+    }
+    clearTimeout(Reflect.get(made.c, "readRetry") as ReturnType<typeof setTimeout>);
+    expect(new Set(sizes)).toEqual(new Set([3]));
+    expect(held().map((h) => h.frame.type === "job.done" && h.frame.job.jobId)).toEqual(
+      journal.map((j) => j.jobId),
+    );
+    // The read works: each job goes once.
+    Reflect.set(made.c, "secrets", { masks: async () => MASKS, lock: () => {} });
+    await made.call("refreshMasks");
+    expect(
+      made.sent.filter((f) => f.type === "job.done").map((f) => f.type === "job.done" && f.job.jobId),
+    ).toEqual(journal.map((j) => j.jobId));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
