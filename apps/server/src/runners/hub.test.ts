@@ -77,6 +77,24 @@ const failure = async (p: Promise<unknown>) => {
 };
 
 describe("runner hub", () => {
+  test("cancellation before or immediately after call never reaches the runner", async () => {
+    const r = await runner("canceled");
+    try {
+      for (const immediate of [false, true]) {
+        const abort = new AbortController();
+        if (!immediate) abort.abort();
+        const call = failure(
+          hub.call("canceled", "write", { path: "x", content: "x" }, { signal: abort.signal, timeoutMs: 20 }),
+        );
+        abort.abort();
+        expect(await call).toMatchObject({ code: "canceled" });
+      }
+      expect(r.frames).toEqual([]);
+    } finally {
+      r.ws.close();
+    }
+  });
+
   test("a call goes out as a request and resolves with the runner's result; output streams to the caller", async () => {
     const r = await runner("r1");
     const chunks: string[] = [];

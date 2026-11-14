@@ -3,7 +3,7 @@
 // rows; an occurrence changed on its own becomes a separate event and leaves the series through `exdates`.
 import type { ActorRef, CalendarEvent, CalendarProposal, RecurrenceRule } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
-import { localParts, occurrences } from "@vanr/engine/recurrence";
+import { localParts, occurrences, zonedTime } from "@vanr/engine/recurrence";
 import { and, eq, gte, lt, or, sql } from "drizzle-orm";
 import type { AppDeps, WorkspaceMember } from "./context";
 import { notFound } from "./http";
@@ -28,10 +28,21 @@ function seriesRule(row: EventRow): RecurrenceRule | null {
   return { ...rest, timezone: rule.timezone || row.timezone, start: row.start.toISOString() };
 }
 
+const daySpan = (row: EventRow) =>
+  (Date.parse(localDate(row.end, row.timezone)) - Date.parse(localDate(row.start, row.timezone))) /
+  86_400_000;
+const shiftDays = (at: Date, days: number, tz: string) => {
+  const p = localParts(at, tz);
+  return zonedTime({ y: p.y, m: p.m, d: p.d + days }, 0, 0, tz);
+};
+const eventEnd = (row: EventRow, start: Date) =>
+  row.allDay
+    ? shiftDays(start, daySpan(row), row.timezone)
+    : new Date(start.getTime() + row.end.getTime() - row.start.getTime());
+
 export function toEvent(row: EventRow, occurrence?: Date): CalendarEvent {
-  const duration = row.end.getTime() - row.start.getTime();
   const start = occurrence ?? row.start;
-  const end = new Date(start.getTime() + duration);
+  const end = eventEnd(row, start);
   const rule = ruleOf(row);
   return {
     id: row.id,
@@ -60,8 +71,11 @@ export function expand(row: EventRow, from: Date, to: Date): CalendarEvent[] {
   const rule = seriesRule(row);
   if (!rule) return row.end > from && row.start < to ? [toEvent(row)] : [];
   const skip = new Set(row.exdates);
-  return occurrences(rule, { from: new Date(from.getTime() - duration), to, limit: 500 })
-    .filter((at) => !skip.has(at.toISOString()) && at.getTime() + duration > from.getTime())
+  const since = row.allDay
+    ? shiftDays(from, -daySpan(row), row.timezone)
+    : new Date(from.getTime() - duration);
+  return occurrences(rule, { from: since, to, limit: 500 })
+    .filter((at) => !skip.has(at.toISOString()) && eventEnd(row, at) > from)
     .map((at) => toEvent(row, at));
 }
 

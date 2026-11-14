@@ -8,7 +8,8 @@ import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { dueAt, silenceUntil, wantsChannel } from "@vanr/engine/notify-rules";
 import { PRODUCT } from "@vanr/product";
-import { and, eq, inArray, lt, sql } from "drizzle-orm";
+import { and, eq, inArray, lt, ne, sql } from "drizzle-orm";
+import { canReadChannel } from "./channels";
 import type { AppDeps } from "./context";
 import { log } from "./logger";
 import { requestEnded, requestStates, waitingKeyOf } from "./notify-requests";
@@ -70,37 +71,47 @@ export async function scheduleDeliveries(
   const now = deps.now();
   let kick = false;
   for (const channel of channels) {
-    if (channel === "email") {
-      const [already] = await deps.db
-        .select({ id: notificationDeliveries.id })
-        .from(notificationDeliveries)
-        .where(
-          and(
-            eq(notificationDeliveries.notificationId, row.id),
-            eq(notificationDeliveries.channel, "email"),
-            eq(notificationDeliveries.status, "sent"),
-            sql`${notificationDeliveries.createdAt} >= ${row.createdAt.toISOString()}::timestamptz`,
-          ),
-        )
-        .limit(1);
-      if (already) continue;
-    }
     const at = dueAt(channel, { critical: row.critical }, settings, tz, now);
-    const inserted = await deps.db
-      .insert(notificationDeliveries)
-      .values({
-        id: newId("ndl"),
-        workspaceId: row.workspaceId,
-        userId: row.userId,
-        notificationId: row.id,
-        channel,
-        cause: opts.reminder ? "reminder" : "event",
-        dueAt: at,
-        createdAt: now,
-      })
-      .onConflictDoNothing()
-      .returning({ id: notificationDeliveries.id });
-    if (inserted.length > 0 && at <= now) kick = true;
+    const inserted = await deps.db.transaction(async (tx) => {
+      const [created] = await tx
+        .insert(notificationDeliveries)
+        .values({
+          id: newId("ndl"),
+          workspaceId: row.workspaceId,
+          userId: row.userId,
+          notificationId: row.id,
+          channel,
+          cause: opts.reminder ? "reminder" : "event",
+          dueAt: at,
+          createdAt: now,
+        })
+        .onConflictDoNothing()
+        .returning({ id: notificationDeliveries.id });
+      if (!created) return false;
+      if (channel === "email") {
+        // Check after inserting: an open delivery may have finished while the INSERT waited.
+        // Keep terminal failures too: the provider may have accepted an attempt whose answer was lost.
+        const [already] = await tx
+          .select({ id: notificationDeliveries.id })
+          .from(notificationDeliveries)
+          .where(
+            and(
+              eq(notificationDeliveries.notificationId, row.id),
+              eq(notificationDeliveries.channel, "email"),
+              ne(notificationDeliveries.id, created.id),
+              inArray(notificationDeliveries.status, ["sent", "failed"]),
+              sql`${notificationDeliveries.createdAt} >= ${row.createdAt.toISOString()}::timestamptz`,
+            ),
+          )
+          .limit(1);
+        if (already) {
+          await tx.delete(notificationDeliveries).where(eq(notificationDeliveries.id, created.id));
+          return false;
+        }
+      }
+      return true;
+    });
+    if (inserted && at <= now) kick = true;
   }
   // Already due: sends now in the background instead of waiting for the tick (tests wait with settle).
   if (kick) deps.runtime.track(drainDeliveries(deps), "notify.deliver");
@@ -226,6 +237,12 @@ async function deliver(deps: AppDeps, d: Delivery): Promise<Outcome> {
     .from(members)
     .where(and(eq(members.workspaceId, row.workspaceId), eq(members.userId, row.userId)));
   if (!member) return { status: "skipped", note: "not_member" };
+  const channelId = channelIdOf(row);
+  if (
+    channelId &&
+    !(await canReadChannel(db, { workspaceId: row.workspaceId, userId: row.userId, channelId }))
+  )
+    return { status: "skipped", note: "channel_access" };
   const settings = await settingsFor(db, row.workspaceId, row.userId);
   const view = {
     tab: row.tab,

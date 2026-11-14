@@ -145,6 +145,7 @@ export class RunnerHub {
     args: OpArgs<O>,
     opts: CallOptions = {},
   ): Promise<T> {
+    if (opts.signal?.aborted) throw new RunnerCallError("canceled", "Canceled");
     if (!this.isOnline(runnerId)) throw new RunnerCallError("offline", "The runner is offline");
     const release = await this.slot(runnerId, opts.signal);
     const id = newId("rq");
@@ -152,6 +153,7 @@ export class RunnerHub {
       if (this.pending.has(id)) this.send(runnerId, { type: "cancel", id });
     };
     try {
+      if (opts.signal?.aborted) throw new RunnerCallError("canceled", "Canceled");
       return await new Promise<T>((resolve, reject) => {
         const timer = setTimeout(() => {
           this.pending.delete(id);

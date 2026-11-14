@@ -4,7 +4,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { DEFAULT_SETTINGS } from "@vanr/engine/notify-rules";
-import { eq } from "drizzle-orm";
+import { eq, type SQL } from "drizzle-orm";
 import { SERVER_TEST_MS, startTestServer } from "../test/harness";
 import { resendMailer } from "./mailer";
 import { drainDeliveries, scheduleDeliveries } from "./notify-delivery";
@@ -93,8 +93,65 @@ async function row() {
 }
 
 const later = (minutes: number) => new Date(clock.getTime() + minutes * 60_000);
+async function notice() {
+  const [n] = await server.deps.db
+    .select()
+    .from(S.notifications)
+    .where(eq(S.notifications.id, `n${seq}`));
+  if (!n) throw new Error("no notification");
+  return n;
+}
 
 describe("email delivery of a notification", () => {
+  test("finishing the previous delivery during rescheduling sends only one email", async () => {
+    await drainDeliveries(server.deps);
+    const db = server.deps.db;
+    const racing = new Proxy(db, {
+      get(target, key) {
+        // The old pre-insert lookup read no sent row before the previous delivery finished.
+        if (key === "select")
+          return (fields: Parameters<typeof db.select>[0]) =>
+            fields?.id === S.notificationDeliveries.id
+              ? {
+                  from: () => ({
+                    where: (condition: SQL | undefined) => {
+                      const query = target.select(fields).from(S.notificationDeliveries).where(condition);
+                      return { limit: async () => [], orderBy: query.orderBy.bind(query) };
+                    },
+                  }),
+                }
+              : target.select(fields);
+        const value = Reflect.get(target, key, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    await scheduleDeliveries({ ...server.deps, db: racing }, await notice());
+    await server.deps.runtime.settle();
+    await drainDeliveries(server.deps);
+    expect(requests).toBe(1);
+  });
+
+  test("a retry rechecks private channel access before disclosing content", async () => {
+    const db = server.deps.db;
+    const channelId = `private-${seq}`;
+    await db
+      .insert(S.channels)
+      .values({ id: channelId, workspaceId: "w", name: channelId, visibility: "private" });
+    await db.insert(S.channelMemberships).values({ channelId, memberType: "person", memberId: "u" });
+    await db
+      .update(S.notifications)
+      .set({ source: { channelId }, latest: { text: "confidential" } })
+      .where(eq(S.notifications.id, `n${seq}`));
+    answers = ["silent"];
+    expect(await drainDeliveries(server.deps)).toBe(0);
+    expect(requests).toBe(1);
+    await db.delete(S.channelMemberships).where(eq(S.channelMemberships.channelId, channelId));
+    clock = later(2);
+    expect(await drainDeliveries(server.deps)).toBe(0);
+    expect(await row()).toMatchObject({ status: "skipped", note: "channel_access" });
+    expect(requests).toBe(1);
+  });
+
   test("accepted: sent", async () => {
     expect(await drainDeliveries(server.deps)).toBe(1);
     expect(await row()).toMatchObject({ status: "sent", attempts: 1 });
@@ -132,7 +189,7 @@ describe("email delivery of a notification", () => {
   });
 
   test("rejected on every attempt: failed after the last one, with growing waits", async () => {
-    answers = [429, 429, 429];
+    answers = ["silent", "silent", "silent"];
     const start = clock;
     expect(await drainDeliveries(server.deps)).toBe(0);
     expect((await row()).dueAt).toBe(new Date(start.getTime() + 2 * 60_000).toISOString());
@@ -141,7 +198,10 @@ describe("email delivery of a notification", () => {
     expect((await row()).dueAt).toBe(new Date(clock.getTime() + 4 * 60_000).toISOString());
     clock = new Date(clock.getTime() + 4 * 60_000);
     expect(await drainDeliveries(server.deps)).toBe(0);
-    expect(await row()).toMatchObject({ status: "failed", attempts: 3, note: "email_http_429" });
+    expect(await row()).toMatchObject({ status: "failed", attempts: 3, note: "email_timeout" });
+    await scheduleDeliveries(server.deps, await notice());
+    await server.deps.runtime.settle();
+    await drainDeliveries(server.deps);
     expect(requests).toBe(3);
   });
 });
@@ -245,6 +305,9 @@ describe("email delivery against the provider's idempotency keys", () => {
           ]);
         } else {
           expect(await row()).toMatchObject({ status: "failed", attempts: 2, note: "email_outcome_unknown" });
+          await scheduleDeliveries(server.deps, await notice());
+          await server.deps.runtime.settle();
+          await drainDeliveries(server.deps);
           expect(provider.keys).toEqual([`notification-delivery/${delivery}`]);
         }
         expect(provider.sentBodies.length).toBe(1);
