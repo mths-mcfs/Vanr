@@ -214,6 +214,66 @@ describe("threads", () => {
   );
 
   test(
+    "opening a thread that already exists answers it as it is: a reader can't rename, reopen or take it over",
+    async () => {
+      const { workspaceId, general, ana, beto, caio } = await team();
+      const root = await post(workspaceId, general, ana, "Ana's topic");
+      const open = (who: Person, title?: string) =>
+        call(who, `${W(workspaceId)}/threads`, "POST", { channelId: general, messageId: root.id, title });
+      await ok(await open(ana, "Original"), 201);
+      await post(workspaceId, general, beto, "a reply", { threadId: root.id });
+      await ok(await call(ana, `${W(workspaceId)}/threads/${root.id}/close`, "POST"));
+      const before = await ok(await call(ana, `${W(workspaceId)}/threads/${root.id}`));
+
+      const events: RealtimeEvent[] = [];
+      const off = server.deps.hub.onPublish((_, e) => {
+        if (e.type === "thread.info_changed") events.push(e);
+      });
+      try {
+        const again = await ok(await open(caio, "Hijacked"), 200);
+        expect(again).toMatchObject({
+          title: "Original",
+          state: "closed",
+          manageable: false,
+          following: false,
+        });
+        await ok(await open(ana, "Renamed by POST"), 200);
+      } finally {
+        off();
+      }
+      expect(events).toEqual([]);
+      const after = await ok(await call(ana, `${W(workspaceId)}/threads/${root.id}`));
+      expect(after).toEqual(before);
+      const [row] = await server.deps.db.select().from(schema.threads).where(eq(schema.threads.id, root.id));
+      expect(row).toMatchObject({ title: "Original", state: "closed", createdById: ana.user.id });
+      const follows = await server.deps.db
+        .select({ userId: schema.threadSubscriptions.userId })
+        .from(schema.threadSubscriptions)
+        .where(eq(schema.threadSubscriptions.threadId, root.id));
+      expect(follows.map((f) => f.userId)).not.toContain(caio.user.id);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a PATCH with nothing to change is rejected at the edge with 400, for whoever manages the thread",
+    async () => {
+      const { workspaceId, general, ana } = await team();
+      const root = await post(workspaceId, general, ana, "empty patch");
+      await post(workspaceId, general, ana, "r", { threadId: root.id });
+      const patch = (data: unknown) => call(ana, `${W(workspaceId)}/threads/${root.id}`, "PATCH", data);
+      expect(await failure(await patch({}))).toEqual({ status: 400, code: "invalid_request" });
+      expect(await failure(await patch({ unknown: "field" }))).toEqual({
+        status: 400,
+        code: "invalid_request",
+      });
+      expect((await call(ana, `${W(workspaceId)}/threads/${root.id}`, "PATCH")).status).toBe(400);
+      expect((await ok(await patch({ title: "" }))).title).toBe("");
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "a thread starts only from a top-level message of that channel, and the context cut stays in the thread",
     async () => {
       const { workspaceId, general, sales, ana, beto } = await team();

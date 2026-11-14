@@ -489,13 +489,16 @@ async function touchThread(deps: AppDeps, input: { root: MessageRow; reply: Mess
   await publishThread(deps, root.id);
 }
 
-/** Creates the thread's state row if it doesn't exist yet. The root must be a top-level message. */
+/**
+ * Creates the thread's state row if it doesn't exist yet, and says whether it did. The root must be a top-level
+ * message. An existing thread is never touched: its title, state and opener stay.
+ */
 export async function ensureThread(
   db: Db,
   input: { root: MessageRow; by: ActorRef; at: Date; title?: string },
-): Promise<void> {
+): Promise<boolean> {
   const { root, by, at } = input;
-  await db
+  const created = await db
     .insert(threads)
     .values({
       id: root.id,
@@ -507,7 +510,9 @@ export async function ensureThread(
       lastTouchedAt: at,
       firstReplyAt: input.title === undefined ? at : null,
     })
-    .onConflictDoNothing();
+    .onConflictDoNothing()
+    .returning({ id: threads.id });
+  return created.length > 0;
 }
 
 /** A channel's messages, in posting order. `before` is the id of the message used as the cursor. */
