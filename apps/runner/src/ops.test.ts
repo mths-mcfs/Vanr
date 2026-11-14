@@ -6,6 +6,7 @@ import { Access } from "./access";
 import { execOp, listOp, type OpContext, readOp } from "./ops";
 import { defaultPolicyContext, sandboxOff } from "./sandbox";
 import { maskBytes, type SecretStore } from "./secrets";
+import { seeded } from "./testing/random";
 
 // The mask of a command's output is the last barrier before the model: a secret cut between two pieces of
 // the stream, or by the cap of the captured output, never shows up, not even in part.
@@ -98,29 +99,67 @@ test("a read that would come back as base64 (a NUL byte, a cut inside a characte
   expect(bytes.toString("latin1")).not.toContain("abcd");
 });
 
-test("property: what a read returns is the file's bytes masked, then cut, for any content and cut", async () => {
+test("property: a read returns the start of the masked whole file, in UTF-8, UTF-16LE, UTF-16BE and Latin-1", async () => {
   const c = ctx([]);
+  const secrets: [string, string][] = [
+    [SECRET, "[secret:S]"],
+    ["café-key", "[secret:C]"],
+    ["two\nlines", "[secret:L]"],
+  ];
+  const store = c.secrets as unknown as { masks: () => Promise<[string, string][]> };
+  store.masks = async () => secrets;
   const root = c.access.agentRoot(c.agent);
-  let seed = 5;
-  const rand = (n: number) => {
-    seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff;
-    return seed % n;
-  };
-  const pieces = [SECRET, "abcd", "EFGH", "é", "\0", "x", "\n", "ab", "cdEF", "\u00ff"];
+  const r = seeded(777);
+  const encode = (text: string, how: number) =>
+    how === 0
+      ? Buffer.from(text, "utf8")
+      : how === 1
+        ? Buffer.from(text, "utf16le")
+        : how === 2
+          ? Buffer.from(text, "utf16le").swap16()
+          : Buffer.from(text, "latin1");
+  const words = [SECRET, "café-key", "two\nlines", "two\r\nlines", "x", "é", "\0", "abcd", "café"];
   let cases = 0;
-  for (let round = 0; round < 600; round++) {
-    const text = Array.from({ length: rand(12) }, () => pieces[rand(pieces.length)] ?? "").join("");
-    if (!text) continue;
-    const file = Buffer.from(text, "utf8");
+  for (let round = 0; round < 800; round++) {
+    const parts: Buffer[] = [];
+    for (let i = 0, n = 1 + r.int(8); i < n; i++)
+      parts.push(encode(r.pick(words, "word"), r.int(4, "encoding")));
+    const file = Buffer.concat(parts);
     writeFileSync(join(root, "p.dat"), file);
-    const maxBytes = 1 + rand(file.byteLength + 4);
-    const r = await readOp(c, { path: "p.dat", maxBytes });
-    const got = r.encoding === "base64" ? Buffer.from(r.content, "base64") : Buffer.from(r.content, "utf8");
-    const expected = maskBytes(file, [[SECRET, "[secret:S]"]]).subarray(0, maxBytes);
-    if (r.encoding === "base64") expect(got.equals(expected)).toBe(true);
-    else expect(r.content).toBe(expected.toString("utf8"));
-    expect(got.toString("latin1")).not.toContain(SECRET);
+    const maxBytes = 1 + r.int(file.byteLength + 8, "cut");
+    const got = await readOp(c, { path: "p.dat", maxBytes });
+    const bytes =
+      got.encoding === "base64" ? Buffer.from(got.content, "base64") : Buffer.from(got.content, "utf8");
+    const whole = maskBytes(file, secrets);
+    const expected = whole.subarray(0, maxBytes);
+    if (got.encoding === "base64") expect(bytes.equals(expected)).toBe(true);
+    else expect(got.content).toBe(expected.toString("utf8"));
+    expect(got.truncated).toBe(whole.byteLength > maxBytes);
+    // No secret, whole, in any of the four encodings.
+    for (const [v] of secrets)
+      for (let how = 0; how < 4; how++) {
+        const form = encode(v, how);
+        if (how === 3 && Buffer.from(form.toString("latin1"), "latin1").toString("latin1") !== v) continue;
+        expect([v, how, bytes.includes(form)]).toEqual([v, how, false]);
+      }
     cases++;
   }
-  expect(cases).toBeGreaterThan(500);
+  console.log(
+    `[read] ${cases} files; encodings ${JSON.stringify(r.spread("encoding"))}; words ${JSON.stringify(r.spread("word"))}`,
+  );
+  expect(Math.min(...r.spread("encoding"))).toBeGreaterThan(500);
+});
+
+test("a cut right after a masked secret never shows the start of the next one (16 characters, twice, every cut)", async () => {
+  const c = ctx([]);
+  const secret = "abcdefghijklmnop";
+  (c.secrets as unknown as { masks: () => Promise<[string, string][]> }).masks = async () => [
+    [secret, "[secret:S]"],
+  ];
+  const root = c.access.agentRoot(c.agent);
+  writeFileSync(join(root, "twice"), secret.repeat(2));
+  for (let maxBytes = 1; maxBytes < 64; maxBytes++) {
+    const r = await readOp(c, { path: "twice", maxBytes });
+    expect([maxBytes, r.content]).toEqual([maxBytes, "[secret:S][secret:S]".slice(0, maxBytes)]);
+  }
 });

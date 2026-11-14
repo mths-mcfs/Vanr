@@ -14,12 +14,12 @@ import { randomId } from "@vanr/engine/ids";
 import { createSealer, keyPreview, type Sealer } from "@vanr/engine/seal";
 import { eq, sql } from "drizzle-orm";
 import type { AppDeps } from "../context";
-import { HttpError } from "../http";
+import { HttpError, notFound } from "../http";
 import { log } from "../logger";
 import { checkServerUrl } from "./net";
 import { type S3Settings, s3Blobs, testS3 } from "./s3";
 
-const { workspaceStorage } = schema;
+const { workspaceStorage, files, fileVersions } = schema;
 type StorageRow = typeof workspaceStorage.$inferSelect;
 type S3ConfigRow = schema.S3ConfigRow;
 type StorageMigrationRow = schema.StorageMigrationRow;
@@ -117,7 +117,9 @@ export async function saveStorage(
     return row;
   }
   const { cfg, keys } = await resolveInput(deps, workspaceId, input.s3);
-  await assertDestinationFree(deps, workspaceId, cfg);
+  // Before the bucket test (no network for a change that can't be accepted anyway); the check that counts
+  // is the one in the transaction below.
+  await deps.db.transaction((tx) => assertDestinationFree(tx, deps.localBlobs, workspaceId, cfg));
   const test = await testS3(settingsOf(cfg, keys), randomId(10));
   if (!test.ok)
     throw new HttpError(400, "storage.bucket_check_failed", "The bucket did not pass the test", {
@@ -131,12 +133,18 @@ export async function saveStorage(
     secretPreview: keyPreview(keys.secretAccessKey),
     updatedAt: at,
   };
-  const [row] = await deps.db
-    .insert(workspaceStorage)
-    .values({ workspaceId, ...values })
-    .onConflictDoUpdate({ target: workspaceStorage.workspaceId, set: values })
-    .returning();
-  if (!row) throw new Error("storage upsert failed");
+  // Checking and saving are one step: the row lock waits for any Drive write that is recording a file
+  // in the saved bucket right now (it holds the same row shared), and then counts that file too.
+  const row = await deps.db.transaction(async (tx) => {
+    await assertDestinationFree(tx, deps.localBlobs, workspaceId, cfg);
+    const [saved] = await tx
+      .insert(workspaceStorage)
+      .values({ workspaceId, ...values })
+      .onConflictDoUpdate({ target: workspaceStorage.workspaceId, set: values })
+      .returning();
+    if (!saved) throw new Error("storage upsert failed");
+    return saved;
+  });
   storageCache.delete(workspaceId);
   return row;
 }
@@ -146,31 +154,50 @@ const sameDestination = (a: S3ConfigRow, b: S3ConfigRow) =>
   a.endpoint === b.endpoint && a.bucket === b.bucket && cleanPrefix(a.prefix) === cleanPrefix(b.prefix);
 
 /**
- * The saved bucket is the only reference to the Drive files written there, and the migration only copies
- * from the server to a bucket. So a new endpoint, bucket or prefix is rejected while the saved destination
- * still holds a file of the workspace (or can't be listed to prove it holds none). New keys for the same
- * destination are accepted.
+ * The storage row read inside a transaction, locked: `update` by whoever changes the destination, `share` by
+ * whoever records a file it just sent to the bucket. Both locks are taken through here (a seam the
+ * Postgres race test replaces, to show the test fails without them).
  */
-async function assertDestinationFree(deps: AppDeps, workspaceId: string, next: S3ConfigRow): Promise<void> {
-  const row = await storageRow(deps.db, workspaceId);
-  if (!row?.s3 || !row.secret || sameDestination(row.s3, next)) return;
-  const saved = s3Blobs(
-    settingsOf(row.s3, JSON.parse(storageSealer(deps.config.authSecret).open(row.secret)) as S3Keys),
-  );
-  let held: number;
-  try {
-    held = (await saved.keys()).filter((k) => k.startsWith(`files/${workspaceId}/`)).length;
-  } catch (err) {
-    log.warn("storage.destination_list_failed", { err, workspaceId });
-    throw new StorageUnavailable("The saved bucket can't be listed to check it holds no files");
-  }
+export const storageLock = {
+  async row(tx: Db, workspaceId: string, mode: "update" | "share"): Promise<StorageRow | null> {
+    const [row] = await tx
+      .select()
+      .from(workspaceStorage)
+      .where(eq(workspaceStorage.workspaceId, workspaceId))
+      .for(mode);
+    return row ?? null;
+  },
+};
+
+/** Locks the storage row and rejects a new destination while the saved one is the only copy of a file. */
+async function assertDestinationFree(tx: Db, local: BlobStore, workspaceId: string, next: S3ConfigRow) {
+  const current = await storageLock.row(tx, workspaceId, "update");
+  if (!current?.s3 || sameDestination(current.s3, next)) return;
+  const held = await filesOnlyInBucket(tx, local, workspaceId);
   if (held > 0)
     throw new HttpError(
       409,
       "storage.destination_in_use",
       "The saved bucket still holds this workspace's files; keep its endpoint, bucket and prefix",
-      { files: held, endpoint: row.s3.endpoint, bucket: row.s3.bucket, prefix: row.s3.prefix },
+      { files: held, endpoint: current.s3.endpoint, bucket: current.s3.bucket, prefix: current.s3.prefix },
     );
+}
+
+/**
+ * How many of the workspace's stored files (any version's blob, thumbnail or preview, in the trash too) exist
+ * only in the bucket. The rows don't say where their bytes are; like the router, a key that is not on the
+ * server's disk is read from the saved bucket, so that bucket is its only copy.
+ */
+async function filesOnlyInBucket(tx: Db, local: BlobStore, workspaceId: string): Promise<number> {
+  const rows = await tx
+    .select({ blob: fileVersions.blobKey, thumb: fileVersions.thumbKey, preview: fileVersions.previewKey })
+    .from(fileVersions)
+    .innerJoin(files, eq(files.id, fileVersions.fileId))
+    .where(eq(files.workspaceId, workspaceId));
+  let held = 0;
+  for (const r of rows)
+    for (const key of [r.blob, r.thumb, r.preview]) if (key && !(await local.open(key))) held++;
+  return held;
 }
 
 /** The bucket failed (down, rejected the call, timed out): not the same as a file that doesn't exist. */
@@ -181,23 +208,126 @@ export class StorageUnavailable extends HttpError {
   }
 }
 
-/** A bucket call whose failure becomes `StorageUnavailable` (logged once with the original error). */
+/** The destination changed while a file was being saved there; the save was undone. */
+export class DestinationChanged extends HttpError {
+  constructor() {
+    super(
+      409,
+      "storage.destination_changed",
+      "The storage changed while the file was being saved; send it again",
+    );
+    this.name = "DestinationChanged";
+  }
+}
+
+/**
+ * The one place that reads what the bucket's client threw: the object isn't there (404 of the object) or
+ * the bucket can't answer now (403, 5xx, 301, a deadline, the network, a body that breaks in the middle).
+ * A 403 is never "not found".
+ */
+function classify(what: string, key: string, err: unknown): HttpError {
+  if (err instanceof HttpError) return err;
+  const code = typeof err === "object" && err !== null && "code" in err ? err.code : undefined;
+  if (code === "NoSuchKey") return notFound("This version has no file");
+  log.warn("storage.bucket_failed", { err, what, key });
+  return new StorageUnavailable();
+}
+
 async function bucket<T>(what: string, key: string, call: () => Promise<T>): Promise<T> {
   try {
     return await call();
   } catch (err) {
-    if (err instanceof StorageUnavailable) throw err;
-    log.warn("storage.bucket_failed", { err, what, key });
-    throw new StorageUnavailable();
+    throw classify(what, key, err);
   }
+}
+
+/** The bucket's lazy body: reading it (all, a slice or a stream) goes through the same classification. */
+function guardedBody(inner: globalThis.Blob, key: string): globalThis.Blob {
+  const read = <T>(call: () => Promise<T>) => bucket("read", key, call);
+  return {
+    size: inner.size,
+    type: inner.type,
+    slice: (start?: number, end?: number, type?: string) => guardedBody(inner.slice(start, end, type), key),
+    bytes: () => read(() => inner.bytes()),
+    arrayBuffer: () => read(() => inner.arrayBuffer()),
+    text: () => read(() => inner.text()),
+    json: () => read(() => inner.json()),
+    formData: () => read(() => inner.formData()),
+    // Lazy and unused by the server: its reads happen in Bun.Image, outside this classification.
+    image: (options) => inner.image(options),
+    stream: () => {
+      const reader = inner.stream().getReader();
+      return new ReadableStream<Uint8Array<ArrayBuffer>>({
+        async pull(controller) {
+          try {
+            const { done, value } = await reader.read();
+            if (done) controller.close();
+            else controller.enqueue(value);
+          } catch (err) {
+            controller.error(classify("read", key, err));
+          }
+        },
+        cancel: (reason) => reader.cancel(reason),
+      });
+    },
+  };
+}
+
+/** A saved bucket: every call and every body it hands out pass through `classify`; it knows where it points. */
+interface RemoteStore extends BlobStore {
+  destination: S3ConfigRow;
+}
+
+function remoteStore(cfg: S3ConfigRow, keys: S3Keys): RemoteStore {
+  const inner = s3Blobs(settingsOf(cfg, keys));
+  return {
+    destination: cfg,
+    put: (key, data, type) => bucket("write", key, () => inner.put(key, data, type)),
+    get: (key) => bucket("read", key, () => inner.get(key)),
+    async open(key) {
+      const handle = await bucket("read", key, () => inner.open(key));
+      return handle ? { ...handle, body: guardedBody(handle.body, key) } : null;
+    },
+    delete: (key) => bucket("delete", key, () => inner.delete(key)),
+    keys: () => bucket("list", "", () => inner.keys()),
+  };
+}
+
+/** Files sent to a bucket whose row isn't recorded yet: key -> the bucket they went to. */
+const unconfirmed = new Map<string, RemoteStore>();
+
+/**
+ * Called in the transaction that records the rows of `keys`, before writing them: each key sent to a bucket
+ * must have gone to the destination saved now. It holds the storage row shared until the commit, so a
+ * destination change waits and then counts these rows; a change that came first makes this throw
+ * `DestinationChanged` (the caller undoes the save with `discardBlob`).
+ */
+export async function confirmBlobs(tx: Db, keys: readonly (string | null)[]): Promise<void> {
+  for (const key of keys) {
+    const sent = key ? unconfirmed.get(key) : undefined;
+    const workspaceId = key ? WORKSPACE_KEY.exec(key)?.[1] : undefined;
+    if (!key || !sent || !workspaceId) continue;
+    const row = await storageLock.row(tx, workspaceId, "share");
+    if (!row?.s3 || !sameDestination(row.s3, sent.destination)) throw new DestinationChanged();
+  }
+  for (const key of keys) if (key) unconfirmed.delete(key);
+}
+
+/** Undoes a file whose row was not recorded: deletes it where it was actually sent. */
+export async function discardBlob(blobs: BlobStore, key: string): Promise<void> {
+  const sent = unconfirmed.get(key);
+  unconfirmed.delete(key);
+  await (sent ? sent.delete(key) : blobs.delete(key)).catch((err: unknown) =>
+    log.warn("storage.discard_failed", { err, key }),
+  );
 }
 
 // ---- Router ----
 
 interface Route {
-  primary: BlobStore | null;
+  primary: RemoteStore | null;
   /** The saved S3, even with the workspace back on "builtin": files written there stay readable. */
-  s3: BlobStore | null;
+  s3: RemoteStore | null;
   at: number;
 }
 const storageCache = new Map<string, Route>();
@@ -206,10 +336,10 @@ async function routeOf(db: Db, authSecret: string, workspaceId: string): Promise
   const hit = storageCache.get(workspaceId);
   if (hit && Date.now() - hit.at < CACHE_MS) return hit;
   const row = await storageRow(db, workspaceId);
-  let s3: BlobStore | null = null;
+  let s3: RemoteStore | null = null;
   if (row?.s3 && row.secret) {
     const keys = JSON.parse(storageSealer(authSecret).open(row.secret)) as S3Keys;
-    s3 = s3Blobs(settingsOf(row.s3, keys));
+    s3 = remoteStore(row.s3, keys);
   }
   const route = { primary: row?.kind === "s3" ? s3 : null, s3, at: Date.now() };
   storageCache.set(workspaceId, route);
@@ -239,7 +369,7 @@ export function routedBlobs(base: BlobStore, ctx: () => { db: Db; authSecret: st
     let failed: StorageUnavailable | null = null;
     for (const store of order) {
       try {
-        const found = store === base ? await how(base) : await bucket("read", key, () => how(store));
+        const found = await how(store);
         if (found) return found;
       } catch (err) {
         if (!(err instanceof StorageUnavailable)) throw err;
@@ -253,16 +383,16 @@ export function routedBlobs(base: BlobStore, ctx: () => { db: Db; authSecret: st
     async put(key, data, contentType) {
       const r = await route(key);
       const target = r?.primary;
-      if (target) await bucket("write", key, () => target.put(key, data, contentType));
-      else await base.put(key, data, contentType);
+      if (!target) return base.put(key, data, contentType);
+      await target.put(key, data, contentType);
+      unconfirmed.set(key, target);
     },
     get: (key): Promise<Blob | null> => read(key, (store) => store.get(key)),
     open: (key) => read(key, (store) => store.open(key)),
     async delete(key) {
       const r = await route(key);
       await base.delete(key);
-      const saved = r?.s3;
-      if (saved) await bucket("delete", key, () => saved.delete(key));
+      await r?.s3?.delete(key);
     },
     keys: () => base.keys(),
   };
@@ -284,8 +414,9 @@ export async function startMigration(
   if (row.transfer?.status === "running" && running.has(workspaceId)) return row.transfer;
   const prefix = `files/${workspaceId}/`;
   const keys = (await base.keys()).filter((k) => k.startsWith(prefix));
-  const target = s3Blobs(
-    settingsOf(row.s3, JSON.parse(storageSealer(deps.config.authSecret).open(row.secret)) as S3Keys),
+  const target = remoteStore(
+    row.s3,
+    JSON.parse(storageSealer(deps.config.authSecret).open(row.secret)) as S3Keys,
   );
   const state: StorageMigrationRow = { status: "running", copied: 0, total: keys.length, error: null };
   const save = (m: StorageMigrationRow) =>

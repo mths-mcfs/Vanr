@@ -157,9 +157,20 @@ test.skipIf(!chrome)(
       if (how === "secret") await act(a, { action: "type_secret", selector: "#u", name: "CODE" });
       else await act(a, { action: "fill", selector: "#u", text: value });
       await act(a, { action: "scroll", dy: 0 });
-      await Bun.sleep(400);
-      const shot = (await act(a, { action: "screenshot" })).screenshot as string;
-      const frame = frames.get(a.id)?.at(-1) as string;
+      // The page has settled when two screenshots in a row are the same, and the live view when its last
+      // frame stays the same across a few reads (conditions, not a time: under load the page paints late).
+      let shot = "";
+      for (let i = 0, prev = ""; i < 100; i++, prev = shot) {
+        shot = (await act(a, { action: "screenshot" })).screenshot as string;
+        if (shot === prev) break;
+      }
+      let frame = "";
+      for (let i = 0, same = 0; i < 400 && same < 5; i++) {
+        const last = frames.get(a.id)?.at(-1) ?? "";
+        same = last && last === frame ? same + 1 : 0;
+        frame = last;
+        await Bun.sleep(20);
+      }
       expect(shot.length).toBeGreaterThan(500);
       expect(frame.length).toBeGreaterThan(500);
       return { shot, frame };

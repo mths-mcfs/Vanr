@@ -411,7 +411,7 @@ export class CdpBrowser implements BrowserDriver {
       const url = await new Promise<string>((resolve, reject) => {
         let buf = "";
         const timer = setTimeout(
-          () => reject(new RunnerError("browser_unavailable", "The browser did not start")),
+          () => reject(new RunnerError("browser_not_running", "The browser did not start")),
           LAUNCH_TIMEOUT_MS,
         );
         proc.stderr?.on("data", (chunk: Buffer) => {
@@ -427,7 +427,7 @@ export class CdpBrowser implements BrowserDriver {
           const fatal = /FATAL:[^\]]*\]\s*([^\n]{0,200})/.exec(buf)?.[1];
           reject(
             new RunnerError(
-              "browser_unavailable",
+              "browser_not_running",
               `The browser closed while starting${fatal ? `: ${fatal}` : ""}`,
             ),
           );
@@ -490,14 +490,14 @@ export class CdpBrowser implements BrowserDriver {
       const end = Date.now() + ms;
       while (Date.now() < end) {
         if (s.pages.length > 0) return true;
-        if (s.cdp.closed) throw new RunnerError("browser_unavailable", "The browser closed while starting");
+        if (s.cdp.closed) throw new RunnerError("browser_not_running", "The browser closed while starting");
         await sleep(25);
       }
       return false;
     };
     if (await ready(3000)) return;
     await s.cdp.send("Target.createTarget", { url: "about:blank" });
-    if (!(await ready(5000))) throw new RunnerError("browser_unavailable", "The browser has no page open");
+    if (!(await ready(5000))) throw new RunnerError("browser_not_running", "The browser has no page open");
   }
 
   /**
@@ -695,7 +695,7 @@ export class CdpBrowser implements BrowserDriver {
 
   private page(s: Session): Page {
     const p = s.pages[s.active] ?? s.pages[0];
-    if (!p) throw new RunnerError("browser_unavailable", "The browser has no page open");
+    if (!p) throw new RunnerError("browser_not_running", "The browser has no page open");
     return p;
   }
 
@@ -1218,7 +1218,7 @@ export class CdpBrowser implements BrowserDriver {
           s.cdp.send<{ data: string }>("Page.captureScreenshot", { format: "jpeg", quality: 70 }, sid),
           SHOT_TIMEOUT_MS,
         );
-        if (!shot) throw new RunnerError("browser_unavailable", "The page did not draw; try again");
+        if (!shot) throw new RunnerError("browser_not_running", "The page did not draw; try again");
         return { ...(await this.info(s)), screenshot: shot.data };
       }
       case "upload": {
@@ -1289,7 +1289,7 @@ export class CdpBrowser implements BrowserDriver {
   /** Mouse and keyboard of whoever took over control (the server only relays from whoever has control). */
   private async input(agent: AgentRef, args: OpArgs<"live_view.input">) {
     const s = this.sessions.get(agent.id);
-    if (!s) throw new RunnerError("browser_unavailable", "The browser is not open");
+    if (!s) throw new RunnerError("browser_not_running", "The browser is not open");
     // Input that arrives after the person hands back (or before the server says they took over)
     // does not count: only the server's notice says a person drives.
     if (s.policy.driver !== "person") return { applied: 0 };
