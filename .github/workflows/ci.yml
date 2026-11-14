@@ -42,8 +42,8 @@ jobs:
       fail-fast: false
       matrix:
         # The shard count is the length of this list.
-        # Three keep each one near 30 s with the times in scripts/ci/test-timings.json.
-        shard: [1, 2, 3]
+        # Four keep each one under ~40 s with the CI times in scripts/ci/test-timings.json.
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

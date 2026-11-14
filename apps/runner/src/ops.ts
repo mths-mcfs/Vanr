@@ -29,7 +29,7 @@ import {
   SESSION_ENV,
   type Wrapped,
 } from "./sandbox";
-import { maskBytes, maskSecrets, type SecretStore, StreamMasker } from "./secrets";
+import { maskBytesPrefix, maskSecrets, type SecretStore, StreamMasker } from "./secrets";
 
 const OUTPUT_MAX = 2_000_000;
 const STREAM_EVERY_MS = 100;
@@ -117,7 +117,7 @@ export async function sandboxed(
   const status = ctx.sandbox.status();
   if (status.state === "off") return null;
   if (!isolated(status))
-    throw new RunnerError("sandbox_unavailable", status.reason ?? "No sandbox in this environment");
+    throw new RunnerError("sandbox_not_ready", status.reason ?? "No sandbox in this environment");
   ctx.sandbox.setMode(input.network.mode);
   const { unchecked, ...fs } = fsPolicy(ctx.policy, input);
   const wrapped = await ctx.sandbox.wrap({
@@ -295,21 +295,17 @@ export async function readOp(ctx: OpContext, args: { path: string; maxBytes?: nu
   if (!st.isFile()) throw new RunnerError("bad_request", `${args.path} is not a file`);
   const max = Math.min(args.maxBytes ?? READ_MAX, READ_MAX);
   const all = readFileSync(path);
-  const masks = await masksOf(ctx);
-  // The bytes are masked before the cut, over a window a little past it, so a secret across the cut is
-  // replaced whole. Text and binary alike: what goes out as base64 (a cut inside a character, a NUL byte)
-  // is masked too, so a real binary that holds a secret comes back changed.
-  const longest = Math.max(0, ...masks.map(([v]) => Buffer.byteLength(v)));
-  const window = all.subarray(0, max + longest);
-  const masked = masks.length ? maskBytes(window, masks) : window;
-  const buf = masked.subarray(0, max);
+  // Masked before the cut, in every byte form of a secret (UTF-8 and its escaped forms, UTF-16, Latin-1):
+  // what comes back is the start of the mask of the whole file, so a cut never leaves part of a secret.
+  // Text and binary alike: a real binary that holds a secret comes back changed.
+  const { bytes: buf, truncated } = maskBytesPrefix(all, await masksOf(ctx), max);
   const binary = looksBinary(buf);
   return {
     path: args.path,
     content: binary ? buf.toString("base64") : buf.toString("utf8"),
     encoding: binary ? "base64" : "utf8",
     size: st.size,
-    truncated: masks.length ? masked.byteLength > max || st.size > window.byteLength : st.size > max,
+    truncated,
   };
 }
 

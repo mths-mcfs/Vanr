@@ -24,6 +24,11 @@ export interface SignupQueueLimits {
   maxWaiting: number;
   /** When a turn's deadline passes (tests replace it with a clock of their own). */
   sectionDeadline: (ms: number) => Deadline;
+  /**
+   * How long the first user's creation may wait for the database before the server reports it: past it,
+   * an error is logged once per period and the health check says sign-up waits for the database.
+   */
+  stuckInsertMs: number;
 }
 
 /** A deadline that resolves when it passes, unless cancelled before. */
@@ -47,6 +52,7 @@ export const SIGNUP_QUEUE_LIMITS: SignupQueueLimits = {
   sectionMs: 15_000,
   maxWaiting: 32,
   sectionDeadline: realDeadline,
+  stuckInsertMs: 60_000,
 };
 
 const RETRY_AFTER_S = 5;
@@ -59,40 +65,98 @@ const rejection = (status: 408 | 413 | 503, code: string, message: string) =>
 
 const busy = () => rejection(503, "signup_busy", "Sign-up is busy; try again in a few seconds");
 
-/** The first user's place on a new installation: free, or taken by one identified sign-up section. */
-type Place = { kind: "free" } | { kind: "taken"; section: number };
-
 /**
- * The first user's place. A section that is let in as the first user takes it, and the place goes back
- * only when THAT section's work really ends (it created the user, and the count is no longer zero; or it
- * failed, and the place is free again), never when its deadline passes. While it is taken, any other
- * sign-up on an empty installation is turned away to try again.
+ * The first user's place on a new installation:
+ * - `free`: nobody is becoming the first user;
+ * - `deciding`: a section took it and hasn't reached the INSERT yet (reading, checking, hashing the
+ *   password). Past the section's deadline the place can be taken back, and that is safe: right before the
+ *   INSERT the sign-up hook checks that this section still owns the place, and throws when it lost it;
+ * - `inserting`: the hook passed and the INSERT went out. The place stays until the database answers
+ *   (success or error): no deadline frees it, since nobody can tell whether that INSERT will still land.
  */
+type Place =
+  | { kind: "free" }
+  | { kind: "deciding"; section: number; since: number }
+  | { kind: "inserting"; section: number; since: number };
+
+/** A section's turn at the first user's place. */
+export interface PlaceTurn {
+  /** Runs the section's work; when it really ends, the place (in whatever state it is) goes back. */
+  run<T>(work: () => Promise<T>): Promise<T>;
+  /** The section's deadline passed: the place is taken back if the section is still deciding. */
+  expire(): void;
+}
+
+/** What `/api/v1/health` says about sign-up. */
+export type SignupHealth = { status: "ok" } | { status: "waiting_for_database"; waitingSeconds: number };
+
 export class FirstUserPlace {
   private place: Place = { kind: "free" };
   private sections = 0;
   private readonly current = new AsyncLocalStorage<number>();
 
-  /** Runs one sign-up section; the place it takes is given back when its work settles. */
-  section<T>(work: () => Promise<T>): Promise<T> {
+  constructor(private readonly now: () => number = Date.now) {}
+
+  /** A section starts on an empty installation: it takes the place (`deciding`), or null when it is held. */
+  begin(): PlaceTurn | null {
+    if (this.place.kind !== "free") return null;
     const id = ++this.sections;
-    const run = this.current.run(id, work);
-    run
-      .finally(() => {
-        if (this.place.kind === "taken" && this.place.section === id) this.place = { kind: "free" };
-      })
-      .catch(() => {});
-    return run;
+    this.place = { kind: "deciding", section: id, since: this.now() };
+    const mine = () => this.place.kind !== "free" && this.place.section === id;
+    return {
+      run: (work) => {
+        const run = this.current.run(id, work);
+        run
+          .finally(() => {
+            if (mine()) this.place = { kind: "free" };
+          })
+          .catch(() => {});
+        return run;
+      },
+      expire: () => {
+        if (this.place.kind === "deciding" && this.place.section === id) this.place = { kind: "free" };
+      },
+    };
   }
 
-  /** The calling section takes the place; false when another section holds it, or outside any section. */
-  take(): boolean {
+  /**
+   * Right before the INSERT of the first user (the sign-up hook): true when the calling section still owns
+   * the place while deciding, and then the place moves to `inserting`. One synchronous step: nothing can
+   * take the place between the check and the move.
+   */
+  claimInsert(): boolean {
     const id = this.current.getStore();
-    if (id === undefined) return false;
-    if (this.place.kind === "taken" && this.place.section !== id) return false;
-    this.place = { kind: "taken", section: id };
+    if (this.place.kind !== "deciding" || this.place.section !== id) return false;
+    this.place = { kind: "inserting", section: id, since: this.now() };
     return true;
   }
+
+  /** How long the first user's INSERT has been waiting for the database, or null when none is. */
+  insertingForMs(): number | null {
+    return this.place.kind === "inserting" ? this.now() - this.place.since : null;
+  }
+
+  health(stuckInsertMs: number): SignupHealth {
+    const ms = this.insertingForMs();
+    return ms !== null && ms > stuckInsertMs
+      ? { status: "waiting_for_database", waitingSeconds: Math.floor(ms / 1000) }
+      : { status: "ok" };
+  }
+}
+
+/**
+ * The sign-up decision of a closed installation, at the hook right before the user's INSERT. On an empty
+ * installation the first user's place decides (a pending invite doesn't need it); otherwise only an invite
+ * lets a person in.
+ */
+export async function signupDecision(
+  place: FirstUserPlace,
+  input: { users: () => Promise<number>; invited: () => Promise<boolean> },
+): Promise<"allow" | "closed" | "busy"> {
+  const empty = (await input.users()) === 0;
+  if (empty && place.claimInsert()) return "allow";
+  if (await input.invited()) return "allow";
+  return empty ? "busy" : "closed";
 }
 
 /** The answer for the sign-up requests of a closed installation (the others go straight to Better Auth). */
@@ -108,7 +172,13 @@ export function signupGate(
     const buffered = new Request(req.url, { method: req.method, headers: req.headers, body: read });
     const [row] = await deps.db.select({ n: count() }).from(schema.users);
     if ((row?.n ?? 0) > 0) return deps.auth.handler(buffered);
-    return queue(() => firstUser.section(() => deps.auth.handler(buffered)), req.signal);
+    return queue((whenLate) => {
+      const turn = firstUser.begin();
+      // Another section holds the first user's place: try again once it ends.
+      if (!turn) return Promise.resolve(busy());
+      whenLate(() => turn.expire());
+      return turn.run(() => deps.auth.handler(buffered));
+    }, req.signal);
   };
 }
 
@@ -157,7 +227,9 @@ function oneAtATime(limits: SignupQueueLimits) {
     running = false;
     waiting.shift()?.();
   };
-  const runNow = async (task: () => Promise<Response>): Promise<Response> => {
+  /** A task gets a way to hear its own deadline pass. */
+  type Task = (whenLate: (fn: () => void) => void) => Promise<Response>;
+  const runNow = async (task: Task): Promise<Response> => {
     running = true;
     const deadline = limits.sectionDeadline(limits.sectionMs);
     let released = false;
@@ -168,18 +240,22 @@ function oneAtATime(limits: SignupQueueLimits) {
       next();
     };
     const late = deadline.passed.then(() => "late" as const);
-    const work = task();
+    let onLate = () => {};
+    const work = task((fn) => {
+      onLate = fn;
+    });
     try {
       const out = await Promise.race([work, late]);
       if (out !== "late") return out;
       log.error("signup.section_timed_out", { ms: limits.sectionMs });
+      onLate();
       work.catch(() => {});
       return busy();
     } finally {
       release();
     }
   };
-  return (task: () => Promise<Response>, signal: AbortSignal): Promise<Response> => {
+  return (task: Task, signal: AbortSignal): Promise<Response> => {
     if (!running) return runNow(task);
     if (waiting.length >= limits.maxWaiting) return Promise.resolve(busy());
     return new Promise<Response>((resolve) => {

@@ -16,10 +16,13 @@ let server: RunningServer;
 /** The provider's next answers, in order (a number is an HTTP status; `silent` never answers). */
 let answers: (number | "silent")[] = [];
 let requests = 0;
+/** The idempotency key each request to the provider carried. */
+let keys: (string | null)[] = [];
 
 const provider: typeof fetch = Object.assign(
   (_url: string | URL | Request, init?: RequestInit) => {
     requests++;
+    keys.push(new Headers(init?.headers).get("idempotency-key"));
     const next = answers.shift() ?? 200;
     if (next === "silent")
       return new Promise<Response>((_resolve, reject) => {
@@ -54,6 +57,7 @@ beforeEach(async () => {
   clock = new Date("2026-11-14T12:00:00Z");
   answers = [];
   requests = 0;
+  keys = [];
   const id = `n${++seq}`;
   delivery = `d${seq}`;
   await server.deps.db.insert(S.notifications).values({
@@ -113,6 +117,8 @@ describe("email delivery of a notification", () => {
       expect(await drainDeliveries(server.deps)).toBe(1);
       expect(await row()).toMatchObject({ status: "sent", attempts: 2 });
       expect(requests).toBe(2);
+      // Both attempts are the same delivery to the provider: an accepted first one isn't sent again.
+      expect(keys).toEqual([`notification-delivery/${delivery}`, `notification-delivery/${delivery}`]);
     });
   }
 
