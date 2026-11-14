@@ -61,9 +61,12 @@
     "apps/server/test/storage-race.test.ts": 6496,
     "apps/server/test/storage-routing.test.ts": 9270,
     "apps/server/test/usage-ledger.test.ts": 1574,
-    "apps/server/test/wiki-collab.test.ts": 9756,
+    "apps/server/test/wiki-annotations-postgres.test.ts": 11,
+    "apps/server/test/wiki-collab.test.ts": 10398,
     "apps/server/test/wiki-live-guards.test.ts": 31254,
+    "apps/server/test/wiki-live-queue.test.ts": 15956,
     "apps/server/test/wiki-md.test.ts": 517,
+    "apps/server/test/wiki-p1.test.ts": 8644,
     "apps/server/test/wiki-search.test.ts": 54,
     "apps/server/test/wiki.test.ts": 13370,
     "packages/contract/src/permissions.test.ts": 1,
@@ -76,7 +79,7 @@
     "packages/engine/src/blobs.test.ts": 2,
     "packages/engine/src/browser-policy.test.ts": 4,
     "packages/engine/src/db/browser-log.test.ts": 1539,
-    "packages/engine/src/db/catalog.test.ts": 6217,
+    "packages/engine/src/db/catalog.test.ts": 7667,
     "packages/engine/src/db/db.test.ts": 1594,
     "packages/engine/src/db/lock.test.ts": 13,
     "packages/engine/src/db/open.test.ts": 7467,
@@ -117,7 +120,6 @@
     "packages/engine/src/wiki/props-vault.test.ts": 1,
     "packages/engine/src/work-state.test.ts": 2,
     "scripts/ci/gate.test.ts": 14,
-    "scripts/typecheck.test.ts": 4,
-    "apps/server/test/wiki-live-queue.test.ts": 15956
+    "scripts/typecheck.test.ts": 4
   }
 }
