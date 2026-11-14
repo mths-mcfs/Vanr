@@ -5,7 +5,7 @@
 // timer, and every write changes the shared document only after its transaction committed.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import * as Y from "yjs";
 import { log } from "../src/logger";
 import type { RunningServer } from "../src/server";
@@ -138,8 +138,14 @@ function captureTimers(delays: readonly number[]) {
 }
 
 describe("the page's queue", () => {
-  for (const when of ["before", "committed"] as const)
-    test(`an edit that arrives while a discard holds the page (${when} its commit) waits, then lands on the reverted document`, async () => {
+  test.each([
+    ["before", "append"],
+    ["committed", "append"],
+    ["before", "removed paragraph"],
+    ["committed", "removed paragraph"],
+  ] as const)(
+    "a concurrent edit waits for discard (%s its commit, %s), then is applied or explicitly refused",
+    async (when, edit) => {
       const { workspaceId, ana, beto } = await team();
       const page = await ana.api.wiki.createWikiPage(workspaceId, {
         title: `Discard ${when}`,
@@ -149,25 +155,83 @@ describe("the page's queue", () => {
       const a = connect(server, ana.browser, workspaceId, name);
       const b = connect(server, beto.browser, workspaceId, name);
       await Promise.all([a.synced, b.synced]);
-      await a.edit(() => "Old shared draft.\n");
+      await a.edit(() => "Original.\n\nOld shared draft.\n");
       await until(() => !a.provider.hasUnsyncedChanges);
       await until(async () => (await b.md()).includes("Old shared"));
       const hold = holdNextTransaction(server, when);
       const discarding = ana.api.wiki.deleteWikiPageDraft(workspaceId, page.slug);
       await hold.started;
       const acks = b.syncStatus.length;
-      await b.edit((md) => `${md.trimEnd()}\n\nNEW EDIT DURING THE DISCARD.\n`);
+      await b.edit((md) =>
+        edit === "append"
+          ? `${md.trimEnd()}\n\nNEW EDIT DURING THE DISCARD.\n`
+          : md.replace("Old shared draft.", "NEW EDIT DURING THE DISCARD."),
+      );
       // Not acknowledged while the discard holds the page: it isn't applied yet.
       expect(b.syncStatus.length).toBe(acks);
       hold.release();
       await discarding;
       await until(() => b.syncStatus.length > acks);
-      expect(b.syncStatus.at(-1)).toBe(true);
-      await until(async () => (await a.md()).includes("NEW EDIT DURING THE DISCARD."));
+      expect(b.syncStatus.at(-1)).toBe(edit === "append");
+      if (edit === "append") await until(async () => (await a.md()).includes("NEW EDIT DURING THE DISCARD."));
+      else {
+        await until(() => b.closeCodes.includes(4412));
+        expect(await a.md()).not.toContain("NEW EDIT DURING THE DISCARD.");
+      }
       expect(await a.md()).not.toContain("Old shared draft.");
       a.close();
       b.close();
+    },
+  );
+
+  test("a discard queued behind a publish restores the version that publish committed", async () => {
+    const { workspaceId, ana } = await team();
+    const page = await ana.api.wiki.createWikiPage(workspaceId, {
+      title: "Queued discard",
+      body: "Original.\n",
     });
+    const a = connect(server, ana.browser, workspaceId, docName(workspaceId, page.slug));
+    await a.synced;
+    await a.edit(() => "Published edit.\n");
+    await until(() => !a.provider.hasUnsyncedChanges);
+    const row = await pageBySlug(server.deps.db, { workspaceId, system: true }, page.slug);
+    const hold = holdNextTransaction(server, "before");
+    const publishing = ana.api.wiki.publishWikiPageDraft(workspaceId, page.slug);
+    await hold.started;
+    const discarding = server.deps.wikiLive.discard(row, { type: "person", id: ana.user.id }, true);
+    hold.release();
+    await publishing;
+    await discarding;
+    expect(await a.md()).toBe("Published edit.\n");
+    expect(await storedDraft(server, workspaceId, page.slug)).toMatchObject({
+      parentVersion: 2,
+      dirty: false,
+      text: "Published edit.\n",
+    });
+    a.close();
+  });
+
+  test("a removed member cannot discard an unlocked page's shared draft", async () => {
+    const { workspaceId, ana, beto } = await team();
+    const page = await ana.api.wiki.createWikiPage(workspaceId, {
+      title: "Removed discard",
+      body: "Original.\n",
+    });
+    const a = connect(server, ana.browser, workspaceId, docName(workspaceId, page.slug));
+    await a.synced;
+    await a.edit(() => "Shared work.\n");
+    await until(() => !a.provider.hasUnsyncedChanges);
+    const hold = holdNextTransaction(server, "before");
+    const discarding = apiError(beto.api.wiki.deleteWikiPageDraft(workspaceId, page.slug));
+    await hold.started;
+    await server.deps.db
+      .delete(schema.members)
+      .where(and(eq(schema.members.workspaceId, workspaceId), eq(schema.members.userId, beto.user.id)));
+    hold.release();
+    expect((await discarding).status).toBe(403);
+    expect(await a.md()).toBe("Shared work.\n");
+    a.close();
+  });
 
   test("a publish cleans the draft only if nothing came in since its snapshot: a later edit stays dirty and is published next", async () => {
     const { workspaceId, ana } = await team();
@@ -329,7 +393,19 @@ describe("deadlocks and the automatic retries", () => {
           async () =>
             (await storedDraft(quick, workspaceId, page.slug))?.text.includes("second try") ?? false,
         );
+        deadlockNext(quick, 1);
+        await a.edit(() => "Discarded edit.\n");
+        await until(() => timers.caught.some((t) => t.ms === RETRY_MS[0]));
+        await ana.api.wiki.deleteWikiPageDraft(workspaceId, page.slug);
         a.close();
+        await unloaded(quick);
+        timers.fire(RETRY_MS[0]);
+        await quick.deps.wikiLive.settled();
+        expect(await storedDraft(quick, workspaceId, page.slug)).toMatchObject({
+          dirty: false,
+          editors: [],
+          text: "Original.\n",
+        });
       } finally {
         timers.restore();
         await quick.stop();

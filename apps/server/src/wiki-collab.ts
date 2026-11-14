@@ -29,6 +29,7 @@ import {
   MAX_BODY,
   pageBySlug,
   pageLock,
+  requireWriter,
   type SaveOrigin,
   savePage,
   type WikiRow,
@@ -251,21 +252,26 @@ export async function checkCollabUpgrade(
   deps: AppDeps,
   req: Request,
   trustedOrigins: string[],
+  isClosing = () => false,
 ): Promise<{ ok: true; data: CollabSocketData } | { ok: false; response: Response }> {
   const fail = (status: number, code: string, message: string) => ({
     ok: false as const,
     response: Response.json(errorBody(code, message), { status }),
   });
+  const unavailable = () => fail(503, "unavailable", "Server is stopping");
+  if (isClosing()) return unavailable();
   const origin = req.headers.get("origin");
   if (origin && !trustedOrigins.includes(origin)) return fail(403, "forbidden", "Origin not allowed");
   const workspaceId = new URL(req.url).searchParams.get("workspaceId");
   if (!workspaceId) return fail(400, "invalid_request", "Missing workspaceId");
   const session = await deps.auth.api.getSession({ headers: req.headers });
+  if (isClosing()) return unavailable();
   if (!session) return fail(401, "unauthorized", "Sign in to continue");
   const [m] = await deps.db
     .select({ userId: members.userId })
     .from(members)
     .where(and(eq(members.workspaceId, workspaceId), eq(members.userId, session.user.id)));
+  if (isClosing()) return unavailable();
   if (!m) return fail(404, "not_found", "Workspace not found");
   return {
     ok: true,
@@ -297,6 +303,7 @@ export class Peer {
   closed = false;
   /** When this connection's right was last read from the database (ms, by the injected clock). */
   rightReadAt: number | null = null;
+  rightGeneration = 0;
   /** Waiters for the server's SyncStatus on a document key (the answer to a forwarded update). */
   readonly acks = new Map<string, () => void>();
   /** What Hocuspocus sees as the socket: its sends go through the gate. */
@@ -454,19 +461,30 @@ export function createWikiCollab(
 
   // ---- Who may stay connected, and who may have their edits saved.
 
-  /** Right reads in flight: a stop waits for them, and none starts once it began. */
-  const reading = new Set<Promise<Verdict>>();
+  /** Access reads, authentication, loads and upgrades: a stop drains them and refuses new work. */
+  const reading = new Set<Promise<unknown>>();
   let closing = false;
+
+  function track<A extends unknown[], T>(fn: (...args: A) => Promise<T>) {
+    return (...args: A): Promise<T> => {
+      if (closing || stopped) return Promise.reject(new Error("wiki live session stopped"));
+      const job = fn(...args);
+      reading.add(job);
+      void job.finally(() => reading.delete(job)).catch(() => undefined);
+      return job;
+    };
+  }
 
   function verdict(p: Peer, opts: { force?: boolean } = {}): Promise<Verdict> {
     if (closing || stopped) return Promise.resolve("revoked");
-    const job = readRight(p, opts);
-    reading.add(job);
-    void job.finally(() => reading.delete(job)).catch(() => undefined);
-    return job;
+    const generation = p.rightGeneration;
+    return track(async () => {
+      const result = await readRight(p, opts, generation);
+      return generation === p.rightGeneration ? result : verdict(p, { force: true });
+    })();
   }
 
-  async function readRight(p: Peer, opts: { force?: boolean }): Promise<Verdict> {
+  async function readRight(p: Peer, opts: { force?: boolean }, generation: number): Promise<Verdict> {
     const { db, now } = getDeps();
     const at = now().getTime();
     const fresh = p.rightReadAt !== null && at - p.rightReadAt < RIGHT_TTL_MS;
@@ -486,7 +504,7 @@ export function createWikiCollab(
       .where(and(eq(members.workspaceId, workspaceId), eq(members.userId, userId)));
     if (closing || !m) return "revoked";
     if (!p.docs.size) {
-      p.rightReadAt = at;
+      if (generation === p.rightGeneration) p.rightReadAt = at;
       return "ok";
     }
     const slugs = [...p.docs.values()].map((d) => d.slug);
@@ -512,7 +530,7 @@ export function createWikiCollab(
       if (!page || page.deletedAt) return "revoked";
       if (page.locked && !doc.readOnly && !can(m.role, "configure")) return "read_only";
     }
-    p.rightReadAt = at;
+    if (generation === p.rightGeneration) p.rightReadAt = at;
     return "ok";
   }
 
@@ -538,20 +556,20 @@ export function createWikiCollab(
    */
   async function persist(s: Session, doc: Y.Doc, extra?: (tx: Tx, page: WikiRow) => Promise<void>) {
     if (stopped) throw new Error("wiki live session stopped");
-    if ((await textOf(s, doc)).length > MAX_BODY) throw new DraftRejected("too_large");
     const deps = getDeps();
-    const values = {
-      state: b64(Y.encodeStateAsUpdate(doc)),
-      parentVersion: s.parentVersion,
-      dirty: s.dirty,
-      editors: s.editors,
-      editedAt: s.editedAt,
-      updatedAt: deps.now(),
-    };
     await writeTx(deps.db, async (tx) => {
       const page = await pageLock.row(tx, s.pageId);
       if (!page || page.deletedAt) throw new DraftRejected("gone");
       await extra?.(tx, page);
+      if ((await textOf(s, doc)).length > MAX_BODY) throw new DraftRejected("too_large");
+      const values = {
+        state: b64(Y.encodeStateAsUpdate(doc)),
+        parentVersion: s.parentVersion,
+        dirty: s.dirty,
+        editors: s.editors,
+        editedAt: s.editedAt,
+        updatedAt: deps.now(),
+      };
       await tx
         .insert(wikiPageDocs)
         .values({ pageId: s.pageId, ...values })
@@ -746,9 +764,9 @@ export function createWikiCollab(
 
   /**
    * The database aborted a draft save (a deadlock): it tries again after RETRY_MS, with the document as it
-   * is then if still open, else with the state it had. Out of tries, whoever is connected hears it.
+   * is then if the same session is still open. Out of tries, whoever is connected hears it.
    */
-  function retrySave(name: string, s: Session, doc: Y.Doc, attempt: number) {
+  function retrySave(name: string, s: Session, attempt: number) {
     const wait = RETRY_MS[attempt];
     if (wait === undefined) {
       log.error("wiki.draft_save_failed", { pageId: s.pageId, attempts: attempt + 1 });
@@ -756,21 +774,12 @@ export function createWikiCollab(
       return;
     }
     log.warn("wiki.draft_save_retry", { pageId: s.pageId, attempt: attempt + 1, waitMs: wait });
-    const kept = Y.encodeStateAsUpdate(doc);
-    const snapshot = { ...s };
     later(wait, () => {
       void serial(s.pageId, async () => {
         const open = sessions.get(name) === s ? hocuspocus.documents.get(name) : undefined;
-        if (open) return persist(s, open);
-        const copy = new Y.Doc();
-        try {
-          Y.applyUpdate(copy, kept);
-          await persist(snapshot, copy);
-        } finally {
-          copy.destroy();
-        }
+        if (open && !s.closed) await persist(s, open);
       }).catch((err) => {
-        if (err instanceof HttpError && err.code === "wiki.busy") retrySave(name, s, doc, attempt + 1);
+        if (err instanceof HttpError && err.code === "wiki.busy") retrySave(name, s, attempt + 1);
         else log.error("wiki.draft_save_failed", { err, pageId: s.pageId });
       });
     });
@@ -788,7 +797,7 @@ export function createWikiCollab(
     debounce: opts.debounceMs ?? 2000,
     maxDebounce: 10_000,
     quiet: true,
-    async onAuthenticate({ documentName, context, connectionConfig }) {
+    onAuthenticate: track(async ({ documentName, context, connectionConfig }) => {
       const [kind, workspaceId, slug, ...rest] = documentName.split("/");
       if (kind !== "wiki" || !workspaceId || !slug || rest.length || workspaceId !== context.workspaceId)
         throw new Error("forbidden");
@@ -797,18 +806,20 @@ export function createWikiCollab(
         .select({ role: members.role })
         .from(members)
         .where(and(eq(members.workspaceId, workspaceId), eq(members.userId, context.userId)));
-      if (!m) throw new Error("forbidden");
+      if (closing || !m) throw new Error("forbidden");
       // The page must be one the person reads; one they don't is gone, like one that doesn't exist.
       const page = await pageBySlug(deps.db, { workspaceId, userId: context.userId }, slug).catch(() => null);
-      if (!page) throw new Error("not_found");
+      if (closing || !page) throw new Error("not_found");
       if (page.locked && !can(m.role, "configure")) connectionConfig.readOnly = true;
       context.peer.docs.set(documentName, { slug, readOnly: connectionConfig.readOnly });
-    },
-    async onLoadDocument({ document, documentName }) {
+    }),
+    onLoadDocument: track(async ({ document, documentName }) => {
       const [, workspaceId = "", slug = ""] = documentName.split("/");
       const deps = getDeps();
       const page = await pageBySlug(deps.db, { workspaceId, system: true }, slug);
+      if (closing) throw new Error("wiki live session stopped");
       return serial(page.id, async () => {
+        if (closing) throw new Error("wiki live session stopped");
         const [saved] = await deps.db.select().from(wikiPageDocs).where(eq(wikiPageDocs.pageId, page.id));
         const s: Session = {
           pageId: page.id,
@@ -844,7 +855,7 @@ export function createWikiCollab(
         loading.delete(documentName);
         return document;
       });
-    },
+    }),
     async beforeHandleAwareness({ states, context, connection }) {
       // Presence is declared by the client: the server stamps who it is (nobody passes for another person
       // or for the agent).
@@ -879,8 +890,7 @@ export function createWikiCollab(
       if (!s || s.closed) return;
       await serial(s.pageId, () => persist(s, document)).catch((err) => {
         if (err instanceof DraftRejected) abandon(documentName, s, err);
-        else if (err instanceof HttpError && err.code === "wiki.busy")
-          retrySave(documentName, s, document, 0);
+        else if (err instanceof HttpError && err.code === "wiki.busy") retrySave(documentName, s, 0);
         else log.error("wiki.draft_save_failed", { err, pageId: s.pageId });
       });
     },
@@ -934,12 +944,17 @@ export function createWikiCollab(
       if (!s || !document) return p.close(CLOSE.revoked);
       const size = await sizeAfter(s, document, update);
       if (size === null) return p.close(CLOSE.malformed);
+      if (size === "out_of_sync") {
+        p.sendNow(syncStatus(head.rawKey, false));
+        return p.close(CLOSE.outOfSync);
+      }
       // Rejected: the client's document now differs from the server's and every later update of it depends
       // on this one, so the connection closes after the rejection instead of acknowledging what can't apply.
       if (size > MAX_BODY) {
         p.sendNow(syncStatus(head.rawKey, false));
         return p.close(CLOSE.tooLarge);
       }
+      if (p.closed || !p.apply(await verdict(p))) return;
       const pendingBefore = hasPending(document);
       const acked = new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, ACK_MS);
@@ -983,11 +998,26 @@ export function createWikiCollab(
   }
 
   /** The page's length once `update` is applied to a copy of the document; null for an invalid update. */
-  async function sizeAfter(s: Session, document: Y.Doc, update: Uint8Array): Promise<number | null> {
+  async function sizeAfter(
+    s: Session,
+    document: Y.Doc,
+    update: Uint8Array,
+  ): Promise<number | "out_of_sync" | null> {
     const probe = new Y.Doc();
     try {
       Y.applyUpdate(probe, Y.encodeStateAsUpdate(document));
       Y.applyUpdate(probe, update);
+      // A new item integrated under a deleted parent disappears without becoming pending. Refuse it
+      // before Hocuspocus can confirm it, excluding deletions the update itself intentionally carries.
+      const decoded = Y.decodeUpdate(update);
+      for (const item of decoded.structs) {
+        if (!(item instanceof Y.Item) || item.content instanceof Y.ContentDeleted) continue;
+        const clock = Math.max(item.id.clock, Y.getState(document.store, item.id.client));
+        if (clock >= item.id.clock + item.length || clock >= Y.getState(probe.store, item.id.client))
+          continue;
+        const id = Y.createID(item.id.client, clock);
+        if (Y.getItem(probe.store, id).deleted && !Y.isDeleted(decoded.ds, id)) return "out_of_sync";
+      }
       return (await textOf(s, probe)).length;
     } catch {
       return null;
@@ -1046,15 +1076,20 @@ export function createWikiCollab(
 
   /** Checks a socket's right now, outside a message: closes it, or makes a read-only one reconnect to write. */
   async function recheck(p: Peer, slug?: string) {
-    if (p.closed || !p.apply(await verdict(p, { force: true }))) return;
-    if (!slug) return;
-    const doc = [...p.docs.values()].find((d) => d.slug === slug);
-    if (!doc?.readOnly) return;
-    const [page] = await getDeps()
-      .db.select({ locked: knowledgePages.locked })
-      .from(knowledgePages)
-      .where(and(eq(knowledgePages.workspaceId, p.data.workspaceId), eq(knowledgePages.slug, slug)));
-    if (page && !page.locked) p.close(CLOSE.readOnly);
+    if (closing || p.closed) return;
+    p.rightReadAt = null;
+    p.rightGeneration++;
+    return track(async () => {
+      if (p.closed || !p.apply(await verdict(p, { force: true }))) return;
+      if (closing || !slug) return;
+      const doc = [...p.docs.values()].find((d) => d.slug === slug);
+      if (!doc?.readOnly) return;
+      const [page] = await getDeps()
+        .db.select({ locked: knowledgePages.locked })
+        .from(knowledgePages)
+        .where(and(eq(knowledgePages.workspaceId, p.data.workspaceId), eq(knowledgePages.slug, slug)));
+      if (page && !page.locked) p.close(CLOSE.readOnly);
+    })();
   }
 
   const toHttp = (err: unknown) => {
@@ -1124,25 +1159,22 @@ export function createWikiCollab(
             const copy = new Y.Doc();
             try {
               Y.applyUpdate(copy, Y.encodeStateAsUpdate(doc));
-              m.replaceYContent(copy, row.body, "wiki-server");
-              const reset = {
-                parentVersion: row.version,
-                baseBody: row.body,
-                dirty: false,
-                editors: [],
-                conflictVersion: null,
-              };
-              await persist({ ...s, ...reset }, copy, async (tx, page) => {
+              const reset = { ...s, dirty: false, editors: [], conflictVersion: null };
+              await persist(reset, copy, async (tx, page) => {
+                await requireWriter(tx, page.workspaceId, by);
                 if (page.locked && !(canBypassLock && (await bypassesLock(tx, page.workspaceId, by))))
                   throw new HttpError(403, "wiki.page_locked", "This page is locked");
+                m.replaceYContent(copy, page.body, "wiki-server");
+                reset.parentVersion = page.version;
+                reset.baseBody = page.body;
               });
-              m.replaceYContent(doc, row.body, "wiki-server");
+              Y.applyUpdate(doc, Y.encodeStateAsUpdate(copy), "wiki-server");
               Object.assign(s, reset);
             } finally {
               copy.destroy();
             }
             clearTimeout(s.idle);
-            broadcast(docName(row.workspaceId, row.slug), { type: "discarded", version: row.version });
+            broadcast(docName(row.workspaceId, row.slug), { type: "discarded", version: s.parentVersion });
           },
           { persist: false },
         ),
@@ -1176,8 +1208,8 @@ export function createWikiCollab(
         CLOSE_MS,
       );
       try {
-        while (hocuspocus.documents.size || queues.size || reading.size) {
-          await Promise.allSettled([...queues.values(), ...reading.values()]);
+        while (hocuspocus.documents.size || hocuspocus.loadingDocuments.size || queues.size || reading.size) {
+          await Promise.allSettled([...queues.values(), ...reading, ...hocuspocus.loadingDocuments.values()]);
           await Bun.sleep(10);
         }
       } finally {
@@ -1190,6 +1222,7 @@ export function createWikiCollab(
 
   const socket = {
     open(ws: Bun.ServerWebSocket<CollabSocketData>) {
+      if (closing) return ws.close(...CLOSE.revoked);
       const peer = new Peer(ws.data, ws, { verdict, deliver });
       ws.data.peer = peer;
       peers.add(peer);
@@ -1215,5 +1248,9 @@ export function createWikiCollab(
     },
   };
 
-  return { live, socket };
+  const upgrade = (req: Request, origins: string[]) =>
+    closing
+      ? Promise.resolve({ ok: false as const, response: new Response("Server is stopping", { status: 503 }) })
+      : track(() => checkCollabUpgrade(getDeps(), req, origins, () => closing))();
+  return { live, socket, upgrade };
 }

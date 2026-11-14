@@ -375,8 +375,6 @@ export function registerWiki(app: Hono<AppEnv>) {
         at: deps.now(),
         detail: moved.folder,
       });
-    // A moved page's live connections are checked again at once, like a lock.
-    await deps.wikiLive.recheckPage(moved);
     return c.json(await toPage(deps.db, moved, me));
   });
 
@@ -387,8 +385,6 @@ export function registerWiki(app: Hono<AppEnv>) {
     const row = await page(c, me);
     const { locked } = await readJson(c, z.object({ locked: z.boolean() }).strict());
     const updated = await patchPage(deps, row, { locked }, adminOnly(me$(me)));
-    // Whoever is editing live is checked again now: a member drops to read only on a lock.
-    if (locked !== row.locked) deps.wikiLive.recheckPage(updated);
     return c.json(await toPage(deps.db, updated, me));
   });
 
@@ -579,7 +575,7 @@ export function registerWiki(app: Hono<AppEnv>) {
     const names = new Set(input.defs.map((d) => d.name.toLowerCase()));
     if (ids.size !== input.defs.length || names.size !== input.defs.length)
       throw new HttpError(400, "wiki.props.duplicate", "Property ids and names must be unique");
-    return c.json(await savePropSchema(deps, me.workspaceId, input.defs, input.parentVersion));
+    return c.json(await savePropSchema(deps, me.workspaceId, input.defs, input.parentVersion, me$(me)));
   });
 
   // The graph: the whole wiki, or the local one around a page (`pageId`) up to `depth` steps. Only pages
@@ -766,9 +762,9 @@ export function registerWiki(app: Hono<AppEnv>) {
         await unindex(tx, deps, { kind: "wiki", id: p.id });
       },
     );
-    // Whoever is editing live and lost the read is closed now (at the old address too, if it changed).
-    await deps.wikiLive.recheckPage(row);
-    if (updated.slug !== row.slug) await deps.wikiLive.recheckPage(updated);
+    // Whoever is editing live and lost the read is closed now: patchPage checks the page's connections,
+    // and a new slug leaves the ones at the old address to check here.
+    if (updated.slug !== row.slug) await deps.wikiLive.recheckPage(row);
     return c.json(await toPage(deps.db, updated, me));
   });
 

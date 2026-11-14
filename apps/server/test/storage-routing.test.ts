@@ -270,6 +270,23 @@ describe("a bucket that fails", () => {
     }
   });
 
+  test("a local copy downloads when HEAD succeeds but the bucket GET is rejected", async () => {
+    const { workspaceId, ana } = await team();
+    const file = await upload(ana, workspaceId, "local bytes");
+    await saveStorage(server.deps, workspaceId, { kind: "s3", s3: input("head-only") });
+    await startMigration(server.deps, server.deps.localBlobs, workspaceId);
+    await migrationDone(workspaceId);
+    s3.override = ({ method, list }) =>
+      method === "GET" && !list
+        ? new Response("<Error><Code>AccessDenied</Code></Error>", { status: 403 })
+        : null;
+    try {
+      expect(await read(ana, workspaceId, file.id)).toBe("local bytes");
+    } finally {
+      s3.override = null;
+    }
+  });
+
   test("writes: a clear error and no file row without its bytes, in the form and in the chunked upload", async () => {
     const { workspaceId, ana } = await team();
     await saveStorage(server.deps, workspaceId, { kind: "s3", s3: input("nowrite") });

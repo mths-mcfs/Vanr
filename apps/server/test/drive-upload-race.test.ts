@@ -3,9 +3,9 @@
 // interleaving is reached without timers. The property: whatever the order (the same offset twice,
 // different offsets, a part that pauses in the middle, a part that drops), the stored file is exactly the
 // concatenation of the parts the server accepted, and its recorded hash is that file's.
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { createApp } from "../src/app";
 import type { RunningServer } from "../src/server";
 import { FirstUserPlace, SIGNUP_QUEUE_LIMITS } from "../src/signup-queue";
@@ -249,6 +249,67 @@ describe("concurrent parts of one upload", () => {
     const done = await body(await json(`/${session.id}/complete`, "POST"));
     const blob = await ana.browser.fetch(`${base.replace(/\/uploads$/, "")}/${done.id}/blob`);
     expect(await blob.text()).toBe("xyz");
+  });
+
+  test("a failed session commit rolls back the file and a retry returns one result", async () => {
+    const session = await body(await json("", "POST", { fileName: "atomic.txt", size: 0 }));
+    const before = await server.deps.db.select().from(schema.files);
+    await server.deps.db.execute(sql`create function reject_upload_done() returns trigger language plpgsql as $$
+      begin if NEW.status = 'done' then raise exception 'commit failed'; end if; return NEW; end $$`);
+    await server.deps.db.execute(sql`create trigger reject_upload_done before update on upload_sessions
+      for each row execute function reject_upload_done()`);
+    try {
+      expect((await json(`/${session.id}/complete`, "POST")).status).toBe(500);
+      expect(await server.deps.db.select().from(schema.files)).toHaveLength(before.length);
+    } finally {
+      await server.deps.db.execute(sql`drop trigger reject_upload_done on upload_sessions`);
+      await server.deps.db.execute(sql`drop function reject_upload_done()`);
+    }
+    const transaction = server.deps.db.transaction.bind(server.deps.db);
+    const lostReply = spyOn(server.deps.db, "transaction").mockImplementationOnce(async (...args) => {
+      await transaction(...args);
+      throw new Error("connection lost after commit");
+    });
+    try {
+      expect((await json(`/${session.id}/complete`, "POST")).status).toBe(500);
+    } finally {
+      lostReply.mockRestore();
+    }
+    const saved = await body(await json(`/${session.id}/complete`, "POST"));
+    expect((await body(await json(`/${session.id}/complete`, "POST"))).id).toBe(saved.id);
+    expect(await server.deps.db.select().from(schema.files)).toHaveLength(before.length + 1);
+    expect((await ana.browser.fetch(`${base.replace(/\/uploads$/, "")}/${saved.id}/blob`)).status).toBe(200);
+  });
+
+  test("a resumed complete fences out the attempt still writing its blob", async () => {
+    const session = await body(await json("", "POST", { fileName: "resumed.txt", size: 0 }));
+    const before = await server.deps.db.select().from(schema.files);
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const put = server.deps.blobs.put.bind(server.deps.blobs);
+    const held = spyOn(server.deps.blobs, "put").mockImplementationOnce(async (...args) => {
+      const bytes = args[1] instanceof Blob ? await args[1].bytes() : args[1];
+      entered.resolve();
+      await release.promise;
+      await put(args[0], bytes, args[2]);
+    });
+    const first = json(`/${session.id}/complete`, "POST");
+    await entered.promise;
+    const clock = spyOn(server.deps, "now").mockReturnValue(new Date(Date.now() + 11 * 60_000));
+    try {
+      const second = await json(`/${session.id}/complete`, "POST");
+      expect(second.status).toBe(200);
+      const saved = await body(second);
+      release.resolve();
+      expect((await first).status).toBe(409);
+      expect((await body(await json(`/${session.id}/complete`, "POST"))).id).toBe(saved.id);
+      expect(await server.deps.db.select().from(schema.files)).toHaveLength(before.length + 1);
+    } finally {
+      release.resolve();
+      await first;
+      held.mockRestore();
+      clock.mockRestore();
+    }
   });
 
   test("two completes at once make one file", async () => {

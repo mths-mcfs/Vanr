@@ -5,10 +5,10 @@
 // Only files have a producer in this slice (the Drive). The other kinds' producers (chat S6, wiki S4,
 // issues S4, debates S3) come with their areas; here their rows are written straight to the database and
 // `reindex` reads them back, the same call each producer makes after it saves.
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { ASK_LIMIT } from "../src/search-ask";
 import { backfillSearch, reindex } from "../src/search-index";
 import type { RunningServer } from "../src/server";
@@ -207,27 +207,33 @@ describe("search: every kind the index accepts", () => {
     expect(await ids(beto, workspaceId, "sardine")).toEqual([]);
   });
 
-  test("the backfill indexes what is missing, once per source", async () => {
-    const { workspaceId, general, ana } = await team();
-    const id = newId("msg");
-    await server.deps.db.insert(schema.messages).values({
-      id,
-      workspaceId,
-      channelId: general,
-      authorKind: "person",
-      authorId: ana.user.id,
-      body: "unindexed walrus",
+  test("recovery replaces stale file chunks after a failed reindex", async () => {
+    const { workspaceId, ana } = await team();
+    const file = await body(
+      await ana.browser.json(`${W(workspaceId)}/files`, "POST", {
+        title: "Notes",
+        content: { kind: "document", markdown: "oldword" },
+      }),
+    );
+    const failed = spyOn(server.deps.search, "withDb").mockImplementationOnce(() => {
+      throw new Error("index unavailable");
     });
-    expect(await ids(ana, workspaceId, "walrus")).toEqual([]);
-    expect(await backfillSearch(server.deps)).toBeGreaterThanOrEqual(1);
-    expect(await ids(ana, workspaceId, "walrus")).toEqual([`message:${id}`]);
-    // A second pass finds nothing missing for it and doesn't duplicate its chunks.
+    try {
+      expect(
+        (
+          await ana.browser.json(`${W(workspaceId)}/files/${file.id}/versions`, "POST", {
+            parentVersion: 1,
+            content: { kind: "document", markdown: "newword" },
+          })
+        ).status,
+      ).toBe(200);
+    } finally {
+      failed.mockRestore();
+    }
+    expect(await ids(ana, workspaceId, "newword")).toEqual([]);
     await backfillSearch(server.deps);
-    const chunks = await server.deps.db
-      .select()
-      .from(schema.searchChunks)
-      .where(and(eq(schema.searchChunks.sourceKind, "message"), eq(schema.searchChunks.sourceId, id)));
-    expect(chunks).toHaveLength(1);
+    expect(await ids(ana, workspaceId, "newword")).toEqual([`file:${file.id}`]);
+    expect(await ids(ana, workspaceId, "oldword")).toEqual([]);
   });
 });
 

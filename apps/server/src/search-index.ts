@@ -107,12 +107,29 @@ export function embedderFor(config: Config, fetchImpl?: typeof fetch): Embedder 
   return null;
 }
 
+/** Transaction copies keep pgvector state and read permissions on that same connection. */
+class ServerSearchIndex extends PgSearchIndex {
+  constructor(
+    db: Db,
+    private readonly options: ConstructorParameters<typeof PgSearchIndex>[1],
+  ) {
+    super(db, options);
+  }
+
+  override withDb(db: Db): PgSearchIndex {
+    const state = super.withDb(db);
+    const index = new PgSearchIndex(db, { ...this.options, access: dbAccess(db) });
+    index.ensureVector = () => state.ensureVector();
+    return index;
+  }
+}
+
 /** The server's index. Embeddings go into the ledger as `search`, paid by the platform. */
 export function createSearchIndex(
   deps: Pick<AppDeps, "db" | "config" | "ledger" | "now">,
   fetchImpl?: typeof fetch,
 ) {
-  return new PgSearchIndex(deps.db, {
+  return new ServerSearchIndex(deps.db, {
     access: dbAccess(deps.db),
     embedder: embedderFor(deps.config, fetchImpl),
     now: deps.now,
@@ -447,39 +464,24 @@ export async function unindex(tx: Db, deps: Pick<AppDeps, "search">, ref: Source
   await deps.search.withDb(tx).remove(ref);
 }
 
-/**
- * Indexes what is not in the index yet (data from before the search, or a write that went down before
- * indexing). Runs at boot, in batches; returns how many sources it indexed.
- */
+/** Replays live files, including stale chunks left by failed version or extraction indexing. */
 export async function backfillSearch(deps: Pick<AppDeps, "db" | "search">, batch = 500): Promise<number> {
-  const missing = (table: string, kind: IndexedKind, extra = sql``) =>
-    sql`select t.id from ${sql.raw(table)} t
-      where not exists (select 1 from search_chunks c where c.source_kind = ${kind} and c.source_id = t.id)${extra}
-      limit ${batch}`;
-  const plans: [IndexedKind, ReturnType<typeof sql>][] = [
-    ["message", missing("messages", "message", sql` and not (t.meta ? 'retracted') and t.body <> ''`)],
-    ["wiki", missing("knowledge_pages", "wiki", sql` and t.deleted_at is null`)],
-    ["file", missing("files", "file", sql` and t.deleted_at is null`)],
-    ["issue", missing("issues", "issue")],
-    ["debate", missing("debates", "debate")],
-  ];
+  let after = "";
   let n = 0;
-  for (const [kind, query] of plans) {
-    // A source that makes no chunk (a message of only spaces) comes back as "missing": seen once, it stops.
-    const seen = new Set<string>();
-    for (;;) {
-      const ids = rowsOf(await deps.db.execute(query))
-        .map((r) => String(r.id))
-        .filter((id) => !seen.has(id));
-      if (!ids.length) break;
-      for (const id of ids) {
-        seen.add(id);
-        await reindex(deps, { kind, id });
-      }
-      n += ids.length;
+  for (;;) {
+    const rows = await deps.db
+      .select({ id: files.id })
+      .from(files)
+      .where(and(isNull(files.deletedAt), sql`${files.id} > ${after}`))
+      .orderBy(files.id)
+      .limit(batch);
+    if (!rows.length) return n;
+    for (const { id } of rows) {
+      await reindex(deps, { kind: "file", id });
+      after = id;
+      n++;
     }
   }
-  return n;
 }
 
 /** Tick: the vector queue. */

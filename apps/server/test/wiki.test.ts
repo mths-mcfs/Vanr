@@ -16,6 +16,7 @@ import { Browser, holdNextIndexWrite, SERVER_TEST_MS, signedIn, startTestServer 
 import { NO_POSTGRES, TEST_POSTGRES_URL, testDatabaseUrl } from "./postgres";
 import { memberOf, type Person, seedWorkspace } from "./seed";
 import { apiError, wikiApi } from "./wiki-api";
+import { until } from "./wiki-live";
 
 /** The real search index (T8, Postgres), with the permission in the WHERE. */
 const search = { search: (viewer: Viewer, q: string) => server.deps.search.search(viewer, q) };
@@ -46,6 +47,28 @@ function vaultZip(extra: Record<string, Uint8Array> = {}) {
   files["Handbook/.obsidian/workspace.json"] = strToU8("{}");
   return zipSync({ ...files, ...extra });
 }
+
+test(
+  "the running server purges expired wiki trash after 30 days",
+  async () => {
+    let now = new Date();
+    const running = await startTestServer({ fileServicesMs: 20, now: () => now });
+    try {
+      const ana = await signedIn(running, "Ana", email("cleanup"));
+      const { workspaceId } = await seedWorkspace(running, ana, "Wiki cleanup");
+      const wiki = wikiApi(ana.browser);
+      const page = await wiki.createWikiPage(workspaceId, { title: "Expired wiki page", body: "Old text" });
+      await wiki.deleteWikiPage(workspaceId, page.slug);
+      expect(await wiki.getWikiTrash(workspaceId)).toHaveLength(1);
+      now = new Date(now.getTime() + 31 * DAY);
+      await until(async () => (await running.deps.db.select().from(schema.knowledgePages)).length === 0);
+      expect(await running.deps.db.select().from(schema.pageRevisions)).toHaveLength(0);
+    } finally {
+      await running.stop();
+    }
+  },
+  SERVER_TEST_MS,
+);
 
 describe("links and rename (P0-05)", () => {
   test("[[a|b]], [[a#heading]], [[a#^block]], embed; a target created later starts to count", async () => {
@@ -616,10 +639,10 @@ describe("zip vault (P0-10)", () => {
       new Uint8Array(await (await ana.api.wiki.exportWiki(workspaceId)).arrayBuffer()),
     );
     expect(Object.keys(exported).filter((k) => k.endsWith(".md")).length).toBe(VAULT_NOTES.length);
-    expect(Object.keys(exported)).toContain("attachments/diagram.png");
-    const startMd = new TextDecoder().decode(exported["Start.md"]);
+    expect(Object.keys(exported)).toContain("wiki/attachments/diagram.png");
+    const startMd = new TextDecoder().decode(exported["wiki/Start.md"]);
     expect(startMd.startsWith("---\naliases:\n  - Home\n  - Front page\ntags:\n")).toBe(true);
-    expect(startMd).toContain("status: active\n---\n# Welcome to the team handbook");
+    expect(startMd).toContain("status: active\ntitle: Start\n---\n# Welcome to the team handbook");
 
     // Reimporting the export in another workspace gives the same pages, bodies and properties.
     const other = await team();
@@ -641,6 +664,61 @@ describe("zip vault (P0-10)", () => {
         (await ana.api.wiki.getWikiPage(workspaceId, p.slug)).body,
       );
     }
+  });
+
+  test("successive imports persist new options of existing properties", async () => {
+    const { workspaceId, ana } = await team();
+    await ana.api.wiki.setWikiProps(
+      workspaceId,
+      [{ id: "prop_status", name: "status", type: "select", options: [{ id: "opt_open", name: "Open" }] }],
+      0,
+    );
+    for (const status of ["Done", "Later"]) {
+      await ana.api.wiki.importWiki(workspaceId, {
+        files: [{ path: `${status}.md`, text: `---\nstatus: ${status}\n---\nbody` }],
+      });
+      const { defs } = await ana.api.wiki.listWikiProps(workspaceId);
+      const option = defs[0]?.options?.find((o) => o.name === status);
+      expect(option).toBeDefined();
+      expect((await ana.api.wiki.getWikiPage(workspaceId, status.toLowerCase())).props).toEqual({
+        prop_status: option?.id,
+      });
+    }
+  });
+
+  test("a schema conflict leaves no orphan note and a fresh import recovers", async () => {
+    const { workspaceId, ana } = await team();
+    const hold = holdNextTransaction(server);
+    const input = { files: [{ path: "Race.md", text: "---\nscore: 10\n---\nbody" }] };
+    const importing = apiError(ana.api.wiki.importWiki(workspaceId, input));
+    await hold.started;
+    await ana.api.wiki.setWikiProps(workspaceId, [{ id: "prop_owner", name: "owner", type: "text" }], 0);
+    hold.release();
+    expect((await importing).status).toBe(409);
+    expect(await ana.api.wiki.listWikiPages(workspaceId)).toEqual([]);
+    expect((await ana.api.wiki.importWiki(workspaceId, input)).created).toBe(1);
+    const { defs } = await ana.api.wiki.listWikiProps(workspaceId);
+    expect((await ana.api.wiki.getWikiPage(workspaceId, "race")).props).toEqual({
+      [defs.find((d) => d.name === "score")?.id ?? ""]: 10,
+    });
+  });
+
+  test("export preserves original titles and a common real folder, even with file collisions and a title property", async () => {
+    const { workspaceId, ana } = await team();
+    await ana.api.wiki.setWikiProps(workspaceId, [{ id: "prop_title", name: "TITLE", type: "text" }], 0);
+    for (const title of ["Q3/Plan", "Q3-Plan", "Q3:Plan"]) {
+      await ana.api.wiki.createWikiPage(workspaceId, {
+        title,
+        folder: "Processes",
+        props: { prop_title: "Wrong title" },
+      });
+    }
+    const other = await team();
+    const zip = await (await ana.api.wiki.exportWiki(workspaceId)).blob();
+    await other.ana.api.wiki.importWikiVault(other.workspaceId, { file: zip, fileName: "export.zip" });
+    expect(
+      (await other.ana.api.wiki.listWikiPages(other.workspaceId)).map((p) => [p.title, p.folder]).sort(),
+    ).toEqual(["Q3/Plan", "Q3-Plan", "Q3:Plan"].map((t) => [t, "Processes"]).sort());
   });
 
   test("attachments that only differ in the path's case become a single file in the Drive", async () => {
@@ -1055,6 +1133,33 @@ describe("a write decides on the page it reads locked in its own transaction", (
     }
     expect(outcomes).toEqual(writes.map(([what]) => `${what}: 403 wiki.page_locked`));
   });
+
+  for (const operation of ["create", "import", "properties"] as const)
+    test(`a removed member cannot commit ${operation} after passing the request guard`, async () => {
+      const { workspaceId, ana, beto } = await team();
+      const hold = holdNextTransaction(server);
+      const pending = apiError(
+        operation === "create"
+          ? beto.api.wiki.createWikiPage(workspaceId, { title: "After removal" })
+          : operation === "import"
+            ? beto.api.wiki.importWiki(workspaceId, {
+                files: [{ path: "After removal.md", text: "---\nscore: 10\n---\nbody" }],
+              })
+            : beto.api.wiki.setWikiProps(
+                workspaceId,
+                [{ id: "prop_score", name: "score", type: "number" }],
+                0,
+              ),
+      );
+      await hold.started;
+      await server.deps.db
+        .delete(schema.members)
+        .where(and(eq(schema.members.workspaceId, workspaceId), eq(schema.members.userId, beto.user.id)));
+      hold.release();
+      expect((await pending).status).toBe(403);
+      expect(await ana.api.wiki.listWikiPages(workspaceId)).toEqual([]);
+      expect((await ana.api.wiki.listWikiProps(workspaceId)).defs).toEqual([]);
+    });
 
   test("restoring from the trash while an admin deletes for good: the restore finds nothing and the page stays gone", async () => {
     const { workspaceId, ana, beto } = await team();

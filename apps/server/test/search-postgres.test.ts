@@ -6,8 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { eq, sql } from "drizzle-orm";
-import { searchTick } from "../src/search-index";
-import { body, signedIn, startTestServer } from "./harness";
+import { body, signedIn, startTestServer, waitFor } from "./harness";
 import { NO_POSTGRES, TEST_POSTGRES_URL, testDatabaseUrl } from "./postgres";
 import { type Person, seedChannel, seedWorkspace } from "./seed";
 
@@ -27,7 +26,10 @@ async function document(who: Person, workspaceId: string, markdown: string, chan
 describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("vector search on Postgres"), () => {
   test("the boot turns the vector on; the tick embeds only workspace and public chunks and records them in the ledger", async () => {
     const url = await testDatabaseUrl("vec");
-    const server = await startTestServer({ env: { DATABASE_URL: url, SEARCH_EMBEDDER: "fake" } });
+    const server = await startTestServer({
+      env: { DATABASE_URL: url, SEARCH_EMBEDDER: "fake" },
+      fileServicesMs: 20,
+    });
     try {
       const column = await server.deps.db.execute(
         sql`select 1 from information_schema.columns where table_name = 'search_chunks' and column_name = 'embedding'`,
@@ -42,7 +44,6 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("vector search on Postgres"), () 
       });
       const open = await document(ana, workspaceId, "harbor expansion roadmap for the spring");
       const secret = await document(ana, workspaceId, "board salary negotiation notes", board);
-      expect(await searchTick(server.deps)).toBeGreaterThanOrEqual(1);
       const state = async (id: string) =>
         (
           await server.deps.db
@@ -50,7 +51,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("vector search on Postgres"), () 
             .from(schema.searchChunks)
             .where(eq(schema.searchChunks.sourceId, id))
         ).map((r) => r.s);
-      expect(await state(open.id)).toEqual(["done"]);
+      await waitFor(async () => (await state(open.id)).join() === "done");
       expect(await state(secret.id)).toEqual(["none"]);
       const lines = await server.deps.db
         .select()
@@ -71,9 +72,9 @@ describe("vector search without pgvector", () => {
     try {
       expect(await server.deps.search.ensureVector()).toBe(false);
       const ana = await signedIn(server, "Ana", "ana@search-pglite.test");
-      const { workspaceId } = await seedWorkspace(server, ana, "Lexical");
-      const doc = await document(ana, workspaceId, "lighthouse maintenance schedule");
-      expect(await searchTick(server.deps)).toBe(0);
+      const { workspaceId, general } = await seedWorkspace(server, ana, "Lexical");
+      const doc = await document(ana, workspaceId, "lighthouse maintenance schedule", general);
+      await server.deps.db.execute(sql`select 1`);
       const hits = await body(await ana.browser.fetch(`${W(workspaceId)}/search?q=lighthouse`));
       expect(hits.hits.map((h: { sourceId: string }) => h.sourceId)).toEqual([doc.id]);
     } finally {

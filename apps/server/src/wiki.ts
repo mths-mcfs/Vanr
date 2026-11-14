@@ -281,6 +281,7 @@ export async function createPage(
     author: Author;
     sourceType?: "obsidian";
     note?: string | null;
+    propSchema?: { defs: PropDef[]; version: number };
   },
 ): Promise<WikiRow> {
   checkTitle(input.title);
@@ -289,6 +290,9 @@ export async function createPage(
   const id = newId("wiki");
   const body = input.body ?? "";
   const row = await writeTx(deps.db, async (tx) => {
+    await requireWriter(tx, input.workspaceId, input.author);
+    if (input.propSchema)
+      await writePropSchema(tx, input.workspaceId, input.propSchema.defs, input.propSchema.version, at);
     const [created] = await tx
       .insert(knowledgePages)
       .values({
@@ -395,7 +399,7 @@ export async function anyBypasses(tx: Tx, workspaceId: string, who: readonly Act
 }
 
 /** A person who writes must still be a member when the write commits; an agent's access is its run's. */
-async function requireWriter(tx: Tx, workspaceId: string, who: ActorRef) {
+export async function requireWriter(tx: Tx, workspaceId: string, who: ActorRef) {
   if (who.type === "person" && !(await roleIn(tx, workspaceId, who.id)))
     throw forbidden("You are not a member of this workspace any more");
 }
@@ -547,6 +551,9 @@ export async function patchPage(
       await reresolveLinks(tx, changed.workspaceId, [...namesOf(page), ...namesOf(changed)]);
     return changed;
   });
+  // The lock, the folder and the access change who may keep a live connection: checked again now.
+  if (set.locked !== undefined || set.folder !== undefined || set.access !== undefined)
+    await deps.wikiLive.recheckPage(updated);
   await reindex(deps, { kind: "wiki", id: updated.id });
   return updated;
 }
@@ -737,7 +744,7 @@ export async function purgeWikiTrash(deps: AppDeps): Promise<number> {
 
 /** Property definitions of the workspace's pages (seam 4). */
 export async function propSchemaOf(
-  db: Db,
+  db: Db | Tx,
   workspaceId: string,
 ): Promise<{ defs: PropDef[]; version: number }> {
   const [row] = await db.select().from(wikiPropSchemas).where(eq(wikiPropSchemas.workspaceId, workspaceId));
@@ -750,24 +757,37 @@ export async function savePropSchema(
   workspaceId: string,
   defs: PropDef[],
   parentVersion: number,
+  author: Author,
 ): Promise<{ defs: PropDef[]; version: number }> {
-  const at = deps.now();
+  return writeTx(deps.db, async (tx) => {
+    await requireWriter(tx, workspaceId, author);
+    return writePropSchema(tx, workspaceId, defs, parentVersion, deps.now());
+  });
+}
+
+async function writePropSchema(
+  tx: Tx,
+  workspaceId: string,
+  defs: PropDef[],
+  parentVersion: number,
+  at: Date,
+): Promise<{ defs: PropDef[]; version: number }> {
   if (parentVersion === 0) {
-    const inserted = await deps.db
+    const inserted = await tx
       .insert(wikiPropSchemas)
       .values({ workspaceId, defs, version: 1, updatedAt: at })
       .onConflictDoNothing()
       .returning();
     if (inserted[0]) return { defs, version: 1 };
   } else {
-    const [row] = await deps.db
+    const [row] = await tx
       .update(wikiPropSchemas)
       .set({ defs, version: parentVersion + 1, updatedAt: at })
       .where(and(eq(wikiPropSchemas.workspaceId, workspaceId), eq(wikiPropSchemas.version, parentVersion)))
       .returning();
     if (row) return { defs, version: row.version };
   }
-  const current = await propSchemaOf(deps.db, workspaceId);
+  const current = await propSchemaOf(tx, workspaceId);
   throw new HttpError(409, "wiki.stale_draft", "Someone changed the properties", {
     currentVersion: current.version,
   });
