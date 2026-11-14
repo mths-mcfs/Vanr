@@ -172,7 +172,7 @@ async function assertDestinationFree(deps: AppDeps, workspaceId: string, next: S
     );
 }
 
-/** The bucket failed (down, refused, timed out): not the same as a file that doesn't exist. */
+/** The bucket failed (down, rejected the call, timed out): not the same as a file that doesn't exist. */
 export class StorageUnavailable extends HttpError {
   constructor(message = "The file storage is unavailable right now; try again in a moment") {
     super(503, "storage.unavailable", message);
