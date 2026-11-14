@@ -73,6 +73,7 @@
     "apps/server/test/sql-guard.test.ts": 2280,
     "apps/server/test/static.test.ts": 15,
     "apps/server/test/wiki-md.test.ts": 661,
-    "apps/server/test/wiki-search.test.ts": 90
+    "apps/server/test/wiki-search.test.ts": 90,
+    "apps/server/test/notify-text.test.ts": 10
   }
 }
