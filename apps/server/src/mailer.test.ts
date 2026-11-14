@@ -83,20 +83,25 @@ describe("resend mailer", () => {
     expect(keys).toEqual(["notification/n1-email", null]);
   });
 
-  test("409: still running with the same key is worth retrying; the key reused with another payload is final", async () => {
+  test("409: still running with the same key is worth retrying; the key already used for another payload means the first attempt was sent", async () => {
     const conflict = (name: string): typeof fetch =>
       Object.assign(async () => Response.json({ name, message: "x", statusCode: 409 }, { status: 409 }), {
         preconnect: () => {},
       });
+    const keyed = { ...mail, idempotencyKey: "notification/n1-email" };
     expect(
       await resendMailer("k", "n@example.com", { fetch: conflict("concurrent_idempotent_requests") }).send(
-        mail,
+        keyed,
       ),
     ).toEqual({ ok: false, retry: true, reason: "http_409" });
     expect(
+      await resendMailer("k", "n@example.com", { fetch: conflict("invalid_idempotent_request") }).send(keyed),
+    ).toEqual({ ok: true, alreadyAccepted: true });
+    // Without a key of ours, that answer can't be about an earlier attempt: it stays a final rejection.
+    expect(
       await resendMailer("k", "n@example.com", { fetch: conflict("invalid_idempotent_request") }).send(mail),
     ).toEqual({ ok: false, retry: false, reason: "http_409" });
-    expect(await resendMailer("k", "n@example.com", { fetch: answering(409) }).send(mail)).toEqual({
+    expect(await resendMailer("k", "n@example.com", { fetch: answering(409) }).send(keyed)).toEqual({
       ok: false,
       retry: false,
       reason: "http_409",

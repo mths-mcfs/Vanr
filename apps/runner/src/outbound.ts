@@ -246,9 +246,10 @@ const field = (frame: unknown, key: string): unknown => (isRecord(frame) ? frame
 
 /**
  * What goes in place of an invalid frame, by type. First the frame is repaired: only the part that failed goes
- * (an item of a list, an optional field, a nullable one set to null), the rest stays as it is, since the server
- * stores what it gets (a hello overwrites the environment's row, a job.done finishes the task). What cannot be
- * repaired becomes the form below, built only from the frame's ids and the error; `null`: the frame is dropped
+ * (an item of a list, an optional field, a nullable one set to null, a required one set to the neutral value
+ * of its type), the rest stays as it is, since the server stores what it gets (a hello overwrites the
+ * environment's row, a job.done finishes the task); the outcome (`status`, `exitCode`, `ok`) changes only when
+ * it is the field that failed. What cannot be repaired (a closed value, an id) becomes the form below, built only from the frame's ids and the error; `null`: the frame is dropped
  * and the runner goes on (the log says it). A frame over the socket's size limit is invalid too (see fit).
  */
 export const INVALID: Record<RunnerFrame["type"], string> = {
@@ -267,7 +268,8 @@ export const INVALID: Record<RunnerFrame["type"], string> = {
   "harness.tool": "the tool call with an empty input",
   "access.changed": "the failing folder left out; no access if the tools fail",
   "sandbox.changed": "the sandbox unavailable, with the error as the reason",
-  "live_view.frame": "dropped; the next frame replaces it",
+  "live_view.frame":
+    "the failing field neutral; dropped only over the size limit (the next frame replaces it)",
   "live_view.stream_ended": "the stream ended with reason error; dropped without a valid agent id",
 };
 
@@ -427,6 +429,35 @@ type Fix =
  * (or field with a default) or nullable field on the way. A job that fails leaves a hello whole, and a hello's
  * field with no such place becomes its neutral value. `null`: nothing to take out (the frame is replaced).
  */
+const NONE = Symbol("no neutral value");
+
+/**
+ * The neutral value of a schema's type: a list `[]`, a text `""`, a number 0, a record `{}`, and an object
+ * made of the neutral values of its required fields (an optional one left out, a nullable one null). `NONE`
+ * when some part has none (an enum, a literal, a boolean, a free value).
+ */
+function neutralOf(schema: z.ZodType): unknown {
+  const d = defOf(schema);
+  if (d.type === "array") return [];
+  if (d.type === "record") return {};
+  if (d.type === "string") return "";
+  if (d.type === "number") return 0;
+  if (d.type !== "object") return NONE;
+  const out: Record<string, unknown> = {};
+  for (const [k, field] of Object.entries(d.shape ?? {})) {
+    const f = defOf(field);
+    if (f.type === "optional" || f.type === "default") continue;
+    if (f.type === "nullable") {
+      out[k] = null;
+      continue;
+    }
+    const v = neutralOf(field);
+    if (v === NONE) return NONE;
+    out[k] = v;
+  }
+  return out;
+}
+
 function fixAt(frame: Record<string, unknown>, path: PropertyKey[]): Fix | null {
   if (
     frame.type === "hello" &&
@@ -438,8 +469,12 @@ function fixAt(frame: Record<string, unknown>, path: PropertyKey[]): Fix | null 
   let schema = optionOf(frame);
   let holder: unknown = frame;
   let best: Fix | null = null;
+  // The failing field itself, when the walk reaches it: where a required field gets its neutral value.
+  let last: { holder: Record<string, unknown>; key: string; schema: z.ZodType; at: string } | null = null;
+  const steps: string[] = [];
   for (const key of path) {
     if (!schema || holder === null || typeof holder !== "object") break;
+    steps.push(typeof key === "number" ? "[]" : String(key));
     let d = defOf(schema);
     while (WRAPPERS.has(d.type) && d.innerType) d = defOf(d.innerType);
     const child = d.type === "object" ? d.shape?.[String(key)] : d.type === "array" ? d.element : undefined;
@@ -453,10 +488,23 @@ function fixAt(frame: Record<string, unknown>, path: PropertyKey[]): Fix | null 
         if (c.type === "optional" || c.type === "default") best = { holder, key, how: "delete" };
         else if (c.type === "nullable") best = { holder, key, how: "null" };
       }
+    last =
+      isRecord(holder) && typeof key === "string" && child
+        ? { holder, key, schema: child, at: steps.join(".").replace(/\.\[\]/g, "[]") }
+        : null;
     holder = (holder as Record<PropertyKey, unknown>)[key as string];
     schema = child;
   }
   if (best) return best;
+  // A required field with no optional part around it takes the neutral value of its type: the rest of the
+  // frame, and its outcome (`status`, `exitCode`, `ok`), stay. A closed value (an enum, a literal, a boolean),
+  // an id and a free value have no neutral one.
+  if (last && path.length === steps.length) {
+    const neutral = neutralOf(last.schema);
+    const id = `${String(frame.type)}:${last.at}` in EXEMPT_IDS;
+    if (neutral !== NONE && !id && JSON.stringify(last.holder[last.key]) !== JSON.stringify(neutral))
+      return { holder: last.holder, key: last.key, how: "set", value: neutral };
+  }
   const top = path[0];
   if (frame.type === "hello" && typeof top === "string" && top in HELLO_NEUTRAL)
     return { holder: frame, key: top, how: "set", value: structuredClone(HELLO_NEUTRAL[top]) };
