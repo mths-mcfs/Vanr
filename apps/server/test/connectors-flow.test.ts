@@ -6,15 +6,19 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { and, eq } from "drizzle-orm";
+import { z } from "zod";
 import {
   connectCustom,
+  disconnect,
   finishOAuth,
   integrationSealer,
   MAX_SCOPE_ATTEMPTS,
   mcpFor,
+  refreshCustom,
   requestScope,
   type Starter,
 } from "../src/integrations/connectors";
+import { McpAuthRequired } from "../src/integrations/mcp";
 import { REFRESH_MARGIN_MS } from "../src/integrations/oauth";
 import type { RunningServer } from "../src/server";
 import { type FakeMcp, startFakeMcp } from "./fake-mcp";
@@ -255,6 +259,116 @@ describe("the OAuth credential", () => {
         kinds.push((await requestScope(server.deps, row, "create_item", "items:write")).kind);
       expect(kinds).toEqual([...Array.from({ length: MAX_SCOPE_ATTEMPTS }, () => "ask"), "exhausted"]);
       expect((await connection(row.id)).scopeRequest?.attempts).toBe(MAX_SCOPE_ATTEMPTS);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("the callback and the kept credential", () => {
+  test(
+    "a connection revoked while the code is being exchanged stays revoked: the token received is dropped",
+    async () => {
+      const back = await begin();
+      const pending = await connection(back.serverId);
+      let entered!: () => void;
+      const entering = new Promise<void>((r) => {
+        entered = r;
+      });
+      let release!: () => void;
+      const released = new Promise<void>((r) => {
+        release = r;
+      });
+      const inner = server.deps.fetchExternal;
+      const held = Object.assign(
+        async (url: string | URL | Request, init?: RequestInit) => {
+          if (String(url).endsWith("/token")) {
+            entered();
+            await released;
+          }
+          return inner(url, init);
+        },
+        { preconnect: () => {} },
+      ) as typeof fetch;
+      const finishing = finishOAuth(
+        { ...server.deps, fetchExternal: held },
+        { userId: ana.user.id, sessionId: "session-ana" },
+        {
+          code: back.code,
+          state: back.state,
+          iss: back.iss ?? undefined,
+        },
+      );
+      await entering;
+      await disconnect(server.deps, pending);
+      release();
+      expect(await finishing).toBe("/back?connector_error=gone");
+      const after = await connection(back.serverId);
+      expect(after.revokedAt).not.toBeNull();
+      expect(after.secret).toBeNull();
+      expect(after.status).toBe("pending");
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a kept credential in an old or broken shape is never sent: the connection asks to reconnect",
+    async () => {
+      const back = await begin();
+      await finish(back);
+      for (const kept of [
+        { apiKey: mcp.apiKey },
+        { kind: "api_key" },
+        { kind: "oauth", tokens: { accessToken: 1 } },
+      ]) {
+        await server.deps.db
+          .update(connections)
+          .set({ secret: integrationSealer(server.deps).seal(JSON.stringify(kept)), status: "active" })
+          .where(eq(connections.id, back.serverId));
+        const row = await connection(back.serverId);
+        const calls = mcp.calls.length;
+        expect(await mcpFor(server.deps, row).catch((e: unknown) => e)).toBeInstanceOf(McpAuthRequired);
+        await expect(refreshCustom(server.deps, row)).rejects.toMatchObject({ code: "connector.auth" });
+        expect(mcp.calls.length).toBe(calls);
+        expect((await connection(back.serverId)).status).toBe("reauth_required");
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a server that echoes the key in its error doesn't get it into ours",
+    async () => {
+      const key = "echoed-key+/value=42";
+      const echo = Bun.serve({
+        port: 0,
+        async fetch(req) {
+          const auth = req.headers.get("authorization") ?? "";
+          const { id } = z.object({ id: z.number() }).parse(await req.json());
+          const words = `rejected ${auth} b64=${Buffer.from(key).toString("base64")} pct=${encodeURIComponent(key)}\u0007\r\n`;
+          return Response.json({
+            jsonrpc: "2.0",
+            id,
+            error: { code: -1, message: words.repeat(20) },
+          });
+        },
+      });
+      try {
+        const err = await connectCustom(server.deps, me, {
+          serverUrl: `http://localhost:${echo.port}/mcp`,
+          apiKey: key,
+          nextPath: "/",
+        }).catch((e: unknown) => e);
+        expect(err).toMatchObject({ code: "connector.unreachable" });
+        const message = err instanceof Error ? err.message : "";
+        for (const form of [key, Buffer.from(key).toString("base64"), encodeURIComponent(key)])
+          expect([form, message.includes(form)]).toEqual([form, false]);
+        expect(message).toContain("rejected Bearer [redacted]");
+        expect(message.length).toBeLessThanOrEqual(300);
+        // biome-ignore lint/suspicious/noControlCharactersInRegex: the assertion is about control characters
+        expect(/[\u0000-\u001f]/.test(message)).toBe(false);
+      } finally {
+        echo.stop(true);
+      }
     },
     SERVER_TEST_MS,
   );

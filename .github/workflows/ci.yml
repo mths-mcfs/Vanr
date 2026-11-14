@@ -199,7 +199,8 @@ jobs:
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_DROP_LOCKS: "1"
-      # One refresh exchange per expiring OAuth token and one step-up card per scope set, from two connections.
+      # One refresh exchange per expiring OAuth token, one step-up card per scope set and no secret written onto a
+      # connection revoked during the OAuth callback, from two connections.
       - run: bun test apps/server/test/connectors-postgres.test.ts
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
@@ -219,12 +220,24 @@ jobs:
               exit 1
             fi
           done
-          for label in refresh step-up; do
+          labels="refresh step-up revoke"
+          for label in $labels; do
             if ! grep -qF "LOCK_OUTCOME_MISMATCH($label)" forced-connectors.log; then
               echo "::error::the forced $label test did not fail on its outcome without the lock"
               exit 1
             fi
           done
+          # Only the forced tests may fail, one per label: count distinct test names (bun prints each failure
+          # twice on the runner), and every failed test must be a forced one.
+          failed=$(grep -aE '^\(fail\) ' forced-connectors.log | sed -E 's/ \[[0-9.]+m?s\]$//' | sort -u)
+          if grep -v 'forced' <<< "$failed" | grep -q .; then
+            echo "::error::a test that is not a forced lock test failed without the lock"
+            exit 1
+          fi
+          if [ "$(grep -c . <<< "$failed")" -ne "$(wc -w <<< "$labels")" ]; then
+            echo "::error::expected one failed test per label, got: $failed"
+            exit 1
+          fi
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_DROP_LOCKS: "1"

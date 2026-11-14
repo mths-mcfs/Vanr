@@ -3,6 +3,7 @@
 // callback spends its state once, for the same person and session, before it expires. The IMAP/SMTP server and
 // Composio are local fakes; nothing goes out to the network.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createServer, type Socket } from "node:net";
 import { schema } from "@vanr/engine/db";
 import { createSealer } from "@vanr/engine/seal";
 import { eq } from "drizzle-orm";
@@ -26,9 +27,15 @@ let clock = new Date("2026-11-14T12:00:00Z");
 /** The fake Composio: each connected account answers a redirect link. */
 function fakeComposio() {
   const started: { authConfig: string; callback: string; apiKey: string | null }[] = [];
+  /** Answers once with a body that isn't JSON and repeats the key it got. */
+  const mode = { echo: false };
   const fn = async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = new URL(String(input));
     if (url.pathname !== "/api/v3/connected_accounts") return new Response("not found", { status: 404 });
+    if (mode.echo) {
+      mode.echo = false;
+      return new Response(`{oops key=${new Headers(init.headers).get("x-api-key")}`);
+    }
     const body = JSON.parse(String(init.body));
     started.push({
       authConfig: body.auth_config.id,
@@ -37,7 +44,7 @@ function fakeComposio() {
     });
     return Response.json({ id: `ca_${started.length}`, redirect_url: "https://composio.test/consent" });
   };
-  return { fetch: Object.assign(fn, { preconnect: () => {} }) as typeof fetch, started };
+  return { fetch: Object.assign(fn, { preconnect: () => {} }) as typeof fetch, started, mode };
 }
 
 const composio = fakeComposio();
@@ -204,6 +211,87 @@ describe("hosted (Composio) accounts", () => {
         code: "mail.composio_unavailable",
       });
       expect(composio.started.length).toBe(before);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+/** What the server writes to its log (stderr) while `run` runs. */
+async function logged(run: () => Promise<unknown>): Promise<string> {
+  const lines: string[] = [];
+  const write = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    lines.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    await run().catch(() => {});
+  } finally {
+    process.stderr.write = write;
+  }
+  return lines.join("");
+}
+
+describe("outside text in errors and logs", () => {
+  test(
+    "an IMAP server that echoes the password in its error doesn't get it into ours",
+    async () => {
+      const password = 'app"pass\\word+/=';
+      const sockets = new Set<Socket>();
+      const imap = createServer((sock) => {
+        sockets.add(sock);
+        sock.on("close", () => sockets.delete(sock));
+        sock.write("* OK ready\r\n");
+        let buf = "";
+        sock.on("data", (chunk) => {
+          buf += chunk.toString();
+          for (let n = buf.indexOf("\r\n"); n >= 0; n = buf.indexOf("\r\n")) {
+            const line = buf.slice(0, n);
+            buf = buf.slice(n + 2);
+            const tag = line.split(" ")[0];
+            if (line.includes("LOGIN")) sock.write(`${tag} OK logged in\r\n`);
+            else if (line.includes("LOGOUT")) sock.end(`* BYE\r\n${tag} OK bye\r\n`);
+            else
+              sock.write(
+                `${tag} BAD you said ${line} with ${Buffer.from(password).toString("base64")}\u0007\r\n`,
+              );
+          }
+        });
+      });
+      await new Promise<void>((r) => imap.listen(0, "127.0.0.1", () => r()));
+      const address = imap.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      try {
+        const err = await connectImap(server.deps, me, {
+          address: "echo@mail.test",
+          preset: "other",
+          imapHost: "127.0.0.1",
+          imapPort: port,
+          smtpHost: "127.0.0.1",
+          smtpPort: port,
+          password,
+        }).catch((e: unknown) => e);
+        expect(err).toMatchObject({ code: "mail.unreachable" });
+        const message = err instanceof Error ? err.message : "";
+        for (const form of [password, Buffer.from(password).toString("base64")])
+          expect([form, message.includes(form)]).toEqual([form, false]);
+        // biome-ignore lint/suspicious/noControlCharactersInRegex: the assertion is about control characters
+        expect(/[\u0000-\u001f]/.test(message)).toBe(false);
+      } finally {
+        for (const s of sockets) s.destroy();
+        await new Promise<void>((r) => imap.close(() => r()));
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a Composio answer that repeats our key doesn't put it in the log",
+    async () => {
+      composio.mode.echo = true;
+      const log = await logged(() => connectComposio(server.deps, me, { provider: "gmail" }));
+      expect(log).toContain("mail.composio_failed");
+      expect(log.includes("composio-key")).toBe(false);
     },
     SERVER_TEST_MS,
   );

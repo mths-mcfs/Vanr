@@ -24,8 +24,8 @@ import { McpAuthRequired, McpClient, McpError, type McpTool } from "./mcp";
 import { checkServerUrl } from "./net";
 import {
   type AuthServer,
-  authorizeUrl,
   checkIssuer,
+  consentUrl,
   discoverAuthServer,
   exchangeCode,
   freshTokens,
@@ -36,6 +36,7 @@ import {
   scopeUnion,
   widens,
 } from "./oauth";
+import { outsideText } from "./outside-text";
 
 const { connections, oauthStates, agentGrants, messages, members } = schema;
 type StoredTool = schema.StoredTool;
@@ -46,7 +47,7 @@ const STATE_TTL_MS = 10 * 60_000;
 const oauthTokens = z.object({
   accessToken: z.string(),
   refreshToken: z.string().nullable(),
-  expiresAt: z.string().nullable(),
+  expiresAt: z.string().datetime().nullable(),
   tokenEndpoint: z.string(),
   clientId: z.string(),
   clientSecret: z.string().nullable(),
@@ -85,10 +86,45 @@ export const MAX_SCOPE_ATTEMPTS = 2;
 export const integrationSealer = (deps: AppDeps): Sealer =>
   createSealer(deps.config.authSecret, "integrations");
 const sealJson = (deps: AppDeps, v: unknown) => integrationSealer(deps).seal(JSON.stringify(v));
-/** Opens what this module sealed and checks its shape: a row that doesn't match is not trusted. */
-const openJson = <T>(deps: AppDeps, sealed: string, shape: z.ZodType<T>): T =>
-  shape.parse(JSON.parse(integrationSealer(deps).open(sealed)));
-const openSecret = (deps: AppDeps, sealed: string): ConnSecret => openJson(deps, sealed, connSecret);
+/**
+ * The connection's kept credential. One in an old or broken shape is never used: the connection asks to be
+ * reconnected instead of sending a header built from it.
+ */
+function openSecret(deps: AppDeps, sealed: string): ConnSecret {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(integrationSealer(deps).open(sealed));
+  } catch {
+    throw new McpAuthRequired(null);
+  }
+  const parsed = connSecret.safeParse(raw);
+  if (!parsed.success) throw new McpAuthRequired(null);
+  return parsed.data;
+}
+
+/** Every value of a credential that a service could echo back in its error text. */
+function secretsOf(secret: ConnSecret | null): string[] {
+  if (secret?.kind === "api_key") return [secret.apiKey];
+  if (secret?.kind === "oauth")
+    return [secret.tokens.accessToken, secret.tokens.refreshToken, secret.tokens.clientSecret].filter(
+      (v): v is string => !!v,
+    );
+  return [];
+}
+
+/** The kept credential of a row for redaction, or none when it can't be opened. */
+function rowSecrets(deps: AppDeps, row: { secret: string | null }): string[] {
+  if (!row.secret) return [];
+  try {
+    return secretsOf(openSecret(deps, row.secret));
+  } catch {
+    return [];
+  }
+}
+
+/** The server couldn't be used: its own words, without the credential we sent it. */
+const unreachable = (err: unknown, secrets: readonly string[]) =>
+  new HttpError(400, "connector.unreachable", outsideText(err, secrets) || "Server unreachable");
 
 const callbackUrl = (deps: AppDeps) => `${deps.config.publicUrl}/api/v1/connectors/oauth/callback`;
 
@@ -300,11 +336,12 @@ async function listToolsOf(deps: AppDeps, row: ConnectionRow): Promise<McpTool[]
       await markNeedsReconnect(deps, row.id);
       throw new HttpError(400, "connector.auth", "The server rejected the credential");
     }
-    throw new HttpError(
-      400,
-      "connector.unreachable",
-      err instanceof Error ? err.message : "Server unreachable",
-    );
+    // The row read now: a refresh may have put a new token in it since `row` was read.
+    const [now] = await deps.db
+      .select({ secret: connections.secret })
+      .from(connections)
+      .where(eq(connections.id, row.id));
+    throw unreachable(err, [...rowSecrets(deps, row), ...rowSecrets(deps, now ?? { secret: null })]);
   }
 }
 
@@ -348,11 +385,7 @@ export async function connectWithKey(
   } catch (err) {
     if (err instanceof McpAuthRequired)
       throw new HttpError(400, "connector.invalid_key", "The key was rejected");
-    throw new HttpError(
-      400,
-      "connector.unreachable",
-      err instanceof Error ? err.message : "Server unreachable",
-    );
+    throw unreachable(err, secretsOf(secret));
   }
   const at = deps.now();
   const [row] = await deps.db
@@ -440,7 +473,7 @@ async function beginOAuth(
     { kind: "connector", targetId: row.id, nextPath, ttlMs: STATE_TTL_MS },
     secret,
   );
-  return authorizeUrl({
+  return consentUrl({
     endpoint: server.authorization_endpoint,
     clientId: client.clientId,
     redirectUri,
@@ -519,12 +552,7 @@ export async function connectCustom(
   try {
     tools = await probe(deps, url, secret);
   } catch (err) {
-    if (!(err instanceof McpAuthRequired))
-      throw new HttpError(
-        400,
-        "connector.unreachable",
-        err instanceof Error ? err.message : "Server unreachable",
-      );
+    if (!(err instanceof McpAuthRequired)) throw unreachable(err, secretsOf(secret));
     // With a rejected key, or without OAuth on the server, the person needs (another) key.
     if (input.apiKey) return { status: "key_missing", serverId: null };
     const row = await pendingConnection(deps, me, {
@@ -597,7 +625,7 @@ export async function finishOAuth(
     try {
       checkIssuer({ iss: query.iss, expected: s.issuer, supported: s.issParameterSupported === true });
     } catch (err) {
-      log.warn("connector.oauth_issuer", { connectionId: row.id, err });
+      log.warn("connector.oauth_issuer", { connectionId: row.id, error: outsideText(err, []) });
       await dropPending();
       return back("connector_error=issuer");
     }
@@ -606,6 +634,8 @@ export async function finishOAuth(
     await dropPending();
     return back(`connector_error=${encodeURIComponent(query.error ?? "denied")}`);
   }
+  /** What the token endpoint gave, kept out of the log if anything after it fails. */
+  const received: string[] = [];
   try {
     const tokens = await exchangeCode(
       deps.fetchExternal,
@@ -623,29 +653,43 @@ export async function finishOAuth(
       deps.now(),
     );
     const secret: ConnSecret = { kind: "oauth", tokens };
+    received.push(...secretsOf(secret));
     // The scope request is only settled if the service gave what was asked. A partial consent keeps the
     // request and the counter (the card keeps waiting and no other one is born on each return).
     const granted = row.scopeRequest !== null && !widens(row.scopeRequest.scope, tokens.scope ?? null);
-    const [active] = await deps.db
-      .update(connections)
-      .set({
-        secret: sealJson(deps, secret),
-        status: "active",
-        ...(granted ? { scopeRequest: null } : {}),
-        updatedAt: deps.now(),
-      })
-      .where(eq(connections.id, row.id))
-      .returning();
-    if (active) {
-      const tools = await listToolsOf(deps, active).catch(() => [] as McpTool[]);
-      await deps.db
+    // The exchange took a while: the connection is read again under its row lock and only written if it is
+    // still as the start left it. Revoked or deleted meanwhile, the token received is dropped.
+    const active = await deps.db.transaction(async (tx) => {
+      const [locked] = await tx
+        .select({ status: connections.status, revokedAt: connections.revokedAt })
+        .from(connections)
+        .where(eq(connections.id, row.id))
+        .for("update");
+      if (!locked || locked.revokedAt || locked.status !== row.status) return null;
+      const [written] = await tx
         .update(connections)
-        .set({ tools: mergeTools(tools, active.tools, active.custom) })
-        .where(eq(connections.id, row.id));
-      if (granted) await settleScopeCards(deps, row.id);
-    }
+        .set({
+          secret: sealJson(deps, secret),
+          status: "active",
+          ...(granted ? { scopeRequest: null } : {}),
+          updatedAt: deps.now(),
+        })
+        .where(eq(connections.id, row.id))
+        .returning();
+      return written ?? null;
+    });
+    if (!active) return back("connector_error=gone");
+    const tools = await listToolsOf(deps, active).catch(() => [] as McpTool[]);
+    await deps.db
+      .update(connections)
+      .set({ tools: mergeTools(tools, active.tools, active.custom) })
+      .where(eq(connections.id, row.id));
+    if (granted) await settleScopeCards(deps, row.id);
   } catch (err) {
-    log.warn("connector.oauth_failed", { err, connectionId: row.id });
+    log.warn("connector.oauth_failed", {
+      connectionId: row.id,
+      error: outsideText(err, [s.clientSecret, s.verifier, query.code, ...received]),
+    });
     await dropPending();
     return back("connector_error=token");
   }

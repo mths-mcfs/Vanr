@@ -11,6 +11,7 @@ import type { AppDeps } from "../context";
 import { HttpError, notFound } from "../http";
 import { log } from "../logger";
 import { backTo, type Starter, saveState, takeState, type Viewer } from "./connectors";
+import { outsideText } from "./outside-text";
 
 const { githubInstallations } = schema;
 type InstallationRow = typeof githubInstallations.$inferSelect;
@@ -163,8 +164,64 @@ export async function installations(deps: AppDeps, workspaceId: string): Promise
     .orderBy(githubInstallations.createdAt);
 }
 
+/** The App's OAuth client, without which an installation can't be verified (and so not started). */
+function oauthClientOf(cfg: AppConfig) {
+  if (!cfg.oauthClient)
+    throw new HttpError(400, "github_app.not_configured", "The GitHub App is not set up on this server");
+  return cfg.oauthClient;
+}
+
+const userToken = z.object({ access_token: z.string().min(1) });
+const userInstallations = z.object({
+  total_count: z.number().int().min(0),
+  installations: z.array(z.object({ id: z.number().int() })),
+});
+
+/**
+ * Proves the person who came back controls the installation: the `code` GitHub sends with the installation
+ * (the App asks for user authorization on install) becomes a user token, and the installation has to be among
+ * that user's. The token is only used here and then dropped.
+ */
+async function controlsInstallation(
+  deps: AppDeps,
+  cfg: AppConfig,
+  code: string,
+  installationId: number,
+): Promise<boolean> {
+  const client = oauthClientOf(cfg);
+  let token: string;
+  try {
+    const res = await deps.fetchExternal(`${cfg.webUrl}/login/oauth/access_token`, {
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/json", "user-agent": PRODUCT.slug },
+      body: JSON.stringify({ client_id: client.clientId, client_secret: client.clientSecret, code }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) return false;
+    const parsed = userToken.safeParse(await res.json().catch(() => null));
+    if (!parsed.success) return false;
+    token = parsed.data.access_token;
+  } catch {
+    return false;
+  }
+  for (let page = 1; page <= 10; page++) {
+    const out = await githubJson(
+      deps,
+      cfg,
+      `/user/installations?per_page=100&page=${page}`,
+      { token },
+      userInstallations,
+    ).catch(() => null);
+    if (!out) return false;
+    if (out.installations.some((i) => i.id === installationId)) return true;
+    if (page * 100 >= out.total_count || out.installations.length < 100) return false;
+  }
+  return false;
+}
+
 export async function installUrl(deps: AppDeps, me: Starter, nextPath: string): Promise<string> {
   const cfg = appConfig(deps);
+  oauthClientOf(cfg);
   const state = await saveState(deps, me, {
     kind: "github_app",
     targetId: null,
@@ -176,13 +233,15 @@ export async function installUrl(deps: AppDeps, me: Starter, nextPath: string): 
 
 /**
  * The return from the installation (the app's Setup URL). The state binds it to the workspace, to whoever
- * started and to that session; the installation is checked on GitHub's API with the app's JWT. An installation
- * belongs to a single workspace: the upsert only updates the row of the same workspace, in one statement.
+ * started and to that session; the person proves they control the installation (`code` -> their
+ * installations), and only then it is read on GitHub's API with the app's JWT. Without that proof nothing is
+ * kept (`github_app=unverified`). An installation belongs to a single workspace: the upsert only updates the
+ * row of the same workspace, in one statement.
  */
 export async function finishInstall(
   deps: AppDeps,
   viewer: Viewer,
-  query: { installation_id?: string; setup_action?: string; state?: string },
+  query: { installation_id?: string; setup_action?: string; state?: string; code?: string },
 ): Promise<string> {
   const taken = await takeState(deps, "github_app", query.state, viewer);
   if (!taken.row) return "/?github_app=error";
@@ -191,6 +250,9 @@ export async function finishInstall(
   if (!taken.ok) return back("github_app=error");
   if (!query.installation_id || !/^\d{1,20}$/.test(query.installation_id)) return back("github_app=error");
   const cfg = appConfig(deps);
+  const installationId = Number(query.installation_id);
+  if (!cfg.oauthClient || !query.code || !(await controlsInstallation(deps, cfg, query.code, installationId)))
+    return back("github_app=unverified");
   try {
     const info = await githubJson(
       deps,
@@ -215,7 +277,7 @@ export async function finishInstall(
       .returning({ id: githubInstallations.id });
     if (saved.length === 0) return back("github_app=taken");
   } catch (err) {
-    log.warn("github_app.install_failed", { err });
+    log.warn("github_app.install_failed", { error: outsideText(err, [cfg.oauthClient?.clientSecret]) });
     return back("github_app=error");
   }
   return back("github_app=installed");
@@ -236,7 +298,7 @@ export async function removeInstallation(deps: AppDeps, workspaceId: string, id:
       `/app/installations/${encodeURIComponent(id)}`,
       { method: "DELETE", token: appJwt(cfg, deps.now()) },
       z.unknown(),
-    ).catch((err) => log.warn("github_app.uninstall_failed", { err, id }));
+    ).catch((err) => log.warn("github_app.uninstall_failed", { error: outsideText(err, []), id }));
   }
   await deps.db
     .delete(githubInstallations)

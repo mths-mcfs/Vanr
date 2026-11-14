@@ -36,11 +36,15 @@ export interface AuthServer extends AuthServerMetadata {
   scope: string | null;
 }
 
+/** The longest token lifetime a provider may announce: ten years, in seconds. */
+export const MAX_EXPIRES_IN_S = 10 * 365 * 24 * 60 * 60;
+
 const tokenResponse = z.object({
   access_token: z.string().min(1),
   token_type: z.string().optional(),
   refresh_token: z.string().optional(),
-  expires_in: z.number().optional(),
+  /** Seconds; 0 is expired now (the next call refreshes); absent is "doesn't expire". */
+  expires_in: z.number().int().min(0).max(MAX_EXPIRES_IN_S).optional(),
   scope: z.string().optional(),
 });
 
@@ -235,7 +239,7 @@ export function pkcePair(): { verifier: string; challenge: string } {
   return { verifier, challenge };
 }
 
-export function authorizeUrl(input: {
+export function consentUrl(input: {
   endpoint: string;
   clientId: string;
   redirectUri: string;
@@ -286,7 +290,8 @@ async function tokenRequest(
   return {
     accessToken: t.access_token,
     refreshToken: t.refresh_token ?? previous.refreshToken,
-    expiresAt: t.expires_in ? new Date(now.getTime() + t.expires_in * 1000).toISOString() : null,
+    expiresAt:
+      t.expires_in === undefined ? null : new Date(now.getTime() + t.expires_in * 1000).toISOString(),
     tokenEndpoint: endpoint,
     clientId: client.clientId,
     clientSecret: client.clientSecret,
@@ -338,7 +343,9 @@ export const REFRESH_MARGIN_MS = 60_000;
 /** The token expires within the margin and there is a refresh token to renew it with. */
 export function needsRefresh(tokens: OAuthTokens, now: Date): boolean {
   if (!tokens.expiresAt || !tokens.refreshToken) return false;
-  return new Date(tokens.expiresAt).getTime() - now.getTime() <= REFRESH_MARGIN_MS;
+  const at = Date.parse(tokens.expiresAt);
+  // An unreadable expiry is treated as expired: refreshing is the safe side.
+  return !Number.isFinite(at) || at - now.getTime() <= REFRESH_MARGIN_MS;
 }
 
 /** Refreshes when less than a minute is left; without a refresh token, returns what it has. */

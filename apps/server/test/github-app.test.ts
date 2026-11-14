@@ -1,5 +1,6 @@
 // The GitHub App installation, called as the connector routes will call it (they come with a later slice).
-// GitHub is a local fake that checks the app's JWT with the app's public key; nothing goes out to the network.
+// GitHub is a local fake that checks the app's JWT with the app's public key, turns a user's `code` into a user
+// token and lists the installations that user controls; nothing goes out to the network.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createVerify, generateKeyPairSync } from "node:crypto";
 import { schema } from "@vanr/engine/db";
@@ -14,16 +15,34 @@ const STATE_TTL_MS = 30 * 60_000;
 const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const API = "https://api.github.test";
 
-/** The fake GitHub API: every request must carry a JWT of the app (or the installation token). */
+/** Which installations each GitHub user (by their user token) controls. */
+const USERS: Record<string, number[]> = { "user-ana": [101], "user-bob": [101, 202], "user-eve": [303] };
+const CLIENT = { id: "Iv1.vanr", secret: "app-client-secret" };
+
+/** The fake GitHub API: every request must carry a JWT of the app, the installation token or a user token. */
 function fakeGitHub() {
-  const seen: { method: string; path: string; jwt: "valid" | "invalid" | "token" }[] = [];
+  const seen: { method: string; path: string; jwt: "valid" | "invalid" | "token" | "user" }[] = [];
   const installs = new Map([
     ["101", { id: 101, account: { login: "acme" }, repository_selection: "selected", suspended_at: null }],
     ["202", { id: 202, account: { login: "other" }, repository_selection: "all", suspended_at: null }],
+    [
+      "909",
+      { id: 909, account: { login: "victim-account" }, repository_selection: "all", suspended_at: null },
+    ],
   ]);
-  const checkJwt = (auth: string | null): "valid" | "invalid" | "token" => {
+  /** A code works once and belongs to one user. */
+  const codes = new Map([
+    ["code-ana", "user-ana"],
+    ["code-ana-2", "user-ana"],
+    ["code-bob", "user-bob"],
+    ["code-bob-2", "user-bob"],
+    ["code-bob-3", "user-bob"],
+    ["code-eve", "user-eve"],
+  ]);
+  const checkJwt = (auth: string | null): "valid" | "invalid" | "token" | "user" => {
     const bearer = auth?.replace(/^Bearer /, "") ?? "";
     if (bearer === "inst-token") return "token";
+    if (bearer in USERS) return "user";
     const [head, body, sig] = bearer.split(".");
     if (!head || !body || !sig) return "invalid";
     const ok = createVerify("RSA-SHA256")
@@ -35,6 +54,15 @@ function fakeGitHub() {
   const fn = async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = new URL(String(input));
     const method = init.method ?? "GET";
+    if (url.origin === "https://github.test" && url.pathname === "/login/oauth/access_token") {
+      const body = JSON.parse(String(init.body));
+      seen.push({ method, path: url.pathname, jwt: "user" });
+      const user = codes.get(body.code);
+      codes.delete(body.code);
+      if (body.client_id !== CLIENT.id || body.client_secret !== CLIENT.secret || !user)
+        return Response.json({ error: "bad_verification_code" });
+      return Response.json({ access_token: user, token_type: "bearer" });
+    }
     const jwt = checkJwt(new Headers(init.headers).get("authorization"));
     seen.push({ method, path: url.pathname, jwt });
     if (jwt === "invalid") return new Response("bad credentials", { status: 401 });
@@ -45,6 +73,10 @@ function fakeGitHub() {
       if (m[2]) return Response.json({ token: "inst-token" }, { status: 201 });
       if (method === "DELETE") return new Response(null, { status: 204 });
       return Response.json(install);
+    }
+    if (url.pathname === "/user/installations" && jwt === "user") {
+      const ids = USERS[new Headers(init.headers).get("authorization")?.replace(/^Bearer /, "") ?? ""] ?? [];
+      return Response.json({ total_count: ids.length, installations: ids.map((id) => ({ id })) });
     }
     if (url.pathname === "/installation/repositories" && jwt === "token")
       return Response.json({ total_count: 1, repositories: [{ full_name: "acme/site", private: true }] });
@@ -67,6 +99,8 @@ beforeAll(async () => {
       GITHUB_APP_PRIVATE_KEY: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
       GITHUB_API_URL: API,
       GITHUB_WEB_URL: "https://github.test",
+      GITHUB_APP_CLIENT_ID: CLIENT.id,
+      GITHUB_APP_CLIENT_SECRET: CLIENT.secret,
     },
     fetchExternal: github.fetch,
     now: () => clock,
@@ -82,8 +116,13 @@ afterAll(() => server.stop(), SERVER_TEST_MS);
 
 const stateOf = (url: string) => new URL(url).searchParams.get("state") ?? "";
 const viewer = (s: Starter) => ({ userId: s.userId, sessionId: s.sessionId });
-const install = (s: Starter, state: string, id = "101") =>
-  finishInstall(server.deps, viewer(s), { installation_id: id, setup_action: "install", state });
+const install = (s: Starter, state: string, id = "101", code?: string) =>
+  finishInstall(server.deps, viewer(s), {
+    installation_id: id,
+    setup_action: "install",
+    state,
+    code: code ?? `code-${s.handle}`,
+  });
 
 describe("GitHub App installation", () => {
   test(
@@ -143,10 +182,53 @@ describe("GitHub App installation", () => {
 
       state = stateOf(await installUrl(server.deps, bob, "/b"));
       clock = new Date(clock.getTime() + STATE_TTL_MS - 1);
-      expect(await install(bob, state, "202")).toBe("/b?github_app=installed");
+      expect(await install(bob, state, "202", "code-bob-2")).toBe("/b?github_app=installed");
       state = stateOf(await installUrl(server.deps, bob, "/b"));
       clock = new Date(clock.getTime() + STATE_TTL_MS);
-      expect(await install(bob, state, "202")).toBe("/b?github_app=error");
+      expect(await install(bob, state, "202", "code-bob-3")).toBe("/b?github_app=error");
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "only someone who controls the installation can link it: no code, a bad code or someone else's installation keeps nothing",
+    async () => {
+      const rowsOf = async (id: string) =>
+        server.deps.db.select().from(schema.githubInstallations).where(eq(schema.githubInstallations.id, id));
+      const appCalls = () => github.seen.filter((c) => c.path.startsWith("/app/installations/909")).length;
+      for (const code of [undefined, "", "code-unknown", "code-eve"]) {
+        const state = stateOf(await installUrl(server.deps, ana, "/back"));
+        const back = await finishInstall(server.deps, viewer(ana), {
+          installation_id: "909",
+          setup_action: "install",
+          state,
+          ...(code === undefined ? {} : { code }),
+        });
+        expect([code, back]).toEqual([code, "/back?github_app=unverified"]);
+      }
+      expect(await rowsOf("909")).toEqual([]);
+      // Never even read with the app's JWT: nothing about the victim's installation reached the workspace.
+      expect(appCalls()).toBe(0);
+      expect((await repositoriesOf(server.deps, ana.workspaceId)).accounts.map((a) => a.login)).toEqual([
+        "acme",
+      ]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "without the App's OAuth client the installation doesn't start",
+    async () => {
+      const cfg = server.deps.config;
+      const app = cfg.integrations.githubApp;
+      if (!app) throw new Error("the App is configured in this test");
+      const deps = {
+        ...server.deps,
+        config: { ...cfg, integrations: { ...cfg.integrations, githubApp: { ...app, oauthClient: null } } },
+      };
+      await expect(installUrl(deps, ana, "/back")).rejects.toMatchObject({
+        code: "github_app.not_configured",
+      });
     },
     SERVER_TEST_MS,
   );
