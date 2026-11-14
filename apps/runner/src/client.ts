@@ -173,7 +173,7 @@ export class RunnerClient {
       status: () => ({ state: "unavailable", engine: null, reason: "Starting" }),
       setMode: () => {},
       wrap: async () => {
-        throw new RunnerError("sandbox_unavailable", "The sandbox is starting");
+        throw new RunnerError("sandbox_not_ready", "The sandbox is starting");
       },
       close: async () => {},
     };
@@ -666,7 +666,7 @@ export class RunnerClient {
       case "browser.policy":
       case "live_view.input": {
         const driver = this.browser;
-        if (!driver) throw new RunnerError("browser_unavailable", "No browser in this environment");
+        if (!driver) throw new RunnerError("browser_not_running", "No browser in this environment");
         this.access.requireTool("browser");
         return driver.handle(op, this.needAgent(ctx.agent), args, (frame) => this.send(frame, masks));
       }

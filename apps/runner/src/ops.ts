@@ -117,7 +117,7 @@ export async function sandboxed(
   const status = ctx.sandbox.status();
   if (status.state === "off") return null;
   if (!isolated(status))
-    throw new RunnerError("sandbox_unavailable", status.reason ?? "No sandbox in this environment");
+    throw new RunnerError("sandbox_not_ready", status.reason ?? "No sandbox in this environment");
   ctx.sandbox.setMode(input.network.mode);
   const { unchecked, ...fs } = fsPolicy(ctx.policy, input);
   const wrapped = await ctx.sandbox.wrap({

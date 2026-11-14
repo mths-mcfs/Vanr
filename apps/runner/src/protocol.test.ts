@@ -80,7 +80,7 @@ test("every frame the runner sends passes the engine schema, and the runner acce
     fetch(req, srv) {
       const path = new URL(req.url).pathname;
       if (path === "/api/v1/runners/session")
-        return Response.json({ session: "s".repeat(24), credential: "cred_rotated_0001" });
+        return Response.json({ session: `rst_${"s".repeat(24)}`, credential: "rrt_rotated_0001" });
       if (path === "/api/v1/runners/connect" && srv.upgrade(req)) return undefined;
       return new Response("not found", { status: 404 });
     },
@@ -123,8 +123,8 @@ test("every frame the runner sends passes the engine schema, and the runner acce
     server: `http://127.0.0.1:${server.port}`,
     runnerId: "rnr_0000000000000001",
     name: "laptop",
-    token: "cred_initial_0001",
-    workspaceId: "wsp_1",
+    token: "rrt_initial_0001",
+    workspaceId: "workspace_1",
     workspaceName: "Workspace",
     workDir: join(dir, "work"),
     access: { folders: [], tools: { claude: true, codex: false, commands: true, browser: true } },
@@ -215,10 +215,18 @@ test("every frame the runner sends passes the engine schema, and the runner acce
     const ended = next((f) => f.type === "live_view.stream_ended");
     await ok("browser.close", {});
     await ended;
+    // The error codes of the engine, made by the runner itself: a path out of the work folder, and the
+    // browser used after it closed.
+    const outside = await ask("read", { path: "../../outside.txt" });
+    expect(outside.type === "result" && !outside.ok && outside.error.code).toBe("outside_work_dir");
+    const closed = await ask("live_view.input", {
+      events: [{ type: "navigate", url: "https://example.com" }],
+    });
+    expect(closed.type === "result" && !closed.ok && closed.error.code).toBe("browser_not_running");
 
     // The person pauses the runner from its CLI (the config on disk): `runner.state`.
     const paused = next((f) => f.type === "runner.state");
-    writeConfig(home, { ...config, paused: true, token: "cred_rotated_0001" });
+    writeConfig(home, { ...config, paused: true, token: "rrt_rotated_0001" });
     await paused;
 
     // Errors are protocol frames too.
@@ -274,4 +282,21 @@ test("the frames built outside the request loop pass the schema too", () => {
     { type: "sandbox.changed", sandbox: sandboxOff().status() },
   ];
   for (const f of frames) expect(runnerFrame.safeParse(f).success).toBe(true);
+});
+
+test("each renamed error code goes out as a valid result frame by the client's real send", () => {
+  for (const code of ["outside_work_dir", "browser_not_running", "sandbox_not_ready"] as const) {
+    const frame: RunnerFrame = { type: "result", id: "req_1", ok: false, error: { code, message: "m" } };
+    expect([code, runnerFrame.safeParse(frame).success]).toEqual([code, true]);
+    const sent: string[] = [];
+    const c = Object.create(RunnerClient.prototype) as Record<string, unknown>;
+    Object.assign(c, {
+      ws: { readyState: WebSocket.OPEN, send: (s: string) => sent.push(s) },
+      maskState: { kind: "empty" },
+      heldFrames: [],
+      opts: { log: () => {} },
+    });
+    (Reflect.get(c, "send") as (f: RunnerFrame, m: [string, string][]) => boolean).call(c, frame, []);
+    expect(sent.map((s) => JSON.parse(s))).toEqual([frame]);
+  }
 });

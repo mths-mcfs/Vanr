@@ -200,13 +200,18 @@ test.skipIf(!chrome)(
   "what is blocked between one action and the next shows up in the following answer, marked",
   async () => {
     const a = agent();
+    // The page runs into the block only when the test lets it (it asks `/go` until the answer is yes):
+    // after the first answer, however loaded the host is.
+    let go = false;
+    sites.page("site.test", "/go", () => new Response(go ? "yes" : "no"));
     sites.page("site.test", "/later", () =>
       html(
-        `ok<script>setTimeout(() => fetch('http://127.0.0.1:${sites.port}/late').catch(() => {}), 300)</script>`,
+        `ok<script>(async () => { while ((await (await fetch('/go')).text()) !== 'yes') await new Promise((r) => setTimeout(r, 20)); fetch('http://127.0.0.1:${sites.port}/late').catch(() => {}); })()</script>`,
       ),
     );
     const first = await open(a, sites.http("site.test", "/later"));
     expect(first.blocked ?? []).toEqual([]);
+    go = true;
     // Reads until the page's timer has run into the block (a condition, not a time): each read reports what
     // was blocked since the previous answer.
     let next = await act(a, { action: "read" });

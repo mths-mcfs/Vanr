@@ -167,7 +167,7 @@ test("a hello with more pending jobs than it can carry is valid; the rest goes a
         heartbeatMs: 25_000,
       });
       client = made;
-      made.call("openSocket", "fixture-session-1234");
+      made.call("openSocket", "rst_fixture_session_1234");
       const ws = Reflect.get(made.c, "ws") as FakeSocket;
       ws.onopen?.();
       clearTimeout(Reflect.get(made.c, "watchdog") as ReturnType<typeof setTimeout>);
@@ -227,7 +227,7 @@ test("property: across reconnections at any point, every frame (the first hello 
     });
     await call("refreshMasks");
     const connect = () => {
-      call("openSocket", `fixture-session-${String(r.int(1e6)).padStart(8, "0")}`);
+      call("openSocket", `rst_fixture_session_${String(r.int(1e6)).padStart(8, "0")}`);
       (Reflect.get(c, "ws") as FakeSocket).onopen?.();
       clearTimeout(Reflect.get(c, "watchdog") as ReturnType<typeof setTimeout>);
       Reflect.set(c, "hadWelcome", true);
@@ -422,7 +422,7 @@ test("the first hello, before the secrets are read, carries no text from outside
       toolCalls: new Map(),
       retryLater: () => {},
     });
-    call("openSocket", "fixture-session-1234");
+    call("openSocket", "rst_fixture_session_1234");
     (Reflect.get(c, "ws") as FakeSocket).onopen?.();
     clearTimeout(Reflect.get(c, "watchdog") as ReturnType<typeof setTimeout>);
     expect(sent.length).toBe(1);

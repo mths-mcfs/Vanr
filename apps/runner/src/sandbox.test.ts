@@ -33,7 +33,7 @@ import { realSandbox, testSocat } from "./testing/sandbox";
 const dir = mkdtempSync(join(tmpdir(), "runner-sbx-"));
 const home = join(dir, "runner-home");
 const agent = { id: "agt_0000000087654321", handle: "lia" };
-const TOKEN = "mrt_TOKEN_THAT_MUST_NOT_LEAK_0123456789abcdef";
+const TOKEN = "rrt_TOKEN_THAT_MUST_NOT_LEAK_0123456789abcdef";
 const tools = { claude: true, codex: true, commands: true, browser: false };
 const access = new Access(() => ({
   access: { folders: [], tools } as RunnerAccess,
@@ -288,7 +288,7 @@ test("with no sandbox available (no bubblewrap or socat), the command is rejecte
   } catch (err) {
     code = err instanceof RunnerError ? err.code : String(err);
   }
-  expect(code).toBe("sandbox_unavailable");
+  expect(code).toBe("sandbox_not_ready");
   expect(existsSync(marker)).toBe(false);
 });
 
