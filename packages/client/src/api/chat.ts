@@ -14,8 +14,8 @@ export interface ThreadsQuery {
   tab?: string;
   channelId?: string;
   agentId?: string;
-  actionNeeded?: boolean;
-  mine?: boolean;
+  actionNeeded?: true;
+  mine?: true;
   q?: string;
   cursor?: string;
   limit?: number;

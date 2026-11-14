@@ -14,6 +14,7 @@ import {
   SILENCE_LIMIT_MS,
   STABLE_AFTER_MS,
 } from "../src/realtime/socket.ts";
+import { parse } from "../src/schema.ts";
 import { fakeSockets } from "../src/testing/fake-socket.ts";
 import table from "./event-table.json";
 
@@ -202,9 +203,59 @@ describe("connection", () => {
     sockets.last.open();
     expect(sockets.last.sent).toEqual([]);
   });
+
+  test("unsubscribe acknowledgments preserve later subscriptions across reconnects", () => {
+    const lost: string[] = [];
+    const { rt, sockets, clock } = setup({ onUnsubscribed: (c) => lost.push(c) });
+    rt.start();
+    sockets.last.open();
+    rt.subscribe("ch_1");
+    for (let i = 0; i < 2; i++) {
+      rt.unsubscribe("ch_1");
+      rt.subscribe("ch_1");
+    }
+    for (let i = 0; i < 2; i++) {
+      sockets.last.push({ type: "unsubscribed", channelId: "ch_1" });
+      sockets.last.push({ type: "subscribed", channelId: "ch_1" });
+    }
+    expect(lost).toEqual([]);
+    sockets.last.drop();
+    clock.advance(500);
+    sockets.last.open();
+    expect(sockets.last.sent).toEqual([{ type: "subscribe", channelId: "ch_1" }]);
+  });
 });
 
 describe("events", () => {
+  test("run payload consumers can read the validated event-specific fields", () => {
+    const delta = parse(BROWSER_EVENTS["run.text_delta"], { agentId: "a", text: "hi" });
+    const tool = parse(BROWSER_EVENTS["run.tool_call"], { agentId: "a", callId: "c", tool: "read" });
+    const unavailable = parse(BROWSER_EVENTS["run.agent_unavailable"], { agentId: "a", reason: "offline" });
+    expect([delta.text, tool.callId, tool.tool, unavailable.reason]).toEqual(["hi", "c", "read", "offline"]);
+  });
+
+  test("delivers the server's direct live view frames with image and control fields", () => {
+    const { rt, sockets } = setup();
+    const got: unknown[] = [];
+    rt.onAny((e) => got.push(e));
+    rt.start();
+    sockets.last.open();
+    const intervention = { id: "i", status: "active" };
+    const metadata = { deviceWidth: 800, deviceHeight: 600, url: null };
+    const frames = [
+      { type: "live_view.status", mode: "control", controllingUserId: "u", intervention },
+      { type: "live_view.frame", data: "jpeg", seq: 1, metadata },
+      { type: "live_view.ended", reason: "closed" },
+      { type: "live_view.unavailable", reason: "no_environment" },
+    ].map((frame) => ({ agentId: "a", ...frame }));
+    for (const frame of frames) sockets.last.push(frame);
+    expect(got).toEqual(
+      frames.map(({ type, ...payload }) => ({ type, payload, scope: { kind: "workspace" } })),
+    );
+    sockets.last.push({ ...frames[1], metadata: { deviceWidth: "invalid" } });
+    expect(got).toHaveLength(4);
+  });
+
   test("delivers a validated, typed event with its scope", () => {
     const { rt, sockets } = setup();
     const got: AnyRealtimeEvent[] = [];

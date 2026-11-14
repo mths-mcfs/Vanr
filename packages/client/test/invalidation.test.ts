@@ -2,12 +2,14 @@
 // nothing cached), its keys name real methods inside the event's workspace, and an event refetches only
 // the queries under its keys.
 import { describe, expect, test } from "bun:test";
-import { QueryClient } from "@tanstack/react-query";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { endpoints } from "../src/api/index.ts";
+import { createClient, type ResultOf } from "../src/client.ts";
 import { INVALIDATION, invalidateForEvent, keysForEvent } from "../src/react/invalidation.ts";
 import { queryKey } from "../src/react/keys.ts";
 import { BROWSER_EVENTS, type BrowserEventName, NOT_BROWSER_EVENTS } from "../src/realtime/events.ts";
 import type { AnyRealtimeEvent } from "../src/realtime/socket.ts";
+import { parse } from "../src/schema.ts";
 import table from "./event-table.json";
 
 /** A payload that answers any field with another such value, so every rule can run without real data. */
@@ -47,21 +49,26 @@ describe("invalidation table", () => {
 
   test("an event refetches the queries under its keys and leaves the rest alone", async () => {
     const qc = new QueryClient();
+    const client = createClient();
     const seed = (key: readonly unknown[]) => qc.setQueryData(key, []);
-    const ch1 = queryKey("listChannelMessages", {
+    const ch1 = queryKey(client, "listChannelMessages", {
       workspaceId: "w",
       channelId: "ch_1",
       query: { limit: 50 },
     });
-    const ch1Thread = queryKey("listChannelMessages", {
+    const ch1Thread = queryKey(client, "listChannelMessages", {
       workspaceId: "w",
       channelId: "ch_1",
       query: { threadId: "t" },
     });
-    const ch2 = queryKey("listChannelMessages", { workspaceId: "w", channelId: "ch_2" });
-    const otherWs = queryKey("listChannelMessages", { workspaceId: "w2", channelId: "ch_1" });
-    const channels = queryKey("listChannels", { workspaceId: "w" });
-    for (const k of [ch1, ch1Thread, ch2, otherWs, channels]) seed(k);
+    const ch2 = queryKey(client, "listChannelMessages", { workspaceId: "w", channelId: "ch_2" });
+    const otherWs = queryKey(client, "listChannelMessages", { workspaceId: "w2", channelId: "ch_1" });
+    const channels = queryKey(client, "listChannels", { workspaceId: "w" });
+    const otherClient = queryKey(createClient(), "listChannelMessages", {
+      workspaceId: "w",
+      channelId: "ch_1",
+    });
+    for (const k of [ch1, ch1Thread, ch2, otherWs, channels, otherClient]) seed(k);
 
     await invalidateForEvent(
       qc,
@@ -71,9 +78,59 @@ describe("invalidation table", () => {
         scope: { kind: "channel", channelId: "ch_1" },
       },
       "w",
+      client,
     );
     const stale = (k: readonly unknown[]) => qc.getQueryState(k)?.isInvalidated;
-    expect([ch1, ch1Thread, ch2, otherWs, channels].map(stale)).toEqual([true, true, false, false, false]);
+    expect([ch1, ch1Thread].map(stale)).toEqual([true, true]);
+    expect([ch2, otherWs, channels, otherClient].some(stale)).toBe(false);
+  });
+
+  test("row changes and recalc progress refresh base queries only in their workspace", async () => {
+    const qc = new QueryClient();
+    const client = createClient();
+    const baseId = "linked";
+    const keys = ["w", "other"].flatMap((workspaceId) => [
+      queryKey(client, "createBaseTableQuery", { workspaceId, baseId, tableId: "t", body: {} }),
+      queryKey(client, "getBaseRow", { workspaceId, baseId, rowId: "r" }),
+      queryKey(client, "getBase", { workspaceId, baseId }),
+      queryKey(client, "listBases", { workspaceId }),
+    ]);
+    for (const key of keys) qc.setQueryData(key, []);
+    await invalidateForEvent(
+      qc,
+      { type: "base.rows", payload: { baseId: "owner", tableId: "t" }, scope: { kind: "workspace" } },
+      "w",
+      client,
+    );
+    expect(keys.filter((key) => qc.getQueryState(key)?.isInvalidated)).toEqual(keys.slice(0, 4));
+    for (const done of [false, true]) {
+      const key = queryKey(client, "getBase", { workspaceId: "w", baseId });
+      qc.setQueryData(key, {});
+      const payload = parse(BROWSER_EVENTS["base.recalc"], { baseId, tableId: "t", processed: 3, done });
+      const event = { type: "base.recalc", payload, scope: { kind: "workspace" } } as const;
+      await invalidateForEvent(qc, event, "w", client);
+      expect(qc.getQueryState(key)?.isInvalidated).toBe(true);
+    }
+    qc.clear();
+  });
+
+  test("file updates refresh active text after extraction and version changes", async () => {
+    const qc = new QueryClient();
+    let text: ResultOf<"getFileText"> = { version: 1, status: "pending", pages: [] };
+    const client = createClient({ fetch: async () => Response.json(text) });
+    const args = { workspaceId: "w", fileId: "f" };
+    const query = new QueryObserver(qc, {
+      queryKey: queryKey(client, "getFileText", args),
+      queryFn: () => client.api.getFileText(args),
+    });
+    const off = query.subscribe(() => {});
+    await query.refetch();
+    text = { version: 2, status: "ready", pages: [{ page: 1, markdown: "extracted" }] };
+    const event = { type: "file.updated", payload: { fileId: "f" }, scope: { kind: "workspace" } } as const;
+    await invalidateForEvent(qc, event, "w", client);
+    expect(query.getCurrentResult().data).toEqual(text);
+    off();
+    qc.clear();
   });
 
   test("a posted message refreshes its channel, the channel list and its thread", () => {

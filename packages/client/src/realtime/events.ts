@@ -11,7 +11,7 @@ import * as s from "../schema.ts";
 const id = s.string;
 const opt = s.optional;
 
-const run = (extra: Record<string, s.AnySchema> = {}) =>
+const run = <S extends Record<string, s.AnySchema>>(extra: S) =>
   s.object({ agentId: id, runId: opt(id), channelId: opt(id), threadId: opt(s.nullable(id)), ...extra });
 
 const runnerId = { runnerId: id };
@@ -25,8 +25,8 @@ export const BROWSER_EVENTS = {
   "run.tool_call": run({ tool: opt(s.string), callId: opt(s.string) }),
   "run.tool_result": run({ tool: opt(s.string), callId: opt(s.string), ok: opt(s.boolean) }),
   "run.steered": run({ messageId: opt(id) }),
-  "run.idle": run(),
-  "run.stopped": run(),
+  "run.idle": run({}),
+  "run.stopped": run({}),
   "run.completed": run({ status: opt(s.string) }),
   "run.agent_unavailable": run({ reason: s.string }),
   "agent.typing": s.object({ agentId: id, ttlMs: opt(s.number) }),
@@ -76,8 +76,18 @@ export const BROWSER_EVENTS = {
   "connector.scope": s.object({ connectionId: opt(id), messageId: opt(id) }),
 
   // The agent's browser, seen live.
-  "live_view.frame": s.object({ agentId: id, data: opt(s.string), mime: opt(s.string) }),
-  "live_view.status": s.object({ agentId: id, status: opt(s.string) }),
+  "live_view.frame": s.object({
+    agentId: id,
+    data: s.string,
+    seq: s.number,
+    metadata: s.object({ deviceWidth: s.number, deviceHeight: s.number, url: s.nullable(s.string) }),
+  }),
+  "live_view.status": s.object({
+    agentId: id,
+    mode: s.literal("watch", "control"),
+    controllingUserId: s.nullable(id),
+    intervention: s.nullable(s.object({ id, status: C.InterventionStatus })),
+  }),
   "live_view.ended": s.object({ agentId: id, reason: opt(s.string) }),
   "live_view.unavailable": s.object({ agentId: id, reason: opt(s.string) }),
 
@@ -120,7 +130,7 @@ export const BROWSER_EVENTS = {
   "base.updated": s.object({ baseId: id }),
   "base.deleted": s.object({ baseId: id }),
   "base.rows": s.object({ baseId: id, tableId: opt(id) }),
-  "base.recalc": s.object({ baseId: id, done: opt(s.number), version: opt(s.number) }),
+  "base.recalc": s.object({ baseId: id, tableId: id, processed: s.number, done: s.boolean }),
 } as const;
 
 export type BrowserEventName = keyof typeof BROWSER_EVENTS;

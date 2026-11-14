@@ -3,6 +3,7 @@
 // and each method really calls that verb and path.
 import { describe, expect, test } from "bun:test";
 import { endpoints } from "../src/api/index.ts";
+import type { ArgsOf } from "../src/client.ts";
 import { createClient } from "../src/client.ts";
 import { pathParamNames } from "../src/endpoint.ts";
 import table from "./route-table.json";
@@ -26,6 +27,18 @@ const EXTRAS: Record<string, string> = {
 };
 
 const rows: Row[] = table.methods;
+
+test("required query fields and true-only thread filters remain required in public types", () => {
+  // @ts-expect-error q is required
+  const search: ArgsOf<"getWikiSearch"> = { workspaceId: "w" };
+  // @ts-expect-error the server accepts true or absence
+  const mine: ArgsOf<"listThreads"> = { workspaceId: "w", query: { mine: false } };
+  // @ts-expect-error the channel route has the same filter constraint
+  const action: ArgsOf<"listChannelThreads">["query"] = { actionNeeded: false };
+  const optional: ArgsOf<"listThreads"> = { workspaceId: "w" };
+  const filters: ArgsOf<"listChannelThreads">["query"] = { mine: true, actionNeeded: true };
+  expect([search, mine, action, optional, filters]).toHaveLength(5);
+});
 
 describe("route table", () => {
   test("every approved divergence is a row of the table", () => {

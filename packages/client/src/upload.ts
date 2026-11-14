@@ -1,6 +1,6 @@
 // Resumable upload: opens (or resumes) an upload session, sends the file in parts in order, and after a
 // dropped connection asks the server where it stopped and goes on from there. A 409 with another offset
-// (another tab sent the same part) only moves the pointer; an error the request caused is not retried.
+// (another tab sent the same part) is reconciled with the server; other request errors are not retried.
 import type * as T from "@vanr/contract";
 import type { StartUploadBody } from "./api/files.ts";
 import type { Api } from "./client.ts";
@@ -98,6 +98,7 @@ async function sendParts(
     (await api.createFileUpload({ workspaceId, body: { ...start, size: file.size } }, call));
   options.onSession?.(session);
   let offset = session.offset;
+  let confirmedOffset = offset;
   let failures = 0;
   options.onProgress?.({ sent: offset, total: file.size });
 
@@ -110,20 +111,23 @@ async function sendParts(
       );
       options.onSession?.(session);
       offset = session.offset;
-      failures = 0;
+      if (offset > confirmedOffset) {
+        confirmedOffset = offset;
+        failures = 0;
+      }
       options.onProgress?.({ sent: offset, total: file.size });
     } catch (err) {
       if (signal?.aborted) throw err;
       const moved = mismatchOffset(err);
-      if (moved !== null) {
-        offset = moved;
-        continue;
-      }
-      if (!retryable(err) || ++failures > retries) throw err;
+      if ((moved === null && !retryable(err)) || ++failures > retries) throw err;
       await wait(clock, backoff(failures), signal);
       // The part may have arrived before the connection dropped: the server says where it stopped.
       try {
         session = await api.getFileUpload({ workspaceId, uploadId: session.id }, call);
+        if (session.offset > confirmedOffset) {
+          confirmedOffset = session.offset;
+          failures = 0;
+        }
         offset = session.offset;
         options.onProgress?.({ sent: offset, total: file.size });
       } catch (statusErr) {
