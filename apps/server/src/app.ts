@@ -5,7 +5,7 @@ import { errorBody, HttpError } from "./http";
 import { log } from "./logger";
 import { registerAccount } from "./routes/account";
 import { registerWaitlist } from "./routes/waitlist";
-import { SIGNUP_QUEUE_LIMITS, type SignupQueueLimits, signupGate } from "./signup-queue";
+import { type FirstUserPlace, SIGNUP_QUEUE_LIMITS, type SignupQueueLimits, signupGate } from "./signup-queue";
 import { createStatic } from "./static";
 import { registerWorkspaceScope } from "./workspace-scope";
 
@@ -19,7 +19,10 @@ const CREATES_USER = /^\/api\/auth\/(sign-up\/|sign-in\/social$|callback\/|oauth
 /** A part of a chunked upload: raw bytes. A form from another site doesn't send that type without a preflight. */
 const RAW_PART = /\/files\/uploads\/[^/]+$/;
 
-export function createApp(deps: AppDeps, opts: { signupQueue?: Partial<SignupQueueLimits> } = {}) {
+export function createApp(
+  deps: AppDeps,
+  opts: { firstUser: FirstUserPlace; signupQueue?: Partial<SignupQueueLimits> },
+) {
   const app = new Hono<AppEnv>();
   const serveStatic = createStatic(deps.config.webDist);
 
@@ -39,7 +42,7 @@ export function createApp(deps: AppDeps, opts: { signupQueue?: Partial<SignupQue
   // Better Auth answers at /api/auth/* in its own format. With closed sign-up, the requests that may
   // create a user pass the sign-up gate (signup-queue.ts): on a new installation, deciding that a person is
   // the first user and creating them is one step. With open sign-up, and for a sign-in, nothing waits.
-  const gate = signupGate(deps, { ...SIGNUP_QUEUE_LIMITS, ...opts.signupQueue });
+  const gate = signupGate(deps, { ...SIGNUP_QUEUE_LIMITS, ...opts.signupQueue }, opts.firstUser);
   app.on(["GET", "POST"], "/api/auth/*", (c) =>
     !deps.config.signupOpen && CREATES_USER.test(c.req.path) ? gate(c.req.raw) : deps.auth.handler(c.req.raw),
   );

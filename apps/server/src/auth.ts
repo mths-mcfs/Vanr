@@ -8,13 +8,18 @@ import type { Config } from "./config";
 import type { Mailer } from "./mailer";
 import { authSubject, localeFromHeader } from "./notify-text";
 
+export type SignupDecision = "allow" | "closed" | "busy";
+
 export interface AuthDeps {
   db: Db;
   config: Pick<Config, "publicUrl" | "authSecret" | "social">;
   mailer: Mailer;
   trustedOrigins: string[];
-  /** Decides whether this email may create an account (open sign-up, first install or a pending invite). */
-  signupAllowed: (email: string, headers: Headers | null) => Promise<boolean>;
+  /**
+   * Decides whether this email may create an account (open sign-up, first install or a pending invite).
+   * `busy`: the installation is empty but another sign-up holds the first user's place; try again soon.
+   */
+  signupAllowed: (email: string, headers: Headers | null) => Promise<SignupDecision>;
 }
 
 /**
@@ -76,7 +81,18 @@ export function createAuth(deps: AuthDeps) {
         create: {
           before: async (user, ctx) => {
             const headers = ctx?.headers ?? ctx?.request?.headers ?? null;
-            if (!(await deps.signupAllowed(user.email, headers))) {
+            const decision = await deps.signupAllowed(user.email, headers);
+            if (decision === "busy") {
+              throw new APIError(
+                "SERVICE_UNAVAILABLE",
+                {
+                  message: "Another sign-up is creating the first account; try again shortly.",
+                  code: "SIGNUP_BUSY",
+                },
+                { "retry-after": "5" },
+              );
+            }
+            if (decision === "closed") {
               throw new APIError("FORBIDDEN", {
                 message: "Sign-up is closed. Ask a workspace admin for an invite.",
                 code: "SIGNUP_CLOSED",

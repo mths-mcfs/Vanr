@@ -1,5 +1,5 @@
-// Runner credentials. The device credential (`mrt_`, only its hash in the database) serves only to get a
-// session at `POST /api/v1/runners/session`; the session (`mst_`) lasts 2 minutes and is good once, in the
+// Runner credentials. The device credential (`rrt_`, only its hash in the database) serves only to get a
+// session at `POST /api/v1/runners/session`; the session (`rst_`) lasts 2 minutes and is good once, in the
 // WebSocket's `hello`. Every session taken rotates the credential: the new one goes in the same response and
 // stays pending (a response lost on the way doesn't lock the runner out, which tries again with the current
 // one). When the session is used in the `hello`, the runner proved it got the new one: it becomes the current
@@ -20,8 +20,8 @@ const SESSION_TTL_S = 120;
 /** A connection past this and the server asks for another (which takes a new session and rotates the credential). */
 export const CONNECTION_MAX_MS = 24 * 3600_000;
 
-export const newCredential = () => `mrt_${newToken(32)}`;
-const newSession = () => `mst_${newToken(32)}`;
+export const newCredential = () => `rrt_${newToken(32)}`;
+const newSession = () => `rst_${newToken(32)}`;
 
 /** A rejection in the format the runner understands (401: invalid credential; 403: revoked or removed). */
 const rejected = (status: 401 | 403, code: string, message: string) => new HttpError(status, code, message);
@@ -55,7 +55,7 @@ export async function mintSession(
   deps: AppDeps,
   credential: string,
 ): Promise<{ session: string; credential: string; expiresIn: number }> {
-  if (!/^mrt_[A-Za-z0-9_-]{16,200}$/.test(credential))
+  if (!/^rrt_[A-Za-z0-9_-]{16,200}$/.test(credential))
     throw rejected(401, "runner.invalid_token", "This runner is not paired; pair it again");
   const hash = sha256Hex(credential);
   const [row] = await deps.db

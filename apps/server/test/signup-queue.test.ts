@@ -209,7 +209,7 @@ describe("closed sign-up queue", () => {
   );
 
   test(
-    "with a user in the installation, a refused sign-up and a sign-in don't wait for a held section",
+    "with a user in the installation, a rejected sign-up and a sign-in don't wait for a held section",
     async () => {
       const server = await startTestServer({ env: CLOSED });
       try {
@@ -218,10 +218,10 @@ describe("closed sign-up queue", () => {
         const held = new Browser(server.url).signUp("Held", "held@example.com");
         while (reached.length === 0) await Bun.sleep(5);
         const started = Date.now();
-        const refused = await new Browser(server.url).signUp("Other", "other@example.com");
+        const rejected = await new Browser(server.url).signUp("Other", "other@example.com");
         const signIn = await new Browser(server.url).signIn("owner@example.com");
         expect(Date.now() - started).toBeLessThan(2_000);
-        expect([refused.status, signIn.status]).toEqual([403, 200]);
+        expect([rejected.status, signIn.status]).toEqual([403, 200]);
         release();
         await held;
       } finally {
@@ -230,4 +230,107 @@ describe("closed sign-up queue", () => {
     },
     SERVER_TEST_MS,
   );
+});
+
+/** A clock of the test's own for the turns' deadlines: a deadline passes only when the test says so. */
+function testClock() {
+  const pending = new Set<() => void>();
+  return {
+    deadline: (_ms: number) => {
+      let fire!: () => void;
+      const passed = new Promise<void>((r) => {
+        fire = r;
+      });
+      pending.add(fire);
+      return { passed, cancel: () => pending.delete(fire) };
+    },
+    /** Every deadline running now passes. */
+    pass() {
+      for (const fire of [...pending]) fire();
+      pending.clear();
+    },
+  };
+}
+
+/**
+ * Holds the first creation of a user in the database (past the hook that let it in) until the test
+ * succeeds it or fails it; the creations after it go through.
+ */
+function holdFirstUserCreation(server: RunningServer) {
+  const db = server.deps.db;
+  const insert = db.insert.bind(db);
+  let reached!: () => void;
+  const atCreation = new Promise<void>((r) => {
+    reached = r;
+  });
+  let decide!: (ok: boolean) => void;
+  const decided = new Promise<boolean>((r) => {
+    decide = r;
+  });
+  let held = false;
+  db.insert = ((table: Parameters<typeof insert>[0]) => {
+    const builder = insert(table);
+    if (table !== schema.users || held) return builder;
+    held = true;
+    const values = builder.values.bind(builder);
+    builder.values = ((rows: Parameters<typeof values>[0]) => {
+      const query = values(rows);
+      const returning = query.returning.bind(query);
+      query.returning = (() =>
+        (async () => {
+          reached();
+          if (!(await decided)) throw new Error("the first creation failed");
+          return returning();
+        })()) as unknown as typeof query.returning;
+      return query;
+    }) as typeof builder.values;
+    return builder;
+  }) as typeof db.insert;
+  return { atCreation, succeed: () => decide(true), fail: () => decide(false) };
+}
+
+describe("the first user's place", () => {
+  for (const first of ["succeeds", "fails"] as const) {
+    test(
+      `the first section outlives its deadline and then ${first}: never two first users`,
+      async () => {
+        const clock = testClock();
+        const server = await startTestServer({
+          env: CLOSED,
+          signupQueue: { sectionDeadline: clock.deadline },
+        });
+        const creation = holdFirstUserCreation(server);
+        try {
+          const n = 4;
+          const answers = Array.from({ length: n }, (_, i) =>
+            new Browser(server.url)
+              .signUp(`Person ${i}`, `p${i}@example.com`)
+              .then((r) => `${r.status} retry-after=${r.headers.get("retry-after")}`),
+          );
+          await creation.atCreation;
+          // The held section's deadline passes: the queue moves on while its creation is still pending.
+          clock.pass();
+          // The turns after it run to their end (their deadlines never pass), all while the held creation is
+          // still pending.
+          const statuses = await Promise.all(answers);
+          expect(await users(server)).toBe(0);
+          // The held one answered 503 at its deadline; the others were turned away while it held the place.
+          expect(statuses).toEqual(Array.from({ length: n }, () => "503 retry-after=5"));
+          if (first === "succeeds") creation.succeed();
+          else creation.fail();
+          // Its work really ends now: the place goes back (or the count is no longer zero).
+          await Bun.sleep(100);
+          expect(await users(server)).toBe(first === "succeeds" ? 1 : 0);
+          // After it: with a first user, the next one is rejected; without one, the next one gets in.
+          const after = await new Browser(server.url).signUp("After", "after@example.com");
+          expect(after.status).toBe(first === "succeeds" ? 403 : 200);
+          expect(await users(server)).toBe(1);
+        } finally {
+          creation.fail();
+          await server.stop();
+        }
+      },
+      SERVER_TEST_MS,
+    );
+  }
 });

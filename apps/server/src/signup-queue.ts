@@ -4,6 +4,7 @@
 // decision and the creation: the body is read and checked before, the wait and the section have deadlines,
 // a client that gives up leaves without running, and the queue has a maximum size. Once the installation has
 // a user, nobody can be the first one, so the request skips the queue (the sign-up hook still decides it).
+import { AsyncLocalStorage } from "node:async_hooks";
 import { schema } from "@vanr/engine/db";
 import { count } from "drizzle-orm";
 import type { AppDeps } from "./context";
@@ -21,7 +22,23 @@ export interface SignupQueueLimits {
   sectionMs: number;
   /** Requests that may wait at once; past it, 503 with Retry-After without waiting. */
   maxWaiting: number;
+  /** When a turn's deadline passes (tests replace it with a clock of their own). */
+  sectionDeadline: (ms: number) => Deadline;
 }
+
+/** A deadline that resolves when it passes, unless cancelled before. */
+export interface Deadline {
+  passed: Promise<void>;
+  cancel(): void;
+}
+
+const realDeadline = (ms: number): Deadline => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const passed = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms);
+  });
+  return { passed, cancel: () => clearTimeout(timer) };
+};
 
 export const SIGNUP_QUEUE_LIMITS: SignupQueueLimits = {
   maxBodyBytes: 16 * 1024,
@@ -29,20 +46,61 @@ export const SIGNUP_QUEUE_LIMITS: SignupQueueLimits = {
   waitMs: 10_000,
   sectionMs: 15_000,
   maxWaiting: 32,
+  sectionDeadline: realDeadline,
 };
 
 const RETRY_AFTER_S = 5;
 
-const refusal = (status: 408 | 413 | 503, code: string, message: string) =>
+const rejection = (status: 408 | 413 | 503, code: string, message: string) =>
   Response.json(errorBody(code, message), {
     status,
     headers: status === 503 ? { "retry-after": String(RETRY_AFTER_S) } : undefined,
   });
 
-const busy = () => refusal(503, "signup_busy", "Sign-up is busy; try again in a few seconds");
+const busy = () => rejection(503, "signup_busy", "Sign-up is busy; try again in a few seconds");
+
+/** The first user's place on a new installation: free, or taken by one identified sign-up section. */
+type Place = { kind: "free" } | { kind: "taken"; section: number };
+
+/**
+ * The first user's place. A section that is let in as the first user takes it, and the place goes back
+ * only when THAT section's work really ends (it created the user, and the count is no longer zero; or it
+ * failed, and the place is free again), never when its deadline passes. While it is taken, any other
+ * sign-up on an empty installation is turned away to try again.
+ */
+export class FirstUserPlace {
+  private place: Place = { kind: "free" };
+  private sections = 0;
+  private readonly current = new AsyncLocalStorage<number>();
+
+  /** Runs one sign-up section; the place it takes is given back when its work settles. */
+  section<T>(work: () => Promise<T>): Promise<T> {
+    const id = ++this.sections;
+    const run = this.current.run(id, work);
+    run
+      .finally(() => {
+        if (this.place.kind === "taken" && this.place.section === id) this.place = { kind: "free" };
+      })
+      .catch(() => {});
+    return run;
+  }
+
+  /** The calling section takes the place; false when another section holds it, or outside any section. */
+  take(): boolean {
+    const id = this.current.getStore();
+    if (id === undefined) return false;
+    if (this.place.kind === "taken" && this.place.section !== id) return false;
+    this.place = { kind: "taken", section: id };
+    return true;
+  }
+}
 
 /** The answer for the sign-up requests of a closed installation (the others go straight to Better Auth). */
-export function signupGate(deps: Pick<AppDeps, "db" | "auth">, limits: SignupQueueLimits) {
+export function signupGate(
+  deps: Pick<AppDeps, "db" | "auth">,
+  limits: SignupQueueLimits,
+  firstUser: FirstUserPlace,
+) {
   const queue = oneAtATime(limits);
   return async (req: Request): Promise<Response> => {
     const read = await readBody(req, limits);
@@ -50,14 +108,14 @@ export function signupGate(deps: Pick<AppDeps, "db" | "auth">, limits: SignupQue
     const buffered = new Request(req.url, { method: req.method, headers: req.headers, body: read });
     const [row] = await deps.db.select({ n: count() }).from(schema.users);
     if ((row?.n ?? 0) > 0) return deps.auth.handler(buffered);
-    return queue(() => deps.auth.handler(buffered), req.signal);
+    return queue(() => firstUser.section(() => deps.auth.handler(buffered)), req.signal);
   };
 }
 
-/** The whole body within the size and time limits, or the refusal. A GET (an OAuth callback) has none. */
+/** The whole body within the size and time limits, or the rejection. A GET (an OAuth callback) has none. */
 async function readBody(req: Request, limits: SignupQueueLimits): Promise<Uint8Array | null | Response> {
   if (!req.body) return null;
-  const tooLarge = () => refusal(413, "payload_too_large", "The request body is too large");
+  const tooLarge = () => rejection(413, "payload_too_large", "The request body is too large");
   if (Number(req.headers.get("content-length") ?? 0) > limits.maxBodyBytes) return tooLarge();
   const reader = req.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -69,7 +127,7 @@ async function readBody(req: Request, limits: SignupQueueLimits): Promise<Uint8A
   try {
     for (;;) {
       const next = await Promise.race([reader.read(), late]);
-      if (next === "late") return refusal(408, "request_timeout", "The request body took too long");
+      if (next === "late") return rejection(408, "request_timeout", "The request body took too long");
       if (next.done) break;
       size += next.value.byteLength;
       if (size > limits.maxBodyBytes) return tooLarge();
@@ -101,17 +159,15 @@ function oneAtATime(limits: SignupQueueLimits) {
   };
   const runNow = async (task: () => Promise<Response>): Promise<Response> => {
     running = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = limits.sectionDeadline(limits.sectionMs);
     let released = false;
     const release = () => {
       if (released) return;
       released = true;
-      clearTimeout(timer);
+      deadline.cancel();
       next();
     };
-    const late = new Promise<"late">((resolve) => {
-      timer = setTimeout(() => resolve("late"), limits.sectionMs);
-    });
+    const late = deadline.passed.then(() => "late" as const);
     const work = task();
     try {
       const out = await Promise.race([work, late]);

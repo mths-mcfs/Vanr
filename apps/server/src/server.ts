@@ -6,7 +6,7 @@ import { createSealer } from "@vanr/engine/seal";
 import { postgresConnector, type SqlConnector } from "@vanr/engine/sqlconn";
 import { count } from "drizzle-orm";
 import { createApp } from "./app";
-import { createAuth } from "./auth";
+import { createAuth, type SignupDecision } from "./auth";
 import type { Config } from "./config";
 import type { AppDeps, RuntimePort } from "./context";
 import { HttpError } from "./http";
@@ -19,7 +19,7 @@ import { loadVapid, webPushSender } from "./push";
 import { Hub } from "./realtime/hub";
 import { RunnerHub } from "./runners/hub";
 import { BackgroundWork } from "./runtime/background";
-import type { SignupQueueLimits } from "./signup-queue";
+import { FirstUserPlace, type SignupQueueLimits } from "./signup-queue";
 import { postgresLedger } from "./usage-ledger";
 
 interface StartOptions {
@@ -138,12 +138,16 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   // Slice S2 (integrations/storage) wraps this in routedBlobs (Drive files go to the workspace's S3).
   const blobs = localBlobs;
   const now = opts.now ?? (() => new Date());
-  // Closed sign-up still accepts the installation's first user and whoever has a pending invite.
-  const signupAllowed = async (email: string, headers: Headers | null) => {
-    if (effective.signupOpen) return true;
+  // Closed sign-up still accepts the installation's first user and whoever has a pending invite. The first
+  // user's place is taken by one sign-up section at a time (signup-queue.ts); a pending invite doesn't need it.
+  const firstUser = new FirstUserPlace();
+  const signupAllowed = async (email: string, headers: Headers | null): Promise<SignupDecision> => {
+    if (effective.signupOpen) return "allow";
     const [row] = await db.select({ n: count() }).from(schema.users);
-    if ((row?.n ?? 0) === 0) return true;
-    return hasPendingInvite(email, headers);
+    const empty = (row?.n ?? 0) === 0;
+    if (empty && firstUser.take()) return "allow";
+    if (await hasPendingInvite(email, headers)) return "allow";
+    return empty ? "busy" : "closed";
   };
   const origins = [publicUrl, ...(opts.extraOrigins ?? [])];
   const auth = createAuth({ db, config: effective, mailer, trustedOrigins: origins, signupAllowed });
@@ -179,7 +183,7 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   // Here, in this order: the undo of stopRecalcs (S2, bases/write) and of the assignment engine's stop
   // (S5); the provider lookup (S6); search.ensureVector (S2, search-index); runtime.start (S6), the
   // engine's start (S5) and resumeRecalcs (S2), all before the app takes requests.
-  const app = createApp(deps, { signupQueue: opts.signupQueue });
+  const app = createApp(deps, { firstUser, signupQueue: opts.signupQueue });
   handler = (req) => app.fetch(req);
   log.info("server.started", { url: publicUrl, db: opened.kind });
 
