@@ -81,6 +81,10 @@ jobs:
       - run: bun test packages/engine/src/db/catalog.test.ts packages/engine/src/sqlconn.test.ts --test-name-pattern Postgres
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # Search with the vector leg (pgvector), each index in a database of its own.
+      - run: bun test packages/engine/src/search-pg.test.ts --test-name-pattern "real Postgres"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
 
   workflows:
     runs-on: ubuntu-latest
