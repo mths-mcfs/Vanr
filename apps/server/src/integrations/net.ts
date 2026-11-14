@@ -102,8 +102,8 @@ function pinned(url: URL, ip: string, init: RequestInit): [string, RequestInit] 
 /**
  * fetch for outside servers. Every address goes through the `checkServerUrl` rule: the request and also each
  * redirect, followed here by hand. Without this, a remote server points ours at the internal network through
- * what it returns (OAuth metadata, client registration, `Location`). The `Authorization` doesn't follow to
- * another origin. Without the local network allowed, every hop connects to the checked IP.
+ * what it returns (OAuth metadata, client registration, `Location`). `Authorization` and `Cookie` don't follow
+ * to another origin. Without the local network allowed, every hop connects to the checked IP.
  */
 export function guardedFetch(
   fetchFn: typeof fetch,
@@ -132,6 +132,7 @@ export function guardedFetch(
       if (next.origin !== checked.origin) {
         const headers = new Headers(req.headers);
         headers.delete("authorization");
+        headers.delete("cookie");
         req = { ...req, headers };
       }
       url = next.toString();

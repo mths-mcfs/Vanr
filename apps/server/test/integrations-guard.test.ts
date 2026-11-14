@@ -99,6 +99,45 @@ describe("guardedFetch", () => {
     expect(await failureOf(guardedFetch(fetchFn, false, dns, false)("http://ok.test/"))).toBe("invalid_url");
     expect(await failureOf(guardedFetch(fetchFn, false, dns, true)("http://ok.test/"))).toBe("ok");
   });
+
+  test("credentials follow a redirect on the same origin but stop when the origin changes", async () => {
+    const received: (string | null)[][] = [];
+    const record = (req: Request) => {
+      received.push([req.headers.get("authorization"), req.headers.get("cookie"), req.headers.get("x-test")]);
+    };
+    const target = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(req) {
+        record(req);
+        return new Response("ok");
+      },
+    });
+    stops.push(async () => {
+      await target.stop(true);
+    });
+    const source = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(req) {
+        if (new URL(req.url).pathname === "/start")
+          return new Response(null, { status: 302, headers: { location: "/same" } });
+        record(req);
+        return new Response(null, { status: 302, headers: { location: target.url.toString() } });
+      },
+    });
+    stops.push(async () => {
+      await source.stop(true);
+    });
+    const res = await guardedFetch(fetch, true)(new URL("/start", source.url), {
+      headers: { Authorization: "Bearer test-token", Cookie: "session=test-cookie", "x-test": "kept" },
+    });
+    expect(await res.text()).toBe("ok");
+    expect(received).toEqual([
+      ["Bearer test-token", "session=test-cookie", "kept"],
+      [null, null, "kept"],
+    ]);
+  });
 });
 
 /** A TCP server that counts connections and answers each with `onSocket`. */
