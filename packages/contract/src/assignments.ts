@@ -1,0 +1,297 @@
+// Assignments: goals handed to an executor agent, with plan, decisions, submissions and reviews.
+
+export interface ThreadAssignmentInfo {
+  agentId: string;
+  assignmentId: string;
+  planDone: number;
+  planTotal: number;
+  role: string | null;
+  status: string;
+  waitingYou: boolean;
+}
+
+export type AssignmentStatus = "active" | "awaiting_close" | "canceled" | "done" | "paused" | "proposed";
+
+export type AssignmentExecutor = "agent" | "claude_code" | "codex";
+
+/** always: always ask; low_risk_auto: allow what is low risk; never: never ask. */
+export type CommandPolicy = "always" | "low_risk_auto" | "never";
+
+/** Role of whoever is viewing the assignment: owner, participant who decides or comments, or read-only. */
+export type AssignmentRole = "comment" | "decide" | "owner" | "view";
+
+export type ParticipantRole = "comment" | "decide";
+
+export type PlanItemStatus = "doing" | "done" | "dropped" | "todo" | "waiting_you";
+
+export interface Assignment {
+  id: string;
+  agentId: string;
+  canAct: boolean;
+  canManage: boolean;
+  /** Limit that paused the assignment. */
+  ceiling: AssignmentLimitKind | null;
+  channelId: string;
+  closedAt: string | null;
+  commandPolicy: CommandPolicy;
+  createdAt: string;
+  dueAt: string | null;
+  executor: AssignmentExecutor;
+  findings: string[];
+  goal: string;
+  joinRequested: boolean;
+  lastActivityAt: string | null;
+  limits: AssignmentLimits;
+  needsEnvironment: boolean;
+  openQuestion: string | null;
+  outcome: "canceled" | "done" | null;
+  overdue: boolean;
+  ownerId: string;
+  pausedAt: string | null;
+  pending: {
+    commands: number;
+    decisions: number;
+    joinRequests: number;
+    provisional: number;
+    reviews: number;
+    submissions: number;
+  };
+  plan: {
+    done: number;
+    items: AssignmentPlanItem[];
+    /** Items the verifier approved. */
+    passed: number;
+    total: number;
+    version: number;
+    waiting: number;
+  };
+  repoDir: string | null;
+  resumeJobs: boolean;
+  role: AssignmentRole | null;
+  runner: { id: string; executors: AssignmentExecutor[]; name: string; online: boolean } | null;
+  runningJobs: number;
+  /** Active, not waiting on anyone, and no news for more than 30 min. */
+  stale: boolean;
+  startedAt: string | null;
+  /** Work state, from the server: waiting on you, stopped, with a deadline... */
+  state: AssignmentWorkState;
+  status: AssignmentStatus;
+  threadId: string;
+  title: string;
+  /** Trail events the person has not seen yet. */
+  unseen: number;
+  usage: AssignmentUsage;
+  waitReason: AssignmentWaitReason | null;
+  /** The engine looks again at this time (the agent asked, or a decision's deadline). */
+  wakeAt: string | null;
+}
+
+export interface AssignmentEligibleAgent {
+  agentId: string;
+  canManage: boolean;
+  eligible: boolean;
+  executors: AssignmentExecutor[];
+  reason: string | null;
+  runner: { id: string; name: string; online: boolean } | null;
+}
+
+export interface AssignmentJoinRequest {
+  createdAt: string;
+  name: string;
+  role: ParticipantRole | null;
+  status: "accepted" | "declined" | "pending";
+  userId: string;
+}
+
+export interface AssignmentParticipants {
+  owner: { name: string; userId: string };
+  participants: { name: string; role: ParticipantRole; userId: string }[];
+}
+
+export interface AssignmentCommandRule {
+  id: string;
+  by: string;
+  createdAt: string;
+  rule: string;
+}
+
+export interface AssignmentSettings {
+  agentDefault: { canSet: boolean; commandPolicy: CommandPolicy };
+  rules: AssignmentCommandRule[];
+  stats: { asked: number; auto: number; blocked: number };
+}
+
+export interface AssignmentHarness {
+  canSetModel: boolean;
+  effectiveHarness: AssignmentExecutor;
+  effectiveModel: string;
+  options: { kind: AssignmentExecutor; models: { label: string; recommended?: boolean; value: string }[] }[];
+}
+
+export interface AssignmentDecision {
+  id: string;
+  blocking: boolean;
+  chosen: string | null;
+  chosenAt: string | null;
+  chosenBy: string | null;
+  impact: string | null;
+  messageId: string | null;
+  opinions: { at: string; option: string; userId: string }[];
+  options: string[];
+  question: string;
+  recommendation: string | null;
+  status: "pending" | "provisional" | "taken";
+  why: string | null;
+}
+
+export interface AssignmentCommand {
+  id: string;
+  always: boolean;
+  command: string;
+  createdAt: string;
+  jobId: string;
+  rules: string[];
+  state: "allowed" | "denied" | "expired" | "pending";
+  tool: string;
+}
+
+export interface AssignmentSubmission {
+  id: string;
+  auto: boolean;
+  changesNote: string | null;
+  checklist: { id: string; checkedBy: string | null; text: string }[];
+  createdAt: string;
+  fileIds: string[];
+  note: string;
+  status: "accepted" | "changes_requested" | "pending" | "superseded";
+}
+
+export interface AssignmentReview {
+  id: string;
+  decidedAt: string | null;
+  decidedBy: string | null;
+  fileIds: string[];
+  note: string | null;
+  prUrl: string | null;
+  status: "approved" | "changes_requested" | "pending";
+  summary: string;
+  title: string;
+}
+
+/** Same as the engine's work state (the contract does not depend on the engine). */
+export type AssignmentWorkState = "done" | "due" | "failed" | "running" | "stopped" | "waiting_you";
+
+export type AssignmentLimitKind = "minutes" | "steps" | "usd";
+
+export type AssignmentWaitReason =
+  | "ceiling"
+  | "closed"
+  | "idle"
+  | "paused"
+  | "person"
+  | "proposed"
+  | "stuck"
+  | "submission"
+  | "timer"
+  | "working";
+
+/** Who acted: a person, the assignment's agent, the verifier (clean context) or the engine. */
+export interface AssignmentActorRef {
+  id: string | null;
+  type: "agent" | "person" | "system" | "verifier";
+}
+
+export interface AssignmentPlanItem {
+  id: string;
+  createdBy: AssignmentActorRef;
+  /** Definition of done: what the verifier checks. */
+  criteria: string;
+  /** Fix item: which item it fixes. */
+  fixes: string | null;
+  kind: "change" | "fix" | "work";
+  milestone: string | null;
+  /** null: not verified. Only the verifier writes it. */
+  passes: boolean | null;
+  state: AssignmentWorkState;
+  status: PlanItemStatus;
+  /** Stuck: the attempts (`turns`) or the validation rounds (`rounds`) ran out; waits for the person. */
+  stuck: "rounds" | "turns" | null;
+  summary: string | null;
+  title: string;
+  updatedAt: string;
+  updatedBy: AssignmentActorRef;
+  verdict: string | null;
+  verifiedAt: string | null;
+}
+
+export interface AssignmentLimits {
+  minutes: number | null;
+  steps: number | null;
+  usd: number | null;
+}
+
+export interface AssignmentUsage {
+  /** Tokens reported by Claude Code/Codex (the pairing person's plan: no USD). */
+  jobTokens: number;
+  /** Job minutes on the environment. */
+  minutes: number;
+  /** Agent turns and jobs the engine sent. */
+  steps: number;
+  /** Jobs that finished without reporting usage ("cost not measured"). */
+  unmeasuredJobs: number;
+  /** USD spent by the harness through the API (ledger). */
+  usd: number;
+}
+
+export type AssignmentEventKind =
+  | "ceiling_hit"
+  | "ceiling_warning"
+  | "closed"
+  | "decision_asked"
+  | "decision_deadline"
+  | "decision_taken"
+  | "delivered"
+  | "engine_forked"
+  | "fix_created"
+  | "item_done"
+  | "item_retry"
+  | "item_started"
+  | "item_stuck"
+  | "job_done"
+  | "overdue"
+  | "paused"
+  | "plan_edited"
+  | "proof_added"
+  | "resumed"
+  | "stale"
+  | "started"
+  | "validation_failed"
+  | "validation_passed"
+  | "verifier_unavailable"
+  | "waiting_until"
+  | "work_ended";
+
+export interface AssignmentEvent {
+  actor: AssignmentActorRef;
+  at: string;
+  data: Record<string, unknown>;
+  itemId: string | null;
+  kind: AssignmentEventKind;
+  seq: number;
+}
+
+export interface AssignmentProof {
+  id: string;
+  body: string | null;
+  by: AssignmentActorRef;
+  createdAt: string;
+  fileId: string | null;
+  itemId: string | null;
+  jobId: string | null;
+  kind: "diff" | "files" | "preview" | "screenshot" | "test_log";
+  title: string;
+  url: string | null;
+}
+
+/** The six work states. */
+export type WorkStateName = "done" | "due" | "failed" | "running" | "stopped" | "waiting_you";

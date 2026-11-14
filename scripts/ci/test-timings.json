@@ -2,6 +2,8 @@
   "version": 1,
   "files": {
     "scripts/typecheck.test.ts": 50,
-    "scripts/ci/gate.test.ts": 24
+    "scripts/ci/gate.test.ts": 24,
+    "packages/contract/src/secret-box.test.ts": 90,
+    "packages/contract/src/permissions.test.ts": 5
   }
 }
