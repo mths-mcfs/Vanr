@@ -998,7 +998,8 @@ async function prepareSchema(db: Db | Tx, table: TableRow, input: PropDef[]): Pr
       : d,
   );
   defs = await withOptionsFromValues(db, table, defs);
-  defs = withResultTypes(defs);
+  // the rollups' types first, then the formulas' (a formula over a rollup reads its type): the order the
+  // values are calculated in
   const linked = await withRollupTypes(db, table, defs);
   // a relation or a rollup saved before stays as it was when its source went away (the cell shows the
   // error): only a new or changed one has to close
@@ -1008,7 +1009,7 @@ async function prepareSchema(db: Db | Tx, table: TableRow, input: PropDef[]): Pr
     return !before || JSON.stringify(linkShape(before)) !== JSON.stringify(now && linkShape(now));
   });
   if (unclosed.length) throw bad("base.invalid_schema", "Invalid schema", { problems: unclosed });
-  defs = linked.defs;
+  defs = withResultTypes(linked.defs);
   return { defs, recalc: calcSignature(defs) !== calcSignature(table.defs) };
 }
 
@@ -1457,7 +1458,8 @@ async function refreshDependents(deps: AppDeps, table: Pick<TableRow, "id" | "wo
         const [current] = await tx.select().from(dbTables).where(eq(dbTables.id, y.id)).for("update");
         if (!current) return null;
         await held.recheck();
-        const { defs } = await withRollupTypes(tx, current, current.defs);
+        // the rollups' new types, then the formulas that read them
+        const defs = withResultTypes((await withRollupTypes(tx, current, current.defs)).defs);
         const changed = JSON.stringify(defs) !== JSON.stringify(current.defs);
         const at = deps.now();
         const [row] = await tx

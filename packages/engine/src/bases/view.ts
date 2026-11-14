@@ -3,7 +3,7 @@
 // oracle of the same rule (the server test compares the two by fuzzing) and lets the front end update the
 // screen before the response arrives.
 import { z } from "zod";
-import { utcMs } from "../formula/values";
+import { parseIso, utcMs } from "../formula/values";
 import { isCalendarIso, type PropActor, type PropDef } from "../props";
 
 export const VIEW_TYPES = [
@@ -378,19 +378,28 @@ function isEmpty(v: unknown): boolean {
   return v === undefined || v === null || v === "" || (Array.isArray(v) && v.length === 0);
 }
 
+/**
+ * The calendar day of a date's text: a day as written; a date with a time, the UTC day of its instant (so
+ * `2026-11-01T00:30+02:00` is October 31st, the same day as `2026-10-31T22:30Z`). An invalid time: null.
+ */
+export function dayOfText(text: string): string | null {
+  if (!text.includes("T")) return text.slice(0, 10);
+  const p = parseIso(text);
+  return p ? isoDay(p.ms) : null;
+}
+
 /** Day of a date cell: `start` (props, formula) or the recorded instant (created/edited at). */
 function dayOf(def: PropDef, v: unknown): string | null {
   if (v === undefined || v === null) return null;
   if (def.type === "created_time" || def.type === "edited_time") return isoDay(Date.parse(String(v)));
-  if (typeof v === "object" && "start" in (v as object))
-    return String((v as { start: string }).start).slice(0, 10);
+  if (typeof v === "object" && "start" in v && typeof v.start === "string") return dayOfText(v.start);
   return null;
 }
 
 /** End day of a date's span (`{start, end}`); without an end, null. */
 function endDayOf(v: unknown): string | null {
   if (typeof v !== "object" || v === null || !("end" in v)) return null;
-  return typeof v.end === "string" && v.end ? v.end.slice(0, 10) : null;
+  return typeof v.end === "string" && v.end ? dayOfText(v.end) : null;
 }
 
 const sameActor = (a: unknown, b: PropActor) =>

@@ -3,9 +3,12 @@
 // source another write holds is skipped and its notice stays for the next round, so two writes that cross
 // (A rolls up B and B rolls up A) never end in a deadlock or a 500.
 //
-// VANR_TEST_BASES_LINKS=late swaps the propagation's first lock (`linkLocks.claimSource`) for a double that
-// doesn't take the dependent source before its rows; the CI runs the forced interleaving that way too and
-// expects it to FAIL (the propagation then waits for the held source).
+// VANR_TEST_BASES_LINKS swaps one of the propagation's locks for a double, and the CI runs the forced
+// interleavings that way too and expects exactly one of them to FAIL each time:
+// - `late`: `linkLocks.claimSource` doesn't take the dependent source before its rows, and the propagation
+//   then waits for the held source ("forced interleaving: links: a source ...");
+// - `wait`: `linkLocks.lockRows` waits for a held dependent row instead of skipping it, and the write then
+//   waits for the other transaction ("forced interleaving: links: a dependent row ...").
 // Here, without VANR_TEST_POSTGRES_URL, the file skips with the reason in the name.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { BasePropDef } from "@vanr/contract";
@@ -26,13 +29,19 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("bases relations on Postgres"), (
   let pg: RunningServer;
   let n = 0;
   const original = linkLocks.claimSource;
+  const originalRows = linkLocks.lockRows;
   beforeAll(async () => {
     pg = await startTestServer({ env: { DATABASE_URL: await testDatabaseUrl("baselinks") } });
     // the double: says the source is taken without locking it, so the marking locks the rows first
     if (LINKS === "late") linkLocks.claimSource = async () => true;
+    // the other double: the dependent rows taken with a plain FOR UPDATE, which waits for a held one
+    if (LINKS === "wait")
+      linkLocks.lockRows = (tx, where) =>
+        tx.select({ id: schema.dbRows.id }).from(schema.dbRows).where(where).for("update");
   }, SERVER_TEST_MS);
   afterAll(async () => {
     linkLocks.claimSource = original;
+    linkLocks.lockRows = originalRows;
     await pg?.stop();
   }, SERVER_TEST_MS);
 
@@ -87,7 +96,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("bases relations on Postgres"), (
   }
 
   test(
-    "a dependent row held by another transaction: the propagation doesn't wait, comes back and gets it right",
+    "forced interleaving: links: a dependent row another transaction holds isn't waited for; the notice comes back and gets it right",
     async () => {
       const { ws, api } = await owner("Held");
       const { tasks, projects } = await projectsAndTasks(api, ws);
@@ -101,22 +110,27 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("bases relations on Postgres"), (
       const held = new Promise<void>((r) => {
         release = r;
       });
-      let locked = () => {};
-      const isLocked = new Promise<void>((r) => {
-        locked = r;
+      let reached!: (pid: number) => void;
+      const holding = new Promise<number>((r) => {
+        reached = r;
       });
       const holder = pg.deps.db.transaction(async (tx) => {
         await tx.select().from(schema.dbRows).where(eq(schema.dbRows.id, p.id)).for("update");
-        locked();
+        reached(pidIn(rowsOf(await tx.execute(sql`select pg_backend_pid() as pid`))));
         await held;
       });
-      await isLocked;
-      // the task's write isn't stuck on the project's lock
-      await api.updateRow(ws, tasks.id, t1.id, { props: { hours: 5 } });
-      const [dirty] = await notices();
-      expect(dirty?.rowIds).toEqual([t1.id]);
+      const pid = await holding;
+      // the task's write isn't stuck on the project's lock: it answers before anyone waits for the holder
+      const signal = { stop: false };
+      const write = api.updateRow(ws, tasks.id, t1.id, { props: { hours: 5 } }).then(() => false);
+      const blocked = await Promise.race([write, blockedBy(pid, signal)]);
+      signal.stop = true;
+      const [dirty] = blocked ? [] : await notices();
       release();
       await holder;
+      await write;
+      expect(blocked).toBe(false);
+      expect(dirty?.rowIds).toEqual([t1.id]);
       await settle(pg);
       expect((await api.getRow(ws, projects.id, p.id)).computed).toMatchObject({ sum: 5 });
       expect(await notices()).toEqual([]);

@@ -2,7 +2,16 @@
 // (one per linked row, as a formula sees them) and calls `rollupValue`; the result type comes from
 // `rollupType` when the schema is saved, for the filter, the order and the grid.
 import { type FormulaPlan, planFormulas, propValue, type RowData } from "../formula/index";
-import { type FType, type FValue, fromJson, isDate, isPerson, T, toJson } from "../formula/values";
+import {
+  type ComputedJson,
+  type FType,
+  type FValue,
+  fromJson,
+  isDate,
+  isPerson,
+  T,
+  toJson,
+} from "../formula/values";
 import type { PropActor, PropDef, RollupFn } from "../props";
 
 /** The rollup's result type; `null` when the function doesn't fit the target property's type. */
@@ -59,10 +68,58 @@ function unique(values: FValue[]): FValue[] {
   });
 }
 
+/** A finite number in units of 2^-1074 (the smallest step of a double): every double is a whole count of them. */
+function units(x: number): bigint {
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, x);
+  const bits = view.getBigUint64(0);
+  const negative = bits >> 63n === 1n;
+  const exponent = Number((bits >> 52n) & 0x7ffn);
+  const fraction = bits & 0xfffffffffffffn;
+  const n = exponent === 0 ? fraction : (fraction | (1n << 52n)) << BigInt(exponent - 1);
+  return negative ? -n : n;
+}
+
+/** A whole count of 2^-1074 back to the nearest double (ties to even); past the largest double, ±Infinity. */
+function fromUnits(total: bigint): number {
+  const negative = total < 0n;
+  let a = negative ? -total : total;
+  const bits = a.toString(2).length;
+  let scale = 0;
+  if (bits > 53) {
+    scale = bits - 53;
+    const rest = a & ((1n << BigInt(scale)) - 1n);
+    const half = 1n << BigInt(scale - 1);
+    a >>= BigInt(scale);
+    if (rest > half || (rest === half && (a & 1n) === 1n)) a += 1n;
+  }
+  // a fits in 53 bits: the product is exact unless it overflows (then it is Infinity, as it should)
+  const v = Number(a) * 2 ** (scale - 1074);
+  return negative ? -v : v;
+}
+
+/**
+ * The sum as the database's `numeric` makes it: exact, rounded once at the end. A plain left-to-right sum gives
+ * 0 for 1e308 + 5 − 1e308 and depends on the rows' order; an exact sum past the largest number is ±Infinity
+ * (shown as `not_finite`). Bun's `Math.sumPrecise` isn't used: it gets -50 + -119 wrong.
+ */
+export function exactSum(nums: readonly number[]): number {
+  let total = 0n;
+  for (const x of nums) total += units(x);
+  return fromUnits(total);
+}
+
+/** The average without overflowing on the way: 1e308 and 1e308 average 1e308, not Infinity. */
+function average(nums: readonly number[]): number {
+  const sum = exactSum(nums);
+  return Number.isFinite(sum) ? sum / nums.length : exactSum(nums.map((x) => x / nums.length));
+}
+
 function median(sorted: number[]): number {
   const mid = Math.floor(sorted.length / 2);
   const at = (i: number) => sorted[i] ?? 0;
-  return sorted.length % 2 ? at(mid) : (at(mid - 1) + at(mid)) / 2;
+  // half of each, so two 1e308 don't overflow
+  return sorted.length % 2 ? at(mid) : at(mid - 1) / 2 + at(mid) / 2;
 }
 
 /**
@@ -97,9 +154,9 @@ export function rollupValue(fn: RollupFn, values: readonly FValue[]): FValue {
     case "percent_not_empty":
       return share(values.length - empties);
     case "sum":
-      return nums.reduce((a, b) => a + b, 0);
+      return exactSum(nums);
     case "average":
-      return nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : null;
+      return nums.length ? average(nums) : null;
     case "median":
       return nums.length ? median([...nums].sort((a, b) => a - b)) : null;
     case "min":
@@ -137,6 +194,19 @@ export function rollupValue(fn: RollupFn, values: readonly FValue[]): FValue {
     case "percent_unchecked":
       return share(values.length - checked);
   }
+}
+
+/** The error of a result that doesn't fit a number (a sum or a range past ±1.8e308), as a formula's. */
+export const NOT_FINITE = { err: "not_finite" } as const;
+
+/**
+ * The rollup's value as it is stored and answered: its JSON, `null` when empty, and `{ err: "not_finite" }`
+ * when a number doesn't fit (the footer's summary answers the same).
+ */
+export function rollupJson(fn: RollupFn, values: readonly FValue[]): ComputedJson | null {
+  const v = rollupValue(fn, values);
+  if (typeof v === "number" && !Number.isFinite(v)) return NOT_FINITE;
+  return toJson(v) ?? null;
 }
 
 /**
@@ -219,10 +289,11 @@ export function linkedValues(
     const values = rowsOf(rel).map((r) =>
       target.type === "formula" ? fromJson(r.computed[target.id], names) : propValue(target, r, names),
     );
+    const json = rollupJson(def.rollup.fn, values);
+    // a number that doesn't fit is an error in the cell and empty for the formulas that read it
     const v = rollupValue(def.rollup.fn, values);
-    extra[def.id] = v;
-    const json = toJson(v);
-    if (json !== undefined) computed[def.id] = json;
+    extra[def.id] = typeof v === "number" && !Number.isFinite(v) ? null : v;
+    if (json !== null) computed[def.id] = json;
   }
   return { extra, computed };
 }

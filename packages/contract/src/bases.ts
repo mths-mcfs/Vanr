@@ -253,7 +253,10 @@ export interface BaseSummariesInput {
 }
 
 export interface BaseSummariesResult {
-  /** Per property: a number, a date as `{ start }` (`{ start, end }` for the range) or `null`. */
+  /**
+   * Per property: a number, a date as `{ start }` (`{ start, end }` for the range), `null`, or
+   * `{ err: "not_finite" }` when the result doesn't fit a number.
+   */
   values: Record<string, unknown>;
 }
 
@@ -273,7 +276,8 @@ export interface BaseAggregateInput {
 
 export interface BaseAggregateResult {
   /** In the grid's group order; without `x`, one group with the `null` key. Up to 100. */
-  groups: { key: string | null; value: number | null }[];
+  /** `{ err: "not_finite" }`: a result that doesn't fit a number (past ±1.8e308), as a formula cell shows it. */
+  groups: { key: string | null; value: number | null | { err: "not_finite" } }[];
   total: number;
 }
 

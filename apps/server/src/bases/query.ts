@@ -2,7 +2,8 @@
 // as the `rowMatches` oracle of packages/engine/src/bases/view.ts (the tests compare both by fuzzing).
 // Nothing from the user goes into the SQL text: a property id, a value and an option go as parameters, and
 // the id only goes in after it was checked against the schema.
-import type { ActorRef } from "@vanr/contract";
+import type { ActorRef, BaseAggregateResult } from "@vanr/contract";
+import { NOT_FINITE } from "@vanr/engine/bases/rollup";
 import { type ChartAgg, type SummaryFn, summaryFns } from "@vanr/engine/bases/summary";
 import {
   checkFilter,
@@ -53,16 +54,37 @@ const numOf = (c: SQL) => sql`(case when jsonb_typeof(${c}) = 'number' then (${c
 const emptyOf = (c: SQL) =>
   sql`(${c} is null or ${c} = 'null'::jsonb or ${c} = '""'::jsonb or ${c} = '[]'::jsonb)`;
 
+// A date's text is a day (`2026-10-22`) or an instant with a time and maybe an offset. Days compare as calendar
+// days; times compare as instants, never as text (`2026-11-01T00:30+02:00` is before `2026-10-31T23:30Z`). A
+// day next to a time counts as the start of that day in UTC, as `parseIso` reads it in the oracle. An invalid
+// time (`T25:00`) has no instant and no day, as in the oracle; validation keeps it out of the props anyway.
+const DAY_RE = "^\\d{4}-\\d{2}-\\d{2}$";
+const TIME_RE =
+  "^\\d{4}-\\d{2}-\\d{2}T([01]\\d|2[0-3]):[0-5]\\d(:[0-5]\\d(\\.\\d+)?)?(Z|[+-]([01]\\d|2[0-3]):[0-5]\\d)?$";
+
+const ZONE_RE = "(Z|[+-]\\d{2}:\\d{2})$";
+
+/** The instant of a date's text (`timestamptz`), or null. Without an offset a time is UTC, as in `parseIso`. */
+function instantOf(text: SQL): SQL {
+  return sql`(case when ${text} ~ ${DAY_RE} then (${text} || 'T00:00:00Z')::timestamptz
+    when ${text} ~ ${TIME_RE} then (case when ${text} ~ ${ZONE_RE} then ${text} else ${text} || 'Z' end)::timestamptz end)`;
+}
+
+/** The calendar day of a date's text: the day as written, or the UTC day of a time's instant. */
+function dayOfText(text: SQL): SQL {
+  return sql`(case when strpos(${text}, 'T') = 0 then left(${text}, 10) else to_char(${instantOf(text)} at time zone 'UTC', 'YYYY-MM-DD') end)`;
+}
+
 function dayOf(def: PropDef): SQL {
   if (def.type === "created_time") return sql`to_char(${R.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`;
   if (def.type === "edited_time") return sql`to_char(${R.editedAt} at time zone 'UTC', 'YYYY-MM-DD')`;
-  return sql`left(${jcell(def)} ->> 'start', 10)`;
+  return dayOfText(sql`(${jcell(def)} ->> 'start')`);
 }
 
 /** End day of the span (the date's `end`); without an end, null, and the `greatest` keeps the start. */
 function endDayOf(def: PropDef): SQL {
   if (def.type === "created_time" || def.type === "edited_time") return sql`null::text`;
-  return sql`nullif(left(${jcell(def)} ->> 'end', 10), '')`;
+  return sql`nullif(${dayOfText(sql`(${jcell(def)} ->> 'end')`)}, '')`;
 }
 
 function isEmptySql(def: PropDef): SQL {
@@ -269,7 +291,8 @@ function sortExprs(def: PropDef): SQL[] {
     case "person":
       return [sql`${cell} -> 0 ->> 'id'`];
     case "date":
-      return [sql`${cell} ->> 'start'`];
+      // by the instant, not the text: two offsets don't sort by how they were written
+      return [instantOf(sql`(${cell} ->> 'start')`), sql`${cell} ->> 'start'`];
     case "checkbox":
       return [sql`coalesce(${cell} = 'true'::jsonb, false)`];
     case "file":
@@ -458,21 +481,29 @@ async function rowsById(db: Db, tableId: string, ids: string[]): Promise<RowRow[
 // ---------- the footer's summary and the chart ----------
 
 const ARRAY_KINDS: ReadonlySet<string> = new Set(["multi", "person", "file"]);
-const ISO = `'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'`;
+const ISO_TIME = `'YYYY-MM-DD"T"HH24:MI:SS"Z"'`;
+const ISO_DAY = `'YYYY-MM-DD'`;
 const timeCol = (def: PropDef) => (def.type === "created_time" ? R.createdAt : R.editedAt);
 const isTime = (def: PropDef) => def.type === "created_time" || def.type === "edited_time";
+/** Who created and who edited: one actor object per row, not a list. */
+const isActor = (def: PropDef) => def.type === "creator" || def.type === "editor";
+/** A cell that holds a list (tags, people, files, a relation): its unique count counts the items. */
+const isList = (def: PropDef) => ARRAY_KINDS.has(filterKind(def)) && !isActor(def);
 
-/** Start and end of the cell's date, as ISO text (the same that is stored). */
-function dateEnds(def: PropDef): { start: SQL; end: SQL } {
-  if (isTime(def)) {
-    const at = sql`to_char(${timeCol(def)} at time zone 'UTC', ${sql.raw(ISO)})`;
-    return { start: at, end: at };
-  }
+/** An instant back as the date text the oracle writes (`isoOf`): the day alone, or the time in UTC. */
+const isoText = (at: SQL, time: SQL) =>
+  sql`(case when ${time} then to_char(${at} at time zone 'UTC', ${sql.raw(ISO_TIME)}) else to_char(${at} at time zone 'UTC', ${sql.raw(ISO_DAY)}) end)`;
+
+/** The start and end instants of the cell's date, and whether it has a time (the start's, as in the oracle). */
+function dateParts(def: PropDef): { start: SQL; end: SQL; time: SQL } {
+  if (isTime(def)) return { start: sql`${timeCol(def)}`, end: sql`${timeCol(def)}`, time: sql`true` };
   const c = jcell(def);
-  return { start: sql`(${c} ->> 'start')`, end: sql`coalesce(${c} ->> 'end', ${c} ->> 'start')` };
+  const start = sql`(${c} ->> 'start')`;
+  const end = sql`coalesce(${c} ->> 'end', ${c} ->> 'start')`;
+  return { start: instantOf(start), end: instantOf(end), time: sql`(strpos(${start}, 'T') > 0)` };
 }
 
-/** The SQL of one summary over the rows of the `where` (a column of the select). */
+/** The SQL of one summary over the rows of the `where` (a column of the select). Sums stay `numeric`. */
 function summarySql(def: PropDef, fn: SummaryFn): SQL {
   const c = jcell(def);
   const empty = isEmptySql(def);
@@ -488,8 +519,11 @@ function summarySql(def: PropDef, fn: SummaryFn): SQL {
       return sql`coalesce(sum(case when jsonb_typeof(${c}) = 'array' then jsonb_array_length(${c}) when ${empty} then 0 else 1 end), 0)::float8`;
     case "count_unique":
       if (isTime(def)) return sql`count(distinct ${timeCol(def)})::float8`;
-      // a list (tags, people, files, a relation) counts its items, in a statement of its own (uniqueItems)
-      if (ARRAY_KINDS.has(filterKind(def))) return sql`null::float8`;
+      // a person or an agent by its identity, not by the object's text
+      if (isActor(def))
+        return sql`count(distinct (${c} ->> 'type') || ':' || (${c} ->> 'id')) filter (where not ${empty})::float8`;
+      // a list counts its items, in a statement of its own (uniqueItems)
+      if (isList(def)) return sql`null::float8`;
       return sql`count(distinct ${c}) filter (where not ${empty})::float8`;
     case "count_empty":
       return sql`count(*) filter (where ${empty})::float8`;
@@ -499,25 +533,33 @@ function summarySql(def: PropDef, fn: SummaryFn): SQL {
       return ratio(sql`count(*) filter (where ${empty})`);
     case "percent_not_empty":
       return ratio(sql`count(*) filter (where not ${empty})`);
+    // exact in `numeric`: a float8 cast would fail on 1e308 + 1e308; the caller turns what doesn't fit a
+    // number into `not_finite`
     case "sum":
-      return sql`coalesce(sum(${n}), 0)::float8`;
+      return sql`coalesce(sum(${n}), 0)`;
     case "average":
-      return sql`avg(${n})::float8`;
+      return sql`avg(${n})`;
     case "median":
-      return sql`(percentile_cont(0.5) within group (order by ${n}))::float8`;
+      // the two middle values, half each (percentile_cont goes through float8 and overflows)
+      return sql`((percentile_disc(0.5) within group (order by ${n})) + (percentile_disc(0.5) within group (order by ${n} desc))) / 2`;
     case "min":
-      return sql`min(${n})::float8`;
+      return sql`min(${n})`;
     case "max":
-      return sql`max(${n})::float8`;
+      return sql`max(${n})`;
     case "range":
-      return sql`(max(${n}) - min(${n}))::float8`;
-    case "earliest":
-      return sql`min(${dateEnds(def).start})`;
-    case "latest":
-      return sql`max(${dateEnds(def).end})`;
+      return sql`(max(${n}) - min(${n}))`;
+    case "earliest": {
+      const d = dateParts(def);
+      return sql`(array_agg(${isoText(d.start, d.time)} order by ${d.start} asc) filter (where ${d.start} is not null))[1]`;
+    }
+    case "latest": {
+      const d = dateParts(def);
+      return sql`(array_agg(${isoText(d.end, d.time)} order by ${d.end} desc) filter (where ${d.end} is not null))[1]`;
+    }
     case "date_range": {
-      const d = dateEnds(def);
-      return sql`case when count(${d.start}) = 0 then null else jsonb_build_object('start', min(${d.start}), 'end', max(${d.end})) end`;
+      const d = dateParts(def);
+      const time = sql`coalesce(bool_or(${d.time}) filter (where ${d.start} is not null), false)`;
+      return sql`case when count(${d.start}) = 0 then null else jsonb_build_object('start', ${isoText(sql`min(${d.start})`, time)}, 'end', ${isoText(sql`max(${d.end})`, time)}) end`;
     }
     case "checked":
       return sql`count(*) filter (where ${on})::float8`;
@@ -528,6 +570,13 @@ function summarySql(def: PropDef, fn: SummaryFn): SQL {
     case "percent_unchecked":
       return ratio(sql`count(*) filter (where not ${on})`);
   }
+}
+
+/** A number the database answered (`numeric` comes as text): one that doesn't fit is `not_finite`. */
+function numberOut(v: number | string | null | undefined): number | null | typeof NOT_FINITE {
+  if (v === null || v === undefined) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : NOT_FINITE;
 }
 
 /** Summaries per request: one per column, and a view has at most the schema's columns. */
@@ -579,12 +628,10 @@ export async function summarizeRows(
   const out: Record<string, unknown> = {};
   for (const [i, p] of picked.entries()) {
     const v =
-      p.fn === "count_unique" && ARRAY_KINDS.has(filterKind(p.def))
-        ? await uniqueItems(db, p.def, where)
-        : (row[`s${i}`] ?? null);
+      p.fn === "count_unique" && isList(p.def) ? await uniqueItems(db, p.def, where) : (row[`s${i}`] ?? null);
     if (p.fn === "earliest" || p.fn === "latest") out[p.def.id] = typeof v === "string" ? { start: v } : null;
     else if (p.fn === "date_range") out[p.def.id] = typeof v === "object" ? v : null;
-    else out[p.def.id] = typeof v === "string" ? Number(v) : v;
+    else out[p.def.id] = typeof v === "object" ? null : numberOut(v);
   }
   return out;
 }
@@ -614,7 +661,7 @@ export async function aggregateRows(
   table: TableRow,
   q: Narrowing & { x?: string | null; y?: string | null; agg: ChartAgg },
   ctx: QueryCtx,
-): Promise<{ groups: { key: string | null; value: number | null }[]; total: number }> {
+): Promise<BaseAggregateResult> {
   const defs = table.defs;
   const where = rowsWhere(table, q, ctx);
   let value: SQL = sql`count(*)::float8`;
@@ -623,14 +670,14 @@ export async function aggregateRows(
     if (!y || filterKind(y) !== "number")
       throw bad("base.bad_chart", "Pick a number property to add up", { prop: q.y ?? null });
     const n = numOf(jcell(y));
+    // `numeric`, as in the summary: what doesn't fit a number comes back as `not_finite`, never a 500
     value = {
-      sum: sql`coalesce(sum(${n}), 0)::float8`,
-      avg: sql`avg(${n})::float8`,
-      min: sql`min(${n})::float8`,
-      max: sql`max(${n})::float8`,
+      sum: sql`coalesce(sum(${n}), 0)`,
+      avg: sql`avg(${n})`,
+      min: sql`min(${n})`,
+      max: sql`max(${n})`,
     }[q.agg];
   }
-  const num = (v: number | string | null | undefined) => (v === null || v === undefined ? null : Number(v));
   const [count] = await db.select({ n: sql<number>`count(*)::int` }).from(R).where(where);
   const total = Number(count?.n ?? 0);
   if (!q.x) {
@@ -638,7 +685,7 @@ export async function aggregateRows(
       .select({ v: sql<number | string | null>`${value}` })
       .from(R)
       .where(where);
-    return { groups: [{ key: null, value: num(one?.v) }], total };
+    return { groups: [{ key: null, value: numberOut(one?.v) }], total };
   }
   const def = defs.find((d) => d.id === q.x);
   if (!def || !groupable(def)) throw bad("base.bad_chart", "Can't group by this property", { prop: q.x });
@@ -654,7 +701,7 @@ export async function aggregateRows(
     .from(grouped)
     .orderBy(...groupOrder(def, sql`${grouped.key}`))
     .limit(MAX_CHART_GROUPS);
-  return { groups: rows.map((r) => ({ key: r.key, value: num(r.v) })), total };
+  return { groups: rows.map((r) => ({ key: r.key, value: numberOut(r.v) })), total };
 }
 
 /** Groups a chart returns. */

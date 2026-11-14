@@ -20,7 +20,7 @@ import { type Db, schema } from "@vanr/engine/db";
 import { planFormulas, propFType, resultTypeOf } from "@vanr/engine/formula";
 import { newId } from "@vanr/engine/ids";
 import type { PropDef, PropError, Props } from "@vanr/engine/props";
-import { and, asc, count, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, asc, count, eq, gte, inArray, type SQL, sql } from "drizzle-orm";
 import { type RowRow, relationTableIds, type TableRow, type Tx } from "./core";
 
 const { dbTables, dbRows, dbCalcDirty } = schema;
@@ -30,8 +30,8 @@ type Q = Db | Tx;
 /** Rows per statement: an `in` list, a notice and the dependents marked at once. */
 const CHUNK = 500;
 const MARK_CHUNK = 200;
-/** Notices taken per round of `propagate`, and rounds before it leaves the rest for later. */
-const NOTICES_PER_ROUND = 20;
+/** Sources taken per round of `propagate`, and rounds before it leaves the rest for later. */
+const SOURCES_PER_ROUND = 20;
 const MAX_ROUNDS = 1000;
 
 function chunks<T>(xs: readonly T[], n: number): T[][] {
@@ -209,88 +209,139 @@ async function claimSource(tx: Tx, tableId: string): Promise<boolean> {
 
 /**
  * The seam of the Postgres tests (bases-postgres.test.ts), in the mold of `baseLocks`: a test swaps
- * `claimSource` for a double that doesn't take the source first, to prove the test needs it.
+ * `claimSource` for a double that doesn't take the source first, and `lockRows` for one that waits for a held
+ * row, to prove the tests need them.
  */
-export const linkLocks = { claimSource };
+/** Takes the dependent rows that match, skipping the ones another write holds. */
+async function lockRows(tx: Tx, where: SQL | undefined): Promise<{ id: string }[]> {
+  return tx.select({ id: dbRows.id }).from(dbRows).where(where).for("update", { skipLocked: true });
+}
+
+export const linkLocks = { claimSource, lockRows };
 
 /**
- * Marks the dependents of the pending notices. Returns the sources marked (the caller schedules their
- * recalculation) and whether a notice was left because a source or a row was held (the caller tries again).
+ * Marks the dependents of the rows `rowIds` of the source `tableId`. Returns whether every dependent was
+ * marked (false: a dependent source or row was held, so the notice has to stay).
+ */
+async function markDependents(
+  tx: Tx,
+  workspaceId: string,
+  tableId: string,
+  rowIds: readonly string[],
+  marked: Set<string>,
+): Promise<boolean> {
+  let complete = true;
+  for (const { table: y, rels } of await dependentsOf(tx, workspaceId, tableId)) {
+    if (!(await linkLocks.claimSource(tx, y.id))) {
+      // held by another write: next round; gone meanwhile (its database deleted): nothing to mark
+      const [still] = await tx.select({ id: dbTables.id }).from(dbTables).where(eq(dbTables.id, y.id));
+      if (still) complete = false;
+      continue;
+    }
+    // the source read again under its lock: its calc_version is the one the marking uses
+    const [now] = await tx
+      .select({ calcVersion: dbTables.calcVersion })
+      .from(dbTables)
+      .where(eq(dbTables.id, y.id));
+    if (!now) continue;
+    let touched = false;
+    for (const rel of rels) {
+      for (const part of chunks(rowIds, MARK_CHUNK)) {
+        const fresh = and(
+          eq(dbRows.tableId, y.id),
+          gte(dbRows.calcVersion, now.calcVersion),
+          linksAny(rel.id, part),
+        );
+        const got = await linkLocks.lockRows(tx, fresh);
+        if (got.length) {
+          await tx
+            .update(dbRows)
+            .set({ calcVersion: now.calcVersion - 1 })
+            .where(
+              inArray(
+                dbRows.id,
+                got.map((g) => g.id),
+              ),
+            );
+          touched = true;
+        }
+        // what is left with the version up to date was held by another write
+        const [left] = await tx.select({ n: count() }).from(dbRows).where(fresh);
+        if (Number(left?.n ?? 0) > 0) complete = false;
+      }
+    }
+    if (touched) {
+      await tx
+        .update(dbTables)
+        .set({ calcDoneVersion: sql`least(${dbTables.calcDoneVersion}, ${dbTables.calcVersion} - 1)` })
+        .where(eq(dbTables.id, y.id));
+      marked.add(y.id);
+    }
+  }
+  return complete;
+}
+
+/**
+ * Marks the dependents of the pending notices. The work is chosen by source, not by arrival: each round takes
+ * the next sources with notices (oldest first) that this call hasn't seen, so a source whose dependents are
+ * held is passed over and the others are handled in the same call; no free source waits for a held one. The
+ * notices of one source are merged into one (each row once), so a source held for a long time keeps one
+ * notice, as big as its changed rows, however many writes it gets. Returns the sources marked (the caller
+ * schedules their recalculation) and whether a notice was left because something was held (the caller tries
+ * again).
  */
 export async function propagate(db: Db): Promise<{ marked: Set<string>; pending: boolean }> {
   const marked = new Set<string>();
+  const seen = new Set<string>();
+  let pending = false;
   for (let round = 0; round < MAX_ROUNDS; round++) {
-    const r = await db.transaction(async (tx) => {
-      const notices = await tx
-        .select()
-        .from(dbCalcDirty)
-        .orderBy(asc(dbCalcDirty.createdAt), asc(dbCalcDirty.id))
-        .limit(NOTICES_PER_ROUND)
-        .for("update", { skipLocked: true });
-      if (!notices.length) return null;
-      const done: string[] = [];
-      let incomplete = false;
-      for (const n of notices) {
-        let complete = true;
-        for (const { table: y, rels } of await dependentsOf(tx, n.workspaceId, n.tableId)) {
-          if (!(await linkLocks.claimSource(tx, y.id))) {
-            // held by another write: next round; gone meanwhile (its database deleted): nothing to mark
-            const [still] = await tx.select({ id: dbTables.id }).from(dbTables).where(eq(dbTables.id, y.id));
-            if (still) complete = false;
-            continue;
-          }
-          // the source read again under its lock: its calc_version is the one the marking uses
-          const [now] = await tx
-            .select({ calcVersion: dbTables.calcVersion })
-            .from(dbTables)
-            .where(eq(dbTables.id, y.id));
-          if (!now) continue;
-          let touched = false;
-          for (const rel of rels) {
-            for (const part of chunks(n.rowIds, MARK_CHUNK)) {
-              const fresh = and(
-                eq(dbRows.tableId, y.id),
-                gte(dbRows.calcVersion, now.calcVersion),
-                linksAny(rel.id, part),
-              );
-              const got = await tx
-                .select({ id: dbRows.id })
-                .from(dbRows)
-                .where(fresh)
-                .for("update", { skipLocked: true });
-              if (got.length) {
-                await tx
-                  .update(dbRows)
-                  .set({ calcVersion: now.calcVersion - 1 })
-                  .where(
-                    inArray(
-                      dbRows.id,
-                      got.map((g) => g.id),
-                    ),
-                  );
-                touched = true;
-              }
-              // what is left with the version up to date was held by another write
-              const [left] = await tx.select({ n: count() }).from(dbRows).where(fresh);
-              if (Number(left?.n ?? 0) > 0) complete = false;
-            }
-          }
-          if (touched) {
-            await tx
-              .update(dbTables)
-              .set({ calcDoneVersion: sql`least(${dbTables.calcDoneVersion}, ${dbTables.calcVersion} - 1)` })
-              .where(eq(dbTables.id, y.id));
-            marked.add(y.id);
-          }
-        }
-        if (complete) done.push(n.id);
-        else incomplete = true;
-      }
-      if (done.length) await tx.delete(dbCalcDirty).where(inArray(dbCalcDirty.id, done));
-      return { incomplete };
-    });
-    if (!r) return { marked, pending: false };
-    if (r.incomplete) return { marked, pending: true };
+    const sources = await db
+      .select({ tableId: dbCalcDirty.tableId, workspaceId: dbCalcDirty.workspaceId })
+      .from(dbCalcDirty)
+      .where(
+        seen.size
+          ? sql`${dbCalcDirty.tableId} not in (${sql.join(
+              [...seen].map((id) => sql`${id}`),
+              sql`, `,
+            )})`
+          : sql`true`,
+      )
+      .groupBy(dbCalcDirty.tableId, dbCalcDirty.workspaceId)
+      .orderBy(sql`min(${dbCalcDirty.createdAt})`, dbCalcDirty.tableId)
+      .limit(SOURCES_PER_ROUND);
+    if (!sources.length) return { marked, pending };
+    for (const source of sources) {
+      seen.add(source.tableId);
+      const left = await db.transaction(async (tx) => {
+        const notices = await tx
+          .select()
+          .from(dbCalcDirty)
+          .where(eq(dbCalcDirty.tableId, source.tableId))
+          .orderBy(asc(dbCalcDirty.createdAt), asc(dbCalcDirty.id))
+          .for("update", { skipLocked: true });
+        if (!notices.length) return false;
+        const rowIds = [...new Set(notices.flatMap((n) => n.rowIds))];
+        const complete = await markDependents(tx, source.workspaceId, source.tableId, rowIds, marked);
+        await tx.delete(dbCalcDirty).where(
+          inArray(
+            dbCalcDirty.id,
+            notices.map((n) => n.id),
+          ),
+        );
+        // what is left goes back as one notice, as old as the oldest one (its turn doesn't move back)
+        if (!complete)
+          for (const part of chunks(rowIds, CHUNK))
+            await tx.insert(dbCalcDirty).values({
+              id: newId("dcd"),
+              workspaceId: source.workspaceId,
+              tableId: source.tableId,
+              rowIds: part,
+              createdAt: notices[0]?.createdAt ?? new Date(),
+            });
+        return !complete;
+      });
+      if (left) pending = true;
+    }
   }
   return { marked, pending: true };
 }

@@ -3,13 +3,16 @@
 // the calendar's window, and the grid's bulk write (all or nothing, the caps before any write). The locks
 // only Postgres proves are in bases-postgres.test.ts.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { BasePropDef } from "@vanr/contract";
-import { rollupValue } from "@vanr/engine/bases/rollup";
+import { rollupJson } from "@vanr/engine/bases/rollup";
 import { summaryFns } from "@vanr/engine/bases/summary";
 import { type Filter, rowMatches } from "@vanr/engine/bases/view";
-import { schema } from "@vanr/engine/db";
+import { openDb, schema } from "@vanr/engine/db";
 import { propValue } from "@vanr/engine/formula";
-import { fromJson, toJson } from "@vanr/engine/formula/values";
+import { fromJson } from "@vanr/engine/formula/values";
 import { eq, sql } from "drizzle-orm";
 import { MAX_ROWS } from "../src/bases/core";
 import { linkLocks } from "../src/bases/links";
@@ -491,12 +494,18 @@ describe("bases: the footer's summary and the chart", () => {
       const r = rng(7);
       const pick = <T>(xs: readonly T[]): T => xs[Math.floor(r() * xs.length)] as T;
       // edge values: big and tiny numbers, the first and the last day the calendar takes, an end before the start
-      const edgeNumbers = [0, -0, 0.1, 0.2, 1e15, -9007199254740991, 1e-12, 123456.789];
+      // 1e308 and -1e308: their sum is exact (as `numeric` makes it), and two of the same overflow to `not_finite`
+      const edgeNumbers = [0, -0, 0.1, 0.2, 1e15, -9007199254740991, 1e-12, 123456.789, 1e308, -1e308];
       const edgeDates = [
         { start: "0001-01-01" },
         { start: "9999-12-31" },
         { start: "2026-02-28", end: "2026-02-01" },
         { start: "2024-02-29" },
+        // times with offsets: compared as instants (00:30+02:00 is before 23:30Z the day before)
+        { start: "2026-11-01T00:30:00+02:00" },
+        { start: "2026-10-31T23:30:00Z" },
+        { start: "2026-10-31T21:00:00-03:00", end: "2026-11-01T01:00:00+05:00" },
+        { start: "2026-10-31T12:00:00.5+00:00" },
       ];
       for (let i = 0; i < 80; i++) {
         const props: Record<string, unknown> = { [b.titleId]: r() < 0.15 ? "" : pick(["a", "b", "A", "c"]) };
@@ -526,6 +535,14 @@ describe("bases: the footer's summary and the chart", () => {
         .update(schema.dbRows)
         .set({ props: sql`jsonb_set(${schema.dbRows.props}, '{n}', '"abc"'::jsonb)` })
         .where(eq(schema.dbRows.id, String(stale?.id)));
+      // and NaN and Infinity as text (a number can't hold them): ignored by the sums on both sides
+      for (const text of ["NaN", "Infinity"])
+        await ana.api.createRow(ws, b.id, b.tableId, { props: { [b.titleId]: text } }).then((row) =>
+          server.deps.db
+            .update(schema.dbRows)
+            .set({ props: sql`jsonb_set(${schema.dbRows.props}, '{n}', ${JSON.stringify(text)}::jsonb)` })
+            .where(eq(schema.dbRows.id, row.id)),
+        );
       const table = (await ana.api.get(ws, b.id)).tables[0];
       if (!table) throw new Error("no table");
       const filters: (Filter | null)[] = [
@@ -538,6 +555,9 @@ describe("bases: the footer's summary and the chart", () => {
           ],
         },
         { prop: "d", op: "overlaps", value: ["2026-02-10", "2026-03-31"] },
+        // the day of a time is the UTC day of its instant, in SQL and in the oracle
+        { prop: "d", op: "on_or_before", value: "2026-10-31" },
+        { prop: "d", op: "overlaps", value: ["2026-11-01", "2026-11-01"] },
       ];
       let compared = 0;
       for (const filter of filters) {
@@ -570,7 +590,7 @@ describe("bases: the footer's summary and the chart", () => {
                     editedBy: row.editedBy,
                   }),
             );
-            const want = toJson(rollupValue(fn, values)) ?? null;
+            const want = rollupJson(fn, values);
             const v = one.values[def.id];
             const label = `${JSON.stringify(filter)} ${def.name} ${fn}`;
             if (typeof want === "number" && typeof v === "number")
@@ -1092,5 +1112,385 @@ describe("bases: a propagation that keeps failing", () => {
       }
     },
     SERVER_TEST_MS,
+  );
+});
+
+describe("bases: the review's round (each defect reproduced becomes a test)", () => {
+  /** Each summary of `def` in SQL against `rollupJson` over the values JS reads from the same rows. */
+  async function expectOracle(
+    api: BasesApi,
+    ws: string,
+    baseId: string,
+    tableId: string,
+    read: (def: BasePropDef, row: Awaited<ReturnType<BasesApi["query"]>>["rows"][number]) => unknown,
+    only: (def: BasePropDef) => boolean,
+  ) {
+    const table = (await api.get(ws, baseId)).tables[0];
+    if (!table) throw new Error("no table");
+    const all = await api.query(ws, baseId, tableId, { limit: 500 });
+    let compared = 0;
+    for (const def of table.defs.filter(only))
+      for (const fn of summaryFns(def)) {
+        const got = (await api.summaries(ws, baseId, tableId, { summaries: { [def.id]: fn } })).values[
+          def.id
+        ];
+        const want = rollupJson(
+          fn,
+          all.rows.map((row) => read(def, row) as never),
+        );
+        expect({ prop: def.name, fn, got }).toEqual({ prop: def.name, fn, got: want });
+        compared++;
+      }
+    return compared;
+  }
+
+  test(
+    "a held source doesn't hold the queue: 1,000 notices of it and 1 of a free source, the free one is recalculated in the first pass and the held one keeps a single notice",
+    async () => {
+      const srv = await startTestServer();
+      const original = linkLocks.claimSource;
+      try {
+        const ana = withApi(await signedIn(srv, "Ana", email("ana")));
+        const { workspaceId: ws } = await seedWorkspace(srv, ana, "Queue");
+        const held = await projectsAndTasks(ana.api, ws);
+        const free = await projectsAndTasks(ana.api, ws);
+        const t1 = await held.task("Wash", { hours: 1 });
+        const t2 = await free.task("Dry", { hours: 1 });
+        await ana.api.createRow(ws, held.projects.id, held.projects.tableId, {
+          props: { [held.projects.titleId]: "Held", rel: [t1.id] },
+        });
+        const p = await ana.api.createRow(ws, free.projects.id, free.projects.tableId, {
+          props: { [free.projects.titleId]: "Free", rel: [t2.id] },
+        });
+        // a thousand notices of the held source, older than anything else
+        const at = new Date(Date.parse("2026-01-01T00:00:00Z"));
+        await srv.deps.db.insert(schema.dbCalcDirty).values(
+          Array.from({ length: 1000 }, (_, i) => ({
+            id: `dcd_held${i}`,
+            workspaceId: ws,
+            tableId: held.tasks.tableId,
+            rowIds: [t1.id],
+            createdAt: new Date(at.getTime() + i),
+          })),
+        );
+        let freeClaims = 0;
+        linkLocks.claimSource = async (tx, id) => {
+          if (id === held.projects.tableId) return false;
+          if (id === free.projects.tableId) freeClaims++;
+          return original(tx, id);
+        };
+        // the free source's write: its project is recalculated inside the same request
+        await ana.api.updateRow(ws, free.tasks.id, t2.id, { props: { hours: 9 } });
+        expect(freeClaims).toBe(1);
+        expect((await ana.api.getRow(ws, free.projects.id, p.id)).computed).toMatchObject({ sum: 9 });
+        // the held source's thousand notices became one, with its rows once
+        const left = await srv.deps.db.select().from(schema.dbCalcDirty);
+        expect(left.map((n) => [n.tableId, n.rowIds])).toEqual([[held.tasks.tableId, [t1.id]]]);
+        linkLocks.claimSource = original;
+        await settle(srv);
+        expect(await srv.deps.db.select().from(schema.dbCalcDirty)).toEqual([]);
+      } finally {
+        linkLocks.claimSource = original;
+        await srv.stop();
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a sum that doesn't fit a number is not_finite in the summary, the chart and the rollup cell, never a 500",
+    async () => {
+      const { workspaceId: ws, ana } = await team();
+      const { tasks, projects, task } = await projectsAndTasks(ana.api, ws);
+      const a = await task("A", { hours: 1e308 });
+      const b = await task("B", { hours: 1e308 });
+      const c = await task("C", { hours: -1e308 });
+      expect(
+        (await ana.api.summaries(ws, tasks.id, tasks.tableId, { summaries: { hours: "sum" } })).values,
+      ).toEqual({
+        hours: 1e308,
+      });
+      const p = await ana.api.createRow(ws, projects.id, projects.tableId, {
+        props: { [projects.titleId]: "Big", rel: [a.id, b.id] },
+      });
+      expect(p.computed.sum).toEqual({ err: "not_finite" });
+      // exact, whatever the order: 1e308 + 5 − 1e308 is 5
+      const d = await task("D", { hours: 5 });
+      const q = await ana.api.createRow(ws, projects.id, projects.tableId, {
+        props: { [projects.titleId]: "Exact", rel: [a.id, d.id, c.id] },
+      });
+      expect(q.computed.sum).toBe(5);
+      // from 1e308 down to -1e308: the range doesn't fit
+      expect(
+        (await ana.api.summaries(ws, tasks.id, tasks.tableId, { summaries: { hours: "range" } })).values,
+      ).toEqual({ hours: { err: "not_finite" } });
+      await ana.api.updateRow(ws, tasks.id, c.id, { props: { hours: 1e308 } });
+      expect(
+        (await ana.api.summaries(ws, tasks.id, tasks.tableId, { summaries: { hours: "sum" } })).values,
+      ).toEqual({ hours: { err: "not_finite" } });
+      // the average, the median, the extremes fit: they come back as numbers
+      expect(
+        (await ana.api.summaries(ws, tasks.id, tasks.tableId, { summaries: { hours: "max" } })).values.hours,
+      ).toBe(1e308);
+      expect(
+        (await ana.api.aggregate(ws, tasks.id, tasks.tableId, { y: "hours", agg: "sum" })).groups,
+      ).toEqual([{ key: null, value: { err: "not_finite" } }]);
+      expect(
+        (await ana.api.aggregate(ws, tasks.id, tasks.tableId, { y: "hours", agg: "avg" })).groups,
+      ).toEqual([{ key: null, value: 7.5e307 }]); // (3e308 + 5) / 4, without overflowing on the way
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "dates with a time compare as instants across offsets: the earliest, the order and the day of a filter",
+    async () => {
+      const { workspaceId: ws, ana } = await team();
+      const b = await base(ana.api, ws, "Times", () => [
+        { id: "d", name: "When", type: "date", withTime: true },
+      ]);
+      const texts = ["2026-11-01T00:30:00+02:00", "2026-10-31T23:30:00Z", "2026-10-31T23:00:00-01:00"];
+      for (const [i, start] of texts.entries())
+        await ana.api.createRow(ws, b.id, b.tableId, { props: { [b.titleId]: `r${i}`, d: { start } } });
+      const earliest = await ana.api.summaries(ws, b.id, b.tableId, { summaries: { d: "earliest" } });
+      expect(earliest.values).toEqual({ d: { start: "2026-10-31T22:30:00Z" } });
+      expect((await ana.api.summaries(ws, b.id, b.tableId, { summaries: { d: "latest" } })).values).toEqual({
+        d: { start: "2026-11-01T00:00:00Z" },
+      });
+      const sorted = await ana.api.query(ws, b.id, b.tableId, { sorts: [{ prop: "d", dir: "asc" }] });
+      expect(sorted.rows.map((r) => r.props[b.titleId])).toEqual(["r0", "r1", "r2"]);
+      // the day of a time is the UTC day of its instant: October 31st for the first two, November 1st for the last
+      const oct = await ana.api.query(ws, b.id, b.tableId, {
+        filter: { prop: "d", op: "eq", value: "2026-10-31" },
+      });
+      expect(oct.rows.map((r) => r.props[b.titleId]).sort()).toEqual(["r0", "r1"]);
+      const window = await ana.api.query(ws, b.id, b.tableId, {
+        within: { prop: "d", op: "overlaps", value: ["2026-11-01", "2026-11-30"] },
+      });
+      expect(window.rows.map((r) => r.props[b.titleId])).toEqual(["r2"]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "the summaries of who created, who edited, when, a person and a relation equal the oracle; distinct people count by identity",
+    async () => {
+      const { workspaceId: ws, ana, beto } = await team();
+      const { tasks, task } = await projectsAndTasks(ana.api, ws);
+      const t1 = await task("Wash", {});
+      const t2 = await task("Dry", {});
+      const b = await base(ana.api, ws, "People", () => [
+        { id: "cb", name: "Created by", type: "creator" },
+        { id: "eb", name: "Edited by", type: "editor" },
+        { id: "ct", name: "Created at", type: "created_time" },
+        { id: "et", name: "Edited at", type: "edited_time" },
+        { id: "who", name: "Owner", type: "person" },
+        { id: "rel", name: "Tasks", type: "relation", relation: { tableId: tasks.tableId } },
+      ]);
+      const anaRef = { type: "person" as const, id: ana.user.id };
+      const betoRef = { type: "person" as const, id: beto.user.id };
+      const r1 = await ana.api.createRow(ws, b.id, b.tableId, {
+        props: { who: [anaRef], rel: [t1.id, t2.id] },
+      });
+      await ana.api.createRow(ws, b.id, b.tableId, { props: { who: [anaRef, betoRef], rel: [t1.id] } });
+      await beto.api.createRow(ws, b.id, b.tableId, { props: {} });
+      await beto.api.updateRow(ws, b.id, r1.id, { props: { who: [betoRef] } });
+      const unique = await ana.api.summaries(ws, b.id, b.tableId, {
+        summaries: { cb: "count_unique", eb: "count_unique", who: "count_unique", rel: "count_unique" },
+      });
+      expect(unique.values).toEqual({ cb: 2, eb: 2, who: 2, rel: 2 });
+      const compared = await expectOracle(
+        ana.api,
+        ws,
+        b.id,
+        b.tableId,
+        (def, row) =>
+          def.type === "relation"
+            ? (row.props[def.id] ?? [])
+            : propValue(def, {
+                id: row.id,
+                props: row.props as never,
+                createdAt: row.createdAt,
+                createdBy: row.createdBy,
+                editedAt: row.editedAt,
+                editedBy: row.editedBy,
+              }),
+        (def) => def.id !== b.titleId,
+      );
+      expect(compared).toBeGreaterThan(30);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a formula over a new rollup gets the rollup's type: filter and order by it for a number, a date and a count; changing the rollup retypes it",
+    async () => {
+      const { workspaceId: ws, ana } = await team();
+      const { projects, task } = await projectsAndTasks(ana.api, ws);
+      const pv = (await ana.api.get(ws, projects.id)).tables[0];
+      if (!pv) throw new Error("no table");
+      const saved = await ana.api.saveSchema(ws, projects.id, projects.tableId, {
+        parentVersion: pv.schemaVersion,
+        defs: [
+          ...pv.defs,
+          {
+            id: "n",
+            name: "N",
+            type: "rollup",
+            rollup: { relationPropId: "rel", targetPropId: "hours", fn: "count" },
+          },
+          { id: "fs", name: "FS", type: "formula", formula: { expression: 'prop("Hours") + 0' } },
+          { id: "fd", name: "FD", type: "formula", formula: { expression: 'prop("Last due")' } },
+          { id: "fc", name: "FC", type: "formula", formula: { expression: 'prop("N") * 1' } },
+        ],
+      });
+      const types = Object.fromEntries(
+        saved.defs.map((d) => [d.id, d.formula?.resultType ?? d.rollup?.resultType]),
+      );
+      expect([types.fs, types.fd, types.fc]).toEqual(["number", "date", "number"]);
+      const a = await task("A", { hours: 1, due: { start: "2026-03-01" } });
+      const b = await task("B", { hours: 4, due: { start: "2026-05-01" } });
+      const small = await ana.api.createRow(ws, projects.id, projects.tableId, {
+        props: { [projects.titleId]: "Small", rel: [a.id] },
+      });
+      const big = await ana.api.createRow(ws, projects.id, projects.tableId, {
+        props: { [projects.titleId]: "Big", rel: [a.id, b.id] },
+      });
+      const ids = async (q: Parameters<BasesApi["query"]>[3]) =>
+        (await ana.api.query(ws, projects.id, projects.tableId, q)).rows.map((r) => r.id);
+      expect(await ids({ filter: { prop: "fs", op: "gt", value: 1 } })).toEqual([big.id]);
+      expect(await ids({ filter: { prop: "fd", op: "after", value: "2026-04-01" } })).toEqual([big.id]);
+      expect(await ids({ filter: { prop: "fc", op: "gte", value: 2 } })).toEqual([big.id]);
+      expect(await ids({ sorts: [{ prop: "fs", dir: "desc" }] })).toEqual([big.id, small.id]);
+      expect(await ids({ sorts: [{ prop: "fd", dir: "asc" }] })).toEqual([small.id, big.id]);
+      // the date rollup becomes a count: the formula that reads it is a number now
+      const now = (await ana.api.get(ws, projects.id)).tables[0];
+      if (!now) throw new Error("no table");
+      const retyped = await ana.api.saveSchema(ws, projects.id, projects.tableId, {
+        parentVersion: now.schemaVersion,
+        defs: now.defs.map((d) =>
+          d.id === "last" && d.rollup ? { ...d, rollup: { ...d.rollup, fn: "count" as const } } : d,
+        ),
+      });
+      expect(retyped.defs.find((d) => d.id === "fd")?.formula?.resultType).toBe("number");
+      expect(await ids({ filter: { prop: "fd", op: "eq", value: 2 } })).toEqual([big.id]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "two starts resume the same notice at once: the dependents recalculate once and the notice isn't lost",
+    async () => {
+      const { workspaceId: ws, ana } = await team();
+      const { tasks, projects, task } = await projectsAndTasks(ana.api, ws);
+      const t1 = await task("Wash", { hours: 2 });
+      const ps = await Promise.all(
+        [1, 2, 3].map((i) =>
+          ana.api.createRow(ws, projects.id, projects.tableId, {
+            props: { [projects.titleId]: `P${i}`, rel: [t1.id] },
+          }),
+        ),
+      );
+      await server.deps.db.transaction(async (tx) => {
+        await tx
+          .update(schema.dbRows)
+          .set({ props: sql`jsonb_set(${schema.dbRows.props}, '{hours}', '11'::jsonb)` })
+          .where(eq(schema.dbRows.id, t1.id));
+        await tx
+          .insert(schema.dbCalcDirty)
+          .values({ id: "dcd_twice", workspaceId: ws, tableId: tasks.tableId, rowIds: [t1.id] });
+      });
+      let processed = 0;
+      const off = server.deps.hub.onPublish((_, event) => {
+        if (event.type === "base.recalc" && event.tableId === projects.tableId && event.done === true)
+          processed += Number(event.processed);
+      });
+      try {
+        await Promise.all([resumeRecalcs(server.deps), resumeRecalcs(server.deps)]);
+        await settle(server);
+      } finally {
+        off();
+      }
+      expect(processed).toBe(ps.length);
+      for (const p of ps)
+        expect((await ana.api.getRow(ws, projects.id, p.id)).computed).toMatchObject({ sum: 11 });
+      expect(await notices()).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "stopping the server while more than 2,000 dependent rows recalculate: nothing writes after the stop, and the next start finishes",
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), "vanr-bases-links-"));
+      const env = { DATA_DIR: dir };
+      try {
+        const first = await startTestServer({ env });
+        const ana = withApi(await signedIn(first, "Ana", email("ana")));
+        const { workspaceId: ws } = await seedWorkspace(first, ana, "Disk");
+        const { tasks, projects, task } = await projectsAndTasks(ana.api, ws);
+        const t1 = await task("Wash", { hours: 2 });
+        const rows = 2100; // past the 2,000 recalculated inside the request: the background takes them
+        const pv = (await ana.api.get(ws, projects.id)).tables[0];
+        if (!pv) throw new Error("no table");
+        await first.deps.db.execute(sql`
+          insert into db_rows (id, workspace_id, table_id, position, props, computed, calc_version, created_by, edited_by)
+          select 'dbr_dep' || lpad(g::text, 5, '0'), ${ws}, ${projects.tableId}, 'a' || lpad(g::text, 6, '0'),
+                 jsonb_build_object('rel', jsonb_build_array(${t1.id}::text)), '{"sum":2}'::jsonb, ${pv.recalc.version},
+                 '{"type":"person","id":"x"}'::jsonb, '{"type":"person","id":"x"}'::jsonb
+            from generate_series(1, ${rows}) g`);
+        // the stop starts as soon as the first batch of the dependents is committed
+        let stopping: Promise<void> | null = null;
+        first.deps.hub.onPublish((_, event) => {
+          if (event.type === "base.recalc" && event.tableId === projects.tableId && event.done === false)
+            stopping ??= first.stop();
+        });
+        await ana.api.updateRow(ws, tasks.id, t1.id, { props: { hours: 7 } });
+        await settle(first);
+        expect(stopping).not.toBeNull();
+        await stopping;
+
+        // what the first server left on disk: one batch done, the rest stale, the source still pending
+        const { dbRows, dbTables } = schema;
+        const disk = await openDb({ kind: "pglite", dataDir: join(dir, "db") });
+        const [t] = await disk.db.select().from(dbTables).where(eq(dbTables.id, projects.tableId));
+        if (!t) throw new Error("no table");
+        const all = await disk.db.select().from(dbRows).where(eq(dbRows.tableId, projects.tableId));
+        const done = all.filter((r) => r.calcVersion === t.calcVersion);
+        expect(t.calcDoneVersion).toBeLessThan(t.calcVersion);
+        expect(done.length).toBe(500);
+        expect(done.every((r) => r.computed.sum === 7)).toBe(true);
+        expect(all.filter((r) => r.calcVersion < t.calcVersion).every((r) => r.computed.sum === 2)).toBe(
+          true,
+        );
+        await disk.db.execute(
+          sql`update db_rows set computed = '{"sum":"kept"}'::jsonb where table_id = ${projects.tableId} and calc_version = ${t.calcVersion}`,
+        );
+        await disk.close();
+
+        const second = await startTestServer({ env });
+        try {
+          await settle(second);
+          const after = await second.deps.db
+            .select()
+            .from(dbRows)
+            .where(eq(dbRows.tableId, projects.tableId));
+          const doneIds = new Set(done.map((r) => r.id));
+          expect(after.filter((r) => r.id.startsWith("dbr_dep"))).toHaveLength(rows);
+          // nothing repeated: the batch the first server committed keeps its mark; nothing lost: the rest is 7
+          expect(after.filter((r) => doneIds.has(r.id)).every((r) => r.computed.sum === "kept")).toBe(true);
+          expect(
+            after
+              .filter((r) => r.id.startsWith("dbr_dep") && !doneIds.has(r.id))
+              .every((r) => r.computed.sum === 7),
+          ).toBe(true);
+        } finally {
+          await second.stop();
+        }
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+    SERVER_TEST_MS * 4,
   );
 });
