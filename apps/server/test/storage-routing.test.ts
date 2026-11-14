@@ -182,3 +182,153 @@ describe("routed storage", () => {
     });
   });
 });
+
+describe("changing the destination never makes a file unreadable", () => {
+  test("a new prefix, bucket or endpoint is rejected while the saved bucket holds files; new keys are accepted", async () => {
+    const { workspaceId, ana } = await team();
+    await saveStorage(server.deps, workspaceId, { kind: "s3", s3: input("first") });
+    const remote = await upload(ana, workspaceId, "remote");
+    await saveStorage(server.deps, workspaceId, { kind: "builtin" });
+    for (const change of [
+      { prefix: "second" },
+      { bucket: "elsewhere" },
+      { endpoint: "http://127.0.0.2:9" },
+    ]) {
+      await expect(
+        saveStorage(server.deps, workspaceId, { kind: "s3", s3: { ...input("first"), ...change } }),
+      ).rejects.toMatchObject({
+        status: 409,
+        code: "storage.destination_in_use",
+        params: { files: 1, bucket: "workshop", prefix: "first" },
+      });
+    }
+    // The saved destination is untouched and the file still downloads.
+    expect((await storageRow(server.deps.db, workspaceId))?.s3).toMatchObject({ prefix: "first" });
+    expect(await read(ana, workspaceId, remote.id)).toBe("remote");
+    // The same destination with other keys (and the prefix written another way) is a credential change.
+    const rotated = await saveStorage(server.deps, workspaceId, {
+      kind: "s3",
+      s3: { ...input("/first/"), accessKeyId: "AKIAROTATED", secretAccessKey: "rotated-secret" },
+    });
+    expect(toStorageConfig(rotated).s3).toMatchObject({ prefix: "first", accessKeyIdPreview: "…ATED" });
+    expect(await read(ana, workspaceId, remote.id)).toBe("remote");
+  });
+
+  test("a saved bucket without files of the workspace can be changed; one that can't be listed can't", async () => {
+    const empty = await team();
+    await saveStorage(server.deps, empty.workspaceId, { kind: "s3", s3: input("unused-a") });
+    await saveStorage(server.deps, empty.workspaceId, { kind: "builtin" });
+    const moved = await saveStorage(server.deps, empty.workspaceId, { kind: "s3", s3: input("unused-b") });
+    expect(moved.s3).toMatchObject({ prefix: "unused-b" });
+
+    const { workspaceId } = await team();
+    await saveStorage(server.deps, workspaceId, { kind: "s3", s3: input("listed") });
+    s3.failOn.add("LIST");
+    try {
+      await expect(
+        saveStorage(server.deps, workspaceId, { kind: "s3", s3: input("other") }),
+      ).rejects.toMatchObject({ status: 503, code: "storage.unavailable" });
+    } finally {
+      s3.failOn.clear();
+    }
+    expect((await storageRow(server.deps.db, workspaceId))?.s3).toMatchObject({ prefix: "listed" });
+  });
+});
+
+describe("a bucket that fails", () => {
+  test("reads: the server's copy is served; a file only in the bucket answers storage.unavailable, not 500 nor 404", async () => {
+    const { workspaceId, ana } = await team();
+    const local = await upload(ana, workspaceId, "local");
+    await saveStorage(server.deps, workspaceId, { kind: "s3", s3: input("down") });
+    const remote = await upload(ana, workspaceId, "remote");
+    s3.failOn.add("GET");
+    try {
+      const fromDisk = await ana.browser.fetch(`${W(workspaceId)}/files/${local.id}/blob`);
+      expect(fromDisk.status).toBe(200);
+      expect(await fromDisk.text()).toBe("local");
+      const fromBucket = await ana.browser.fetch(`${W(workspaceId)}/files/${remote.id}/blob`);
+      expect(fromBucket.status).toBe(503);
+      expect((await body(fromBucket)).error.code).toBe("storage.unavailable");
+      // What the database holds doesn't need the bucket.
+      expect((await ana.browser.fetch(`${W(workspaceId)}/files/${remote.id}`)).status).toBe(200);
+      expect(
+        (await body(await ana.browser.fetch(`${W(workspaceId)}/files/${remote.id}/text`))).pages,
+      ).toEqual([{ page: 1, markdown: "remote" }]);
+      expect((await ana.browser.fetch(`${W(workspaceId)}/files/${remote.id}/versions`)).status).toBe(200);
+    } finally {
+      s3.failOn.clear();
+    }
+    expect(await read(ana, workspaceId, remote.id)).toBe("remote");
+    // Back on the server's storage with the saved bucket down: the disk still answers first.
+    await saveStorage(server.deps, workspaceId, { kind: "builtin" });
+    s3.failOn.add("GET");
+    try {
+      expect(await read(ana, workspaceId, local.id)).toBe("local");
+      const res = await ana.browser.fetch(`${W(workspaceId)}/files/${remote.id}/blob`);
+      expect((await body(res)).error.code).toBe("storage.unavailable");
+    } finally {
+      s3.failOn.clear();
+    }
+  });
+
+  test("writes: a clear error and no file row without its bytes, in the form and in the chunked upload", async () => {
+    const { workspaceId, ana } = await team();
+    await saveStorage(server.deps, workspaceId, { kind: "s3", s3: input("nowrite") });
+    const countFiles = async () =>
+      (await server.deps.db.select().from(schema.files).where(eq(schema.files.workspaceId, workspaceId)))
+        .length;
+    s3.failOn.add("PUT");
+    try {
+      const form = new FormData();
+      form.set("file", new File(["x"], "x.txt"));
+      const res = await ana.browser.fetch(`${W(workspaceId)}/files/files`, { method: "POST", body: form });
+      expect(res.status).toBe(503);
+      expect((await body(res)).error.code).toBe("storage.unavailable");
+      expect(await countFiles()).toBe(0);
+      const s = await body(
+        await ana.browser.json(`${W(workspaceId)}/files/uploads`, "POST", { fileName: "p.bin", size: 2 }),
+      );
+      await ana.browser.fetch(`${W(workspaceId)}/files/uploads/${s.id}?offset=0`, {
+        method: "PUT",
+        headers: { "content-type": "application/octet-stream" },
+        body: "ok",
+      });
+      const done = await ana.browser.json(`${W(workspaceId)}/files/uploads/${s.id}/complete`, "POST");
+      expect(done.status).toBe(503);
+      expect((await body(done)).error.code).toBe("storage.unavailable");
+      expect(await countFiles()).toBe(0);
+      // The session went back to open: completing works once the bucket is back.
+      s3.failOn.clear();
+      const again = await ana.browser.json(`${W(workspaceId)}/files/uploads/${s.id}/complete`, "POST");
+      expect(again.status).toBe(200);
+      expect(await read(ana, workspaceId, (await body(again)).id)).toBe("ok");
+      expect(await countFiles()).toBe(1);
+    } finally {
+      s3.failOn.clear();
+    }
+  });
+
+  test("extraction: the bucket down is not the file's fault; the claim goes back to the queue and ends ready", async () => {
+    const { extractPending } = await import("../src/drive-extract");
+    const { workspaceId, ana } = await team();
+    await saveStorage(server.deps, workspaceId, { kind: "s3", s3: input("extract") });
+    const big = await upload(ana, workspaceId, "x".repeat(2 * 1024 * 1024 + 1));
+    const where = eq(schema.fileVersions.fileId, big.id);
+    s3.failOn.add("GET");
+    try {
+      await extractPending(server.deps, { batch: 50 });
+    } finally {
+      s3.failOn.clear();
+    }
+    const [stuck] = await server.deps.db.select().from(schema.fileVersions).where(where);
+    expect(stuck).toMatchObject({ extractStatus: "working", extractError: null });
+    // Stale after 10 min, the queue claims it again.
+    await server.deps.db
+      .update(schema.fileVersions)
+      .set({ extractClaimedAt: new Date(Date.now() - 11 * 60_000) })
+      .where(where);
+    await extractPending(server.deps, { batch: 50 });
+    const [ready] = await server.deps.db.select().from(schema.fileVersions).where(where);
+    expect(ready?.extractStatus).toBe("ready");
+  });
+});

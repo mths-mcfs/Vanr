@@ -9,6 +9,7 @@ import { and, asc, eq, inArray, lt, or, sql } from "drizzle-orm";
 import sharp from "sharp";
 import type { AppDeps } from "./context";
 import type { Page } from "./drive-extract-core";
+import { StorageUnavailable } from "./integrations/storage";
 import { log } from "./logger";
 import { reindex } from "./search-index";
 
@@ -186,6 +187,13 @@ async function extractOne(deps: AppDeps, v: VersionRow, timeoutMs: number): Prom
     }
     await finish(deps, v, set, written);
   } catch (err) {
+    if (err instanceof StorageUnavailable) {
+      // Not the file's fault: the claim stays and goes back to the queue once it is stale (the attempts
+      // still count, so a bucket that never comes back ends in "gave up").
+      log.warn("drive.extract_storage_unavailable", { fileId: v.fileId, version: v.version });
+      for (const key of written) await deps.blobs.delete(key).catch(() => undefined);
+      return;
+    }
     const message = err instanceof Error ? err.message.slice(0, 300) : "extraction failed";
     log.warn("drive.extract_failed", { fileId: v.fileId, version: v.version, err: message });
     // An error of the file (corrupt, large, deadline) is final; it is the stalled claim that goes back to the queue.
