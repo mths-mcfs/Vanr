@@ -11,9 +11,9 @@ import { log } from "../src/logger";
 import { createWorkspace, joinWorkspace } from "../src/members";
 import { revalidateBrowsers } from "../src/realtime/browser-socket";
 import { MAX_TRANSITIONS } from "../src/runners/hub";
-import { publishIntervention, publishSecret } from "../src/runners/requests";
+import { publishIntervention, publishSecret, waitIntervention } from "../src/runners/requests";
 import type { RunningServer } from "../src/server";
-import { Browser, body, SERVER_TEST_MS, signedIn, startTestServer, TestSocket } from "./harness";
+import { Browser, body, isEvent, SERVER_TEST_MS, signedIn, startTestServer, TestSocket } from "./harness";
 import { wrapQuery } from "./lock-double";
 import { connectProtocolRunner, mintSession, type ProtocolRunner } from "./protocol-runner";
 
@@ -513,8 +513,8 @@ describe("a frame naming another runner's id", () => {
         intruder.send({ type: "live_view.stream_ended", agentId: t.lia.id, reason: "closed" });
       }
       a.send({ type: "live_view.frame", agentId: t.lia.id, data: "REAL", width: 2, height: 2 });
-      expect(await ana.next((f) => f.type === "live_view.frame")).toMatchObject({ seq: 1, data: "REAL" });
-      expect(ana.frames.some((f) => f.type === "live_view.ended")).toBe(false);
+      expect((await ana.event("live_view.frame")).event).toMatchObject({ seq: 1, data: "REAL" });
+      expect(ana.frames.some((f) => isEvent(f, "live_view.ended"))).toBe(false);
       ana.close();
       for (const r of [a, b, c]) expect(r.invalid).toEqual([]);
     },
@@ -655,7 +655,7 @@ describe("who may call each runner route", () => {
         )[0]?.status,
       ).toBe("pending");
       // And the ones who may: Ana (owner) cancels, reads the log, sets the sandbox.
-      expect((await api(t.ana.browser, "GET", `${lia}/browser/log`)).body.steps).toHaveLength(1);
+      expect((await api(t.ana.browser, "GET", `${lia}/browser/log`)).body.entries).toHaveLength(1);
       expect(
         (await api(t.ana.browser, "PUT", `${t.ws}/sandbox-settings`, { minutesPerDay: 10 })).status,
       ).toBe(200);
@@ -789,6 +789,10 @@ describe("requests to a person", () => {
 
       const base = `${t.ws}/browser-interventions/${id}`;
       expect((await api(t.ana.browser, "POST", `${base}/control`)).status).toBe(403);
+      expect(
+        (await api(t.ana.browser, "POST", `${t.ws}/agents/${shared.id}/browser/interventions/start`, {}))
+          .status,
+      ).toBe(403);
       expect((await api(t.ana.browser, "POST", `${base}/complete`)).status).toBe(403);
       expect((await api(t.beto.browser, "POST", `${base}/control`)).body).toMatchObject({
         status: "active",
@@ -838,6 +842,160 @@ describe("requests to a person", () => {
   );
 });
 
+describe("intervention regressions", () => {
+  test(
+    "a stale completion or failure cannot end a new controller's intervention",
+    async () => {
+      const t = await team();
+      const shared = await agent(t, t.ana.user.id, "race");
+      const runner = await online(await pairOverHttp(t, t.ana), { browser: true });
+      await lend(shared.id, runner.runnerId);
+      const hold = stepHolder(server);
+      try {
+        for (const action of ["complete", "fail"]) {
+          const id = newId("bi");
+          await server.deps.db.insert(schema.browserInterventions).values({
+            id,
+            workspaceId: t.workspaceId,
+            agentId: shared.id,
+            runnerId: runner.runnerId,
+            kind: "other",
+            expiresAt: new Date(Date.now() + 60_000),
+          });
+          const step = hold.arm((prop, arg) => prop === "select" && arg === undefined);
+          const finishing = api(t.ana.browser, "POST", `${t.ws}/browser-interventions/${id}/${action}`, {});
+          try {
+            await step.reached;
+            expect(
+              (await api(t.beto.browser, "POST", `${t.ws}/browser-interventions/${id}/control`)).status,
+            ).toBe(200);
+          } finally {
+            step.release();
+          }
+          expect((await finishing).status).toBe(409);
+          expect(
+            (await api(t.beto.browser, "GET", `${t.ws}/browser-interventions/${id}`)).body,
+          ).toMatchObject({ status: "active", controllingUserId: t.beto.user.id });
+          await api(t.beto.browser, "POST", `${t.ws}/browser-interventions/${id}/complete`);
+        }
+      } finally {
+        hold.done();
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "expired control is refused, start replaces it, and the production sweep releases active control",
+    async () => {
+      const t = await team();
+      const runner = await online(await pairOverHttp(t, t.ana), { browser: true });
+      await lend(t.lia.id, runner.runnerId);
+      const id = newId("bi");
+      await server.deps.db.insert(schema.browserInterventions).values({
+        id,
+        workspaceId: t.workspaceId,
+        agentId: t.lia.id,
+        runnerId: runner.runnerId,
+        kind: "login",
+        expiresAt: new Date(Date.now() - 1),
+      });
+      expect((await api(t.ana.browser, "POST", `${t.ws}/browser-interventions/${id}/control`)).status).toBe(
+        409,
+      );
+      const start = `${t.ws}/agents/${t.lia.id}/browser/interventions/start`;
+      const active = await api(t.ana.browser, "POST", start, {});
+      ahead += 16 * 60_000;
+      const socket = await TestSocket.open(t.ana.browser, t.workspaceId);
+      try {
+        const next = await api(t.ana.browser, "POST", start, {});
+        expect(next.status).toBe(200);
+        expect(next.body.id).not.toBe(active.body.id);
+        socket.frames.length = 0;
+        ahead += 16 * 60_000;
+        const expired = socket.next(
+          (f) =>
+            isEvent(f, "browser_intervention.updated") &&
+            JSON.stringify(f.event).includes('"status":"expired"'),
+          17_000,
+        );
+        expect(await expired).toMatchObject({
+          event: { intervention: { id: next.body.id, status: "expired" } },
+        });
+        await runner.next(
+          (f) =>
+            f.type === "request" &&
+            f.op === "browser.policy" &&
+            JSON.stringify(f.args).includes('"driver":"agent"'),
+        );
+      } finally {
+        ahead -= 32 * 60_000;
+        socket.close();
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "ending the granting session, membership or audience releases control, while another session's logout preserves it",
+    async () => {
+      const t = await team();
+      const runner = await online(await pairOverHttp(t, t.ana), { browser: true });
+      for (const reason of ["signout", "expiry", "audience", "member"]) {
+        const shared = await agent(t, t.ana.user.id, reason);
+        await lend(shared.id, runner.runnerId);
+        const controller = new Browser(server.url);
+        await controller.signIn(t.beto.user.email);
+        const socket = await TestSocket.open(controller, t.workspaceId);
+        const start = `${t.ws}/agents/${shared.id}/browser/interventions/start`;
+        const takeOver = (b: Browser) => api(b, "POST", start, {});
+        try {
+          const { body: active, status } = await takeOver(controller);
+          expect(status).toBe(200);
+          runner.frames.length = 0;
+          if (reason === "signout") {
+            const other = new Browser(server.url);
+            await other.signIn(t.beto.user.email);
+            expect((await takeOver(other)).status).toBe(409);
+            await other.json("/api/auth/sign-out", "POST", {});
+            expect((await takeOver(controller)).body.id).toBe(active.id);
+            socket.close();
+            await socket.closed;
+            await controller.json("/api/auth/sign-out", "POST", {});
+          }
+          if (reason === "expiry")
+            await server.deps.db
+              .update(schema.sessions)
+              .set({ expiresAt: new Date(Date.now() - 1) })
+              .where(eq(schema.sessions.userId, t.beto.user.id));
+          if (reason === "member")
+            await server.deps.db.delete(schema.members).where(eq(schema.members.userId, t.beto.user.id));
+          if (reason === "audience")
+            await server.deps.db
+              .update(schema.agents)
+              .set({ visibilityMode: "owner" })
+              .where(eq(schema.agents.id, shared.id));
+          await revalidateBrowsers(server.deps);
+          if (reason === "expiry" || reason === "member") expect(await socket.closed).toBe(4401);
+          expect(
+            (await api(t.ana.browser, "GET", `${t.ws}/browser-interventions/${active.id}`)).body.status,
+          ).toBe("canceled");
+          await runner.next(
+            (f) =>
+              f.type === "request" &&
+              f.op === "browser.policy" &&
+              JSON.stringify(f.args).includes('"driver":"agent"'),
+          );
+          expect((await takeOver(t.ana.browser)).status).toBe(200);
+        } finally {
+          socket.close();
+        }
+      }
+    },
+    SERVER_TEST_MS,
+  );
+});
+
 describe("a secret delivered against a decline", () => {
   /** A runner whose `secret.store` answers wait for the test (or answer at once, with `auto`). */
   async function holdingRunner(t: Team, auto?: { ok: false; code: string }) {
@@ -862,6 +1020,7 @@ describe("a secret delivered against a decline", () => {
     return { paired, runner, held };
   }
   async function request(t: Team, agentId: string, runnerId: string, targetUserId: string | null = null) {
+    await lend(agentId, runnerId);
     const id = newId("sr");
     await server.deps.db.insert(schema.secretPrompts).values({
       id,
@@ -960,6 +1119,86 @@ describe("a secret delivered against a decline", () => {
   );
 
   test(
+    "a failed delivery cannot roll back another delivered secret's metadata",
+    async () => {
+      const t = await team();
+      const { paired, runner, held } = await holdingRunner(t);
+      const a = await request(t, t.lia.id, paired.runnerId);
+      const b = await request(t, t.lia.id, paired.runnerId);
+      const first = api(t.ana.browser, "POST", `${t.ws}/secret-requests/${a}/deliver`, box("invalid"));
+      await runner.request("secret.store");
+      const second = api(t.ana.browser, "POST", `${t.ws}/secret-requests/${b}/deliver`, box("valid"));
+      await runner.request("secret.store");
+      held[1]?.answer({ ok: true, data: { stored: true } });
+      expect((await second).status).toBe(200);
+      held[0]?.answer({ ok: false, error: { code: "bad_request", message: "invalid box" } });
+      expect((await first).status).toBe(409);
+      expect(await state(b, t.lia.id)).toEqual({ status: "delivered", rows: 1 });
+      expect(
+        (
+          await api(
+            t.ana.browser,
+            "DELETE",
+            `${t.ws}/agents/${t.lia.id}/secrets/API_TOKEN?runnerId=${paired.runnerId}`,
+          )
+        ).status,
+      ).toBe(204);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "moving, detaching, removing or revoking the runner closes its old requests, including a racing delivery",
+    async () => {
+      const t = await team();
+      const other = await online(await pairOverHttp(t, t.ana), { browser: true });
+      for (const action of ["move", "target", "detach", "remove", "revoke"]) {
+        const runner = await online(await pairOverHttp(t, t.ana), { browser: true });
+        const subject = await agent(t, t.ana.user.id, action);
+        const agentPath = `${t.ws}/agents/${subject.id}`;
+        const id = await request(t, subject.id, runner.runnerId);
+        await server.deps.db.insert(schema.runnerSecrets).values({
+          agentId: subject.id,
+          runnerId: runner.runnerId,
+          name: "SAVED_TOKEN",
+          workspaceId: t.workspaceId,
+          target: "env",
+        });
+        const active = await api(t.ana.browser, "POST", `${agentPath}/browser/interventions/start`, {});
+        const waiting = waitIntervention(active.body.id, new AbortController().signal);
+        const hold = stepHolder(server);
+        const step = hold.arm((prop, arg) => prop === "select" && arg === undefined);
+        const delivering = api(t.ana.browser, "POST", `${t.ws}/secret-requests/${id}/deliver`, box("late"));
+        try {
+          await step.reached;
+          const path = `${t.ws}/runners/${runner.runnerId}`;
+          const result = await (action === "move"
+            ? api(t.ana.browser, "POST", `${path}/move-agents`, { toRunnerId: other.runnerId })
+            : action === "target"
+              ? api(t.ana.browser, "PUT", `${agentPath}/environment/target`, { runnerId: other.runnerId })
+              : action === "detach"
+                ? api(t.ana.browser, "DELETE", `${agentPath}/environment`)
+                : action === "remove"
+                  ? api(t.ana.browser, "DELETE", path)
+                  : api(t.ana.browser, "POST", `${path}/revoke`, {}));
+          expect(result.status).toBeLessThan(300);
+        } finally {
+          step.release();
+          hold.done();
+        }
+        expect((await delivering).status).toBe(409);
+        expect((await waiting)?.status).toBe("canceled");
+        expect(await state(id, subject.id)).toEqual({ status: "canceled", rows: 1 });
+        expect((await api(t.ana.browser, "GET", `${agentPath}/secrets`)).body.secrets).toMatchObject([
+          { name: "SAVED_TOKEN", runnerId: runner.runnerId },
+        ]);
+        expect(runner.frames.some((f) => f.type === "request" && f.op === "secret.store")).toBe(false);
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "when the runner answers with an error, the request opens again and no row is left; when no answer comes, the row stays",
     async () => {
       const t = await team();
@@ -993,6 +1232,75 @@ describe("a secret delivered against a decline", () => {
   );
 });
 
+describe("live view regressions", () => {
+  test(
+    "CLI access changes cancel calls and stop the browser stream",
+    async () => {
+      const t = await team();
+      const runner = await online(await pairOverHttp(t, t.ana), {
+        browser: true,
+        answer: (req) => (req.op === "exec" ? new Promise(() => {}) : { ok: true, data: {} }),
+      });
+      await lend(t.lia.id, runner.runnerId);
+      const socket = await TestSocket.open(t.ana.browser, t.workspaceId);
+      try {
+        socket.send({ type: "live_view.subscribe", agentId: t.lia.id });
+        await runner.request("live_view.start");
+        const running = server.deps.runners
+          .call(runner.runnerId, "exec", { command: "pwd" }, { agent: t.lia, timeoutMs: 5000 })
+          .catch((err) => err.code);
+        await runner.request("exec");
+        runner.send({
+          type: "access.changed",
+          access: { folders: [], tools: { browser: false, claude: false, codex: false, commands: true } },
+        });
+        expect(await running).toBe("canceled");
+        await socket.event("live_view.ended");
+        await runner.request("live_view.stop");
+        runner.send({ type: "live_view.frame", agentId: t.lia.id, data: "AFTER", width: 1, height: 1 });
+        await revalidateBrowsers(server.deps);
+        socket.send({ type: "ping" });
+        await socket.next((f) => f.type === "pong");
+        expect(socket.frames.some((f) => isEvent(f, "live_view.frame"))).toBe(false);
+      } finally {
+        socket.close();
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a disconnected or replaced runner restarts its stream without replaying the old image",
+    async () => {
+      const t = await team();
+      const paired = await pairOverHttp(t, t.ana);
+      let runner = await online(paired, { browser: true });
+      await lend(t.lia.id, runner.runnerId);
+      const socket = await TestSocket.open(t.ana.browser, t.workspaceId);
+      try {
+        socket.send({ type: "live_view.subscribe", agentId: t.lia.id });
+        await runner.request("live_view.start");
+        for (const close of [true, false]) {
+          runner.send({ type: "live_view.frame", agentId: t.lia.id, data: "OLD", width: 1, height: 1 });
+          await socket.event("live_view.frame");
+          if (close) {
+            await runner.close();
+            await server.deps.runners.settled();
+          }
+          runner = await online(paired, { browser: true });
+          socket.send({ type: "live_view.subscribe", agentId: t.lia.id });
+          await runner.request("live_view.start");
+          runner.send({ type: "live_view.frame", agentId: t.lia.id, data: "NEW", width: 1, height: 1 });
+          expect((await socket.event("live_view.frame")).event.data).toBe("NEW");
+        }
+      } finally {
+        socket.close();
+      }
+    },
+    SERVER_TEST_MS,
+  );
+});
+
 describe("live view", () => {
   test(
     "only who can talk to the agent watches, frames reach the watchers only, and the last to leave stops the stream",
@@ -1006,12 +1314,12 @@ describe("live view", () => {
 
       // Lia talks only to Ana (her owner): Beto's watch is rejected and starts nothing.
       beto.send({ type: "live_view.subscribe", agentId: t.lia.id });
-      expect(await beto.next((f) => f.type === "live_view.unavailable")).toMatchObject({
+      expect((await beto.event("live_view.unavailable")).event).toMatchObject({
         reason: "forbidden",
       });
 
       ana.send({ type: "live_view.subscribe", agentId: t.lia.id });
-      expect(await ana.next((f) => f.type === "live_view.status")).toMatchObject({
+      expect((await ana.event("live_view.status")).event).toMatchObject({
         mode: "watch",
         intervention: null,
       });
@@ -1021,7 +1329,7 @@ describe("live view", () => {
       });
 
       runner.send({ type: "live_view.frame", agentId: t.lia.id, data: "AAAA", width: 800, height: 600 });
-      expect(await ana.next((f) => f.type === "live_view.frame")).toMatchObject({
+      expect((await ana.event("live_view.frame")).event).toMatchObject({
         seq: 1,
         data: "AAAA",
         metadata: { deviceWidth: 800, deviceHeight: 600, url: null },
@@ -1030,8 +1338,8 @@ describe("live view", () => {
       const intruder = await online(await pairOverHttp(t, t.ana), { browser: true });
       intruder.send({ type: "live_view.frame", agentId: t.lia.id, data: "EVIL", width: 1, height: 1 });
       runner.send({ type: "live_view.frame", agentId: t.lia.id, data: "BBBB", width: 800, height: 600 });
-      expect(await ana.next((f) => f.type === "live_view.frame")).toMatchObject({ seq: 2, data: "BBBB" });
-      expect(beto.frames.some((f) => f.type === "live_view.frame")).toBe(false);
+      expect((await ana.event("live_view.frame")).event).toMatchObject({ seq: 2, data: "BBBB" });
+      expect(beto.frames.some((f) => isEvent(f, "live_view.frame"))).toBe(false);
 
       // Input only from who has the control, at most 100 events, frames up to 64 KB.
       ana.send({ type: "live_view.input", agentId: t.lia.id, events: [{ type: "click", x: 1, y: 1 }] });
@@ -1055,7 +1363,9 @@ describe("live view", () => {
         kind: "intervention",
         controllingUserId: t.ana.user.id,
       });
-      expect(await ana.next((f) => f.type === "live_view.status" && f.mode === "control")).toBeTruthy();
+      expect(
+        await ana.next((f) => isEvent(f, "live_view.status") && f.event.mode === "control"),
+      ).toBeTruthy();
       expect((await runner.request("live_view.start")).args).toMatchObject({
         fps: 15,
         policy: { driver: "person" },
@@ -1280,13 +1590,13 @@ describe("a connection doesn't outlive the right that opened it", () => {
         .set({ visibilityMode: "owner" })
         .where(eq(schema.agents.id, ivy.id));
       beto.send({ type: "live_view.input", agentId: ivy.id, events: [{ type: "click" }] });
-      expect(await beto.next((f) => f.type === "live_view.unavailable")).toMatchObject({
+      expect((await beto.event("live_view.unavailable")).event).toMatchObject({
         reason: "forbidden",
       });
       expect(await beto.next((f) => f.type === "error")).toMatchObject({ code: "not_watching" });
       runner.send({ type: "live_view.frame", agentId: ivy.id, data: "AFTER", width: 1, height: 1 });
       await runner.request("live_view.stop");
-      expect(beto.frames.some((f) => f.type === "live_view.frame" && f.data === "AFTER")).toBe(false);
+      expect(beto.frames.some((f) => isEvent(f, "live_view.frame") && f.event.data === "AFTER")).toBe(false);
       expect(runner.frames.some((f) => f.type === "request" && f.op === "live_view.input")).toBe(false);
       beto.close();
     },
@@ -1335,7 +1645,7 @@ describe("a connection doesn't outlive the right that opened it", () => {
       expect(moved.body.moved).toEqual([ivy.id]);
       expect(await moving).toBe("canceled");
       expect(await a.next((f) => f.type === "cancel" && f.id === req.id)).toBeTruthy();
-      expect(await ana.next((f) => f.type === "live_view.ended")).toMatchObject({ agentId: ivy.id });
+      expect((await ana.event("live_view.ended")).event).toMatchObject({ agentId: ivy.id });
       a.send({ type: "live_view.frame", agentId: ivy.id, data: "LATE", width: 1, height: 1 });
       a.send({ type: "result", id: req.id, ok: true, data: { late: true } });
 
@@ -1378,7 +1688,7 @@ describe("a connection doesn't outlive the right that opened it", () => {
       expect(rowA?.paused).toBe(false);
       expect((await mintSession(server.url, oldCredential)).status).toBe(403);
       expect(await again.next((f) => f.type === "rejected")).toMatchObject({ reason: "revoked" });
-      expect(ana.frames.some((f) => f.type === "live_view.frame")).toBe(false);
+      expect(ana.frames.some((f) => isEvent(f, "live_view.frame"))).toBe(false);
       for (const r of [a, b, again]) expect(r.invalid).toEqual([]);
       ana.close();
     },
@@ -1520,7 +1830,7 @@ describe("frames, limits and the hello's waits", () => {
         .from(schema.runnerJobs)
         .where(eq(schema.runnerJobs.id, jobId));
       expect(job).toMatchObject({ status: "running", outputTail: [], tailLine: null });
-      expect(ana.frames.some((f) => f.type === "live_view.frame" || f.type === "live_view.ended")).toBe(
+      expect(ana.frames.some((f) => isEvent(f, "live_view.frame") || isEvent(f, "live_view.ended"))).toBe(
         false,
       );
       expect(server.deps.runners.isOnline(a.runnerId)).toBe(true);
@@ -1588,7 +1898,7 @@ describe("frames, limits and the hello's waits", () => {
         (await api(t.ana.browser, "POST", `${t.ws}/agents/${t.lia.id}/browser/interventions/start`, {}))
           .status,
       ).toBe(200);
-      await ana.next((f) => f.type === "live_view.status" && f.mode === "control");
+      await ana.next((f) => isEvent(f, "live_view.status") && f.event.mode === "control");
       const events = (n: number) => Array.from({ length: n }, (_, i) => ({ type: "move", x: i }));
       ana.send({ type: "live_view.input", agentId: t.lia.id, events: events(100) });
       expect((await runner.request("live_view.input")).args).toEqual({ events: events(100) });

@@ -21,7 +21,7 @@ export interface AuthDeps {
    */
   signupAllowed: (email: string, headers: Headers | null) => Promise<SignupDecision>;
   /** A session was deleted (sign-out, revoked): the live connections it opened close. */
-  onSessionEnded?: (sessionId: string) => void;
+  onSessionEnded?: (sessionId: string) => void | Promise<void>;
 }
 
 /**
@@ -82,7 +82,7 @@ export function createAuth(deps: AuthDeps) {
       session: {
         delete: {
           after: async (session) => {
-            deps.onSessionEnded?.(session.id);
+            await deps.onSessionEnded?.(session.id);
           },
         },
       },

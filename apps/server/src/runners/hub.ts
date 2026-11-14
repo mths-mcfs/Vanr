@@ -64,13 +64,18 @@ interface CallOptions {
   onHarnessEvent?: (event: HarnessEvent) => void;
   onHarnessTool?: HarnessToolHandler;
   signal?: AbortSignal;
+  authorized?: () => boolean;
 }
 
 export class RunnerHub {
   private readonly sockets = new Map<string, RunnerSocket>();
   private readonly pending = new Map<string, Pending>();
   private readonly busy = new Map<string, number>();
-  private readonly waiting = new Map<string, (() => void)[]>();
+  private readonly waiting = new Map<
+    string,
+    { agentId: string | null; go: () => void; cancel: (err: RunnerCallError) => void }[]
+  >();
+  private readonly grants = new Map<string, object>();
   /** Connections the server cut (revoked, removed, re-paired): nothing they send counts any more. */
   private readonly cut = new WeakSet<RunnerSocket>();
   /** Each runner's connection transitions, one at a time: the tail of the chain and how many wait on it. */
@@ -166,27 +171,42 @@ export class RunnerHub {
 
   /** The socket is the runner's current connection and the server didn't cut it. */
   isCurrent(ws: RunnerSocket): boolean {
-    return !this.cut.has(ws) && !!ws.data.runnerId && this.sockets.get(ws.data.runnerId) === ws;
+    return (
+      !ws.data.closed && !this.cut.has(ws) && !!ws.data.runnerId && this.sockets.get(ws.data.runnerId) === ws
+    );
   }
 
-  private async slot(runnerId: string, signal?: AbortSignal): Promise<() => void> {
+  /** Captures the connection and access under which an operation was authorized, including before DB waits. */
+  authorization(runnerId: string, agentId?: string): () => boolean {
+    const keys = [runnerId, `${runnerId}/${agentId ?? ""}`];
+    const grants = keys.map((key) => this.grants.get(key));
+    const socket = this.sockets.get(runnerId);
+    return () =>
+      !!socket && this.isCurrent(socket) && keys.every((key, i) => this.grants.get(key) === grants[i]);
+  }
+
+  private async slot(runnerId: string, agentId: string | null, signal?: AbortSignal): Promise<() => void> {
+    if (signal?.aborted) throw new RunnerCallError("canceled", "Canceled");
     const used = this.busy.get(runnerId) ?? 0;
     if (used >= MAX_INFLIGHT) {
       await new Promise<void>((resolve, reject) => {
         const list = this.waiting.get(runnerId) ?? [];
         // A reused signal keeps no listener once the slot comes: `go` takes it off.
-        const onAbort = () => {
+        const cancel = (err: RunnerCallError) => {
+          signal?.removeEventListener("abort", onAbort);
           this.waiting.set(
             runnerId,
-            (this.waiting.get(runnerId) ?? []).filter((g) => g !== go),
+            (this.waiting.get(runnerId) ?? []).filter((g) => g !== entry),
           );
-          reject(new RunnerCallError("canceled", "Canceled"));
+          reject(err);
         };
+        const onAbort = () => cancel(new RunnerCallError("canceled", "Canceled"));
         const go = () => {
           signal?.removeEventListener("abort", onAbort);
           resolve();
         };
-        list.push(go);
+        const entry = { agentId, go, cancel };
+        list.push(entry);
         this.waiting.set(runnerId, list);
         signal?.addEventListener("abort", onAbort, { once: true });
       });
@@ -197,7 +217,7 @@ export class RunnerHub {
       if (released) return;
       released = true;
       this.busy.set(runnerId, Math.max(0, (this.busy.get(runnerId) ?? 1) - 1));
-      this.waiting.get(runnerId)?.shift()?.();
+      this.waiting.get(runnerId)?.shift()?.go();
     };
   }
 
@@ -208,12 +228,15 @@ export class RunnerHub {
     opts: CallOptions = {},
   ): Promise<T> {
     if (!this.isOnline(runnerId)) throw new RunnerCallError("offline", "The runner is offline");
-    const release = await this.slot(runnerId, opts.signal);
+    const authorized = opts.authorized ?? this.authorization(runnerId, opts.agent?.id);
+    const release = await this.slot(runnerId, opts.agent?.id ?? null, opts.signal);
     const id = newId("rq");
     const onAbort = () => {
       if (this.pending.has(id)) this.send(runnerId, { type: "cancel", id });
     };
     try {
+      if (!authorized() || opts.signal?.aborted)
+        throw new RunnerCallError("canceled", "Canceled: the access it ran under changed");
       return await new Promise<T>((resolve, reject) => {
         const timer = setTimeout(() => {
           this.pending.delete(id);
@@ -329,6 +352,10 @@ export class RunnerHub {
    * every pending request of the runner.
    */
   cancelPending(runnerId: string, agentId?: string) {
+    this.grants.set(agentId === undefined ? runnerId : `${runnerId}/${agentId}`, {});
+    for (const w of [...(this.waiting.get(runnerId) ?? [])])
+      if (agentId === undefined || w.agentId === agentId)
+        w.cancel(new RunnerCallError("canceled", "Canceled: the access it ran under changed"));
     for (const [id, p] of this.pending) {
       if (p.runnerId !== runnerId || (agentId !== undefined && p.agentId !== agentId)) continue;
       this.pending.delete(id);
@@ -339,6 +366,8 @@ export class RunnerHub {
   }
 
   private failAll(runnerId: string, code: RunnerErrorCode, message: string) {
+    this.grants.set(runnerId, {});
+    for (const w of [...(this.waiting.get(runnerId) ?? [])]) w.cancel(new RunnerCallError(code, message));
     for (const [id, p] of this.pending) {
       if (p.runnerId !== runnerId) continue;
       this.pending.delete(id);

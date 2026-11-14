@@ -206,6 +206,7 @@ export type AppEnv = {
   Variables: {
     deps: AppDeps;
     user: SessionUser | null;
+    sessionId: string | null;
     /** Set by the middleware of /api/v1/workspaces/:workspaceId. */
     member: WorkspaceMember | null;
   };

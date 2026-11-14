@@ -28,6 +28,7 @@ import { type BrowserSocket, type BrowserSocketData, Hub } from "./realtime/hub"
 import { hasPendingInvite, INVITE_COOKIE } from "./routes/invitations";
 import { dropAllLiveViews } from "./runners/browser-live";
 import { RunnerHub, type RunnerSocketData } from "./runners/hub";
+import { revalidateInterventions } from "./runners/requests";
 import { runnerClose, runnerMessage, runnerOpen, runnerSocketData } from "./runners/socket";
 import { BackgroundWork } from "./runtime/background";
 import { FirstUserPlace, SIGNUP_QUEUE_LIMITS, type SignupQueueLimits, signupDecision } from "./signup-queue";
@@ -234,7 +235,10 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     trustedOrigins: origins,
     signupAllowed,
     // A signed-out or revoked session closes the sockets it opened at once.
-    onSessionEnded: (sessionId) => hub.dropSession(sessionId),
+    onSessionEnded: async (sessionId) => {
+      hub.dropSession(sessionId);
+      if (depsRef) await revalidateInterventions(depsRef, sessionId);
+    },
   });
   // Background work (the notification queue today); stopping waits for what is running. Slice S6
   // (runtime/runtime) creates the AgentRuntime here instead, which takes this work over.
@@ -268,15 +272,24 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   // Here, in this order: the undo of stopRecalcs (S2, bases/write) and of the assignment engine's stop
   // (S5); the provider lookup (S6); search.ensureVector (S2, search-index); runtime.start (S6), the
   // engine's start (S5) and resumeRecalcs (S2), all before the app takes requests.
+  await revalidateBrowsers(deps);
   const app = createApp(deps, { firstUser, signupQueue: signupLimits });
   handler = (req) => app.fetch(req);
   depsRef = deps;
   // A session that expires, or a membership or channel lost outside this server's routes, is caught here.
+  let sweeping: Promise<void> | null = null;
   const sweep = setInterval(() => {
-    void revalidateBrowsers(deps).catch((err) => log.warn("ws.revalidate_failed", { err }));
+    sweeping ??= revalidateBrowsers(deps)
+      .catch((err) => log.warn("ws.revalidate_failed", { err }))
+      .finally(() => {
+        sweeping = null;
+      });
   }, REVALIDATE_MS);
   sweep.unref?.();
-  undo.push(() => clearInterval(sweep));
+  undo.push(async () => {
+    clearInterval(sweep);
+    await sweeping;
+  });
   log.info("server.started", { url: publicUrl, db: opened.kind });
 
   // Every stop, at once or later, gets the same shutdown: it ends (or fails) once for all of them.

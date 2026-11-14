@@ -211,3 +211,7 @@ export class TestSocket {
 
 const isFrame = (v: unknown): v is RealtimeFrame =>
   typeof v === "object" && v !== null && "type" in v && typeof v.type === "string";
+
+/** An event in the same envelope the browser client validates. */
+export const isEvent = (f: RealtimeFrame, type: string): f is RealtimeFrame & { event: RealtimeFrame } =>
+  f.type === "event" && isFrame(f.event) && f.event.type === type;

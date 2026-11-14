@@ -40,6 +40,7 @@ export function createApp(
   app.use("*", async (c, next) => {
     c.set("deps", deps);
     c.set("user", null);
+    c.set("sessionId", null);
     c.set("member", null);
     await next();
   });
@@ -95,6 +96,7 @@ export function createApp(
   app.use("/api/v1/*", async (c, next) => {
     const session = await deps.auth.api.getSession({ headers: c.req.raw.headers });
     if (session) {
+      c.set("sessionId", session.session.id);
       const u = session.user;
       c.set("user", { id: u.id, name: u.name, email: u.email, image: u.image ?? null });
     }

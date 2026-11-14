@@ -13,6 +13,7 @@ import type { AppDeps } from "../context";
 import { HttpError } from "../http";
 import { log } from "../logger";
 import { endLiveViewsOf } from "./browser-live";
+import { cancelRunnerRequests, publishRunnerRequests } from "./requests";
 import type { RunnerRow } from "./runners";
 
 const { runners, runnerSessions } = schema;
@@ -34,11 +35,14 @@ export async function revokeRunner(
 ): Promise<void> {
   const now = deps.now();
   // The hashes stay: the current, the pending and the old one now get "revoked" (403), not "not paired".
-  await deps.db
-    .update(runners)
-    .set({ revokedAt: now, revokedReason: reason, updatedAt: now })
-    .where(eq(runners.id, row.id));
-  await deps.db.delete(runnerSessions).where(eq(runnerSessions.runnerId, row.id));
+  const closed = await deps.db.transaction(async (tx) => {
+    await tx
+      .update(runners)
+      .set({ revokedAt: now, revokedReason: reason, updatedAt: now })
+      .where(eq(runners.id, row.id));
+    await tx.delete(runnerSessions).where(eq(runnerSessions.runnerId, row.id));
+    return cancelRunnerRequests(tx, now, row.id);
+  });
   deps.runners.close(row.id, {
     type: "rejected",
     reason: "revoked",
@@ -48,6 +52,7 @@ export async function revokeRunner(
         : "This runner's access was revoked; pair it again",
   });
   endLiveViewsOf(deps, row.id);
+  await publishRunnerRequests(deps, closed);
   deps.hub.toWorkspace(row.workspaceId, { type: "runner.revoked", runnerId: row.id, reason });
   log.warn("runner.revoked", { runnerId: row.id, reason });
 }

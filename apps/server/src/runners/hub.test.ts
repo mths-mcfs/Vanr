@@ -295,6 +295,31 @@ describe("runner hub", () => {
     expect(listeners()).toBe(0);
   });
 
+  test("canceling an agent rejects its queued calls before a released slot can send them", async () => {
+    const r = await runner("queue-cancel");
+    const opts = { agent: { id: "moved", handle: "lia" }, timeoutMs: 2000 };
+    const calls = Array.from({ length: MAX_INFLIGHT + 1 }, () =>
+      failure(hub.call("queue-cancel", "list", { path: "." }, opts)),
+    );
+    await r.until(MAX_INFLIGHT);
+    hub.cancelPending("queue-cancel", "moved");
+    expect((await Promise.all(calls)).map((e) => e.code)).toEqual(Array(MAX_INFLIGHT + 1).fill("canceled"));
+    const fresh = hub.call(
+      "queue-cancel",
+      "list",
+      { path: "new" },
+      { agent: { id: "other", handle: "ivy" } },
+    );
+    await r.until(MAX_INFLIGHT * 2 + 1);
+    const requests = r.frames.filter((f) => f.type === "request");
+    expect(requests).toHaveLength(MAX_INFLIGHT + 1);
+    expect(requests.at(-1)?.args).toEqual({ path: "new" });
+    hub.onResult(socketOf("queue-cancel"), { id: requests.at(-1)?.id ?? "", ok: true, data: "ok" });
+    expect(await fresh).toBe("ok");
+    r.ws.close();
+    await r.closed;
+  });
+
   test("closeAll closes every runner connection", async () => {
     hub = new RunnerHub();
     const a = await runner("ra");

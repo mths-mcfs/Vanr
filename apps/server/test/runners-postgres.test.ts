@@ -258,6 +258,12 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("forced: runner locks on Postgres
     app.use("*", async (c, next) => {
       c.set("deps", deps);
       c.set("user", { id: who.id, name: "x", email: "x@x.test", image: null });
+      const [session] = await server.deps.db
+        .select({ id: schema.sessions.id })
+        .from(schema.sessions)
+        .where(eq(schema.sessions.userId, who.id))
+        .limit(1);
+      c.set("sessionId", session?.id ?? null);
       c.set("member", { workspaceId, userId: who.id, role: "owner", handle: "x" });
       await next();
     });
