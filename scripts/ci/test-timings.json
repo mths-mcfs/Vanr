@@ -112,6 +112,7 @@
     "packages/engine/src/work-state.test.ts": 2,
     "scripts/ci/gate.test.ts": 14,
     "scripts/typecheck.test.ts": 4,
-    "apps/server/test/storage-bucket.test.ts": 19513
+    "apps/server/test/storage-bucket.test.ts": 9919,
+    "apps/server/test/drive-slow-client.test.ts": 12940
   }
 }
