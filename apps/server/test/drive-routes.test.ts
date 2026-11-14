@@ -139,6 +139,16 @@ describe("access: workspace scope and visibility", () => {
       parentVersion: 1,
     });
     expect(v2.status).toBe(404);
+    const form = new FormData();
+    form.set("file", new File(["swapped"], "here.txt"));
+    const asFile = await ana.browser.fetch(`${W(other.workspaceId)}/files/${file.id}/files`, {
+      method: "POST",
+      body: form,
+    });
+    expect(asFile.status).toBe(404);
+    expect(await body(await ana.browser.fetch(`${W(workspaceId)}/files/${file.id}`))).toMatchObject({
+      version: 1,
+    });
     const list = await body(await ana.browser.fetch(`${W(other.workspaceId)}/files`));
     expect(list.files).toEqual([]);
     // The trash too: deleted in its own workspace, the other one doesn't list nor restore it.
