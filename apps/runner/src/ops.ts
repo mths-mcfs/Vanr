@@ -336,8 +336,16 @@ export function writeOp(
   mkdirSync(dirname(path), { recursive: true });
   // Aborted: nothing is written. The write goes into the file itself (its mode, its owner, a link stay).
   if (ctx.signal.aborted) throw new RunnerError("canceled", "Canceled");
-  if (args.append) appendFileSync(path, data);
-  else writeFileSync(path, data);
+  // Node writes the whole buffer or throws (a size limit, a full disk, a quota): a short write is an error,
+  // never a success, and the error says the file may be cut.
+  try {
+    if (args.append) appendFileSync(path, data);
+    else writeFileSync(path, data);
+  } catch (err) {
+    const code = err instanceof Error && "code" in err ? String(err.code) : "error";
+    if (code === "EACCES" || code === "EPERM") throw err;
+    throw new RunnerError("internal", `${args.path} could not be written whole (${code}); it may be cut`);
+  }
   return { path: args.path, bytes: data.byteLength };
 }
 

@@ -14,6 +14,7 @@ import {
   readdirSync,
   readFileSync,
   readSync,
+  realpathSync,
   rmSync,
   statSync,
   unlinkSync,
@@ -94,7 +95,7 @@ const masksOf = (values: readonly SecretValue[]): [string, string][] =>
  * since a file the agent creates right after removing the runner's can get the same inode back. Where the
  * file system keeps no birth time (0), the device and the inode decide alone.
  */
-interface FileId {
+export interface FileId {
   dev: bigint;
   ino: bigint;
   birth: bigint;
@@ -105,17 +106,39 @@ const idOf = (st: { dev: bigint; ino: bigint; birthtimeNs: bigint }): FileId => 
   ino: st.ino,
   birth: st.birthtimeNs,
 });
-const sameId = (a: FileId, b: FileId) => a.dev === b.dev && a.ino === b.ino && a.birth === b.birth;
+export const sameId = (a: FileId, b: FileId) => a.dev === b.dev && a.ino === b.ino && a.birth === b.birth;
 
-/** The path still holds the runner's file (a plain file with that identity). */
-function stillOwn(path: string, id: FileId): boolean {
+/**
+ * What the path holds now, against the runner's file: `own` (a plain file with that identity), `other`
+ * (checked: it is not the runner's file), `gone`, or `unknown` (the check itself failed, e.g. no access): only
+ * `other` and `gone` are answers; `unknown` is asked again later.
+ */
+function holds(path: string, id: FileId): "own" | "other" | "gone" | "unknown" {
   try {
     const st = lstatSync(path, { bigint: true });
-    return st.isFile() && sameId(idOf(st), id);
-  } catch {
-    return false;
+    return st.isFile() && sameId(idOf(st), id) ? "own" : "other";
+  } catch (err) {
+    return errno(err) === "ENOENT" ? "gone" : "unknown";
   }
 }
+
+/** A secret file that could not be written whole (a limit, a full disk, a quota): nothing runs. */
+class ShortWrite extends Error {
+  constructor(readonly code: string) {
+    super(code);
+  }
+}
+
+/** A secret file of this process: its identity, and for the log its secret's name, its path and the masks. */
+interface OwnFile {
+  id: FileId;
+  name: string;
+  rel: string;
+  masks: [string, string][];
+}
+
+/** How many secret files may wait for a new try at removal; past it, a file stays (logged once). */
+const TO_REMOVE_MAX = 1000;
 
 const OPEN_NEW = constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW;
 const OPEN_LOOK = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
@@ -135,12 +158,28 @@ function createOnly(path: string, value: string): FileId | null {
     if (errno(err) === "EEXIST") return null;
     throw err;
   }
+  const id = idOf(fstatSync(fd, { bigint: true }));
+  // Written in a loop until the whole value is out, each return checked: a short write is not success.
+  const data = Buffer.from(value, "utf8");
+  let failed: string | null = null;
   try {
-    writeSync(fd, Buffer.from(value, "utf8"));
-    return idOf(fstatSync(fd, { bigint: true }));
+    for (let off = 0; off < data.byteLength; ) {
+      const n = writeSync(fd, data, off, data.byteLength - off);
+      if (n <= 0) {
+        failed = "EIO";
+        break;
+      }
+      off += n;
+    }
+  } catch (err) {
+    failed = errno(err) || "EIO";
   } finally {
     closeSync(fd);
   }
+  if (failed === null) return id;
+  // The partial file is this call's own: it goes (if it is still that file).
+  if (holds(path, id) === "own") unlinkSync(path);
+  throw new ShortWrite(failed);
 }
 
 /**
@@ -227,9 +266,11 @@ export class SecretStore {
    * The secret files this process created or adopted and still has in use: how many commands use each and
    * the value it holds (another command with another value at the same path is rejected, not given this one).
    */
-  private readonly materialized = new Map<string, { count: number; value: string; id: FileId }>();
-  /** Secret files whose removal failed, with their identity: tried again later. */
-  private readonly toRemove = new Map<string, FileId>();
+  private readonly materialized = new Map<string, OwnFile & { count: number; value: string }>();
+  /** Secret files whose removal failed (at most TO_REMOVE_MAX), with their identity: tried again later. */
+  private readonly toRemove = new Map<string, OwnFile>();
+  /** What was logged once about a file. */
+  private readonly noted = new Set<string>();
 
   constructor(
     private readonly home: string,
@@ -441,11 +482,20 @@ export class SecretStore {
    */
   async materialize(
     agent: AgentRef,
-    root: string,
+    givenRoot: string,
     signal?: AbortSignal,
   ): Promise<{ env: Record<string, string>; masks: [string, string][]; release: () => void }> {
     this.retryRemovals();
     if (!this.key) return { env: {}, masks: [], release: () => {} };
+    // The work folder by its real path, once: a work folder that is a link is the person's choice, and its
+    // target is the work folder. Every check below (the folders on the way, "inside", the identities) starts
+    // from this path.
+    let root: string;
+    try {
+      root = realpathSync(givenRoot);
+    } catch (err) {
+      throw new RunnerError("not_found", `The work folder is not there (${errno(err) || "error"})`);
+    }
     const values = await this.values(agent);
     // Aborted while the values were read: nothing is written.
     if (signal?.aborted) throw new RunnerError("canceled", "Canceled");
@@ -471,6 +521,7 @@ export class SecretStore {
         throw reject({ name: v.name, rel }, "which is outside the work folder");
       wanted.push({ name: v.name, path, rel: path.slice(root.length + 1), value: v.value });
     }
+    const valueMasks = masksOf(values);
     const taken: string[] = [];
     try {
       for (const w of wanted) {
@@ -478,7 +529,7 @@ export class SecretStore {
         if (use) {
           if (use.value !== w.value) throw reject(w, "which another command is using with another secret");
           // Shared only while it is still the file the runner wrote: the agent may have changed it meanwhile.
-          if (!stillOwn(w.path, use.id))
+          if (holds(w.path, use.id) !== "own")
             throw reject(w, "which was changed while another command was using it");
           use.count += 1;
           taken.push(w.path);
@@ -486,13 +537,30 @@ export class SecretStore {
         }
         if (!folderInside(root, w.rel)) throw reject(w, "and a folder on the way is a link or not a folder");
         this.hooks?.beforeCreate?.(w.path);
-        let id = createOnly(w.path, w.value);
+        let id: FileId | null;
+        try {
+          id = createOnly(w.path, w.value);
+        } catch (err) {
+          if (err instanceof ShortWrite)
+            throw new RunnerError(
+              "internal",
+              `The secret ${w.name} could not be written whole to ${w.rel} (${err.code}); nothing ran`,
+            );
+          throw err;
+        }
         if (!id) {
           this.hooks?.beforeLook?.(w.path);
           id = sameFile(w.path, w.value);
         }
         if (!id) throw reject(w, "and something the runner did not put there is in its place");
-        this.materialized.set(w.path, { count: 1, value: w.value, id });
+        this.materialized.set(w.path, {
+          count: 1,
+          value: w.value,
+          id,
+          name: w.name,
+          rel: w.rel,
+          masks: valueMasks,
+        });
         taken.push(w.path);
       }
     } catch (err) {
@@ -521,38 +589,54 @@ export class SecretStore {
         continue;
       }
       this.materialized.delete(path);
-      this.removeOwn(path, use.id);
+      this.removeOwn(path, use);
     }
     this.retryRemovals();
   }
 
+  /** A log line about a secret file: the secret's name and its path in the work folder, both masked. */
+  private note(f: OwnFile, what: string, once: string) {
+    const key = `${once}\0${f.rel}`;
+    if (this.noted.has(key)) return;
+    this.noted.add(key);
+    this.log(
+      `the file of the secret ${maskSecrets(f.name, f.masks)} at ${maskSecrets(f.rel, f.masks)} ${what}`,
+    );
+  }
+
   /**
    * Removes the file at `path` only if it is still the one this process created or adopted (a plain file
-   * with the same identity); anything else is the agent's now and is left, and logged. Left open by
-   * Node, which has no `unlinkat` on a descriptor: an agent swapping the file between this check and the
-   * removal loses its own new file, in its own work folder.
+   * with the same identity). Checked to be something else: the agent's now, left and logged. The check or
+   * the removal failing (no access): kept for a new try, logged once. Left open by Node, which has no
+   * `unlinkat` on a descriptor: an agent swapping the file between this check and the removal loses its own
+   * new file, in its own work folder.
    */
-  private removeOwn(path: string, id: FileId) {
-    try {
-      this.hooks?.beforeRemove?.(path);
-      if (!stillOwn(path, id)) {
-        this.log(`left ${path}: it is no longer the secret file the runner wrote there`);
-        return;
-      }
-      unlinkSync(path);
-    } catch (err) {
-      if (errno(err) === "ENOENT") return;
-      this.log(`could not remove the secret file ${path} (${errno(err) || "error"}); trying again later`);
-      this.toRemove.set(path, id);
+  private removeOwn(path: string, f: OwnFile) {
+    this.hooks?.beforeRemove?.(path);
+    const now = holds(path, f.id);
+    if (now === "gone") return this.toRemove.delete(path);
+    if (now === "other") {
+      this.toRemove.delete(path);
+      return this.note(f, "is no longer the file the runner wrote there; it was left", "other");
     }
+    if (now === "own") {
+      try {
+        unlinkSync(path);
+        this.toRemove.delete(path);
+        return;
+      } catch (err) {
+        if (errno(err) === "ENOENT") return this.toRemove.delete(path);
+      }
+    }
+    if (!this.toRemove.has(path) && this.toRemove.size >= TO_REMOVE_MAX)
+      return this.note(f, `could not be removed, and ${TO_REMOVE_MAX} files already wait: it stays`, "full");
+    this.toRemove.set(path, f);
+    this.note(f, "could not be removed now; the runner tries again at each release", "retry");
   }
 
   /** The removals that failed before, tried again (at each release and each materialize). */
   private retryRemovals() {
-    for (const [path, id] of [...this.toRemove]) {
-      this.toRemove.delete(path);
-      if (!this.materialized.has(path)) this.removeOwn(path, id);
-    }
+    for (const [path, f] of [...this.toRemove]) if (!this.materialized.has(path)) this.removeOwn(path, f);
   }
 
   /** Paths of the agent's secret files (the agent neither reads nor writes them through the ops). */

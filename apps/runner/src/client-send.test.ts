@@ -760,3 +760,13 @@ test("ready() resolves at the welcome of the connection with the real hello, not
     globalThis.WebSocket = real;
   }
 });
+
+test("every line the runner logs is masked with the secrets it knows", () => {
+  const lines: string[] = [];
+  const { call } = fakeClient({
+    maskState: { kind: "known", byAgent: new Map([[agent.id, MASKS]]), all: MASKS },
+    opts: { log: (l: string) => lines.push(l) },
+  });
+  call("log", `could not open a session: declined for ${SECRET}`);
+  expect(lines).toEqual(["could not open a session: declined for [secret:S]"]);
+});

@@ -54,7 +54,7 @@ import {
   serialize,
 } from "./outbound";
 import { type CommandSandbox, defaultPolicyContext, openSandbox, type PolicyContext } from "./sandbox";
-import { SecretStore } from "./secrets";
+import { maskSecrets, SecretStore } from "./secrets";
 import { runningBundle, UpdateError, update } from "./update";
 
 export type ExitReason = "stopped" | "updated" | RejectReason;
@@ -245,8 +245,13 @@ export class RunnerClient {
     if (s.state === "off") this.log("sandbox turned off in this environment: commands run without isolation");
   }
 
+  /**
+   * Every line the runner logs goes out masked with the secrets it knows (a path, a command, a server or
+   * system message can carry a value); not knowing them yet, the line goes as the runner wrote it.
+   */
   private log(line: string) {
-    this.opts.log?.(line);
+    const state = this.maskState;
+    this.opts.log?.(state?.kind === "known" ? maskSecrets(line, state.all) : line);
   }
 
   get runnerId() {

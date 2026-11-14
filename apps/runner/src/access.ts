@@ -192,7 +192,8 @@ export function rejectedFolder(path: string, ctx: { runnerHome: string; workDir:
     if (system) return system;
     const home = resolve(ctx.runnerHome);
     if (inside(p, home) || inside(home, p)) return "runner";
-    if (inside(resolve(ctx.workDir), p)) return "contains_work_dir";
+    // The work folder by its written and its real path too (a work folder that is a link is its target).
+    if (inside(resolve(ctx.workDir), p) || inside(real(ctx.workDir), p)) return "contains_work_dir";
   }
   return null;
 }
@@ -217,12 +218,21 @@ export class Access {
     return this.get().access;
   }
 
-  /** The agent's folder in the work folder (created the first time). */
+  /**
+   * The agent's folder in the work folder (created the first time), by its real path: the one root every op
+   * starts from (the ops on files, the secret files, the sandbox's folders, the jobs). A work folder that is a
+   * link is the person's choice, and its target is the work folder; a link that leads nowhere fails here.
+   */
   agentRoot(agent: AgentRef | null): string {
     const ws = resolve(this.get().workDir);
     const root = agent ? join(ws, `${agent.handle}-${agent.id.slice(-8)}`) : ws;
-    mkdirSync(root, { recursive: true, mode: 0o700 });
-    return root;
+    try {
+      mkdirSync(root, { recursive: true, mode: 0o700 });
+      return realpathSync(root);
+    } catch (err) {
+      const code = err instanceof Error && "code" in err ? String(err.code) : "error";
+      throw new RunnerError("not_found", `The work folder is not there (${code})`);
+    }
   }
 
   /**
