@@ -66,7 +66,24 @@ export const RIGHT_TTL_MS = 5_000;
  * (SyncStatus false) and its connection closes (4412), like any other rejected update. A mutable object so a
  * test can lower it.
  */
-export const LIVE_LIMITS = { pendingUpdates: 256 };
+export const LIVE_LIMITS = {
+  pendingUpdates: 256,
+  /**
+   * The live document's encoded Yjs state (text, structure and the history Yjs keeps), checked before an
+   * update is applied and before the draft is saved. The body is capped at MAX_BODY characters (up to 1.5
+   * MB in UTF-8); the rest is room for the structure and for what a long session deletes.
+   */
+  stateBytes: 8 * 1024 * 1024,
+  /**
+   * What waits in one connection's incoming buffer (it fills while its updates wait for the page's queue):
+   * past either cap that connection closes. Four whole-page pastes, or minutes of typing.
+   */
+  inBytes: 4 * MAX_UPDATE,
+  inMessages: 512,
+  /** Sockets one person keeps open on one page (tabs) and in all: past either, the next one is rejected. */
+  connectionsPerPage: 8,
+  connectionsPerPerson: 32,
+};
 /** The waits before each new try of an automatic publish or draft save the database aborted (wiki.busy). */
 export const RETRY_MS = [1_000, 2_000, 4_000, 8_000, 16_000] as const;
 /** How long the gate waits for the server to answer an update it forwarded (it always does, or closes). */
@@ -84,6 +101,8 @@ const CLOSE = {
   // was rejected), so the client drops its local document and loads the page again from the server.
   tooLarge: [4413, "content-too-large"],
   outOfSync: [4412, "out-of-sync"],
+  // Too much at once from one person: incoming buffer full or too many sockets on the page.
+  tooMany: [4429, "too-many-messages"],
 } as const satisfies Record<string, readonly [number, string]>;
 
 export interface WikiLive {
@@ -159,6 +178,13 @@ class DraftRejected extends Error {
 }
 
 const b64 = (u: Uint8Array) => Buffer.from(u).toString("base64");
+
+/** Whether a shared type holds anything not deleted (Yjs keeps deleted items as small tombstones). */
+function liveContent(type: { _start: Y.Item | null; _map: Map<string, Y.Item> }): boolean {
+  for (let item = type._start; item; item = item.right) if (!item.deleted) return true;
+  for (const item of type._map.values()) if (!item.deleted) return true;
+  return false;
+}
 const unb64 = (s: string) => new Uint8Array(Buffer.from(s, "base64"));
 
 // ---- The wire format of a Hocuspocus message: varString(document key), varUint(type), then the payload.
@@ -299,6 +325,9 @@ export class Peer {
   readonly docs = new Map<string, { slug: string; readOnly: boolean }>();
   private readonly out: Uint8Array[] = [];
   private readonly in: Uint8Array[] = [];
+  /** Messages received and not yet delivered (waiting in `in` or in the batch being delivered). */
+  private inBytes = 0;
+  private inCount = 0;
   private pumping = false;
   closed = false;
   /** When this connection's right was last read from the database (ms, by the injected clock). */
@@ -346,6 +375,12 @@ export class Peer {
 
   receive(bytes: Uint8Array) {
     if (this.closed) return;
+    // A client that sends faster than its updates get through the page's queue closes here, before its
+    // buffer holds more than LIVE_LIMITS allows.
+    if (this.inCount + 1 > LIVE_LIMITS.inMessages || this.inBytes + bytes.byteLength > LIVE_LIMITS.inBytes)
+      return this.close(CLOSE.tooMany);
+    this.inCount++;
+    this.inBytes += bytes.byteLength;
     this.in.push(bytes);
     void this.pump();
   }
@@ -366,6 +401,8 @@ export class Peer {
     this.closed = true;
     this.out.length = 0;
     this.in.length = 0;
+    this.inBytes = 0;
+    this.inCount = 0;
     for (const release of [...this.acks.values()]) release();
     this.acks.clear();
   }
@@ -395,6 +432,8 @@ export class Peer {
         for (const bytes of ins) {
           if (this.closed) return;
           await this.hooks.deliver(this, bytes);
+          this.inCount--;
+          this.inBytes -= bytes.byteLength;
         }
       }
     } catch (err) {
@@ -461,7 +500,7 @@ export function createWikiCollab(
 
   // ---- Who may stay connected, and who may have their edits saved.
 
-  /** Access reads, authentication, loads and upgrades: a stop drains them and refuses new work. */
+  /** Access reads, authentication, loads and upgrades: a stop drains them and rejects new work. */
   const reading = new Set<Promise<unknown>>();
   let closing = false;
 
@@ -562,8 +601,11 @@ export function createWikiCollab(
       if (!page || page.deletedAt) throw new DraftRejected("gone");
       await extra?.(tx, page);
       if ((await textOf(s, doc)).length > MAX_BODY) throw new DraftRejected("too_large");
+      const state = Y.encodeStateAsUpdate(doc);
+      if (state.byteLength > LIVE_LIMITS.stateBytes || foreignContent(doc))
+        throw new DraftRejected("too_large");
       const values = {
-        state: b64(Y.encodeStateAsUpdate(doc)),
+        state: b64(state),
         parentVersion: s.parentVersion,
         dirty: s.dirty,
         editors: s.editors,
@@ -575,6 +617,41 @@ export function createWikiCollab(
         .values({ pageId: s.pageId, ...values })
         .onConflictDoUpdate({ target: wikiPageDocs.pageId, set: values });
     });
+  }
+
+  /**
+   * A saved state from before the live limits (content outside the editor's fragment, or past the state's
+   * cap) opens trimmed: the other shared types are emptied, which keeps the fragment's history (a tab that
+   * reconnects with it merges as usual); if that still passes the cap, the draft's text starts a new
+   * history. The draft's text stays the same either way.
+   */
+  async function loadableState(s: Session, state: Uint8Array): Promise<Uint8Array> {
+    const doc = new Y.Doc();
+    try {
+      Y.applyUpdate(doc, state);
+      if (state.byteLength <= LIVE_LIMITS.stateBytes && !foreignContent(doc)) return state;
+      doc.transact((tr) => {
+        for (const [key, type] of doc.share) {
+          if (key === YFRAGMENT) continue;
+          for (let item = type._start; item; item = item.right) if (!item.deleted) item.delete(tr);
+          for (const item of type._map.values()) if (!item.deleted) item.delete(tr);
+        }
+      });
+      let out = Y.encodeStateAsUpdate(doc);
+      if (out.byteLength > LIVE_LIMITS.stateBytes) {
+        const fresh = (await markdown()).toYDoc(await textOf(s, doc));
+        out = Y.encodeStateAsUpdate(fresh);
+        fresh.destroy();
+      }
+      log.warn("wiki.draft_state_trimmed", {
+        pageId: s.pageId,
+        bytes: state.byteLength,
+        now: out.byteLength,
+      });
+      return out;
+    } finally {
+      doc.destroy();
+    }
   }
 
   /** A draft that can't be saved: the session closes without publishing and its memory is let go. */
@@ -811,6 +888,15 @@ export function createWikiCollab(
       const page = await pageBySlug(deps.db, { workspaceId, userId: context.userId }, slug).catch(() => null);
       if (closing || !page) throw new Error("not_found");
       if (page.locked && !can(m.role, "configure")) connectionConfig.readOnly = true;
+      // One person's sockets on one page (tabs): past the cap the newest one closes.
+      const open = [...peers].filter(
+        (o) =>
+          o !== context.peer && !o.closed && o.data.userId === context.userId && o.docs.has(documentName),
+      ).length;
+      if (open >= LIVE_LIMITS.connectionsPerPage) {
+        context.peer.close(CLOSE.tooMany);
+        throw new Error("too_many_connections");
+      }
       context.peer.docs.set(documentName, { slug, readOnly: connectionConfig.readOnly });
     }),
     onLoadDocument: track(async ({ document, documentName }) => {
@@ -834,7 +920,6 @@ export function createWikiCollab(
           closed: false,
         };
         if (saved) {
-          Y.applyUpdate(document, unb64(saved.state));
           Object.assign(s, {
             parentVersion: saved.parentVersion,
             baseBody: await versionBody(page.id, saved.parentVersion, page),
@@ -842,6 +927,7 @@ export function createWikiCollab(
             editors: saved.editors,
             editedAt: saved.editedAt,
           });
+          Y.applyUpdate(document, await loadableState(s, unb64(saved.state)));
           await reconcile(s, document, page);
         } else {
           // The page's first session: seed it from the markdown and save it at once, so whoever reconnects
@@ -923,6 +1009,10 @@ export function createWikiCollab(
     if (bytes.length === 1) return conn.handleMessage(bytes);
     const head = parseHead(bytes);
     if (!head) return p.close(CLOSE.malformed);
+    // Only the plain document name is spoken here: a key with a suffix (`name\0…`, Hocuspocus's multiplexing,
+    // which the editor doesn't use) would be answered under the plain name, and the wait for that answer
+    // would hold the page's queue.
+    if (head.rawKey !== head.documentName) return p.close(CLOSE.malformed);
     const doc = p.docs.get(head.documentName);
     if (!head.update) return conn.handleMessage(bytes);
     // An update for a document this socket hasn't authenticated to is dropped: Hocuspocus would queue it and
@@ -950,7 +1040,8 @@ export function createWikiCollab(
       }
       // Rejected: the client's document now differs from the server's and every later update of it depends
       // on this one, so the connection closes after the rejection instead of acknowledging what can't apply.
-      if (size > MAX_BODY) {
+      // Over a limit: the page's length, the encoded state, or content outside the editor's fragment.
+      if (size === "too_large" || size > MAX_BODY) {
         p.sendNow(syncStatus(head.rawKey, false));
         return p.close(CLOSE.tooLarge);
       }
@@ -977,6 +1068,10 @@ export function createWikiCollab(
     });
   }
 
+  /** Whether a shared type other than the editor's fragment holds anything not deleted. */
+  const foreignContent = (doc: Y.Doc) =>
+    [...doc.share].some(([key, type]) => key !== YFRAGMENT && liveContent(type));
+
   /** Whether the document holds updates Yjs couldn't apply yet (they miss what they depend on). */
   const hasPending = (doc: Y.Doc) => doc.store.pendingStructs !== null || doc.store.pendingDs !== null;
 
@@ -997,17 +1092,21 @@ export function createWikiCollab(
     });
   }
 
-  /** The page's length once `update` is applied to a copy of the document; null for an invalid update. */
+  /**
+   * The page's length once `update` is applied to a copy of the document; null for an invalid update,
+   * "too_large" past the state's cap or with content in a shared type other than the editor's fragment
+   * (which the page's text doesn't count, so it would grow the saved state unseen).
+   */
   async function sizeAfter(
     s: Session,
     document: Y.Doc,
     update: Uint8Array,
-  ): Promise<number | "out_of_sync" | null> {
+  ): Promise<number | "out_of_sync" | "too_large" | null> {
     const probe = new Y.Doc();
     try {
       Y.applyUpdate(probe, Y.encodeStateAsUpdate(document));
       Y.applyUpdate(probe, update);
-      // A new item integrated under a deleted parent disappears without becoming pending. Refuse it
+      // A new item integrated under a deleted parent disappears without becoming pending. Reject it
       // before Hocuspocus can confirm it, excluding deletions the update itself intentionally carries.
       const decoded = Y.decodeUpdate(update);
       for (const item of decoded.structs) {
@@ -1018,7 +1117,11 @@ export function createWikiCollab(
         const id = Y.createID(item.id.client, clock);
         if (Y.getItem(probe.store, id).deleted && !Y.isDeleted(decoded.ds, id)) return "out_of_sync";
       }
-      return (await textOf(s, probe)).length;
+      if (foreignContent(probe) || Y.encodeStateAsUpdate(probe).byteLength > LIVE_LIMITS.stateBytes)
+        return "too_large";
+      const text = await textOf(s, probe);
+      // A NUL can't be published (Postgres text can't hold it): an update that brings one is invalid.
+      return text.includes("\0") ? null : text.length;
     } catch {
       return null;
     } finally {
@@ -1220,9 +1323,15 @@ export function createWikiCollab(
     },
   };
 
+  /** The person's open sockets, all pages. */
+  const socketsOf = (userId: string) =>
+    [...peers].filter((p) => !p.closed && p.data.userId === userId).length;
+
   const socket = {
     open(ws: Bun.ServerWebSocket<CollabSocketData>) {
       if (closing) return ws.close(...CLOSE.revoked);
+      // Upgrades checked at the same time can all pass the cap at the upgrade; the extra ones close here.
+      if (socketsOf(ws.data.userId) >= LIVE_LIMITS.connectionsPerPerson) return ws.close(...CLOSE.tooMany);
       const peer = new Peer(ws.data, ws, { verdict, deliver });
       ws.data.peer = peer;
       peers.add(peer);
@@ -1248,9 +1357,17 @@ export function createWikiCollab(
     },
   };
 
-  const upgrade = (req: Request, origins: string[]) =>
-    closing
-      ? Promise.resolve({ ok: false as const, response: new Response("Server is stopping", { status: 503 }) })
-      : track(() => checkCollabUpgrade(getDeps(), req, origins, () => closing))();
+  const upgrade = async (req: Request, origins: string[]) => {
+    if (closing) return { ok: false as const, response: new Response("Server is stopping", { status: 503 }) };
+    const checked = await track(() => checkCollabUpgrade(getDeps(), req, origins, () => closing))();
+    if (checked.ok && socketsOf(checked.data.userId) >= LIVE_LIMITS.connectionsPerPerson)
+      return {
+        ok: false as const,
+        response: Response.json(errorBody("wiki.too_many_connections", "Too many open wiki connections"), {
+          status: 429,
+        }),
+      };
+    return checked;
+  };
   return { live, socket, upgrade };
 }

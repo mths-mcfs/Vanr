@@ -24,6 +24,7 @@ import {
   MAX_BODY,
   memberOnly,
   pageLock,
+  rejectNul,
   savePage,
   type WikiRow,
   writeTx,
@@ -189,6 +190,7 @@ export async function createComment(
   // Asking an agent needs the DM and the runtime (the chat and runtime slices): rejected before any read
   // or write, so a comment never exists without the request it promised.
   if (input.agentId !== undefined) throw agentNotAvailable();
+  rejectNul(input);
   const author: ActorRef = { type: "person", id: me.userId };
   const at = deps.now();
   const row = await writeTx(deps.db, async (tx) => {
@@ -302,6 +304,8 @@ export async function createProposal(
   },
 ): Promise<{ row: AnnotationRow; warnings: string[] }> {
   const { page } = input;
+  // The agent tool's input reaches here without the routes' border check.
+  rejectNul([input.edits, input.note]);
   if (input.edits.length === 0 || input.edits.length > MAX_HUNKS)
     throw new HttpError(400, "wiki.proposal.invalid", `A proposal has from 1 to ${MAX_HUNKS} changes`, {
       max: MAX_HUNKS,

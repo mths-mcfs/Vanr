@@ -9,11 +9,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { and, eq } from "drizzle-orm";
+import { strToU8, zipSync } from "fflate";
 import { joinWorkspace } from "../src/members";
 import { searchAs } from "../src/routes/search";
 import type { RunningServer } from "../src/server";
 import { createPage, pageBySlug } from "../src/wiki";
 import { createProposal } from "../src/wiki-annotations";
+import { MAX_LINKS } from "../src/wiki-links";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
 import { memberOf, type Person, seedChannel, seedWorkspace } from "./seed";
 import { apiError, wikiApi } from "./wiki-api";
@@ -437,5 +439,92 @@ describe("mentions and the search with an answer", () => {
       .set({ access: { kind: "private", principals: [`user:${ana.user.id}`] } })
       .where(eq(schema.knowledgePages.id, row.id));
     expect((await apiError(beto.api.wiki.getWikiPage(workspaceId, row.slug))).status).toBe(404);
+  });
+});
+
+describe("the base's limits on this layer's paths", () => {
+  test("the routes of this layer go through the wiki's border check: a NUL character is a 400 before anything is written", async () => {
+    const { workspaceId, ana } = await team();
+    const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Border", body: "text" });
+    for (const call of [
+      () => ana.api.wiki.createWikiPageComment(workspaceId, page.slug, { body: "bad \u0000 text" }),
+      () =>
+        ana.api.wiki.createWikiPageComment(workspaceId, page.slug, {
+          body: "ok",
+          anchor: { quote: "te\u0000xt", prefix: "", suffix: "" },
+        }),
+      () =>
+        ana.api.wiki.setWikiPageAccess(workspaceId, page.slug, {
+          kind: "private",
+          userIds: ["u\u0000"],
+          agentIds: [],
+        }),
+      () => ana.api.wiki.decideWikiAnnotation(workspaceId, "ann_\u0000", [{ hunkId: "h1", accept: true }]),
+    ]) {
+      const err = await apiError(call());
+      expect([err.status, err.code]).toEqual([400, "wiki.invalid_text"]);
+    }
+    const row = await rowOf(workspaceId, page.slug);
+    expect(
+      await db().select().from(schema.pageAnnotations).where(eq(schema.pageAnnotations.pageId, row.id)),
+    ).toEqual([]);
+    expect(row.access).toBeNull();
+    // The domain function the agent tool will call checks it too.
+    expect(
+      createProposal(server.deps, {
+        page: row,
+        author: { type: "agent", id: "agt_lia" },
+        parentVersion: 1,
+        edits: [{ oldStr: "text", newStr: "te\u0000xt" }],
+        note: "",
+      }),
+    ).rejects.toMatchObject({ code: "wiki.invalid_text" });
+  });
+
+  test("the all-or-nothing vault import skips only notes over pages the importer reads", async () => {
+    const { workspaceId, ana, beto } = await team();
+    const hidden = await ana.api.wiki.createWikiPage(workspaceId, {
+      title: "Payroll",
+      folder: "HR",
+      body: "secret",
+    });
+    await ana.api.wiki.setWikiPageAccess(workspaceId, hidden.slug, onlyMe);
+    const zip = zipSync({ "HR/Payroll.md": strToU8("someone's note"), "Readme.md": strToU8("hi") });
+    // Beto doesn't read the restricted page: his note goes in, as for a title nobody used.
+    const asBeto = await beto.api.wiki.importWikiVault(workspaceId, {
+      file: new Blob([zip]),
+      fileName: "v.zip",
+    });
+    expect([asBeto.created, asBeto.skipped]).toEqual([2, 0]);
+    // Ana reads it: her note with the same title and folder is skipped (and so is Beto's, now there).
+    const asAna = await ana.api.wiki.importWikiVault(workspaceId, {
+      file: new Blob([zip]),
+      fileName: "v.zip",
+    });
+    expect([asAna.created, asAna.skipped]).toEqual([0, 2]);
+    // The restricted page itself is untouched.
+    const restricted = (await ana.api.wiki.listWikiPages(workspaceId)).find((p) => p.restricted);
+    expect((await rowOf(workspaceId, String(restricted?.slug))).body).toBe("secret");
+  });
+
+  test("accepting a proposal is held to the links ceiling: rejected whole, the proposal stays pending", async () => {
+    const { workspaceId, ana } = await team();
+    const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Links", body: "anchor" });
+    const row = await rowOf(workspaceId, page.slug);
+    const many = Array.from({ length: MAX_LINKS + 1 }, (_, i) => `[[p${i}]]`).join(" ");
+    const { row: proposal } = await createProposal(server.deps, {
+      page: row,
+      author: { type: "agent", id: "agt_lia", actingFor: ana.user.id },
+      parentVersion: 1,
+      edits: [{ oldStr: "anchor", newStr: many }],
+      note: "",
+    });
+    const err = await apiError(
+      ana.api.wiki.decideWikiAnnotation(workspaceId, proposal.id, [{ hunkId: "h1", accept: true }]),
+    );
+    expect([err.status, err.code]).toEqual([400, "wiki.too_many_links"]);
+    const [after] = (await ana.api.wiki.listWikiPageAnnotations(workspaceId, page.slug)).proposals;
+    expect([after?.status, after?.hunks[0]?.status]).toEqual(["pending", "pending"]);
+    expect((await rowOf(workspaceId, page.slug)).body).toBe("anchor");
   });
 });

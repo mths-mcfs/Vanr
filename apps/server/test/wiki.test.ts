@@ -9,9 +9,10 @@ import { and, eq, sql } from "drizzle-orm";
 import { strToU8, unzipSync, zipSync } from "fflate";
 import * as Y from "yjs";
 import type { RunningServer } from "../src/server";
-import { MAX_BODY, pageLock, purgeWikiTrash, savePage } from "../src/wiki";
+import { MAX_BODY, pageBySlug, pageLock, purgeWikiTrash, savePage } from "../src/wiki";
+import { MAX_LINKS } from "../src/wiki-links";
 import { wikiMarkdown } from "../src/wiki-md";
-import { VAULT_LIMITS } from "../src/wiki-vault";
+import { exportVault, VAULT_LIMITS } from "../src/wiki-vault";
 import { Browser, holdNextIndexWrite, SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
 import { NO_POSTGRES, TEST_POSTGRES_URL, testDatabaseUrl } from "./postgres";
 import { memberOf, type Person, seedWorkspace } from "./seed";
@@ -924,6 +925,7 @@ describe("guards without a test in the origin", () => {
       ["GET", "/wiki/graph"],
       ["GET", "/wiki/reads"],
       ["POST", "/wiki/import"],
+      ["POST", "/wiki/import/vault"],
       ["GET", "/wiki/export"],
       ["GET", "/wiki/attachments"],
     ];
@@ -1076,6 +1078,203 @@ function holdNextTransaction(srv: RunningServer) {
   }) as typeof original;
   return { started, release };
 }
+
+describe("limits at the border", () => {
+  const status = async (p: Promise<unknown>) => {
+    const e = await apiError(p);
+    return [e.status, e.code];
+  };
+  const links = (count: number) => Array.from({ length: count }, (_, i) => `[[Target ${i}]]`).join(" ");
+
+  test("a page past MAX_LINKS links is rejected with 400 before anything is written; one at the cap saves", async () => {
+    const { workspaceId, ana } = await team();
+    expect(
+      await status(
+        ana.api.wiki.createWikiPage(workspaceId, { title: "Too linked", body: links(MAX_LINKS + 1) }),
+      ),
+    ).toEqual([400, "wiki.too_many_links"]);
+    expect(await ana.api.wiki.listWikiPages(workspaceId)).toHaveLength(0);
+    const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Linked", body: links(MAX_LINKS) });
+    const row = await pageBySlug(server.deps.db, { workspaceId, system: true }, page.slug);
+    const [{ count }] = (await server.deps.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(schema.pageLinks)
+      .where(eq(schema.pageLinks.sourceId, row.id))) as [{ count: number }];
+    expect(count).toBe(MAX_LINKS);
+    expect(
+      await status(
+        ana.api.wiki.replaceWikiPage(workspaceId, page.slug, {
+          body: links(MAX_LINKS + 1),
+          parentVersion: 1,
+        }),
+      ),
+    ).toEqual([400, "wiki.too_many_links"]);
+    expect((await ana.api.wiki.getWikiPage(workspaceId, page.slug)).version).toBe(1);
+  });
+
+  test("a NUL character is rejected with 400 on every way in: body, title, folder, properties, path, query, import", async () => {
+    const { workspaceId, ana } = await team();
+    const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Clean", body: "x" });
+    const NUL = "a\u0000b";
+    const rejected = [
+      () => ana.api.wiki.createWikiPage(workspaceId, { title: NUL }),
+      () => ana.api.wiki.createWikiPage(workspaceId, { title: "T", body: NUL }),
+      () => ana.api.wiki.createWikiPage(workspaceId, { title: "T", folder: NUL }),
+      () => ana.api.wiki.createWikiPage(workspaceId, { title: "T", tags: [NUL] }),
+      () => ana.api.wiki.replaceWikiPage(workspaceId, page.slug, { body: NUL, parentVersion: 1 }),
+      () => ana.api.wiki.updateWikiPageMeta(workspaceId, page.slug, { parentVersion: 1, altTitles: [NUL] }),
+      () => ana.api.wiki.renameWikiPage(workspaceId, page.slug, NUL),
+      () => ana.api.wiki.moveWikiPage(workspaceId, page.slug, NUL),
+      () => ana.api.wiki.setWikiProps(workspaceId, [{ id: "prop_a", name: NUL, type: "text" }], 0),
+      () => ana.api.wiki.importWiki(workspaceId, { files: [{ path: "Note.md", text: NUL }] }),
+      () => ana.api.wiki.importWiki(workspaceId, { files: [{ path: `${NUL}.md`, text: "x" }] }),
+      () => ana.api.wiki.getWikiPage(workspaceId, NUL),
+      () => ana.api.wiki.getWikiSearch(workspaceId, NUL),
+      () =>
+        ana.api.wiki.importWikiVault(workspaceId, {
+          file: new Blob([zipSync({ "Note.md": strToU8(NUL) })]),
+          fileName: "n.zip",
+        }),
+      () =>
+        ana.api.wiki.importWikiVault(workspaceId, {
+          file: new Blob([zipSync({ "Note.md": strToU8("x") })]),
+          fileName: "f.zip",
+          folder: NUL,
+        }),
+    ];
+    for (const r of rejected) expect(await status(r())).toEqual([400, "wiki.invalid_text"]);
+    expect((await ana.api.wiki.listWikiPages(workspaceId)).map((p) => p.title)).toEqual(["Clean"]);
+    expect((await ana.api.wiki.getWikiPage(workspaceId, page.slug)).version).toBe(1);
+  });
+
+  test("a vault file whose name has a NUL is rejected with 400 for the whole vault", async () => {
+    const { workspaceId, ana } = await team();
+    const zip = zipSync({ "Good.md": strToU8("good"), "evil\u0000.png": new Uint8Array([1, 2, 3]) });
+    expect(
+      await status(ana.api.wiki.importWikiVault(workspaceId, { file: new Blob([zip]), fileName: "z.zip" })),
+    ).toEqual([400, "wiki.invalid_text"]);
+    expect(await ana.api.wiki.listWikiPages(workspaceId)).toHaveLength(0);
+  });
+
+  test("an import is all or nothing: a note rejected after good ones leaves none of them", async () => {
+    const { workspaceId, ana } = await team();
+    const files = [
+      { path: "Good.md", text: "# Good" },
+      { path: "Also good.md", text: "fine" },
+      { path: "Bad.md", text: "hello\u0000world" },
+    ];
+    expect(await status(ana.api.wiki.importWiki(workspaceId, { files }))).toEqual([400, "wiki.invalid_text"]);
+    const linked = [...files.slice(0, 2), { path: "Linked.md", text: links(MAX_LINKS + 1) }];
+    expect(await status(ana.api.wiki.importWiki(workspaceId, { files: linked }))).toEqual([
+      400,
+      "wiki.too_many_links",
+    ]);
+    expect(await ana.api.wiki.listWikiPages(workspaceId)).toHaveLength(0);
+    expect((await ana.api.wiki.importWiki(workspaceId, { files: files.slice(0, 2) })).created).toBe(2);
+  });
+
+  test("an import that fails while writing its third note leaves none of them", async () => {
+    const { workspaceId, ana } = await team();
+    const { db } = server.deps;
+    const original = db.transaction.bind(db);
+    let pages = 0;
+    db.transaction = ((fn: Parameters<typeof original>[0], ...rest: unknown[]) =>
+      original(
+        async (tx) => {
+          const insert = tx.insert.bind(tx);
+          tx.insert = ((table: Parameters<typeof insert>[0]) => {
+            if (table === schema.knowledgePages && ++pages === 3) throw new Error("injected failure");
+            return insert(table);
+          }) as typeof insert;
+          return fn(tx);
+        },
+        ...(rest as []),
+      )) as typeof original;
+    try {
+      const files = ["One", "Two", "Three"].map((t) => ({ path: `${t}.md`, text: t }));
+      expect((await apiError(ana.api.wiki.importWiki(workspaceId, { files }))).status).toBe(500);
+    } finally {
+      db.transaction = original;
+    }
+    expect(await ana.api.wiki.listWikiPages(workspaceId)).toHaveLength(0);
+  });
+
+  test("an import respects the property route's caps across the whole folder; the excess is reported", async () => {
+    const { workspaceId, ana } = await team();
+    const note = (from: number) => {
+      const keys = Array.from({ length: 200 }, (_, i) => `p${from + i}: x`).join("\n");
+      return `---\n${keys}\n---\nbody`;
+    };
+    const r = await ana.api.wiki.importWiki(workspaceId, {
+      files: [
+        { path: "One.md", text: note(0) },
+        { path: "Two.md", text: note(1000) },
+      ],
+    });
+    expect(r.created).toBe(2);
+    expect(r.failed).toEqual([
+      { path: "One.md", error: "wiki.import.too_many_props" },
+      { path: "Two.md", error: "wiki.import.too_many_props" },
+    ]);
+    expect((await ana.api.wiki.listWikiProps(workspaceId)).defs).toHaveLength(100);
+  });
+
+  test("numbers past 32 bits are rejected with 400 at the border: version, diff range, parent version", async () => {
+    const { workspaceId, ana } = await team();
+    const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Numbers", body: "x" });
+    const big = 2 ** 31;
+    const url = `/api/v1/workspaces/${workspaceId}/wiki/pages/${page.slug}`;
+    expect((await ana.browser.json(`${url}/versions/${big}`, "GET")).status).toBe(400);
+    expect((await ana.browser.json(`${url}/diff?from=${big}`, "GET")).status).toBe(400);
+    expect((await ana.browser.json(url, "PUT", { body: "y", parentVersion: big })).status).toBe(400);
+    expect((await ana.browser.json(`${url}/versions/1/restore`, "POST", { parentVersion: big })).status).toBe(
+      400,
+    );
+    expect(
+      (
+        await ana.browser.json(`/api/v1/workspaces/${workspaceId}/wiki/props`, "PUT", {
+          defs: [],
+          parentVersion: big,
+        })
+      ).status,
+    ).toBe(400);
+  });
+
+  test("a JSON body past the wiki's cap is rejected with 413 before it is parsed", async () => {
+    const { workspaceId, ana } = await team();
+    const text = "x".repeat(400_000);
+    const files = Array.from({ length: 90 }, (_, i) => ({ path: `N${i}.md`, text }));
+    expect(await status(ana.api.wiki.importWiki(workspaceId, { files }))).toEqual([413, "payload_too_large"]);
+    expect(await ana.api.wiki.listWikiPages(workspaceId)).toHaveLength(0);
+  });
+
+  test("the export streams: an attachment is read only when the reader gets to it", async () => {
+    const { workspaceId, ana } = await team();
+    const png = new Uint8Array(Buffer.from(VAULT_ATTACHMENTS[0]?.base64 ?? "", "base64"));
+    await ana.api.wiki.importWikiVault(workspaceId, {
+      file: new Blob([zipSync({ "Streamed.md": strToU8("![[photo.png]]"), "photo.png": png })]),
+      fileName: "s.zip",
+    });
+    const { blobs } = server.deps;
+    const get = blobs.get.bind(blobs);
+    let reads = 0;
+    blobs.get = ((...args: Parameters<typeof get>) => {
+      reads++;
+      return get(...args);
+    }) as typeof get;
+    try {
+      const stream = await exportVault(server.deps, { workspaceId });
+      expect(reads).toBe(0);
+      const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+      expect(reads).toBe(1);
+      const files = unzipSync(bytes);
+      expect(new TextDecoder().decode(files["wiki/Streamed.md"])).toContain("photo.png");
+      expect(files["wiki/photo.png"]).toEqual(png);
+    } finally {
+      blobs.get = get;
+    }
+  });
+});
 
 describe("a write decides on the page it reads locked in its own transaction", () => {
   test("every member write that read the page before a lock and commits after it is rejected with wiki.page_locked", async () => {
