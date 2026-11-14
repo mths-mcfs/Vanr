@@ -1558,7 +1558,10 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki saves on Postgres"), () => 
         // Release the lock once the write waits for the page's row lock (or already ended without one).
         await Promise.race([writing, waitingForLock(pg, "the write never waited for the page's lock")]);
         hold.release();
-        await locking;
+        // The lock answers with the page as Ana reads it now: 404 when the unlocked run let the trash in.
+        await locking.catch((e: { status?: number }) => {
+          if (e.status !== 404) throw e;
+        });
         outcomes.push(`${what} ${await writing}`);
         const now = await ana.api.wiki.getWikiPage(workspaceId, page.slug).catch(() => null);
         states.push([what, now?.locked, now?.body, now?.folder]);
