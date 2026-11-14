@@ -116,6 +116,32 @@ jobs:
       - run: bun test apps/server/test/bases-postgres.test.ts --test-name-pattern "on Postgres"
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # The same forced interleavings with the one lock order of the bases swapped for a double in the test
+      # (VANR_TEST_BASES_LOCKS): each write locks only its own database, and the two deletes must FAIL for the
+      # deadlock (one side answers base.busy); with no database lock at all, the three view writes must FAIL
+      # for the race (the cap passed, the last view taken, one place shared). Nothing else counts.
+      - name: The bases lock tests fail without the one order and without the view locks
+        run: |
+          set +e
+          own=$(VANR_TEST_BASES_LOCKS=own bun test apps/server/test/bases-postgres.test.ts --test-name-pattern "forced interleaving: deleting" 2>&1)
+          own_status=$?
+          none=$(VANR_TEST_BASES_LOCKS=none bun test apps/server/test/bases-postgres.test.ts --test-name-pattern "forced interleaving: views" 2>&1)
+          none_status=$?
+          set -e
+          echo "$own"
+          echo "$none"
+          if [ "$own_status" -eq 0 ] || [ "$none_status" -eq 0 ]; then
+            echo "::error::a bases lock test passed with its lock turned off"
+            exit 1
+          fi
+          test "$(grep -c 'Expected to not contain: "base.busy"' <<< "$own")" -eq 2
+          grep -q ' 2 fail' <<< "$own"
+          grep -q 'Expected: "base.too_many_views"' <<< "$none"
+          grep -q 'Expected: "base.last_view"' <<< "$none"
+          grep -q 'Expected: 4' <<< "$none"
+          grep -q ' 3 fail' <<< "$none"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
 
   sandbox:
     # The runner's real sandbox (bubblewrap + socat): the attack tests of the isolation of the agent's

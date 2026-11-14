@@ -22,6 +22,7 @@ import {
   importRows,
   resumeRecalcs,
   runRecalc,
+  updateView,
 } from "../src/bases/write";
 import type { AppDeps } from "../src/context";
 import { backfillSearch } from "../src/search-index";
@@ -1602,6 +1603,35 @@ function heldViews(deps: AppDeps, parties: number): AppDeps {
   return { ...deps, db };
 }
 
+/** The server's dependencies with each transaction held at its start until `release` (the check before it ran). */
+function heldTransaction(deps: AppDeps) {
+  let waiting = 0;
+  let release = () => {};
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  const db = new Proxy(deps.db, {
+    get(target, key) {
+      if (key === "transaction")
+        return async (...args: Parameters<typeof target.transaction>) => {
+          waiting++;
+          await gate;
+          return target.transaction(...args);
+        };
+      const value = Reflect.get(target, key);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return {
+    deps: { ...deps, db },
+    release: () => release(),
+    /** Resolves once `n` transactions wait at the gate. */
+    async entered(n: number) {
+      while (waiting < n) await new Promise((r) => setImmediate(r));
+    },
+  };
+}
+
 describe("bases: caps and checks at the same time", () => {
   /** Extra views written as the view route writes them, to start next to the cap without 49 requests. */
   async function addViews(workspaceId: string, databaseId: string, tableId: string, n: number) {
@@ -1767,6 +1797,55 @@ describe("bases: caps and checks at the same time", () => {
       expect(await server.deps.db.select().from(dbViews).where(eq(dbViews.databaseId, cap.id))).toHaveLength(
         50,
       );
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a view's settings are checked against the schema there at the commit: a field removed meanwhile rejects it",
+    async () => {
+      const { workspaceId, ana } = await team();
+      const base = await ana.api.create(workspaceId, { title: "Stale" });
+      const first = base.tables[0];
+      if (!first) throw new Error("no table");
+      const withGone = await ana.api.saveSchema(workspaceId, base.id, first.id, {
+        parentVersion: first.schemaVersion,
+        defs: [...first.defs, { id: "gone", name: "Gone", type: "text" }],
+      });
+      const [baseRow] = await server.deps.db
+        .select()
+        .from(schema.dbDatabases)
+        .where(eq(schema.dbDatabases.id, base.id));
+      const [tableRow] = await server.deps.db
+        .select()
+        .from(schema.dbTables)
+        .where(eq(schema.dbTables.id, first.id));
+      const [viewRow] = await server.deps.db
+        .select()
+        .from(schema.dbViews)
+        .where(eq(schema.dbViews.databaseId, base.id));
+      if (!baseRow || !tableRow || !viewRow) throw new Error("no rows");
+      const filter = { prop: "gone", op: "eq", value: "x" };
+      // each write is held at the start of its transaction (after the check outside it) while the field goes
+      const held = heldTransaction(server.deps);
+      const creating = createView(held.deps, baseRow, tableRow, {
+        name: "stale",
+        type: "table",
+        config: { filter },
+      });
+      const editing = updateView(held.deps, baseRow, viewRow, tableRow, { config: { filter } });
+      await held.entered(2);
+      await ana.api.saveSchema(workspaceId, base.id, first.id, {
+        parentVersion: withGone.schemaVersion,
+        defs: withGone.defs.filter((d) => d.id !== "gone"),
+      });
+      held.release();
+      for (const write of [creating, editing])
+        expect(await apiError(write)).toEqual({ status: 400, code: "base.bad_filter" });
+      const after = await ana.api.get(workspaceId, base.id);
+      expect(after.views).toHaveLength(1);
+      expect(after.views[0]?.config).toEqual({});
+      expect((await ana.api.query(workspaceId, base.id, first.id, { viewId: viewRow.id })).total).toBe(0);
     },
     SERVER_TEST_MS,
   );

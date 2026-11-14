@@ -32,6 +32,7 @@ import {
 } from "@vanr/engine/props";
 import { and, asc, count, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { AppDeps } from "../context";
+import { pgCode } from "../db-errors";
 import { conflict, HttpError, notFound } from "../http";
 import { log } from "../logger";
 import { reindexRows, unindexMany } from "../search-index";
@@ -65,6 +66,117 @@ export const newOptionId = () => `opt_${randomId(8)}`;
 
 const bad = (code: string, message: string, params?: Record<string, unknown>) =>
   new HttpError(400, code, message, params);
+
+// ---------- locks ----------
+//
+// One lock order for every write of the bases: the rows of the databases the write reaches, in ascending id
+// (lockDatabases); then their sources (db_tables); then the rows, the views and the search chunks under
+// them. A write that can reach more than one database (deleting a source other databases show; any write on
+// a view, which a delete of the view's source also takes by cascade) finds the whole set first and locks it
+// here, before any statement that takes a row of another database, directly or by cascade.
+
+/** Locks the databases' rows in ascending id; returns the ones that still exist. */
+async function lockDatabases(tx: Tx, ids: readonly string[]): Promise<Set<string>> {
+  const found = new Set<string>();
+  for (const id of [...new Set(ids)].sort()) {
+    const [row] = await tx
+      .select({ id: dbDatabases.id })
+      .from(dbDatabases)
+      .where(eq(dbDatabases.id, id))
+      .for("update");
+    if (row) found.add(row.id);
+  }
+  return found;
+}
+
+/** A point inside a write where the Postgres tests hold the transaction, to force an interleaving. */
+export type LockPoint = "view:counted" | "view:moving" | "view:deleting" | "base:deleted";
+
+/**
+ * The seams of the Postgres tests (bases-postgres.test.ts), in the mold of `storageLock`: `databases` is the
+ * lock of the order above (a test swaps it for a double without the order to prove the tests need it), and
+ * `pause` is called at each `LockPoint` with the transaction (a no-op outside the tests).
+ */
+export const baseLocks = {
+  databases: lockDatabases,
+  pause: async (_point: LockPoint, _tx: Tx): Promise<void> => {},
+};
+
+const busy = () =>
+  conflict("base.busy", "Someone else is changing this database right now; try again", { retryable: true });
+
+/** A transaction of the bases: a deadlock (40P01) or a serialization failure (40001) is `base.busy`, never a 500. */
+async function writeTx<T>(db: Db, fn: (tx: Tx) => Promise<T>): Promise<T> {
+  try {
+    return await db.transaction(fn);
+  } catch (err) {
+    const code = pgCode(err);
+    if (code === "40P01" || code === "40001") throw busy();
+    throw err;
+  }
+}
+
+/** The set of databases grew between finding it and locking it: the transaction starts over. */
+class Regrown extends Error {}
+
+/**
+ * A transaction that first locks the databases `reach` finds (the write's own database first: the order
+ * comes from the lock). Once the write holds its sources, it calls `recheck`: a database that joined the set
+ * before the locks (a view created just then) makes the transaction start over with the new set, up to three
+ * times, then `base.busy`.
+ */
+async function lockedTx<T>(
+  deps: AppDeps,
+  reach: (q: Db | Tx) => Promise<string[]>,
+  fn: (tx: Tx, held: { found: Set<string>; recheck: () => Promise<void> }) => Promise<T>,
+): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    const want = await reach(deps.db);
+    try {
+      return await writeTx(deps.db, async (tx) => {
+        const found = await baseLocks.databases(tx, want);
+        const recheck = async () => {
+          if ((await reach(tx)).some((id) => !want.includes(id))) throw new Regrown();
+        };
+        return fn(tx, { found, recheck });
+      });
+    } catch (err) {
+      if (!(err instanceof Regrown)) throw err;
+      if (attempt >= 3) throw busy();
+    }
+  }
+}
+
+/** The databases a write on these sources reaches: their owners, then every database with a view of them. */
+async function reachOfSources(q: Db | Tx, owner: string, tableIds: readonly string[]): Promise<string[]> {
+  if (!tableIds.length) return [owner];
+  const viewers = await q
+    .select({ id: dbViews.databaseId })
+    .from(dbViews)
+    .where(inArray(dbViews.tableId, [...tableIds]));
+  return [owner, ...viewers.map((v) => v.id)];
+}
+
+/**
+ * The databases deleting `id` reaches: itself, the owners of the sources its views show (their views go by
+ * cascade too) and every database with a view of its own sources.
+ */
+async function reachOfDatabase(q: Db | Tx, id: string): Promise<string[]> {
+  const shown = await q
+    .select({ owner: dbTables.databaseId })
+    .from(dbViews)
+    .innerJoin(dbTables, eq(dbTables.id, dbViews.tableId))
+    .where(eq(dbViews.databaseId, id));
+  const own = await q.select({ id: dbTables.id }).from(dbTables).where(eq(dbTables.databaseId, id));
+  return [
+    ...(await reachOfSources(
+      q,
+      id,
+      own.map((t) => t.id),
+    )),
+    ...shown.map((s) => s.owner),
+  ];
+}
 
 // ---------- database ----------
 
@@ -121,10 +233,11 @@ export async function createDatabase(deps: AppDeps, input: CreateDatabaseInput) 
   const w = input.rows?.length
     ? { actor: input.actor, names: await namesOf(db, input.workspaceId), at }
     : null;
-  const { row, table, inserted } = await db.transaction(async (tx) => {
-    // the linked source is read again, locked until the commit: a delete of it meanwhile waits, then this
-    // answers 404 instead of a view pointing at nothing (a foreign key error)
+  const { row, table, inserted } = await writeTx(db, async (tx) => {
+    // a linked database: the source's database is locked, then the source read again (the lock order): a
+    // delete of it meanwhile waits, then this answers 404 instead of a view pointing at nothing
     if (linked) {
+      await baseLocks.databases(tx, [linked.databaseId]);
       const [source] = await tx
         .select({ id: dbTables.id })
         .from(dbTables)
@@ -460,7 +573,7 @@ export async function createRow(
   const { db } = deps;
   checkBody(input.body);
   const w = { actor: input.actor, names: names ?? (await namesOf(db, table.workspaceId)), at: deps.now() };
-  const row = await db.transaction(async (tx) => createRowTx(tx, await lockTable(tx, table.id), input, w));
+  const row = await writeTx(db, async (tx) => createRowTx(tx, await lockTable(tx, table.id), input, w));
   publishRows(deps, table.workspaceId, table, { rowIds: [row.id], by: input.actor });
   await indexRows(deps, [row]);
   return row;
@@ -475,6 +588,10 @@ async function updateRowTx(
   w: WriteCtx,
 ): Promise<{ row: RowRow; before: RowRow }> {
   checkBody(input.body);
+  // the source shared before the row (the lock order): a schema save waits, so the values are checked
+  // against the schema that is there at the commit
+  const [fresh] = await tx.select().from(dbTables).where(eq(dbTables.id, table.id)).for("share");
+  if (!fresh) throw notFound("Table not found");
   const [current] = await tx
     .select()
     .from(dbRows)
@@ -486,8 +603,6 @@ async function updateRowTx(
       row: toRow(current, table.databaseId),
     });
   }
-  const [fresh] = await tx.select().from(dbTables).where(eq(dbTables.id, table.id));
-  if (!fresh) throw notFound("Table not found");
   // the row leaves with the source's calc_version, so the recalculation won't go over it again: if it was
   // still stale, the values that didn't change have to go to the new type here, as the recalculation would
   const was =
@@ -536,7 +651,7 @@ export async function updateRow(
   const { db } = deps;
   checkBody(input.body);
   const w = { actor: input.actor, names: names ?? (await namesOf(db, table.workspaceId)), at: deps.now() };
-  const result = await db.transaction(async (tx) => updateRowTx(tx, table, rowId, input, w));
+  const result = await writeTx(db, async (tx) => updateRowTx(tx, table, rowId, input, w));
   publishRows(deps, table.workspaceId, table, { rowIds: [rowId], by: input.actor });
   await indexRows(deps, [result.row]);
   return result;
@@ -559,7 +674,7 @@ async function deleteRowsTx(tx: Tx, table: TableRow, rowIds: string[]): Promise<
 
 export async function deleteRows(deps: AppDeps, table: TableRow, rowIds: string[], actor: ActorRef) {
   if (!rowIds.length) return [];
-  const gone = await deps.db.transaction(async (tx) => deleteRowsTx(tx, table, rowIds));
+  const gone = await writeTx(deps.db, async (tx) => deleteRowsTx(tx, table, rowIds));
   publishRows(deps, table.workspaceId, table, { deleted: gone.map((r) => r.id), by: actor });
   return gone;
 }
@@ -643,7 +758,7 @@ export async function rewriteRows(
   const w = { actor, names: await namesOf(deps.db, table.workspaceId), at: deps.now() };
   const touched: RowRow[] = [];
   const gone: string[] = [];
-  await deps.db.transaction(async (tx) => {
+  await writeTx(deps.db, async (tx) => {
     const fresh = await lockTable(tx, table.id);
     await plan({
       tx,
@@ -698,8 +813,10 @@ export async function saveSchema(
 ): Promise<TableRow> {
   const next = await prepareSchema(deps.db, table, input.defs);
   const at = deps.now();
-  const saved = await deps.db.transaction((tx) =>
-    writeSchemaTx(tx, deps, table, next, input.parentVersion, at),
+  const saved = await lockedTx(
+    deps,
+    (q) => reachOfSources(q, table.databaseId, [table.id]),
+    (tx, held) => writeSchemaTx(tx, deps, table, next, input.parentVersion, at, held.recheck),
   );
   return afterSchema(deps, saved, next.recalc);
 }
@@ -735,7 +852,10 @@ async function prepareSchema(db: Db, table: TableRow, input: PropDef[]): Promise
   return { defs, recalc: calcSignature(defs) !== calcSignature(table.defs) };
 }
 
-/** Saves the schema with the source locked and prunes the views, inside the caller's transaction. */
+/**
+ * Saves the schema with the source locked and prunes the views, inside the caller's transaction, which holds
+ * the source's database and every database with a view of it (`reachOfSources`, through `lockedTx`).
+ */
 async function writeSchemaTx(
   tx: Tx,
   deps: AppDeps,
@@ -743,9 +863,11 @@ async function writeSchemaTx(
   next: PreparedSchema,
   parentVersion: number,
   at: Date,
+  recheck: () => Promise<void>,
 ): Promise<{ table: TableRow; touched: Set<string> }> {
   const { defs, recalc } = next;
   const current = await lockTable(tx, table.id);
+  await recheck();
   if (current.schemaVersion !== parentVersion) {
     throw conflict("base.schema_conflict", "Someone changed the properties after you read them", {
       table: toTable(current),
@@ -797,16 +919,23 @@ export async function importRows(
   const { db } = deps;
   const next = input.defs ? await prepareSchema(db, table, input.defs) : null;
   const w = { actor: input.actor, names: await namesOf(db, table.workspaceId), at: deps.now() };
-  const done = await db.transaction(async (tx) => {
-    const saved = next ? await writeSchemaTx(tx, deps, table, next, table.schemaVersion, w.at) : null;
-    const fresh = saved?.table ?? (await lockTable(tx, table.id));
-    if (fresh.schemaVersion !== (saved ? table.schemaVersion + 1 : table.schemaVersion))
-      throw conflict("base.schema_conflict", "Someone changed the properties during the import", {
-        table: toTable(fresh),
-      });
-    const rows = input.rows(fresh).map((props) => ({ props }));
-    return { saved, fresh, inserted: await insertRowsTx(tx, fresh, rows, w) };
-  });
+  const done = await lockedTx(
+    deps,
+    // without new columns the import writes rows only: no database to lock
+    async (q) => (next ? reachOfSources(q, table.databaseId, [table.id]) : []),
+    async (tx, held) => {
+      const saved = next
+        ? await writeSchemaTx(tx, deps, table, next, table.schemaVersion, w.at, held.recheck)
+        : null;
+      const fresh = saved?.table ?? (await lockTable(tx, table.id));
+      if (fresh.schemaVersion !== (saved ? table.schemaVersion + 1 : table.schemaVersion))
+        throw conflict("base.schema_conflict", "Someone changed the properties during the import", {
+          table: toTable(fresh),
+        });
+      const rows = input.rows(fresh).map((props) => ({ props }));
+      return { saved, fresh, inserted: await insertRowsTx(tx, fresh, rows, w) };
+    },
+  );
   const after = done.saved && next ? await afterSchema(deps, done.saved, next.recalc) : done.fresh;
   if (done.inserted.length) {
     publishRows(deps, table.workspaceId, after, { rowIds: [], by: input.actor });
@@ -867,7 +996,7 @@ async function recalcBatch(
   names: Names,
 ): Promise<{ done: boolean; changed: RowRow[] }> {
   const { db } = deps;
-  return db.transaction(async (tx) => {
+  return writeTx(db, async (tx) => {
     const [table] = await tx.select().from(dbTables).where(eq(dbTables.id, tableId));
     if (!table) return { done: true, changed: [] };
     const stale = await tx
@@ -1082,19 +1211,16 @@ function validateViewConfig(config: unknown, table: TableRow): ViewConfig {
   return cfg;
 }
 
-/**
- * Locks the database's row until the commit. Creating, moving and deleting a view go through here: the view
- * cap and "at least one view" are checked and written in the same transaction, one writer per database at a
- * time (without it, two deletes at once took the last two views and four creations passed the cap).
- */
-async function lockDatabase(tx: Tx, databaseId: string): Promise<void> {
-  const [row] = await tx
-    .select({ id: dbDatabases.id })
-    .from(dbDatabases)
-    .where(eq(dbDatabases.id, databaseId))
-    .for("update");
-  if (!row) throw notFound("Database not found");
+/** Reads the source again inside the transaction, under the locks: the schema a view is checked against. */
+async function sourceNow(tx: Tx, tableId: string): Promise<TableRow> {
+  const [table] = await tx.select().from(dbTables).where(eq(dbTables.id, tableId)).for("share");
+  if (!table) throw notFound("Table not found");
+  return table;
 }
+
+// A view belongs to its database and shows a source of maybe another one: deleting that source takes the view
+// by cascade. So every view write locks both databases (own first; the lock sorts them), then reads the
+// source and checks the settings against the schema that is there at the commit.
 
 export async function createView(
   deps: AppDeps,
@@ -1102,44 +1228,43 @@ export async function createView(
   table: TableRow,
   input: { name: string; type: BaseViewType; config?: unknown },
 ): Promise<ViewRow> {
-  const config = validateViewConfig(input.config, table);
+  validateViewConfig(input.config, table);
   const at = deps.now();
-  const view = await deps.db.transaction(async (tx) => {
-    // the source first, then the database (the lock order of deleteDatabase and saveSchema): the source stays
-    // while the view goes in; one deleted meanwhile answers 404, not a view pointing at nothing
-    const [source] = await tx
-      .select({ id: dbTables.id })
-      .from(dbTables)
-      .where(eq(dbTables.id, table.id))
-      .for("share");
-    if (!source) throw notFound("Table not found");
-    await lockDatabase(tx, database.id);
-    const existing = await tx
-      .select({ position: dbViews.position })
-      .from(dbViews)
-      .where(eq(dbViews.databaseId, database.id))
-      .orderBy(desc(sql`${dbViews.position} collate "C"`));
-    if (existing.length >= MAX_VIEWS)
-      throw conflict("base.too_many_views", "Too many views", { max: MAX_VIEWS });
-    const [created] = await tx
-      .insert(dbViews)
-      .values({
-        id: newId("dbv"),
-        workspaceId: database.workspaceId,
-        databaseId: database.id,
-        tableId: table.id,
-        name: input.name,
-        type: input.type,
-        position: keyBetween(existing[0]?.position ?? null, null),
-        config,
-        createdAt: at,
-        updatedAt: at,
-      })
-      .returning();
-    await tx.update(dbDatabases).set({ updatedAt: at }).where(eq(dbDatabases.id, database.id));
-    if (!created) throw notFound("View not found");
-    return created;
-  });
+  const view = await lockedTx(
+    deps,
+    async () => [database.id, table.databaseId],
+    async (tx, held) => {
+      if (!held.found.has(database.id)) throw notFound("Database not found");
+      const source = await sourceNow(tx, table.id);
+      const config = validateViewConfig(input.config, source);
+      const existing = await tx
+        .select({ position: dbViews.position })
+        .from(dbViews)
+        .where(eq(dbViews.databaseId, database.id))
+        .orderBy(desc(sql`${dbViews.position} collate "C"`));
+      if (existing.length >= MAX_VIEWS)
+        throw conflict("base.too_many_views", "Too many views", { max: MAX_VIEWS });
+      await baseLocks.pause("view:counted", tx);
+      const [created] = await tx
+        .insert(dbViews)
+        .values({
+          id: newId("dbv"),
+          workspaceId: database.workspaceId,
+          databaseId: database.id,
+          tableId: table.id,
+          name: input.name,
+          type: input.type,
+          position: keyBetween(existing[0]?.position ?? null, null),
+          config,
+          createdAt: at,
+          updatedAt: at,
+        })
+        .returning();
+      await tx.update(dbDatabases).set({ updatedAt: at }).where(eq(dbDatabases.id, database.id));
+      if (!created) throw notFound("View not found");
+      return created;
+    },
+  );
   publishBase(deps, database.workspaceId, database.id);
   return view;
 }
@@ -1151,43 +1276,61 @@ export async function updateView(
   table: TableRow,
   input: { name?: string; type?: BaseViewType; config?: unknown; afterId?: string | null },
 ): Promise<ViewRow> {
-  const patch: Partial<typeof dbViews.$inferInsert> = { updatedAt: deps.now() };
-  if (input.name !== undefined) patch.name = input.name;
-  if (input.type !== undefined) patch.type = input.type;
-  if (input.config !== undefined) patch.config = validateViewConfig(input.config, table);
-  const saved = await deps.db.transaction(async (tx) => {
-    if (input.afterId !== undefined) {
-      // the neighbors are read and the new key written with the database locked: two moves at once don't
-      // compute their keys from the same neighbors
-      await lockDatabase(tx, database.id);
-      const all = await tx
-        .select({ id: dbViews.id, position: dbViews.position })
-        .from(dbViews)
-        .where(eq(dbViews.databaseId, database.id))
-        .orderBy(sql`${dbViews.position} collate "C"`, dbViews.id);
-      const rest = all.filter((v) => v.id !== view.id);
-      const i = input.afterId === null ? -1 : rest.findIndex((v) => v.id === input.afterId);
-      if (input.afterId !== null && i < 0) throw bad("base.bad_position", "View not found");
-      const a = i >= 0 ? (rest[i]?.position ?? null) : null;
-      let b = rest[i + 1]?.position ?? null;
-      if (a !== null && b !== null && a >= b) b = null;
-      patch.position = keyBetween(a, b);
-    }
-    const [row] = await tx.update(dbViews).set(patch).where(eq(dbViews.id, view.id)).returning();
-    if (!row) throw notFound("View not found");
-    return row;
-  });
+  if (input.config !== undefined) validateViewConfig(input.config, table);
+  const saved = await lockedTx(
+    deps,
+    async () => [database.id, table.databaseId],
+    async (tx) => {
+      const patch: Partial<typeof dbViews.$inferInsert> = { updatedAt: deps.now() };
+      if (input.name !== undefined) patch.name = input.name;
+      if (input.type !== undefined) patch.type = input.type;
+      if (input.config !== undefined)
+        patch.config = validateViewConfig(input.config, await sourceNow(tx, table.id));
+      if (input.afterId !== undefined) {
+        // the neighbors are read and the new key written with the database locked: two moves at once don't
+        // compute their keys from the same neighbors
+        const all = await tx
+          .select({ id: dbViews.id, position: dbViews.position })
+          .from(dbViews)
+          .where(eq(dbViews.databaseId, database.id))
+          .orderBy(sql`${dbViews.position} collate "C"`, dbViews.id);
+        await baseLocks.pause("view:moving", tx);
+        const rest = all.filter((v) => v.id !== view.id);
+        const i = input.afterId === null ? -1 : rest.findIndex((v) => v.id === input.afterId);
+        if (input.afterId !== null && i < 0) throw bad("base.bad_position", "View not found");
+        const a = i >= 0 ? (rest[i]?.position ?? null) : null;
+        let b = rest[i + 1]?.position ?? null;
+        if (a !== null && b !== null && a >= b) b = null;
+        patch.position = keyBetween(a, b);
+      }
+      const [row] = await tx
+        .update(dbViews)
+        .set(patch)
+        .where(and(eq(dbViews.id, view.id), eq(dbViews.databaseId, database.id)))
+        .returning();
+      if (!row) throw notFound("View not found");
+      return row;
+    },
+  );
   publishBase(deps, database.workspaceId, database.id);
   return saved;
 }
 
 export async function deleteView(deps: AppDeps, database: DatabaseRow, view: ViewRow) {
-  await deps.db.transaction(async (tx) => {
-    await lockDatabase(tx, database.id);
-    const [n] = await tx.select({ n: count() }).from(dbViews).where(eq(dbViews.databaseId, database.id));
-    if (Number(n?.n ?? 0) <= 1) throw conflict("base.last_view", "A database needs at least one view");
-    await tx.delete(dbViews).where(eq(dbViews.id, view.id));
-  });
+  const [source] = await deps.db
+    .select({ owner: dbTables.databaseId })
+    .from(dbTables)
+    .where(eq(dbTables.id, view.tableId));
+  await lockedTx(
+    deps,
+    async () => [database.id, ...(source ? [source.owner] : [])],
+    async (tx) => {
+      const [n] = await tx.select({ n: count() }).from(dbViews).where(eq(dbViews.databaseId, database.id));
+      if (Number(n?.n ?? 0) <= 1) throw conflict("base.last_view", "A database needs at least one view");
+      await baseLocks.pause("view:deleting", tx);
+      await tx.delete(dbViews).where(and(eq(dbViews.id, view.id), eq(dbViews.databaseId, database.id)));
+    },
+  );
   publishBase(deps, database.workspaceId, database.id);
 }
 
@@ -1200,67 +1343,81 @@ export async function viewIn(db: Db, database: DatabaseRow, viewId: string): Pro
   return view;
 }
 
+/**
+ * Deletes a database. The views other databases had of its sources go by cascade, and so do its own views of
+ * other databases' sources: every database reached (`reachOfDatabase`) is locked first, in the one order. A
+ * linked database left with no view shows nothing more and goes with it; a database with a source of its own
+ * gets its source's default view back (otherwise it would be left without a view, which deleteView doesn't
+ * allow). The sweep looks only at the databases locked. The sources are locked next (a row or a view created
+ * now waits and then fails), so the rows read are all the rows that leave, and they leave the search in the
+ * same commit. A database already gone (deleted by a delete of its source just before) is a no-op.
+ */
 export async function deleteDatabase(deps: AppDeps, database: DatabaseRow) {
-  const { db } = deps;
-  // The views other databases had of these sources go away by cascade. A linked database left with no view
-  // shows nothing more and goes with it; a database with a source of its own gets its source's default view
-  // back (otherwise it would be left without a view, which deleteView doesn't allow). All in one
-  // transaction. The sweep is over the whole workspace and after the delete: a view created in a race holds
-  // the delete until its commit, and only a new statement sees the database that came with it.
-  // The sources are locked first (a row created now waits and then fails), so the rows read here are all the
-  // rows that leave, and they leave the search in the same commit.
   const at = deps.now();
-  const { gone, healed } = await db.transaction(async (tx) => {
-    const tables = await tx
-      .select({ id: dbTables.id })
-      .from(dbTables)
-      .where(eq(dbTables.databaseId, database.id))
-      .for("update");
-    const rowIds = tables.length
-      ? (
-          await tx
-            .select({ id: dbRows.id })
-            .from(dbRows)
-            .where(
-              inArray(
-                dbRows.tableId,
-                tables.map((t) => t.id),
-              ),
-            )
-        ).map((r) => r.id)
-      : [];
-    await unindexMany(tx, "db_row", rowIds);
-    await tx.delete(dbDatabases).where(eq(dbDatabases.id, database.id));
-    const bare = sql`not exists (select 1 from ${dbViews} where ${dbViews.databaseId} = ${dbDatabases.id})`;
-    const gone = await tx
-      .delete(dbDatabases)
-      .where(and(eq(dbDatabases.workspaceId, database.workspaceId), eq(dbDatabases.kind, "linked"), bare))
-      .returning({ id: dbDatabases.id });
-    const own = await tx
-      .select({ databaseId: dbTables.databaseId, tableId: dbTables.id })
-      .from(dbTables)
-      .innerJoin(dbDatabases, eq(dbDatabases.id, dbTables.databaseId))
-      .where(and(eq(dbDatabases.workspaceId, database.workspaceId), bare))
-      .orderBy(asc(dbTables.createdAt));
-    const healed = [...new Map(own.map((o) => [o.databaseId, o.tableId])).entries()];
-    if (healed.length)
-      await tx.insert(dbViews).values(
-        healed.map(([databaseId, tableId]) => ({
-          id: newId("dbv"),
-          workspaceId: database.workspaceId,
-          databaseId,
-          tableId,
-          name: "",
-          type: "table" as const,
-          position: keyBetween(null, null),
-          config: {},
-          createdAt: at,
-          updatedAt: at,
-        })),
-      );
-    return { gone, healed: healed.map(([id]) => id) };
-  });
-  for (const id of healed) publishBase(deps, database.workspaceId, id);
-  for (const id of [database.id, ...gone.map((g) => g.id)])
+  const result = await lockedTx(
+    deps,
+    (q) => reachOfDatabase(q, database.id),
+    async (tx, held) => {
+      if (!held.found.has(database.id)) return null;
+      const tables = await tx
+        .select({ id: dbTables.id })
+        .from(dbTables)
+        .where(eq(dbTables.databaseId, database.id))
+        .orderBy(asc(dbTables.id))
+        .for("update");
+      // with the sources locked no view of them can come in: the set is final here
+      await held.recheck();
+      const rowIds = tables.length
+        ? (
+            await tx
+              .select({ id: dbRows.id })
+              .from(dbRows)
+              .where(
+                inArray(
+                  dbRows.tableId,
+                  tables.map((t) => t.id),
+                ),
+              )
+          ).map((r) => r.id)
+        : [];
+      await tx.delete(dbDatabases).where(eq(dbDatabases.id, database.id));
+      await baseLocks.pause("base:deleted", tx);
+      // the rows went by cascade above; their chunks after them (rows before chunks, as reindex locks them)
+      await unindexMany(tx, "db_row", rowIds);
+      const reached = [...held.found].filter((id) => id !== database.id);
+      if (!reached.length) return { gone: [], healed: [] };
+      const bare = sql`not exists (select 1 from ${dbViews} where ${dbViews.databaseId} = ${dbDatabases.id})`;
+      const gone = await tx
+        .delete(dbDatabases)
+        .where(and(inArray(dbDatabases.id, reached), eq(dbDatabases.kind, "linked"), bare))
+        .returning({ id: dbDatabases.id });
+      const own = await tx
+        .select({ databaseId: dbTables.databaseId, tableId: dbTables.id })
+        .from(dbTables)
+        .innerJoin(dbDatabases, eq(dbDatabases.id, dbTables.databaseId))
+        .where(and(inArray(dbDatabases.id, reached), bare))
+        .orderBy(asc(dbTables.createdAt));
+      const healed = [...new Map(own.map((o) => [o.databaseId, o.tableId])).entries()];
+      if (healed.length)
+        await tx.insert(dbViews).values(
+          healed.map(([databaseId, tableId]) => ({
+            id: newId("dbv"),
+            workspaceId: database.workspaceId,
+            databaseId,
+            tableId,
+            name: "",
+            type: "table" as const,
+            position: keyBetween(null, null),
+            config: {},
+            createdAt: at,
+            updatedAt: at,
+          })),
+        );
+      return { gone, healed: healed.map(([id]) => id) };
+    },
+  );
+  if (!result) return;
+  for (const id of result.healed) publishBase(deps, database.workspaceId, id);
+  for (const id of [database.id, ...result.gone.map((g) => g.id)])
     deps.hub.toWorkspace(database.workspaceId, { type: "base.deleted", baseId: id });
 }
