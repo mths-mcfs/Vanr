@@ -1,15 +1,21 @@
 {
   "version": 1,
   "files": {
-    "scripts/typecheck.test.ts": 50,
-    "scripts/ci/gate.test.ts": 24,
-    "packages/contract/src/secret-box.test.ts": 90,
     "packages/contract/src/permissions.test.ts": 5,
+    "packages/contract/src/secret-box.test.ts": 90,
+    "packages/engine/src/db/browser-log.test.ts": 3000,
     "packages/engine/src/db/catalog.test.ts": 8000,
     "packages/engine/src/db/db.test.ts": 3000,
-    "packages/engine/src/db/browser-log.test.ts": 3000,
-    "packages/engine/src/sqlconn.test.ts": 800,
+    "packages/engine/src/db/lock.test.ts": 50,
     "packages/engine/src/db/open.test.ts": 20000,
-    "packages/engine/src/db/lock.test.ts": 50
+    "packages/engine/src/sqlconn.test.ts": 800,
+    "packages/ui/test/contrast.test.ts": 286,
+    "packages/ui/test/field.test.tsx": 10,
+    "packages/ui/test/hydration.test.tsx": 257,
+    "packages/ui/test/identity.test.ts": 8,
+    "packages/ui/test/smoke.test.tsx": 208,
+    "packages/ui/test/styles.test.ts": 4,
+    "scripts/ci/gate.test.ts": 24,
+    "scripts/typecheck.test.ts": 9
   }
 }
