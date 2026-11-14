@@ -11,7 +11,10 @@ import type { AgentRow, ProviderLookup } from "./forward-types";
 
 const { credentials, workspaces } = schema;
 
-export function createProviderLookup(deps: AppDeps, opts: { forceFake?: boolean }): ProviderLookup {
+export function createProviderLookup(
+  deps: Pick<AppDeps, "config" | "db" | "sealer">,
+  opts: { forceFake?: boolean },
+): ProviderLookup {
   const { config } = deps;
   const fake = fakeProvider({ chunkDelayMs: config.model.provider === "fake" ? config.model.delayMs : 0 });
   const platform = config.model.provider === "anthropic" ? anthropicProvider(config.model.apiKey) : null;

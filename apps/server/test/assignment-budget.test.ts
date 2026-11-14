@@ -1,9 +1,7 @@
 import { expect, test } from "bun:test";
 import { openDb } from "@vanr/engine/db";
-import { createSealer } from "@vanr/engine/seal";
 import { sql } from "drizzle-orm";
 import { assignmentScope, assignmentUsage } from "../src/assignments/budget";
-import { loadConfig } from "../src/config";
 import { postgresLedger } from "../src/usage-ledger";
 
 test("uncapped assignment spending counts toward a new cap; queued jobs contribute no time", async () => {
@@ -23,9 +21,6 @@ test("uncapped assignment spending counts toward a new cap; queued jobs contribu
       db,
       ledger,
       now: () => at,
-      config: loadConfig({ DATA_DIR: "memory" }),
-      sealer: createSealer("test", "test"),
-      hub: { toChannel() {}, toWorkspace() {} },
     };
     const request = { workspaceId: "w1", estimateUsd: 2, at };
     const scope = assignmentScope(row);

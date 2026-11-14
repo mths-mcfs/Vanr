@@ -12,6 +12,7 @@ import { AUTH_RATE_LIMITS, createAuth } from "../src/auth";
 import { loadConfig } from "../src/config";
 import { errorBody, HttpError, JSON_BODY_LIMIT, readJson } from "../src/http";
 import { log } from "../src/logger";
+import { createMailer } from "../src/mailer";
 import { createProviderLookup } from "../src/models";
 import { installScript } from "../src/runners/install";
 import { LEDGER_LIMITS, postgresLedger } from "../src/usage-ledger";
@@ -31,9 +32,6 @@ describe("model credentials", () => {
       {
         config: loadConfig({ ANTHROPIC_API_KEY: "sk-ant-platform" }),
         db,
-        now: () => new Date(),
-        hub: { toChannel() {}, toWorkspace() {} },
-        ledger: postgresLedger(db, CONTRACT_PRICES),
         sealer,
       },
       {},
@@ -218,9 +216,9 @@ describe("auth rate limits", () => {
     return createAuth({
       db,
       config: cfg,
-      mailer: { async send() {} },
+      mailer: createMailer(cfg.mail, true),
       trustedOrigins: cfg.trustedOrigins,
-      signupAllowed: async () => true,
+      signupAllowed: async () => "allow",
     });
   };
   const signIn = (a: ReturnType<typeof auth>, ip: string) =>

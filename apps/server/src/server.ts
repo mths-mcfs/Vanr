@@ -182,7 +182,12 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     // Slice S2 (search-index) adds `search` (createSearchIndex).
     sealer: createSealer(effective.authSecret, "credentials"),
     // Every integration fetch checks the destination (and each redirect) against the internal network.
-    fetchExternal: guardedFetch(opts.fetchExternal ?? fetch, effective.integrations.allowPrivateNetworks),
+    fetchExternal: guardedFetch(
+      opts.fetchExternal ?? fetch,
+      effective.integrations.allowPrivateNetworks,
+      undefined,
+      effective.integrations.allowPlaintext,
+    ),
     sql: opts.sql ?? postgresConnector,
     runners: runnersHub,
     // Push goes only to known push service hosts (push.ts), without redirects: it doesn't go through

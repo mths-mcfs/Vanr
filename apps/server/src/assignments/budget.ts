@@ -54,7 +54,7 @@ export async function assignmentOfRun(
 
 /** Usage so far: USD in the ledger, minutes of the jobs on the runner and steps the engine sent. */
 export async function assignmentUsage(
-  deps: AppDeps,
+  deps: Pick<AppDeps, "db" | "ledger" | "now">,
   row: { id: string; limits: AssignmentLimits },
 ): Promise<AssignmentUsage> {
   const now = deps.now();
