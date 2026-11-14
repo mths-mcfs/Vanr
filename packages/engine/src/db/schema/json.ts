@@ -18,10 +18,10 @@ export type Props = Record<string, PropValue>;
 
 /** The concrete credential an action used, as recorded for audit. */
 export interface CredentialRef {
-  kind: "connection" | "mailbox" | "database" | "computer_plan";
+  kind: "connection" | "mailbox" | "database" | "environment_plan";
   /** Id of the connection, mail account, database or environment. */
   id: string;
-  owner: "agent" | "org" | "requester";
+  owner: "agent" | "workspace" | "requester";
   /** Display name. */
   label: string;
 }

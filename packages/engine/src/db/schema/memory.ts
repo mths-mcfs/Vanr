@@ -21,7 +21,7 @@ const workspace = () =>
     .references(() => workspaces.id, { onDelete: "cascade" });
 
 const author = () => ({
-  authorType: text("author_type", { enum: ["person", "agent", "system"] }).notNull(),
+  authorKind: text("author_kind", { enum: ["person", "agent", "system"] }).notNull(),
   /** userId, agentId or null (system: the starting version of a text that already existed). */
   authorId: text("author_id"),
 });
@@ -105,7 +105,7 @@ export const memoryReviews = pgTable(
       .notNull()
       .default("fact"),
     about: text("about"),
-    supersedes: text("supersedes"),
+    replaces: text("replaces"),
     /** SHA-256 of the item text when the run asked (null on `create`). */
     baseSha256: text("base_sha256"),
     /** What turned flag A on in the run (`mail_read account/INBOX/42`). */

@@ -30,14 +30,14 @@ export const dbDatabases = pgTable(
     /** Wiki page the database is embedded in (inline); null = standalone database. */
     pageId: text("page_id"),
     /** File table the database was migrated from, so it is not migrated twice. */
-    sourceArtifactId: text("source_artifact_id"),
+    sourceFileId: text("source_file_id"),
     createdBy: jsonb("created_by").$type<Actor>().notNull(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   (t) => [
     index("db_databases_workspace_idx").on(t.workspaceId, t.updatedAt),
-    uniqueIndex("db_databases_file_uq").on(t.workspaceId, t.sourceArtifactId),
+    uniqueIndex("db_databases_file_uq").on(t.workspaceId, t.sourceFileId),
   ],
 );
 

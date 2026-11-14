@@ -78,8 +78,8 @@ export const issues = pgTable(
   ],
 );
 
-export const issueActivity = pgTable(
-  "issue_activity",
+export const issueTimeline = pgTable(
+  "issue_timeline",
   {
     id: text("id").primaryKey(),
     issueId: text("issue_id")
@@ -97,7 +97,7 @@ export const issueActivity = pgTable(
     /** Write order: events from the same edit land in the same millisecond. */
     seq: serial("seq").notNull(),
   },
-  (t) => [index("issue_activity_issue_idx").on(t.issueId, t.seq)],
+  (t) => [index("issue_timeline_issue_idx").on(t.issueId, t.seq)],
 );
 
 // ---- Routines ----
@@ -115,7 +115,7 @@ export const routines = pgTable(
     target: jsonb("target").$type<Record<string, unknown>>().notNull(),
     trigger: jsonb("trigger").$type<Record<string, unknown>>().notNull(),
     active: boolean("active").notNull().default(true),
-    nextRunAt: ts("next_run_at"),
+    nextFireAt: ts("next_fire_at"),
     /** While running, when it started (prevents two executions at once). */
     runningSince: ts("running_since"),
     /**
@@ -146,7 +146,7 @@ export const routines = pgTable(
   },
   (t) => [
     index("routines_workspace_idx").on(t.workspaceId),
-    index("routines_due_idx").on(t.nextRunAt).where(sql`active`),
+    index("routines_due_idx").on(t.nextFireAt).where(sql`active`),
     uniqueIndex("routines_hook_uq").on(t.hookId),
   ],
 );
@@ -286,7 +286,7 @@ export const notifications = pgTable(
     waiting: boolean("waiting").notNull().default(false),
     readAt: ts("read_at"),
     doneAt: ts("done_at"),
-    snoozedUntil: ts("snoozed_until"),
+    mutedUntil: ts("muted_until"),
     /** Saved: excluded from the 3-month retention. */
     savedAt: ts("saved_at"),
     /** Tab (`action_needed` or `fyi`), already applying the person's rules. */

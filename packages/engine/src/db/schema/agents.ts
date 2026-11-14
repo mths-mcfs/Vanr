@@ -34,19 +34,19 @@ export const agents = pgTable(
       .notNull()
       .default("everyone"),
     audienceUserIds: jsonb("audience_user_ids").$type<string[]>().notNull().default([]),
-    appearance: jsonb("appearance").$type<{ color: string; eyes: string; accessory: string }>().notNull(),
-    runtimeKind: text("runtime_kind", { enum: ["model", "claude_code", "codex"] })
+    appearance: jsonb("appearance").$type<{ color: string; eyes: string; adornment: string }>().notNull(),
+    harnessKind: text("harness_kind", { enum: ["model", "claude_code", "codex"] })
       .notNull()
       .default("model"),
     /** Model of the local executor (claude_code/codex); null uses its default. */
-    runtimeModel: text("runtime_model"),
-    runtimeFallback: boolean("runtime_fallback").notNull().default(true),
+    harnessModel: text("harness_model"),
+    harnessFallback: boolean("harness_fallback").notNull().default(true),
     /** Advisor: a stronger model the executor can consult; null = off. */
     advisorModel: text("advisor_model"),
     advisorMaxUses: integer("advisor_max_uses").notNull().default(2),
     environmentId: text("environment_id"),
     /** Default autonomy for this agent's assignments. */
-    missionCommandApproval: text("mission_command_approval", { enum: ["always", "when_safe", "never"] })
+    assignmentCommandPolicy: text("assignment_command_policy", { enum: ["always", "when_safe", "never"] })
       .notNull()
       .default("when_safe"),
     /** GitHub repositories the agent uses ("owner/repo" or "owner/*"); empty = all. */
@@ -122,7 +122,7 @@ export const runs = pgTable(
     costUsd: doublePrecision("cost_usd").notNull().default(0),
     createdAt: createdAt(),
     startedAt: ts("started_at"),
-    heartbeatAt: ts("heartbeat_at"),
+    lastPingAt: ts("last_ping_at"),
     finishedAt: ts("finished_at"),
   },
   (t) => [
@@ -191,7 +191,7 @@ export const memories = pgTable(
     workspaceId: workspace(),
     /** Owner in the agent store; author in a person's store; null in the workspace store. */
     agentId: text("agent_id").references(() => agents.id, { onDelete: "cascade" }),
-    scope: text("scope", { enum: ["agent", "person", "org"] })
+    scope: text("scope", { enum: ["agent", "person", "workspace"] })
       .notNull()
       .default("agent"),
     /** Owner of a `person` store. */
@@ -210,11 +210,11 @@ export const memories = pgTable(
     uses: integer("uses").notNull().default(0),
     lastUsedAt: ts("last_used_at"),
     /** Last applied consolidation that read the item: the next one starts with unread and oldest items. */
-    reviewedAt: ts("reviewed_at"),
+    vettedAt: ts("vetted_at"),
     source: text("source"),
     origin: jsonb("origin").$type<MemoryOrigin>(),
     originMessageId: text("origin_message_id"),
-    supersedes: text("supersedes"),
+    replaces: text("replaces"),
     /** Text before a person's last edit: "revert" goes back to it. */
     textBefore: text("text_before"),
     editorUserId: text("editor_user_id"),
@@ -232,7 +232,7 @@ export const memories = pgTable(
       .where(sql`scope = 'person' and archived = false and path is not null`),
     uniqueIndex("memories_workspace_path_uq")
       .on(t.workspaceId, t.path)
-      .where(sql`scope = 'org' and archived = false and path is not null`),
+      .where(sql`scope = 'workspace' and archived = false and path is not null`),
   ],
 );
 

@@ -44,14 +44,14 @@ export const files = pgTable(
     threadId: text("thread_id"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
-    /** In the trash: hidden from lists and deleted for good at `purgeAt`. */
+    /** In the trash: hidden from lists and deleted for good at `expungeAt`. */
     deletedAt: ts("deleted_at"),
     deletedBy: jsonb("deleted_by").$type<Actor>(),
-    purgeAt: ts("purge_at"),
+    expungeAt: ts("expunge_at"),
   },
   (t) => [
     index("files_workspace_idx").on(t.workspaceId, t.updatedAt),
-    index("files_purge_idx").on(t.purgeAt).where(sql`deleted_at is not null`),
+    index("files_purge_idx").on(t.expungeAt).where(sql`deleted_at is not null`),
   ],
 );
 
@@ -114,7 +114,7 @@ export const uploadSessions = pgTable(
     userId: text("user_id").notNull(),
     /** New version of an existing file; null creates a new file. */
     fileId: text("file_id"),
-    baseVersion: integer("base_version"),
+    parentVersion: integer("parent_version"),
     channelId: text("channel_id"),
     threadId: text("thread_id"),
     title: text("title"),
@@ -129,7 +129,7 @@ export const uploadSessions = pgTable(
       .notNull()
       .default("open"),
     /** Completed: the file and the version (repeating "complete" returns the same ones). */
-    resultArtifactId: text("result_artifact_id"),
+    resultFileId: text("result_file_id"),
     resultVersion: integer("result_version"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
@@ -155,22 +155,22 @@ export const wikiPages = pgTable(
     /** Locked: only admins edit (agents do not). */
     locked: boolean("locked").notNull().default(false),
     sourceType: text("source_type", { enum: ["obsidian"] }),
-    updatedBy: jsonb("updated_by").$type<Actor & { onBehalfOf?: string }>().notNull(),
+    updatedBy: jsonb("updated_by").$type<Actor & { actingFor?: string }>().notNull(),
     /** Typed properties: `{ [propId]: value }`, defined in wiki_prop_schemas. */
     props: jsonb("props").$type<Props>().notNull().default({}),
     /** Other titles of the page: they also resolve [[links]]. */
     aliases: jsonb("aliases").$type<string[]>().notNull().default([]),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
-    /** In the trash: hidden from lists, links and search; deleted for good at `purgeAt`. */
+    /** In the trash: hidden from lists, links and search; deleted for good at `expungeAt`. */
     deletedAt: ts("deleted_at"),
     deletedBy: jsonb("deleted_by").$type<Actor>(),
-    purgeAt: ts("purge_at"),
+    expungeAt: ts("expunge_at"),
   },
   (t) => [
     uniqueIndex("wiki_pages_slug_uq").on(t.workspaceId, t.slug),
     index("wiki_pages_workspace_idx").on(t.workspaceId),
-    index("wiki_pages_purge_idx").on(t.purgeAt).where(sql`deleted_at is not null`),
+    index("wiki_pages_purge_idx").on(t.expungeAt).where(sql`deleted_at is not null`),
   ],
 );
 
@@ -185,7 +185,7 @@ export const wikiVersions = pgTable(
     body: text("body").notNull(),
     /** Properties at this version (restoring brings back body, title and properties). */
     props: jsonb("props").$type<Props>(),
-    author: jsonb("author").$type<Actor & { onBehalfOf?: string }>().notNull(),
+    author: jsonb("author").$type<Actor & { actingFor?: string }>().notNull(),
     note: text("note"),
     createdAt: createdAt(),
   },
@@ -210,7 +210,7 @@ export const wikiLinks = pgTable(
     /** `slugify` of the target: finds the link when a new page gets that slug (`[[Foo_Bar]]` → `foo-bar`). */
     targetSlug: text("target_slug").notNull().default(""),
     anchor: text("anchor"),
-    alias: text("alias"),
+    linkText: text("link_text"),
     embed: boolean("embed").notNull().default(false),
   },
   (t) => [
@@ -232,15 +232,16 @@ export const wikiPropSchemas = pgTable("wiki_prop_schemas", {
 });
 
 /**
- * Live page session (Yjs): the shared draft. `state` is the full Yjs update in base64; `baseVersion` is the
- * page version the draft started from; `dirty` says whether there are edits not yet published as a version.
+ * Live page session (Yjs): the shared draft. `state` is the full Yjs update in base64; `parentVersion` is
+ * the page version the draft started from; `dirty` says whether there are edits not yet published as a
+ * version.
  */
 export const wikiPageDocs = pgTable("wiki_page_docs", {
   pageId: text("page_id")
     .primaryKey()
     .references(() => wikiPages.id, { onDelete: "cascade" }),
   state: text("state").notNull(),
-  baseVersion: integer("base_version").notNull(),
+  parentVersion: integer("parent_version").notNull(),
   dirty: boolean("dirty").notNull().default(false),
   /** Who edited the draft since the last version (they become authors of the published version). */
   editors: jsonb("editors").$type<Actor[]>().notNull().default([]),
@@ -267,8 +268,8 @@ export const wikiAttachments = pgTable(
 );
 
 /** Reads per reader (agent or person): how many and when the last one was. */
-export const wikiReads = pgTable(
-  "wiki_reads",
+export const wikiPageViews = pgTable(
+  "wiki_page_views",
   {
     pageId: text("page_id")
       .notNull()
@@ -333,14 +334,14 @@ export const debates = pgTable(
     verdictState: jsonb("verdict_state").$type<{
       state: "accepted" | "reverted";
       acceptedAt: string;
-      acceptedBy: string;
+      endorsedBy: string;
       revertedAt?: string;
       revertedBy?: string;
     }>(),
     /** Blind reads: synthesis against a single agent's answer, in an order drawn per person. */
     blindReviews: jsonb("blind_reviews")
       .$type<
-        { userId: string; debateFirst: boolean; pick: "forum" | "single" | "tie" | null; at: string }[]
+        { userId: string; debateFirst: boolean; pick: "debate" | "single" | "tie" | null; at: string }[]
       >()
       .notNull()
       .default([]),
@@ -359,7 +360,7 @@ export const debatePosts = pgTable(
       .references(() => debates.id, { onDelete: "cascade" }),
     author: jsonb("author").$type<Actor>().notNull(),
     kind: text("kind", {
-      enum: ["turn", "free", "seat", "comment", "synthesis", "out_of_budget"],
+      enum: ["turn", "free", "speaker", "comment", "synthesis", "out_of_budget"],
     }).notNull(),
     round: integer("round").notNull(),
     body: text("body").notNull(),

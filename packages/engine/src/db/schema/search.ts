@@ -28,7 +28,7 @@ export const searchChunks = pgTable(
      * Scope: `org`, `channel` (with `channel_id`; `principals` also read from outside) or `private`
      * (`principals` only).
      */
-    scopeKind: text("scope_kind", { enum: ["org", "channel", "private"] }).notNull(),
+    scopeKind: text("scope_kind", { enum: ["workspace", "channel", "private"] }).notNull(),
     channelId: text("channel_id"),
     principals: text("principals").array().notNull().default(sql`'{}'::text[]`),
     /** `user:<id>` or `agent:<id>`. */

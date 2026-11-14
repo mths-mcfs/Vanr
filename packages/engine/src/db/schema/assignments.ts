@@ -42,11 +42,11 @@ export interface AssignmentActor {
 }
 
 /**
- * Assignment cap: USD for the runtime through the API; job minutes and steps (runs and jobs) for the
+ * Assignment cap: dollars for the harness through the API; job minutes and steps (runs and jobs) for the
  * runner.
  */
 export interface AssignmentLimits {
-  usd: number | null;
+  dollars: number | null;
   minutes: number | null;
   steps: number | null;
 }
@@ -72,7 +72,7 @@ export const assignments = pgTable(
       .notNull()
       .default("agent"),
     runnerId: text("runner_id"),
-    repoDir: text("repo_dir"),
+    checkoutPath: text("checkout_path"),
     ownerId: text("owner_id").notNull(),
     commandPolicy: text("command_policy", { enum: ["always", "when_safe", "never"] })
       .notNull()
@@ -86,7 +86,10 @@ export const assignments = pgTable(
     planVersion: integer("plan_version").notNull().default(0),
     /** Durable workflow driving the assignment; a fork changes the id. */
     workflowId: text("workflow_id"),
-    limits: jsonb("limits").$type<AssignmentLimits>().notNull().default({ usd: 5, minutes: 480, steps: 30 }),
+    limits: jsonb("limits")
+      .$type<AssignmentLimits>()
+      .notNull()
+      .default({ dollars: 5, minutes: 480, steps: 30 }),
     /** Cap that paused the assignment (null: not paused by a cap). */
     ceiling: text("ceiling", { enum: ["usd", "minutes", "steps"] }),
     /** Assignment deadline (optional): once passed, the owner is notified. */
@@ -148,8 +151,8 @@ export const assignmentDecisions = pgTable(
     options: jsonb("options").$type<string[]>().notNull(),
     status: text("status", { enum: ["pending", "provisional", "taken"] }).notNull(),
     chosen: text("chosen"),
-    chosenBy: text("chosen_by"),
-    chosenAt: ts("chosen_at"),
+    selectedBy: text("selected_by"),
+    selectedAt: ts("selected_at"),
     blocking: boolean("blocking").notNull().default(true),
     recommendation: text("recommendation"),
     why: text("why"),
@@ -238,7 +241,7 @@ export const assignmentSubmissions = pgTable(
     note: text("note").notNull(),
     fileIds: jsonb("file_ids").$type<string[]>().notNull().default([]),
     checklist: jsonb("checklist")
-      .$type<{ id: string; text: string; checkedBy: string | null }[]>()
+      .$type<{ id: string; text: string; verifiedBy: string | null }[]>()
       .notNull()
       .default([]),
     messageId: text("message_id"),

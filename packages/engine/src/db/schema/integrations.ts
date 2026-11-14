@@ -17,7 +17,7 @@ export interface StoredTool {
   /** Name the workspace gave it (empty = the server's). */
   label: string;
   access: ToolAccessLevel;
-  suggestedAccess: ToolAccessLevel;
+  proposedAccess: ToolAccessLevel;
   readOnlyHint: boolean;
   inputSchema: Record<string, unknown>;
   /** The workspace has decided on this tool; a new tool without a decision stays away from agents. */
@@ -41,7 +41,7 @@ export const connections = pgTable(
     /** Sealed JSON: {apiKey} or the OAuth tokens. */
     secret: text("secret"),
     tools: jsonb("tools").$type<StoredTool[]>().notNull().default([]),
-    reviewedAt: ts("reviewed_at"),
+    vettedAt: ts("vetted_at"),
     /** `pending`: OAuth started and did not come back. */
     status: text("status", { enum: ["pending", "active", "reauth_required"] })
       .notNull()
@@ -87,7 +87,7 @@ export const oauthStates = pgTable(
     targetId: text("target_id"),
     /** Sealed JSON: PKCE verifier, client and token endpoint. */
     secret: text("secret"),
-    returnTo: text("return_to").notNull(),
+    nextPath: text("next_path").notNull(),
     expiresAt: ts("expires_at").notNull(),
     createdAt: createdAt(),
   },
@@ -150,12 +150,12 @@ export const githubInstallations = pgTable(
 
 export interface MailPolicyRow {
   folders: string[];
-  senders: string[];
-  windowDays: number | null;
-  allowedRecipients: string[];
-  dailySendCap: number;
-  sendWithoutAsking: boolean;
-  fromAddress: string | null;
+  senderAllowlist: string[];
+  lookbackDays: number | null;
+  recipientAllowlist: string[];
+  sendsPerDay: number;
+  autoSend: boolean;
+  senderAddress: string | null;
 }
 
 export const mailAccounts = pgTable(
@@ -193,7 +193,7 @@ export const agentMailboxes = pgTable(
       .references(() => mailAccounts.id, { onDelete: "cascade" }),
     workspaceId: workspace(),
     level: text("level", { enum: ["none", "read", "read_write"] }).notNull(),
-    canDelete: boolean("can_delete").notNull().default(false),
+    deletable: boolean("deletable").notNull().default(false),
     policy: jsonb("policy").$type<MailPolicyRow>().notNull(),
   },
   (t) => [primaryKey({ columns: [t.agentId, t.accountId] })],
@@ -201,8 +201,8 @@ export const agentMailboxes = pgTable(
 
 export interface DatabasePolicyRow {
   tables: string[];
-  hiddenColumns: string[];
-  dailyQueryCap: number | null;
+  maskedColumns: string[];
+  queriesPerDay: number | null;
   timeoutSeconds: 15 | 30 | 60;
 }
 
@@ -271,7 +271,7 @@ export interface S3ConfigRow {
   region: string;
   bucket: string;
   prefix: string | null;
-  pathStyle: boolean;
+  pathAddressing: boolean;
 }
 
 export interface StorageMigrationRow {
@@ -291,6 +291,6 @@ export const workspaceStorage = pgTable("workspace_storage", {
   secret: text("secret"),
   accessKeyIdPreview: text("access_key_id_preview"),
   secretPreview: text("secret_preview"),
-  migration: jsonb("migration").$type<StorageMigrationRow>(),
+  transfer: jsonb("transfer").$type<StorageMigrationRow>(),
   updatedAt: updatedAt(),
 });

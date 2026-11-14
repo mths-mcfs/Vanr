@@ -54,10 +54,10 @@ export const channelMembers = pgTable(
     memberType: text("member_type", { enum: ["person", "agent"] }).notNull(),
     memberId: text("member_id").notNull(),
     /** Agents only: answers in this channel without needing a mention. */
-    autoReply: boolean("auto_reply").notNull().default(false),
+    autoAnswer: boolean("auto_answer").notNull().default(false),
     lastReadAt: ts("last_read_at"),
     lastReadMessageId: text("last_read_message_id"),
-    joinedAt: createdAt(),
+    memberSince: ts("member_since").notNull().defaultNow(),
   },
   (t) => [
     primaryKey({ columns: [t.channelId, t.memberType, t.memberId] }),
@@ -77,7 +77,7 @@ export const messages = pgTable(
       .references(() => channels.id, { onDelete: "cascade" }),
     /** Id of the root message when this is a thread reply; null in the main conversation. */
     threadId: text("thread_id"),
-    authorType: text("author_type", { enum: ["person", "agent"] }).notNull(),
+    authorKind: text("author_kind", { enum: ["person", "agent"] }).notNull(),
     authorId: text("author_id").notNull(),
     body: text("body").notNull(),
     meta: jsonb("meta").$type<Record<string, unknown>>().notNull().default({}),
@@ -152,11 +152,11 @@ export const threads = pgTable(
     createdByType: text("created_by_type", { enum: ["person", "agent"] }).notNull(),
     createdById: text("created_by_id").notNull(),
     resolvedSuggestion: boolean("resolved_suggestion").notNull().default(false),
-    openedByReplyAt: ts("opened_by_reply_at"),
-    lastActivityAt: ts("last_activity_at").notNull(),
+    firstReplyAt: ts("first_reply_at"),
+    lastTouchedAt: ts("last_touched_at").notNull(),
     createdAt: createdAt(),
   },
-  (t) => [index("threads_workspace_activity_idx").on(t.workspaceId, t.lastActivityAt)],
+  (t) => [index("threads_workspace_activity_idx").on(t.workspaceId, t.lastTouchedAt)],
 );
 
 export const threadSubscriptions = pgTable(

@@ -52,7 +52,7 @@ export const usageLines = pgTable(
     speed: text("speed").notNull().default("standard"),
     inferenceGeo: text("inference_geo"),
     serviceTier: text("service_tier"),
-    keySource: text("key_source", { enum: ["platform", "org", "plan"] })
+    keySource: text("key_source", { enum: ["platform", "workspace", "plan"] })
       .notNull()
       .default("platform"),
     /** Cost in millionths of a dollar (integer: sums without floating point error). */
@@ -137,7 +137,7 @@ export const toolDecisions = pgTable(
     flags: jsonb("flags").$type<string[]>().notNull().default([]),
     approvalId: text("approval_id"),
     /** Who requested the run (null for routines) and the action's credential, for audit and revocation. */
-    requestedBy: text("requested_by"),
+    initiatedBy: text("initiated_by"),
     credential: jsonb("credential").$type<CredentialRef | null>(),
     /** Who resolved the request without a person: an "always allow" rule or the model reviewer. */
     by: text("by", { enum: ["rule", "reviewer"] }),

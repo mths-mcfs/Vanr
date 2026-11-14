@@ -36,7 +36,7 @@ export const approvals = pgTable(
     issue: jsonb("issue").$type<{ number: number; title: string }>(),
     connector: text("connector"),
     linkedAccount: text("linked_account"),
-    status: text("status", { enum: ["pending", "approved", "refused", "expired", "canceled"] })
+    status: text("status", { enum: ["pending", "approved", "rejected", "expired", "canceled"] })
       .notNull()
       .default("pending"),
     /** Effect class of the call; null for approvals that predate the gate. */
@@ -76,7 +76,7 @@ export const approvals = pgTable(
     decidedAt: ts("decided_at"),
     deciderUserId: text("decider_user_id"),
     reason: text("reason"),
-    executedAt: ts("executed_at"),
+    appliedAt: ts("applied_at"),
     result: jsonb("result").$type<{ ok: boolean; text: string }>(),
     trail: jsonb("trail")
       .$type<{ at: string; text: string; code?: string; params?: Record<string, string> }[]>()
@@ -96,17 +96,19 @@ export const proposals = pgTable(
     id: text("id").primaryKey(),
     workspaceId: workspace(),
     agentId: agent(),
-    targetKind: text("target_kind", { enum: ["agent_prompt", "workspace_context", "org_memory"] }).notNull(),
+    targetKind: text("target_kind", {
+      enum: ["agent_prompt", "workspace_context", "workspace_memory"],
+    }).notNull(),
     /** Agent whose instructions change (`agent_prompt` only). */
-    targetAgentId: text("target_agent_id"),
-    /** Workspace memory file that changes (`org_memory` only; empty `before` = new file). */
+    recipientAgentId: text("recipient_agent_id"),
+    /** Workspace memory file that changes (`workspace_memory` only; empty `before` = new file). */
     targetPath: text("target_path"),
     title: text("title").notNull(),
     before: text("before").notNull(),
     after: text("after").notNull(),
     why: text("why").notNull().default(""),
     evidence: text("evidence").notNull().default(""),
-    status: text("status", { enum: ["pending", "accepted", "refused"] })
+    status: text("status", { enum: ["pending", "accepted", "rejected"] })
       .notNull()
       .default("pending"),
     channelId: text("channel_id"),
@@ -167,8 +169,8 @@ export const agentActions = pgTable(
       .notNull(),
     params: jsonb("params").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: createdAt(),
-    undoableUntil: ts("undoable_until"),
-    undoneAt: ts("undone_at"),
+    revertibleUntil: ts("revertible_until"),
+    revertedAt: ts("reverted_at"),
     reverterUserId: text("reverter_user_id"),
   },
   (t) => [index("agent_actions_message_idx").on(t.messageId), index("agent_actions_run_idx").on(t.runId)],

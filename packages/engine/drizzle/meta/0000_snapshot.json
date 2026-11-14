@@ -1,5 +1,5 @@
 {
-  "id": "20faef3a-1c6e-4026-a748-cbc17fd30f61",
+  "id": "a55e2abb-c0fe-4873-ac48-779057776db2",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -134,21 +134,21 @@
           "primaryKey": false,
           "notNull": true
         },
-        "runtime_kind": {
-          "name": "runtime_kind",
+        "harness_kind": {
+          "name": "harness_kind",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
           "default": "'model'"
         },
-        "runtime_model": {
-          "name": "runtime_model",
+        "harness_model": {
+          "name": "harness_model",
           "type": "text",
           "primaryKey": false,
           "notNull": false
         },
-        "runtime_fallback": {
-          "name": "runtime_fallback",
+        "harness_fallback": {
+          "name": "harness_fallback",
           "type": "boolean",
           "primaryKey": false,
           "notNull": true,
@@ -173,8 +173,8 @@
           "primaryKey": false,
           "notNull": false
         },
-        "mission_command_approval": {
-          "name": "mission_command_approval",
+        "assignment_command_policy": {
+          "name": "assignment_command_policy",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
@@ -602,8 +602,8 @@
           "primaryKey": false,
           "notNull": false
         },
-        "reviewed_at": {
-          "name": "reviewed_at",
+        "vetted_at": {
+          "name": "vetted_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
@@ -626,8 +626,8 @@
           "primaryKey": false,
           "notNull": false
         },
-        "supersedes": {
-          "name": "supersedes",
+        "replaces": {
+          "name": "replaces",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -769,7 +769,7 @@
             }
           ],
           "isUnique": true,
-          "where": "scope = 'org' and archived = false and path is not null",
+          "where": "scope = 'workspace' and archived = false and path is not null",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -1166,8 +1166,8 @@
           "primaryKey": false,
           "notNull": false
         },
-        "heartbeat_at": {
-          "name": "heartbeat_at",
+        "last_ping_at": {
+          "name": "last_ping_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
@@ -1668,14 +1668,14 @@
           "primaryKey": false,
           "notNull": false
         },
-        "chosen_by": {
-          "name": "chosen_by",
+        "selected_by": {
+          "name": "selected_by",
           "type": "text",
           "primaryKey": false,
           "notNull": false
         },
-        "chosen_at": {
-          "name": "chosen_at",
+        "selected_at": {
+          "name": "selected_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
@@ -2833,8 +2833,8 @@
           "primaryKey": false,
           "notNull": false
         },
-        "repo_dir": {
-          "name": "repo_dir",
+        "checkout_path": {
+          "name": "checkout_path",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -2890,7 +2890,7 @@
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true,
-          "default": "'{\"usd\":5,\"minutes\":480,\"steps\":30}'::jsonb"
+          "default": "'{\"dollars\":5,\"minutes\":480,\"steps\":30}'::jsonb"
         },
         "ceiling": {
           "name": "ceiling",
@@ -3461,8 +3461,8 @@
           "primaryKey": false,
           "notNull": false
         },
-        "source_artifact_id": {
-          "name": "source_artifact_id",
+        "source_file_id": {
+          "name": "source_file_id",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -3520,7 +3520,7 @@
               "nulls": "last"
             },
             {
-              "expression": "source_artifact_id",
+              "expression": "source_file_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -4029,8 +4029,8 @@
           "primaryKey": false,
           "notNull": true
         },
-        "auto_reply": {
-          "name": "auto_reply",
+        "auto_answer": {
+          "name": "auto_answer",
           "type": "boolean",
           "primaryKey": false,
           "notNull": true,
@@ -4048,8 +4048,8 @@
           "primaryKey": false,
           "notNull": false
         },
-        "created_at": {
-          "name": "created_at",
+        "member_since": {
+          "name": "member_since",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
@@ -4346,8 +4346,8 @@
           "primaryKey": false,
           "notNull": false
         },
-        "author_type": {
-          "name": "author_type",
+        "author_kind": {
+          "name": "author_kind",
           "type": "text",
           "primaryKey": false,
           "notNull": true
@@ -4722,14 +4722,14 @@
           "notNull": true,
           "default": false
         },
-        "opened_by_reply_at": {
-          "name": "opened_by_reply_at",
+        "first_reply_at": {
+          "name": "first_reply_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },
-        "last_activity_at": {
-          "name": "last_activity_at",
+        "last_touched_at": {
+          "name": "last_touched_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true
@@ -4753,7 +4753,7 @@
               "nulls": "last"
             },
             {
-              "expression": "last_activity_at",
+              "expression": "last_touched_at",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -5431,8 +5431,8 @@
           "primaryKey": false,
           "notNull": false
         },
-        "purge_at": {
-          "name": "purge_at",
+        "expunge_at": {
+          "name": "expunge_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
@@ -5464,7 +5464,7 @@
           "name": "files_purge_idx",
           "columns": [
             {
-              "expression": "purge_at",
+              "expression": "expunge_at",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -5522,8 +5522,8 @@
           "primaryKey": false,
           "notNull": false
         },
-        "base_version": {
-          "name": "base_version",
+        "parent_version": {
+          "name": "parent_version",
           "type": "integer",
           "primaryKey": false,
           "notNull": false
@@ -5590,8 +5590,8 @@
           "notNull": true,
           "default": "'open'"
         },
-        "result_artifact_id": {
-          "name": "result_artifact_id",
+        "result_file_id": {
+          "name": "result_file_id",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -5772,8 +5772,8 @@
           "primaryKey": false,
           "notNull": false
         },
-        "alias": {
-          "name": "alias",
+        "link_text": {
+          "name": "link_text",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -5895,8 +5895,8 @@
           "primaryKey": false,
           "notNull": true
         },
-        "base_version": {
-          "name": "base_version",
+        "parent_version": {
+          "name": "parent_version",
           "type": "integer",
           "primaryKey": false,
           "notNull": true
@@ -5942,6 +5942,66 @@
         }
       },
       "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.wiki_page_views": {
+      "name": "wiki_page_views",
+      "schema": "",
+      "columns": {
+        "page_id": {
+          "name": "page_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "reader_type": {
+          "name": "reader_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "reader_id": {
+          "name": "reader_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "count": {
+          "name": "count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "last_at": {
+          "name": "last_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "wiki_page_views_page_id_wiki_pages_id_fk": {
+          "name": "wiki_page_views_page_id_wiki_pages_id_fk",
+          "tableFrom": "wiki_page_views",
+          "tableTo": "wiki_pages",
+          "columnsFrom": ["page_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "wiki_page_views_page_id_reader_type_reader_id_pk": {
+          "name": "wiki_page_views_page_id_reader_type_reader_id_pk",
+          "columns": ["page_id", "reader_type", "reader_id"]
+        }
+      },
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
@@ -6069,8 +6129,8 @@
           "primaryKey": false,
           "notNull": false
         },
-        "purge_at": {
-          "name": "purge_at",
+        "expunge_at": {
+          "name": "expunge_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
@@ -6117,7 +6177,7 @@
           "name": "wiki_pages_purge_idx",
           "columns": [
             {
-              "expression": "purge_at",
+              "expression": "expunge_at",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -6192,66 +6252,6 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.wiki_reads": {
-      "name": "wiki_reads",
-      "schema": "",
-      "columns": {
-        "page_id": {
-          "name": "page_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "reader_type": {
-          "name": "reader_type",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "reader_id": {
-          "name": "reader_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "count": {
-          "name": "count",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "last_at": {
-          "name": "last_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "wiki_reads_page_id_wiki_pages_id_fk": {
-          "name": "wiki_reads_page_id_wiki_pages_id_fk",
-          "tableFrom": "wiki_reads",
-          "tableTo": "wiki_pages",
-          "columnsFrom": ["page_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "wiki_reads_page_id_reader_type_reader_id_pk": {
-          "name": "wiki_reads_page_id_reader_type_reader_id_pk",
-          "columns": ["page_id", "reader_type", "reader_id"]
-        }
-      },
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
@@ -6400,14 +6400,14 @@
           "notNull": true,
           "default": "now()"
         },
-        "undoable_until": {
-          "name": "undoable_until",
+        "revertible_until": {
+          "name": "revertible_until",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },
-        "undone_at": {
-          "name": "undone_at",
+        "reverted_at": {
+          "name": "reverted_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
@@ -6861,8 +6861,8 @@
           "primaryKey": false,
           "notNull": false
         },
-        "executed_at": {
-          "name": "executed_at",
+        "applied_at": {
+          "name": "applied_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
@@ -7097,8 +7097,8 @@
           "primaryKey": false,
           "notNull": true
         },
-        "target_agent_id": {
-          "name": "target_agent_id",
+        "recipient_agent_id": {
+          "name": "recipient_agent_id",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -7622,8 +7622,8 @@
           "primaryKey": false,
           "notNull": true
         },
-        "can_delete": {
-          "name": "can_delete",
+        "deletable": {
+          "name": "deletable",
           "type": "boolean",
           "primaryKey": false,
           "notNull": true,
@@ -7743,8 +7743,8 @@
           "notNull": true,
           "default": "'[]'::jsonb"
         },
-        "reviewed_at": {
-          "name": "reviewed_at",
+        "vetted_at": {
+          "name": "vetted_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
@@ -8353,8 +8353,8 @@
           "primaryKey": false,
           "notNull": false
         },
-        "return_to": {
-          "name": "return_to",
+        "next_path": {
+          "name": "next_path",
           "type": "text",
           "primaryKey": false,
           "notNull": true
@@ -8447,8 +8447,8 @@
           "primaryKey": false,
           "notNull": false
         },
-        "migration": {
-          "name": "migration",
+        "transfer": {
+          "name": "transfer",
           "type": "jsonb",
           "primaryKey": false,
           "notNull": false
@@ -8784,8 +8784,8 @@
           "primaryKey": false,
           "notNull": true
         },
-        "author_type": {
-          "name": "author_type",
+        "author_kind": {
+          "name": "author_kind",
           "type": "text",
           "primaryKey": false,
           "notNull": true
@@ -9121,8 +9121,8 @@
           "primaryKey": false,
           "notNull": false
         },
-        "supersedes": {
-          "name": "supersedes",
+        "replaces": {
+          "name": "replaces",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -9299,8 +9299,8 @@
           "primaryKey": false,
           "notNull": true
         },
-        "author_type": {
-          "name": "author_type",
+        "author_kind": {
+          "name": "author_kind",
           "type": "text",
           "primaryKey": false,
           "notNull": true
@@ -9436,8 +9436,8 @@
           "notNull": true,
           "default": "'[]'::jsonb"
         },
-        "private_ranges_machine_id": {
-          "name": "private_ranges_machine_id",
+        "private_ranges_runner_id": {
+          "name": "private_ranges_runner_id",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -9742,8 +9742,8 @@
           "primaryKey": false,
           "notNull": true
         },
-        "resolved_at": {
-          "name": "resolved_at",
+        "handled_at": {
+          "name": "handled_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
@@ -10230,8 +10230,8 @@
           "primaryKey": false,
           "notNull": false
         },
-        "last_event_at": {
-          "name": "last_event_at",
+        "last_signal_at": {
+          "name": "last_signal_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
@@ -10394,8 +10394,8 @@
           "primaryKey": false,
           "notNull": true
         },
-        "previous_machine_id": {
-          "name": "previous_machine_id",
+        "previous_runner_id": {
+          "name": "previous_runner_id",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -10419,8 +10419,8 @@
           "primaryKey": false,
           "notNull": false
         },
-        "approved_by": {
-          "name": "approved_by",
+        "signed_off_by": {
+          "name": "signed_off_by",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -10601,8 +10601,8 @@
           "notNull": true,
           "default": "''"
         },
-        "runner_version": {
-          "name": "runner_version",
+        "runner_release": {
+          "name": "runner_release",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
@@ -10703,14 +10703,14 @@
           "notNull": true,
           "default": false
         },
-        "last_seen_at": {
-          "name": "last_seen_at",
+        "last_online_at": {
+          "name": "last_online_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },
-        "offline_since": {
-          "name": "offline_since",
+        "disconnected_at": {
+          "name": "disconnected_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
@@ -11014,8 +11014,8 @@
           "primaryKey": false,
           "notNull": true
         },
-        "delivered_at": {
-          "name": "delivered_at",
+        "fulfilled_at": {
+          "name": "fulfilled_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
@@ -11454,8 +11454,8 @@
           "primaryKey": false,
           "notNull": false
         },
-        "requested_by": {
-          "name": "requested_by",
+        "initiated_by": {
+          "name": "initiated_by",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -12343,8 +12343,83 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.issue_activity": {
-      "name": "issue_activity",
+    "public.issue_columns": {
+      "name": "issue_columns",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "stage": {
+          "name": "stage",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "position": {
+          "name": "position",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "issue_columns_workspace_idx": {
+          "name": "issue_columns_workspace_idx",
+          "columns": [
+            {
+              "expression": "workspace_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "position",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "issue_columns_workspace_id_workspaces_id_fk": {
+          "name": "issue_columns_workspace_id_workspaces_id_fk",
+          "tableFrom": "issue_columns",
+          "tableTo": "workspaces",
+          "columnsFrom": ["workspace_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.issue_timeline": {
+      "name": "issue_timeline",
       "schema": "",
       "columns": {
         "id": {
@@ -12424,8 +12499,8 @@
         }
       },
       "indexes": {
-        "issue_activity_issue_idx": {
-          "name": "issue_activity_issue_idx",
+        "issue_timeline_issue_idx": {
+          "name": "issue_timeline_issue_idx",
           "columns": [
             {
               "expression": "issue_id",
@@ -12447,86 +12522,11 @@
         }
       },
       "foreignKeys": {
-        "issue_activity_issue_id_issues_id_fk": {
-          "name": "issue_activity_issue_id_issues_id_fk",
-          "tableFrom": "issue_activity",
+        "issue_timeline_issue_id_issues_id_fk": {
+          "name": "issue_timeline_issue_id_issues_id_fk",
+          "tableFrom": "issue_timeline",
           "tableTo": "issues",
           "columnsFrom": ["issue_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.issue_columns": {
-      "name": "issue_columns",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "workspace_id": {
-          "name": "workspace_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "stage": {
-          "name": "stage",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "position": {
-          "name": "position",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {
-        "issue_columns_workspace_idx": {
-          "name": "issue_columns_workspace_idx",
-          "columns": [
-            {
-              "expression": "workspace_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "position",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "issue_columns_workspace_id_workspaces_id_fk": {
-          "name": "issue_columns_workspace_id_workspaces_id_fk",
-          "tableFrom": "issue_columns",
-          "tableTo": "workspaces",
-          "columnsFrom": ["workspace_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
@@ -13010,8 +13010,8 @@
           "primaryKey": false,
           "notNull": false
         },
-        "snoozed_until": {
-          "name": "snoozed_until",
+        "muted_until": {
+          "name": "muted_until",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
@@ -13624,8 +13624,8 @@
           "notNull": true,
           "default": true
         },
-        "next_run_at": {
-          "name": "next_run_at",
+        "next_fire_at": {
+          "name": "next_fire_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
@@ -13713,7 +13713,7 @@
           "name": "routines_due_idx",
           "columns": [
             {
-              "expression": "next_run_at",
+              "expression": "next_fire_at",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -13826,8 +13826,8 @@
           "primaryKey": false,
           "notNull": false
         },
-        "accepted_by": {
-          "name": "accepted_by",
+        "endorsed_by": {
+          "name": "endorsed_by",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -13950,15 +13950,15 @@
           "primaryKey": false,
           "notNull": false
         },
-        "created_at": {
-          "name": "created_at",
+        "member_since": {
+          "name": "member_since",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
         },
-        "last_seen_at": {
-          "name": "last_seen_at",
+        "last_online_at": {
+          "name": "last_online_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false

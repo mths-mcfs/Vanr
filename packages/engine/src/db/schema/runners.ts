@@ -31,7 +31,7 @@ export const runners = pgTable(
     os: text("os").notNull().default(""),
     arch: text("arch").notNull().default(""),
     hostname: text("hostname").notNull().default(""),
-    runnerVersion: text("runner_version").notNull().default(""),
+    runnerRelease: text("runner_release").notNull().default(""),
     tokenHash: text("token_hash").notNull(),
     /** New credential handed out with the last session and not used yet. */
     tokenPendingHash: text("token_pending_hash"),
@@ -56,9 +56,9 @@ export const runners = pgTable(
     cli: jsonb("cli").$type<{ claude_code?: RunnerCli; codex?: RunnerCli }>().notNull().default({}),
     browser: boolean("browser").notNull().default(false),
     paused: boolean("paused").notNull().default(false),
-    lastSeenAt: ts("last_seen_at"),
+    lastOnlineAt: ts("last_online_at"),
     /** When it went offline (for runner-offline notices). */
-    offlineSince: ts("offline_since"),
+    disconnectedAt: ts("disconnected_at"),
     removedAt: ts("removed_at"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
@@ -137,13 +137,13 @@ export const runnerPairings = pgTable(
     arch: text("arch").notNull(),
     hostname: text("hostname").notNull(),
     version: text("version").notNull(),
-    previousMachineId: text("previous_machine_id"),
+    previousRunnerId: text("previous_runner_id"),
     status: text("status", { enum: ["pending", "approved", "denied", "claimed"] })
       .notNull()
       .default("pending"),
     workspaceId: text("workspace_id"),
     runnerId: text("runner_id"),
-    approvedBy: text("approved_by"),
+    signedOffBy: text("signed_off_by"),
     /** Token sealed between confirmation and the runner's fetch; cleared once it fetches. */
     tokenSealed: text("token_sealed"),
     lastPollAt: ts("last_poll_at"),
@@ -196,7 +196,7 @@ export const runnerJobs = pgTable(
     createdAt: createdAt(),
     startedAt: ts("started_at"),
     endedAt: ts("ended_at"),
-    lastEventAt: ts("last_event_at"),
+    lastSignalAt: ts("last_signal_at"),
     /** Assignment plan item the job works on. */
     planItemId: text("plan_item_id"),
     /** Tokens the CLI reported at the end (the pairing person's plan: no USD here). */
@@ -284,7 +284,7 @@ export const secretRequests = pgTable(
     browser: jsonb("browser").$type<SecretBrowserBinding>(),
     createdAt: createdAt(),
     expiresAt: ts("expires_at").notNull(),
-    deliveredAt: ts("delivered_at"),
+    fulfilledAt: ts("fulfilled_at"),
   },
   (t) => [index("secret_requests_agent_idx").on(t.agentId)],
 );
@@ -318,7 +318,7 @@ export const browserInterventions = pgTable(
       .notNull()
       .references(() => agents.id, { onDelete: "cascade" }),
     runnerId: text("runner_id").notNull(),
-    kind: text("kind", { enum: ["login", "captcha", "confirm", "other", "takeover"] }).notNull(),
+    kind: text("kind", { enum: ["login", "captcha", "confirm", "other", "intervention"] }).notNull(),
     status: text("status", { enum: ["pending", "active", "done", "failed", "canceled", "expired"] })
       .notNull()
       .default("pending"),
@@ -333,7 +333,7 @@ export const browserInterventions = pgTable(
     runId: text("run_id"),
     createdAt: createdAt(),
     expiresAt: ts("expires_at").notNull(),
-    resolvedAt: ts("resolved_at"),
+    handledAt: ts("handled_at"),
   },
   (t) => [index("browser_interventions_agent_idx").on(t.agentId)],
 );
@@ -354,7 +354,7 @@ export const agentBrowserSettings = pgTable("agent_browser_settings", {
   level: text("level").$type<BrowserLevel>(),
   /** Private network ranges allowed (CIDR). They only apply on the runner where they were allowed. */
   privateRanges: jsonb("private_ranges").$type<string[]>().notNull().default([]),
-  privateRangesMachineId: text("private_ranges_machine_id"),
+  privateRangesRunnerId: text("private_ranges_runner_id"),
   updatedAt: updatedAt(),
 });
 
