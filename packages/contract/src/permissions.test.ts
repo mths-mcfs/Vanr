@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { PERMISSIONS } from "./permissions.ts";
+import { can, PERMISSIONS } from "./index.ts";
 import type { Role } from "./workspaces.ts";
 
 test("each permission lists the roles that hold it, lowest first", () => {
@@ -16,4 +16,13 @@ test("each permission lists the roles that hold it, lowest first", () => {
     read: everyone,
     view_usage: admins,
   });
+});
+
+test("can exposes role-based permission checks through the public entry point", () => {
+  expect(can("member", "read")).toBe(true);
+  expect(can("member", "create_channels")).toBe(true);
+  expect(can("member", "configure")).toBe(false);
+  expect(can("admin", "configure")).toBe(true);
+  expect(can("admin", "manage_owners")).toBe(false);
+  expect(can("owner", "manage_owners")).toBe(true);
 });

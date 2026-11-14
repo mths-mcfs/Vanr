@@ -232,7 +232,7 @@ export type {
   NotificationTab,
   NotifyToggle,
 } from "./notifications.ts";
-export { PERMISSIONS } from "./permissions.ts";
+export { can, PERMISSIONS } from "./permissions.ts";
 export type {
   RecurrenceRule,
   Routine,

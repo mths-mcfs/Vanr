@@ -17,3 +17,6 @@ export const PERMISSIONS = {
   read: from("member"),
   view_usage: from("admin"),
 } as const satisfies Record<string, readonly Role[]>;
+
+export const can = (role: Role, permission: keyof typeof PERMISSIONS): boolean =>
+  PERMISSIONS[permission].includes(role);
