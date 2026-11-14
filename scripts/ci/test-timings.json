@@ -74,6 +74,13 @@
     "apps/server/test/static.test.ts": 15,
     "apps/server/test/wiki-md.test.ts": 661,
     "apps/server/test/wiki-search.test.ts": 90,
-    "apps/server/test/notify-text.test.ts": 10
+    "apps/server/test/notify-text.test.ts": 10,
+    "apps/server/test/base.test.ts": 7314,
+    "apps/server/test/boot.test.ts": 9039,
+    "apps/server/test/production.test.ts": 216,
+    "apps/server/test/usage-ledger.test.ts": 2729,
+    "apps/server/src/members.test.ts": 2631,
+    "apps/server/src/realtime/hub.test.ts": 188,
+    "apps/server/src/runners/hub.test.ts": 218
   }
 }
