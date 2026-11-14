@@ -1,7 +1,7 @@
 // An Obsidian vault as a zip: import (notes, attachments, alternate titles, #tags and front matter as
 // properties) and export (the pages as .md with front matter and the imported attachments). The zip comes
 // from outside: the limits count what comes out of the decompressor, not the size the header declares (zip
-// bomb), and a path with `..`, absolute or with a drive letter is refused (zip slip).
+// bomb), and a path with `..`, absolute or with a drive letter is rejected (zip slip).
 import type { ActorRef, WikiAttachment, WikiVaultImportResult } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import type { PropDef } from "@vanr/engine/props";

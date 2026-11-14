@@ -2,11 +2,15 @@
 // trash (P0-09), the zip vault (P0-10) and the search through seam 5.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { WikiPropDef } from "@vanr/contract";
+import { schema } from "@vanr/engine/db";
 import type { Viewer } from "@vanr/engine/search";
 import { VAULT_ATTACHMENTS, VAULT_NOTES } from "@vanr/engine/wiki/vault-fixture";
+import { and, eq, sql } from "drizzle-orm";
 import { strToU8, unzipSync, zipSync } from "fflate";
+import * as Y from "yjs";
 import type { RunningServer } from "../src/server";
-import { purgeWikiTrash, savePage } from "../src/wiki";
+import { MAX_BODY, pageLock, purgeWikiTrash, savePage } from "../src/wiki";
+import { wikiMarkdown } from "../src/wiki-md";
 import { VAULT_LIMITS } from "../src/wiki-vault";
 import { Browser, holdNextIndexWrite, SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
 import { NO_POSTGRES, TEST_POSTGRES_URL, testDatabaseUrl } from "./postgres";
@@ -257,7 +261,7 @@ describe("names only the slug finds and titles that break a link (P0-05)", () =>
     expect(await out()).toEqual(["Foo_Bar->foo-bar", `Q3/Plan->${plan.slug}`]);
   });
 
-  test("attack: a title with [ ] | # ^ is refused on create and rename (the vault strips those characters)", async () => {
+  test("attack: a title with [ ] | # ^ is rejected on create and rename (the vault strips those characters)", async () => {
     const { workspaceId, ana } = await team();
     for (const title of ["C# Guide", "A|B", "x]]y", "[[z", "note ^1"]) {
       const err = await apiError(ana.api.wiki.createWikiPage(workspaceId, { title, body: "x" }));
@@ -663,7 +667,7 @@ describe("zip vault (P0-10)", () => {
     expect((await other.ana.api.wiki.getWikiPage(other.workspaceId, "divider")).body).toBe(body);
   });
 
-  test("attack: zip slip (.., absolute, drive letter) is refused and creates no folder", async () => {
+  test("attack: zip slip (.., absolute, drive letter) is rejected and creates no folder", async () => {
     const { workspaceId, ana } = await team();
     const zip = zipSync({
       "../../outside.md": strToU8("# outside"),
@@ -780,6 +784,34 @@ describe("graph and permissions", () => {
 });
 
 describe("guards without a test in the origin", () => {
+  test("MAX_BODY on every way in: create, save, the loose notes import and a vault note", async () => {
+    const { workspaceId, ana } = await team();
+    const over = "x".repeat(MAX_BODY + 1);
+    const create = await apiError(ana.api.wiki.createWikiPage(workspaceId, { title: "Over", body: over }));
+    expect([create.status, create.code]).toEqual([400, "invalid_request"]);
+    const atLimit = await ana.api.wiki.createWikiPage(workspaceId, {
+      title: "At limit",
+      body: "x".repeat(MAX_BODY),
+    });
+    expect(atLimit.body.length).toBe(MAX_BODY);
+    const save = await apiError(
+      ana.api.wiki.replaceWikiPage(workspaceId, atLimit.slug, { body: over, parentVersion: 1 }),
+    );
+    expect([save.status, save.code]).toEqual([400, "invalid_request"]);
+    const loose = await apiError(
+      ana.api.wiki.importWiki(workspaceId, {
+        files: [{ path: "big.md", text: "y".repeat(MAX_BODY + 10_001) }],
+      }),
+    );
+    expect(loose.status).toBe(400);
+    const note = await ana.api.wiki.importWikiVault(workspaceId, {
+      file: new Blob([zipSync({ "Huge.md": strToU8(over) })]),
+      fileName: "huge.zip",
+    });
+    expect(note).toMatchObject({ created: 0, failed: [{ path: "Huge.md", error: "wiki.import.too_large" }] });
+    expect((await ana.api.wiki.listWikiPages(workspaceId)).map((p) => p.title)).toEqual(["At limit"]);
+  });
+
   test("without a session 401; a non-member gets 404 on every wiki route; only an admin locks", async () => {
     const { workspaceId, ana, beto } = await team();
     const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Guarded", body: "x" });
@@ -946,6 +978,105 @@ describe("guards without a test in the origin", () => {
   });
 });
 
+/** Holds the server's next database transaction before it starts, until `release`. */
+function holdNextTransaction(srv: RunningServer) {
+  const { db } = srv.deps;
+  const original = db.transaction.bind(db);
+  let begun!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>((r) => {
+    begun = r;
+  });
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  db.transaction = (async (...args: Parameters<typeof original>) => {
+    db.transaction = original;
+    begun();
+    await gate;
+    return original(...args);
+  }) as typeof original;
+  return { started, release };
+}
+
+describe("a write decides on the page it reads locked in its own transaction", () => {
+  test("every member write that read the page before a lock and commits after it is rejected with wiki.page_locked", async () => {
+    const { workspaceId, ana, beto } = await team();
+    // A live draft row, so publishing and discarding have something to write.
+    const withDraft = async (title: string) => {
+      const p = await beto.api.wiki.createWikiPage(workspaceId, { title, body: "Original.\n" });
+      const row = await server.deps.db.query.knowledgePages.findFirst({
+        where: (t, { and, eq }) => and(eq(t.workspaceId, workspaceId), eq(t.slug, p.slug)),
+      });
+      if (!row) throw new Error("page");
+      const state = Y.encodeStateAsUpdate((await wikiMarkdown()).toYDoc("Original.\n"));
+      await server.deps.db
+        .insert(schema.wikiPageDocs)
+        .values({ pageId: row.id, state: Buffer.from(state).toString("base64"), parentVersion: 1 });
+      return p;
+    };
+    const writes: [string, (slug: string) => Promise<unknown>][] = [
+      [
+        "save",
+        (slug) => beto.api.wiki.replaceWikiPage(workspaceId, slug, { body: "AFTER LOCK", parentVersion: 1 }),
+      ],
+      [
+        "meta",
+        (slug) => beto.api.wiki.updateWikiPageMeta(workspaceId, slug, { parentVersion: 1, tags: ["after"] }),
+      ],
+      ["rename", (slug) => beto.api.wiki.renameWikiPage(workspaceId, slug, `${slug} after lock`)],
+      ["move", (slug) => beto.api.wiki.moveWikiPage(workspaceId, slug, "after-lock")],
+      ["restore", (slug) => beto.api.wiki.restoreWikiPageVersion(workspaceId, slug, 1, 1)],
+      ["trash", (slug) => beto.api.wiki.deleteWikiPage(workspaceId, slug)],
+      ["publish", (slug) => beto.api.wiki.publishWikiPageDraft(workspaceId, slug, true)],
+      ["discard", (slug) => beto.api.wiki.deleteWikiPageDraft(workspaceId, slug)],
+    ];
+    const outcomes: string[] = [];
+    for (const [what, write] of writes) {
+      const p = await withDraft(`Locked ${what}`);
+      const hold = holdNextTransaction(server);
+      const pending = write(p.slug).then(
+        () => "accepted",
+        (e: { status?: number; code?: string }) => `${e.status} ${e.code}`,
+      );
+      await hold.started;
+      await ana.api.wiki.lockWikiPage(workspaceId, p.slug, true);
+      hold.release();
+      outcomes.push(`${what}: ${await pending}`);
+      const now = await ana.api.wiki.getWikiPage(workspaceId, p.slug);
+      expect([what, now.version, now.body, now.folder, now.title, now.tags]).toEqual([
+        what,
+        1,
+        "Original.\n",
+        "",
+        `Locked ${what}`,
+        [],
+      ]);
+    }
+    expect(outcomes).toEqual(writes.map(([what]) => `${what}: 403 wiki.page_locked`));
+  });
+
+  test("an admin demoted between the check and the commit can't lock any more", async () => {
+    const { workspaceId, ana } = await team();
+    const carla = withApi(await memberOf(server, workspaceId, "Carla", email("carla"), "admin"));
+    const p = await ana.api.wiki.createWikiPage(workspaceId, { title: "Demote race", body: "x" });
+    const hold = holdNextTransaction(server);
+    const pending = carla.api.wiki.lockWikiPage(workspaceId, p.slug, true).then(
+      () => "accepted",
+      (e: { status?: number }) => String(e.status),
+    );
+    await hold.started;
+    await server.deps.db
+      .update(schema.members)
+      .set({ role: "member" })
+      .where(and(eq(schema.members.workspaceId, workspaceId), eq(schema.members.userId, carla.user.id)));
+    hold.release();
+    expect(await pending).toBe("403");
+    expect((await ana.api.wiki.getWikiPage(workspaceId, p.slug)).locked).toBe(false);
+  });
+});
+
+const UNLOCKED = process.env.VANR_TEST_WIKI_UNLOCKED === "1";
 const onPostgres = (name: string) => (TEST_POSTGRES_URL ? name : `${name} (skipped: ${NO_POSTGRES})`);
 
 describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki saves on Postgres"), () => {
@@ -977,4 +1108,75 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki saves on Postgres"), () => 
     },
     SERVER_TEST_MS,
   );
+  test("a member's save that comes while a lock holds the page waits for it and is then rejected", async () => {
+    const url = await testDatabaseUrl("wikilock");
+    const pg = await startTestServer({ env: { DATABASE_URL: url } });
+    const locked = pageLock.row;
+    try {
+      const ana = withApi(await signedIn(pg, "Ana", email("ana")));
+      const { workspaceId } = await seedWorkspace(pg, ana, "Postgres lock");
+      const beto = withApi(await memberOf(pg, workspaceId, "Beto", email("beto")));
+      const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Lock race", body: "Original" });
+      // VANR_TEST_WIKI_UNLOCKED=1: the same read without FOR UPDATE (the CI runs it and expects a failure).
+      const read: typeof locked = UNLOCKED
+        ? async (tx, id) => {
+            const [row] = await tx
+              .select()
+              .from(schema.knowledgePages)
+              .where(eq(schema.knowledgePages.id, id));
+            return row ?? null;
+          }
+        : locked;
+      let reached!: () => void;
+      let release!: () => void;
+      const holding = new Promise<void>((r) => {
+        reached = r;
+      });
+      const gate = new Promise<void>((r) => {
+        release = r;
+      });
+      let held = false;
+      // The lock's transaction reads the page and holds it there, uncommitted.
+      pageLock.row = async (tx, id) => {
+        const row = await read(tx, id);
+        if (!held) {
+          held = true;
+          reached();
+          await gate;
+        }
+        return row;
+      };
+      const locking = ana.api.wiki.lockWikiPage(workspaceId, page.slug, true);
+      await holding;
+      const saving = beto.api.wiki
+        .replaceWikiPage(workspaceId, page.slug, { body: "MEMBER DURING LOCK", parentVersion: 1 })
+        .then(
+          () => 200,
+          (e: { status?: number }) => e.status ?? 0,
+        );
+      // Release the lock once the save waits for the page's row lock (or already ended without one).
+      const waitingForLock = async () => {
+        const deadline = Date.now() + 15_000;
+        for (;;) {
+          const rows = await pg.deps.db.execute(
+            sql`select pid from pg_stat_activity where wait_event_type = 'Lock' and datname = current_database()`,
+          );
+          if (Array.isArray(rows) && rows.length) return;
+          if (Date.now() > deadline) throw new Error("the save never waited for the page's lock");
+          await new Promise((r) => setTimeout(r, 20));
+        }
+      };
+      await Promise.race([saving, waitingForLock()]);
+      release();
+      await locking;
+      const status = await saving;
+      const now = await ana.api.wiki.getWikiPage(workspaceId, page.slug);
+      // The save read the page after the lock committed: rejected (unlocked, it read it before and saved).
+      expect(status).toBe(403);
+      expect({ locked: now.locked, body: now.body }).toEqual({ locked: true, body: "Original" });
+    } finally {
+      pageLock.row = locked;
+      await pg.stop();
+    }
+  }, 60_000);
 });

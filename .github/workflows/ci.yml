@@ -112,10 +112,26 @@ jobs:
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_STORAGE_UNLOCKED: "1"
-      # The wiki's saves on the same parent version, with real concurrent transactions.
+      # The wiki's saves on the same parent version, with real concurrent transactions, and a member's save
+      # that comes while a lock holds the page: it waits for the page's row lock and is rejected. The second
+      # run reads the page without the lock (a double in the test) and must fail, so the first can't pass
+      # without it.
       - run: bun test apps/server/test/wiki.test.ts --test-name-pattern "on Postgres"
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      - name: The wiki lock race test fails without the row lock
+        run: |
+          if out=$(bun test apps/server/test/wiki.test.ts --test-name-pattern "on Postgres" 2>&1); then
+            echo "$out"
+            echo "::error::the wiki lock race test passed without the row lock"
+            exit 1
+          fi
+          echo "$out"
+          # It must fail for the race (the member's save was accepted), not for anything else.
+          grep -q 'Received: 200' <<< "$out"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_WIKI_UNLOCKED: "1"
 
   sandbox:
     # The runner's real sandbox (bubblewrap + socat): the attack tests of the isolation of the agent's

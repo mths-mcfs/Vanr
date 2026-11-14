@@ -13,12 +13,13 @@ import { forbidden, HttpError, notFound } from "./http";
 import { reindex, unindex } from "./search-index";
 import { namesOf, reresolveLinks, syncLinks } from "./wiki-links";
 
-const { knowledgePages, pageRevisions, wikiPageViews, pageLinks, wikiPageDocs, wikiPropSchemas } = schema;
+const { knowledgePages, pageRevisions, wikiPageViews, pageLinks, wikiPageDocs, wikiPropSchemas, members } =
+  schema;
 export type WikiRow = typeof knowledgePages.$inferSelect;
 export type Author = ActorRef & { actingFor?: string };
 
 export const MAX_BODY = 500_000;
-/** Characters that break a [[link]] by title (Obsidian refuses them too; the vault import strips them). */
+/** Characters that break a [[link]] by title (Obsidian rejects them too; the vault import strips them). */
 export const TITLE_BREAKS_LINK = /[[\]|#^]/;
 
 function checkTitle(title: string) {
@@ -279,7 +280,59 @@ export async function createPage(
   return row;
 }
 
-/** Saves a new version. On a locked page only whoever may bypass the lock (an admin) writes. */
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/**
+ * The page's row read for a write: locked until the write's transaction ends, so a lock, a trash or another
+ * save that lands meanwhile waits and the write decides on the state it read here. A mutable seam: the
+ * Postgres race test swaps it for an unlocked read (VANR_TEST_WIKI_UNLOCKED) to prove it depends on it.
+ */
+export const pageLock = {
+  row: async (tx: Tx, id: string): Promise<WikiRow | null> => {
+    const [row] = await tx.select().from(knowledgePages).where(eq(knowledgePages.id, id)).for("update");
+    return row ?? null;
+  },
+};
+
+/** A person's role in the workspace read inside the write's transaction (null: not a member any more). */
+async function roleIn(tx: Tx, workspaceId: string, userId: string) {
+  const [m] = await tx
+    .select({ role: members.role })
+    .from(members)
+    .where(and(eq(members.workspaceId, workspaceId), eq(members.userId, userId)))
+    .for("share");
+  return m?.role ?? null;
+}
+
+/** Whether `who` may write a locked page, decided with the role read in `tx`: only a person who is an admin. */
+export async function bypassesLock(tx: Tx, workspaceId: string, who: ActorRef): Promise<boolean> {
+  if (who.type !== "person") return false;
+  const role = await roleIn(tx, workspaceId, who.id);
+  return !!role && can(role, "configure");
+}
+
+/** A person who writes must still be a member when the write commits; an agent's access is its run's. */
+async function requireWriter(tx: Tx, workspaceId: string, who: ActorRef) {
+  if (who.type === "person" && !(await roleIn(tx, workspaceId, who.id)))
+    throw forbidden("You are not a member of this workspace any more");
+}
+
+const pageLocked = () => new HttpError(403, "wiki.page_locked", "This page is locked");
+
+/** The page's row for a write that needs it outside the trash, locked in `tx`. */
+async function livePage(tx: Tx, id: string): Promise<WikiRow> {
+  const row = await pageLock.row(tx, id);
+  if (!row || row.deletedAt) throw notFound("Page not found");
+  return row;
+}
+
+/**
+ * Saves a new version. The page is re-read locked inside the transaction: a lock, a trash or a newer
+ * version that landed after the caller read `row` decides here. On a locked page only who may bypass the
+ * lock writes: `canBypassLock` is the caller's ceiling, and the author's role is read again in the
+ * transaction. `inTx` runs with the locked row before anything is written (the live session checks its
+ * editors there).
+ */
 export async function savePage(
   deps: AppDeps,
   input: {
@@ -295,23 +348,28 @@ export async function savePage(
     props?: Props;
     note?: string | null;
     origin?: SaveOrigin;
+    inTx?: (tx: Tx, page: WikiRow) => Promise<void>;
   },
 ): Promise<WikiRow> {
-  const { row } = input;
-  if (row.deletedAt) throw notFound("Page not found");
-  if (row.locked && !input.canBypassLock) throw new HttpError(403, "wiki.page_locked", "This page is locked");
-  if (input.parentVersion !== undefined && input.parentVersion !== row.version)
-    throw new HttpError(409, "wiki.stale_draft", "Someone saved a newer version", {
-      currentVersion: row.version,
-    });
-  if (input.title !== undefined && input.title !== row.title) checkTitle(input.title);
+  if (input.title !== undefined && input.title !== input.row.title) checkTitle(input.title);
   const at = deps.now();
-  const next = row.version + 1;
-  const body = input.body ?? row.body;
-  const title = input.title ?? row.title;
-  const aliases = input.aliases !== undefined ? normalizeAltTitles(input.aliases, title) : row.aliases;
-  const props = input.props ?? row.props;
-  const saved = await deps.db.transaction(async (tx) => {
+  const result = await deps.db.transaction(async (tx) => {
+    const row = await livePage(tx, input.row.id);
+    await requireWriter(tx, row.workspaceId, input.author);
+    if (row.locked && !(input.canBypassLock && (await bypassesLock(tx, row.workspaceId, input.author))))
+      throw pageLocked();
+    // Without a parent version the caller saves over the version it read.
+    const expected = input.parentVersion ?? input.row.version;
+    if (expected !== row.version)
+      throw new HttpError(409, "wiki.stale_draft", "Someone saved a newer version", {
+        currentVersion: row.version,
+      });
+    await input.inTx?.(tx, row);
+    const next = row.version + 1;
+    const body = input.body ?? row.body;
+    const title = input.title ?? row.title;
+    const aliases = input.aliases !== undefined ? normalizeAltTitles(input.aliases, title) : row.aliases;
+    const props = input.props ?? row.props;
     const [updated] = await tx
       .update(knowledgePages)
       .set({
@@ -325,18 +383,9 @@ export async function savePage(
         ...(input.folder !== undefined ? { folder: normalizeFolder(input.folder) } : {}),
         ...(input.tags !== undefined ? { tags: normalizeTags(input.tags) } : {}),
       })
-      .where(
-        and(
-          eq(knowledgePages.id, row.id),
-          eq(knowledgePages.version, row.version),
-          isNull(knowledgePages.deletedAt),
-        ),
-      )
+      .where(eq(knowledgePages.id, row.id))
       .returning();
-    if (!updated)
-      throw new HttpError(409, "wiki.stale_draft", "Someone saved a newer version", {
-        currentVersion: row.version + 1,
-      });
+    if (!updated) throw notFound("Page not found");
     await tx.insert(pageRevisions).values({
       pageId: row.id,
       version: next,
@@ -353,30 +402,54 @@ export async function savePage(
     if (renamed) await reresolveLinks(tx, updated.workspaceId, [...namesOf(row), ...namesOf(updated)]);
     return updated;
   });
-  await afterWrite(deps, saved, input.origin ?? "api");
-  return saved;
+  await afterWrite(deps, result, input.origin ?? "api");
+  return result;
 }
 
 /**
- * A state change without a new version (pin, lock, move). Only the one with an author (move) counts as a
- * change of the page; pinning and locking keep the "who changed it and when" the page shows.
+ * A state change without a new version (pin, lock, move), on the page re-read locked; `guard` decides with
+ * that row inside the transaction. Only the one with an author (move) counts as a change of the page;
+ * pinning and locking keep the "who changed it and when" the page shows.
  */
 export async function patchPage(
   deps: AppDeps,
   row: WikiRow,
   set: Partial<typeof knowledgePages.$inferInsert>,
+  guard?: (tx: Tx, page: WikiRow) => Promise<void>,
 ) {
-  const [updated] = await deps.db
-    .update(knowledgePages)
-    .set(set.updatedBy ? { ...set, updatedAt: deps.now() } : set)
-    .where(eq(knowledgePages.id, row.id))
-    .returning();
-  if (!updated) throw notFound("Page not found");
-  if (set.folder !== undefined)
-    await reresolveLinks(deps.db, updated.workspaceId, [...namesOf(row), ...namesOf(updated)]);
+  const at = deps.now();
+  const updated = await deps.db.transaction(async (tx) => {
+    const page = await livePage(tx, row.id);
+    await guard?.(tx, page);
+    const [changed] = await tx
+      .update(knowledgePages)
+      .set(set.updatedBy ? { ...set, updatedAt: at } : set)
+      .where(eq(knowledgePages.id, row.id))
+      .returning();
+    if (!changed) throw notFound("Page not found");
+    if (set.folder !== undefined)
+      await reresolveLinks(tx, changed.workspaceId, [...namesOf(page), ...namesOf(changed)]);
+    return changed;
+  });
   await reindex(deps, { kind: "wiki", id: updated.id });
   return updated;
 }
+
+/** Guard of a write that a lock forbids (move): only who bypasses the lock, by the role read in `tx`. */
+export const unlockedFor = (who: ActorRef) => async (tx: Tx, page: WikiRow) => {
+  await requireWriter(tx, page.workspaceId, who);
+  if (page.locked && !(await bypassesLock(tx, page.workspaceId, who))) throw pageLocked();
+};
+
+/** Guard of the lock itself: an admin by the role read in `tx`. */
+export const adminOnly = (who: ActorRef) => async (tx: Tx, page: WikiRow) => {
+  if (!(await bypassesLock(tx, page.workspaceId, who))) throw forbidden("Only admins can lock pages");
+};
+
+/** Guard of a write any member may do (pin): still a member when it commits. */
+export const memberOnly = (who: ActorRef) => async (tx: Tx, page: WikiRow) => {
+  await requireWriter(tx, page.workspaceId, who);
+};
 
 export async function recordRead(deps: AppDeps, pageId: string, reader: ActorRef) {
   const at = deps.now();
@@ -389,7 +462,7 @@ export async function recordRead(deps: AppDeps, pageId: string, reader: ActorRef
     });
 }
 
-async function firstAuthor(db: Db, pageId: string): Promise<ActorRef | undefined> {
+async function firstAuthor(db: Db | Tx, pageId: string): Promise<ActorRef | undefined> {
   const [first] = await db
     .select({ author: pageRevisions.author })
     .from(pageRevisions)
@@ -399,53 +472,87 @@ async function firstAuthor(db: Db, pageId: string): Promise<ActorRef | undefined
   return first?.author;
 }
 
-export async function requireDeleter(db: Db, row: WikiRow, me: WorkspaceMember) {
-  const admin = can(me.role, "configure");
-  if (row.locked && !admin) throw new HttpError(403, "wiki.page_locked", "This page is locked");
+/** Who may trash, restore or delete for good: who created the page or an admin, never past a lock. */
+async function deleterCheck(db: Db | Tx, row: WikiRow, userId: string, role: WorkspaceMember["role"] | null) {
+  if (!role) throw forbidden("You are not a member of this workspace any more");
+  const admin = can(role, "configure");
+  if (row.locked && !admin) throw pageLocked();
   const first = await firstAuthor(db, row.id);
-  if (!admin && !(first?.type === "person" && first.id === me.userId))
+  if (!admin && !(first?.type === "person" && first.id === userId))
     throw forbidden("Only who created the page or an admin can delete it");
 }
 
+/** The trash list's `canPurge`: the same rule, on the role the request carries (a read, nothing is written). */
+export async function requireDeleter(db: Db, row: WikiRow, me: WorkspaceMember) {
+  await deleterCheck(db, row, me.userId, me.role);
+}
+
+/** The page of a trash write, re-read locked, and the rule checked on it with the role read in `tx`. */
+async function deletablePage(tx: Tx, id: string, me: WorkspaceMember, trashed: boolean): Promise<WikiRow> {
+  const row = await pageLock.row(tx, id);
+  if (!row || !!row.deletedAt !== trashed) throw notFound("Page not found");
+  await deleterCheck(tx, row, me.userId, await roleIn(tx, row.workspaceId, me.userId));
+  return row;
+}
+
 /** Sends to the trash: gone from lists, inbound links and search; comes back within 30 days. */
-export async function trashPage(deps: AppDeps, row: WikiRow, by: ActorRef): Promise<WikiRow> {
+export async function trashPage(deps: AppDeps, row: WikiRow, me: WorkspaceMember): Promise<WikiRow> {
   const at = deps.now();
   // Leaves the search in the same commit that puts it in the trash (seam 5).
   const trashed = await deps.db.transaction(async (tx) => {
+    await deletablePage(tx, row.id, me, false);
     const [r] = await tx
       .update(knowledgePages)
-      .set({ deletedAt: at, deletedBy: by, expungeAt: new Date(at.getTime() + TRASH_DAYS * 86_400_000) })
-      .where(and(eq(knowledgePages.id, row.id), isNull(knowledgePages.deletedAt)))
+      .set({
+        deletedAt: at,
+        deletedBy: { type: "person", id: me.userId },
+        expungeAt: new Date(at.getTime() + TRASH_DAYS * 86_400_000),
+      })
+      .where(eq(knowledgePages.id, row.id))
       .returning();
-    if (r) await unindex(tx, deps, { kind: "wiki", id: r.id });
+    if (!r) throw notFound("Page not found");
+    await unindex(tx, deps, { kind: "wiki", id: r.id });
     return r;
   });
-  if (!trashed) throw notFound("Page not found");
   // A link with the same name moves to another page outside the trash, if there is one.
   await reresolveLinks(deps.db, trashed.workspaceId, namesOf(trashed));
   deps.wikiLive.pageClosed(trashed);
   return trashed;
 }
 
-export async function untrashPage(deps: AppDeps, row: WikiRow): Promise<WikiRow> {
-  const [restored] = await deps.db
-    .update(knowledgePages)
-    .set({ deletedAt: null, deletedBy: null, expungeAt: null })
-    .where(and(eq(knowledgePages.id, row.id), isNotNull(knowledgePages.deletedAt)))
-    .returning();
-  if (!restored) throw notFound("Page not found");
+export async function untrashPage(deps: AppDeps, row: WikiRow, me: WorkspaceMember): Promise<WikiRow> {
+  const restored = await deps.db.transaction(async (tx) => {
+    await deletablePage(tx, row.id, me, true);
+    const [r] = await tx
+      .update(knowledgePages)
+      .set({ deletedAt: null, deletedBy: null, expungeAt: null })
+      .where(eq(knowledgePages.id, row.id))
+      .returning();
+    if (!r) throw notFound("Page not found");
+    return r;
+  });
   await reresolveLinks(deps.db, restored.workspaceId, namesOf(restored));
   await reindex(deps, { kind: "wiki", id: restored.id });
   return restored;
 }
 
-/** Deletes for good (with versions, links and draft, by the cascade). */
-export async function purgePage(deps: AppDeps, row: WikiRow) {
-  deps.wikiLive.pageClosed(row);
-  await deps.db.transaction(async (tx) => {
+/**
+ * Deletes for good (with versions, links and draft, by the cascade). From the trash route, `me` must still
+ * be allowed when it commits; the trash tick passes none and checks the page is still due.
+ */
+export async function purgePage(deps: AppDeps, row: WikiRow, me?: WorkspaceMember) {
+  const gone = await deps.db.transaction(async (tx) => {
+    if (me) await deletablePage(tx, row.id, me, true);
+    else {
+      const page = await pageLock.row(tx, row.id);
+      if (!page?.deletedAt || !page.expungeAt || page.expungeAt > deps.now()) return false;
+    }
     await tx.delete(knowledgePages).where(eq(knowledgePages.id, row.id));
     await unindex(tx, deps, { kind: "wiki", id: row.id });
+    return true;
   });
+  if (gone) deps.wikiLive.pageClosed(row);
+  return gone;
 }
 
 /** A page written outside createPage (redoing an undone creation): links and search. */
@@ -464,8 +571,9 @@ export async function purgeWikiTrash(deps: AppDeps): Promise<number> {
     .from(knowledgePages)
     .where(and(isNotNull(knowledgePages.deletedAt), lte(knowledgePages.expungeAt, deps.now())))
     .limit(100);
-  for (const row of due) await purgePage(deps, row);
-  return due.length;
+  let purged = 0;
+  for (const row of due) if (await purgePage(deps, row)) purged++;
+  return purged;
 }
 
 /** Property definitions of the workspace's pages (seam 4). */

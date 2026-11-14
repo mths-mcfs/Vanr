@@ -4,40 +4,83 @@
 // the last person leaves. A write through the API (agent, another tab, restore) enters the session with the
 // smallest change; with a dirty draft it merges three ways against the parent version (parentVersion) and,
 // if the changes cross, the draft stays put with a conflict notice.
+//
+// A connection doesn't outlive the right that opened it. Every message to it and from it goes through its
+// gate (`Peer`): the session, the membership and the page's lock are read again first, and a connection
+// that lost them is closed instead (a member on a page locked since then is closed too, and reconnects read
+// only). Every draft save and every publish reads the page locked and checks again, in its own
+// transaction, everyone whose edits it carries. An update that would take the page past MAX_BODY is
+// answered with SyncStatus false and never applied, stored or relayed.
 
 import { type Document, Hocuspocus } from "@hocuspocus/server";
 import type { ActorRef } from "@vanr/contract";
 import { can } from "@vanr/contract";
-import { schema } from "@vanr/engine/db";
+import { type Db, schema } from "@vanr/engine/db";
 import { merge3 } from "@vanr/engine/wiki/merge";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import * as Y from "yjs";
 import type { AppDeps } from "./context";
-import { errorBody, HttpError } from "./http";
+import { errorBody, forbidden, HttpError } from "./http";
 import { log } from "./logger";
-import { type Author, MAX_BODY, pageBySlug, type SaveOrigin, savePage, type WikiRow } from "./wiki";
-import { wikiMarkdown, YFRAGMENT } from "./wiki-md";
+import {
+  type Author,
+  bypassesLock,
+  MAX_BODY,
+  pageBySlug,
+  pageLock,
+  type SaveOrigin,
+  savePage,
+  type WikiRow,
+} from "./wiki";
+import { type WikiMarkdown, wikiMarkdown, YFRAGMENT } from "./wiki-md";
 
-const { knowledgePages, pageRevisions, wikiPageDocs, members, agents } = schema;
+const { knowledgePages, pageRevisions, wikiPageDocs, members, agents, sessions: authSessions } = schema;
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
 export const COLLAB_PATH = "/api/v1/wiki/collab";
 const docName = (workspaceId: string, slug: string) => `wiki/${workspaceId}/${slug}`;
-/** The largest Yjs message accepted from a client (the page body is capped at 500 thousand characters). */
+/**
+ * The largest message accepted from a client. The page body is capped at 500 thousand characters (MAX_BODY),
+ * at most 3 bytes each in UTF-8 for one UTF-16 unit, so a whole page pasted at once (1.5 MB plus the Yjs
+ * structure) fits; anything larger is closed before it is decoded.
+ */
 export const MAX_UPDATE = 2 * 1024 * 1024;
+/** The socket's own frame cap, just above MAX_UPDATE: a larger frame never reaches the server's code. */
+export const MAX_FRAME = MAX_UPDATE + 64 * 1024;
 const AGENT_PRESENCE_MS = 10_000;
 const AGENT_COLOR = "#2f6fed";
+/** How long the gate waits for the server to answer an update it forwarded (it always does, or closes). */
+const ACK_MS = 30_000;
+/** How long a stop waits for the live documents to save and unload before it stops writing. */
+const CLOSE_MS = 10_000;
+
+/** Close codes of a connection the server drops. */
+const CLOSE = {
+  sessionEnded: [4401, "session-ended"],
+  revoked: [4403, "access-revoked"],
+  readOnly: [4409, "reconnect-read-only"],
+  malformed: [4400, "malformed-message"],
+  tooLarge: [4413, "message-too-large"],
+} as const satisfies Record<string, readonly [number, string]>;
 
 export interface WikiLive {
   /** A version was saved outside the live session (API, agent, restore). */
   pageSaved(row: WikiRow): void;
   /** The page went to the trash or was deleted: closes the session without publishing. */
   pageClosed(row: Pick<WikiRow, "workspaceId" | "slug">): void;
-  /** Permission changed (lock): drops the connections; the client reconnects and goes through the check. */
-  reconnect(row: Pick<WikiRow, "workspaceId" | "slug">): void;
+  /**
+   * The page's access changed (lock, unlock): its connections are checked again now; a member on a locked
+   * page is closed (it reconnects read only) and a read-only one on an unlocked page reconnects to write.
+   */
+  recheckPage(row: Pick<WikiRow, "workspaceId" | "slug">): Promise<void>;
+  /** A person's membership or role changed: their connections in the workspace are checked again now. */
+  recheckUser(workspaceId: string, userId: string): Promise<void>;
+  /** A sign-in session ended (sign-out, revoked): its connections close now. */
+  sessionEnded(sessionId: string): void;
   /** Publishes the draft now (the button). `force` goes over a newer version (conflict). */
   publish(row: WikiRow, by: Author, opts?: { force?: boolean; canBypassLock?: boolean }): Promise<WikiRow>;
   /** Throws the draft away: the session goes back to the published version. */
-  discard(row: WikiRow): Promise<void>;
+  discard(row: WikiRow, by: ActorRef, canBypassLock: boolean): Promise<void>;
   /** Waits for the queued work (tests and shutdown). */
   settled(): Promise<void>;
   /** Pages held in memory now (a live document with its session). */
@@ -51,7 +94,10 @@ export interface CollabSocketData {
   workspaceId: string;
   userId: string;
   name: string;
+  /** The sign-in session that opened the socket: it must stay valid for the socket to stay open. */
+  sessionId: string;
   req: Request;
+  peer?: Peer;
   conn?: ReturnType<Hocuspocus["handleConnection"]>;
 }
 
@@ -59,6 +105,7 @@ interface Ctx {
   workspaceId: string;
   userId: string;
   name: string;
+  peer: Peer;
 }
 
 interface Session {
@@ -72,6 +119,10 @@ interface Session {
   edits: number;
   editors: ActorRef[];
   editedAt: Date | null;
+  /** Whose edits (person → sign-in session) are in the document and not yet saved: checked on every save. */
+  pending: Map<string, string>;
+  /** The latest sign-in session of each editor: the automatic publish checks its author's. */
+  editorSessions: Map<string, string>;
   /** A newer version that couldn't be merged into the draft (the changes cross). */
   conflictVersion: number | null;
   closed: boolean;
@@ -79,8 +130,90 @@ interface Session {
   agentPresence?: ReturnType<typeof setTimeout>;
 }
 
+/** Why a draft save was rejected: nothing is written and the session closes without publishing. */
+class DraftRejected extends Error {
+  constructor(readonly reason: "gone" | "revoked" | "too_large") {
+    super(`draft rejected: ${reason}`);
+  }
+}
+
 const b64 = (u: Uint8Array) => Buffer.from(u).toString("base64");
 const unb64 = (s: string) => new Uint8Array(Buffer.from(s, "base64"));
+
+// ---- The wire format of a Hocuspocus message: varString(document key), varUint(type), then the payload.
+
+const MSG_SYNC = 0;
+const MSG_SYNC_REPLY = 4;
+const MSG_CLOSE = 7;
+const MSG_SYNC_STATUS = 8;
+const SYNC_STEP2 = 1;
+const SYNC_UPDATE = 2;
+
+/** A lib0 varUint at `at` and the position after it, or null past the end. */
+function varUint(bytes: Uint8Array, at: number): [number, number] | null {
+  let num = 0;
+  let mult = 1;
+  for (let i = at; i < bytes.length && i < at + 8; i++) {
+    const b = bytes[i] ?? 0;
+    num += (b & 0x7f) * mult;
+    mult *= 128;
+    if (b < 0x80) return [num, i + 1];
+  }
+  return null;
+}
+
+interface Head {
+  rawKey: string;
+  documentName: string;
+  type: number;
+  /** For a sync message that carries a document update (step 2 or update): the Yjs update. */
+  update: Uint8Array | null;
+}
+
+const utf8 = new TextDecoder("utf-8", { fatal: true });
+
+/** The message's head; null when it doesn't parse (a malformed message). */
+function parseHead(bytes: Uint8Array): Head | null {
+  const len = varUint(bytes, 0);
+  if (!len || len[1] + len[0] > bytes.length) return null;
+  let rawKey: string;
+  try {
+    rawKey = utf8.decode(bytes.subarray(len[1], len[1] + len[0]));
+  } catch {
+    return null;
+  }
+  const type = varUint(bytes, len[1] + len[0]);
+  if (!type) return null;
+  const sep = rawKey.indexOf("\0");
+  const head: Head = {
+    rawKey,
+    documentName: sep < 0 ? rawKey : rawKey.slice(0, sep),
+    type: type[0],
+    update: null,
+  };
+  if (head.type === MSG_SYNC || head.type === MSG_SYNC_REPLY) {
+    const sync = varUint(bytes, type[1]);
+    if (!sync) return null;
+    if (sync[0] === SYNC_STEP2 || sync[0] === SYNC_UPDATE) {
+      const size = varUint(bytes, sync[1]);
+      if (!size || size[1] + size[0] > bytes.length) return null;
+      head.update = bytes.subarray(size[1], size[1] + size[0]);
+    }
+  }
+  return head;
+}
+
+/** The SyncStatus a server answers to an update (false: rejected, nothing was applied). */
+function syncStatus(rawKey: string, applied: boolean): Uint8Array {
+  const key = new TextEncoder().encode(rawKey);
+  const out: number[] = [];
+  for (let n = key.length; ; ) {
+    out.push((n & 0x7f) | (n > 0x7f ? 0x80 : 0));
+    n = Math.floor(n / 128);
+    if (!n) break;
+  }
+  return new Uint8Array([...out, ...key, MSG_SYNC_STATUS, applied ? 1 : 0]);
+}
 
 /**
  * A stable color per person. It stays away from the product's role colors: blue is an agent, amber is
@@ -116,8 +249,131 @@ export async function checkCollabUpgrade(
   if (!m) return fail(404, "not_found", "Workspace not found");
   return {
     ok: true,
-    data: { kind: "wiki", workspaceId, userId: session.user.id, name: session.user.name, req },
+    data: {
+      kind: "wiki",
+      workspaceId,
+      userId: session.user.id,
+      name: session.user.name,
+      sessionId: session.session.id,
+      req,
+    },
   };
+}
+
+type Verdict = "ok" | "revoked" | "session_ended" | "read_only";
+
+/**
+ * One socket: the gate every message to it and from it waits at. Messages queue in order; before a batch
+ * goes out or in, the connection's right is read again (`verdict`); a connection that lost it is closed and
+ * its queue dropped.
+ */
+export class Peer {
+  /** Documents this socket authenticated to, and whether it got them read only. */
+  readonly docs = new Map<string, { slug: string; readOnly: boolean }>();
+  private readonly out: Uint8Array[] = [];
+  private readonly in: Uint8Array[] = [];
+  private pumping = false;
+  closed = false;
+  /** Waiters for the server's SyncStatus on a document key (the answer to a forwarded update). */
+  readonly acks = new Map<string, () => void>();
+  /** What Hocuspocus sees as the socket: its sends go through the gate. */
+  readonly socket: {
+    readonly readyState: number;
+    send(bytes: Uint8Array): void;
+    close(code?: number, reason?: string): void;
+  };
+
+  constructor(
+    readonly data: CollabSocketData,
+    private readonly ws: Bun.ServerWebSocket<CollabSocketData>,
+    private readonly hooks: {
+      verdict: (p: Peer) => Promise<Verdict>;
+      deliver: (p: Peer, bytes: Uint8Array) => Promise<void>;
+    },
+  ) {
+    this.socket = {
+      get readyState() {
+        return ws.readyState;
+      },
+      send: (bytes) => this.send(bytes),
+      close: (code, reason) => ws.close(code, reason),
+    };
+  }
+
+  send(bytes: Uint8Array) {
+    if (this.closed) return;
+    const head = bytes.length > 1 ? parseHead(bytes) : null;
+    if (head?.type === MSG_SYNC_STATUS) this.acks.get(head.rawKey)?.();
+    // The server closed this document's connection (an error in one of its messages): the socket is no
+    // longer authenticated to it, and an update waiting for its answer won't get one.
+    if (head?.type === MSG_CLOSE) {
+      this.docs.delete(head.documentName);
+      this.acks.get(head.rawKey)?.();
+    }
+    this.out.push(bytes);
+    void this.pump();
+  }
+
+  receive(bytes: Uint8Array) {
+    if (this.closed) return;
+    this.in.push(bytes);
+    void this.pump();
+  }
+
+  /** Sends now, past the queue: only an answer to a message of this connection, right after its verdict. */
+  sendNow(bytes: Uint8Array) {
+    if (!this.closed) this.ws.send(bytes);
+  }
+
+  close([code, reason]: readonly [number, string]) {
+    if (this.closed) return;
+    this.ended();
+    this.ws.close(code, reason);
+  }
+
+  /** The socket closed (or is closing): nothing more goes out or in. */
+  ended() {
+    this.closed = true;
+    this.out.length = 0;
+    this.in.length = 0;
+    for (const release of [...this.acks.values()]) release();
+    this.acks.clear();
+  }
+
+  /** Closes the connection for a verdict other than ok; true when it is still open. */
+  apply(verdict: Verdict): boolean {
+    if (verdict === "ok") return true;
+    this.close(
+      verdict === "session_ended"
+        ? CLOSE.sessionEnded
+        : verdict === "read_only"
+          ? CLOSE.readOnly
+          : CLOSE.revoked,
+    );
+    return false;
+  }
+
+  private async pump() {
+    if (this.pumping) return;
+    this.pumping = true;
+    try {
+      while (!this.closed && (this.out.length || this.in.length)) {
+        const outs = this.out.splice(0);
+        const ins = this.in.splice(0);
+        if (!this.apply(await this.hooks.verdict(this))) return;
+        for (const bytes of outs) this.ws.send(bytes);
+        for (const bytes of ins) {
+          if (this.closed) return;
+          await this.hooks.deliver(this, bytes);
+        }
+      }
+    } catch (err) {
+      log.error("wiki.peer_failed", { err });
+      this.close(CLOSE.revoked);
+    } finally {
+      this.pumping = false;
+    }
+  }
 }
 
 export function createWikiCollab(
@@ -127,17 +383,98 @@ export function createWikiCollab(
   const idleMs = opts.idlePublishMs ?? 5 * 60_000;
   const sessions = new Map<string, Session>();
   const queues = new Map<string, Promise<unknown>>();
+  const peers = new Set<Peer>();
+  /** Per document: updates are checked and applied one at a time, so the size check sees the real state. */
+  const applying = new Map<string, Promise<unknown>>();
+  /** Updates waiting for their document to load. */
+  const loading = new Map<string, Set<(s: Session | null) => void>>();
+  /** Set once a stop finished: nothing reads or writes the database after it. */
+  let stopped = false;
+  let md: WikiMarkdown | null = null;
+  const markdown = async () => {
+    md ??= await wikiMarkdown();
+    return md;
+  };
 
   /** One thing at a time per page: an API write, a publish and a load don't cross. */
   function serial<T>(key: string, job: () => Promise<T>): Promise<T> {
     const prev = queues.get(key) ?? Promise.resolve();
-    const next = prev.then(job, job);
+    const run = () => (stopped ? Promise.reject(new Error("wiki live session stopped")) : job());
+    const next = prev.then(run, run);
     const tail = next.catch(() => undefined);
     queues.set(key, tail);
     void tail.then(() => {
       if (queues.get(key) === tail) queues.delete(key);
     });
     return next;
+  }
+
+  function oneAtATime<T>(key: string, job: () => Promise<T>): Promise<T> {
+    const prev = applying.get(key) ?? Promise.resolve();
+    const next = prev.then(job, job);
+    const tail = next.catch(() => undefined);
+    applying.set(key, tail);
+    void tail.then(() => {
+      if (applying.get(key) === tail) applying.delete(key);
+    });
+    return next;
+  }
+
+  // ---- Who may stay connected, and who may have their edits saved.
+
+  async function sessionValid(db: Db | Tx, userId: string, sessionId: string): Promise<boolean> {
+    const [row] = await db
+      .select({ expiresAt: authSessions.expiresAt })
+      .from(authSessions)
+      .where(and(eq(authSessions.id, sessionId), eq(authSessions.userId, userId)));
+    return !!row && row.expiresAt > getDeps().now();
+  }
+
+  async function verdict(p: Peer): Promise<Verdict> {
+    if (stopped) return "revoked";
+    const { db } = getDeps();
+    const { workspaceId, userId, sessionId } = p.data;
+    if (!(await sessionValid(db, userId, sessionId))) return "session_ended";
+    const [m] = await db
+      .select({ role: members.role })
+      .from(members)
+      .where(and(eq(members.workspaceId, workspaceId), eq(members.userId, userId)));
+    if (!m) return "revoked";
+    if (!p.docs.size) return "ok";
+    const slugs = [...p.docs.values()].map((d) => d.slug);
+    const pages = await db
+      .select({
+        slug: knowledgePages.slug,
+        locked: knowledgePages.locked,
+        deletedAt: knowledgePages.deletedAt,
+      })
+      .from(knowledgePages)
+      .where(and(eq(knowledgePages.workspaceId, workspaceId), inArray(knowledgePages.slug, slugs)));
+    for (const doc of p.docs.values()) {
+      const page = pages.find((x) => x.slug === doc.slug);
+      if (!page || page.deletedAt) return "revoked";
+      if (page.locked && !doc.readOnly && !can(m.role, "configure")) return "read_only";
+    }
+    return "ok";
+  }
+
+  /** Whether an editor's edits may still be saved on `page`: their session, membership and the lock, in `tx`. */
+  async function editorAllowed(tx: Tx, page: WikiRow, userId: string, sessionId: string | undefined) {
+    if (sessionId !== undefined && !(await sessionValid(tx, userId, sessionId))) return false;
+    if (!page.locked) {
+      const [m] = await tx
+        .select({ role: members.role })
+        .from(members)
+        .where(and(eq(members.workspaceId, page.workspaceId), eq(members.userId, userId)))
+        .for("share");
+      return !!m;
+    }
+    return bypassesLock(tx, page.workspaceId, { type: "person", id: userId });
+  }
+
+  async function checkEditors(tx: Tx, page: WikiRow, pending: [string, string][]) {
+    for (const [userId, sessionId] of pending)
+      if (!(await editorAllowed(tx, page, userId, sessionId))) throw new DraftRejected("revoked");
   }
 
   async function versionBody(pageId: string, version: number, current: WikiRow): Promise<string> {
@@ -149,8 +486,22 @@ export function createWikiCollab(
     return v?.body ?? current.body;
   }
 
-  async function persist(s: Session, doc: Y.Doc) {
+  /** The page's markdown the document holds now (what a publish would save). */
+  async function textOf(s: Session, doc: Y.Doc) {
+    const m = await markdown();
+    return m.serializePreserving(m.fromYDoc(doc), s.baseBody);
+  }
+
+  /**
+   * Saves the draft. The page is read locked, and everyone whose edits are not saved yet must still have
+   * their session, membership and (on a locked page) the admin role, in the same transaction; `extra` adds
+   * the check of whoever asked for this save. A rejection writes nothing.
+   */
+  async function persist(s: Session, doc: Y.Doc, extra?: (tx: Tx, page: WikiRow) => Promise<void>) {
+    if (stopped) throw new Error("wiki live session stopped");
+    if ((await textOf(s, doc)).length > MAX_BODY) throw new DraftRejected("too_large");
     const deps = getDeps();
+    const pending = [...s.pending];
     const values = {
       state: b64(Y.encodeStateAsUpdate(doc)),
       parentVersion: s.parentVersion,
@@ -159,10 +510,26 @@ export function createWikiCollab(
       editedAt: s.editedAt,
       updatedAt: deps.now(),
     };
-    await deps.db
-      .insert(wikiPageDocs)
-      .values({ pageId: s.pageId, ...values })
-      .onConflictDoUpdate({ target: wikiPageDocs.pageId, set: values });
+    await deps.db.transaction(async (tx) => {
+      const page = await pageLock.row(tx, s.pageId);
+      if (!page || page.deletedAt) throw new DraftRejected("gone");
+      await checkEditors(tx, page, pending);
+      await extra?.(tx, page);
+      await tx
+        .insert(wikiPageDocs)
+        .values({ pageId: s.pageId, ...values })
+        .onConflictDoUpdate({ target: wikiPageDocs.pageId, set: values });
+    });
+    for (const [userId, sessionId] of pending)
+      if (s.pending.get(userId) === sessionId) s.pending.delete(userId);
+  }
+
+  /** A draft that can't be saved: the session closes without publishing and its memory is let go. */
+  function abandon(name: string, s: Session, err: unknown) {
+    log.warn("wiki.draft_rejected", { err, pageId: s.pageId });
+    s.closed = true;
+    clearTimeout(s.idle);
+    hocuspocus.closeConnections(name);
   }
 
   async function freshPage(s: Session): Promise<WikiRow | null> {
@@ -172,30 +539,30 @@ export function createWikiCollab(
 
   /**
    * Brings version `row` into the document. Without a draft it becomes the version. With a draft, a
-   * three-way merge; if the changes cross, nothing changes and the conflict is marked. Returns the block
-   * where the change began (for the agent's presence) or null.
+   * three-way merge; if the changes cross (or the merge would pass MAX_BODY), nothing changes and the
+   * conflict is marked. Returns the block where the change began (for the agent's presence) or null.
    */
   async function reconcile(s: Session, doc: Y.Doc, row: WikiRow): Promise<number | null> {
     if (row.version <= s.parentVersion) return null;
-    const md = await wikiMarkdown();
-    const before = md.fromYDoc(doc);
-    const current = md.serializePreserving(before, s.baseBody);
+    const m = await markdown();
+    const before = m.fromYDoc(doc);
+    const current = m.serializePreserving(before, s.baseBody);
     let target = row.body;
     if (s.dirty && current !== s.baseBody) {
       const merged = merge3(s.baseBody, current, row.body);
-      if (!merged.ok) {
+      if (!merged.ok || merged.text.length > MAX_BODY) {
         s.conflictVersion = row.version;
         return null;
       }
       target = merged.text;
     }
-    md.replaceYContent(doc, target, "wiki-server");
+    m.replaceYContent(doc, target, "wiki-server");
     s.parentVersion = row.version;
     s.baseBody = row.body;
     s.dirty = target !== row.body;
     s.conflictVersion = null;
     if (!s.dirty) s.editors = [];
-    const after = md.fromYDoc(doc);
+    const after = m.fromYDoc(doc);
     for (let i = 0; i < after.childCount; i++)
       if (i >= before.childCount || !after.child(i).eq(before.child(i))) return i;
     return null;
@@ -229,32 +596,50 @@ export function createWikiCollab(
     }, AGENT_PRESENCE_MS);
   }
 
+  /**
+   * Publishes the document as a version. The save's transaction reads the page locked and checks, there,
+   * everyone whose unsaved edits it carries and (for the automatic publish) the author's own session.
+   */
   async function publishSession(
     name: string,
     s: Session,
     doc: Y.Doc,
     by: Author,
     note: string,
-    opts: { force?: boolean; canBypassLock?: boolean; origin?: SaveOrigin },
+    opts: { force?: boolean; canBypassLock?: boolean; origin?: SaveOrigin; authorSession?: string },
   ): Promise<WikiRow | null> {
     const deps = getDeps();
     const page = await freshPage(s);
     if (!page) return null;
-    const md = await wikiMarkdown();
     const seen = s.edits;
-    const text = md.serializePreserving(md.fromYDoc(doc), s.baseBody);
+    const text = await textOf(s, doc);
     if (text.length > MAX_BODY) throw new HttpError(400, "wiki.too_large", "The page is too long");
     if (s.parentVersion !== page.version && !opts.force)
       throw new HttpError(409, "wiki.stale_draft", "Someone saved a newer version", {
         currentVersion: page.version,
       });
+    const pending = [...s.pending];
+    const authorCheck = async (tx: Tx, locked: WikiRow) => {
+      try {
+        await checkEditors(tx, locked, pending);
+      } catch {
+        throw forbidden("The draft has edits from someone who lost access to the page");
+      }
+      if (opts.authorSession && !(await sessionValid(tx, by.id, opts.authorSession)))
+        throw forbidden("The draft's author signed out");
+    };
     if (text === page.body) {
       s.dirty = false;
       s.editors = [];
       s.parentVersion = page.version;
       s.baseBody = page.body;
       s.conflictVersion = null;
-      await persist(s, doc);
+      // Nothing to publish, but the draft is saved: by someone who may write the page when it commits.
+      await persist(s, doc, async (tx, locked) => {
+        await authorCheck(tx, locked);
+        if (locked.locked && !(opts.canBypassLock && (await bypassesLock(tx, locked.workspaceId, by))))
+          throw new HttpError(403, "wiki.page_locked", "This page is locked");
+      });
       return page;
     }
     const saved = await savePage(deps, {
@@ -265,6 +650,7 @@ export function createWikiCollab(
       body: text,
       note,
       origin: "live",
+      inTx: authorCheck,
     });
     s.parentVersion = saved.version;
     s.baseBody = saved.body;
@@ -278,15 +664,6 @@ export function createWikiCollab(
     return saved;
   }
 
-  async function canBypass(workspaceId: string, actor: ActorRef): Promise<boolean> {
-    if (actor.type !== "person") return false;
-    const [m] = await getDeps()
-      .db.select({ role: members.role })
-      .from(members)
-      .where(and(eq(members.workspaceId, workspaceId), eq(members.userId, actor.id)));
-    return !!m && can(m.role, "configure");
-  }
-
   /** Automatic publish (quiet or end of the session): the author is whoever edited last. */
   async function autoPublish(name: string, s: Session, doc: Y.Doc, note: string) {
     if (!s.dirty || s.closed || s.conflictVersion !== null) return;
@@ -295,10 +672,12 @@ export function createWikiCollab(
     const others = s.editors.length - 1;
     try {
       await publishSession(name, s, doc, author, others > 0 ? `${note} +${others}` : note, {
-        canBypassLock: await canBypass(s.workspaceId, author),
+        // The role is read again in the save's transaction (savePage); this is only the ceiling.
+        canBypassLock: true,
+        authorSession: s.editorSessions.get(author.id),
       });
     } catch (err) {
-      // Conflict or lock: the draft stays saved and the page shows the notice.
+      // Conflict, lock or lost access: the draft stays saved (if it may be) and the page shows the notice.
       log.warn("wiki.autopublish_skipped", { err, pageId: s.pageId });
     }
   }
@@ -306,7 +685,7 @@ export function createWikiCollab(
   function armIdle(name: string, s: Session, doc: Y.Doc) {
     clearTimeout(s.idle);
     s.idle = setTimeout(() => {
-      void serial(s.pageId, () => autoPublish(name, s, doc, "idle"));
+      void serial(s.pageId, () => autoPublish(name, s, doc, "idle")).catch(() => undefined);
     }, idleMs);
   }
 
@@ -316,8 +695,8 @@ export function createWikiCollab(
     maxDebounce: 10_000,
     quiet: true,
     async onAuthenticate({ documentName, context, connectionConfig }) {
-      const [kind, workspaceId, slug] = documentName.split("/");
-      if (kind !== "wiki" || !workspaceId || !slug || workspaceId !== context.workspaceId)
+      const [kind, workspaceId, slug, ...rest] = documentName.split("/");
+      if (kind !== "wiki" || !workspaceId || !slug || rest.length || workspaceId !== context.workspaceId)
         throw new Error("forbidden");
       const deps = getDeps();
       const [m] = await deps.db
@@ -328,6 +707,7 @@ export function createWikiCollab(
       const page = await pageBySlug(deps.db, workspaceId, slug).catch(() => null);
       if (!page) throw new Error("not_found");
       if (page.locked && !can(m.role, "configure")) connectionConfig.readOnly = true;
+      context.peer.docs.set(documentName, { slug, readOnly: connectionConfig.readOnly });
     },
     async onLoadDocument({ document, documentName }) {
       const [, workspaceId = "", slug = ""] = documentName.split("/");
@@ -344,6 +724,8 @@ export function createWikiCollab(
           edits: 0,
           editors: [],
           editedAt: null,
+          pending: new Map(),
+          editorSessions: new Map(),
           conflictVersion: null,
           closed: false,
         };
@@ -360,16 +742,15 @@ export function createWikiCollab(
         } else {
           // The page's first session: seed it from the markdown and save it at once, so whoever reconnects
           // later merges with the same history (and doesn't duplicate the text).
-          const md = await wikiMarkdown();
-          Y.applyUpdate(document, Y.encodeStateAsUpdate(md.toYDoc(page.body)));
+          const m = await markdown();
+          Y.applyUpdate(document, Y.encodeStateAsUpdate(m.toYDoc(page.body)));
         }
         await persist(s, document);
         sessions.set(documentName, s);
+        for (const done of [...(loading.get(documentName) ?? [])]) done(s);
+        loading.delete(documentName);
         return document;
       });
-    },
-    async beforeHandleMessage({ update }) {
-      if (update.byteLength > MAX_UPDATE) throw new Error("update_too_large");
     },
     async beforeHandleAwareness({ states, context, connection }) {
       // Presence is declared by the client: the server stamps who it is (nobody passes for another person
@@ -398,12 +779,17 @@ export function createWikiCollab(
         ...s.editors.filter((e) => e.id !== context.userId),
         { type: "person", id: context.userId },
       ];
+      s.pending.set(context.userId, context.peer.data.sessionId);
+      s.editorSessions.set(context.userId, context.peer.data.sessionId);
       armIdle(documentName, s, document);
     },
     async onStoreDocument({ documentName, document }) {
       const s = sessions.get(documentName);
       if (!s || s.closed) return;
-      await serial(s.pageId, () => persist(s, document));
+      await serial(s.pageId, () => persist(s, document)).catch((err) => {
+        if (err instanceof DraftRejected) abandon(documentName, s, err);
+        else log.error("wiki.draft_save_failed", { err, pageId: s.pageId });
+      });
     },
     async beforeUnloadDocument({ documentName, document }) {
       const s = sessions.get(documentName);
@@ -420,17 +806,94 @@ export function createWikiCollab(
     },
   });
 
+  /**
+   * A message from a socket that passed its gate. An update to a document is checked against the document
+   * as it is (one update per document at a time, until the server acknowledges it): an invalid one closes
+   * the connection; one that would take the page past MAX_BODY is answered with SyncStatus false and
+   * dropped.
+   */
+  async function deliver(p: Peer, bytes: Uint8Array) {
+    const conn = p.data.conn;
+    if (!conn) return;
+    if (bytes.byteLength > MAX_UPDATE) return p.close(CLOSE.tooLarge);
+    // A ping or pong is one byte; Hocuspocus answers it.
+    if (bytes.length === 1) return conn.handleMessage(bytes);
+    const head = parseHead(bytes);
+    if (!head) return p.close(CLOSE.malformed);
+    const doc = p.docs.get(head.documentName);
+    if (!head.update) return conn.handleMessage(bytes);
+    // An update for a document this socket hasn't authenticated to is dropped: Hocuspocus would queue it and
+    // apply it after the authentication, past the checks below.
+    if (!doc) return;
+    if (doc.readOnly) return conn.handleMessage(bytes);
+    const update = head.update;
+    await oneAtATime(head.documentName, async () => {
+      if (p.closed || !p.apply(await verdict(p))) return;
+      const s = await whenLoaded(head.documentName);
+      const document = hocuspocus.documents.get(head.documentName);
+      if (!s || !document) return p.close(CLOSE.revoked);
+      const size = await sizeAfter(s, document, update);
+      if (size === null) return p.close(CLOSE.malformed);
+      if (size > MAX_BODY) return p.sendNow(syncStatus(head.rawKey, false));
+      const acked = new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, ACK_MS);
+        p.acks.set(head.rawKey, () => {
+          clearTimeout(timer);
+          p.acks.delete(head.rawKey);
+          resolve();
+        });
+      });
+      conn.handleMessage(bytes);
+      await acked;
+    });
+  }
+
+  /** The document's session once it loaded (an update waits for it, to be checked against it); null if it didn't. */
+  function whenLoaded(name: string): Promise<Session | null> {
+    const s = sessions.get(name);
+    if (s) return Promise.resolve(s);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => done(null), ACK_MS);
+      const done = (value: Session | null) => {
+        clearTimeout(timer);
+        loading.get(name)?.delete(done);
+        resolve(value);
+      };
+      const waiting = loading.get(name) ?? new Set();
+      waiting.add(done);
+      loading.set(name, waiting);
+    });
+  }
+
+  /** The page's length once `update` is applied to a copy of the document; null for an invalid update. */
+  async function sizeAfter(s: Session, document: Y.Doc, update: Uint8Array): Promise<number | null> {
+    const probe = new Y.Doc();
+    try {
+      Y.applyUpdate(probe, Y.encodeStateAsUpdate(document));
+      Y.applyUpdate(probe, update);
+      return (await textOf(s, probe)).length;
+    } catch {
+      return null;
+    } finally {
+      probe.destroy();
+    }
+  }
+
   /** Opens the loaded document (or the saved one) for a change made by the server. */
   async function withDocument<T>(
     row: Pick<WikiRow, "id" | "workspaceId" | "slug">,
     fn: (s: Session, doc: Y.Doc, live: Document | null) => Promise<T>,
+    extra?: (tx: Tx, page: WikiRow) => Promise<void>,
   ): Promise<T | null> {
     const name = docName(row.workspaceId, row.slug);
     const loaded = hocuspocus.documents.get(name);
     const s = sessions.get(name);
     if (loaded && s) {
       const result = await fn(s, loaded, loaded);
-      await persist(s, loaded);
+      await persist(s, loaded, extra).catch((err) => {
+        if (err instanceof DraftRejected) abandon(name, s, err);
+        throw err;
+      });
       return result;
     }
     // No open session: works on the saved state, if the page already had a session.
@@ -450,17 +913,40 @@ export function createWikiCollab(
       edits: 0,
       editors: saved.editors,
       editedAt: saved.editedAt,
+      pending: new Map(),
+      editorSessions: new Map(),
       conflictVersion: null,
       closed: false,
     };
     try {
       const result = await fn(offline, doc, null);
-      await persist(offline, doc);
+      await persist(offline, doc, extra);
       return result;
     } finally {
       doc.destroy();
     }
   }
+
+  /** Checks a socket's right now, outside a message: closes it, or makes a read-only one reconnect to write. */
+  async function recheck(p: Peer, slug?: string) {
+    if (p.closed || !p.apply(await verdict(p))) return;
+    if (!slug) return;
+    const doc = [...p.docs.values()].find((d) => d.slug === slug);
+    if (!doc?.readOnly) return;
+    const [page] = await getDeps()
+      .db.select({ locked: knowledgePages.locked })
+      .from(knowledgePages)
+      .where(and(eq(knowledgePages.workspaceId, p.data.workspaceId), eq(knowledgePages.slug, slug)));
+    if (page && !page.locked) p.close(CLOSE.readOnly);
+  }
+
+  const toHttp = (err: unknown) => {
+    if (err instanceof DraftRejected)
+      return err.reason === "too_large"
+        ? new HttpError(400, "wiki.too_large", "The page is too long")
+        : forbidden("The draft has edits from someone who lost access to the page");
+    return err;
+  };
 
   const live: WikiLive = {
     pageSaved(row) {
@@ -484,8 +970,19 @@ export function createWikiCollab(
       }
       hocuspocus.closeConnections(name);
     },
-    reconnect(row) {
-      hocuspocus.closeConnections(docName(row.workspaceId, row.slug));
+    async recheckPage(row) {
+      const name = docName(row.workspaceId, row.slug);
+      await Promise.all([...peers].filter((p) => p.docs.has(name)).map((p) => recheck(p, row.slug)));
+    },
+    async recheckUser(workspaceId, userId) {
+      await Promise.all(
+        [...peers]
+          .filter((p) => p.data.workspaceId === workspaceId && p.data.userId === userId)
+          .map((p) => recheck(p)),
+      );
+    },
+    sessionEnded(sessionId) {
+      for (const p of peers) if (p.data.sessionId === sessionId) p.close(CLOSE.sessionEnded);
     },
     async publish(row, by, opts = {}) {
       const saved = await serial(row.id, () =>
@@ -494,52 +991,84 @@ export function createWikiCollab(
             ? publishSession(docName(row.workspaceId, row.slug), s, doc, by, "publish", opts)
             : Promise.resolve(null),
         ),
-      );
+      ).catch((err) => {
+        throw toHttp(err);
+      });
       return saved ?? row;
     },
-    async discard(row) {
+    async discard(row, by, canBypassLock) {
       await serial(row.id, () =>
-        withDocument(row, async (s, doc) => {
-          const md = await wikiMarkdown();
-          md.replaceYContent(doc, row.body, "wiki-server");
-          Object.assign(s, {
-            parentVersion: row.version,
-            baseBody: row.body,
-            dirty: false,
-            editors: [],
-            conflictVersion: null,
-          });
-          clearTimeout(s.idle);
-          broadcast(docName(row.workspaceId, row.slug), { type: "discarded", version: row.version });
-        }),
-      );
+        withDocument(
+          row,
+          async (s, doc) => {
+            const m = await markdown();
+            m.replaceYContent(doc, row.body, "wiki-server");
+            Object.assign(s, {
+              parentVersion: row.version,
+              baseBody: row.body,
+              dirty: false,
+              editors: [],
+              conflictVersion: null,
+            });
+            // The draft's edits are gone with it: nobody's unsaved edit is written by this save.
+            s.pending.clear();
+            clearTimeout(s.idle);
+            broadcast(docName(row.workspaceId, row.slug), { type: "discarded", version: row.version });
+          },
+          async (tx, page) => {
+            if (page.locked && !(canBypassLock && (await bypassesLock(tx, page.workspaceId, by))))
+              throw new HttpError(403, "wiki.page_locked", "This page is locked");
+          },
+        ),
+      ).catch((err) => {
+        throw toHttp(err);
+      });
     },
     async settled() {
-      while (queues.size) await Promise.all([...queues.values()]);
+      while (queues.size || applying.size) await Promise.all([...queues.values(), ...applying.values()]);
     },
     loaded() {
       return hocuspocus.documents.size;
     },
     async close() {
+      if (stopped) return;
       hocuspocus.closeConnections();
-      const end = Date.now() + 3000;
+      const end = Date.now() + CLOSE_MS;
       while ((hocuspocus.documents.size || queues.size) && Date.now() < end) {
         await live.settled();
         await Bun.sleep(10);
       }
+      if (hocuspocus.documents.size || queues.size)
+        log.error("wiki.close_timed_out", { documents: hocuspocus.documents.size, queues: queues.size });
+      // From here nothing touches the database (it closes next): a late job is dropped.
+      stopped = true;
+      for (const p of peers) p.close(CLOSE.revoked);
     },
   };
 
   const socket = {
     open(ws: Bun.ServerWebSocket<CollabSocketData>) {
-      const { workspaceId, userId, name, req } = ws.data;
-      ws.data.conn = hocuspocus.handleConnection(ws as never, req, { workspaceId, userId, name });
+      const peer = new Peer(ws.data, ws, { verdict, deliver });
+      ws.data.peer = peer;
+      peers.add(peer);
+      const { workspaceId, userId, name } = ws.data;
+      ws.data.conn = hocuspocus.handleConnection(peer.socket as never, ws.data.req, {
+        workspaceId,
+        userId,
+        name,
+        peer,
+      });
     },
     message(ws: Bun.ServerWebSocket<CollabSocketData>, raw: string | Buffer) {
       const bytes = typeof raw === "string" ? new TextEncoder().encode(raw) : new Uint8Array(raw);
-      ws.data.conn?.handleMessage(bytes);
+      ws.data.peer?.receive(bytes);
     },
     close(ws: Bun.ServerWebSocket<CollabSocketData>, code: number, reason: string) {
+      const peer = ws.data.peer;
+      if (peer) {
+        peer.ended();
+        peers.delete(peer);
+      }
       ws.data.conn?.handleClose({ code, reason });
     },
   };

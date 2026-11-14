@@ -15,10 +15,12 @@ import type { AppEnv, Ctx, WorkspaceMember } from "../context";
 import { type Form, readFormFile } from "../drive";
 import { forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
 import {
+  adminOnly,
   allPages,
   createPage,
   historyOf,
   MAX_BODY,
+  memberOnly,
   normalizeFolder,
   pageBySlug,
   patchPage,
@@ -30,6 +32,7 @@ import {
   toPage,
   toSummary,
   trashPage,
+  unlockedFor,
   untrashPage,
   type WikiRow,
   writeProps,
@@ -291,7 +294,12 @@ export function registerWiki(app: Hono<AppEnv>) {
     const row = await page(c, me);
     const input = await readJson(c, z.object({ folder }).strict());
     if (row.locked && !isAdmin(me)) throw new HttpError(403, "wiki.page_locked", "This page is locked");
-    const moved = await patchPage(deps, row, { folder: normalizeFolder(input.folder), updatedBy: me$(me) });
+    const moved = await patchPage(
+      deps,
+      row,
+      { folder: normalizeFolder(input.folder), updatedBy: me$(me) },
+      unlockedFor(me$(me)),
+    );
     return c.json(await toPage(deps.db, moved, me));
   });
 
@@ -301,9 +309,9 @@ export function registerWiki(app: Hono<AppEnv>) {
     if (!isAdmin(me)) throw forbidden("Only admins can lock pages");
     const row = await page(c, me);
     const { locked } = await readJson(c, z.object({ locked: z.boolean() }).strict());
-    const updated = await patchPage(deps, row, { locked });
-    // Whoever is editing live reconnects and goes through the new check (read only if it was locked).
-    if (locked !== row.locked) deps.wikiLive.reconnect(updated);
+    const updated = await patchPage(deps, row, { locked }, adminOnly(me$(me)));
+    // Whoever is editing live is checked again now: a member drops to read only on a lock.
+    if (locked !== row.locked) deps.wikiLive.recheckPage(updated);
     return c.json(await toPage(deps.db, updated, me));
   });
 
@@ -312,7 +320,7 @@ export function registerWiki(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const row = await page(c, me);
     const { pinned } = await readJson(c, z.object({ pinned: z.boolean() }).strict());
-    return c.json(await toPage(deps.db, await patchPage(deps, row, { pinned }), me));
+    return c.json(await toPage(deps.db, await patchPage(deps, row, { pinned }, memberOnly(me$(me))), me));
   });
 
   // Deleting sends it to the trash (30 days). Deleting for good is in the trash.
@@ -320,8 +328,7 @@ export function registerWiki(app: Hono<AppEnv>) {
     const me = requireMember(c);
     const deps = c.get("deps");
     const row = await page(c, me);
-    await requireDeleter(deps.db, row, me);
-    await trashPage(deps, row, me$(me));
+    await trashPage(deps, row, me);
     return c.body(null, 204);
   });
 
@@ -358,16 +365,14 @@ export function registerWiki(app: Hono<AppEnv>) {
     const me = requireMember(c);
     const deps = c.get("deps");
     const row = await pageBySlug(deps.db, me.workspaceId, param(c, "trashId"), { trashed: true });
-    await requireDeleter(deps.db, row, me);
-    return c.json(await toPage(deps.db, await untrashPage(deps, row), me));
+    return c.json(await toPage(deps.db, await untrashPage(deps, row, me), me));
   });
 
   app.delete(`${WORKSPACE}/wiki/trash/:trashId`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
     const row = await pageBySlug(deps.db, me.workspaceId, param(c, "trashId"), { trashed: true });
-    await requireDeleter(deps.db, row, me);
-    await purgePage(deps, row);
+    await purgePage(deps, row, me);
     return c.body(null, 204);
   });
 
@@ -470,7 +475,7 @@ export function registerWiki(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const row = await page(c, me);
     if (row.locked && !isAdmin(me)) throw new HttpError(403, "wiki.page_locked", "This page is locked");
-    await deps.wikiLive.discard(row);
+    await deps.wikiLive.discard(row, me$(me), isAdmin(me));
     return c.json(await toPage(deps.db, row, me));
   });
 

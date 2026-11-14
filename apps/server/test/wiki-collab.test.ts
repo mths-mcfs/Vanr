@@ -4,17 +4,17 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HocuspocusProvider, HocuspocusProviderWebsocket } from "@hocuspocus/provider";
 import { schema } from "@vanr/engine/db";
 import { eq } from "drizzle-orm";
 import * as Y from "yjs";
 import type { RunningServer } from "../src/server";
 import { pageBySlug, savePage } from "../src/wiki";
 import { COLLAB_PATH, MAX_UPDATE } from "../src/wiki-collab";
-import { wikiMarkdown, YFRAGMENT } from "../src/wiki-md";
+import { YFRAGMENT } from "../src/wiki-md";
 import { type Browser, holdNextIndexWrite, SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
 import { memberOf, type Person, seedWorkspace } from "./seed";
 import { apiError, wikiApi } from "./wiki-api";
+import { connect, unloaded, until } from "./wiki-live";
 
 let server: RunningServer;
 beforeAll(async () => {
@@ -31,118 +31,6 @@ async function team() {
   const { workspaceId } = await seedWorkspace(server, ana, "Live");
   const beto = withApi(await memberOf(server, workspaceId, "Beto", email("beto")));
   return { workspaceId, ana, beto };
-}
-
-/** Waits for a condition the server or the socket makes true (each check is a fresh read). */
-async function until(cond: () => boolean | Promise<boolean>, ms = 8000): Promise<void> {
-  const end = Date.now() + ms;
-  while (!(await cond())) {
-    if (Date.now() > end) throw new Error("timeout");
-    await Bun.sleep(20);
-  }
-}
-
-/** The session's queued work is done and no page of this server is held in memory. */
-const unloaded = (srv: RunningServer) =>
-  until(async () => {
-    await srv.deps.wikiLive.settled();
-    return srv.deps.wikiLive.loaded() === 0;
-  });
-
-interface Client {
-  doc: Y.Doc;
-  provider: HocuspocusProvider;
-  stateless: Record<string, unknown>[];
-  /** SyncStatus answers of the server: `false` is an update it refused (a read-only connection). */
-  syncStatus: boolean[];
-  synced: Promise<void>;
-  md(base?: string): Promise<string>;
-  edit(fn: (md: string) => string): Promise<void>;
-  close(): void;
-}
-
-/** Reads a lib0 varUint at `at`; returns the value and the next position. */
-function varUint(bytes: Uint8Array, at: number): [number, number] {
-  let num = 0;
-  let mult = 1;
-  for (;;) {
-    const b = bytes[at++] ?? 0;
-    num += (b & 0x7f) * mult;
-    mult *= 128;
-    if (b < 0x80) return [num, at];
-  }
-}
-
-/** The SyncStatus of a server message (type 8: document name, type, then a varInt 1 or 0), or null. */
-function syncStatusOf(data: ArrayBuffer | Uint8Array): boolean | null {
-  const bytes = new Uint8Array(data);
-  const [nameLength, afterLength] = varUint(bytes, 0);
-  const [type, afterType] = varUint(bytes, afterLength + nameLength);
-  return type === 8 ? (bytes[afterType] ?? 0) === 1 : null;
-}
-
-function connect(
-  srv: RunningServer,
-  browser: Browser,
-  workspaceId: string,
-  name: string,
-  opts: { origin?: string } = {},
-): Client {
-  const cookie = [...browser.cookies].map(([k, v]) => `${k}=${v}`).join("; ");
-  const origin = opts.origin ?? srv.url;
-  class CookieSocket extends WebSocket {
-    constructor(url: string | URL) {
-      super(url, { headers: { cookie, origin } } as never);
-    }
-  }
-  const socket = new HocuspocusProviderWebsocket({
-    url: `${srv.url.replace(/^http/, "ws")}${COLLAB_PATH}?workspaceId=${encodeURIComponent(workspaceId)}`,
-    WebSocketPolyfill: CookieSocket,
-    maxAttempts: 1,
-  });
-  const doc = new Y.Doc();
-  const stateless: Record<string, unknown>[] = [];
-  const syncStatus: boolean[] = [];
-  let resolve!: () => void;
-  let reject!: (e: Error) => void;
-  const synced = new Promise<void>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  const provider = new HocuspocusProvider({
-    websocketProvider: socket,
-    name,
-    document: doc,
-    token: "cookie",
-    onSynced: () => resolve(),
-    onAuthenticationFailed: ({ reason }) => reject(new Error(`auth: ${reason}`)),
-    onStateless: ({ payload }) => stateless.push(JSON.parse(payload)),
-  });
-  provider.on("message", ({ event }: { event: MessageEvent }) => {
-    const status = syncStatusOf(event.data);
-    if (status !== null) syncStatus.push(status);
-  });
-  provider.attach();
-  return {
-    doc,
-    provider,
-    stateless,
-    syncStatus,
-    synced,
-    async md(base) {
-      const md = await wikiMarkdown();
-      const pm = md.fromYDoc(doc);
-      return base === undefined ? md.serialize(pm) : md.serializePreserving(pm, base);
-    },
-    async edit(fn) {
-      const md = await wikiMarkdown();
-      md.replaceYContent(doc, fn(md.serialize(md.fromYDoc(doc))));
-    },
-    close() {
-      provider.destroy();
-      socket.destroy();
-    },
-  };
 }
 
 const docRow = async (slug: string, workspaceId: string, srv = server) => {
@@ -394,11 +282,16 @@ describe("publishing while someone types (P0-03)", () => {
         const published = ana.api.wiki.publishWikiPageDraft(workspaceId, page.slug);
         await hold.begun;
         await a.edit((md) => `${md.trimEnd()}\n\nThree, typed during the publish.\n`);
-        await until(() => !a.provider.hasUnsyncedChanges);
+        // The typed update waits at its connection's gate, which reads the person's right first: on PGlite
+        // (one transaction at a time) that read waits for the held save, so the update lands right after the
+        // version is saved, never inside it.
         hold.release();
         const v2 = await published;
         expect(v2.body).toBe("One edited.\n\nTwo.\n");
-        expect(v2.draft?.dirty).toBe(true);
+        await until(() => !a.provider.hasUnsyncedChanges);
+        await until(
+          async () => (await ana.api.wiki.getWikiPage(workspaceId, page.slug)).draft?.dirty === true,
+        );
 
         // A version from outside merges with the draft instead of erasing what was typed.
         await ana.api.wiki.replaceWikiPage(workspaceId, page.slug, {
@@ -421,7 +314,7 @@ describe("publishing while someone types (P0-03)", () => {
 });
 
 describe("attacks on the collaboration socket", () => {
-  test("another site's origin, no session and a non-member of the workspace: refused before the upgrade", async () => {
+  test("another site's origin, no session and a non-member of the workspace: rejected before the upgrade", async () => {
     const { workspaceId, ana } = await team();
     const stranger = await signedIn(server, "Zed", email("zed"));
     const cookie = (b: Browser) => [...b.cookies].map(([k, v]) => `${k}=${v}`).join("; ");
@@ -488,7 +381,7 @@ describe("attacks on the collaboration socket", () => {
     const member = connect(server, beto.browser, workspaceId, name);
     await Promise.all([admin.synced, member.synced]);
     await member.edit((md) => md.replace("One.", "INTRUSION."));
-    // The server answers the refused update with SyncStatus false (it applied nothing).
+    // The server answers the rejected update with SyncStatus false (it applied nothing).
     await until(() => member.syncStatus.includes(false));
     await server.deps.wikiLive.settled();
     expect(await admin.md()).not.toContain("INTRUSION");
@@ -513,7 +406,7 @@ describe("attacks on the collaboration socket", () => {
     member.close();
   });
 
-  test("a giant Yjs message is refused", async () => {
+  test("a giant Yjs message is rejected", async () => {
     const { workspaceId, ana, beto } = await team();
     const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Big", body: BODY });
     const name = `wiki/${workspaceId}/${page.slug}`;

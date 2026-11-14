@@ -23,7 +23,13 @@ import { BackgroundWork } from "./runtime/background";
 import { createSearchIndex } from "./search-index";
 import { FirstUserPlace, SIGNUP_QUEUE_LIMITS, type SignupQueueLimits, signupDecision } from "./signup-queue";
 import { postgresLedger } from "./usage-ledger";
-import { COLLAB_PATH, type CollabSocketData, checkCollabUpgrade, createWikiCollab } from "./wiki-collab";
+import {
+  COLLAB_PATH,
+  type CollabSocketData,
+  checkCollabUpgrade,
+  createWikiCollab,
+  MAX_FRAME,
+} from "./wiki-collab";
 import { wikiMarkdown } from "./wiki-md";
 
 interface StartOptions {
@@ -148,7 +154,7 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
       return handler(req);
     },
     websocket: {
-      maxPayloadLength: 8 * 1024 * 1024,
+      maxPayloadLength: MAX_FRAME,
       open: (ws) => collab.socket.open(ws),
       message: (ws, raw) => collab.socket.message(ws, raw),
       close: (ws, code, reason) => collab.socket.close(ws, code, reason),
@@ -195,7 +201,14 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   stuckWatch.unref();
   undo.push(() => clearInterval(stuckWatch));
   const origins = [publicUrl, ...(opts.extraOrigins ?? [])];
-  const auth = createAuth({ db, config: effective, mailer, trustedOrigins: origins, signupAllowed });
+  const auth = createAuth({
+    db,
+    config: effective,
+    mailer,
+    trustedOrigins: origins,
+    signupAllowed,
+    onSessionEnded: (sessionId) => collab.live.sessionEnded(sessionId),
+  });
   // Background work (the notification queue today); stopping waits for what is running. Slice S6
   // (runtime/runtime) creates the AgentRuntime here instead, which takes this work over.
   const background = new BackgroundWork();
