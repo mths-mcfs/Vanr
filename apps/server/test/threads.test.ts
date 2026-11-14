@@ -251,13 +251,15 @@ describe("threads", () => {
 
       // archive (open or closed -> archived) against close (open -> closed): close then archive is fine, but
       // once an archive went through nothing closes the thread again.
-      const mixed = await Promise.all([act("archive"), act("close"), act("archive"), act("close")]);
-      const won: string[] = [];
-      for (const r of mixed) if (r.status === 200) won.push((await body(r)).state);
-      expect(won.filter((s) => s === "archived").length).toBeLessThanOrEqual(1);
-      expect(won.filter((s) => s === "closed").length).toBeLessThanOrEqual(1);
+      // The winners are counted by the action asked: the body is read after the write and may already
+      // show the other action's state.
+      const asked = ["archive", "close", "archive", "close"];
+      const mixed = await Promise.all(asked.map(act));
+      const won = asked.filter((_, i) => mixed[i]?.status === 200);
+      expect(won.filter((s) => s === "archive").length).toBeLessThanOrEqual(1);
+      expect(won.filter((s) => s === "close").length).toBeLessThanOrEqual(1);
       const [row] = await server.deps.db.select().from(schema.threads).where(eq(schema.threads.id, root.id));
-      expect(row?.state).toBe(won.includes("archived") ? "archived" : "closed");
+      expect(row?.state).toBe(won.includes("archive") ? "archived" : "closed");
     },
     SERVER_TEST_MS,
   );

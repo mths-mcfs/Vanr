@@ -11,7 +11,7 @@ import { channelInWorkspace } from "../src/channels";
 import { createWorkspace } from "../src/members";
 import { postMessage } from "../src/messages";
 import type { RunningServer } from "../src/server";
-import { body, SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
+import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
 import { NO_POSTGRES, TEST_POSTGRES_URL, testDatabaseUrl } from "./postgres";
 
 const onPostgres = (name: string) => (TEST_POSTGRES_URL ? name : `${name} (skipped: ${NO_POSTGRES})`);
@@ -67,19 +67,18 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("messages and threads at once on 
         expect(closes.filter((r) => r.status === 200)).toHaveLength(1);
         expect(closes.filter((r) => r.status === 409)).toHaveLength(N - 1);
         expect((await act("reopen")).status).toBe(200);
-        const mixed = await Promise.all(
-          Array.from({ length: N }, (_, i) => act(i % 2 ? "archive" : "close")),
-        );
-        const won: string[] = [];
-        for (const r of mixed) if (r.status === 200) won.push((await body(r)).state);
+        const asked = Array.from({ length: N }, (_, i) => (i % 2 ? "archive" : "close"));
+        const mixed = await Promise.all(asked.map(act));
+        // Counted by the action asked: the body is read after the write and may show the other one's state.
+        const won = asked.filter((_, i) => mixed[i]?.status === 200);
         // close then archive is a valid order; once an archive went through nothing closes the thread again.
-        expect(won.filter((s) => s === "archived").length).toBeLessThanOrEqual(1);
-        expect(won.filter((s) => s === "closed").length).toBeLessThanOrEqual(1);
+        expect(won.filter((s) => s === "archive").length).toBeLessThanOrEqual(1);
+        expect(won.filter((s) => s === "close").length).toBeLessThanOrEqual(1);
         const [state] = await server.deps.db
           .select({ state: schema.threads.state })
           .from(schema.threads)
           .where(eq(schema.threads.id, root.id));
-        expect(state?.state).toBe(won.includes("archived") ? "archived" : "closed");
+        expect(state?.state).toBe(won.includes("archive") ? "archived" : "closed");
       });
     },
     SERVER_TEST_MS * 2,
