@@ -67,4 +67,39 @@ describe("resend mailer", () => {
     await resendMailer("k", "n@example.com", { fetch: capture }).send(mail);
     expect(sent).toEqual({ from: "n@example.com", to: ["ana@example.com"], subject: "Hi", text: "Hello" });
   });
+
+  test("the idempotency key goes in Resend's header, and no header without a key", async () => {
+    const keys: (string | null)[] = [];
+    const capture: typeof fetch = Object.assign(
+      async (_url: string | URL | Request, init?: RequestInit) => {
+        keys.push(new Headers(init?.headers).get("idempotency-key"));
+        return new Response("{}", { status: 200 });
+      },
+      { preconnect: () => {} },
+    );
+    const mailer = resendMailer("k", "n@example.com", { fetch: capture });
+    await mailer.send({ ...mail, idempotencyKey: "notification-delivery/d1" });
+    await mailer.send(mail);
+    expect(keys).toEqual(["notification-delivery/d1", null]);
+  });
+
+  test("409: still running with the same key is worth retrying; the key reused with another payload is final", async () => {
+    const conflict = (name: string): typeof fetch =>
+      Object.assign(async () => Response.json({ name, message: "x", statusCode: 409 }, { status: 409 }), {
+        preconnect: () => {},
+      });
+    expect(
+      await resendMailer("k", "n@example.com", { fetch: conflict("concurrent_idempotent_requests") }).send(
+        mail,
+      ),
+    ).toEqual({ ok: false, retry: true, reason: "http_409" });
+    expect(
+      await resendMailer("k", "n@example.com", { fetch: conflict("invalid_idempotent_request") }).send(mail),
+    ).toEqual({ ok: false, retry: false, reason: "http_409" });
+    expect(await resendMailer("k", "n@example.com", { fetch: answering(409) }).send(mail)).toEqual({
+      ok: false,
+      retry: false,
+      reason: "http_409",
+    });
+  });
 });
