@@ -93,6 +93,9 @@
     "scripts/ci/gate.test.ts": 21,
     "scripts/typecheck.test.ts": 10,
     "apps/server/src/runtime/background.test.ts": 97,
-    "apps/server/test/runtime-port.test.ts": 7994
+    "apps/server/test/runtime-port.test.ts": 7994,
+    "apps/server/test/workspaces.test.ts": 17570,
+    "apps/server/test/inbox.test.ts": 6290,
+    "apps/server/test/notify-sources.test.ts": 7040
   }
 }
