@@ -22,6 +22,8 @@ export interface TestServerOptions {
   /** The live wiki: the quiet before the draft publishes itself and the autosave debounce. */
   wikiIdlePublishMs?: number;
   wikiDebounceMs?: number;
+  /** The inactivity limit of every request, in seconds (Bun's default is 10). */
+  idleTimeoutSeconds?: number;
 }
 
 /**
@@ -52,6 +54,7 @@ export async function startTestServer(opts: TestServerOptions = {}): Promise<Run
     signupQueue: opts.signupQueue,
     wikiIdlePublishMs: opts.wikiIdlePublishMs,
     wikiDebounceMs: opts.wikiDebounceMs,
+    idleTimeoutSeconds: opts.idleTimeoutSeconds,
   });
 }
 

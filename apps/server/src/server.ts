@@ -18,6 +18,7 @@ import { createMailer, type Mailer } from "./mailer";
 import { testModelCheck } from "./models";
 import { loadVapid, webPushSender } from "./push";
 import { Hub } from "./realtime/hub";
+import { isTransfer, TRANSFER_IDLE_SECONDS } from "./routes/drive";
 import { RunnerHub } from "./runners/hub";
 import { BackgroundWork } from "./runtime/background";
 import { createSearchIndex } from "./search-index";
@@ -48,6 +49,8 @@ interface StartOptions {
   onInstanceLockLost?: () => void;
   /** Tests: shorter limits for the closed sign-up queue (signup-queue.ts). */
   signupQueue?: Partial<SignupQueueLimits>;
+  /** Tests: the inactivity limit of every request (Bun's default is 10 s); the Drive's transfers keep theirs. */
+  idleTimeoutSeconds?: number;
   /** Tests: replaces a step of the boot that touches the outside, to break it or hold it. */
   steps?: Partial<BootSteps>;
   /** The live wiki: the quiet before the draft publishes itself (default 5 min) and the autosave debounce. */
@@ -142,10 +145,14 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
 
   const server = Bun.serve<CollabSocketData>({
     port: config.port,
+    ...(opts.idleTimeoutSeconds !== undefined ? { idleTimeout: opts.idleTimeoutSeconds } : {}),
     async fetch(req, srv) {
+      const path = new URL(req.url).pathname;
+      // Large bodies (Drive downloads and uploads) get a longer inactivity limit than the rest.
+      if (isTransfer(path)) srv.timeout(req, TRANSFER_IDLE_SECONDS);
       // Slice S2 (realtime/browser-socket, runners/socket) adds here the WebSocket upgrades of
       // /api/v1/realtime and /api/v1/runners/connect, and their handlers.
-      if (depsRef && new URL(req.url).pathname === COLLAB_PATH) {
+      if (depsRef && path === COLLAB_PATH) {
         const check = await checkCollabUpgrade(depsRef, req, origins);
         if (!check.ok) return check.response;
         if (srv.upgrade(req, { data: check.data })) return undefined;
@@ -173,7 +180,13 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   const db = opened.db;
   const localBlobs = config.dataDir === "memory" ? memoryBlobs() : diskBlobs(join(config.dataDir, "blobs"));
   // Drive files go to the workspace's S3 when it configured one; everything else stays local.
-  const blobs = routedBlobs(localBlobs, () => ({ db, authSecret: effective.authSecret }));
+  // A bucket call that ends after its deadline is undone as background work (the stop waits for it).
+  const blobs = routedBlobs(localBlobs, () => ({
+    db,
+    authSecret: effective.authSecret,
+    track: (work, what) => deps.runtime.track(work, what),
+    now,
+  }));
   const now = opts.now ?? (() => new Date());
   // Closed sign-up still accepts the installation's first user and whoever has a pending invite. The first
   // user's place (signup-queue.ts) lets one sign-up section at a time become it; an invite doesn't need it.
