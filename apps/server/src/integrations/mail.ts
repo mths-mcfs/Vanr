@@ -22,7 +22,8 @@ import { backTo, type Starter, saveState, takeState, type Viewer } from "./conne
 import { ImapClient, ImapError, type ImapFolder } from "./imap";
 import { defaultPolicy, isAddress, MAIL_ACTIONS, normalizePolicy, policyInput } from "./mail-rules";
 import { assertReachableHost, resolveHost } from "./net";
-import { type SmtpOptions, smtpSend } from "./smtp";
+import { outsideText } from "./outside-text";
+import { SmtpError, type SmtpOptions, smtpSend } from "./smtp";
 
 const { mailConnections, agentMailboxes } = schema;
 export type MailAccountRow = typeof mailConnections.$inferSelect;
@@ -195,6 +196,17 @@ async function transport(
   };
 }
 
+/** Every form of the account's password a mail server could echo back (IMAP LOGIN quotes it, AUTH PLAIN and
+ * LOGIN send it in base64, alone or with the user). */
+function mailSecrets(secret: Pick<ImapSecret, "username" | "password">): string[] {
+  const { username: u, password: p } = secret;
+  return [p, p.replace(/\\/g, "\\\\").replace(/"/g, '\\"'), `\0${u}\0${p}`, `${u}\0${p}`, `${u}:${p}`];
+}
+
+/** The mail server couldn't be used: its own words, without the password we sent it. */
+const mailUnreachable = (err: unknown, secret: Pick<ImapSecret, "username" | "password">) =>
+  new HttpError(400, "mail.unreachable", outsideText(err, mailSecrets(secret)) || "Mail server unreachable");
+
 /** Opens the account's IMAP session; a rejected login marks the account to reconnect. */
 export async function withImap<T>(
   deps: AppDeps,
@@ -221,7 +233,7 @@ export async function withImap<T>(
         .where(eq(mailConnections.id, row.id));
       throw new HttpError(400, "mail.auth", "The mail server rejected the password");
     }
-    if (err instanceof ImapError) throw new HttpError(400, "mail.unreachable", err.message);
+    if (err instanceof ImapError || err instanceof SmtpError) throw mailUnreachable(err, secret);
     throw err;
   } finally {
     await imap?.close();
@@ -319,11 +331,7 @@ export async function connectImap(
   } catch (err) {
     if (err instanceof ImapError && err.kind === "auth")
       throw new HttpError(400, "mail.auth", "The mail server rejected the password");
-    throw new HttpError(
-      400,
-      "mail.unreachable",
-      err instanceof Error ? err.message : "Mail server unreachable",
-    );
+    throw mailUnreachable(err, secret);
   } finally {
     await imap?.close();
   }
@@ -392,7 +400,7 @@ export async function connectComposio(
     if (!res.ok) throw new Error(`Composio answered ${res.status}`);
     started = composioStart.parse(await res.json());
   } catch (err) {
-    log.warn("mail.composio_failed", { err });
+    log.warn("mail.composio_failed", { error: outsideText(err, [cfg.apiKey]) });
     throw new HttpError(502, "mail.composio_failed", "Could not start the connection");
   }
   const at = deps.now();
@@ -476,11 +484,7 @@ export async function updateMailAccount(
     } catch (err) {
       if (err instanceof ImapError && err.kind === "auth")
         throw new HttpError(400, "mail.auth", "The mail server rejected the password");
-      throw new HttpError(
-        400,
-        "mail.unreachable",
-        err instanceof Error ? err.message : "Mail server unreachable",
-      );
+      throw mailUnreachable(err, next);
     } finally {
       await imap?.close();
     }

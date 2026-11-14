@@ -10,6 +10,7 @@ import postgres from "postgres";
 import type { ConnectionRow } from "../src/integrations/access";
 import {
   connectCustom,
+  disconnect,
   finishOAuth,
   mcpFor,
   requestScope,
@@ -110,6 +111,38 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("the connection's row lock on Pos
           attempts: (await row(current.id)).scopeRequest?.attempts,
         },
         { first: 1, attempts: 2 },
+      );
+    },
+    SERVER_TEST_MS,
+  );
+  test(
+    "forced: a revoke during the callback's write waits for it and the connection ends revoked with no secret",
+    async () => {
+      const start = await connectCustom(server.deps, me, { serverUrl: mcp.url, nextPath: "/back" });
+      if (start.status !== "oauth") throw new Error("expected an OAuth start");
+      const back = await mcp.authorize(start.consentUrl);
+      const pending = await row(start.serverId);
+      const run = await forcedPair(
+        admin,
+        "revoke",
+        "select",
+        (side, hooks) => {
+          const deps = { ...server.deps, db: instrumented(server.deps.db, hooks) };
+          return side === "A"
+            ? finishOAuth(
+                deps,
+                { userId: me.userId, sessionId: me.sessionId },
+                { code: back.code, state: back.state, iss: back.iss ?? undefined },
+              )
+            : disconnect(deps, pending).then(() => "revoked");
+        },
+        "update",
+      );
+      const after = await row(start.serverId);
+      outcome(
+        "revoke",
+        { b: run.b, revoked: after.revokedAt !== null, secret: after.secret !== null },
+        { b: "revoked", revoked: true, secret: false },
       );
     },
     SERVER_TEST_MS,

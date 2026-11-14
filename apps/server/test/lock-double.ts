@@ -135,6 +135,8 @@ export async function forcedPair<T>(
   label: string,
   kind: "select" | "update",
   start: (side: "A" | "B", hooks: Hooks) => Promise<T>,
+  /** The first query of B that counts as "passed" (B can be another operation than A); default `kind`. */
+  bKind: "select" | "update" = kind,
 ): Promise<{ a: T; b: T; aPids: number[]; bPids: number[] }> {
   const aPids = new Set<number>();
   const bPids = new Set<number>();
@@ -165,7 +167,7 @@ export async function forcedPair<T>(
     const b = start("B", {
       pids: bPids,
       after: {
-        kind,
+        kind: bKind,
         run: async () => {
           bPassed = true;
         },
