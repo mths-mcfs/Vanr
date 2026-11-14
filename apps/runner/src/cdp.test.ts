@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BrowserPolicy } from "@vanr/engine/browser-policy";
@@ -14,14 +14,30 @@ import type { SecretStore } from "./secrets";
 // never answers (what Chrome does when the tab switches midway); with FAKE_FRAMES=1 the page changes
 // nonstop (a frame every 100 ms) and Chrome takes 800 ms to close.
 const dir = mkdtempSync(join(tmpdir(), "cdp-test-"));
+// Each fake Chrome writes its pid here when it starts. It is the process the runner spawned (the shell
+// wrapper `exec`s into it) and it starts no children, so its pid is all there is to stop: no process group
+// of its own (it shares the test's) and nothing found by name or path.
+const pids = join(dir, "pids");
+mkdirSync(pids);
+const started = () => readdirSync(pids).map(Number);
+const running = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 afterAll(() => {
-  Bun.spawnSync(["pkill", "-f", dir]);
+  // Also after a failed test: whatever fake Chrome is still running stops here.
+  for (const pid of started().filter(running)) process.kill(pid, "SIGKILL");
   rmSync(dir, { recursive: true, force: true });
 });
 const fake = join(dir, "fake-chrome.ts");
 writeFileSync(
   fake,
-  `const fail = process.env.FAKE_ATTACH === "fail";
+  `require("node:fs").writeFileSync(${JSON.stringify(pids)} + "/" + process.pid, "");
+const fail = process.env.FAKE_ATTACH === "fail";
 const server = Bun.serve({
   port: 0,
   fetch: (req, srv) => (srv.upgrade(req) ? undefined : new Response("no")),
@@ -55,7 +71,7 @@ chmodSync(chrome, 0o755);
 
 const agent: AgentRef = { id: "agt_0123456789abcdef", handle: "lia" };
 const policy: BrowserPolicy = { driver: "agent", level: "free", sites: [], privateRanges: [] };
-const alive = () => Bun.spawnSync(["pgrep", "-f", fake]).stdout.toString().split("\n").filter(Boolean).length;
+const alive = () => started().filter(running).length;
 const browser = () =>
   new CdpBrowser({
     chrome,
