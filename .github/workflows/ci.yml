@@ -134,7 +134,9 @@ jobs:
             echo "::error::a bases lock test passed with its lock turned off"
             exit 1
           fi
-          test "$(grep -c 'Expected to not contain: "base.busy"' <<< "$own")" -eq 2
+          # On a GitHub runner bun prints each failure twice (the plain line and the annotation), so the
+          # line is only looked for; " 2 fail" below is what says both tests failed.
+          grep -q 'Expected to not contain: "base.busy"' <<< "$own"
           grep -q ' 2 fail' <<< "$own"
           grep -q 'Expected: "base.too_many_views"' <<< "$none"
           grep -q 'Expected: "base.last_view"' <<< "$none"
