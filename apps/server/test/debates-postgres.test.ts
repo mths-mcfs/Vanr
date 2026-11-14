@@ -179,6 +179,37 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("debates and routines at once on 
     });
   }, 120_000);
 
+  test("N turns of one debate reserving at once on its cap: exactly what fits is admitted", async () => {
+    await withServer("deb_spend", async (server, _admin, ctx) => {
+      const debate = await openDebate(server.deps, {
+        workspaceId: ctx.workspaceId,
+        title: "Spend",
+        goal: "Cost",
+        agentIds: [ctx.agentId],
+        createdBy: ctx.people[0] ?? { type: "person", id: "" },
+        requesterUserId: ctx.people[0]?.id ?? null,
+        origin: { kind: "manual" },
+        spendCapPercent: 1,
+      });
+      await server.deps.runtime.settle();
+      const cap = debate.spendCapUsd ?? 0;
+      const scope = { kind: "debate" as const, id: debate.id, limitUsd: cap, period: "total" as const };
+      const at = new Date();
+      const results = await Promise.all(
+        Array.from({ length: N }, () =>
+          server.deps.ledger.reserve({
+            workspaceId: ctx.workspaceId,
+            scopes: [scope],
+            estimateUsd: cap * 0.15,
+            at,
+          }),
+        ),
+      );
+      // 6 × 15% fit in the cap, the 7th would cross it.
+      expect(results.filter((r) => r.ok)).toHaveLength(6);
+    });
+  }, 120_000);
+
   test("one execution per fire, per scheduled time and per queued run, with N callers at once", async () => {
     await withServer("rtn_n", async (server, _admin, ctx) => {
       const insertRoutine = async (values: Partial<typeof schema.routines.$inferInsert>) => {
