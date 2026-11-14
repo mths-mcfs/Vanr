@@ -27,6 +27,7 @@ import { BackgroundWork } from "./runtime/background";
 import { backfillSearch, createSearchIndex, searchTick } from "./search-index";
 import { FirstUserPlace, SIGNUP_QUEUE_LIMITS, type SignupQueueLimits, signupDecision } from "./signup-queue";
 import { postgresLedger } from "./usage-ledger";
+import { purgeWikiTrash } from "./wiki";
 import { COLLAB_PATH, type CollabSocketData, createWikiCollab, MAX_FRAME } from "./wiki-collab";
 import { wikiMarkdown } from "./wiki-md";
 
@@ -262,7 +263,14 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   let timer = setTimeout(cycle, opts.fileServicesMs ?? 60_000);
   function cycle() {
     work = (async () => {
-      for (const run of [expireUploads, purgeTrash, extractPending, backfillSearch, searchTick]) {
+      for (const run of [
+        expireUploads,
+        purgeTrash,
+        purgeWikiTrash,
+        extractPending,
+        backfillSearch,
+        searchTick,
+      ]) {
         try {
           await run(deps);
         } catch (err) {

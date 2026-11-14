@@ -16,6 +16,7 @@ import { Browser, holdNextIndexWrite, SERVER_TEST_MS, signedIn, startTestServer 
 import { NO_POSTGRES, TEST_POSTGRES_URL, testDatabaseUrl } from "./postgres";
 import { memberOf, type Person, seedWorkspace } from "./seed";
 import { apiError, wikiApi } from "./wiki-api";
+import { until } from "./wiki-live";
 
 /** The real search index (T8, Postgres), with the permission in the WHERE. */
 const search = { search: (viewer: Viewer, q: string) => server.deps.search.search(viewer, q) };
@@ -46,6 +47,28 @@ function vaultZip(extra: Record<string, Uint8Array> = {}) {
   files["Handbook/.obsidian/workspace.json"] = strToU8("{}");
   return zipSync({ ...files, ...extra });
 }
+
+test(
+  "the running server purges expired wiki trash after 30 days",
+  async () => {
+    let now = new Date();
+    const running = await startTestServer({ fileServicesMs: 20, now: () => now });
+    try {
+      const ana = await signedIn(running, "Ana", email("cleanup"));
+      const { workspaceId } = await seedWorkspace(running, ana, "Wiki cleanup");
+      const wiki = wikiApi(ana.browser);
+      const page = await wiki.createWikiPage(workspaceId, { title: "Expired wiki page", body: "Old text" });
+      await wiki.deleteWikiPage(workspaceId, page.slug);
+      expect(await wiki.getWikiTrash(workspaceId)).toHaveLength(1);
+      now = new Date(now.getTime() + 31 * DAY);
+      await until(async () => (await running.deps.db.select().from(schema.knowledgePages)).length === 0);
+      expect(await running.deps.db.select().from(schema.pageRevisions)).toHaveLength(0);
+    } finally {
+      await running.stop();
+    }
+  },
+  SERVER_TEST_MS,
+);
 
 describe("links and rename (P0-05)", () => {
   test("[[a|b]], [[a#heading]], [[a#^block]], embed; a target created later starts to count", async () => {
