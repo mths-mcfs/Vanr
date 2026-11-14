@@ -7,17 +7,19 @@ import {
   closeSync,
   constants,
   existsSync,
+  fstatSync,
   lstatSync,
+  mkdirSync,
   openSync,
   readdirSync,
   readFileSync,
-  realpathSync,
+  readSync,
   rmSync,
   statSync,
   unlinkSync,
-  writeFileSync,
+  writeSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type { SecretBrowserBinding } from "@vanr/contract";
 import {
   createRecipient,
@@ -87,44 +89,135 @@ const masksOf = (values: readonly SecretValue[]): [string, string][] =>
     .sort((a, b) => b.value.length - a.value.length)
     .map((v) => [v.value, `[secret:${v.name}]`]);
 
-/** Creates the file only where nothing is (no overwrite, no link followed): `false` when something is there. */
-function createOnly(path: string, value: string): boolean {
+/**
+ * The identity of a file, read from a descriptor the runner holds: device and inode, and its birth time,
+ * since a file the agent creates right after removing the runner's can get the same inode back. Where the
+ * file system keeps no birth time (0), the device and the inode decide alone.
+ */
+interface FileId {
+  dev: bigint;
+  ino: bigint;
+  birth: bigint;
+}
+
+const idOf = (st: { dev: bigint; ino: bigint; birthtimeNs: bigint }): FileId => ({
+  dev: st.dev,
+  ino: st.ino,
+  birth: st.birthtimeNs,
+});
+const sameId = (a: FileId, b: FileId) => a.dev === b.dev && a.ino === b.ino && a.birth === b.birth;
+
+/** The path still holds the runner's file (a plain file with that identity). */
+function stillOwn(path: string, id: FileId): boolean {
   try {
-    writeFileSync(path, value, { mode: 0o600, flag: "wx" });
-    return true;
+    const st = lstatSync(path, { bigint: true });
+    return st.isFile() && sameId(idOf(st), id);
+  } catch {
+    return false;
+  }
+}
+
+const OPEN_NEW = constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW;
+const OPEN_LOOK = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+
+const errno = (err: unknown) => (err instanceof Error && "code" in err ? String(err.code) : "");
+
+/**
+ * Creates the file only where nothing is: `O_CREAT | O_EXCL | O_NOFOLLOW` is one call, so a link or a file put
+ * there at any moment makes it fail instead of being followed or written over. The value goes through the
+ * descriptor, and the identity comes from it. `null` when something is there.
+ */
+function createOnly(path: string, value: string): FileId | null {
+  let fd: number;
+  try {
+    fd = openSync(path, OPEN_NEW, 0o600);
   } catch (err) {
-    if (err instanceof Error && "code" in err && err.code === "EEXIST") return false;
+    if (errno(err) === "EEXIST") return null;
     throw err;
+  }
+  try {
+    writeSync(fd, Buffer.from(value, "utf8"));
+    return idOf(fstatSync(fd, { bigint: true }));
+  } finally {
+    closeSync(fd);
   }
 }
 
 /**
- * A plain file (not a link) whose bytes are exactly `value`: what the runner itself would have written. Read
- * without following a link; neither side is logged or returned.
+ * What is at the path is a plain file holding exactly `value`, judged on the object opened, not on the name:
+ * opened once without following a link and without blocking (a FIFO or a device opens and is rejected by
+ * `fstat`, never waited on), a size other than the value's means other content (not read), and at most the
+ * value's size is read. Neither side is logged or returned. Its identity, or `null`.
  */
-function sameFile(path: string, value: string): boolean {
+function sameFile(path: string, value: string): FileId | null {
+  let fd: number;
   try {
-    if (!lstatSync(path).isFile()) return false;
-    const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try {
-      return readFileSync(fd).equals(Buffer.from(value, "utf8"));
-    } finally {
-      closeSync(fd);
-    }
+    fd = openSync(path, OPEN_LOOK);
   } catch {
-    return false;
+    return null;
+  }
+  try {
+    const st = fstatSync(fd, { bigint: true });
+    const want = Buffer.from(value, "utf8");
+    if (!st.isFile() || st.size !== BigInt(want.byteLength)) return null;
+    const got = Buffer.alloc(want.byteLength);
+    let n = 0;
+    while (n < got.byteLength) {
+      const r = readSync(fd, got, n, got.byteLength - n, n);
+      if (r === 0) break;
+      n += r;
+    }
+    return n === want.byteLength && got.equals(want) ? idOf(st) : null;
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
   }
 }
 
-/** The folder, with its links resolved, is the root or inside it. */
-function insideReal(folder: string, root: string): boolean {
-  try {
-    const real = realpathSync(folder);
-    const top = realpathSync(root);
-    return real === top || real.startsWith(`${top}/`);
-  } catch {
-    return false;
+/**
+ * The folders from the root to the file's folder: each existing one checked without following a link (a link
+ * or anything but a folder rejects the path), then the missing ones created one by one, each checked again
+ * right after (a link put in its place stops it). Nothing is created before every existing part is checked.
+ * Left open by Node, which has no `openat`: an agent swapping a folder of its own work folder for a link
+ * between this check and the file's creation can place the new file (with the value the command gets anyway)
+ * outside; `O_EXCL` still keeps it from writing over anything.
+ */
+function folderInside(root: string, rel: string): boolean {
+  const parts = rel.split("/").slice(0, -1);
+  if (parts.some((p) => p === "" || p === "." || p === "..")) return false;
+  const kind = (p: string) => {
+    try {
+      const st = lstatSync(p);
+      return st.isSymbolicLink() ? "link" : st.isDirectory() ? "dir" : "other";
+    } catch (err) {
+      if (errno(err) === "ENOENT") return "none";
+      return "other";
+    }
+  };
+  let at = root;
+  let missing = -1;
+  for (const [i, part] of parts.entries()) {
+    at = join(at, part);
+    const k = kind(at);
+    if (k === "none") {
+      missing = i;
+      break;
+    }
+    if (k !== "dir") return false;
   }
+  if (missing < 0) return true;
+  at = join(root, ...parts.slice(0, missing));
+  for (const part of parts.slice(missing)) {
+    at = join(at, part);
+    try {
+      mkdirSync(at, { mode: 0o700 });
+    } catch (err) {
+      if (errno(err) !== "EEXIST") return false;
+    }
+    if (kind(at) !== "dir") return false;
+  }
+  return true;
 }
 
 export class SecretStore {
@@ -134,9 +227,20 @@ export class SecretStore {
    * The secret files this process created or adopted and still has in use: how many commands use each and
    * the value it holds (another command with another value at the same path is rejected, not given this one).
    */
-  private readonly materialized = new Map<string, { count: number; value: string }>();
+  private readonly materialized = new Map<string, { count: number; value: string; id: FileId }>();
+  /** Secret files whose removal failed, with their identity: tried again later. */
+  private readonly toRemove = new Map<string, FileId>();
 
-  constructor(private readonly home: string) {}
+  constructor(
+    private readonly home: string,
+    private readonly log: (line: string) => void = () => {},
+    /** Tests: called between the runner's steps on a path, where the agent could change what is there. */
+    private readonly hooks?: {
+      beforeCreate?: (path: string) => void;
+      beforeLook?: (path: string) => void;
+      beforeRemove?: (path: string) => void;
+    },
+  ) {}
 
   async unlock(storeKeyB64: string, runnerId: string): Promise<void> {
     const raw = unb64(storeKeyB64);
@@ -309,87 +413,90 @@ export class SecretStore {
   /**
    * Writes the agent's file secrets into the work folder for one command; `release` takes back what this
    * call created or adopted, and nothing else. No state about these files is kept on disk: what is the
-   * runner's is known in memory, for this process.
+   * runner's is known in memory, for this process, by the identity (device, inode, birth) of the file it created
+   * or adopted. The work folder is the agent's, which can change what is at a path between two calls, so the
+   * runner decides on the object it opened, not on the name.
    *
-   * What is at the path decides. `wx` creates only where nothing is and does not follow a link, so a file
-   * that appears between a look and the write falls into the rows below instead of being written over:
-   *
-   *   | at the path                                         | what happens                                  |
-   *   |-----------------------------------------------------|-----------------------------------------------|
-   *   | nothing                                             | created (0600), removed at release            |
-   *   | a plain file with exactly the current value         | adopted (a leftover of a stop), removed then  |
-   *   | a plain file with other content                     | left as it is; the op fails, naming the path  |
-   *   | a link (inside, outside or broken), a folder        | left as it is; the op fails                   |
-   *   | a folder on the way that leads out of the root      | nothing written; the op fails                 |
-   *   | in use by another command here, same value          | shared (use count)                            |
-   *   | in use by another command here, another value       | left as it is; the op fails ("in use")        |
+   *   | at the path                                   | creating                            | releasing                  |
+   *   |-----------------------------------------------|-------------------------------------|----------------------------|
+   *   | nothing                                       | created 0600 (O_EXCL, no link)      | removed if still that file |
+   *   | a plain file with exactly the current value   | adopted (a leftover of a stop)      | removed if still that file |
+   *   | a plain file with other content (or size)     | untouched; the op fails, names it   | -                          |
+   *   | a link (inside, outside, broken)              | untouched; the op fails             | -                          |
+   *   | a folder, a FIFO, a device                    | untouched; the op fails, no wait    | -                          |
+   *   | a target outside the root, or a folder on     | nothing created; the op fails       | -                          |
+   *   |   the way that is a link or not a folder      |                                     |                            |
+   *   | in use here by another command, same value    | shared (use count), if still the    | removed by the last one    |
+   *   |                                               |   runner's file; else the op fails  |                            |
+   *   | in use here by another command, other value   | untouched; the op fails ("in use")  | -                          |
+   *   | changed by the agent during the command       | -                                   | untouched, logged          |
    *
    * Every path is settled before the command runs; when one fails, what this call created or adopted goes
-   * back and nothing runs. Left out on purpose: after a stop in the middle of a command, its secret file stays
-   * in the work folder until the same secret, with the same value, is used there again (adopted, then
-   * removed) or the person deletes it; if the secret changed or went away meanwhile, the old file stays and
-   * the command fails naming the path.
+   * back and nothing runs. Each file is released on its own: one that cannot be removed does not keep the
+   * others, and it is logged (without the value) and tried again at the next release. Left out on purpose:
+   * after a stop in the middle of a command its secret file stays in the work folder until the same secret,
+   * with the same value, is used there again (adopted, then removed) or the person deletes it; and two runner
+   * processes on the same work folder do not know of each other's use (the count is per process: the first to
+   * release removes a file the other still uses), since knowing would take state shared on disk.
    */
   async materialize(
     agent: AgentRef,
     root: string,
     signal?: AbortSignal,
   ): Promise<{ env: Record<string, string>; masks: [string, string][]; release: () => void }> {
+    this.retryRemovals();
     if (!this.key) return { env: {}, masks: [], release: () => {} };
     const values = await this.values(agent);
     // Aborted while the values were read: nothing is written.
     if (signal?.aborted) throw new RunnerError("canceled", "Canceled");
     const env: Record<string, string> = {};
     const wanted: { name: string; path: string; rel: string; value: string }[] = [];
+    const reject = (w: { name: string; rel: string }, why: string) =>
+      new RunnerError(
+        "not_allowed",
+        `The secret ${w.name} goes to ${w.rel}, ${why}; move it away or change the secret's target`,
+      );
     for (const v of values) {
       // A browser secret only goes to the field of its site: in a command, the agent would read the value and
       // could type it into any other site.
       if (v.browser) continue;
       if (v.target === "env") {
         if (!reservedSecretName(v.name)) env[v.name] = v.value;
-      } else {
-        const rel = v.target.slice("file:".length);
-        const path = join(root, rel);
-        if (path.startsWith(`${root}/`)) wanted.push({ name: v.name, path, rel, value: v.value });
+        continue;
       }
+      const rel = v.target.slice("file:".length);
+      const path = join(root, rel);
+      // A target out of the work folder fails before anything runs (the command would run without it).
+      if (!path.startsWith(`${root}/`))
+        throw reject({ name: v.name, rel }, "which is outside the work folder");
+      wanted.push({ name: v.name, path, rel: path.slice(root.length + 1), value: v.value });
     }
     const taken: string[] = [];
-    const release = () => {
-      for (const path of taken.splice(0)) {
-        const use = this.materialized.get(path);
-        if (use && use.count > 1) {
-          use.count -= 1;
-          continue;
-        }
-        this.materialized.delete(path);
-        // Only a path this process created or adopted is in `taken`: nothing else is ever removed here.
-        rmSync(path, { force: true });
-      }
-    };
-    const reject = (w: (typeof wanted)[number], why: string) =>
-      new RunnerError(
-        "not_allowed",
-        `The secret ${w.name} goes to ${w.rel}, ${why}; move it away or change the secret's target`,
-      );
     try {
       for (const w of wanted) {
         const use = this.materialized.get(w.path);
         if (use) {
           if (use.value !== w.value) throw reject(w, "which another command is using with another secret");
+          // Shared only while it is still the file the runner wrote: the agent may have changed it meanwhile.
+          if (!stillOwn(w.path, use.id))
+            throw reject(w, "which was changed while another command was using it");
           use.count += 1;
           taken.push(w.path);
           continue;
         }
-        ensureDir(dirname(w.path));
-        if (!insideReal(dirname(w.path), root))
-          throw reject(w, "and a folder on the way leads out of the work folder");
-        if (!createOnly(w.path, w.value) && !sameFile(w.path, w.value))
-          throw reject(w, "and something the runner did not put there is in its place");
-        this.materialized.set(w.path, { count: 1, value: w.value });
+        if (!folderInside(root, w.rel)) throw reject(w, "and a folder on the way is a link or not a folder");
+        this.hooks?.beforeCreate?.(w.path);
+        let id = createOnly(w.path, w.value);
+        if (!id) {
+          this.hooks?.beforeLook?.(w.path);
+          id = sameFile(w.path, w.value);
+        }
+        if (!id) throw reject(w, "and something the runner did not put there is in its place");
+        this.materialized.set(w.path, { count: 1, value: w.value, id });
         taken.push(w.path);
       }
     } catch (err) {
-      release();
+      this.releaseAll(taken);
       throw err;
     }
     let released = false;
@@ -399,9 +506,53 @@ export class SecretStore {
       release: () => {
         if (released) return;
         released = true;
-        release();
+        this.releaseAll(taken);
       },
     };
+  }
+
+  /** Each path on its own: one that fails does not keep the others. */
+  private releaseAll(paths: string[]) {
+    for (const path of paths.splice(0)) {
+      const use = this.materialized.get(path);
+      if (!use) continue;
+      if (use.count > 1) {
+        use.count -= 1;
+        continue;
+      }
+      this.materialized.delete(path);
+      this.removeOwn(path, use.id);
+    }
+    this.retryRemovals();
+  }
+
+  /**
+   * Removes the file at `path` only if it is still the one this process created or adopted (a plain file
+   * with the same identity); anything else is the agent's now and is left, and logged. Left open by
+   * Node, which has no `unlinkat` on a descriptor: an agent swapping the file between this check and the
+   * removal loses its own new file, in its own work folder.
+   */
+  private removeOwn(path: string, id: FileId) {
+    try {
+      this.hooks?.beforeRemove?.(path);
+      if (!stillOwn(path, id)) {
+        this.log(`left ${path}: it is no longer the secret file the runner wrote there`);
+        return;
+      }
+      unlinkSync(path);
+    } catch (err) {
+      if (errno(err) === "ENOENT") return;
+      this.log(`could not remove the secret file ${path} (${errno(err) || "error"}); trying again later`);
+      this.toRemove.set(path, id);
+    }
+  }
+
+  /** The removals that failed before, tried again (at each release and each materialize). */
+  private retryRemovals() {
+    for (const [path, id] of [...this.toRemove]) {
+      this.toRemove.delete(path);
+      if (!this.materialized.has(path)) this.removeOwn(path, id);
+    }
   }
 
   /** Paths of the agent's secret files (the agent neither reads nor writes them through the ops). */

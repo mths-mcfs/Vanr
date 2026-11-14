@@ -1,0 +1,79 @@
+import { expect, test } from "bun:test";
+import { CdpBrowser } from "./cdp";
+
+// The browser's ops after an aborted one: they wait for it to finish unwinding (its own steps after the abort
+// do not go), and a wait that is itself aborted ends at once with `canceled`, not at the deadline.
+function browserWithOneSession() {
+  const b = Object.create(CdpBrowser.prototype) as Record<string, unknown>;
+  const agent = { id: "agt_0000000012345678", handle: "lia" };
+  const session = {
+    lock: Promise.resolve(),
+    policy: { driver: "agent" },
+    pages: [{ sessionId: "s" }],
+    active: 0,
+    signal: null,
+    unwinding: new Set(),
+    cdp: { send: async () => ({}) },
+  };
+  Object.assign(b, { sessions: new Map([[agent.id, session]]), opts: { opTimeoutMs: 60_000 } });
+  const calls: string[] = [];
+  let hang: () => void = () => {};
+  let entered: () => void = () => {};
+  const inFirst = new Promise<void>((r) => {
+    entered = r;
+  });
+  Reflect.set(b, "inspect", async () => {
+    calls.push("inspect");
+    if (calls.length === 1) {
+      entered();
+      // The first op's work does not settle until the test lets it.
+      await new Promise<void>((r) => {
+        hang = r;
+      });
+    }
+    return { url: "u", allowed: true, element: null, fingerprint: "f" };
+  });
+  const handle = (signal: AbortSignal) =>
+    (Reflect.get(b, "handle") as (...a: unknown[]) => Promise<unknown>)
+      .call(b, "browser.inspect", agent, {}, () => true, signal)
+      .then(
+        () => "done",
+        (e: { code?: string }) => e.code,
+      );
+  return { handle, calls, inFirst, release: () => hang() };
+}
+
+test("a wait for an aborted op ends at once with canceled when the waiting op is aborted too", async () => {
+  const { handle, inFirst, release } = browserWithOneSession();
+  const first = new AbortController();
+  const one = handle(first.signal);
+  await inFirst;
+  first.abort();
+  expect(await one).toBe("canceled");
+  const second = new AbortController();
+  const two = handle(second.signal);
+  // The second op is waiting for the first to unwind when it is aborted.
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  second.abort();
+  const started = Date.now();
+  expect(await two).toBe("canceled");
+  expect(Date.now() - started).toBeLessThan(1000);
+  release();
+});
+
+test("the next op does not begin while an aborted one is still unwinding", async () => {
+  const { handle, calls, inFirst, release } = browserWithOneSession();
+  const first = new AbortController();
+  const one = handle(first.signal);
+  await inFirst;
+  first.abort();
+  expect(await one).toBe("canceled");
+  const two = handle(new AbortController().signal);
+  // Still unwinding: the second op has not begun its work.
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(calls).toEqual(["inspect"]);
+  release();
+  expect(await two).toBe("done");
+  expect(calls).toEqual(["inspect", "inspect"]);
+});
