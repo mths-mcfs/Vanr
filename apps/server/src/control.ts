@@ -580,7 +580,7 @@ const UNDOERS: Partial<Record<AgentActionKind, Undoer>> = {
       if (row.target.type === "outbox")
         return cancelQueued(deps, row.workspaceId, row.target.id, actorUserId);
       const msg = await lockedMessage(deps, row);
-      const meta = { ...msg.meta, retracted: { byUserId: actorUserId, at: deps.now().toISOString() } };
+      const meta = { ...msg.meta, retracted: { actorUserId: actorUserId, at: deps.now().toISOString() } };
       // Retracting and leaving the search in the same commit: there is no moment with the retracted text findable.
       await deps.db.update(messages).set({ meta }).where(eq(messages.id, msg.id));
       await unindex(deps.db, deps, { kind: "message", id: msg.id });
@@ -800,7 +800,7 @@ export async function canUndo(db: Db, me: WorkspaceMember, row: ActionRow): Prom
  * Checking, changing the content and marking the action are one transaction with the action's row locked
  * (FOR UPDATE): two undos of the same action at once apply once (the second one waits and finds it undone).
  * The undoer locks the content's row in the same transaction before it compares, so a person's edit at the
- * same time either lands first and the undo refuses, or waits for the undo and lands after it.
+ * same time either lands first and the undo declines, or waits for the undo and lands after it.
  */
 export async function applyUndo(
   deps: AppDeps,
@@ -882,7 +882,7 @@ export async function approvalsWaitingFor(
   return rows.filter((r) => canDecideFor(me, owners.get(r.agentId)));
 }
 
-/** "For you" on the agent's profile: approvals, questions and proposals waiting for this person. */
+/** What waits for this person on the agent's profile: approvals, questions and proposals waiting for this person. */
 export async function waitingForMe(db: Db, me: WorkspaceMember, agentId: string, at: Date) {
   const out: {
     kind: "approval" | "question" | "proposal" | "memory_review";

@@ -4,7 +4,7 @@
 //
 // Every undoer runs inside the undo's transaction (`deps.db` is that transaction, see `applyUndo` in control.ts)
 // and locks the content's row before it compares: a person's edit that lands meanwhile waits for the undo to
-// commit (and then wins), or committed first and the undo sees it and refuses. Nothing a person wrote is lost.
+// commit (and then wins), or committed first and the undo sees it and declines. Nothing a person wrote is lost.
 import type { ActorRef } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { and, eq, sql } from "drizzle-orm";
@@ -63,9 +63,9 @@ async function lockedFile(deps: AppDeps, id: string, workspaceId: string) {
 }
 
 /** Whoever undoes must see the file (a file of a channel they don't read is not theirs to change). */
-async function seenFile(deps: AppDeps, row: ActionRow, byUserId: string) {
+async function seenFile(deps: AppDeps, row: ActionRow, actorUserId: string) {
   const file = await lockedFile(deps, row.target.id, row.workspaceId);
-  if (!(await canSeeFile(deps.db, file, person(byUserId)))) throw forbidden("You can't see this file");
+  if (!(await canSeeFile(deps.db, file, person(actorUserId)))) throw forbidden("You can't see this file");
   return file;
 }
 
@@ -85,13 +85,13 @@ async function payloadOf(deps: AppDeps, v: FileVersionRow) {
   };
 }
 
-async function copyVersion(deps: AppDeps, row: ActionRow, byUserId: string, expect: number, from: number) {
-  const file = await seenFile(deps, row, byUserId);
+async function copyVersion(deps: AppDeps, row: ActionRow, actorUserId: string, expect: number, from: number) {
+  const file = await seenFile(deps, row, actorUserId);
   if (file.deletedAt) throw gone("The file is in the trash");
   if (file.version !== expect) throw changed("Someone saved a newer version");
   const saved = await addVersion(deps, {
     row: file,
-    author: person(byUserId),
+    author: person(actorUserId),
     parentVersion: file.version,
     note: `restored version ${from}`,
     ...(await payloadOf(deps, await versionOf(deps.db, file, from))),
@@ -142,7 +142,7 @@ async function lockedPage(deps: AppDeps, row: ActionRow, strength: "no key updat
 async function copyPageVersion(
   deps: AppDeps,
   row: ActionRow,
-  byUserId: string,
+  actorUserId: string,
   expect: number,
   from: number,
 ) {
@@ -156,7 +156,7 @@ async function copyPageVersion(
   // savePage checks again, in this transaction, that the person still writes here and that the page isn't locked.
   const saved = await savePage(deps, {
     row: page,
-    author: person(byUserId),
+    author: person(actorUserId),
     canBypassLock: false,
     parentVersion: expect,
     body: old.body,
@@ -231,28 +231,34 @@ export const CONTENT_UNDOERS: Record<
   Undoer
 > = {
   file_created: {
-    async undo(deps, row, byUserId) {
-      const file = await seenFile(deps, row, byUserId);
+    async undo(deps, row, actorUserId) {
+      const file = await seenFile(deps, row, actorUserId);
       if (file.deletedAt) throw changed("The file is already in the trash");
       if (file.version > 1) throw changed("Someone saved a newer version");
-      await trashFile(deps, file, person(byUserId));
+      await trashFile(deps, file, person(actorUserId));
     },
-    async redo(deps, row, byUserId) {
-      const file = await seenFile(deps, row, byUserId);
+    async redo(deps, row, actorUserId) {
+      const file = await seenFile(deps, row, actorUserId);
       if (!file.deletedAt) throw changed("The file is not in the trash");
       await restoreFile(deps, file);
     },
   },
   file_updated: {
-    async undo(deps, row, byUserId) {
+    async undo(deps, row, actorUserId) {
       const p = versionParams.parse(row.params);
-      const undoVersion = await copyVersion(deps, row, byUserId, p.redoVersion ?? p.toVersion, p.fromVersion);
+      const undoVersion = await copyVersion(
+        deps,
+        row,
+        actorUserId,
+        p.redoVersion ?? p.toVersion,
+        p.fromVersion,
+      );
       await setParams(deps, row, { undoVersion });
     },
-    async redo(deps, row, byUserId) {
+    async redo(deps, row, actorUserId) {
       const p = versionParams.parse(row.params);
       if (p.undoVersion === undefined) throw changed("Nothing to redo");
-      const redoVersion = await copyVersion(deps, row, byUserId, p.undoVersion, p.toVersion);
+      const redoVersion = await copyVersion(deps, row, actorUserId, p.undoVersion, p.toVersion);
       await setParams(deps, row, { redoVersion });
     },
   },
@@ -319,35 +325,35 @@ export const CONTENT_UNDOERS: Record<
     },
   },
   wiki_updated: {
-    async undo(deps, row, byUserId) {
+    async undo(deps, row, actorUserId) {
       const p = versionParams.parse(row.params);
       const undoVersion = await copyPageVersion(
         deps,
         row,
-        byUserId,
+        actorUserId,
         p.redoVersion ?? p.toVersion,
         p.fromVersion,
       );
       await setParams(deps, row, { undoVersion });
     },
-    async redo(deps, row, byUserId) {
+    async redo(deps, row, actorUserId) {
       const p = versionParams.parse(row.params);
       if (p.undoVersion === undefined) throw changed("Nothing to redo");
-      const redoVersion = await copyPageVersion(deps, row, byUserId, p.undoVersion, p.toVersion);
+      const redoVersion = await copyPageVersion(deps, row, actorUserId, p.undoVersion, p.toVersion);
       await setParams(deps, row, { redoVersion });
     },
   },
   issue_opened: {
     // An issue doesn't vanish (its number stays): undo cancels it, redo puts it back in its first column.
-    async undo(deps, row, byUserId) {
+    async undo(deps, row, actorUserId) {
       const issue = await lockedIssue(deps, row, true);
       const { columnId } = z.object({ columnId: z.string() }).parse(row.params);
       if (issue.columnId !== columnId) throw changed("Someone moved the issue");
       const canceled = (await columnsOf(deps.db, issue.workspaceId)).find((c) => c.stage === "canceled");
       if (!canceled) throw changed("There's no canceled column");
-      await updateIssue(deps, issue, { columnId: canceled.id }, person(byUserId));
+      await updateIssue(deps, issue, { columnId: canceled.id }, person(actorUserId));
     },
-    async redo(deps, row, byUserId) {
+    async redo(deps, row, actorUserId) {
       const issue = await lockedIssue(deps, row, true);
       const { columnId } = z.object({ columnId: z.string() }).parse(row.params);
       const cols = await columnsOf(deps.db, issue.workspaceId);
@@ -355,23 +361,23 @@ export const CONTENT_UNDOERS: Record<
         throw changed("Someone moved the issue");
       const back = cols.find((c) => c.id === columnId) ?? cols.find((c) => c.stage === "todo");
       if (!back) throw changed("The original column no longer exists");
-      await updateIssue(deps, issue, { columnId: back.id }, person(byUserId));
+      await updateIssue(deps, issue, { columnId: back.id }, person(actorUserId));
     },
   },
   issue_edited: {
-    async undo(deps, row, byUserId) {
+    async undo(deps, row, actorUserId) {
       const { previous, change } = issueParams.parse(row.params);
       const keys = keysOf(change);
       const issue = await lockedIssue(deps, row, keys.includes("columnId"));
       if (!matches(issue, change, keys)) throw changed("Someone changed the issue");
-      await updateIssue(deps, issue, pick(previous, keys), person(byUserId));
+      await updateIssue(deps, issue, pick(previous, keys), person(actorUserId));
     },
-    async redo(deps, row, byUserId) {
+    async redo(deps, row, actorUserId) {
       const { previous, change } = issueParams.parse(row.params);
       const keys = keysOf(change);
       const issue = await lockedIssue(deps, row, keys.includes("columnId"));
       if (!matches(issue, previous, keys)) throw changed("Someone changed the issue");
-      await updateIssue(deps, issue, pick(change, keys), person(byUserId));
+      await updateIssue(deps, issue, pick(change, keys), person(actorUserId));
     },
   },
   issue_commented: {

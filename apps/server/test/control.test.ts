@@ -2,7 +2,7 @@
 // writes (an approval, a proposal, a question, the receipt of an action) come from the agent runtime (S6) and its
 // tools; here the test writes the same rows the tools write, and everything after that goes through the routes.
 // Deciding an approval, editing it and answering a question wake the waiting run: until the runtime is there those
-// routes refuse with `not_available`, and the tests prove that nothing was written. The clock is injected.
+// routes answer `not_available`, and the tests prove that nothing was written. The clock is injected.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
@@ -321,7 +321,7 @@ describe("approvals", () => {
         createdAt: new Date(clock.getTime() - 60_000),
         decidedAt: clock,
       });
-      const refusedOne = await seedApproval(t, {
+      const rejectedOne = await seedApproval(t, {
         status: "rejected",
         createdAt: new Date(clock.getTime() - 20_000),
         decidedAt: clock,
@@ -340,7 +340,7 @@ describe("approvals", () => {
         .insert(schema.gateDecisions)
         .values([
           decision({ approvalId: asked.id }),
-          decision({ approvalId: refusedOne.id }),
+          decision({ approvalId: rejectedOne.id }),
           decision({ decision: "allow" }),
           decision({ effect: "K3", decision: "deny" }),
           decision({ decision: "allow", createdAt: new Date(clock.getTime() - 40 * 86_400_000) }),
@@ -412,7 +412,7 @@ describe("always allow", () => {
       key,
       label: `to ${key}`,
       approvalId,
-      byUserId: t.beto.user.id,
+      actorUserId: t.beto.user.id,
       at: clock,
     });
   };
@@ -717,7 +717,7 @@ describe("undo", () => {
     async () => {
       const t = await team();
       const reply = await agentReply(t, "Here is what I posted");
-      const posted = await agentReply(t, "Posted for you");
+      const posted = await agentReply(t, "Posted on request");
       const action = await seedAction(
         t,
         "message_posted",
@@ -738,7 +738,7 @@ describe("undo", () => {
       const undone = await body(await undo(t.carla));
       expect(undone).toMatchObject({ id: action.id, reverterUserId: t.carla.user.id });
       expect(undone.revertedAt).not.toBeNull();
-      expect((await meta())?.retracted).toMatchObject({ byUserId: t.carla.user.id });
+      expect((await meta())?.retracted).toMatchObject({ actorUserId: t.carla.user.id });
       expect(await code(await undo(t.beto))).toBe("action.already_undone");
       expect((await redo(t.beto)).status).toBe(200);
       expect((await meta())?.retracted).toBeUndefined();
@@ -864,7 +864,7 @@ describe("undo", () => {
         priority: "high",
       });
 
-      // Beto renames it after the agent: the undo refuses and his title stays.
+      // Beto renames it after the agent: the undo declines and his title stays.
       const person = { type: "person" as const, id: t.beto.user.id };
       await updateIssue(
         server.deps,
@@ -935,7 +935,7 @@ describe("undo", () => {
       expect(await bodyOf()).toMatchObject({ body: "v1", version: 3 });
       expect((await t.carla.browser.json(t.url(`/actions/${edit.id}/redo`), "POST")).status).toBe(200);
       expect(await bodyOf()).toMatchObject({ body: "v2", version: 4 });
-      // Beto saves after the agent: the undo refuses and his version stays.
+      // Beto saves after the agent: the undo declines and his version stays.
       const current = await bodyOf();
       if (!current) throw new Error("no page");
       await savePage(server.deps, {

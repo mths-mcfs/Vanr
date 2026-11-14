@@ -1,10 +1,10 @@
 // Approvals, proposals, questions and undo.
 //
 // Approving and editing send the `payloadHash` of the version the person saw: if the effect changed after that
-// (another edit, another request), the route refuses with `approval.changed` instead of approving something else.
+// (another edit, another request), the route answers `approval.changed` instead of approving something else.
 //
 // Deciding an approval, editing it and answering a question wake the run that waits on them (the agent runtime):
-// until the runtime is there, those routes check who may call and what was sent, then refuse with `not_available`
+// until the runtime is there, those routes check who may call and what was sent, then answer `not_available`
 // before anything is written.
 import type {
   AgentAction,
@@ -138,7 +138,7 @@ async function visibleProposals(
   return out;
 }
 
-/** The action as the API shows it (a kind this server doesn't know never gets here: applyUndo refuses it). */
+/** The action as the API shows it (a kind this server doesn't know never gets here: applyUndo turns it down). */
 function actionOut(row: ActionRow): AgentAction {
   const out = toAction(row);
   if (!out) throw notFound("Action not found");
@@ -275,7 +275,7 @@ export function registerControl(app: Hono<AppEnv>) {
             key: next.ruleKey,
             label: next.ruleLabel,
             approvalId: next.id,
-            byUserId: me.userId,
+            actorUserId: me.userId,
             at,
           });
         await publishApproval(deps, next, "approval.resolved");
@@ -353,7 +353,7 @@ export function registerControl(app: Hono<AppEnv>) {
         key: rule.key,
         label: rule.label,
         approvalId: next.id,
-        byUserId: me.userId,
+        actorUserId: me.userId,
         at,
       });
     await publishApproval(deps, next, "approval.resolved");

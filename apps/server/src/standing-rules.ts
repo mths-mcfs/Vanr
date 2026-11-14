@@ -54,7 +54,7 @@ export async function rememberRule(
     key: string;
     label: string;
     approvalId: string;
-    byUserId: string;
+    actorUserId: string;
     at: Date;
   },
 ): Promise<ApprovalRuleRow> {
@@ -69,7 +69,7 @@ export async function rememberRule(
       ruleKey: keyOf(r.key),
       label: r.label,
       approvalId: r.approvalId,
-      createdByUserId: r.byUserId,
+      createdByUserId: r.actorUserId,
       createdAt: r.at,
       expiresAt,
     })
@@ -79,7 +79,7 @@ export async function rememberRule(
       set: {
         label: r.label,
         approvalId: r.approvalId,
-        createdByUserId: r.byUserId,
+        createdByUserId: r.actorUserId,
         createdAt: r.at,
         expiresAt,
       },
@@ -90,7 +90,7 @@ export async function rememberRule(
 }
 
 /** Whoever answers for the agent or manages agents sees and revokes its rules. */
-function canManage(me: WorkspaceMember, ownerUserId: string | undefined): boolean {
+function mayManage(me: WorkspaceMember, ownerUserId: string | undefined): boolean {
   return ownerUserId === me.userId || can(me.role, "manage_agents");
 }
 
@@ -120,7 +120,7 @@ export async function rulesView(
     rows.map((r) => r.agentId),
   );
   return rows
-    .filter((r) => canManage(me, owners.get(r.agentId)?.ownerUserId))
+    .filter((r) => mayManage(me, owners.get(r.agentId)?.ownerUserId))
     .map((r) => ({
       id: r.id,
       agentId: r.agentId,
@@ -156,7 +156,7 @@ export async function revokeRule(
     );
   if (!row) return "not_found";
   const owner = (await ownersOf(db, me.workspaceId, [row.agentId])).get(row.agentId);
-  if (!canManage(me, owner?.ownerUserId)) return "forbidden";
+  if (!mayManage(me, owner?.ownerUserId)) return "forbidden";
   const done = await db
     .update(approvalRules)
     .set({ revokedAt: at, revokedByUserId: me.userId })

@@ -117,7 +117,7 @@ async function agentPost(server: RunningServer, ctx: Ctx, text: string) {
   return message;
 }
 
-/** The undo's result as a label: ok, or the error code it refused with. */
+/** The undo's result as a label: ok, or the error code it answered. */
 const undoing = (deps: AppDeps, me: WorkspaceMember, row: ActionRow) =>
   applyUndo(deps, me, row, "undo").then(
     () => "ok",
@@ -246,12 +246,12 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("undo at the same time on Postgre
     });
   }, 60_000);
 
-  test("forced: an undo against a person's edit waits on the issue's lock and refuses after it", async () => {
+  test("forced: an undo against a person's edit waits on the issue's lock and declines after it", async () => {
     await withServer("undo_vs_edit", async (server, admin, ctx) => {
       const { issue, action } = await renamed(server, ctx, 0);
       const person = { type: "person" as const, id: ctx.betoId };
       // A is the person's edit, held right after locking the issue. With the lock the undo waits, then sees the
-      // person's title and refuses; without it, the undo compares with the agent's title, writes the old one and
+      // person's title and declines; without it, the undo compares with the agent's title, writes the old one and
       // reports success while the person's edit lands over it.
       const run = await forcedPair(
         admin,

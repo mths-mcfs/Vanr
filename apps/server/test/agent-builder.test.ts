@@ -1,6 +1,6 @@
 // "Describe it and I build it" (agent-builder.ts). Drafting calls the agent runtime (the workspace's provider for a
 // new agent, a completion paid by the agent for an existing one), which comes with S6: here the entries are proven
-// to refuse before taking anything, and the draft's validation (`toDraft`, where everything the model returns goes
+// to say no before taking anything, and the draft's validation (`toDraft`, where everything the model returns goes
 // through) is proven on its own, with replies a model could send.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
@@ -99,7 +99,7 @@ describe("the draft", () => {
     async () => {
       const { agent } = await existingAgent();
       const draft = toDraft(
-        { name: "", handle: "takeover", role: "nonsense", model: "nonsense", instructions: "" },
+        { name: "", handle: "hijack", role: "nonsense", model: "nonsense", instructions: "" },
         { workspaceSkills: [], taken: new Set(), current: agent, testModel: true },
       );
       expect(draft).toMatchObject({
@@ -117,7 +117,7 @@ describe("the draft", () => {
 
 describe("without the runtime", () => {
   test(
-    "both entries refuse with not_available before the hourly slot or a proposal is taken",
+    "both entries answer not_available before the hourly slot or a proposal is taken",
     async () => {
       const { me, agent } = await existingAgent();
       for (let i = 0; i < DRAFTS_PER_HOUR + 2; i++) {

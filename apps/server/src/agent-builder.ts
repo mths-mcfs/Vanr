@@ -40,7 +40,7 @@ const draftModels = MODELS.filter((m) => DRAFT_MODELS.includes(m.id));
 
 const drafted = new Map<string, number[]>();
 
-/** Counts one draft of the person; past the hour's limit, refuses. */
+/** Counts one draft of the person; past the hour's limit, rejects. */
 function takeDraftSlot(userId: string, now: Date) {
   const since = now.getTime() - 3_600_000;
   const recent = (drafted.get(userId) ?? []).filter((t) => t > since);

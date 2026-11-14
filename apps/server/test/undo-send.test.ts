@@ -161,7 +161,7 @@ describe("a post with an undo window", () => {
         .select()
         .from(messages)
         .where(eq(messages.id, posted?.id ?? ""));
-      expect(retracted?.meta.retracted).toMatchObject({ byUserId: t.beto.user.id });
+      expect(retracted?.meta.retracted).toMatchObject({ actorUserId: t.beto.user.id });
     },
     SERVER_TEST_MS,
   );
