@@ -151,6 +151,35 @@ jobs:
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_DROP_LOCKS: "1"
+      # Issue numbers one after another, each change of an issue compared with the one before, one consolidation applied once.
+      - run: bun test apps/server/test/issues-postgres.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      - name: The forced issue lock tests fail without the locks
+        run: |
+          set +e
+          bun test apps/server/test/issues-postgres.test.ts --test-name-pattern forced > forced-issues.log 2>&1
+          status=$?
+          cat forced-issues.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the forced issue lock tests passed without the locks"
+            exit 1
+          fi
+          for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -qF "$broken" forced-issues.log; then
+              echo "::error::the forced issue lock tests broke ($broken) instead of failing on their outcome"
+              exit 1
+            fi
+          done
+          for label in issue-number issue-move consolidation-apply; do
+            if ! grep -qF "LOCK_OUTCOME_MISMATCH($label)" forced-issues.log; then
+              echo "::error::the forced $label test did not fail on its outcome without the lock"
+              exit 1
+            fi
+          done
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_DROP_LOCKS: "1"
       # The server's search with the vector leg the boot turns on (ensureVector) and the embedding tick.
       - run: bun test apps/server/test/search-postgres.test.ts --test-name-pattern "on Postgres"
         env:
