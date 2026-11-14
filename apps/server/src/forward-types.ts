@@ -1,7 +1,7 @@
 // Minimal types of server modules that a later slice of the port brings in. Each one says the module it comes
 // from; that slice replaces the import with the real module and deletes the type here.
 
-import type { EffectClass, GateReason } from "@vanr/contract";
+import type { AgentAction, AgentActionKind, EffectClass, GateReason } from "@vanr/contract";
 import type { schema } from "@vanr/engine/db";
 import type { Preview } from "@vanr/engine/effects";
 import type { ModelProvider } from "@vanr/engine/models/types";
@@ -91,4 +91,20 @@ export interface RunLimits {
    * with the same key and the same payload doesn't run again on the retry.
    */
   effectKey?: string;
+}
+
+/** From `runtime/tools`: what `queueSend` (outbox) reads of the run that asks for a send. */
+export interface ToolContext {
+  deps: AppDeps;
+  workspaceId: string;
+  agent: Pick<AgentRow, "id">;
+  runId: string;
+  /** Records an action a person can undo; the receipt goes with the agent's next message. */
+  recordAction(action: {
+    kind: AgentActionKind;
+    target: AgentAction["target"];
+    params?: Record<string, unknown>;
+    /** Until when it can be undone; by default, the usual window (24 h). */
+    revertibleUntil?: Date;
+  }): Promise<void>;
 }
