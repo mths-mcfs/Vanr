@@ -7,6 +7,7 @@ import { postgresConnector, type SqlConnector } from "@vanr/engine/sqlconn";
 import { count } from "drizzle-orm";
 import { createApp } from "./app";
 import { createAuth, type SignupDecision } from "./auth";
+import { resumeRecalcs, stopRecalcs } from "./bases/write";
 import type { Config } from "./config";
 import type { AppDeps, RuntimePort } from "./context";
 import { HttpError } from "./http";
@@ -188,6 +189,10 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   // The vector leg only with an embedder and pgvector in the database; without them the search is lexical
   // and by name. It acquires nothing, so there is nothing to undo.
   if (effective.search.embedder.kind !== "off") await deps.search.ensureVector();
+  // The formula recalculations: halted before the database closes, then the ones a crash or a deploy left
+  // halfway resume in the background.
+  undo.push(() => stopRecalcs(deps));
+  await resumeRecalcs(deps);
   const app = createApp(deps, { firstUser, signupQueue: opts.signupQueue });
   handler = (req) => app.fetch(req);
   log.info("server.started", { url: publicUrl, db: opened.kind });

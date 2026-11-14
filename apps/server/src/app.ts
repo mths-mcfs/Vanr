@@ -4,6 +4,7 @@ import type { AppDeps, AppEnv } from "./context";
 import { errorBody, HttpError } from "./http";
 import { log } from "./logger";
 import { registerAccount } from "./routes/account";
+import { registerBases } from "./routes/bases";
 import { registerDrive } from "./routes/drive";
 import { registerDriveUploads } from "./routes/drive-upload";
 import { registerSearch } from "./routes/search";
@@ -107,6 +108,7 @@ export function createApp(
   // runners S2, runner pairings S3, assignments S5.
   registerDriveUploads(app);
   registerDrive(app);
+  registerBases(app);
   registerSearch(app);
 
   app.all("/api/*", (c) =>
