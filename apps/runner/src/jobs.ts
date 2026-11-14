@@ -28,7 +28,7 @@ import { type CliWatch, noPlanEnv } from "./cli";
 import { ensureDir, writePrivate } from "./config";
 import { maybe } from "./lines";
 import { agentEnv, domainsFor, sandboxed } from "./ops";
-import { assemble, assembleSnapshot, type Masks, maskDeep } from "./outbound";
+import { assemble, assembleSnapshot, type Masks } from "./outbound";
 import { CLI_DOMAINS, type CommandSandbox, cliPaths, type PolicyContext, shellLine } from "./sandbox";
 import { MIN_MASK, maskBytes, maskSecrets, type SecretStore, StreamMasker } from "./secrets";
 
@@ -281,9 +281,6 @@ export function parseExecutorEvent(executor: "claude_code" | "codex", value: unk
   return {};
 }
 
-/** Each string of a value masked, keys included, at any depth (see `maskDeep`). */
-export const maskValue = maskDeep;
-
 const isEvent = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 
@@ -484,11 +481,13 @@ export function gitChanges(
     from,
     to,
   ]);
-  // Masked before it is cut, so a secret across the cut is replaced whole.
-  return {
-    files: names,
-    diff: diff?.trim() ? clipMiddle(maskDiff(diff, masks), DIFF_MAX) : null,
-  };
+  // The files of this diff, in its order: the header lines are written from them, not taken from git.
+  const blocks = (snapGit(store, cwd, ["diff", "--name-only", "-z", "--no-renames", from, to]) ?? "")
+    .split("\0")
+    .filter(Boolean);
+  const written = diff?.trim() ? writeDiffHeaders(diff, blocks, masks) : null;
+  // Written before it is cut, so a secret across the cut is replaced whole.
+  return { files: names, diff: written ? clipMiddle(written, DIFF_MAX) : null };
 }
 
 /** Git on the runner's snapshot repository with bytes in and out (blobs, the batch reader, the index). */
@@ -591,18 +590,53 @@ export function diffMasks(masks: [string, string][]): [string, string][] {
   return [...masks, ...lines];
 }
 
+/** A file name as the runner writes it in a diff header: masked, and a control character as `\xNN`. */
+function diffName(name: string, masks: [string, string][]): string {
+  const shown = (c: string) => {
+    const code = c.charCodeAt(0);
+    return code < 0x20 || code === 0x7f ? `\\x${code.toString(16).padStart(2, "0")}` : c;
+  };
+  return [...maskSecrets(name, masks)].map(shown).join("");
+}
+
 /**
- * The file names in the header lines of a diff, masked (a name can carry a secret's value). The content lines
- * come from masked trees already.
+ * The diff with its header lines written by the runner from the names (`names[i]` is the file of the i-th
+ * block, in git's order), so no name goes out as git wrote or escaped it. The other lines stay. `null` when
+ * the blocks and the names do not match.
  */
-export function maskDiff(diff: string, masks: [string, string][]): string {
-  if (!masks.length) return diff;
-  return diff
-    .split("\n")
-    .map((line) =>
-      /^(diff --git |--- |\+\+\+ |rename |copy |Binary files )/.test(line) ? maskSecrets(line, masks) : line,
-    )
-    .join("\n");
+function writeDiffHeaders(diff: string, names: string[], masks: [string, string][]): string | null {
+  const lines = diff.split("\n");
+  const out: string[] = [];
+  let block = -1;
+  let inHeader = false;
+  for (const line of lines) {
+    if (line.startsWith("diff --git ")) {
+      block++;
+      inHeader = true;
+      const name = names[block];
+      if (name === undefined) return null;
+      const n = diffName(name, masks);
+      out.push(`diff --git a/${n} b/${n}`);
+      continue;
+    }
+    if (inHeader && line.startsWith("@@")) inHeader = false;
+    const name = names[block];
+    if (!inHeader || name === undefined) {
+      out.push(line);
+      continue;
+    }
+    const n = diffName(name, masks);
+    if (line.startsWith("--- ")) out.push(line === "--- /dev/null" ? line : `--- a/${n}`);
+    else if (line.startsWith("+++ ")) out.push(line === "+++ /dev/null" ? line : `+++ b/${n}`);
+    else if (line.startsWith("Binary files ")) {
+      const from = line.startsWith("Binary files /dev/null and ") ? "/dev/null" : `a/${n}`;
+      const to = line.endsWith(" and /dev/null differ") ? "/dev/null" : `b/${n}`;
+      out.push(`Binary files ${from} and ${to} differ`);
+      inHeader = false;
+    } else if (/^(index |new file mode |deleted file mode |old mode |new mode )/.test(line)) out.push(line);
+    // Any other header line (a rename, a copy, a similarity) names files too: it does not go out.
+  }
+  return block + 1 === names.length ? out.join("\n") : null;
 }
 
 interface JobStartArgs {
@@ -900,14 +934,28 @@ export class Jobs {
       if (parsed.denied) entry.denied = [...new Set([...entry.denied, ...parsed.denied])].slice(0, 50);
       if (parsed.result !== undefined) entry.result = parsed.result;
       if (!parsed.text) return;
-      const text = parsed.text;
-      appendFileSync(logPath, `${maskSecrets(text, secrets.masks).slice(0, LINE_MAX).replace(/\n/g, " ")}\n`);
-      tailLine = text;
-      if (Date.now() - lastSent >= LINE_EVERY_MS && text !== sentLine) {
+      // One line of the job's text: masked whole, then through the flow of the job's lines, so a secret of
+      // two lines split between two events goes out in neither.
+      const one = maskSecrets(parsed.text, secrets.masks).replace(/\r?\n/g, " ");
+      flowed += lines.push(`${one}\n`);
+      takeLines(false);
+    };
+    const lines = new StreamMasker(secrets.masks);
+    let flowed = "";
+    // The lines the flow let go: written to the log, and the newest sent (one every LINE_EVERY_MS).
+    const takeLines = (last: boolean) => {
+      const done = flowed.split("\n");
+      flowed = last ? "" : (done.pop() ?? "");
+      for (const line of done) {
+        if (!line) continue;
+        appendFileSync(logPath, `${line.slice(0, LINE_MAX)}\n`);
+        tailLine = line;
+      }
+      if (tailLine && tailLine !== sentLine && (last || Date.now() - lastSent >= LINE_EVERY_MS)) {
         lastSent = Date.now();
-        sentLine = text;
+        sentLine = tailLine;
         this.emit(
-          { type: "job.event", jobId: args.jobId, kind: "line", line: text, at: at() },
+          { type: "job.event", jobId: args.jobId, kind: "line", line: tailLine, at: at() },
           secrets.masks,
         );
       }
@@ -972,6 +1020,9 @@ export class Jobs {
       try {
         try {
           output.end();
+          // The tail the flow of lines held goes before the job.done.
+          flowed += lines.end();
+          takeLines(true);
         } catch (err) {
           fail(err);
         }
@@ -1011,12 +1062,14 @@ export class Jobs {
       } finally {
         dropSnapshot();
         // The journal keeps the job as it was sent: masked, cut and valid.
-        Object.assign(entry, assembleSnapshot(this.snapshot(entry), secrets.masks));
+        // A field the assembly left out (a usage that failed the schema) goes from the journal too.
+        const sent = assembleSnapshot(this.snapshot(entry), secrets.masks);
+        Object.assign(entry, { ...sent, usage: sent.usage ?? null, diff: sent.diff ?? null });
         // The runner keeps a shorter result than the protocol allows.
         if (entry.result) entry.result = entry.result.slice(0, RESULT_MAX);
         this.liveMasks.delete(args.jobId);
         this.save();
-        this.emit({ type: "job.done", job: this.snapshot(entry) }, []);
+        this.emit({ type: "job.done", job: this.snapshot(entry) }, secrets.masks);
       }
     });
     return { jobId: args.jobId, startedAt, cwd };

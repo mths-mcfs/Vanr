@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { diffMasks, gitChanges, gitSnapshot, maskDiff } from "./jobs";
+import { diffMasks, gitChanges, gitSnapshot } from "./jobs";
 import { maskBytes, maskSecrets } from "./secrets";
 import { seeded } from "./testing/random";
 
@@ -17,6 +17,24 @@ const git = (cwd: string, ...args: string[]) =>
   execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd, encoding: "utf8" });
 
 /** The diff of one change to notes.txt, between its `before` and `after` content. */
+/** The `diff --git` lines of a diff. */
+const headers = (diff: string) => diff.split("\n").filter((l) => l.startsWith("diff --git "));
+/** The lines of a diff that are not header lines (from `diff --git` to the first hunk or `Binary files`). */
+function body(diff: string): string[] {
+  const out: string[] = [];
+  let header = false;
+  for (const line of diff.trimEnd().split("\n")) {
+    if (line.startsWith("diff --git ")) header = true;
+    else if (header && line.startsWith("@@")) header = false;
+    else if (header && line.startsWith("Binary files ")) {
+      header = false;
+      continue;
+    }
+    if (!header && line) out.push(line);
+  }
+  return out;
+}
+
 function diffOf(before: string | null, after: string | null): string {
   return diffWith(before, after, MASKS);
 }
@@ -132,6 +150,8 @@ test("property: every changed file is in the diff, whatever its name, and the di
     "dir/sub é",
     "plain.txt",
     'q"uote',
+    "bell\x07key",
+    "tab\tname",
   ];
   const contents = [
     "TOKEN-0042\n",
@@ -190,7 +210,22 @@ test("property: every changed file is in the diff, whatever its name, and the di
     );
     const changed = names.filter((n) => before.get(n) !== after.get(n)).map((n) => maskSecrets(n, masks));
     expect([...got.files].sort()).toEqual(changed.sort());
-    expect(got.diff ?? "").toBe(expected.trim() ? maskDiff(expected, masks) : "");
+    // The content lines are git's on the masked files; the header lines are the runner's, one block per file
+    // of git's diff, in its order, with the masked name (a control character as \xNN), never git's quoting.
+    const order = git(oracle, "diff", "--cached", "--name-only", "-z", "--no-renames")
+      .split("\0")
+      .filter(Boolean);
+    const shown = (n: string) =>
+      [...maskSecrets(n, masks)]
+        .map((c) =>
+          c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127
+            ? `\\x${c.charCodeAt(0).toString(16).padStart(2, "0")}`
+            : c,
+        )
+        .join("");
+    expect(headers(got.diff ?? "")).toEqual(order.map((n) => `diff --git a/${shown(n)} b/${shown(n)}`));
+    expect(body(got.diff ?? "")).toEqual(body(expected));
+    expect((got.diff ?? "").includes('"a/')).toBe(false);
     for (const leak of ["TOKEN-0042", "ab\ncd"]) expect((got.diff ?? "").includes(leak)).toBe(false);
     rmSync(dir, { recursive: true, force: true });
     rmSync(oracle, { recursive: true, force: true });

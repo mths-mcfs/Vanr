@@ -44,7 +44,7 @@ import { Harnesses } from "./harness";
 import { Jobs, which } from "./jobs";
 import { McpBridge, type ToolOutcome } from "./mcp";
 import { execOp, listOp, type OpContext, readOp, writeOp } from "./ops";
-import { assemble, type Masks, maskResult } from "./outbound";
+import { assemble, Flows, HELLO_JOBS_MAX, type Masks } from "./outbound";
 import { type CommandSandbox, defaultPolicyContext, openSandbox, type PolicyContext } from "./sandbox";
 import { SecretStore } from "./secrets";
 import { runningBundle, UpdateError, update } from "./update";
@@ -113,6 +113,8 @@ export class RunnerClient {
   private cliSent = "";
   private cliCheckedAt = 0;
   agents: { id: string; handle: string; name: string }[] = [];
+  /** The masks of each agent's secrets, known since the welcome: a frame of no agent is masked with all. */
+  private readonly knownMasks = new Map<string, Masks>();
   private welcomeWaiters: (() => void)[] = [];
   private readonly executors: ("claude_code" | "codex")[];
   private readonly browser: BrowserDriver | null;
@@ -254,12 +256,13 @@ export class RunnerClient {
   }
 
   /**
-   * The one way out to the server: the frame is assembled (free text masked with `masks`, cut to the schema,
-   * validated) in outbound.ts; a frame that cannot be made valid is not sent.
+   * The one way out to the server: the frame is assembled in outbound.ts (every string masked with `masks`
+   * and the secrets of every agent, cut to the schema, validated); a frame that cannot be made valid goes in
+   * its minimal form, or not at all.
    */
   private send(frame: RunnerFrame, masks: Masks = []): boolean {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
-    const out = assemble(frame, masks);
+    const out = assemble(frame, [...masks, ...this.allMasks()]);
     if (!out) {
       this.log(`did not send an invalid ${frame.type} frame`);
       return false;
@@ -361,7 +364,8 @@ export class RunnerClient {
         browser: !!this.browser,
         executors: this.executors,
         cli,
-        jobs: this.jobs.pending(),
+        // The rest of the pending jobs goes as job.done after the welcome (redeliver), in the journal's order.
+        jobs: this.helloJobs(),
         sandbox: this.sandbox.status(),
         features: this.browser ? [BROWSER_GUARD_FEATURE] : [],
       });
@@ -381,6 +385,7 @@ export class RunnerClient {
       if (this.ws !== ws) return;
       this.ws = null;
       this.secrets.lock();
+      this.knownMasks.clear();
       for (const c of this.inflight.values()) c.abort();
       this.failToolCalls();
       if (this.watchdog) clearTimeout(this.watchdog);
@@ -406,6 +411,7 @@ export class RunnerClient {
         this.heartbeatMs = frame.heartbeatMs;
         this.saveAgents(frame.agents);
         await this.secrets.unlock(frame.storeKey, frame.runnerId);
+        await this.refreshMasks();
         this.hadWelcome = true;
         if (frame.name !== this.config.name) this.saveConfig({ ...this.config, name: frame.name });
         this.log(`connected as ${frame.name}`);
@@ -418,6 +424,7 @@ export class RunnerClient {
         return;
       case "agents":
         this.saveAgents(frame.agents);
+        await this.refreshMasks();
         return;
       case "ping":
         this.send({ type: "pong", at: frame.at });
@@ -462,6 +469,19 @@ export class RunnerClient {
     this.inflight.set(id, controller);
     // The agent's secrets, for every frame this request sends.
     const masks = frame.agent ? await this.secrets.masks(frame.agent).catch(() => []) : [];
+    // The pieces of one text (a command's output, a harness turn's text) go through one flow each.
+    const flows = new Flows([...masks, ...this.allMasks()]);
+    const piece = (key: string, text: string) => flows.push(key, text);
+    const flush = () => {
+      for (const key of flows.keys()) {
+        const tail = flows.end(key);
+        if (!tail) continue;
+        if (key === "text")
+          this.send({ type: "harness.event", id, event: { kind: "text", text: tail } }, masks);
+        else if (key === "stdout" || key === "stderr")
+          this.send({ type: "output", id, stream: key, chunk: tail }, masks);
+      }
+    };
     const ctx: OpContext = {
       access: this.access,
       secrets: this.secrets,
@@ -470,7 +490,12 @@ export class RunnerClient {
       agent: frame.agent,
       signal: controller.signal,
       ...(frame.stream
-        ? { onOutput: (stream, chunk) => this.send({ type: "output", id, stream, chunk }, masks) }
+        ? {
+            onOutput: (stream, chunk) => {
+              const safe = piece(stream, chunk);
+              if (safe) this.send({ type: "output", id, stream, chunk: safe }, masks);
+            },
+          }
         : {}),
     };
     try {
@@ -478,12 +503,18 @@ export class RunnerClient {
         op === "harness.turn"
           ? await this.harnesses.turn(this.needAgent(ctx.agent), parsed.data as never, {
               signal: controller.signal,
-              emit: (event) => this.send({ type: "harness.event", id, event }, masks),
+              emit: (event) => {
+                const text = piece("text", event.text);
+                if (text) this.send({ type: "harness.event", id, event: { ...event, text } }, masks);
+              },
               callTool: (name, input) => this.callTool(id, name, input, masks),
             })
           : await this.run(op as RunnerOp, parsed.data, ctx, masks);
-      this.send({ type: "result", id, ok: true, data: maskResult(op as RunnerOp, data, masks) }, masks);
+      flush();
+      this.send({ type: "result", id, ok: true, data }, masks);
+      if (op === "secret.store" || op === "secret.remove") await this.refreshMasks();
     } catch (err) {
+      flush();
       if (err instanceof RunnerError) this.fail(id, { code: err.code, message: err.message }, masks);
       else
         this.fail(id, { code: "internal", message: err instanceof Error ? err.message : String(err) }, masks);
@@ -572,6 +603,26 @@ export class RunnerClient {
         return driver.handle(op, this.needAgent(ctx.agent), args, (frame) => this.send(frame, masks));
       }
     }
+  }
+
+  /** The running jobs first (only the hello reports them), then the ended ones, up to the hello's limit. */
+  private helloJobs() {
+    const pending = this.jobs.pending();
+    const running = pending.filter((j) => j.status === "running");
+    return [...running, ...pending.filter((j) => j.status !== "running")].slice(0, HELLO_JOBS_MAX);
+  }
+
+  /** The masks of every known agent's secrets, refreshed at the welcome and when a secret changes. */
+  private async refreshMasks() {
+    this.knownMasks.clear();
+    for (const agent of this.agents) {
+      const masks = await this.secrets.masks(agent).catch((): Masks => []);
+      if (masks.length) this.knownMasks.set(agent.id, masks);
+    }
+  }
+
+  private allMasks(): Masks {
+    return [...this.knownMasks.values()].flat();
   }
 
   private saveAgents(agents: { id: string; handle: string; name: string }[]) {

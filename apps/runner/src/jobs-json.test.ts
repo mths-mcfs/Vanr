@@ -123,3 +123,28 @@ test("any exception while handling a job's output ends the job as failed, sends 
   ]);
   expect(jobs?.runningCount()).toBe(0);
 });
+
+test("the lines of a job are one flow: a secret of two lines split between two events goes out in neither", async () => {
+  let jobs: Jobs | undefined;
+  const say = (text: string) => ({ type: "assistant", message: { content: [{ type: "text", text }] } });
+  const events = await run(
+    [["first half\nsecond half", "[secret:M]"]],
+    [
+      say("before"),
+      say("first half"),
+      say("second half"),
+      say("after"),
+      { type: "result", result: "ok", session_id: "s1" },
+    ],
+    (j) => {
+      jobs = j;
+    },
+  );
+  const log = jobs?.output("job_00000001", 200).lines ?? [];
+  expect(log).toEqual(["before", "[secret:M]", "after"]);
+  const sent = JSON.stringify(events);
+  expect(sent.includes("first half") || sent.includes("second half")).toBe(false);
+  // The last line goes before the job.done.
+  const last = events.findLastIndex((e) => e.type === "job.event");
+  expect(last).toBeLessThan(events.findIndex((e) => e.type === "job.done"));
+});
