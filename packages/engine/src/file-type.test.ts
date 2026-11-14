@@ -4,6 +4,13 @@ import { isSafeInline, sniffType } from "./file-type";
 const b = (...xs: (number | string)[]) =>
   new Uint8Array(xs.flatMap((x) => (typeof x === "string" ? [...new TextEncoder().encode(x)] : [x])));
 
+test("UTF-8 at the sniff limit keeps complete characters and tolerates only an incomplete tail", () => {
+  for (const tail of ["éxxx", "€xx", "😀x"])
+    expect(sniffType(b("x".repeat(4091) + tail), "text.md")).toBe("text/markdown");
+  expect(sniffType(b(`${"x".repeat(4095)}😀`), "text.md")).toBe("text/markdown");
+  expect(sniffType(b("x".repeat(4095), 0xff), "text.md")).toBeNull();
+});
+
 test("signatures of the formats the Drive shows", () => {
   expect(sniffType(b(0x89, "PNG\r\n", 0x1a, "\n", 0, 0), "x")).toBe("image/png");
   expect(sniffType(b(0xff, 0xd8, 0xff, 0xe0), "x")).toBe("image/jpeg");

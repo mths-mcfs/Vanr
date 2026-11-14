@@ -74,6 +74,18 @@ describe("claim", () => {
     expect(parsePosition(text).position.answer).toBe("certo");
   });
 
+  test("JSON evidence strings keep nested braces, unmatched braces and escaped quotes", () => {
+    for (const evidence of ['output: {"result":{"ok":true}}', "SyntaxError: expected }", 'quote: \\" {']) {
+      const claim = { answer: "SQLite", confidence: 0.8, reason: "", evidence: [evidence] };
+      const { position, argument } = parsePosition(
+        `Analisei os resultados.\n\`\`\`json\n${JSON.stringify(claim)}\n\`\`\``,
+        ["Postgres", "SQLite"],
+      );
+      expect(position).toEqual({ ...claim, key: "option:1" });
+      expect(argument).toBe("Analisei os resultados.");
+    }
+  });
+
   test("normalizes numbers, accents and punctuation", () => {
     expect(normalizeAnswer("42.0")).toBe("42");
     expect(normalizeAnswer(" 1,000 ")).toBe("1000");
@@ -104,6 +116,18 @@ describe("simple majority", () => {
     key,
     answer: key,
     confidence,
+  });
+
+  test("punctuation after a single option keeps its vote in the majority", () => {
+    const options = ["Postgres", "SQLite", "Mongo"];
+    const votes = ["Mongo", "Mongo, pelo esquema.", "Postgres"].map((answer, i) => ({
+      member: String(i),
+      answer,
+      key: answerKey(answer, options),
+      confidence: null,
+    }));
+    expect(majority(votes, options).winner).toBe("Mongo");
+    expect(answerKey("Mongo, ou Postgres.", options)).toBe("other:mongo, ou postgres");
   });
 
   test("counts one vote per participant; confidence does not weigh", () => {

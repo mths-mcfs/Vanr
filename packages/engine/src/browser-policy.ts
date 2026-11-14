@@ -313,14 +313,15 @@ export function consequenceOf(
   if (!el) return null;
   if (action === "check" || action === "select") return byLabel(`${el.label} ${detail ?? ""}`);
   if (action === "press") {
-    if (detail !== "Enter" && detail !== " " && detail !== "Space") return null;
+    const key = detail?.split("+").at(-1);
+    if (key !== "Enter" && key !== " " && key !== "Space") return null;
     if (el.editable) {
-      if (detail !== "Enter") return null;
+      if (key !== "Enter") return null;
       return el.tag === "input" && el.form ? byForm(el.form) : "submit";
     }
     if (!el.control) return "submit";
     // Enter on a form checkbox, option or range also submits (the browser's implicit submission).
-    if (detail === "Enter" && el.tag === "input" && el.form && !el.submits) return byForm(el.form);
+    if (key === "Enter" && el.tag === "input" && el.form && !el.submits) return byForm(el.form);
   }
   return byLabel(el.label) ?? (el.submits && el.form ? byForm(el.form) : null);
 }
