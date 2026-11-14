@@ -1056,6 +1056,60 @@ describe("a write decides on the page it reads locked in its own transaction", (
     expect(outcomes).toEqual(writes.map(([what]) => `${what}: 403 wiki.page_locked`));
   });
 
+  test("restoring from the trash while an admin deletes for good: the restore finds nothing and the page stays gone", async () => {
+    const { workspaceId, ana, beto } = await team();
+    const p = await beto.api.wiki.createWikiPage(workspaceId, { title: "Restore race", body: "x" });
+    await beto.api.wiki.deleteWikiPage(workspaceId, p.slug);
+    const hold = holdNextTransaction(server);
+    const restoring = beto.api.wiki.restoreWikiTrash(workspaceId, p.slug).then(
+      () => "accepted",
+      (e: { status?: number }) => String(e.status),
+    );
+    await hold.started;
+    await ana.api.wiki.deleteWikiTrash(workspaceId, p.slug);
+    hold.release();
+    expect(await restoring).toBe("404");
+    expect((await apiError(ana.api.wiki.getWikiPage(workspaceId, p.slug))).status).toBe(404);
+    expect(await ana.api.wiki.getWikiTrash(workspaceId)).toEqual([]);
+  });
+
+  test("deleting for good from the trash while it is restored: the delete finds nothing and the page is back", async () => {
+    const { workspaceId, ana, beto } = await team();
+    const p = await beto.api.wiki.createWikiPage(workspaceId, { title: "Purge race", body: "x" });
+    await beto.api.wiki.deleteWikiPage(workspaceId, p.slug);
+    const hold = holdNextTransaction(server);
+    const purging = ana.api.wiki.deleteWikiTrash(workspaceId, p.slug).then(
+      () => "accepted",
+      (e: { status?: number }) => String(e.status),
+    );
+    await hold.started;
+    await beto.api.wiki.restoreWikiTrash(workspaceId, p.slug);
+    hold.release();
+    expect(await purging).toBe("404");
+    expect((await ana.api.wiki.getWikiPage(workspaceId, p.slug)).body).toBe("x");
+  });
+
+  test("deleting for good from the trash while the daily tick deletes it: one of them does, the other finds nothing", async () => {
+    const { workspaceId, ana } = await team();
+    const p = await ana.api.wiki.createWikiPage(workspaceId, { title: "Tick race", body: "x" });
+    await ana.api.wiki.deleteWikiPage(workspaceId, p.slug);
+    const hold = holdNextTransaction(server);
+    const purging = ana.api.wiki.deleteWikiTrash(workspaceId, p.slug).then(
+      () => "accepted",
+      (e: { status?: number }) => String(e.status),
+    );
+    await hold.started;
+    skew = 31 * DAY;
+    try {
+      expect(await purgeWikiTrash(server.deps)).toBeGreaterThanOrEqual(1);
+    } finally {
+      skew = 0;
+    }
+    hold.release();
+    expect(await purging).toBe("404");
+    expect(await ana.api.wiki.getWikiTrash(workspaceId)).toEqual([]);
+  });
+
   test("an admin demoted between the check and the commit can't lock any more", async () => {
     const { workspaceId, ana } = await team();
     const carla = withApi(await memberOf(server, workspaceId, "Carla", email("carla"), "admin"));

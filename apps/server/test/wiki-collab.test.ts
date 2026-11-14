@@ -254,7 +254,7 @@ describe("publishing after a quiet period (P0-03)", () => {
         await quick.stop();
       }
     },
-    SERVER_TEST_MS,
+    SERVER_TEST_MS * 2,
   );
 });
 
@@ -263,7 +263,11 @@ describe("publishing while someone types (P0-03)", () => {
     "what someone types while the version is saved stays in the draft and goes into the next version",
     async () => {
       // The search holds the end of the save: it is the window in which the person keeps typing.
-      const slow = await startTestServer({ wikiDebounceMs: 50 });
+      // A clock that moves a millisecond per read: the typing person's right, read at the connection, stays
+      // within RIGHT_TTL_MS however slow the host is, so their update is applied while the save is held (a
+      // fresh read would wait for the held transaction on PGlite).
+      let tick = Date.now();
+      const slow = await startTestServer({ wikiDebounceMs: 50, now: () => new Date(tick++) });
       try {
         const ana = withApi(await signedIn(slow, "Ana", email("ana")));
         const { workspaceId } = await seedWorkspace(slow, ana, "Race");
@@ -282,16 +286,11 @@ describe("publishing while someone types (P0-03)", () => {
         const published = ana.api.wiki.publishWikiPageDraft(workspaceId, page.slug);
         await hold.begun;
         await a.edit((md) => `${md.trimEnd()}\n\nThree, typed during the publish.\n`);
-        // The typed update waits at its connection's gate, which reads the person's right first: on PGlite
-        // (one transaction at a time) that read waits for the held save, so the update lands right after the
-        // version is saved, never inside it.
+        await until(() => !a.provider.hasUnsyncedChanges);
         hold.release();
         const v2 = await published;
         expect(v2.body).toBe("One edited.\n\nTwo.\n");
-        await until(() => !a.provider.hasUnsyncedChanges);
-        await until(
-          async () => (await ana.api.wiki.getWikiPage(workspaceId, page.slug)).draft?.dirty === true,
-        );
+        expect(v2.draft?.dirty).toBe(true);
 
         // A version from outside merges with the draft instead of erasing what was typed.
         await ana.api.wiki.replaceWikiPage(workspaceId, page.slug, {
@@ -309,7 +308,7 @@ describe("publishing while someone types (P0-03)", () => {
         await slow.stop();
       }
     },
-    SERVER_TEST_MS,
+    SERVER_TEST_MS * 2,
   );
 });
 

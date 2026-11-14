@@ -300,6 +300,8 @@ export function registerWiki(app: Hono<AppEnv>) {
       { folder: normalizeFolder(input.folder), updatedBy: me$(me) },
       unlockedFor(me$(me)),
     );
+    // A moved page's live connections are checked again at once, like a lock.
+    await deps.wikiLive.recheckPage(moved);
     return c.json(await toPage(deps.db, moved, me));
   });
 

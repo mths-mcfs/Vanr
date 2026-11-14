@@ -311,6 +311,12 @@ export async function bypassesLock(tx: Tx, workspaceId: string, who: ActorRef): 
   return !!role && can(role, "configure");
 }
 
+/** Whether any of `who` may write a locked page now (the live draft's editors decide its automatic publish). */
+export async function anyBypasses(tx: Tx, workspaceId: string, who: readonly ActorRef[]): Promise<boolean> {
+  for (const w of who) if (await bypassesLock(tx, workspaceId, w)) return true;
+  return false;
+}
+
 /** A person who writes must still be a member when the write commits; an agent's access is its run's. */
 async function requireWriter(tx: Tx, workspaceId: string, who: ActorRef) {
   if (who.type === "person" && !(await roleIn(tx, workspaceId, who.id)))
@@ -349,14 +355,19 @@ export async function savePage(
     note?: string | null;
     origin?: SaveOrigin;
     inTx?: (tx: Tx, page: WikiRow) => Promise<void>;
+    /** The author is only the credit (the live draft's last editor): not checked as the one who writes. */
+    attributionOnly?: boolean;
+    /** Whose role decides the lock (default: the author). */
+    lockBypassBy?: readonly ActorRef[];
   },
 ): Promise<WikiRow> {
   if (input.title !== undefined && input.title !== input.row.title) checkTitle(input.title);
   const at = deps.now();
   const result = await deps.db.transaction(async (tx) => {
     const row = await livePage(tx, input.row.id);
-    await requireWriter(tx, row.workspaceId, input.author);
-    if (row.locked && !(input.canBypassLock && (await bypassesLock(tx, row.workspaceId, input.author))))
+    if (!input.attributionOnly) await requireWriter(tx, row.workspaceId, input.author);
+    const deciders = input.lockBypassBy ?? [input.author];
+    if (row.locked && !(input.canBypassLock && (await anyBypasses(tx, row.workspaceId, deciders))))
       throw pageLocked();
     // Without a parent version the caller saves over the version it read.
     const expected = input.parentVersion ?? input.row.version;

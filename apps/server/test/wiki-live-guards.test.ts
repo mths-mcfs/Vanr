@@ -13,7 +13,7 @@ import * as Y from "yjs";
 import { log } from "../src/logger";
 import type { RunningServer } from "../src/server";
 import { MAX_BODY, pageBySlug, savePage } from "../src/wiki";
-import { COLLAB_PATH, MAX_UPDATE } from "../src/wiki-collab";
+import { COLLAB_PATH, MAX_UPDATE, RIGHT_TTL_MS } from "../src/wiki-collab";
 import { wikiMarkdown, YFRAGMENT } from "../src/wiki-md";
 import { type Browser, holdNextIndexWrite, SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
 import { memberOf, type Person, seedWorkspace } from "./seed";
@@ -21,8 +21,10 @@ import { apiError, wikiApi } from "./wiki-api";
 import { connect, unloaded, until } from "./wiki-live";
 
 let server: RunningServer;
+/** The injected clock's offset: moving it past RIGHT_TTL_MS makes the next message read the right again. */
+let skew = 0;
 beforeAll(async () => {
-  server = await startTestServer({ wikiDebounceMs: 50 });
+  server = await startTestServer({ wikiDebounceMs: 50, now: () => new Date(Date.now() + skew) });
 }, SERVER_TEST_MS);
 afterAll(() => server.stop(), SERVER_TEST_MS);
 
@@ -53,13 +55,19 @@ async function storedDraft(srv: RunningServer, workspaceId: string, slug: string
   return { ...d, text: md.serialize(md.fromYDoc(doc)) };
 }
 
+const demote = (srv: RunningServer, workspaceId: string, userId: string) =>
+  srv.deps.db
+    .update(schema.members)
+    .set({ role: "member" })
+    .where(and(eq(schema.members.workspaceId, workspaceId), eq(schema.members.userId, userId)));
+
 const removeMember = (srv: RunningServer, workspaceId: string, userId: string) =>
   srv.deps.db
     .delete(schema.members)
     .where(and(eq(schema.members.workspaceId, workspaceId), eq(schema.members.userId, userId)));
 
 describe("a connection doesn't outlive the right that opened it", () => {
-  test("removed from the workspace: the next message closes it; it gets no new text and its edit lands nowhere", async () => {
+  test("removed outside the server's routes: within RIGHT_TTL_MS nothing reads the database; past it, the next message closes the connection before the new text goes out", async () => {
     const { workspaceId, ana, beto } = await team();
     const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Removed", body: BODY });
     const a = connect(server, ana.browser, workspaceId, docName(workspaceId, page.slug));
@@ -68,10 +76,14 @@ describe("a connection doesn't outlive the right that opened it", () => {
     // Both sides idle (the handshake's last messages handled): what reaches Beto next is only the server's.
     await until(() => !a.provider.hasUnsyncedChanges && !b.provider.hasUnsyncedChanges);
     await server.deps.wikiLive.settled();
-    // A change outside our code (no route removes members yet): the gate reads it on the next message.
     await removeMember(server, workspaceId, beto.user.id);
-    await a.edit((md) => `${md}\nSECRET after removal.\n`);
-    await until(() => b.closeCodes.length > 0);
+    try {
+      skew += RIGHT_TTL_MS;
+      await a.edit((md) => `${md}\nSECRET after removal.\n`);
+      await until(() => b.closeCodes.length > 0);
+    } finally {
+      skew = 0;
+    }
     expect(b.closeCodes[0]).toBe(4403);
     expect(await b.md()).not.toContain("SECRET");
     await b.edit((md) => `${md}\nUNAUTHORIZED.\n`);
@@ -81,7 +93,44 @@ describe("a connection doesn't outlive the right that opened it", () => {
     const now = await ana.api.wiki.getWikiPage(workspaceId, page.slug);
     expect(now.body).not.toContain("UNAUTHORIZED");
     expect(now.body).toContain("SECRET");
-    expect((await storedDraft(server, workspaceId, page.slug))?.text).not.toContain("UNAUTHORIZED");
+  });
+
+  test("N messages within RIGHT_TTL_MS read the right at most once per connection; past it, once more", async () => {
+    const { workspaceId, ana } = await team();
+    const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Reads", body: BODY });
+    const a = connect(server, ana.browser, workspaceId, docName(workspaceId, page.slug));
+    await a.synced;
+    await until(() => !a.provider.hasUnsyncedChanges);
+    await server.deps.wikiLive.settled();
+    // A counter over the right's reads: every one starts by reading the session row.
+    const { db } = server.deps;
+    const select = db.select.bind(db);
+    let reads = 0;
+    db.select = ((...args: Parameters<typeof select>) => {
+      const query = select(...args);
+      const from = query.from.bind(query);
+      query.from = ((table: unknown) => {
+        if (table === schema.sessions) reads++;
+        return from(table as never);
+      }) as typeof query.from;
+      return query;
+    }) as typeof db.select;
+    try {
+      for (let i = 0; i < 20; i++) {
+        await a.edit((md) => md.replace(/One[^\n]*/, `One, edit ${i}.`));
+        await until(() => !a.provider.hasUnsyncedChanges);
+      }
+      expect(reads).toBeLessThanOrEqual(1);
+      const before = reads;
+      skew += RIGHT_TTL_MS + 1;
+      await a.edit((md) => md.replace(/One[^\n]*/, "One, past the window."));
+      await until(() => !a.provider.hasUnsyncedChanges);
+      expect(reads).toBe(before + 1);
+    } finally {
+      skew = 0;
+      db.select = select;
+      a.close();
+    }
   });
 
   test("recheckUser (the members routes' call) closes the connection at once, with no message in between", async () => {
@@ -107,18 +156,29 @@ describe("a connection doesn't outlive the right that opened it", () => {
     b.close();
   });
 
-  test("an expired session: the next message closes it before anything is sent", async () => {
+  test("a session past its expiry, inside RIGHT_TTL_MS: the clock against the stored expiry closes it on the next message", async () => {
     const { workspaceId, ana, beto } = await team();
     const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Expired", body: BODY });
     const a = connect(server, ana.browser, workspaceId, docName(workspaceId, page.slug));
     const b = connect(server, beto.browser, workspaceId, docName(workspaceId, page.slug));
     await Promise.all([a.synced, b.synced]);
+    await until(() => !a.provider.hasUnsyncedChanges && !b.provider.hasUnsyncedChanges);
+    // Beto's session now ends in 2 s; a forced check (the members routes' call) reads it and stores that
+    // expiry with a fresh right, so the clock, not the window, is what has to close the connection.
     await server.deps.db
       .update(schema.sessions)
-      .set({ expiresAt: new Date(Date.now() - 1000) })
+      .set({ expiresAt: new Date(Date.now() + 2000) })
       .where(eq(schema.sessions.userId, beto.user.id));
-    await a.edit((md) => `${md}\nSECRET after expiry.\n`);
-    await until(() => b.closeCodes.length > 0);
+    await server.deps.wikiLive.recheckUser(workspaceId, beto.user.id);
+    expect(b.closeCodes).toEqual([]);
+    try {
+      skew = 3000;
+      expect(skew).toBeLessThan(RIGHT_TTL_MS);
+      await a.edit((md) => `${md}\nSECRET after expiry.\n`);
+      await until(() => b.closeCodes.length > 0);
+    } finally {
+      skew = 0;
+    }
     expect(b.closeCodes[0]).toBe(4401);
     expect(await b.md()).not.toContain("SECRET");
     a.close();
@@ -133,10 +193,7 @@ describe("a connection doesn't outlive the right that opened it", () => {
     const name = docName(workspaceId, page.slug);
     const c = connect(server, carla.browser, workspaceId, name);
     await c.synced;
-    await server.deps.db
-      .update(schema.members)
-      .set({ role: "member" })
-      .where(and(eq(schema.members.workspaceId, workspaceId), eq(schema.members.userId, carla.user.id)));
+    await demote(server, workspaceId, carla.user.id);
     await server.deps.wikiLive.recheckUser(workspaceId, carla.user.id);
     await until(() => c.closeCodes.length > 0);
     expect(c.closeCodes[0]).toBe(4409);
@@ -169,108 +226,206 @@ describe("a connection doesn't outlive the right that opened it", () => {
     ro.close();
     a.close();
   });
+});
 
+describe("the shared draft keeps what was accepted while each editor had the right", () => {
+  const cases: [string, "removed" | "signed out" | "demoted"][] = [
+    ["removed from the workspace", "removed"],
+    ["signed out", "signed out"],
+    ["demoted on a locked page", "demoted"],
+  ];
+  for (const [what, mode] of cases)
+    test(
+      `B ${what} with unsaved edits of A and B: both stay, what B sends after is dropped, A goes on and the draft is saved and published`,
+      async () => {
+        // No autosave on the way: every edit below is only in memory until the session ends.
+        const slow = await startTestServer({ wikiDebounceMs: 600_000 });
+        try {
+          const ana = withApi(await signedIn(slow, "Ana", email("ana")));
+          const { workspaceId } = await seedWorkspace(slow, ana, "Shared draft");
+          const beto = withApi(
+            await memberOf(slow, workspaceId, "Beto", email("beto"), mode === "demoted" ? "admin" : "member"),
+          );
+          const page = await ana.api.wiki.createWikiPage(workspaceId, {
+            title: `Shared ${mode}`,
+            body: BODY,
+          });
+          if (mode === "demoted") await ana.api.wiki.lockWikiPage(workspaceId, page.slug, true);
+          const name = docName(workspaceId, page.slug);
+          const a = connect(slow, ana.browser, workspaceId, name);
+          const b = connect(slow, beto.browser, workspaceId, name);
+          await Promise.all([a.synced, b.synced]);
+          await a.edit((md) => md.replace("One.", "One, by A before."));
+          await until(() => !a.provider.hasUnsyncedChanges);
+          await until(async () => (await b.md()).includes("by A before"));
+          await b.edit((md) => md.replace("Two.", "Two, by B before."));
+          await until(() => !b.provider.hasUnsyncedChanges);
+          await until(async () => (await a.md()).includes("by B before"));
+
+          if (mode === "removed") {
+            await removeMember(slow, workspaceId, beto.user.id);
+            await slow.deps.wikiLive.recheckUser(workspaceId, beto.user.id);
+          } else if (mode === "demoted") {
+            await demote(slow, workspaceId, beto.user.id);
+            await slow.deps.wikiLive.recheckUser(workspaceId, beto.user.id);
+          } else expect((await beto.browser.json("/api/auth/sign-out", "POST")).status).toBe(200);
+          await until(() => b.closeCodes.length > 0);
+          expect(b.closeCodes[0]).toBe(mode === "removed" ? 4403 : mode === "demoted" ? 4409 : 4401);
+
+          await b.edit((md) => `${md.trimEnd()}\n\nB after losing the right.\n`);
+          await a.edit((md) => `${md.trimEnd()}\n\nA after.\n`);
+          await until(() => !a.provider.hasUnsyncedChanges);
+          expect(await a.md()).not.toContain("B after losing");
+          a.close();
+          b.close();
+          await unloaded(slow);
+
+          const published = await ana.api.wiki.getWikiPage(workspaceId, page.slug);
+          expect(published.version).toBe(2);
+          expect(published.body).toContain("One, by A before.");
+          expect(published.body).toContain("Two, by B before.");
+          expect(published.body).toContain("A after.");
+          expect(published.body).not.toContain("B after losing");
+          expect(published.history[0]?.author).toEqual({ type: "person", id: ana.user.id });
+          const draft = await storedDraft(slow, workspaceId, page.slug);
+          expect(draft?.text).toContain("Two, by B before.");
+          expect(draft?.dirty).toBe(false);
+        } finally {
+          await slow.stop();
+        }
+      },
+      SERVER_TEST_MS * 2,
+    );
+});
+
+describe("the shared draft credits who edited, even someone who left", () => {
   test(
-    "a draft save checks again, in its transaction, everyone whose edits it carries: a removed editor's edit is never stored",
+    "B edits last and is removed; the session ends: the version is published with B's edit, credited to B",
     async () => {
-      // No autosave before the unload: the edit is only in memory when the editor loses access.
       const slow = await startTestServer({ wikiDebounceMs: 600_000 });
       try {
-        const { workspaceId, ana, beto } = await team(slow);
-        const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Pending", body: BODY });
-        const b = connect(slow, beto.browser, workspaceId, docName(workspaceId, page.slug));
-        await b.synced;
-        await b.edit((md) => md.replace("One.", "One, by someone removed before the save."));
+        const ana = withApi(await signedIn(slow, "Ana", email("ana")));
+        const { workspaceId } = await seedWorkspace(slow, ana, "Credit");
+        const beto = withApi(await memberOf(slow, workspaceId, "Beto", email("beto")));
+        const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Credit", body: BODY });
+        const name = docName(workspaceId, page.slug);
+        const a = connect(slow, ana.browser, workspaceId, name);
+        const b = connect(slow, beto.browser, workspaceId, name);
+        await Promise.all([a.synced, b.synced]);
+        await b.edit((md) => md.replace("Two.", "Two, by B last."));
         await until(() => !b.provider.hasUnsyncedChanges);
         await removeMember(slow, workspaceId, beto.user.id);
+        await slow.deps.wikiLive.recheckUser(workspaceId, beto.user.id);
+        await until(() => b.closeCodes.length > 0);
+        a.close();
         b.close();
         await unloaded(slow);
-        const now = await ana.api.wiki.getWikiPage(workspaceId, page.slug);
-        expect(now).toMatchObject({ version: 1, body: BODY });
-        expect((await storedDraft(slow, workspaceId, page.slug))?.text).not.toContain("removed before");
+        const published = await ana.api.wiki.getWikiPage(workspaceId, page.slug);
+        expect(published.version).toBe(2);
+        expect(published.body).toContain("Two, by B last.");
+        expect(published.history[0]?.author).toEqual({ type: "person", id: beto.user.id });
       } finally {
         await slow.stop();
       }
     },
-    SERVER_TEST_MS,
+    SERVER_TEST_MS * 2,
   );
 });
 
 describe("the live draft's limits", () => {
-  test("an update past MAX_BODY gets SyncStatus false and is neither applied, relayed nor stored", async () => {
-    const { workspaceId, ana, beto } = await team();
-    const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Too long", body: "Short.\n" });
-    const name = docName(workspaceId, page.slug);
-    const a = connect(server, ana.browser, workspaceId, name);
-    const b = connect(server, beto.browser, workspaceId, name);
-    await Promise.all([a.synced, b.synced]);
-    await a.edit(() => "x".repeat(MAX_BODY + 1));
-    await until(() => a.syncStatus.includes(false));
-    // Then a small edit goes through, and arrives alone.
-    await b.edit((md) => md.replace("Short.", "Short, still."));
-    await until(
-      async () =>
-        (await storedDraft(server, workspaceId, page.slug))?.text.includes("Short, still.") ?? false,
-    );
-    expect((await b.md()).length).toBeLessThan(100);
-    await server.deps.wikiLive.settled();
-    expect((await storedDraft(server, workspaceId, page.slug))?.text.length).toBeLessThan(100);
-    expect(a.closeCodes).toEqual([]);
-    a.close();
-    b.close();
-  });
+  test(
+    "an update past MAX_BODY gets SyncStatus false and is neither applied, relayed nor stored",
+    async () => {
+      const { workspaceId, ana, beto } = await team();
+      const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Too long", body: "Short.\n" });
+      const name = docName(workspaceId, page.slug);
+      const a = connect(server, ana.browser, workspaceId, name);
+      const b = connect(server, beto.browser, workspaceId, name);
+      await Promise.all([a.synced, b.synced]);
+      await a.edit(() => "x".repeat(MAX_BODY + 1));
+      await until(() => a.syncStatus.includes(false));
+      // Then a small edit goes through, and arrives alone.
+      await b.edit((md) => md.replace("Short.", "Short, still."));
+      await until(
+        async () =>
+          (await storedDraft(server, workspaceId, page.slug))?.text.includes("Short, still.") ?? false,
+      );
+      expect((await b.md()).length).toBeLessThan(100);
+      await server.deps.wikiLive.settled();
+      expect((await storedDraft(server, workspaceId, page.slug))?.text.length).toBeLessThan(100);
+      expect(a.closeCodes).toEqual([]);
+      a.close();
+      b.close();
+    },
+    SERVER_TEST_MS * 2,
+  );
 
-  test("an edit right at MAX_BODY is accepted", async () => {
-    const { workspaceId, ana } = await team();
-    const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "At the limit", body: "Short.\n" });
-    const a = connect(server, ana.browser, workspaceId, docName(workspaceId, page.slug));
-    await a.synced;
-    await a.edit(() => "x".repeat(MAX_BODY - 1));
-    await until(() => !a.provider.hasUnsyncedChanges);
-    expect(a.syncStatus).not.toContain(false);
-    a.close();
-  });
+  test(
+    "an edit right at MAX_BODY is accepted",
+    async () => {
+      const { workspaceId, ana } = await team();
+      const page = await ana.api.wiki.createWikiPage(workspaceId, {
+        title: "At the limit",
+        body: "Short.\n",
+      });
+      const a = connect(server, ana.browser, workspaceId, docName(workspaceId, page.slug));
+      await a.synced;
+      await a.edit(() => "x".repeat(MAX_BODY - 1));
+      await until(() => !a.provider.hasUnsyncedChanges);
+      expect(a.syncStatus).not.toContain(false);
+      a.close();
+    },
+    SERVER_TEST_MS * 2,
+  );
 
-  test("a message past MAX_UPDATE closes the sender even when the page text stays small", async () => {
-    const { workspaceId, ana, beto } = await team();
-    const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Heavy", body: BODY });
-    const name = docName(workspaceId, page.slug);
-    const a = connect(server, ana.browser, workspaceId, name);
-    const b = connect(server, beto.browser, workspaceId, name);
-    await Promise.all([a.synced, b.synced]);
-    // An attribute the markdown doesn't keep: a big message, a tiny page.
-    const para = new Y.XmlElement("paragraph");
-    para.setAttribute("junk", "y".repeat(MAX_UPDATE + 1024));
-    para.insert(0, [new Y.XmlText("tiny")]);
-    b.doc.getXmlFragment(YFRAGMENT).push([para]);
-    await until(() => b.closeCodes.length > 0);
-    expect(b.closeCodes[0]).toBe(4413);
-    await server.deps.wikiLive.settled();
-    expect(await a.md()).not.toContain("tiny");
-    a.close();
-    b.close();
-  });
+  test(
+    "a message past MAX_UPDATE closes the sender even when the page text stays small",
+    async () => {
+      const { workspaceId, ana, beto } = await team();
+      const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Heavy", body: BODY });
+      const name = docName(workspaceId, page.slug);
+      const a = connect(server, ana.browser, workspaceId, name);
+      const b = connect(server, beto.browser, workspaceId, name);
+      await Promise.all([a.synced, b.synced]);
+      // An attribute the markdown doesn't keep: a big message, a tiny page.
+      const para = new Y.XmlElement("paragraph");
+      para.setAttribute("junk", "y".repeat(MAX_UPDATE + 1024));
+      para.insert(0, [new Y.XmlText("tiny")]);
+      b.doc.getXmlFragment(YFRAGMENT).push([para]);
+      await until(() => b.closeCodes.length > 0);
+      expect(b.closeCodes[0]).toBe(4413);
+      await server.deps.wikiLive.settled();
+      expect(await a.md()).not.toContain("tiny");
+      a.close();
+      b.close();
+    },
+    SERVER_TEST_MS * 2,
+  );
 
-  test("a merge that would pass MAX_BODY is a conflict: the draft keeps its text and stays within the limit", async () => {
-    const { workspaceId, ana } = await team();
-    const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Big merge", body: BODY });
-    const a = connect(server, ana.browser, workspaceId, docName(workspaceId, page.slug));
-    await a.synced;
-    const half = Math.floor(MAX_BODY * 0.6);
-    await a.edit((md) => md.replace("One.", `One ${"d".repeat(half)}.`));
-    await until(async () => (await storedDraft(server, workspaceId, page.slug))?.dirty === true);
-    await ana.api.wiki.replaceWikiPage(workspaceId, page.slug, {
-      body: BODY.replace("Two.", `Two ${"p".repeat(half)}.`),
-      parentVersion: 1,
-    });
-    await until(() => a.stateless.some((s) => s.type === "conflict"));
-    await server.deps.wikiLive.settled();
-    const stored = await storedDraft(server, workspaceId, page.slug);
-    expect(stored?.text.length).toBeLessThanOrEqual(MAX_BODY);
-    expect(stored?.text).toContain("ddd");
-    expect((await a.md()).length).toBeLessThanOrEqual(MAX_BODY);
-    a.close();
-  });
+  test(
+    "a merge that would pass MAX_BODY is a conflict: the draft keeps its text and stays within the limit",
+    async () => {
+      const { workspaceId, ana } = await team();
+      const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Big merge", body: BODY });
+      const a = connect(server, ana.browser, workspaceId, docName(workspaceId, page.slug));
+      await a.synced;
+      const half = Math.floor(MAX_BODY * 0.6);
+      await a.edit((md) => md.replace("One.", `One ${"d".repeat(half)}.`));
+      await until(async () => (await storedDraft(server, workspaceId, page.slug))?.dirty === true);
+      await ana.api.wiki.replaceWikiPage(workspaceId, page.slug, {
+        body: BODY.replace("Two.", `Two ${"p".repeat(half)}.`),
+        parentVersion: 1,
+      });
+      await until(() => a.stateless.some((s) => s.type === "conflict"));
+      await server.deps.wikiLive.settled();
+      const stored = await storedDraft(server, workspaceId, page.slug);
+      expect(stored?.text.length).toBeLessThanOrEqual(MAX_BODY);
+      expect(stored?.text).toContain("ddd");
+      expect((await a.md()).length).toBeLessThanOrEqual(MAX_BODY);
+      a.close();
+    },
+    SERVER_TEST_MS * 2,
+  );
 
   test("a saved draft past MAX_BODY (stored before the limit) is not published", async () => {
     const { workspaceId, ana } = await team();

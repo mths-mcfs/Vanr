@@ -20,10 +20,11 @@ import { merge3 } from "@vanr/engine/wiki/merge";
 import { and, eq, inArray } from "drizzle-orm";
 import * as Y from "yjs";
 import type { AppDeps } from "./context";
-import { errorBody, forbidden, HttpError } from "./http";
+import { errorBody, HttpError, notFound } from "./http";
 import { log } from "./logger";
 import {
   type Author,
+  anyBypasses,
   bypassesLock,
   MAX_BODY,
   pageBySlug,
@@ -49,6 +50,14 @@ export const MAX_UPDATE = 2 * 1024 * 1024;
 export const MAX_FRAME = MAX_UPDATE + 64 * 1024;
 const AGENT_PRESENCE_MS = 10_000;
 const AGENT_COLOR = "#2f6fed";
+/**
+ * How long a connection's right (session, membership, the pages' lock), once read from the database, stands
+ * without reading it again, by the injected clock. Within it no message reads the database. What changes
+ * through the server's own paths takes effect at once: a deleted session (the auth hook), a lock or unlock
+ * and a membership or role change (recheckPage, recheckUser); the session's expiry is checked against the
+ * clock on every message. Only a change made outside the server's routes waits up to this long.
+ */
+export const RIGHT_TTL_MS = 5_000;
 /** How long the gate waits for the server to answer an update it forwarded (it always does, or closes). */
 const ACK_MS = 30_000;
 /** How long a stop waits for the live documents to save and unload before it stops writing. */
@@ -96,6 +105,8 @@ export interface CollabSocketData {
   name: string;
   /** The sign-in session that opened the socket: it must stay valid for the socket to stay open. */
   sessionId: string;
+  /** When that session expires (ms): checked against the clock on every message, without the database. */
+  sessionExpiresAt: number;
   req: Request;
   peer?: Peer;
   conn?: ReturnType<Hocuspocus["handleConnection"]>;
@@ -119,10 +130,6 @@ interface Session {
   edits: number;
   editors: ActorRef[];
   editedAt: Date | null;
-  /** Whose edits (person → sign-in session) are in the document and not yet saved: checked on every save. */
-  pending: Map<string, string>;
-  /** The latest sign-in session of each editor: the automatic publish checks its author's. */
-  editorSessions: Map<string, string>;
   /** A newer version that couldn't be merged into the draft (the changes cross). */
   conflictVersion: number | null;
   closed: boolean;
@@ -132,7 +139,7 @@ interface Session {
 
 /** Why a draft save was rejected: nothing is written and the session closes without publishing. */
 class DraftRejected extends Error {
-  constructor(readonly reason: "gone" | "revoked" | "too_large") {
+  constructor(readonly reason: "gone" | "too_large") {
     super(`draft rejected: ${reason}`);
   }
 }
@@ -255,6 +262,7 @@ export async function checkCollabUpgrade(
       userId: session.user.id,
       name: session.user.name,
       sessionId: session.session.id,
+      sessionExpiresAt: new Date(session.session.expiresAt).getTime(),
       req,
     },
   };
@@ -274,6 +282,8 @@ export class Peer {
   private readonly in: Uint8Array[] = [];
   private pumping = false;
   closed = false;
+  /** When this connection's right was last read from the database (ms, by the injected clock). */
+  rightReadAt: number | null = null;
   /** Waiters for the server's SyncStatus on a document key (the answer to a forwarded update). */
   readonly acks = new Map<string, () => void>();
   /** What Hocuspocus sees as the socket: its sends go through the gate. */
@@ -422,25 +432,29 @@ export function createWikiCollab(
 
   // ---- Who may stay connected, and who may have their edits saved.
 
-  async function sessionValid(db: Db | Tx, userId: string, sessionId: string): Promise<boolean> {
-    const [row] = await db
+  async function verdict(p: Peer, opts: { force?: boolean } = {}): Promise<Verdict> {
+    if (stopped) return "revoked";
+    const { db, now } = getDeps();
+    const at = now().getTime();
+    const fresh = p.rightReadAt !== null && at - p.rightReadAt < RIGHT_TTL_MS;
+    if (!opts.force && fresh && at < p.data.sessionExpiresAt) return "ok";
+    const { workspaceId, userId, sessionId } = p.data;
+    const [sess] = await db
       .select({ expiresAt: authSessions.expiresAt })
       .from(authSessions)
       .where(and(eq(authSessions.id, sessionId), eq(authSessions.userId, userId)));
-    return !!row && row.expiresAt > getDeps().now();
-  }
-
-  async function verdict(p: Peer): Promise<Verdict> {
-    if (stopped) return "revoked";
-    const { db } = getDeps();
-    const { workspaceId, userId, sessionId } = p.data;
-    if (!(await sessionValid(db, userId, sessionId))) return "session_ended";
+    if (!sess || sess.expiresAt.getTime() <= at) return "session_ended";
+    // The session may have been extended since the upgrade: the clock checks against the stored expiry.
+    p.data.sessionExpiresAt = sess.expiresAt.getTime();
     const [m] = await db
       .select({ role: members.role })
       .from(members)
       .where(and(eq(members.workspaceId, workspaceId), eq(members.userId, userId)));
     if (!m) return "revoked";
-    if (!p.docs.size) return "ok";
+    if (!p.docs.size) {
+      p.rightReadAt = at;
+      return "ok";
+    }
     const slugs = [...p.docs.values()].map((d) => d.slug);
     const pages = await db
       .select({
@@ -455,26 +469,8 @@ export function createWikiCollab(
       if (!page || page.deletedAt) return "revoked";
       if (page.locked && !doc.readOnly && !can(m.role, "configure")) return "read_only";
     }
+    p.rightReadAt = at;
     return "ok";
-  }
-
-  /** Whether an editor's edits may still be saved on `page`: their session, membership and the lock, in `tx`. */
-  async function editorAllowed(tx: Tx, page: WikiRow, userId: string, sessionId: string | undefined) {
-    if (sessionId !== undefined && !(await sessionValid(tx, userId, sessionId))) return false;
-    if (!page.locked) {
-      const [m] = await tx
-        .select({ role: members.role })
-        .from(members)
-        .where(and(eq(members.workspaceId, page.workspaceId), eq(members.userId, userId)))
-        .for("share");
-      return !!m;
-    }
-    return bypassesLock(tx, page.workspaceId, { type: "person", id: userId });
-  }
-
-  async function checkEditors(tx: Tx, page: WikiRow, pending: [string, string][]) {
-    for (const [userId, sessionId] of pending)
-      if (!(await editorAllowed(tx, page, userId, sessionId))) throw new DraftRejected("revoked");
   }
 
   async function versionBody(pageId: string, version: number, current: WikiRow): Promise<string> {
@@ -493,15 +489,14 @@ export function createWikiCollab(
   }
 
   /**
-   * Saves the draft. The page is read locked, and everyone whose edits are not saved yet must still have
-   * their session, membership and (on a locked page) the admin role, in the same transaction; `extra` adds
-   * the check of whoever asked for this save. A rejection writes nothing.
+   * Saves the draft: everything the session accepted while each editor had the right is legitimate and is
+   * kept, like an HTTP save made a second before a removal. The page is read locked in the same transaction
+   * (it must exist outside the trash); `extra` adds the check of whoever asked for this save (discard).
    */
   async function persist(s: Session, doc: Y.Doc, extra?: (tx: Tx, page: WikiRow) => Promise<void>) {
     if (stopped) throw new Error("wiki live session stopped");
     if ((await textOf(s, doc)).length > MAX_BODY) throw new DraftRejected("too_large");
     const deps = getDeps();
-    const pending = [...s.pending];
     const values = {
       state: b64(Y.encodeStateAsUpdate(doc)),
       parentVersion: s.parentVersion,
@@ -513,15 +508,12 @@ export function createWikiCollab(
     await deps.db.transaction(async (tx) => {
       const page = await pageLock.row(tx, s.pageId);
       if (!page || page.deletedAt) throw new DraftRejected("gone");
-      await checkEditors(tx, page, pending);
       await extra?.(tx, page);
       await tx
         .insert(wikiPageDocs)
         .values({ pageId: s.pageId, ...values })
         .onConflictDoUpdate({ target: wikiPageDocs.pageId, set: values });
     });
-    for (const [userId, sessionId] of pending)
-      if (s.pending.get(userId) === sessionId) s.pending.delete(userId);
   }
 
   /** A draft that can't be saved: the session closes without publishing and its memory is let go. */
@@ -597,8 +589,10 @@ export function createWikiCollab(
   }
 
   /**
-   * Publishes the document as a version. The save's transaction reads the page locked and checks, there,
-   * everyone whose unsaved edits it carries and (for the automatic publish) the author's own session.
+   * Publishes the document as a version. The save's transaction reads the page locked (savePage): it must
+   * exist outside the trash and, if locked, someone who decides the lock must be an admin there. The button's
+   * publisher is the person who asked; the automatic publish credits whoever edited last, and its lock is
+   * decided by the session's editors (an admin among them, by the role read in the transaction).
    */
   async function publishSession(
     name: string,
@@ -606,7 +600,7 @@ export function createWikiCollab(
     doc: Y.Doc,
     by: Author,
     note: string,
-    opts: { force?: boolean; canBypassLock?: boolean; origin?: SaveOrigin; authorSession?: string },
+    opts: { force?: boolean; canBypassLock?: boolean; origin?: SaveOrigin; automatic?: boolean },
   ): Promise<WikiRow | null> {
     const deps = getDeps();
     const page = await freshPage(s);
@@ -618,16 +612,7 @@ export function createWikiCollab(
       throw new HttpError(409, "wiki.stale_draft", "Someone saved a newer version", {
         currentVersion: page.version,
       });
-    const pending = [...s.pending];
-    const authorCheck = async (tx: Tx, locked: WikiRow) => {
-      try {
-        await checkEditors(tx, locked, pending);
-      } catch {
-        throw forbidden("The draft has edits from someone who lost access to the page");
-      }
-      if (opts.authorSession && !(await sessionValid(tx, by.id, opts.authorSession)))
-        throw forbidden("The draft's author signed out");
-    };
+    const deciders: ActorRef[] = opts.automatic ? s.editors : [by];
     if (text === page.body) {
       s.dirty = false;
       s.editors = [];
@@ -636,8 +621,7 @@ export function createWikiCollab(
       s.conflictVersion = null;
       // Nothing to publish, but the draft is saved: by someone who may write the page when it commits.
       await persist(s, doc, async (tx, locked) => {
-        await authorCheck(tx, locked);
-        if (locked.locked && !(opts.canBypassLock && (await bypassesLock(tx, locked.workspaceId, by))))
+        if (locked.locked && !(opts.canBypassLock && (await anyBypasses(tx, locked.workspaceId, deciders))))
           throw new HttpError(403, "wiki.page_locked", "This page is locked");
       });
       return page;
@@ -650,7 +634,8 @@ export function createWikiCollab(
       body: text,
       note,
       origin: "live",
-      inTx: authorCheck,
+      attributionOnly: opts.automatic === true,
+      lockBypassBy: deciders,
     });
     s.parentVersion = saved.version;
     s.baseBody = saved.body;
@@ -674,10 +659,10 @@ export function createWikiCollab(
       await publishSession(name, s, doc, author, others > 0 ? `${note} +${others}` : note, {
         // The role is read again in the save's transaction (savePage); this is only the ceiling.
         canBypassLock: true,
-        authorSession: s.editorSessions.get(author.id),
+        automatic: true,
       });
     } catch (err) {
-      // Conflict, lock or lost access: the draft stays saved (if it may be) and the page shows the notice.
+      // Conflict or lock: the draft stays saved and the page shows the notice.
       log.warn("wiki.autopublish_skipped", { err, pageId: s.pageId });
     }
   }
@@ -724,8 +709,6 @@ export function createWikiCollab(
           edits: 0,
           editors: [],
           editedAt: null,
-          pending: new Map(),
-          editorSessions: new Map(),
           conflictVersion: null,
           closed: false,
         };
@@ -779,8 +762,6 @@ export function createWikiCollab(
         ...s.editors.filter((e) => e.id !== context.userId),
         { type: "person", id: context.userId },
       ];
-      s.pending.set(context.userId, context.peer.data.sessionId);
-      s.editorSessions.set(context.userId, context.peer.data.sessionId);
       armIdle(documentName, s, document);
     },
     async onStoreDocument({ documentName, document }) {
@@ -913,8 +894,6 @@ export function createWikiCollab(
       edits: 0,
       editors: saved.editors,
       editedAt: saved.editedAt,
-      pending: new Map(),
-      editorSessions: new Map(),
       conflictVersion: null,
       closed: false,
     };
@@ -929,7 +908,7 @@ export function createWikiCollab(
 
   /** Checks a socket's right now, outside a message: closes it, or makes a read-only one reconnect to write. */
   async function recheck(p: Peer, slug?: string) {
-    if (p.closed || !p.apply(await verdict(p))) return;
+    if (p.closed || !p.apply(await verdict(p, { force: true }))) return;
     if (!slug) return;
     const doc = [...p.docs.values()].find((d) => d.slug === slug);
     if (!doc?.readOnly) return;
@@ -944,7 +923,7 @@ export function createWikiCollab(
     if (err instanceof DraftRejected)
       return err.reason === "too_large"
         ? new HttpError(400, "wiki.too_large", "The page is too long")
-        : forbidden("The draft has edits from someone who lost access to the page");
+        : notFound("Page not found");
     return err;
   };
 
@@ -1010,8 +989,6 @@ export function createWikiCollab(
               editors: [],
               conflictVersion: null,
             });
-            // The draft's edits are gone with it: nobody's unsaved edit is written by this save.
-            s.pending.clear();
             clearTimeout(s.idle);
             broadcast(docName(row.workspaceId, row.slug), { type: "discarded", version: row.version });
           },

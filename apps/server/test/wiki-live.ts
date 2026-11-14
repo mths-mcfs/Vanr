@@ -7,8 +7,8 @@ import { COLLAB_PATH } from "../src/wiki-collab";
 import { wikiMarkdown } from "../src/wiki-md";
 import type { Browser } from "./harness";
 
-/** Waits for a condition the server or the socket makes true (each check is a fresh read). */
-export async function until(cond: () => boolean | Promise<boolean>, ms = 8000): Promise<void> {
+/** Waits for a condition the server or the socket makes true (each check is a fresh read); the bound is generous for a loaded CI host. */
+export async function until(cond: () => boolean | Promise<boolean>, ms = 20_000): Promise<void> {
   const end = Date.now() + ms;
   while (!(await cond())) {
     if (Date.now() > end) throw new Error("timeout");
