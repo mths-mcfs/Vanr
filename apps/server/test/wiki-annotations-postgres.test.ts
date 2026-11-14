@@ -10,7 +10,7 @@ import { newId } from "@vanr/engine/ids";
 import { fakeProvider } from "@vanr/engine/models/fake";
 import { count, eq, sql } from "drizzle-orm";
 import type { RunningServer } from "../src/server";
-import { pageBySlug, pageLock } from "../src/wiki";
+import { pageBySlug, pageLock, wikiRead } from "../src/wiki";
 import { annotationLock, createProposal, MAX_COMMENTS } from "../src/wiki-annotations";
 import { CHECK_NOW_GAP_MS, checkWorkspace } from "../src/wiki-checks";
 import { signedIn, startTestServer } from "./harness";
@@ -19,6 +19,8 @@ import { memberOf, type Person, seedWorkspace } from "./seed";
 import { wikiApi } from "./wiki-api";
 
 const UNLOCKED = process.env.VANR_TEST_WIKI_ANNOTATIONS_UNLOCKED === "1";
+/** The reads without their snapshot: each statement sees the latest commit (the CI expects the leak back). */
+const NO_SNAPSHOT = process.env.VANR_TEST_WIKI_NO_SNAPSHOT === "1";
 
 let n = 0;
 const email = (who: string) => `${who}${++n}@wiki-annotations-pg.test`;
@@ -82,7 +84,7 @@ const outcome = (p: Promise<unknown>) =>
 const onPostgres = (name: string) => (TEST_POSTGRES_URL ? name : `${name} (skipped: ${NO_POSTGRES})`);
 
 describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki annotations on Postgres"), () => {
-  test("two decisions on the same change, interleaved: the second waits for the first's lock and is rejected; the change lands once", async () => {
+  test("forced: two decisions on the same change, interleaved: the second waits for the first's lock and is rejected; the change lands once", async () => {
     const pg = await startTestServer({ env: { DATABASE_URL: await testDatabaseUrl("wikidecide") } });
     const [page0, ann0] = [pageLock.row, annotationLock.row];
     try {
@@ -223,4 +225,77 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki annotations on Postgres"), 
       await pg.stop();
     }
   }, 60_000);
+});
+
+describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki reads across a restriction on Postgres"), () => {
+  // A read held right after its access check, while the page is restricted away from the reader and
+  // written: the answer is the content of before (or 404), never what came after.
+  const paths: [string, (w: ReturnType<typeof wikiApi>, ws: string, slug: string) => Promise<unknown>][] = [
+    ["page", (w, ws, slug) => w.getWikiPage(ws, slug)],
+    ["version", (w, ws, slug) => w.getWikiPageDiff(ws, slug, { from: 1, to: 2 })],
+    ["annotations", (w, ws, slug) => w.listWikiPageAnnotations(ws, slug)],
+    ["panel", (w, ws, slug) => w.getWikiPagePanel(ws, slug)],
+  ];
+  for (const [what, read] of paths)
+    test(`forced: a ${what} read held after its access check answers what was there before`, async () => {
+      const pg = await startTestServer({ env: { DATABASE_URL: await testDatabaseUrl(`wikiread${what}`) } });
+      const original = { ...wikiRead };
+      try {
+        const ana = withApi(await signedIn(pg, "Ana", email("ana")));
+        const { workspaceId } = await seedWorkspace(pg, ana, "Reads");
+        const beto = withApi(await memberOf(pg, workspaceId, "Beto", email("beto")));
+        const created = await beto.api.wiki.createWikiPage(workspaceId, { title: "Shared", body: "before" });
+        const page = await pageBySlug(pg.deps.db, { workspaceId, system: true }, created.slug);
+        if (NO_SNAPSHOT) wikiRead.snapshot = (db, fn) => fn(db as Parameters<typeof fn>[0]);
+        let reached!: () => void;
+        let release!: () => void;
+        const checked = new Promise<void>((r) => {
+          reached = r;
+        });
+        const gate = new Promise<void>((r) => {
+          release = r;
+        });
+        let held = false;
+        wikiRead.checked = async () => {
+          if (held) return;
+          held = true;
+          reached();
+          await gate;
+        };
+        const answer = read(beto.api.wiki, workspaceId, created.slug).then(
+          (v) => JSON.stringify(v),
+          (e: { status?: number; message?: string }) => `${e.status} ${e.message ?? ""}`,
+        );
+        await checked;
+        // Restricted away from Beto, then written: a new version with a note, a link and a comment.
+        await pg.deps.db
+          .update(schema.knowledgePages)
+          .set({ access: { kind: "private", principals: [`user:${ana.user.id}`] } })
+          .where(eq(schema.knowledgePages.id, page.id));
+        await ana.api.wiki.replaceWikiPage(workspaceId, created.slug, {
+          body: "SECRET AFTER [[SECRET AFTER target]]",
+          parentVersion: 1,
+          note: "SECRET AFTER",
+        });
+        await pg.deps.db.insert(schema.pageAnnotations).values({
+          id: newId("ann"),
+          workspaceId,
+          pageId: page.id,
+          kind: "comment",
+          author: { type: "person", id: ana.user.id },
+          body: "SECRET AFTER",
+          status: "open",
+        });
+        release();
+        const text = await answer;
+        expect({ leaked: text.includes("SECRET AFTER") ? `SECRET AFTER in the ${what} read` : "no" }).toEqual(
+          {
+            leaked: "no",
+          },
+        );
+      } finally {
+        Object.assign(wikiRead, original);
+        await pg.stop();
+      }
+    }, 60_000);
 });

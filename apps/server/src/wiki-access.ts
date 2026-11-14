@@ -82,6 +82,18 @@ export async function canReadPage(
   return true;
 }
 
+/**
+ * Whether everyone who reads `inner` also reads `outer`, decided on the access alone: the whole workspace
+ * contains everything; the same channel contains itself; a list contains a list of some of its principals.
+ * Anything else (a list against a channel) is "not contained", the safe answer.
+ */
+export function audienceWithin(inner: WikiAccess | null, outer: WikiAccess | null): boolean {
+  if (!outer) return true;
+  if (!inner) return false;
+  if (outer.kind === "channel") return inner.kind === "channel" && inner.channelId === outer.channelId;
+  return inner.kind === "private" && inner.principals.every((p) => outer.principals.includes(p));
+}
+
 /** The scope of the page's chunks in the search (seam 5): the page's own audience. */
 export function accessScope(access: WikiAccess | null): ChunkScope {
   if (!access) return { kind: "workspace" };

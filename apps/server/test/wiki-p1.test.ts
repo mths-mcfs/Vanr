@@ -431,10 +431,14 @@ describe("per-page access", () => {
     expect((await ana.api.wiki.getWikiReads(workspaceId)).map((r) => r.slug).sort()).toEqual(
       [open.slug, slug].sort(),
     );
-    // Beto renames: the link in the restricted page is rewritten too, but the answer only names what he reads.
+    // Beto renames: the answer only names what he reads.
     const renamed = await beto.api.wiki.renameWikiPage(workspaceId, target.slug, "Guidebook");
     expect(renamed.relinked?.rewritten.map((p) => p.slug)).toEqual([open.slug]);
-    expect((await rowOf(workspaceId, slug)).body).toBe("See [[Guidebook]].");
+    // A page Beto doesn't read is never written by his rename: its link keeps the old title, which becomes an
+    // alternate title of the renamed page, so the link keeps leading there for Ana.
+    expect((await rowOf(workspaceId, slug)).body).toBe("See [[Handbook]].");
+    const panel = await ana.api.wiki.getWikiPagePanel(workspaceId, slug);
+    expect(panel.outgoing.map((o) => o.page?.slug)).toEqual([target.slug]);
   });
 
   test("a page in a restricted page's folder, or moved into it, doesn't inherit the restriction", async () => {

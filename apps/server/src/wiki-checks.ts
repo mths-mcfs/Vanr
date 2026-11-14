@@ -20,6 +20,7 @@ import { z } from "zod";
 import type { AppDeps } from "./context";
 import { log } from "./logger";
 import { readablePagesSql, type WikiViewer } from "./wiki-access";
+import { targetsFor } from "./wiki-links";
 
 const { wikiChecks, pageLinks, knowledgePages } = schema;
 
@@ -237,20 +238,36 @@ export async function readChecks(db: Db, viewer: WikiViewer): Promise<WikiCheckR
       deletedAt: knowledgePages.deletedAt,
     })
     .from(knowledgePages)
-    .where(and(eq(knowledgePages.workspaceId, viewer.workspaceId), readablePagesSql(viewer)));
+    .where(and(eq(knowledgePages.workspaceId, viewer.workspaceId), readablePagesSql(viewer)))
+    .orderBy(asc(knowledgePages.slug));
   const byId = new Map(readable.map((p) => [p.id, p]));
   const live = readable.filter((p) => !p.deletedAt);
   const ref = (id: string) => {
     const p = byId.get(id);
     return p && !p.deletedAt ? { slug: p.slug, title: p.title } : null;
   };
-  const links = live.length
+  const stored = live.length
     ? await db
-        .select({ from: pageLinks.sourceId, to: pageLinks.targetId, text: pageLinks.targetText })
+        .select({
+          sourceId: pageLinks.sourceId,
+          ordinal: pageLinks.ordinal,
+          targetId: pageLinks.targetId,
+          targetText: pageLinks.targetText,
+        })
         .from(pageLinks)
         .where(and(eq(pageLinks.workspaceId, viewer.workspaceId), eq(pageLinks.embed, false)))
         .orderBy(asc(pageLinks.sourceId), asc(pageLinks.ordinal))
     : [];
+  // Each link where it leads for the reader: a page they don't read changes nothing they see.
+  // In the pages' order (by slug), never by ids or rows: the answer depends only on what the reader reads.
+  const fromMine = stored
+    .filter((l) => ref(l.sourceId))
+    .sort((a, b) => {
+      const [sa, sb] = [ref(a.sourceId)?.slug ?? "", ref(b.sourceId)?.slug ?? ""];
+      return sa < sb ? -1 : sa > sb ? 1 : a.ordinal - b.ordinal;
+    });
+  const resolved = await targetsFor(db, viewer, fromMine);
+  const links = fromMine.map((l, i) => ({ from: l.sourceId, to: resolved[i] ?? null, text: l.targetText }));
   const findings: WikiCheckFinding[] = [];
   const inbound = new Set<string>();
   const broken = new Set<string>();
@@ -274,10 +291,16 @@ export async function readChecks(db: Db, viewer: WikiViewer): Promise<WikiCheckR
       if (!inbound.has(p.id) && !p.pinned)
         findings.push({ kind: "orphan", page: { slug: p.slug, title: p.title } });
   findings.push(...brokenFindings);
+  const contradictions: WikiCheckFinding[] = [];
   for (const f of storedFindings(row?.findings ?? [])) {
-    const [a, b] = [ref(f.pageIds[0]), ref(f.pageIds[1])];
-    if (a && b) findings.push({ kind: "contradiction", pages: [a, b], summary: f.summary });
+    const [a, b] = [ref(f.pageIds[0]), ref(f.pageIds[1])].sort((x, y) =>
+      (x?.slug ?? "") < (y?.slug ?? "") ? -1 : 1,
+    );
+    if (a && b) contradictions.push({ kind: "contradiction", pages: [a, b], summary: f.summary });
   }
+  const key = (f: WikiCheckFinding) =>
+    f.kind === "contradiction" ? `${f.pages[0].slug}\n${f.pages[1].slug}` : "";
+  findings.push(...contradictions.sort((x, y) => (key(x) < key(y) ? -1 : key(x) > key(y) ? 1 : 0)));
   return { ranAt: row?.ranAt.toISOString() ?? null, findings, testModel: row?.testModel ?? false };
 }
 

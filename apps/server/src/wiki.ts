@@ -7,17 +7,16 @@ import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { applyProps, type PropDef, type PropError, type Props } from "@vanr/engine/props";
 import { slugify } from "@vanr/engine/wiki/links";
-import { and, asc, desc, eq, isNotNull, isNull, lte, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNotNull, isNull, lte, sql } from "drizzle-orm";
 import type { AppDeps, WorkspaceMember } from "./context";
 import { pgCode } from "./db-errors";
 import { forbidden, HttpError, notFound } from "./http";
 import { reindex, unindex } from "./search-index";
-import { accessView, readablePagesSql, type WikiViewer } from "./wiki-access";
+import { accessView, canReadPage, readablePagesSql, type WikiViewer } from "./wiki-access";
 import { logChange } from "./wiki-changes";
-import { namesOf, reresolveLinks, syncLinks } from "./wiki-links";
+import { inboundFor, namesOf, reresolveLinks, syncLinks } from "./wiki-links";
 
-const { knowledgePages, pageRevisions, wikiPageViews, pageLinks, wikiPageDocs, wikiPropSchemas, members } =
-  schema;
+const { knowledgePages, pageRevisions, wikiPageViews, wikiPageDocs, wikiPropSchemas, members } = schema;
 export type WikiRow = typeof knowledgePages.$inferSelect;
 export type Author = ActorRef & { actingFor?: string };
 
@@ -189,26 +188,17 @@ async function draftOf(db: Db, pageId: string): Promise<WikiDraft | null> {
 export async function toPage(db: Db, row: WikiRow, me: WorkspaceMember | null): Promise<WikiPage> {
   // An inbound link from a page the reader doesn't read stays out (not even its title shows).
   const viewer: WikiViewer = me ? viewerOf(me) : { workspaceId: row.workspaceId };
-  const [history, reads, back, draft, access, accessEditable] = await Promise.all([
+  const [history, reads, inbound, draft, access, accessEditable] = await Promise.all([
     historyOf(db, row.id),
     db.select().from(wikiPageViews).where(eq(wikiPageViews.pageId, row.id)),
-    db
-      .selectDistinct({ slug: knowledgePages.slug, title: knowledgePages.title })
-      .from(pageLinks)
-      .innerJoin(knowledgePages, eq(knowledgePages.id, pageLinks.sourceId))
-      .where(
-        and(
-          eq(pageLinks.targetId, row.id),
-          ne(pageLinks.sourceId, row.id),
-          isNull(knowledgePages.deletedAt),
-          readablePagesSql(viewer),
-        ),
-      )
-      .orderBy(asc(knowledgePages.title)),
+    inboundFor(db, row, viewer),
     draftOf(db, row.id),
     accessView(db, row.access),
     canManageAccess(db, row, me),
   ]);
+  const back: { slug: string; title: string }[] = [];
+  for (const l of inbound)
+    if (!back.some((b) => b.slug === l.slug)) back.push({ slug: l.slug, title: l.title });
   const authors: ActorRef[] = [];
   for (const v of history) {
     if (!authors.some((a) => a.type === v.author.type && a.id === v.author.id))
@@ -399,6 +389,33 @@ export async function anyBypasses(tx: Tx, workspaceId: string, who: readonly Act
 }
 
 /** A person who writes must still be a member when the write commits; an agent's access is its run's. */
+/**
+ * One read-only snapshot of the database (REPEATABLE READ): a page read through it is checked against its
+ * access and its content is read in the same version, so whoever loses the read between the check and
+ * the content gets a 404 or the content of before, never what was written after. A mutable seam: the
+ * Postgres race test holds a read at `checked` (right after the access check) and swaps `snapshot` for
+ * plain statements (VANR_TEST_WIKI_NO_SNAPSHOT) to see the leak come back.
+ */
+export const wikiRead = {
+  snapshot<T>(db: Db, fn: (tx: Tx) => Promise<T>): Promise<T> {
+    return db.transaction(fn, { isolationLevel: "repeatable read", accessMode: "read only" });
+  },
+  checked: async (): Promise<void> => {},
+};
+
+export const snapshot = <T>(db: Db, fn: (tx: Tx) => Promise<T>): Promise<T> => wikiRead.snapshot(db, fn);
+
+/**
+ * A person who writes on a page must still read it, decided on the row the write locked: one restricted
+ * away from them between their request's check and the write is 404, like a page that doesn't exist (the
+ * write would otherwise answer with what was written after). An agent's access is its run's.
+ */
+export async function requireReader(tx: Tx, page: WikiRow, who: ActorRef) {
+  if (who.type !== "person") return;
+  if (!(await canReadPage(tx, { workspaceId: page.workspaceId, userId: who.id }, page)))
+    throw notFound("Page not found");
+}
+
 export async function requireWriter(tx: Tx, workspaceId: string, who: ActorRef) {
   if (who.type === "person" && !(await roleIn(tx, workspaceId, who.id)))
     throw forbidden("You are not a member of this workspace any more");
@@ -452,7 +469,10 @@ export async function savePage(
   const at = deps.now();
   const result = await writeTx(deps.db, async (tx) => {
     const row = await livePage(tx, input.row.id);
-    if (!input.attributionOnly) await requireWriter(tx, row.workspaceId, input.author);
+    if (!input.attributionOnly) {
+      await requireWriter(tx, row.workspaceId, input.author);
+      await requireReader(tx, row, input.author);
+    }
     const deciders = input.lockBypassBy ?? [input.author];
     if (row.locked && !(input.canBypassLock && (await anyBypasses(tx, row.workspaceId, deciders))))
       throw pageLocked();
@@ -561,17 +581,20 @@ export async function patchPage(
 /** Guard of a write that a lock forbids (move): only who bypasses the lock, by the role read in `tx`. */
 export const unlockedFor = (who: ActorRef) => async (tx: Tx, page: WikiRow) => {
   await requireWriter(tx, page.workspaceId, who);
+  await requireReader(tx, page, who);
   if (page.locked && !(await bypassesLock(tx, page.workspaceId, who))) throw pageLocked();
 };
 
 /** Guard of the lock itself: an admin by the role read in `tx`. */
 export const adminOnly = (who: ActorRef) => async (tx: Tx, page: WikiRow) => {
   if (!(await bypassesLock(tx, page.workspaceId, who))) throw forbidden("Only admins can lock pages");
+  await requireReader(tx, page, who);
 };
 
 /** Guard of a write any member may do (pin): still a member when it commits. */
 export const memberOnly = (who: ActorRef) => async (tx: Tx, page: WikiRow) => {
   await requireWriter(tx, page.workspaceId, who);
+  await requireReader(tx, page, who);
 };
 
 export async function recordRead(deps: AppDeps, pageId: string, reader: ActorRef) {
@@ -615,6 +638,7 @@ export async function canManageAccess(db: Db, row: WikiRow, me: WorkspaceMember 
 export const accessManagerOnly = (userId: string) => async (tx: Tx, page: WikiRow) => {
   const role = await roleIn(tx, page.workspaceId, userId);
   if (!role) throw forbidden("You are not a member of this workspace any more");
+  await requireReader(tx, page, { type: "person", id: userId });
   if (can(role, "configure")) return;
   if (page.locked) throw pageLocked();
   if (!createdBy(await firstAuthor(tx, page.id), userId))
@@ -650,6 +674,7 @@ async function deletablePage(
 ): Promise<WikiRow> {
   const row = await lock(tx, id);
   if (!row || !!row.deletedAt !== trashed) throw notFound("Page not found");
+  await requireReader(tx, row, { type: "person", id: me.userId });
   await deleterCheck(tx, row, me.userId, await roleIn(tx, row.workspaceId, me.userId));
   return row;
 }
