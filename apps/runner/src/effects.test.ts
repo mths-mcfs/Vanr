@@ -14,7 +14,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sealSecret } from "@vanr/contract";
 import { Access, RunnerError } from "./access";
-import { writeOp } from "./ops";
+import { Jobs } from "./jobs";
+import { execOp, writeOp } from "./ops";
+import { defaultPolicyContext, sandboxOff } from "./sandbox";
 import { SecretStore } from "./secrets";
 
 // What an operation leaves behind: a write keeps the file it writes into (mode, link), the secrets a command
@@ -93,31 +95,95 @@ async function storeWith(home: string) {
   return { store, add };
 }
 
-test("the secret files of a command are taken back without touching a file that was there before", async () => {
+const codeOf = (p: Promise<unknown>) =>
+  p.then(
+    () => "went",
+    (e) => (e instanceof RunnerError ? `${e.code}: ${e.message}` : String(e)),
+  );
+
+test("a path the runner did not write stops the op before it runs: the person's file stays, nothing is written", async () => {
   const home = mkdtempSync(join(dir, "home-"));
   const { store, add } = await storeWith(home);
   await add("CONF", "file:conf.json", "secret conf");
   await add("KEY", "file:key.pem", "secret key");
   writeFileSync(join(root, "conf.json"), "the person's own config");
-  const first = await store.materialize(agent, root);
-  const second = await store.materialize(agent, root);
-  // The person's file is not overwritten; the new one is written once and shared by the use count.
-  expect(readFileSync(join(root, "conf.json"), "utf8")).toBe("the person's own config");
-  expect(readFileSync(join(root, "key.pem"), "utf8")).toBe("secret key");
-  first.release();
-  expect(existsSync(join(root, "key.pem"))).toBe(true);
-  second.release();
-  expect([existsSync(join(root, "key.pem")), readFileSync(join(root, "conf.json"), "utf8")]).toEqual([
-    false,
+  const why = await codeOf(store.materialize(agent, root));
+  expect(why).toContain("not_allowed");
+  expect(why).toContain("CONF");
+  expect(why).toContain("conf.json");
+  // Checked before any file is written: the other secret's file is not there either.
+  expect([readFileSync(join(root, "conf.json"), "utf8"), existsSync(join(root, "key.pem"))]).toEqual([
     "the person's own config",
+    false,
   ]);
   rmSync(join(root, "conf.json"));
+  // A link in the path: the same, and the link and its target stay.
+  writeFileSync(join(root, "elsewhere.txt"), "not a secret");
+  symlinkSync(join(root, "elsewhere.txt"), join(root, "conf.json"));
+  expect(await codeOf(store.materialize(agent, root))).toContain("not_allowed");
+  expect([kind(join(root, "conf.json")), readFileSync(join(root, "elsewhere.txt"), "utf8")]).toEqual([
+    "link",
+    "not a secret",
+  ]);
+  rmSync(join(root, "conf.json"));
+});
+
+test("a secret file left by a stop is the runner's: removed when the store opens, or written again with the current value", async () => {
+  const home = mkdtempSync(join(dir, "home-"));
+  const { store, add } = await storeWith(home);
+  await add("TOKEN", "file:token.txt", "value one");
+  await store.materialize(agent, root);
+  // The runner stops here, between writing and releasing: the file and the register keep the path.
+  expect(readFileSync(join(root, "token.txt"), "utf8")).toBe("value one");
+  // A new process (a new store on the same folder): the value changed meanwhile.
+  const again = new SecretStore(home);
+  const writeFirst = readFileSync(join(home, "secrets", "materialized.json"), "utf8");
+  expect(writeFirst).toContain("token.txt");
+  await again.unlock(Buffer.alloc(32, 3).toString("base64"), "rnr_1");
+  // Opening the store removed the leftover.
+  expect(existsSync(join(root, "token.txt"))).toBe(false);
+  // Left again, and materialized without a restart in between: the current value is written over it.
+  writeFileSync(join(root, "token.txt"), "value one", { mode: 0o600 });
+  writeFileSync(join(home, "secrets", "materialized.json"), JSON.stringify([join(root, "token.txt")]));
+  await add("TOKEN", "file:token.txt", "value two");
+  // The process that stopped is gone: the one that materializes now is the new one.
+  const m = await again.materialize(agent, root);
+  expect(readFileSync(join(root, "token.txt"), "utf8")).toBe("value two");
+  m.release();
+  expect(existsSync(join(root, "token.txt"))).toBe(false);
+  expect(readFileSync(join(home, "secrets", "materialized.json"), "utf8")).not.toContain("token.txt");
+});
+
+test("two commands with the same secret file share it: the use count still holds", async () => {
+  const home = mkdtempSync(join(dir, "home-"));
+  const { store, add } = await storeWith(home);
+  await add("KEY", "file:shared.pem", "secret key");
+  const first = await store.materialize(agent, root);
+  const second = await store.materialize(agent, root);
+  first.release();
+  expect(readFileSync(join(root, "shared.pem"), "utf8")).toBe("secret key");
+  second.release();
+  expect(existsSync(join(root, "shared.pem"))).toBe(false);
+});
+
+test("a register that cannot be read removes nothing: in doubt, what is there is not the runner's", async () => {
+  const home = mkdtempSync(join(dir, "home-"));
+  const { store, add } = await storeWith(home);
+  await add("TOKEN", "file:doubt.txt", "secret token");
+  writeFileSync(join(root, "doubt.txt"), "someone's file");
+  writeFileSync(join(home, "secrets", "materialized.json"), "{ not json");
+  const again = new SecretStore(home);
+  await again.unlock(Buffer.alloc(32, 3).toString("base64"), "rnr_1");
+  expect(readFileSync(join(root, "doubt.txt"), "utf8")).toBe("someone's file");
+  expect(await codeOf(store.materialize(agent, root))).toContain("not_allowed");
+  expect(readFileSync(join(root, "doubt.txt"), "utf8")).toBe("someone's file");
+  rmSync(join(root, "doubt.txt"));
 });
 
 test("aborted while the values are read, nothing is materialized", async () => {
   const home = mkdtempSync(join(dir, "home-"));
   const { store, add } = await storeWith(home);
-  await add("TOKEN", "file:token.txt", "secret token");
+  await add("TOKEN", "file:abort-token.txt", "secret token");
   const c = new AbortController();
   const pending = store.materialize(agent, root, c.signal);
   c.abort();
@@ -127,7 +193,7 @@ test("aborted while the values are read, nothing is materialized", async () => {
       (e) => (e instanceof RunnerError ? e.code : String(e)),
     ),
   ).toBe("canceled");
-  expect(existsSync(join(root, "token.txt"))).toBe(false);
+  expect(existsSync(join(root, "abort-token.txt"))).toBe(false);
 });
 
 test("a secret.store or a secret.prepare aborted while it opens and seals writes nothing", async () => {
@@ -156,4 +222,47 @@ test("a secret.store or a secret.prepare aborted while it opens and seals writes
     ),
   ).toBe("canceled");
   expect(existsSync(join(home, "secrets", "pending", "sreq_aborted.json"))).toBe(false);
+});
+
+test("exec and job.start with a secret path taken by the person run nothing", async () => {
+  const home = mkdtempSync(join(dir, "home-"));
+  const { store, add } = await storeWith(home);
+  await add("CONF", "file:taken.json", "secret conf");
+  writeFileSync(join(root, "taken.json"), "the person's own");
+  const marker = join(dir, "ran");
+  const ctx = {
+    access,
+    secrets: store,
+    sandbox: sandboxOff(),
+    policy: defaultPolicyContext(home),
+    agent,
+    signal: live(),
+  };
+  expect(await codeOf(execOp(ctx, { command: `touch '${marker}'` }))).toContain("not_allowed");
+  const jobs = new Jobs({
+    home,
+    access,
+    secrets: store,
+    cli: {} as never,
+    maxConcurrent: () => 3,
+    maxSeconds: () => 30,
+    send: () => true,
+    bins: { claude: "claude", codex: "codex" },
+    sandbox: sandboxOff(),
+    policy: defaultPolicyContext(home),
+  });
+  expect(
+    await codeOf(
+      jobs.start(agent, {
+        jobId: "job_00000001",
+        executor: "shell",
+        title: "t",
+        prompt: `touch '${marker}'`,
+      }),
+    ),
+  ).toContain("not_allowed");
+  expect([existsSync(marker), jobs.pending().length, readFileSync(join(root, "taken.json"), "utf8")]).toEqual(
+    [false, 0, "the person's own"],
+  );
+  rmSync(join(root, "taken.json"));
 });

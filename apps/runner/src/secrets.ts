@@ -3,7 +3,16 @@
 // using the key the server sends in `welcome`. The key only exists in the runner's memory while
 // it is connected, and the server never sees the values (only the sealed box, which it does not open).
 // A file secret becomes a file only while a command runs, and goes away at the end.
-import { existsSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import type { SecretBrowserBinding } from "@vanr/contract";
 import {
@@ -74,6 +83,16 @@ const masksOf = (values: readonly SecretValue[]): [string, string][] =>
     .sort((a, b) => b.value.length - a.value.length)
     .map((v) => [v.value, `[secret:${v.name}]`]);
 
+/** What is at a path, without following a link: `null` when nothing is. */
+function kindAt(path: string): "file" | "link" | "other" | null {
+  try {
+    const st = lstatSync(path);
+    return st.isSymbolicLink() ? "link" : st.isFile() ? "file" : "other";
+  } catch {
+    return null;
+  }
+}
+
 export class SecretStore {
   private key: CryptoKey | null = null;
   private runnerId = "";
@@ -88,6 +107,7 @@ export class SecretStore {
     this.key = await crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]);
     this.runnerId = runnerId;
     this.purgePending();
+    this.purgeLeftovers();
   }
 
   /** No store key: the secrets cannot be read (before the welcome, between connections). */
@@ -260,7 +280,7 @@ export class SecretStore {
     // Aborted while the values were read: nothing is written.
     if (signal?.aborted) throw new RunnerError("canceled", "Canceled");
     const env: Record<string, string> = {};
-    const files: string[] = [];
+    const wanted: { name: string; path: string; rel: string; value: string }[] = [];
     for (const v of values) {
       // A browser secret only goes to the field of its site: in a command, the agent would read the value and
       // could type it into any other site.
@@ -270,41 +290,119 @@ export class SecretStore {
       } else {
         const rel = v.target.slice("file:".length);
         const path = join(root, rel);
-        if (!path.startsWith(`${root}/`)) continue;
-        ensureDir(dirname(path));
-        const n = this.materialized.get(path) ?? 0;
-        // Invariant: the release undoes only what was written here. A file this store did not write (the
-        // person's own, or a link) is left as it is and not removed; one another command is using is shared
-        // by the use count. `wx` creates the file only if nothing is at the path, without following a link.
-        if (n === 0) {
-          try {
-            writeFileSync(path, v.value, { mode: 0o600, flag: "wx" });
-          } catch (err) {
-            if (err instanceof Error && "code" in err && err.code === "EEXIST") continue;
-            throw err;
-          }
-        }
-        this.materialized.set(path, n + 1);
-        files.push(path);
+        if (path.startsWith(`${root}/`)) wanted.push({ name: v.name, path, rel, value: v.value });
       }
     }
-    const masks = masksOf(values);
+    // Every path is checked before any file is written: a path held by something the runner did not write
+    // stops the op before it runs, with nothing written.
+    const own = this.ownFiles();
+    for (const w of wanted) {
+      if ((this.materialized.get(w.path) ?? 0) > 0) continue;
+      const there = kindAt(w.path);
+      if (there === null) continue;
+      if (own.has(w.path) && there === "file") continue;
+      throw new RunnerError(
+        "not_allowed",
+        `The secret ${w.name} goes to ${w.rel}, and something the runner did not put there is in its place; move it away or change the secret's target`,
+      );
+    }
+    const files: string[] = [];
+    const release = () => {
+      for (const path of files.splice(0)) {
+        const n = (this.materialized.get(path) ?? 1) - 1;
+        if (n > 0) {
+          this.materialized.set(path, n);
+          continue;
+        }
+        this.materialized.delete(path);
+        // Removed first, then out of the register: a stop in between leaves a path the runner knows is its own.
+        rmSync(path, { force: true });
+        this.forget(path);
+      }
+    };
+    try {
+      for (const w of wanted) {
+        const n = this.materialized.get(w.path) ?? 0;
+        if (n === 0) {
+          // A file of the runner left by a stop in the middle of a command: it goes, and the current value
+          // is written in its place.
+          if (own.has(w.path)) rmSync(w.path, { force: true });
+          // In the register before the file exists: a stop right after leaves a path known as the runner's.
+          this.remember(w.path);
+          ensureDir(dirname(w.path));
+          // `wx`: only where nothing is (another process may have put something there since the check), and
+          // without following a link.
+          writeFileSync(w.path, w.value, { mode: 0o600, flag: "wx" });
+        }
+        this.materialized.set(w.path, n + 1);
+        files.push(w.path);
+      }
+    } catch (err) {
+      release();
+      throw err;
+    }
     let released = false;
     return {
       env,
-      masks,
+      masks: masksOf(values),
       release: () => {
         if (released) return;
         released = true;
-        for (const path of files) {
-          const n = (this.materialized.get(path) ?? 1) - 1;
-          if (n <= 0) {
-            this.materialized.delete(path);
-            rmSync(path, { force: true });
-          } else this.materialized.set(path, n);
-        }
+        release();
       },
     };
+  }
+
+  // ---- the register of the files the runner materialized (outside the work folders) ----
+
+  private get registerPath() {
+    return join(this.home, "secrets", "materialized.json");
+  }
+
+  /**
+   * The paths of secret files the runner wrote and has not removed yet. Invariant: a path is in it from just
+   * before its file is created until just after it is removed, so whatever is at a path not in it is not the
+   * runner's. A register that cannot be read counts as empty: in doubt, nothing is the runner's to remove.
+   */
+  private ownFiles(): Set<string> {
+    try {
+      const parsed = z.array(z.string()).safeParse(JSON.parse(readFileSync(this.registerPath, "utf8")));
+      return new Set(parsed.success ? parsed.data : []);
+    } catch {
+      return new Set();
+    }
+  }
+
+  private saveOwn(paths: Set<string>) {
+    ensureDir(dirname(this.registerPath));
+    writePrivate(this.registerPath, `${JSON.stringify([...paths])}\n`);
+  }
+
+  private remember(path: string) {
+    const own = this.ownFiles();
+    if (own.has(path)) return;
+    own.add(path);
+    this.saveOwn(own);
+  }
+
+  private forget(path: string) {
+    const own = this.ownFiles();
+    if (!own.delete(path)) return;
+    this.saveOwn(own);
+  }
+
+  /** The runner's secret files left by a stop (in the register, used by no command now): removed. */
+  private purgeLeftovers() {
+    const own = this.ownFiles();
+    let changed = false;
+    for (const path of own) {
+      if ((this.materialized.get(path) ?? 0) > 0) continue;
+      // Only a plain file: a link or a folder there now is not what the runner wrote.
+      if (kindAt(path) === "file") rmSync(path, { force: true });
+      own.delete(path);
+      changed = true;
+    }
+    if (changed) this.saveOwn(own);
   }
 
   /** Paths of the agent's secret files (the agent neither reads nor writes them through the ops). */

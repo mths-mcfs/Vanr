@@ -254,6 +254,8 @@ export interface CdpBrowserOptions {
   insecureTls?: boolean;
   /** Tests: a shorter deadline for an action that does not come back. */
   opTimeoutMs?: number;
+  /** Tests: told of each block when it is noted (a signal that it happened, instead of a wait). */
+  onBlocked?: (agentId: string, load: BlockedLoad) => void;
 }
 
 export class CdpBrowser implements BrowserDriver {
@@ -669,6 +671,7 @@ export class CdpBrowser implements BrowserDriver {
     if (now.length >= BLOCKED_MAX) return;
     if (now.some((o) => o.url === b.url && o.reason === b.reason)) return;
     s.blocked.push(b);
+    this.opts.onBlocked?.(s.agent.id, b);
   }
 
   /**

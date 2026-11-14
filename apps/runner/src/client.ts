@@ -257,9 +257,18 @@ export class RunnerClient {
     return this.hadWelcome && this.ws?.readyState === WebSocket.OPEN;
   }
 
-  /** For tests and for the CLI: resolves when the server accepts the connection. */
+  /**
+   * Settled: the server accepted the connection whose hello carried the real state (not the neutral hello of a
+   * runner that had not read its secrets yet, which the runner replaces with a new connection), and the
+   * masks are read. What the server knows of this runner is then what the runner is.
+   */
+  private get settled() {
+    return this.connected && !this.helloNeutral && this.maskState.kind !== "unknown";
+  }
+
+  /** For tests and for the CLI: resolves once the runner is settled with the server (see `settled`). */
   ready(): Promise<void> {
-    if (this.connected) return Promise.resolve();
+    if (this.settled) return Promise.resolve();
     return new Promise((r) => this.welcomeWaiters.push(r));
   }
 
@@ -485,7 +494,7 @@ export class RunnerClient {
         this.jobs.redeliver();
         // A hello sent without the CLI states (before any mask): they go now.
         if (this.cliSent === "") this.recheckCli();
-        for (const w of this.welcomeWaiters.splice(0)) w();
+        if (this.settled) for (const w of this.welcomeWaiters.splice(0)) w();
         if (frame.update && this.config.autoUpdate && newer(frame.update.version, this.version)) {
           this.pendingUpdate = frame.update.version;
           void this.tryUpdate();

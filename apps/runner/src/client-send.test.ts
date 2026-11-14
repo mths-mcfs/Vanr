@@ -682,3 +682,81 @@ test("property: however many reconnections fail to read the secrets, each pendin
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("ready() resolves at the welcome of the connection with the real hello, not at the neutral one before it", async () => {
+  const real = globalThis.WebSocket;
+  const hellos: string[] = [];
+  const closes: number[] = [];
+  class FakeSocket {
+    static OPEN = 1;
+    readyState = 1;
+    onopen: (() => void) | null = null;
+    onclose: (() => void) | null = null;
+    send(s: string) {
+      const f = JSON.parse(s);
+      if (f.type === "hello") hellos.push(f.hostname);
+    }
+    close(code: number) {
+      closes.push(code);
+      this.readyState = 3;
+      this.onclose?.();
+    }
+  }
+  globalThis.WebSocket = FakeSocket as unknown as typeof WebSocket;
+  try {
+    const { c, call } = fakeClient({
+      maskState: { kind: "unknown" },
+      config: {
+        server: "https://example.invalid",
+        name: "laptop",
+        workDir: "/w",
+        paused: false,
+        access: { folders: [], tools: { claude: false, codex: false, commands: true, browser: false } },
+      },
+      opts: {
+        version: "1.2.3",
+        log: () => {},
+        backoffBaseMs: 60_000,
+        home: mkdtempSync(join(tmpdir(), "runner-ready-")),
+      },
+      cli: { states: () => ({}) },
+      jobs: { pending: () => [], redeliver: () => {} },
+      executors: [],
+      sandbox: sandboxOff(),
+      heartbeatMs: 25_000,
+      agents: [agent],
+      toolCalls: new Map(),
+      welcomeWaiters: [],
+      retryLater: () => {},
+      secrets: { masks: async () => MASKS, lock: () => {}, unlock: async () => {} },
+    });
+    const order: string[] = [];
+    const ready = (call("ready") as Promise<void>).then(() => order.push("ready"));
+    const welcome = {
+      type: "welcome",
+      runnerId: "rnr_1",
+      name: "laptop",
+      heartbeatMs: 25_000,
+      storeKey: "k",
+      agents: [{ ...agent, name: "Lia" }],
+    };
+    const connect = () => {
+      call("openSocket", "rst_fixture_session_1234");
+      (Reflect.get(c, "ws") as FakeSocket).onopen?.();
+      clearTimeout(Reflect.get(c, "watchdog") as ReturnType<typeof setTimeout>);
+    };
+    // The first connection: a neutral hello; its welcome reads the secrets and the runner reconnects.
+    connect();
+    await call("onFrame", welcome);
+    order.push("first welcome handled");
+    expect(closes).toEqual([4006]);
+    // The second connection: the real hello; its welcome settles the runner.
+    connect();
+    await call("onFrame", welcome);
+    await ready;
+    expect(hellos).toEqual(["unknown", expect.not.stringMatching(/^unknown$/)]);
+    expect(order).toEqual(["first welcome handled", "ready"]);
+  } finally {
+    globalThis.WebSocket = real;
+  }
+});
