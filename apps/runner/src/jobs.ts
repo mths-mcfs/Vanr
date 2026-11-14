@@ -28,6 +28,7 @@ import { type CliWatch, noPlanEnv } from "./cli";
 import { ensureDir, writePrivate } from "./config";
 import { maybe } from "./lines";
 import { agentEnv, domainsFor, sandboxed } from "./ops";
+import { assemble, assembleSnapshot, type Masks } from "./outbound";
 import { CLI_DOMAINS, type CommandSandbox, cliPaths, type PolicyContext, shellLine } from "./sandbox";
 import { MIN_MASK, maskBytes, maskSecrets, type SecretStore, StreamMasker } from "./secrets";
 
@@ -280,37 +281,28 @@ export function parseExecutorEvent(executor: "claude_code" | "codex", value: unk
   return {};
 }
 
-/** Each string of a decoded event masked, keys included, at any depth. */
-export function maskValue(value: unknown, masks: [string, string][]): unknown {
-  if (typeof value === "string") return maskSecrets(value, masks);
-  if (Array.isArray(value)) return value.map((v) => maskValue(v, masks));
-  if (value !== null && typeof value === "object")
-    return Object.fromEntries(
-      Object.entries(value).map(([k, v]) => [maskSecrets(k, masks), maskValue(v, masks)]),
-    );
-  return value;
-}
+const isEvent = (v: unknown): v is Record<string, unknown> =>
+  typeof v === "object" && v !== null && !Array.isArray(v);
 
 /**
- * The output of a job, split into lines. `text` (a shell job): masked as a stream before the split, so a
- * secret of several lines (a PEM key) is replaced whole even when it arrives in pieces. `json` (Claude Code
- * and Codex): each line that is a JSON value goes out raw, for what the runner decides from it (an API key
- * in place of the plan), with the decoded event masked string by string for what goes to the server; a
- * secret escaped inside a JSON string (`\n`, `\"`) is masked in its decoded form. The other lines take the
- * text path. `onLine(line, masked)`: a JSON line and its masked event, or a masked text line alone.
+ * The output of a job, split into lines, in two flows. Text (a shell job, and the lines of Claude Code or
+ * Codex that are not a JSON object): masked as one stream before the split, so a secret of several lines (a
+ * PEM key) is replaced whole even when it arrives in pieces, and a JSON line in the middle does not make the
+ * stream let go of what it holds. JSON (in `json` mode, each line that is a JSON object): handed over raw,
+ * with the decoded event, for the runner to decide from (an API key in place of the plan) and to build the
+ * frames from; their free text is masked when the frame is assembled (outbound.ts).
+ * `onLine(line, event)`: a JSON line and its raw event, or a masked text line alone.
  */
 export class JobOutput {
   private buffer = "";
-  private readonly masks: [string, string][];
-  private text: StreamMasker;
+  private readonly text: StreamMasker;
   private textBuffer = "";
 
   constructor(
-    masks: [string, string][],
-    private readonly onLine: (line: string, masked?: unknown) => void,
+    masks: [string, string][] | (() => [string, string][]),
+    private readonly onLine: (line: string, event?: Record<string, unknown>) => void,
     private readonly kind: "json" | "text" = "json",
   ) {
-    this.masks = masks;
     this.text = new StreamMasker(masks);
   }
 
@@ -333,7 +325,7 @@ export class JobOutput {
     if (this.kind === "json") {
       const rest = this.buffer;
       this.buffer = "";
-      if (rest.trim()) this.rawLine(rest, false);
+      if (rest) this.rawLine(rest, false);
     }
     this.textBuffer += this.text.end();
     this.textLines();
@@ -346,16 +338,11 @@ export class JobOutput {
     try {
       value = JSON.parse(line);
     } catch {
-      this.addText(newline ? `${line}\n` : line);
-      return;
+      value = undefined;
     }
-    // The text held so far goes out first, in order.
-    this.textBuffer += this.text.end();
-    this.textLines();
-    if (this.textBuffer.trim()) this.onLine(this.textBuffer.trim());
-    this.textBuffer = "";
-    this.text = new StreamMasker(this.masks);
-    this.onLine(line.trim(), maskValue(value, this.masks));
+    // Only an object is an event: a line like `1234` is JSON too, and it stays in the text flow.
+    if (isEvent(value)) this.onLine(line.trim(), value);
+    else this.addText(newline ? `${line}\n` : line);
   }
 
   private addText(chunk: string) {
@@ -416,6 +403,8 @@ function snapGit(store: string, cwd: string, args: string[], env: Record<string,
       "diff.ignoreSubmodules=all",
       "-c",
       "core.untrackedCache=false",
+      "-c",
+      "core.quotePath=false",
       ...args,
     ],
     { GIT_DIR: store, GIT_WORK_TREE: cwd, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", ...env },
@@ -471,16 +460,18 @@ export function gitChanges(
 ): { files: string[]; diff: string | null } {
   const now = gitSnapshot(cwd, store, exclude);
   if (!now) return { files: [], diff: null };
-  const files = (snapGit(store, cwd, ["diff", "--name-only", "--no-renames", base, now]) ?? "")
-    .split("\n")
-    .map((f) => f.trim())
+  // NUL-separated names, as they are: an accent, a space at either end or a line break in a name stays.
+  const files = (snapGit(store, cwd, ["diff", "--name-only", "-z", "--no-renames", base, now]) ?? "")
+    .split("\0")
     .filter(Boolean);
   // With secrets, both sides are masked before the diff: the diff sent is the diff of the masked files.
   const changed = new Set(files);
   const content = diffMasks(masks);
   const from = masks.length ? maskedTree(store, cwd, base, changed, content) : base;
   const to = masks.length ? maskedTree(store, cwd, now, changed, content) : now;
-  if (!from || !to) return { files: files.slice(0, 200), diff: null };
+  // A file name can carry a secret's value too.
+  const names = files.slice(0, 200).map((f) => maskSecrets(f, masks));
+  if (!from || !to) return { files: names, diff: null };
   const diff = snapGit(store, cwd, [
     "diff",
     "--no-color",
@@ -490,11 +481,13 @@ export function gitChanges(
     from,
     to,
   ]);
-  // Masked before it is cut, so a secret across the cut is replaced whole.
-  return {
-    files: files.slice(0, 200),
-    diff: diff?.trim() ? clipMiddle(maskDiff(diff, masks), DIFF_MAX) : null,
-  };
+  // The files of this diff, in its order: the header lines are written from them, not taken from git.
+  const blocks = (snapGit(store, cwd, ["diff", "--name-only", "-z", "--no-renames", from, to]) ?? "")
+    .split("\0")
+    .filter(Boolean);
+  const written = diff?.trim() ? writeDiffHeaders(diff, blocks, masks) : null;
+  // Written before it is cut, so a secret across the cut is replaced whole.
+  return { files: names, diff: written ? clipMiddle(written, DIFF_MAX) : null };
 }
 
 /** Git on the runner's snapshot repository with bytes in and out (blobs, the batch reader, the index). */
@@ -597,16 +590,53 @@ export function diffMasks(masks: [string, string][]): [string, string][] {
   return [...masks, ...lines];
 }
 
+/** A file name as the runner writes it in a diff header: masked, and a control character as `\xNN`. */
+function diffName(name: string, masks: [string, string][]): string {
+  const shown = (c: string) => {
+    const code = c.charCodeAt(0);
+    return code < 0x20 || code === 0x7f ? `\\x${code.toString(16).padStart(2, "0")}` : c;
+  };
+  return [...maskSecrets(name, masks)].map(shown).join("");
+}
+
 /**
- * The file names in the header lines of a diff, masked (a name can carry a secret's value). The content lines
- * come from masked trees already.
+ * The diff with its header lines written by the runner from the names (`names[i]` is the file of the i-th
+ * block, in git's order), so no name goes out as git wrote or escaped it. The other lines stay. `null` when
+ * the blocks and the names do not match.
  */
-export function maskDiff(diff: string, masks: [string, string][]): string {
-  if (!masks.length) return diff;
-  return diff
-    .split("\n")
-    .map((line) => (/^(diff --git |--- |\+\+\+ |rename |copy )/.test(line) ? maskSecrets(line, masks) : line))
-    .join("\n");
+function writeDiffHeaders(diff: string, names: string[], masks: [string, string][]): string | null {
+  const lines = diff.split("\n");
+  const out: string[] = [];
+  let block = -1;
+  let inHeader = false;
+  for (const line of lines) {
+    if (line.startsWith("diff --git ")) {
+      block++;
+      inHeader = true;
+      const name = names[block];
+      if (name === undefined) return null;
+      const n = diffName(name, masks);
+      out.push(`diff --git a/${n} b/${n}`);
+      continue;
+    }
+    if (inHeader && line.startsWith("@@")) inHeader = false;
+    const name = names[block];
+    if (!inHeader || name === undefined) {
+      out.push(line);
+      continue;
+    }
+    const n = diffName(name, masks);
+    if (line.startsWith("--- ")) out.push(line === "--- /dev/null" ? line : `--- a/${n}`);
+    else if (line.startsWith("+++ ")) out.push(line === "+++ /dev/null" ? line : `+++ b/${n}`);
+    else if (line.startsWith("Binary files ")) {
+      const from = line.startsWith("Binary files /dev/null and ") ? "/dev/null" : `a/${n}`;
+      const to = line.endsWith(" and /dev/null differ") ? "/dev/null" : `b/${n}`;
+      out.push(`Binary files ${from} and ${to} differ`);
+      inHeader = false;
+    } else if (/^(index |new file mode |deleted file mode |old mode |new mode )/.test(line)) out.push(line);
+    // Any other header line (a rename, a copy, a similarity) names files too: it does not go out.
+  }
+  return block + 1 === names.length ? out.join("\n") : null;
 }
 
 interface JobStartArgs {
@@ -629,6 +659,8 @@ export class Jobs {
   private readonly starting = new Set<string>();
   /** Jobs canceled while they were still preparing. */
   private readonly canceledStarts = new Set<string>();
+  /** The secrets of each running job, for what is sent while it runs. */
+  private readonly liveMasks = new Map<string, () => Masks>();
 
   constructor(
     private readonly opts: {
@@ -639,6 +671,8 @@ export class Jobs {
       maxConcurrent: () => number;
       maxSeconds: () => number;
       send: (event: JobEvent) => boolean;
+      /** The masks of an agent the runner knows now (they grow while a job runs: a secret given mid-job). */
+      knownMasks?: (agentId: string) => Masks;
       bins: { claude: string; codex: string };
       sandbox: CommandSandbox;
       policy: PolicyContext;
@@ -682,14 +716,28 @@ export class Jobs {
 
   /** For `hello`: the running ones and the ones that ended without the server confirming. */
   pending(): JobSnapshot[] {
-    return this.journal.filter((t) => t.status === "running" || !t.delivered).map((t) => this.snapshot(t));
+    return this.journal.filter((t) => t.status === "running" || !t.delivered).map((t) => this.view(t));
+  }
+
+  /**
+   * A job as it goes to the server: a running job's raw fields masked with its secrets; an ended one is in the
+   * journal as it was sent, masked when it ended.
+   */
+  private view(t: JournalEntry): JobSnapshot {
+    return assembleSnapshot(this.snapshot(t), this.liveMasks.get(t.jobId)?.() ?? []);
+  }
+
+  /** Sends a job frame, assembled (masked, cut, valid) with the job's secrets. */
+  private emit(frame: JobEvent, masks: Masks): void {
+    const out = assemble(frame, masks);
+    if (out?.type === "job.event" || out?.type === "job.done") this.opts.send(out);
   }
 
   /** Sends again the `job.done` that were left unconfirmed (called after `welcome`). */
   redeliver() {
     for (const t of this.journal)
       if (!t.delivered && t.status !== "running" && t.status !== "queued")
-        this.opts.send({ type: "job.done", job: this.snapshot(t) });
+        this.emit({ type: "job.done", job: this.view(t) }, []);
   }
 
   ack(jobId: string) {
@@ -705,7 +753,7 @@ export class Jobs {
   status(jobId: string): JobSnapshot {
     const t = this.journal.find((x) => x.jobId === jobId);
     if (!t) throw new RunnerError("not_found", "No such job");
-    return this.snapshot(t);
+    return this.view(t);
   }
 
   output(jobId: string, tail = 50): { lines: string[]; truncated: boolean } {
@@ -796,6 +844,17 @@ export class Jobs {
       dropSnapshot();
       throw err;
     });
+    // The job's secrets and the ones the runner learns while it runs, read again at each line and each frame.
+    let merged: Masks = secrets.masks;
+    let mergedFrom: Masks | null = null;
+    const masksNow = (): Masks => {
+      const known = this.opts.knownMasks?.(agent.id) ?? [];
+      if (known !== mergedFrom) {
+        mergedFrom = known;
+        merged = [...secrets.masks, ...known];
+      }
+      return merged;
+    };
     const startedAt = new Date().toISOString();
     const canceledEarly = this.canceledStarts.has(args.jobId);
     const entry: JournalEntry = {
@@ -824,7 +883,7 @@ export class Jobs {
       this.save();
       ensureDir(jobDir);
       writeFileSync(join(jobDir, "output.log"), "");
-      this.opts.send({ type: "job.done", job: this.snapshot(entry) });
+      this.emit({ type: "job.done", job: this.snapshot(entry) }, []);
       return { jobId: args.jobId, startedAt, cwd };
     }
     this.journal.push(entry);
@@ -853,19 +912,20 @@ export class Jobs {
     let model: string | null = null;
     let usage: Omit<JobUsage, "model"> | null = null;
     const at = () => new Date().toISOString();
-    const onLine = (line: string, masked?: unknown) => {
-      // What the runner decides comes from the raw event; what goes to the server, from the masked one.
-      const raw =
-        masked === undefined || args.executor === "shell" ? null : parseExecutorLine(args.executor, line);
+    // Raised by the handling of the output (a bad event, a mask that throws): the job ends failed, never hangs.
+    let handlerError: string | null = null;
+    const fail = (err: unknown) => {
+      if (handlerError !== null) return;
+      handlerError = err instanceof Error ? err.message : String(err);
+      stop();
+    };
+    // Every value here is raw: what the runner decides, and what the frames are built from. The free text is
+    // masked when a frame is assembled (outbound.ts), and in the log when it is written.
+    const onLine = (line: string, event?: Record<string, unknown>) => {
       const parsed =
-        masked === undefined || args.executor === "shell"
-          ? { text: line }
-          : parseExecutorEvent(args.executor, masked);
-      if (raw?.apiKey && !rejected) {
-        rejected = maskSecrets(
-          `Claude Code in this environment would use ${raw.apiKey} instead of your plan; stopped.`,
-          secrets.masks,
-        );
+        event && args.executor !== "shell" ? parseExecutorEvent(args.executor, event) : { text: line };
+      if (parsed.apiKey && !rejected) {
+        rejected = `Claude Code in this environment would use ${parsed.apiKey} instead of your plan; stopped.`;
         stop();
       }
       if (parsed.session) entry.session = parsed.session;
@@ -884,24 +944,52 @@ export class Jobs {
               }
             : u;
       }
-      if (parsed.denied) {
-        // The command the CLI wanted to run may hold a value it read from a secret file.
-        entry.denied = [...new Set([...entry.denied, ...parsed.denied])].slice(0, 50);
-      }
-      if (parsed.result !== undefined) entry.result = parsed.result.slice(0, RESULT_MAX);
+      if (parsed.denied) entry.denied = [...new Set([...entry.denied, ...parsed.denied])].slice(0, 50);
+      if (parsed.result !== undefined) entry.result = parsed.result;
       if (!parsed.text) return;
-      const text = parsed.text.slice(0, LINE_MAX);
-      appendFileSync(logPath, `${text.replace(/\n/g, " ")}\n`);
-      tailLine = text;
-      if (Date.now() - lastSent >= LINE_EVERY_MS && text !== sentLine) {
+      // One line of the job's text: masked whole, then through the flow of the job's lines, so a secret of
+      // two lines split between two events goes out in neither.
+      const one = maskSecrets(parsed.text, masksNow()).replace(/\r?\n/g, " ");
+      flowed += lines.push(`${one}\n`);
+      takeLines(false);
+    };
+    const lines = new StreamMasker(masksNow);
+    let flowed = "";
+    // The lines the flow let go: written to the log, and the newest sent (one every LINE_EVERY_MS).
+    const takeLines = (last: boolean) => {
+      const done = flowed.split("\n");
+      flowed = last ? "" : (done.pop() ?? "");
+      for (const line of done) {
+        if (!line) continue;
+        appendFileSync(logPath, `${line.slice(0, LINE_MAX)}\n`);
+        tailLine = line;
+      }
+      if (tailLine && tailLine !== sentLine && (last || Date.now() - lastSent >= LINE_EVERY_MS)) {
         lastSent = Date.now();
-        sentLine = text;
-        this.opts.send({ type: "job.event", jobId: args.jobId, kind: "line", line: text, at: at() });
+        sentLine = tailLine;
+        this.emit(
+          { type: "job.event", jobId: args.jobId, kind: "line", line: tailLine, at: at() },
+          masksNow(),
+        );
       }
     };
-    const output = new JobOutput(secrets.masks, onLine, args.executor === "shell" ? "text" : "json");
-    child.stdout?.setEncoding("utf8").on("data", (s: string) => output.push(s));
-    child.stderr?.setEncoding("utf8").on("data", (s: string) => output.push(s));
+    const guarded = (line: string, event?: Record<string, unknown>) => {
+      try {
+        onLine(line, event);
+      } catch (err) {
+        fail(err);
+      }
+    };
+    const output = new JobOutput(masksNow, guarded, args.executor === "shell" ? "text" : "json");
+    const take = (chunk: string) => {
+      try {
+        output.push(chunk);
+      } catch (err) {
+        fail(err);
+      }
+    };
+    child.stdout?.setEncoding("utf8").on("data", take);
+    child.stderr?.setEncoding("utf8").on("data", take);
     const kill = (signal: NodeJS.Signals) => {
       try {
         if (child.pid && process.platform !== "win32") process.kill(-child.pid, signal);
@@ -916,6 +1004,7 @@ export class Jobs {
     };
     // The job now holds its slot as a running one.
     this.starting.delete(args.jobId);
+    this.liveMasks.set(args.jobId, masksNow);
     this.running.set(args.jobId, {
       kill: () => {
         canceled = true;
@@ -930,42 +1019,71 @@ export class Jobs {
     const progress = setInterval(() => {
       if (Date.now() - lastSent >= PROGRESS_EVERY_MS) {
         lastSent = Date.now();
-        this.opts.send({
-          type: "job.event",
-          jobId: args.jobId,
-          kind: "progress",
-          line: tailLine,
-          at: at(),
-        });
+        this.emit(
+          { type: "job.event", jobId: args.jobId, kind: "progress", line: tailLine, at: at() },
+          masksNow(),
+        );
       }
     }, PROGRESS_EVERY_MS);
-    child.on("error", (e) => onLine(maskSecrets(`error: ${e.message}`, secrets.masks)));
+    child.on("error", (e) => guarded(`error: ${e.message}`));
     child.on("close", (code) => {
-      output.end();
       clearTimeout(timer);
       clearInterval(progress);
       this.running.delete(args.jobId);
-      secrets.release();
-      if (network.mode === "allowlist") entry.blocked = (wrapped?.blocked() ?? []).slice(0, 50);
-      wrapped?.release();
-      entry.exitCode = code;
-      entry.status = canceled ? "canceled" : rejected || timedOut || code !== 0 ? "failed" : "done";
-      if (rejected) entry.result = rejected;
-      entry.endedAt = at();
-      if (entry.result === null && tailLine) entry.result = tailLine.slice(0, RESULT_MAX);
-      if (usage) entry.usage = { model, ...usage };
-      // Files and diff against the start of the job (the server stores them as proof for the assignment).
-      if (base) {
-        const changes = gitChanges(cwd, snapStore, base, secretPaths, secrets.masks);
-        // A file name can carry a secret's value too.
-        entry.files = changes.files.map((f) => maskSecrets(f, secrets.masks));
-        entry.diff = changes.diff;
+      try {
+        try {
+          output.end();
+          // The tail the flow of lines held goes before the job.done.
+          flowed += lines.end();
+          takeLines(true);
+        } catch (err) {
+          fail(err);
+        }
+        secrets.release();
+        if (network.mode === "allowlist") entry.blocked = (wrapped?.blocked() ?? []).slice(0, 50);
+        wrapped?.release();
+        entry.exitCode = code;
+        entry.status =
+          handlerError !== null
+            ? "failed"
+            : canceled
+              ? "canceled"
+              : rejected || timedOut || code !== 0
+                ? "failed"
+                : "done";
+        if (rejected) entry.result = rejected;
+        if (handlerError !== null) entry.result = `The runner stopped this job: ${handlerError}`;
+        entry.endedAt = at();
+        if (entry.result === null && tailLine) entry.result = tailLine;
+        if (usage) entry.usage = { model, ...usage };
+        // Files and diff against the start of the job (the server stores them as proof for the assignment).
+        if (base) {
+          const changes = gitChanges(cwd, snapStore, base, secretPaths, masksNow());
+          entry.files = changes.files;
+          entry.diff = changes.diff;
+        }
+        if (tailLine !== sentLine)
+          this.emit(
+            { type: "job.event", jobId: args.jobId, kind: "line", line: tailLine, at: at() },
+            masksNow(),
+          );
+      } catch (err) {
+        // Whatever failed after the process ended: the job still ends, failed, and its slot is back.
+        entry.status = "failed";
+        entry.endedAt = at();
+        entry.result = `The runner could not finish this job: ${err instanceof Error ? err.message : String(err)}`;
+      } finally {
+        dropSnapshot();
+        // The journal keeps the job as it was sent: masked, cut and valid.
+        // A field the assembly left out (a usage that failed the schema) goes from the journal too.
+        const sent = assembleSnapshot(this.snapshot(entry), masksNow());
+        Object.assign(entry, { ...sent, usage: sent.usage ?? null, diff: sent.diff ?? null });
+        // The runner keeps a shorter result than the protocol allows.
+        if (entry.result) entry.result = entry.result.slice(0, RESULT_MAX);
+        this.liveMasks.delete(args.jobId);
+        this.save();
+        this.emit({ type: "job.done", job: this.snapshot(entry) }, masksNow());
       }
-      dropSnapshot();
-      this.save();
-      if (tailLine !== sentLine)
-        this.opts.send({ type: "job.event", jobId: args.jobId, kind: "line", line: tailLine, at: at() });
-      this.opts.send({ type: "job.done", job: this.snapshot(entry) });
     });
     return { jobId: args.jobId, startedAt, cwd };
   }
