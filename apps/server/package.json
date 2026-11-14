@@ -20,6 +20,7 @@
     "postgres": "3.4.9",
     "remark-gfm": "4.0.1",
     "remark-parse": "11.0.0",
+    "sharp": "0.35.5",
     "unified": "11.0.5",
     "unpdf": "1.9.1",
     "web-push": "3.6.7",
