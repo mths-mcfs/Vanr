@@ -5,8 +5,25 @@
   "type": "module",
   "license": "AGPL-3.0-only",
   "exports": {
+    "./action-credential": "./src/action-credential.ts",
+    "./blobs": "./src/blobs.ts",
+    "./browser-policy": "./src/browser-policy.ts",
     "./db": "./src/db/index.ts",
-    "./sqlconn": "./src/sqlconn.ts"
+    "./debate-protocol": "./src/debate-protocol.ts",
+    "./effects": "./src/effects.ts",
+    "./file-type": "./src/file-type.ts",
+    "./memory": "./src/memory.ts",
+    "./net-address": "./src/net-address.ts",
+    "./notify-rules": "./src/notify-rules.ts",
+    "./recurrence": "./src/recurrence.ts",
+    "./recurrence-text": "./src/recurrence-text.ts",
+    "./roles": "./src/roles.ts",
+    "./runner-protocol": "./src/runner-protocol.ts",
+    "./runner-update": "./src/runner-update.ts",
+    "./seal": "./src/seal.ts",
+    "./skill-md": "./src/skill-md.ts",
+    "./sqlconn": "./src/sqlconn.ts",
+    "./work-state": "./src/work-state.ts"
   },
   "scripts": {
     "db:generate": "drizzle-kit generate"
@@ -15,7 +32,8 @@
     "@electric-sql/pglite": "0.5.10",
     "@vanr/contract": "workspace:*",
     "drizzle-orm": "0.45.4",
-    "postgres": "3.4.9"
+    "postgres": "3.4.9",
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "drizzle-kit": "0.31.11"
