@@ -336,7 +336,8 @@ describe("accessible wiring", () => {
         </RadioGroup>
       </Field>,
     );
-    const labelId = html.match(/<label class="vr-field__label" id="([^"]+)"/)?.[1];
+    const labelId = html.match(/class="vr-field__label" id="([^"]+)"/)?.[1];
+    expect(labelId).toBeDefined();
     expect(html).toMatch(new RegExp(`role="radiogroup"[^>]* aria-labelledby="${labelId}"`));
   });
 

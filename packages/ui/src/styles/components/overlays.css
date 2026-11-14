@@ -122,7 +122,7 @@
     position: fixed;
     inset: 0;
     z-index: var(--vr-z-overlay);
-    background-color: color-mix(in srgb, var(--vr-bg-inverse) 38%, transparent);
+    background-color: color-mix(in srgb, var(--vr-scrim) 45%, transparent);
   }
 
   .vr-dialog {

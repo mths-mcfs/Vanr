@@ -85,3 +85,30 @@ describe("layers", () => {
     expect(zOf(".vr-dialog")).toBe("modal");
   });
 });
+
+describe("dialog scrim", () => {
+  const tokens = readFileSync(join(STYLES, "tokens.css"), "utf8");
+  const overlays = readFileSync(join(STYLES, "components", "overlays.css"), "utf8");
+  const luminance = (hex: string) => {
+    const c = (o: number) => {
+      const v = Number.parseInt(hex.slice(o, o + 2), 16) / 255;
+      return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+    };
+    return 0.2126 * c(1) + 0.7152 * c(3) + 0.0722 * c(5);
+  };
+  const pair = (name: string) => {
+    const m = tokens.match(new RegExp(`--vr-${name}:\\s*light-dark\\((#[0-9a-f]{6}),\\s*(#[0-9a-f]{6})\\)`));
+    return [m?.[1] ?? "", m?.[2] ?? ""] as const;
+  };
+
+  test("the scrim behind a dialog uses the scrim token", () => {
+    expect(overlays).toMatch(/\.vr-dialog__overlay\s*\{[^}]*var\(--vr-scrim\)/);
+  });
+
+  test("the scrim darkens the page in both themes", () => {
+    const [scrimLight, scrimDark] = pair("scrim");
+    const [canvasLight, canvasDark] = pair("bg-canvas");
+    expect(luminance(scrimLight)).toBeLessThan(luminance(canvasLight));
+    expect(luminance(scrimDark)).toBeLessThan(luminance(canvasDark));
+  });
+});

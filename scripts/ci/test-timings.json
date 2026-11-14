@@ -1,11 +1,13 @@
 {
   "version": 1,
   "files": {
-    "packages/ui/test/smoke.test.tsx": 245,
-    "packages/ui/test/contrast.test.ts": 227,
-    "scripts/ci/gate.test.ts": 31,
-    "packages/ui/test/identity.test.ts": 13,
-    "scripts/typecheck.test.ts": 11,
-    "packages/ui/test/styles.test.ts": 5
+    "packages/ui/test/contrast.test.ts": 286,
+    "packages/ui/test/hydration.test.tsx": 257,
+    "packages/ui/test/smoke.test.tsx": 208,
+    "scripts/ci/gate.test.ts": 24,
+    "packages/ui/test/field.test.tsx": 10,
+    "scripts/typecheck.test.ts": 9,
+    "packages/ui/test/identity.test.ts": 8,
+    "packages/ui/test/styles.test.ts": 4
   }
 }

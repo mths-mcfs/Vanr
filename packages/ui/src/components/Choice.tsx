@@ -6,7 +6,7 @@ import {
 } from "radix-ui";
 import { type ComponentPropsWithRef, type ReactNode, useId, useState } from "react";
 import { cx } from "../internal/cx.ts";
-import { joinIds, useFieldControl } from "./Field.tsx";
+import { joinIds, markFieldControl, useFieldControl } from "./Field.tsx";
 import { Icon } from "./Icon.tsx";
 
 type Labelled = {
@@ -49,7 +49,7 @@ function useChoiceWiring<P extends OwnAria & { required?: boolean; disabled?: bo
   const labelId = `${generated}-label`;
   const hintId = `${generated}-hint`;
   const describedBy = joinIds(own["aria-describedby"], hint !== undefined && hintId);
-  const field = useFieldControl({ ...own, "aria-describedby": describedBy });
+  const field = useFieldControl({ ...own, "aria-describedby": describedBy }, { kind: "choice" });
   const wiring = options.inField ? field : { ...own, "aria-describedby": describedBy };
   const id = wiring.id ?? `${generated}-control`;
   const extra = wiring["aria-labelledby"];
@@ -125,7 +125,7 @@ export type RadioGroupProps = ComponentPropsWithRef<typeof RadioPrimitive.Root>;
 
 /** A set of <Radio /> options. Inside a Field, the Field label names the group. */
 export function RadioGroup({ className, ...props }: RadioGroupProps) {
-  const wiring = useFieldControl(props, { labelledBy: true });
+  const wiring = useFieldControl(props, { kind: "group" });
   return <RadioPrimitive.Root {...props} {...wiring} className={cx("vr-radio-group", className)} />;
 }
 
@@ -143,3 +143,7 @@ export function Radio({ label, hint, className, ...props }: RadioProps) {
     </span>
   );
 }
+
+markFieldControl(Checkbox, "labelable");
+markFieldControl(Switch, "labelable");
+markFieldControl(RadioGroup, "group");

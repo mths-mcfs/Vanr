@@ -251,6 +251,16 @@
     color: var(--vr-fg);
   }
 
+  .vr-field__group {
+    min-inline-size: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-2);
+  }
+
   .vr-field__required {
     font-size: var(--vr-text-sm);
     font-weight: var(--vr-weight-regular);

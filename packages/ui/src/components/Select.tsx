@@ -2,7 +2,7 @@ import { Check, ChevronDown } from "lucide-react";
 import { Select as SelectPrimitive } from "radix-ui";
 import type { ComponentPropsWithRef, ReactNode } from "react";
 import { cx } from "../internal/cx.ts";
-import { useFieldControl } from "./Field.tsx";
+import { markFieldControl, useFieldControl } from "./Field.tsx";
 import { Icon } from "./Icon.tsx";
 
 type RootProps = ComponentPropsWithRef<typeof SelectPrimitive.Root>;
@@ -90,3 +90,5 @@ export function SelectItem({ children, className, ...props }: SelectItemProps) {
     </SelectPrimitive.Item>
   );
 }
+
+markFieldControl(Select, "labelable");

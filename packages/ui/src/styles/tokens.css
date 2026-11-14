@@ -20,6 +20,8 @@
     --vr-bg-hover: light-dark(#e3e1da, #322f29);
     --vr-bg-active: light-dark(#d9d6ce, #3b3730);
     --vr-bg-inverse: light-dark(#23211c, #ede9e0);
+    /* Behind a dialog: always darkens the page, in both themes. */
+    --vr-scrim: light-dark(#1d1c19, #000000);
 
     /* Text */
     --vr-fg: light-dark(#1d1c19, #ede9e0);

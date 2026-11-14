@@ -1,6 +1,6 @@
 import type { ComponentPropsWithRef } from "react";
 import { cx } from "../internal/cx.ts";
-import { useFieldControl } from "./Field.tsx";
+import { markFieldControl, useFieldControl } from "./Field.tsx";
 
 export type InputProps = Omit<ComponentPropsWithRef<"input">, "size"> & {
   size?: "sm" | "md" | "lg";
@@ -34,3 +34,6 @@ export function Textarea({ mono = false, rows = 3, className, ...props }: Textar
     />
   );
 }
+
+markFieldControl(Input, "labelable");
+markFieldControl(Textarea, "labelable");
