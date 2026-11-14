@@ -10,9 +10,6 @@ import type { BudgetScope } from "@vanr/engine/usage";
 /** From `agents`. */
 export type AgentRow = typeof schema.agents.$inferSelect;
 
-/** From `wiki`. */
-export type WikiRow = typeof schema.knowledgePages.$inferSelect;
-
 /** From `assignments/core`. */
 export type AssignmentRow = typeof schema.assignments.$inferSelect;
 

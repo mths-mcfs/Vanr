@@ -9,7 +9,7 @@ import { createApp } from "./app";
 import { createAuth, type SignupDecision } from "./auth";
 import type { Config } from "./config";
 import type { AppDeps, RuntimePort } from "./context";
-import { HttpError } from "./http";
+import { errorBody, HttpError } from "./http";
 import { holdInstanceLock } from "./instance-lock";
 import { guardedFetch } from "./integrations/net";
 import { routedBlobs } from "./integrations/storage";
@@ -23,6 +23,8 @@ import { BackgroundWork } from "./runtime/background";
 import { createSearchIndex } from "./search-index";
 import { FirstUserPlace, type SignupQueueLimits } from "./signup-queue";
 import { postgresLedger } from "./usage-ledger";
+import { COLLAB_PATH, type CollabSocketData, checkCollabUpgrade, createWikiCollab } from "./wiki-collab";
+import { wikiMarkdown } from "./wiki-md";
 
 interface StartOptions {
   config: Config;
@@ -42,6 +44,9 @@ interface StartOptions {
   signupQueue?: Partial<SignupQueueLimits>;
   /** Tests: replaces a step of the boot that touches the outside, to break it or hold it. */
   steps?: Partial<BootSteps>;
+  /** The live wiki: the quiet before the draft publishes itself (default 5 min) and the autosave debounce. */
+  wikiIdlePublishMs?: number;
+  wikiDebounceMs?: number;
 }
 
 /** The boot's steps that touch the outside: the instance lock, the database and the VAPID keys. */
@@ -117,19 +122,43 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     new Response("starting", { status: 503 });
 
   const runnersHub = new RunnerHub();
-  // Slice S3 (wiki-collab) adds here the wiki editor (wikiMarkdown) and the live wiki sessions.
+  // The wiki editor (Milkdown without a browser) comes up before accepting connections.
+  await wikiMarkdown();
+  // Set once the deps exist: before that, an upgrade has nothing to check against.
+  let depsRef: AppDeps | null = null;
+  const collab = createWikiCollab(
+    () => {
+      if (!depsRef) throw new Error("server not started");
+      return depsRef;
+    },
+    { idlePublishMs: opts.wikiIdlePublishMs, debounceMs: opts.wikiDebounceMs },
+  );
 
-  const server = Bun.serve({
+  const server = Bun.serve<CollabSocketData>({
     port: config.port,
-    fetch(req) {
-      // Slice S2 (realtime/browser-socket, runners/socket) and S3 (wiki-collab) add here the WebSocket
-      // upgrades of /api/v1/realtime, /api/v1/runners/connect and /api/v1/wiki/collab, and their handlers.
+    async fetch(req, srv) {
+      // Slice S2 (realtime/browser-socket, runners/socket) adds here the WebSocket upgrades of
+      // /api/v1/realtime and /api/v1/runners/connect, and their handlers.
+      if (depsRef && new URL(req.url).pathname === COLLAB_PATH) {
+        const check = await checkCollabUpgrade(depsRef, req, origins);
+        if (!check.ok) return check.response;
+        if (srv.upgrade(req, { data: check.data })) return undefined;
+        return Response.json(errorBody("upgrade_required", "Use WebSocket"), { status: 426 });
+      }
       return handler(req);
+    },
+    websocket: {
+      maxPayloadLength: 8 * 1024 * 1024,
+      open: (ws) => collab.socket.open(ws),
+      message: (ws, raw) => collab.socket.message(ws, raw),
+      close: (ws, code, reason) => collab.socket.close(ws, code, reason),
     },
   });
   undo.push(() => server.stop(true));
   // Before the listener in the undo (as in stop): closes the runners' connections. Before the listener is
-  // up there is no connection to close. Slice S3 (wiki-collab) also saves here what the wiki held in memory.
+  // up there is no connection to close. Before that, the wiki closes its live sessions, saving the drafts it
+  // held in memory (publishing them as versions where it can), while the listener and the database are up.
+  undo.push(() => collab.live.close());
   undo.push(() => runnersHub.closeAll());
   const port = server.port ?? config.port;
   const publicUrl = config.port === 0 ? `http://localhost:${port}` : config.publicUrl;
@@ -179,9 +208,10 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     push: webPushSender(await steps.loadVapid(effective), opts.fetchExternal ?? fetch),
     runtime: runtimePort(background),
     testModelFor: (workspaceId) => testModelCheck(deps, workspaceId, opts.forceFakeModels === true),
-    // S3 (wiki-collab) adds `wikiLive` and S5 (assignments/motor, assignments/verify) adds
-    // `assignmentEngine` and `assignmentVerifier`.
+    wikiLive: collab.live,
+    // S5 (assignments/motor, assignments/verify) adds `assignmentEngine` and `assignmentVerifier`.
   };
+  depsRef = deps;
   // Here, in this order: the undo of stopRecalcs (S2, bases/write) and of the assignment engine's stop
   // (S5); the provider lookup (S6); runtime.start (S6), the engine's start (S5) and resumeRecalcs (S2),
   // all before the app takes requests.

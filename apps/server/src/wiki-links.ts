@@ -13,7 +13,7 @@ import {
   stripMd,
 } from "@vanr/engine/wiki/links";
 import { and, asc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
-import type { WikiRow } from "./forward-types";
+import type { WikiRow } from "./wiki";
 
 const { knowledgePages, pageLinks } = schema;
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];

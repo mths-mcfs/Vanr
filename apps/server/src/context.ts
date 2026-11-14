@@ -24,9 +24,10 @@ import type { Mailer } from "./mailer";
 import type { PushSender } from "./push";
 import type { Hub } from "./realtime/hub";
 import type { RunnerHub } from "./runners/hub";
+import type { WikiLive } from "./wiki-collab";
 
 /**
- * Everything the routes need. Each slice of the server adds what it uses: S3 adds `wikiLive` (wiki-collab) and S5 adds `assignmentEngine` and `assignmentVerifier` (assignments/motor,
+ * Everything the routes need. Each slice of the server adds what it uses: S5 adds `assignmentEngine` and `assignmentVerifier` (assignments/motor,
  * assignments/verify). The runtime is already here as a port; S6 puts the real one behind it.
  */
 export interface AppDeps {
@@ -63,6 +64,8 @@ export interface AppDeps {
   push: PushSender;
   /** Agents: routing, runs and reminders, as the modules outside runtime/ see them. */
   runtime: RuntimePort;
+  /** The wiki's live sessions (wiki-collab): every saved version reaches the open editors. */
+  wikiLive: WikiLive;
   /** For each agent of the workspace, whether the test model answers it now (no key). */
   testModelFor: (
     workspaceId: string,
