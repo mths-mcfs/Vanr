@@ -59,10 +59,18 @@ const AGENT_COLOR = "#2f6fed";
  * clock on every message. Only a change made outside the server's routes waits up to this long.
  */
 export const RIGHT_TTL_MS = 5_000;
+/**
+ * The most operations one page's queue holds (`pendingUpdates`): past it an incoming update is rejected
+ * (SyncStatus false) and its connection closes (4412), like any other rejected update. A mutable object so a
+ * test can lower it.
+ */
+export const LIVE_LIMITS = { pendingUpdates: 256 };
+/** The waits before each new try of an automatic publish or draft save the database aborted (wiki.busy). */
+export const RETRY_MS = [1_000, 2_000, 4_000, 8_000, 16_000] as const;
 /** How long the gate waits for the server to answer an update it forwarded (it always does, or closes). */
 const ACK_MS = 30_000;
 /** How long a stop waits for the live documents to save and unload before it stops writing. */
-const CLOSE_MS = 10_000;
+export const CLOSE_MS = 10_000;
 
 /** Close codes of a connection the server drops. */
 const CLOSE = {
@@ -397,9 +405,11 @@ export function createWikiCollab(
   const idleMs = opts.idlePublishMs ?? 5 * 60_000;
   const sessions = new Map<string, Session>();
   const queues = new Map<string, Promise<unknown>>();
+  /** How many operations wait in (or run at the head of) each page's queue. */
+  const depth = new Map<string, number>();
   const peers = new Set<Peer>();
-  /** Per document: updates are checked and applied one at a time, so the size check sees the real state. */
-  const applying = new Map<string, Promise<unknown>>();
+  /** Timers of the automatic publish and draft save's next try: a stop clears them. */
+  const retryTimers = new Set<ReturnType<typeof setTimeout>>();
   /** Updates waiting for their document to load. */
   const loading = new Map<string, Set<(s: Session | null) => void>>();
   /** Set once a stop finished: nothing reads or writes the database after it. */
@@ -410,28 +420,35 @@ export function createWikiCollab(
     return md;
   };
 
-  /** One thing at a time per page: an API write, a publish and a load don't cross. */
+  /**
+   * The page's queue: everything that changes its document in memory runs here, one at a time (an update
+   * from the socket, a load, a version saved elsewhere, a discard, a publish, a draft save). An operation that
+   * holds it through its own transaction (discard, publish) makes the updates that arrive meanwhile wait, so
+   * they are applied after it, on top of its result, and only then acknowledged.
+   */
   function serial<T>(key: string, job: () => Promise<T>): Promise<T> {
     const prev = queues.get(key) ?? Promise.resolve();
+    depth.set(key, (depth.get(key) ?? 0) + 1);
     const run = () => (stopped ? Promise.reject(new Error("wiki live session stopped")) : job());
     const next = prev.then(run, run);
     const tail = next.catch(() => undefined);
     queues.set(key, tail);
     void tail.then(() => {
+      const left = (depth.get(key) ?? 1) - 1;
+      if (left) depth.set(key, left);
+      else depth.delete(key);
       if (queues.get(key) === tail) queues.delete(key);
     });
     return next;
   }
 
-  function oneAtATime<T>(key: string, job: () => Promise<T>): Promise<T> {
-    const prev = applying.get(key) ?? Promise.resolve();
-    const next = prev.then(job, job);
-    const tail = next.catch(() => undefined);
-    applying.set(key, tail);
-    void tail.then(() => {
-      if (applying.get(key) === tail) applying.delete(key);
-    });
-    return next;
+  /** Runs `job` after `ms`, as the next try of an automatic step; a stop cancels it. */
+  function later(ms: number, job: () => void) {
+    const timer = setTimeout(() => {
+      retryTimers.delete(timer);
+      job();
+    }, ms);
+    retryTimers.add(timer);
   }
 
   // ---- Who may stay connected, and who may have their edits saved.
@@ -644,7 +661,10 @@ export function createWikiCollab(
         if (locked.locked && !(opts.canBypassLock && (await anyBypasses(tx, locked.workspaceId, deciders))))
           throw new HttpError(403, "wiki.page_locked", "This page is locked");
       });
-      Object.assign(s, clean);
+      // Clean only if nothing changed since the snapshot saved (the change counter); otherwise the draft
+      // stays dirty with what came after, on the published version.
+      if (s.edits === seen) Object.assign(s, clean);
+      else Object.assign(s, { parentVersion: page.version, baseBody: page.body, conflictVersion: null });
       return page;
     }
     const saved = await savePage(deps, {
@@ -671,7 +691,7 @@ export function createWikiCollab(
   }
 
   /** Automatic publish (quiet or end of the session): the author is whoever edited last. */
-  async function autoPublish(name: string, s: Session, doc: Y.Doc, note: string) {
+  async function autoPublish(name: string, s: Session, doc: Y.Doc, note: string, attempt = 0) {
     if (!s.dirty || s.closed || s.conflictVersion !== null) return;
     const author = s.editors.at(-1);
     if (!author) return;
@@ -683,9 +703,68 @@ export function createWikiCollab(
         automatic: true,
       });
     } catch (err) {
+      if (err instanceof HttpError && err.code === "wiki.busy") return retryPublish(name, s, note, attempt);
       // Conflict or lock: the draft stays saved and the page shows the notice.
       log.warn("wiki.autopublish_skipped", { err, pageId: s.pageId });
     }
+  }
+
+  /**
+   * The database aborted an automatic publish (a deadlock): it tries again after RETRY_MS, on the page's
+   * document if it is still open or on its saved draft. Out of tries, the draft stays dirty and whoever is
+   * connected hears that the page wasn't published.
+   */
+  function retryPublish(name: string, s: Session, note: string, attempt: number) {
+    const wait = RETRY_MS[attempt];
+    if (wait === undefined) {
+      log.error("wiki.autopublish_failed", { pageId: s.pageId, attempts: attempt + 1 });
+      broadcast(name, { type: "publish_failed" });
+      return;
+    }
+    log.warn("wiki.autopublish_retry", { pageId: s.pageId, attempt: attempt + 1, waitMs: wait });
+    const slug = name.split("/")[2] ?? "";
+    later(wait, () => {
+      void serial(s.pageId, () =>
+        // No draft save on the way: a publish saves its own, and a failed one leaves the draft as it was.
+        withDocument(
+          { id: s.pageId, workspaceId: s.workspaceId, slug },
+          (live, doc) => autoPublish(name, live, doc, note, attempt + 1),
+          { persist: false },
+        ),
+      ).catch((err) => log.warn("wiki.autopublish_skipped", { err, pageId: s.pageId }));
+    });
+  }
+
+  /**
+   * The database aborted a draft save (a deadlock): it tries again after RETRY_MS, with the document as it
+   * is then if still open, else with the state it had. Out of tries, whoever is connected hears it.
+   */
+  function retrySave(name: string, s: Session, doc: Y.Doc, attempt: number) {
+    const wait = RETRY_MS[attempt];
+    if (wait === undefined) {
+      log.error("wiki.draft_save_failed", { pageId: s.pageId, attempts: attempt + 1 });
+      broadcast(name, { type: "draft_save_failed" });
+      return;
+    }
+    log.warn("wiki.draft_save_retry", { pageId: s.pageId, attempt: attempt + 1, waitMs: wait });
+    const kept = Y.encodeStateAsUpdate(doc);
+    const snapshot = { ...s };
+    later(wait, () => {
+      void serial(s.pageId, async () => {
+        const open = sessions.get(name) === s ? hocuspocus.documents.get(name) : undefined;
+        if (open) return persist(s, open);
+        const copy = new Y.Doc();
+        try {
+          Y.applyUpdate(copy, kept);
+          await persist(snapshot, copy);
+        } finally {
+          copy.destroy();
+        }
+      }).catch((err) => {
+        if (err instanceof HttpError && err.code === "wiki.busy") retrySave(name, s, doc, attempt + 1);
+        else log.error("wiki.draft_save_failed", { err, pageId: s.pageId });
+      });
+    });
   }
 
   function armIdle(name: string, s: Session, doc: Y.Doc) {
@@ -790,6 +869,8 @@ export function createWikiCollab(
       if (!s || s.closed) return;
       await serial(s.pageId, () => persist(s, document)).catch((err) => {
         if (err instanceof DraftRejected) abandon(documentName, s, err);
+        else if (err instanceof HttpError && err.code === "wiki.busy")
+          retrySave(documentName, s, document, 0);
         else log.error("wiki.draft_save_failed", { err, pageId: s.pageId });
       });
     },
@@ -829,9 +910,16 @@ export function createWikiCollab(
     if (!doc) return;
     if (doc.readOnly) return conn.handleMessage(bytes);
     const update = head.update;
-    await oneAtATime(head.documentName, async () => {
+    const loaded = await whenLoaded(head.documentName);
+    if (!loaded) return p.close(CLOSE.revoked);
+    // A page whose queue is full rejects the update like any other rejection: the sender diverged.
+    if ((depth.get(loaded.pageId) ?? 0) >= LIVE_LIMITS.pendingUpdates) {
+      p.sendNow(syncStatus(head.rawKey, false));
+      return p.close(CLOSE.outOfSync);
+    }
+    await serial(loaded.pageId, async () => {
       if (p.closed || !p.apply(await verdict(p))) return;
-      const s = await whenLoaded(head.documentName);
+      const s = sessions.get(head.documentName);
       const document = hocuspocus.documents.get(head.documentName);
       if (!s || !document) return p.close(CLOSE.revoked);
       const size = await sizeAfter(s, document, update);
@@ -859,6 +947,8 @@ export function createWikiCollab(
         p.sendNow(syncStatus(head.rawKey, false));
         p.close(CLOSE.outOfSync);
       }
+    }).catch((err) => {
+      if (!stopped) throw err;
     });
   }
 
@@ -1051,7 +1141,7 @@ export function createWikiCollab(
       });
     },
     async settled() {
-      while (queues.size || applying.size) await Promise.all([...queues.values(), ...applying.values()]);
+      while (queues.size) await Promise.all([...queues.values()]);
     },
     loaded() {
       return hocuspocus.documents.size;
@@ -1063,15 +1153,25 @@ export function createWikiCollab(
       closing = true;
       hocuspocus.closeConnections();
       for (const p of peers) p.close(CLOSE.revoked);
-      let warned = false;
-      const end = Date.now() + CLOSE_MS;
-      while (hocuspocus.documents.size || queues.size || applying.size || reading.size) {
-        await Promise.allSettled([...queues.values(), ...applying.values(), ...reading.values()]);
-        if (!warned && Date.now() > end) {
-          warned = true;
-          log.error("wiki.close_slow", { documents: hocuspocus.documents.size, queues: queues.size });
+      for (const timer of retryTimers) clearTimeout(timer);
+      retryTimers.clear();
+      // The warning is its own timer: the wait below can be held by an operation that never ends.
+      const slow = setTimeout(
+        () =>
+          log.error("wiki.close_slow", {
+            documents: hocuspocus.documents.size,
+            queues: queues.size,
+            reads: reading.size,
+          }),
+        CLOSE_MS,
+      );
+      try {
+        while (hocuspocus.documents.size || queues.size || reading.size) {
+          await Promise.allSettled([...queues.values(), ...reading.values()]);
+          await Bun.sleep(10);
         }
-        await Bun.sleep(10);
+      } finally {
+        clearTimeout(slow);
       }
       // From here nothing touches the database: a late job is dropped.
       stopped = true;
