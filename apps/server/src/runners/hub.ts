@@ -166,14 +166,26 @@ export class RunnerHub {
     args: OpArgs<O>,
     opts: CallOptions = {},
   ): Promise<T> {
+    const canceled = () => new RunnerCallError("canceled", "Canceled");
+    // A request whose caller already gave up never goes out.
+    if (opts.signal?.aborted) throw canceled();
     if (!this.isOnline(runnerId)) throw new RunnerCallError("offline", "The runner is offline");
     const release = await this.slot(runnerId, opts.signal);
     const id = newId("rq");
-    const onAbort = () => {
-      if (this.pending.has(id)) this.send(runnerId, { type: "cancel", id });
-    };
+    let onAbort = () => {};
     try {
+      if (opts.signal?.aborted) throw canceled();
       return await new Promise<T>((resolve, reject) => {
+        // Given up while waiting: the runner is told to stop, the deadline goes and the call ends now; an answer
+        // that comes after it finds no request and is dropped.
+        onAbort = () => {
+          const p = this.pending.get(id);
+          if (!p) return;
+          this.pending.delete(id);
+          clearTimeout(p.timer);
+          this.send(runnerId, { type: "cancel", id });
+          reject(canceled());
+        };
         const timer = setTimeout(() => {
           this.pending.delete(id);
           this.send(runnerId, { type: "cancel", id });
