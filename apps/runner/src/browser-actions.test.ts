@@ -506,3 +506,45 @@ test.skipIf(!chrome)(
   },
   60_000,
 );
+
+test.skipIf(!chrome)(
+  "an action canceled while the page loads stops: the load is stopped, the page stays, no result comes back",
+  async () => {
+    const a = agent();
+    let release: () => void = () => {};
+    let entered: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const reached = new Promise<void>((r) => {
+      entered = r;
+    });
+    sites.page("site.test", "/stay", () => html("<title>stay</title>"));
+    sites.page("site.test", "/late", async () => {
+      entered();
+      await gate;
+      return html("<title>LOADED AFTER CANCEL</title>");
+    });
+    await open(a, sites.http("site.test", "/stay"));
+    const c = new AbortController();
+    const going = browser.handle(
+      "browser.open",
+      a,
+      { url: sites.http("site.test", "/late"), policy: policy() },
+      send,
+      c.signal,
+    );
+    // The page is being answered (a signal from the site, not a time): the request is canceled now.
+    await reached;
+    c.abort();
+    const result = await going.then(
+      () => "result",
+      (e: { code?: string }) => e.code,
+    );
+    release();
+    expect(result).toBe("canceled");
+    const after = await act(a, { action: "read" });
+    expect(after.title).toBe("stay");
+  },
+  30_000,
+);

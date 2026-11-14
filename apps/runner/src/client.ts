@@ -695,7 +695,13 @@ export class RunnerClient {
         const driver = this.browser;
         if (!driver) throw new RunnerError("browser_not_running", "No browser in this environment");
         this.access.requireTool("browser");
-        return driver.handle(op, this.needAgent(ctx.agent), args, (frame) => this.send(frame, masks));
+        return driver.handle(
+          op,
+          this.needAgent(ctx.agent),
+          args,
+          (frame) => this.send(frame, masks),
+          ctx.signal,
+        );
       }
     }
   }

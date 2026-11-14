@@ -75,6 +75,7 @@
     "apps/runner/src/jobs-json.test.ts": 1100,
     "apps/runner/src/outbound.test.ts": 7300,
     "apps/runner/src/client-send.test.ts": 500,
-    "apps/runner/src/results.test.ts": 100
+    "apps/runner/src/results.test.ts": 100,
+    "apps/runner/src/effects.test.ts": 300
   }
 }

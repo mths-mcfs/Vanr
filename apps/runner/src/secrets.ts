@@ -253,9 +253,12 @@ export class SecretStore {
   async materialize(
     agent: AgentRef,
     root: string,
+    signal?: AbortSignal,
   ): Promise<{ env: Record<string, string>; masks: [string, string][]; release: () => void }> {
     if (!this.key) return { env: {}, masks: [], release: () => {} };
     const values = await this.values(agent);
+    // Aborted while the values were read: nothing is written.
+    if (signal?.aborted) throw new RunnerError("canceled", "Canceled");
     const env: Record<string, string> = {};
     const files: string[] = [];
     for (const v of values) {
@@ -270,7 +273,17 @@ export class SecretStore {
         if (!path.startsWith(`${root}/`)) continue;
         ensureDir(dirname(path));
         const n = this.materialized.get(path) ?? 0;
-        if (n === 0) writeFileSync(path, v.value, { mode: 0o600 });
+        // Invariant: the release undoes only what was written here. A file this store did not write (the
+        // person's own, or a link) is left as it is and not removed; one another command is using is shared
+        // by the use count. `wx` creates the file only if nothing is at the path, without following a link.
+        if (n === 0) {
+          try {
+            writeFileSync(path, v.value, { mode: 0o600, flag: "wx" });
+          } catch (err) {
+            if (err instanceof Error && "code" in err && err.code === "EEXIST") continue;
+            throw err;
+          }
+        }
         this.materialized.set(path, n + 1);
         files.push(path);
       }

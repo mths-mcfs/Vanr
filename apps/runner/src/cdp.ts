@@ -99,6 +99,59 @@ interface Session {
   blocked: BlockedLoad[];
   /** Dialogs the page opened since the last answer to the agent. */
   dialogs: { type: string; message: string }[];
+  /** The signal of the op in progress (its request's); `null` between ops. */
+  signal: AbortSignal | null;
+}
+
+/**
+ * The commands that act on the page: once the op's request is aborted, none of them goes (the next step of an
+ * action does not happen). Reading, the network rule (Fetch) and stopping the load still go.
+ */
+const ACTING = new Set([
+  "Page.navigate",
+  "Input.dispatchMouseEvent",
+  "Input.dispatchKeyEvent",
+  "Input.insertText",
+  "DOM.setFileInputFiles",
+  "Runtime.evaluate",
+  "Runtime.callFunctionOn",
+  "Target.activateTarget",
+  "Target.createTarget",
+]);
+
+const canceled = () => new RunnerError("canceled", "Canceled");
+
+/**
+ * Runs an op of the browser under its request's signal. Invariant: after the abort no step that acts on the
+ * page starts (the guard on each command), the load in progress is stopped (`Page.stopLoading`) and no result
+ * comes back. What the browser already got (a click already dispatched, a page already loaded) is not undone.
+ */
+async function underSignal<T>(
+  s: Session,
+  signal: AbortSignal | undefined,
+  page: string | undefined,
+  work: () => Promise<T>,
+): Promise<T> {
+  if (!signal) return work();
+  if (signal.aborted) throw canceled();
+  s.signal = signal;
+  let stop: () => void = () => {};
+  const aborted = new Promise<never>((_, reject) => {
+    stop = () => {
+      void s.cdp.send("Page.stopLoading", {}, page).catch(() => {});
+      reject(canceled());
+    };
+    signal.addEventListener("abort", stop, { once: true });
+  });
+  aborted.catch(() => {});
+  try {
+    const out = await Promise.race([work(), aborted]);
+    if (signal.aborted) throw canceled();
+    return out;
+  } finally {
+    signal.removeEventListener("abort", stop);
+    if (s.signal === signal) s.signal = null;
+  }
 }
 
 /**
@@ -215,7 +268,9 @@ export class CdpBrowser implements BrowserDriver {
     agent: AgentRef,
     args: unknown,
     send: (frame: RunnerFrame) => boolean,
+    signal?: AbortSignal,
   ): Promise<unknown> {
+    if (signal?.aborted) throw canceled();
     switch (op) {
       case "browser.close": {
         // The agent does not close a browser a person took over; the person (without `driver`) closes it.
@@ -234,11 +289,19 @@ export class CdpBrowser implements BrowserDriver {
         if (s) s.policy = (args as OpArgs<"browser.policy">).policy;
         return { applied: !!s };
       }
-      case "live_view.input":
-        return this.input(agent, args as OpArgs<"live_view.input">);
+      case "live_view.input": {
+        const s = this.sessions.get(agent.id);
+        return s
+          ? underSignal(s, signal, this.page(s).sessionId, () =>
+              this.input(agent, args as OpArgs<"live_view.input">),
+            )
+          : this.input(agent, args as OpArgs<"live_view.input">);
+      }
       case "live_view.start": {
         const a = args as OpArgs<"live_view.start">;
         const s = await this.session(agent, send, a.policy);
+        // Aborted while the browser started: the stream does not start (the browser stays open).
+        if (signal?.aborted) throw canceled();
         s.policy = a.policy;
         return this.startStream(s, a.fps);
       }
@@ -248,7 +311,9 @@ export class CdpBrowser implements BrowserDriver {
         if (!s) throw new RunnerError("not_found", "Your browser is not open; call browser_navigate first");
         const run = s.lock.then(async () => {
           if (s.policy.driver === "person") throw personDriving();
-          const r = await within(this.inspect(s, a), this.opts.opTimeoutMs ?? OP_TIMEOUT_MS);
+          const r = await underSignal(s, signal, this.page(s).sessionId, () =>
+            within(this.inspect(s, a), this.opts.opTimeoutMs ?? OP_TIMEOUT_MS),
+          );
           if (!r) throw new RunnerError("timeout", "The page did not answer in time");
           return r;
         });
@@ -261,6 +326,8 @@ export class CdpBrowser implements BrowserDriver {
         const policy: BrowserPolicy = { ...a.policy, driver: "agent" };
         const s = await this.session(agent, send, policy);
         const run = s.lock.then(async () => {
+          // Aborted while the browser started or another action ran: this one does not begin.
+          if (signal?.aborted) throw canceled();
           // The person took over after the server checked: the action does not happen (the server waits for them to hand it back).
           if (s.policy.driver === "person") throw personDriving();
           s.policy = policy;
@@ -268,11 +335,13 @@ export class CdpBrowser implements BrowserDriver {
           // What the page tried after the previous answer goes along with this one, marked: it is not from this action.
           s.blocked = s.blocked.map((b) => ({ ...b, before: true }));
           try {
-            const work =
+            const work = () =>
               op === "browser.open"
                 ? this.open(s, (a as OpArgs<"browser.open">).url)
                 : this.act(s, a as OpArgs<"browser.act">);
-            const r = await within(work, this.opts.opTimeoutMs ?? OP_TIMEOUT_MS);
+            const r = await underSignal(s, signal, this.page(s).sessionId, () =>
+              within(work(), this.opts.opTimeoutMs ?? OP_TIMEOUT_MS),
+            );
             if (!r) throw new RunnerError("timeout", "The page did not answer in time");
             return await this.forAgent(s, await this.withEvidence(s, r));
           } finally {
@@ -449,6 +518,10 @@ export class CdpBrowser implements BrowserDriver {
         frames: new Map(),
         blocked: [],
         dialogs: [],
+        signal: null,
+      };
+      cdp.guard = (method) => {
+        if (s.signal?.aborted && ACTING.has(method)) throw canceled();
       };
       ref = s;
       proc.on("exit", () => {

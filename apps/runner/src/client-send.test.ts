@@ -502,7 +502,7 @@ test("property: reads of the secrets that end in any order never take a mask out
   }
 });
 
-test("property: a request aborted at any point of waiting has no effect and no answer (write, exec, job.start)", async () => {
+test("property: a request aborted at any point of waiting has no effect and no answer (write, exec, job.start, secret.remove)", async () => {
   const home = mkdtempSync(join(tmpdir(), "runner-abort-"));
   try {
     const work = join(home, "ws");
@@ -521,11 +521,20 @@ test("property: a request aborted at any point of waiting has no effect and no a
       if (k === abortAt) abort();
       return value;
     };
+    const removed: string[] = [];
+    // The point at which the op's effect happened: an abort after it is not "before the effect".
+    let effectAt = Number.POSITIVE_INFINITY;
     const secrets = {
       masks: () => gate([] as [string, string][]),
       materialize: () => gate({ env: {}, masks: [] as [string, string][], release: () => {} }),
       secretFiles: () => [],
       lock: () => {},
+      // A sync op: only the check of the request itself stands between the abort and its effect.
+      remove: (_a: unknown, name: string) => {
+        effectAt = points;
+        removed.push(name);
+        return { removed: true };
+      },
     };
     const policy = defaultPolicyContext(home);
     const cases = [
@@ -551,13 +560,18 @@ test("property: a request aborted at any point of waiting has no effect and no a
           (jobs?.pending() ?? []).some((j) => j.jobId === `job_${String(n).padStart(8, "0")}`),
       },
     ];
+    const all: { op: string; args: (n: number) => object; effect: (n: number, jobs?: Jobs) => boolean }[] = [
+      ...cases,
+      { op: "secret.remove", args: (n) => ({ name: `S${n}` }), effect: (n) => removed.includes(`S${n}`) },
+    ];
     let n = 0;
     const tried: Record<string, number> = {};
-    for (const kase of cases) {
+    for (const kase of all) {
       for (let at = -1; ; at++) {
         n++;
         points = 0;
         abortAt = at;
+        effectAt = Number.POSITIVE_INFINITY;
         const jobs = new Jobs({
           home: join(home, `h${n}`),
           access,
@@ -599,13 +613,13 @@ test("property: a request aborted at any point of waiting has no effect and no a
           expect([kase.op, effect, answered]).toEqual([kase.op, true, true]);
           continue;
         }
-        if (at >= points) break;
+        if (at >= Math.min(points, effectAt)) break;
         expect([kase.op, at, effect, answered]).toEqual([kase.op, at, false, false]);
         tried[kase.op] = (tried[kase.op] ?? 0) + 1;
       }
     }
     console.log(`[abort] aborted at every waiting point: ${JSON.stringify(tried)}`);
-    expect(Object.keys(tried).sort()).toEqual(["exec", "job.start", "write"]);
+    expect(Object.keys(tried).sort()).toEqual(["exec", "job.start", "secret.remove", "write"]);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

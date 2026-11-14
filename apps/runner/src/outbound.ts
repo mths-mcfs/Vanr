@@ -268,8 +268,7 @@ export const INVALID: Record<RunnerFrame["type"], string> = {
   "harness.tool": "the tool call with an empty input",
   "access.changed": "the failing folder left out; no access if the tools fail",
   "sandbox.changed": "the sandbox unavailable, with the error as the reason",
-  "live_view.frame":
-    "the failing field neutral; dropped only over the size limit (the next frame replaces it)",
+  "live_view.frame": "dropped (the next frame replaces it); a 0 size would misplace the person's clicks",
   "live_view.stream_ended": "the stream ended with reason error; dropped without a valid agent id",
 };
 
@@ -432,6 +431,13 @@ type Fix =
 const NONE = Symbol("no neutral value");
 
 /**
+ * Required fields whose neutral value would do harm on the other side, so a frame that fails there is not
+ * repaired: the size of a live frame is how the viewer maps the person's clicks onto the page (0 would put
+ * every click at the left edge); the next frame replaces a dropped one.
+ */
+export const NO_NEUTRAL = new Set(["live_view.frame:width", "live_view.frame:height"]);
+
+/**
  * The neutral value of a schema's type: a list `[]`, a text `""`, a number 0, a record `{}`, and an object
  * made of the neutral values of its required fields (an optional one left out, a nullable one null). `NONE`
  * when some part has none (an enum, a literal, a boolean, a free value).
@@ -501,7 +507,8 @@ function fixAt(frame: Record<string, unknown>, path: PropertyKey[]): Fix | null 
   // an id and a free value have no neutral one.
   if (last && path.length === steps.length) {
     const neutral = neutralOf(last.schema);
-    const id = `${String(frame.type)}:${last.at}` in EXEMPT_IDS;
+    const at = `${String(frame.type)}:${last.at}`;
+    const id = at in EXEMPT_IDS || NO_NEUTRAL.has(at);
     if (neutral !== NONE && !id && JSON.stringify(last.holder[last.key]) !== JSON.stringify(neutral))
       return { holder: last.holder, key: last.key, how: "set", value: neutral };
   }
