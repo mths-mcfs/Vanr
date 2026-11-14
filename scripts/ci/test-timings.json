@@ -51,6 +51,7 @@
     "packages/engine/src/search-query.test.ts": 15,
     "packages/engine/src/embeddings.test.ts": 20,
     "packages/engine/src/models/anthropic.test.ts": 60,
-    "packages/engine/src/models/catalog.test.ts": 10
+    "packages/engine/src/models/catalog.test.ts": 10,
+    "packages/engine/src/models/anthropic-stream.test.ts": 150
   }
 }

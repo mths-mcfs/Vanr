@@ -62,7 +62,8 @@ function toParam(m: ModelMessage): Anthropic.MessageParam {
   return { role: m.role, content };
 }
 
-function stopOf(reason: Anthropic.Message["stop_reason"]): StopReason {
+/** The stop reason as text: a value this version does not know reads as `other`. */
+function stopOf(reason: string | null): StopReason {
   switch (reason) {
     case "end_turn":
     case "stop_sequence":
@@ -146,9 +147,10 @@ function parse<T>(schema: z.ZodType<T>, value: unknown, what: string): T {
   return r.data;
 }
 
-function contentOf(message: Anthropic.Message): ModelContent[] {
+/** The runtime's content from the assembled blocks (each one already checked when it arrived). */
+function contentOf(blocks: readonly Block[]): ModelContent[] {
   const out: ModelContent[] = [];
-  for (const block of message.content) {
+  for (const block of blocks) {
     if (block.type === "text") {
       const text = parse(ApiText, block, "text block");
       const citations: Citation[] = [];
@@ -196,7 +198,7 @@ function iterationsOf(raw: unknown): UsageIteration[] {
  * The response usage in the runtime's format: 1 h cache, speed, region and each iteration. With no
  * well-formed iteration, the top-level usage is the whole call.
  */
-export function usageOf(raw: Anthropic.Usage): Usage {
+export function usageOf(raw: unknown): Usage {
   const u = parse(ApiUsage, raw, "usage");
   const iterations = iterationsOf(u.iterations);
   const write1h = u.cache_creation?.ephemeral_1h_input_tokens;
@@ -206,11 +208,218 @@ export function usageOf(raw: Anthropic.Usage): Usage {
     cacheWriteTokens: u.cache_creation_input_tokens ?? 0,
     outputTokens: u.output_tokens,
     ...(write1h ? { cacheWrite1hTokens: write1h } : {}),
-    ...(u.speed ? { speed: u.speed } : {}),
+    ...(u.speed != null ? { speed: u.speed } : {}),
     ...(u.inference_geo ? { inferenceGeo: u.inference_geo } : {}),
     ...(u.service_tier ? { serviceTier: u.service_tier } : {}),
     ...(iterations.length ? { iterations } : {}),
   };
+}
+
+// ---- The stream, one event at a time ----
+
+/** A content block as it arrived (fields the SDK may add are kept: the block goes back unchanged). */
+type Block = { type: string } & Record<string, unknown>;
+const AnyBlock = z.looseObject({ type: z.string() });
+const ApiThinking = z.object({ thinking: z.string(), signature: z.string().optional() });
+/** Block types whose input arrives as JSON pieces (`input_json_delta`). */
+const TOOL_INPUT_BLOCKS = new Set(["tool_use", "server_tool_use", "mcp_tool_use"]);
+
+const BlockEvent = z.object({ index: z.number().int().nonnegative() });
+const BlockStart = BlockEvent.extend({ content_block: AnyBlock });
+const BlockDelta = BlockEvent.extend({ delta: AnyBlock });
+const MessageStart = z.object({ message: z.object({ content: z.array(AnyBlock), usage: z.unknown() }) });
+const MessageDelta = z.object({
+  delta: z.object({ stop_reason: z.string().nullish() }),
+  usage: z.object({
+    input_tokens: optionalCount,
+    output_tokens: tokenCount,
+    cache_read_input_tokens: optionalCount,
+    cache_creation_input_tokens: optionalCount,
+    iterations: z.unknown().optional(),
+  }),
+});
+const TextDelta = z.object({ text: z.string() });
+const CitationsDelta = z.object({ citation: AnyBlock });
+const JsonDelta = z.object({ partial_json: z.string() });
+const ThinkingDelta = z.object({ thinking: z.string() });
+const SignatureDelta = z.object({ signature: z.string() });
+
+/** Tool input that is not JSON once its block closes: the one failure worth a fresh request. */
+class ToolInputJsonError extends Error {}
+
+function malformed(message: string): ModelError {
+  return new ModelError("invalid_response", `Invalid stream: ${message}`);
+}
+
+/** Counts the stream carries as totals: a later total never lowers one already seen (the budget errs up). */
+const COUNTERS = [
+  "input_tokens",
+  "output_tokens",
+  "cache_read_input_tokens",
+  "cache_creation_input_tokens",
+] as const;
+
+/**
+ * The stream as a small automaton: `message_start` once, then blocks opened, filled and closed one
+ * at a time in index order, then `message_delta`s and `message_stop`. Every event is checked against
+ * the state and its schema when it arrives, before anything is accumulated or handed on; what does not
+ * fit is an invalid response. Unknown event and delta types are skipped, as the SDK skips them.
+ */
+class StreamAssembler {
+  private phase: "before" | "message" | "stopped" = "before";
+  private readonly blocks: Block[] = [];
+  private open: { index: number; json: string | null } | null = null;
+  private readonly toolIds = new Set<string>();
+  private usage: Record<string, unknown> = {};
+  private iterations: unknown;
+  endedWith: string | null = null;
+
+  /** Checks one event and returns what the consumer sees now (text pieces, the thinking signal). */
+  push(raw: unknown): ModelEvent[] {
+    const event = parse(AnyBlock, raw, "stream event");
+    switch (event.type) {
+      case "message_start": {
+        if (this.phase !== "before") throw malformed("a second message_start");
+        const { message } = parse(MessageStart, event, "message_start");
+        this.usage = { ...parse(ApiUsage, message.usage, "usage") };
+        this.phase = "message";
+        const out: ModelEvent[] = [];
+        for (const block of message.content) out.push(...this.addBlock(block));
+        return out;
+      }
+      case "content_block_start": {
+        this.inMessage(event.type);
+        const { index, content_block } = parse(BlockStart, event, "content_block_start");
+        if (this.open) throw malformed(`block ${index} opened while block ${this.open.index} is open`);
+        if (index !== this.blocks.length)
+          throw malformed(`block ${index} opened where block ${this.blocks.length} was due`);
+        const out = this.addBlock(content_block);
+        this.open = { index, json: TOOL_INPUT_BLOCKS.has(content_block.type) ? "" : null };
+        return out;
+      }
+      case "content_block_delta": {
+        this.inMessage(event.type);
+        const { index, delta } = parse(BlockDelta, event, "content_block_delta");
+        const block = this.openBlock(index, event.type);
+        return this.applyDelta(block, delta);
+      }
+      case "content_block_stop": {
+        this.inMessage(event.type);
+        const { index } = parse(BlockEvent, event, "content_block_stop");
+        const block = this.openBlock(index, event.type);
+        const json = this.open?.json;
+        if (json) {
+          try {
+            block.input = JSON.parse(json);
+          } catch {
+            throw new ToolInputJsonError(`Tool input of block ${index} is not JSON`);
+          }
+        }
+        this.open = null;
+        return [];
+      }
+      case "message_delta": {
+        this.inMessage(event.type);
+        if (this.open) throw malformed(`message_delta while block ${this.open.index} is open`);
+        const d = parse(MessageDelta, event, "message_delta");
+        for (const key of COUNTERS) {
+          const value = d.usage[key];
+          const seen = this.usage[key];
+          if (value != null) this.usage[key] = typeof seen === "number" ? Math.max(seen, value) : value;
+        }
+        if (d.usage.iterations != null) this.iterations = d.usage.iterations;
+        if (d.delta.stop_reason != null) this.endedWith = d.delta.stop_reason;
+        return [];
+      }
+      case "message_stop": {
+        this.inMessage(event.type);
+        if (this.open) throw malformed(`message_stop while block ${this.open.index} is open`);
+        this.phase = "stopped";
+        return [];
+      }
+      default:
+        if (this.phase === "stopped") throw malformed(`${event.type} after message_stop`);
+        return [];
+    }
+  }
+
+  /** The finished message: its blocks as they go back to the API, and its usage. */
+  finish(): { blocks: Block[]; usage: Usage } {
+    if (this.phase !== "stopped") throw malformed("the stream ended before message_stop");
+    const usage = this.iterations == null ? this.usage : { ...this.usage, iterations: this.iterations };
+    return { blocks: this.blocks, usage: usageOf(usage) };
+  }
+
+  private inMessage(type: string) {
+    if (this.phase === "before") throw malformed(`${type} before message_start`);
+    if (this.phase === "stopped") throw malformed(`${type} after message_stop`);
+  }
+
+  private openBlock(index: number, type: string): Block {
+    const block = this.blocks[index];
+    if (!this.open || this.open.index !== index || !block)
+      throw malformed(`${type} for block ${index}, which is not open`);
+    return block;
+  }
+
+  private addBlock(source: Block): ModelEvent[] {
+    const block: Block = { ...source };
+    const out: ModelEvent[] = [];
+    if (block.type === "text") {
+      const text = parse(ApiText, block, "text block");
+      for (const c of text.citations ?? [])
+        if (c.type === "search_result_location") parse(ApiCitation, c, "citation");
+      if (text.text) out.push({ type: "text", text: text.text });
+    } else if (block.type === "tool_use") {
+      const tool = parse(ApiToolUse, block, "tool block");
+      if (this.toolIds.has(tool.id)) throw malformed(`tool id ${tool.id} used twice`);
+      this.toolIds.add(tool.id);
+    } else if (block.type === "thinking") {
+      parse(ApiThinking, block, "thinking block");
+      out.push({ type: "thinking" });
+    }
+    this.blocks.push(block);
+    return out;
+  }
+
+  private applyDelta(block: Block, delta: Block): ModelEvent[] {
+    const on = (types: readonly string[]) => {
+      if (!types.includes(block.type)) throw malformed(`${delta.type} on a ${block.type} block`);
+    };
+    switch (delta.type) {
+      case "text_delta": {
+        on(["text"]);
+        const { text } = parse(TextDelta, delta, "text_delta");
+        block.text = `${typeof block.text === "string" ? block.text : ""}${text}`;
+        return [{ type: "text", text }];
+      }
+      case "citations_delta": {
+        on(["text"]);
+        const { citation } = parse(CitationsDelta, delta, "citations_delta");
+        if (citation.type === "search_result_location") parse(ApiCitation, citation, "citation");
+        block.citations = [...(Array.isArray(block.citations) ? block.citations : []), citation];
+        return [];
+      }
+      case "input_json_delta": {
+        if (!this.open || this.open.json === null)
+          throw malformed(`input_json_delta on a ${block.type} block`);
+        this.open.json += parse(JsonDelta, delta, "input_json_delta").partial_json;
+        return [];
+      }
+      case "thinking_delta": {
+        on(["thinking"]);
+        block.thinking = `${typeof block.thinking === "string" ? block.thinking : ""}${parse(ThinkingDelta, delta, "thinking_delta").thinking}`;
+        return [];
+      }
+      case "signature_delta": {
+        on(["thinking"]);
+        block.signature = parse(SignatureDelta, delta, "signature_delta").signature;
+        return [];
+      }
+      default:
+        return [];
+    }
+  }
 }
 
 function mapError(err: unknown): unknown {
@@ -268,7 +477,8 @@ export function anthropicProvider(apiKey: string, opts: { fetch?: typeof fetch }
         signal: req.signal,
         ...(req.advisor ? { headers: { "anthropic-beta": ADVISOR_BETA } } : {}),
       };
-      const params: Anthropic.MessageStreamParams = {
+      const params: Anthropic.MessageCreateParamsStreaming = {
+        stream: true,
         model: req.model,
         max_tokens: req.maxTokens,
         // Tools come before the system prompt: the cache point on the system prompt covers both.
@@ -279,45 +489,38 @@ export function anthropicProvider(apiKey: string, opts: { fetch?: typeof fetch }
         cache_control: { type: "ephemeral" },
       };
       for (let attempt = 0; ; attempt++) {
-        const stream = client.messages.stream(params, options);
-        const pending: ModelEvent[] = [];
+        const assembler = new StreamAssembler();
         let streamed = false;
-        // The SDK's stable stream does not copy `usage.iterations` from `message_delta` into the final
-        // message; without this, the advisor's cost would vanish from the ledger.
-        let iterations: unknown;
-        stream.on("text", (delta) => pending.push({ type: "text", text: delta }));
         try {
+          // The raw event stream: the SDK's accumulator would merge events before they could be checked.
+          const stream = await client.messages.create(params, options);
           for await (const event of stream) {
-            if (event.type === "message_delta") {
-              const it: unknown = Reflect.get(event.usage, "iterations");
-              if (it != null) iterations = it;
-            }
-            if (event.type === "content_block_start" && event.content_block.type === "thinking") {
-              yield { type: "thinking" };
-            }
-            while (pending.length) {
-              streamed = true;
-              yield pending.shift() as ModelEvent;
+            for (const out of assembler.push(event)) {
+              if (out.type === "text") streamed = true;
+              yield out;
             }
           }
-          const message = await stream.finalMessage();
-          while (pending.length) yield pending.shift() as ModelEvent;
-          const usage = iterations == null ? message.usage : { ...message.usage, iterations };
-          const stop = stopOf(message.stop_reason);
-          const content = contentOf(message);
+          const { blocks, usage } = assembler.finish();
+          const stop = stopOf(assembler.endedWith);
+          const content = contentOf(blocks);
           // Tool input cut at the token limit does not run.
           if (stop === "max_tokens" && content.some((c) => c.type === "tool_use")) {
             throw new ModelError("invalid_tool_input", "Tool input was cut at max_tokens");
           }
-          yield { type: "turn", content, raw: message.content, stop, usage: usageOf(usage) };
+          yield { type: "turn", content, raw: blocks, stop, usage };
           return;
         } catch (err) {
           if (req.signal.aborted || err instanceof ModelError) throw err;
           if (err instanceof Anthropic.APIError) throw mapError(err);
           // With eager_input_streaming, an input that does not parse as JSON rejects the turn. Retries a
           // few times, only if nothing was shown yet (otherwise the streamed text would come out twice).
-          if (!streamed && attempt < JSON_RETRIES) continue;
-          throw new ModelError("invalid_tool_input", err instanceof Error ? err.message : String(err));
+          if (err instanceof ToolInputJsonError) {
+            if (!streamed && attempt < JSON_RETRIES) continue;
+            throw new ModelError("invalid_tool_input", err.message);
+          }
+          // The SDK could not read the stream itself (an event that is not JSON): a malformed response.
+          if (err instanceof Anthropic.AnthropicError) throw new ModelError("invalid_response", err.message);
+          throw new ModelError("network", err instanceof Error ? err.message : String(err));
         }
       }
     },
