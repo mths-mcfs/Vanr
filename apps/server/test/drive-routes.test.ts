@@ -13,7 +13,7 @@ import { expireUploads, PART_SIZE } from "../src/routes/drive-upload";
 import type { RunningServer } from "../src/server";
 import { makeDocx, makePdf, makePng, makePptx, makeXlsx } from "./files";
 import { Browser, body, signedIn, startTestServer } from "./harness";
-import { memberOf, type Person, seedChannel, seedWorkspace } from "./seed";
+import { memberOf, type Person, seedChannel, seedDm, seedWorkspace } from "./seed";
 
 let server: RunningServer;
 let skew = 0;
@@ -162,12 +162,7 @@ describe("access: workspace scope and visibility", () => {
   test("a private channel's file and a DM's file: whoever doesn't read the channel doesn't list, open nor download it", async () => {
     const { workspaceId, board, ana, beto } = await team();
     const caio = await memberOf(server, workspaceId, "Caio", email("caio"));
-    const dm = await seedChannel(server, workspaceId, {
-      name: "dm",
-      kind: "dm",
-      visibility: "private",
-      members: [ana, beto],
-    });
+    const dm = await seedDm(server, workspaceId, ana, beto);
     const secret = await uploaded(ana, workspaceId, "board salaries", "salaries.txt", { channelId: board });
     const inDm = await uploaded(ana, workspaceId, "just us", "dm.txt", { channelId: dm });
     const open = await uploaded(ana, workspaceId, "for everyone", "open.txt");
@@ -189,7 +184,7 @@ describe("access: workspace scope and visibility", () => {
   });
 
   test("writing into a private channel the person doesn't belong to is rejected; a public one, they join by writing", async () => {
-    const { workspaceId, general, board, beto } = await team();
+    const { workspaceId, board, ana, beto } = await team();
     expect((await upload(beto, workspaceId, "x", "x.txt", { channelId: board })).status).toBe(404);
     const doc = await beto.browser.json(`${W(workspaceId)}/files`, "POST", {
       title: "Plan",
@@ -204,13 +199,19 @@ describe("access: workspace scope and visibility", () => {
     });
     expect(start.status).toBe(404);
     expect((await body(await beto.browser.fetch(`${W(workspaceId)}/files`))).files).toEqual([]);
-    const ok = await uploaded(beto, workspaceId, "hi", "hi.txt", { channelId: general });
-    expect(ok.channelId).toBe(general);
-    const joined = await server.deps.db
-      .select()
-      .from(schema.channelMemberships)
-      .where(eq(schema.channelMemberships.channelId, general));
-    expect(joined.map((m) => m.memberId)).toContain(beto.user.id);
+    // A public channel Beto hasn't joined (he is in #general already, like everyone who joins).
+    const lounge = await seedChannel(server, workspaceId, { name: "lounge", members: [ana] });
+    const membersOf = async () =>
+      (
+        await server.deps.db
+          .select()
+          .from(schema.channelMemberships)
+          .where(eq(schema.channelMemberships.channelId, lounge))
+      ).map((m) => m.memberId);
+    expect(await membersOf()).not.toContain(beto.user.id);
+    const ok = await uploaded(beto, workspaceId, "hi", "hi.txt", { channelId: lounge });
+    expect(ok.channelId).toBe(lounge);
+    expect(await membersOf()).toContain(beto.user.id);
   });
 
   test("a thread needs its channel, and a thread of another channel is not found", async () => {

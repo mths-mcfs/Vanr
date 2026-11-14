@@ -13,7 +13,7 @@ import { ASK_LIMIT } from "../src/search-ask";
 import { backfillSearch, reindex } from "../src/search-index";
 import type { RunningServer } from "../src/server";
 import { Browser, body, signedIn, startTestServer } from "./harness";
-import { memberOf, type Person, seedChannel, seedWorkspace } from "./seed";
+import { memberOf, type Person, seedChannel, seedDm, seedWorkspace } from "./seed";
 
 let server: RunningServer;
 beforeAll(async () => {
@@ -65,12 +65,7 @@ async function message(workspaceId: string, channelId: string, who: Person, text
 describe("search: the permission in the WHERE (attacks)", () => {
   test("a DM of Ana and Beto doesn't show to Caio; a private channel only to members, not even through operators", async () => {
     const { workspaceId, sales, ana, beto, caio } = await team();
-    const dm = await seedChannel(server, workspaceId, {
-      name: "dm",
-      kind: "dm",
-      visibility: "private",
-      members: [ana, beto],
-    });
+    const dm = await seedDm(server, workspaceId, ana, beto);
     await message(workspaceId, dm, ana, "password of the blue vault");
     await message(workspaceId, sales, beto, "secret vault target");
     expect((await search(beto, workspaceId, "vault")).map((h) => h.snippet).sort()).toEqual([
