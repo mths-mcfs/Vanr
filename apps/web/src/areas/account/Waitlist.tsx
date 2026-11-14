@@ -4,6 +4,7 @@ import { useState } from "react";
 import { z } from "zod";
 import { AppLink, useSearch } from "../../app/navigation.tsx";
 import { useLocale, useMessages } from "../../i18n/react.tsx";
+import { linkToken } from "../../session/redirect.ts";
 import { AccountForm, AccountPage, emailProblem, ServerProblem, useOnce, useSubmit } from "./shared.tsx";
 
 /** Sign-up is closed and the person has no invitation: they can leave an email. */
@@ -22,8 +23,8 @@ export function WaitlistForm({
   const [joined, setJoined] = useState<string | undefined>();
   const emailError = emailProblem(email);
 
-  const submit = useSubmit(async () => {
-    await api.createWaitlist({ body: { email: email.trim(), locale } });
+  const submit = useSubmit(async ({ signal }) => {
+    await api.createWaitlist({ body: { email: email.trim(), locale } }, { signal });
     setJoined(email.trim());
   });
 
@@ -72,11 +73,7 @@ export function WaitlistForm({
             onChange={(event) => setEmail(event.target.value)}
           />
         </Field>
-        <ServerProblem
-          error={submit.error}
-          failureTime={submit.failureTime}
-          onRetry={() => void submit.run()}
-        />
+        <ServerProblem error={submit.error} waitUntil={submit.waitUntil} onRetry={() => void submit.run()} />
         <div className="acct__actions">
           <Button type="submit" variant="primary" size="lg" loading={submit.busy}>
             {t("waitlist.submit")}
@@ -93,8 +90,8 @@ const NO_SEARCH: z.infer<typeof ConfirmSearch> = {};
 /** The address in the waitlist email: `/?confirm=<token>`. Confirming twice is harmless. */
 export function WaitlistConfirmScreen() {
   const t = useMessages("account");
-  const { confirm } = useSearch(ConfirmSearch, NO_SEARCH);
-  const { api } = useVanrClient();
+  const confirm = linkToken(useSearch(ConfirmSearch, NO_SEARCH).confirm);
+  const api = useVanrClient().api;
   const confirmation = useOnce(confirm ?? "", confirm !== undefined, () =>
     api.confirmWaitlist({ body: { token: confirm ?? "" } }),
   );

@@ -17,7 +17,7 @@ import {
   Skeleton,
 } from "@vanr/ui";
 import { ChevronsUpDown, Ellipsis } from "lucide-react";
-import { type ComponentType, Suspense, use } from "react";
+import { type ComponentType, Suspense, use, useRef } from "react";
 import { loadSidebarChannels } from "../app/areas.ts";
 import { AppLink, useGo } from "../app/navigation.tsx";
 import { isTheme, THEMES, useTheme } from "../app/theme.tsx";
@@ -44,11 +44,39 @@ export type SidebarProps = {
   /** The agents in the middle of a run; "loading" and "failed" while that is not known. */
   working: Agent[] | "loading" | "failed";
   onRetryWorking: () => void;
+  /** Moves focus to the open screen: where it goes after a menu sent the person somewhere. */
+  focusContent: () => void;
 };
 
-function WorkspaceMenu({ me, workspace }: Pick<SidebarProps, "me" | "workspace">) {
+/**
+ * Where focus goes when a menu closes. Dismissed, it returns to the button that opened it (the
+ * menu's own rule). Closed by an item that goes somewhere, it moves to the content instead:
+ * wrap that item's action in `leave`.
+ */
+function useMenuFocus(focusContent: () => void) {
+  const leaving = useRef(false);
+  return {
+    leave: (action: () => void) => {
+      leaving.current = true;
+      action();
+    },
+    onCloseAutoFocus: (event: Event) => {
+      if (!leaving.current) return;
+      leaving.current = false;
+      event.preventDefault();
+      focusContent();
+    },
+  };
+}
+
+function WorkspaceMenu({
+  me,
+  workspace,
+  focusContent,
+}: Pick<SidebarProps, "me" | "workspace" | "focusContent">) {
   const t = useMessages("shell");
   const go = useGo();
+  const focus = useMenuFocus(focusContent);
   const workspaceId = workspace.id;
   return (
     <Menu>
@@ -62,9 +90,12 @@ function WorkspaceMenu({ me, workspace }: Pick<SidebarProps, "me" | "workspace">
           <Icon icon={ChevronsUpDown} size="sm" className="side__chevron" />
         </button>
       </MenuTrigger>
-      <MenuContent>
+      <MenuContent onCloseAutoFocus={focus.onCloseAutoFocus}>
         <MenuLabel>{t("workspace.switch")}</MenuLabel>
-        <MenuRadioGroup value={workspaceId} onValueChange={(next) => void go("home", { workspaceId: next })}>
+        <MenuRadioGroup
+          value={workspaceId}
+          onValueChange={(next) => focus.leave(() => void go("home", { workspaceId: next }))}
+        >
           {me.workspaces.map((candidate) => (
             <MenuRadioItem key={candidate.id} value={candidate.id}>
               {candidate.name}
@@ -72,23 +103,34 @@ function WorkspaceMenu({ me, workspace }: Pick<SidebarProps, "me" | "workspace">
           ))}
         </MenuRadioGroup>
         <MenuSeparator />
-        <MenuItem onSelect={() => void go("settings", { workspaceId, section: "members" })}>
+        <MenuItem
+          onSelect={() => focus.leave(() => void go("settings", { workspaceId, section: "members" }))}
+        >
           {t("workspace.members")}
         </MenuItem>
-        <MenuItem onSelect={() => void go("settings", { workspaceId, section: "general" })}>
+        <MenuItem
+          onSelect={() => focus.leave(() => void go("settings", { workspaceId, section: "general" }))}
+        >
           {t("workspace.settings")}
         </MenuItem>
         <MenuSeparator />
-        <MenuItem onSelect={() => void go("onboarding", {})}>{t("workspace.create")}</MenuItem>
+        <MenuItem onSelect={() => focus.leave(() => void go("onboarding", {}))}>
+          {t("workspace.create")}
+        </MenuItem>
       </MenuContent>
     </Menu>
   );
 }
 
-function PersonMenu({ me, workspace }: Pick<SidebarProps, "me" | "workspace">) {
+function PersonMenu({
+  me,
+  workspace,
+  focusContent,
+}: Pick<SidebarProps, "me" | "workspace" | "focusContent">) {
   const t = useMessages("shell");
   const common = useMessages("common");
   const go = useGo();
+  const focus = useMenuFocus(focusContent);
   const signOut = useSignOut();
   const { locale, setLocale } = useLocale();
   const { theme, setTheme } = useTheme();
@@ -105,9 +147,13 @@ function PersonMenu({ me, workspace }: Pick<SidebarProps, "me" | "workspace">) {
           <Icon icon={Ellipsis} size="sm" className="side__chevron" />
         </button>
       </MenuTrigger>
-      <MenuContent side="top">
+      <MenuContent side="top" onCloseAutoFocus={focus.onCloseAutoFocus}>
         <MenuLabel>{me.user.email}</MenuLabel>
-        <MenuItem onSelect={() => void go("settings", { workspaceId: workspace.id, section: "profile" })}>
+        <MenuItem
+          onSelect={() =>
+            focus.leave(() => void go("settings", { workspaceId: workspace.id, section: "profile" }))
+          }
+        >
           {t("person.profile")}
         </MenuItem>
         <MenuSeparator />
@@ -216,14 +262,14 @@ function WorkingNow({
   );
 }
 
-export function Sidebar({ me, workspace, counts, working, onRetryWorking }: SidebarProps) {
+export function Sidebar({ me, workspace, counts, working, onRetryWorking, focusContent }: SidebarProps) {
   const t = useMessages("shell");
   const workspaceId = workspace.id;
   const channelsId = "side-channels";
   return (
     <div className="side">
       <div className="side__workspace">
-        <WorkspaceMenu me={me} workspace={workspace} />
+        <WorkspaceMenu me={me} workspace={workspace} focusContent={focusContent} />
       </div>
       <div className="side__scroll">
         <nav className="side__nav" aria-label={t("nav.label")}>
@@ -261,7 +307,7 @@ export function Sidebar({ me, workspace, counts, working, onRetryWorking }: Side
       </div>
       <WorkingNow workspaceId={workspaceId} working={working} onRetry={onRetryWorking} />
       <div className="side__person">
-        <PersonMenu me={me} workspace={workspace} />
+        <PersonMenu me={me} workspace={workspace} focusContent={focusContent} />
       </div>
     </div>
   );

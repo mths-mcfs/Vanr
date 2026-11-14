@@ -7,6 +7,7 @@ import { AppLink, useSearch } from "../../app/navigation.tsx";
 import { useMessages } from "../../i18n/react.tsx";
 import { href } from "../../routes.ts";
 import { useSession } from "../../session/react.tsx";
+import { linkToken } from "../../session/redirect.ts";
 import { AccountPage, ServerProblem, useOnce, useSubmit } from "./shared.tsx";
 
 const Search = z.object({ token: z.string().optional(), error: z.string().optional() });
@@ -20,10 +21,14 @@ export function VerifyEmailScreen() {
   const t = useMessages("account");
   const search = useSearch(Search, NO_SEARCH);
   const auth = useAuth();
-  const verification = useOnce(search.token ?? "", search.token !== undefined, () =>
-    auth.verifyEmail({ query: { token: search.token ?? "" } }),
+  const token = linkToken(search.token);
+  const verification = useOnce(token ?? "", token !== undefined, () =>
+    auth.verifyEmail({ query: { token: token ?? "" } }),
   );
-  const failed = search.token === undefined ? search.error !== undefined : verification === "failed";
+  const failed =
+    token === undefined
+      ? search.error !== undefined || search.token !== undefined
+      : verification === "failed";
   if (failed) return <LinkFailed />;
   if (verification === "working") {
     return (
@@ -49,11 +54,12 @@ function LinkFailed() {
   const { origin } = useRuntime();
   const { me } = useSession();
   const [sentTo, setSentTo] = useState<string | undefined>();
-  const resend = useSubmit(async () => {
+  const resend = useSubmit(async ({ signal }) => {
     if (me === null || me === undefined) return;
-    await auth.sendVerificationEmail({
-      body: { email: me.user.email, callbackURL: `${origin}${href("verifyEmail", {})}` },
-    });
+    await auth.sendVerificationEmail(
+      { body: { email: me.user.email, callbackURL: `${origin}${href("verifyEmail", {})}` } },
+      { signal },
+    );
     setSentTo(me.user.email);
   });
   return (
@@ -76,7 +82,7 @@ function LinkFailed() {
           <>
             <ServerProblem
               error={resend.error}
-              failureTime={resend.failureTime}
+              waitUntil={resend.waitUntil}
               onRetry={() => void resend.run()}
             />
             <div className="acct__actions">

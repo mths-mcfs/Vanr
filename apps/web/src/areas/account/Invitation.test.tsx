@@ -140,3 +140,18 @@ describe("invitation", () => {
     expect(screen.getByRole("button", { name: "Entrar para aceitar" })).toBeDefined();
   });
 });
+
+describe("an invitation address that carries no token", () => {
+  test("a token with a space in it: the expired screen, nothing asked and nothing to ask for", async () => {
+    const app = await renderApp({ path: "/invite/a%20b" });
+    await screen.findByRole("heading", { level: 1, name: "This invitation has expired" });
+    expect(screen.queryByRole("button", { name: "Ask for a new one" })).toBeNull();
+    expect(app.server.calls.some((call) => call.method === "getInvitation")).toBe(false);
+  });
+
+  test("a broken escape in the path does not break the screen", async () => {
+    await renderApp({ path: "/invite/%" });
+    expect((await screen.findByRole("heading", { level: 1 })).textContent).not.toBe("");
+    expect(screen.queryByText("This screen stopped working")).toBeNull();
+  });
+});

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { memoryStore, STORAGE_KEYS } from "../platform/storage.ts";
 import { createDraftStore } from "./drafts.ts";
 import { createSessionGate } from "./gate.ts";
-import { safeRedirect } from "./redirect.ts";
+import { addressParts, LINK_TOKEN_MAX, linkToken, safeRedirect } from "./redirect.ts";
 
 describe("safeRedirect", () => {
   test.each([
@@ -31,12 +31,56 @@ describe("safeRedirect", () => {
     expect(safeRedirect(value)).toBeUndefined();
   });
 
+  test.each(["/invite/%", "/workspace/%E0%A4%A/agents", "/%ZZ"])(
+    "drops a path with a broken escape: %s",
+    (value) => {
+      expect(safeRedirect(value)).toBeUndefined();
+    },
+  );
+
   test.each(["/login", "/signup", "/login?redirect=/login", "/forgot-password", "/reset-password?token=x"])(
     "never returns to a sign-in screen: %s",
     (value) => {
       expect(safeRedirect(value)).toBeUndefined();
     },
   );
+});
+
+describe("values read from the address never throw", () => {
+  test("a token is text without spaces or control characters, within the limit", () => {
+    expect(linkToken("inv-mel-pending")).toBe("inv-mel-pending");
+    expect(linkToken("0012345")).toBe("0012345");
+    expect(linkToken("a".repeat(LINK_TOKEN_MAX))).toHaveLength(LINK_TOKEN_MAX);
+    for (const value of [
+      undefined,
+      null,
+      42,
+      "",
+      " ",
+      "a b",
+      "a\tb",
+      "a\nb",
+      "\u007f",
+      "a".repeat(LINK_TOKEN_MAX + 1),
+    ]) {
+      expect(linkToken(value), JSON.stringify(value)).toBeUndefined();
+    }
+  });
+
+  test("the limit is 512 characters", () => {
+    expect(LINK_TOKEN_MAX).toBe(512);
+  });
+
+  test("an address is split for the router, or is not one", () => {
+    expect(addressParts("/workspace/w1/agents?tab=all#top")).toEqual({
+      path: "/workspace/w1/agents",
+      search: { tab: "all" },
+      hash: "top",
+    });
+    for (const value of ["", "agents", "//evil.example", "https://evil.example/x", "/invite/%"]) {
+      expect(addressParts(value), value).toBeUndefined();
+    }
+  });
 });
 
 describe("drafts", () => {
@@ -110,8 +154,9 @@ describe("the session gate", () => {
   const setup = () => {
     const drafts = createDraftStore(memoryStore());
     let ended = 0;
-    const gate = createSessionGate({ drafts, onEnded: () => ended++ });
-    return { drafts, gate, ended: () => ended };
+    let renewed = 0;
+    const gate = createSessionGate({ drafts, onEnded: () => ended++, renew: () => renewed++ });
+    return { drafts, gate, ended: () => ended, renewed: () => renewed };
   };
 
   test("the end of a session is reported once, however many calls fail", () => {
@@ -125,9 +170,27 @@ describe("the session gate", () => {
   });
 
   test("a 401 before any session existed is not the end of one", () => {
-    const { gate, ended } = setup();
+    const { gate, ended, renewed } = setup();
     gate.ended();
     expect(ended()).toBe(0);
+    expect(renewed()).toBe(0);
+  });
+
+  test("the generation ends when the session ends, on signing out and when another person appears", () => {
+    const { gate, renewed } = setup();
+    gate.established("usr_ana");
+    gate.established("usr_ana");
+    expect(renewed()).toBe(0);
+    gate.ended();
+    expect(renewed()).toBe(1);
+    gate.established("usr_ana");
+    gate.leftOnPurpose();
+    expect(renewed()).toBe(2);
+    gate.established("usr_ana");
+    expect(renewed()).toBe(2);
+    gate.established("usr_jonas");
+    expect(renewed()).toBe(3);
+    expect(gate.userId()).toBe("usr_jonas");
   });
 
   test("drafts outlive the end of a session and return to the same person", () => {

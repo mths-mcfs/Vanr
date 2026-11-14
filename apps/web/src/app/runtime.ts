@@ -60,14 +60,26 @@ export function createRuntime(options: RuntimeOptions): AppRuntime {
     },
   });
   const drafts = createDraftStore(options.tabStore);
-  // The gate is built before the router it navigates with.
+  // The gate is built before what it acts on: the router it navigates with, the API whose
+  // generation it ends and the session it marks as unknown.
   let sendToSignIn = () => {};
-  const gate = createSessionGate({ drafts, onEnded: () => sendToSignIn() });
+  let renew = () => {};
+  let sessionUnknown = () => {};
+  const gate = createSessionGate({ drafts, onEnded: () => sendToSignIn(), renew: () => renew() });
   const api = createWebApi(
     options.transport(() => language.current),
-    { onUnauthorized: () => gate.ended(), clock: options.clock },
+    {
+      onUnauthorized: () => gate.ended(),
+      onSessionUnknown: () => sessionUnknown(),
+      clock: options.clock,
+    },
   );
-  const session = createSession({ client: api.client, queryClient, gate });
+  renew = () => {
+    api.renew();
+    queryClient.clear();
+  };
+  const session = createSession({ api, queryClient, gate });
+  sessionUnknown = () => session.expire();
   const router = createAppRouter({ session, store: options.store, language }, options.history);
   sendToSignIn = () => {
     const from = router.state.location;

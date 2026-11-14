@@ -80,7 +80,7 @@ describe("what the client checks before a screen sees anything", () => {
     });
   });
 
-  test("an empty path parameter is refused before any request leaves", async () => {
+  test("an empty path parameter is rejected before any request leaves", async () => {
     const { web, urls } = api(() => Response.json({}));
     const error = await failure(() => web.client.api.getOverview({ workspaceId: "" }));
     expect(error.code).toBe("invalid_request");

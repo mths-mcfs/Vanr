@@ -181,3 +181,33 @@ describe("verify email", () => {
     await screen.findByRole("heading", { level: 1, name: "Email confirmed" });
   });
 });
+
+describe("a link whose token cannot be one", () => {
+  test("reset password: the expired-link screen, and nothing is sent", async () => {
+    const app = await renderApp({ path: "/reset-password?token=a%20b" });
+    await screen.findByRole("heading", { level: 1, name: "This reset link has expired" });
+    expect(screen.queryByLabelText("New password")).toBeNull();
+    expect(app.server.calls.some((call) => call.method === "resetPassword")).toBe(false);
+  });
+
+  test("verify email: the failed-link screen, and nothing is sent", async () => {
+    const app = await renderApp({ path: `/verify-email?token=${"a".repeat(513)}` });
+    await screen.findByRole("heading", { level: 1, name: "This link did not work" });
+    expect(app.server.calls.some((call) => call.method === "verifyEmail")).toBe(false);
+  });
+
+  test("waitlist confirmation: the failed-link screen, and nothing is sent", async () => {
+    const app = await renderApp({ path: "/?confirm=a%09b" });
+    await screen.findByRole("heading", { level: 1, name: "This confirmation link did not work" });
+    expect(app.server.calls.some((call) => call.method === "confirmWaitlist")).toBe(false);
+  });
+
+  test.each(["/reset-password?token=%", "/verify-email?token=%E0%A4%A", "/?confirm=%ZZ"])(
+    "a broken escape in the query does not break the screen: %s",
+    async (path) => {
+      await renderApp({ path });
+      expect((await screen.findByRole("heading", { level: 1 })).textContent).not.toBe("");
+      expect(screen.queryByText("This screen stopped working")).toBeNull();
+    },
+  );
+});

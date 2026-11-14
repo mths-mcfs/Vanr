@@ -8,6 +8,7 @@ import { useErrorMessage } from "../../app/screens.tsx";
 import { useLocale, useMessages } from "../../i18n/react.tsx";
 import { href } from "../../routes.ts";
 import { useCompleteSignIn, useSession, useSignOut } from "../../session/react.tsx";
+import { linkToken } from "../../session/redirect.ts";
 import { AccountPage, ServerProblem, useSubmit } from "./shared.tsx";
 
 /** A date for a person; the raw text when it is not a date. */
@@ -26,9 +27,15 @@ export function InvitationScreen() {
   const t = useMessages("account");
   const common = useMessages("common");
   const describe = useErrorMessage();
-  const { token } = useRouteParams("invitation");
-  const invitation = useApiQuery("getInvitation", { invitationId: token }, { retry: false });
+  // What stands in the address may not be a token at all: then there is no invitation to ask for.
+  const token = linkToken(useRouteParams("invitation").token);
+  const invitation = useApiQuery("getInvitation", token === undefined ? undefined : { invitationId: token }, {
+    enabled: token !== undefined,
+    retry: false,
+  });
   const { me } = useSession();
+
+  if (token === undefined) return <Gone token={undefined} />;
 
   if (invitation.isPending) {
     return (
@@ -108,9 +115,9 @@ function Open({
   const carried = { redirect: here, ...(invitation.email !== null && { email: invitation.email }) };
   const [gone, setGone] = useState(false);
 
-  const accept = useSubmit(async () => {
+  const accept = useSubmit(async ({ signal }) => {
     try {
-      const { workspaceId } = await api.acceptInvitation({ invitationId: token });
+      const { workspaceId } = await api.acceptInvitation({ invitationId: token }, { signal });
       await completeSignIn();
       await go("home", { workspaceId }, { replace: true });
     } catch (cause) {
@@ -185,7 +192,7 @@ function Open({
           <p className="acct__why">{t("invite.accept.why", { email: me.user.email })}</p>
           <ServerProblem
             error={accept.error}
-            failureTime={accept.failureTime}
+            waitUntil={accept.waitUntil}
             onRetry={() => void accept.run()}
           />
           <div className="acct__actions">
@@ -200,12 +207,13 @@ function Open({
 }
 
 /** Expired, withdrawn or unknown: the person can ask whoever invited them for another. */
-function Gone({ token }: { token: string }) {
+function Gone({ token }: { token: string | undefined }) {
   const t = useMessages("account");
   const { api } = useVanrClient();
   const [asked, setAsked] = useState(false);
-  const ask = useSubmit(async () => {
-    await api.requestInvitationNew({ invitationId: token });
+  const ask = useSubmit(async ({ signal }) => {
+    if (token === undefined) return;
+    await api.requestInvitationNew({ invitationId: token }, { signal });
     setAsked(true);
   });
   return (
@@ -213,14 +221,17 @@ function Gone({ token }: { token: string }) {
       {asked ? (
         <p role="status">{t("invite.gone.requested")}</p>
       ) : (
-        <>
-          <ServerProblem error={ask.error} failureTime={ask.failureTime} onRetry={() => void ask.run()} />
-          <div className="acct__actions">
-            <Button variant="primary" size="lg" loading={ask.busy} onClick={() => void ask.run()}>
-              {t("invite.gone.action")}
-            </Button>
-          </div>
-        </>
+        // Without a token there is nothing to ask a new one for.
+        token !== undefined && (
+          <>
+            <ServerProblem error={ask.error} waitUntil={ask.waitUntil} onRetry={() => void ask.run()} />
+            <div className="acct__actions">
+              <Button variant="primary" size="lg" loading={ask.busy} onClick={() => void ask.run()}>
+                {t("invite.gone.action")}
+              </Button>
+            </div>
+          </>
+        )
       )}
     </AccountPage>
   );

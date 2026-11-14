@@ -1,9 +1,10 @@
 // Navigation by route id. Areas link and navigate with these, never with a path string, so an
 // address only ever comes from the route table.
 import { Link, useLocation, useParams, useRouter } from "@tanstack/react-router";
-import { type ComponentPropsWithRef, useCallback, useMemo } from "react";
+import { type ComponentPropsWithRef, useCallback, useEffect, useMemo, useRef } from "react";
 import type { z } from "zod";
 import { type ParamsOf, paramNames, ROUTES, type RouteId } from "../routes.ts";
+import { addressParts } from "../session/redirect.ts";
 
 type Search = Record<string, string | undefined>;
 
@@ -35,39 +36,62 @@ export function AppLink<Id extends RouteId>({
   );
 }
 
-/** Navigates to a route: `go("wikiPage", { workspaceId, pageId })`. */
+/** Whether the component calling it is still on screen. */
+function useOnScreen(): { readonly current: boolean } {
+  const onScreen = useRef(true);
+  useEffect(() => {
+    onScreen.current = true;
+    return () => {
+      onScreen.current = false;
+    };
+  }, []);
+  return onScreen;
+}
+
+/**
+ * Navigates to a route: `go("wikiPage", { workspaceId, pageId })`. Only while the component that
+ * asked is on screen: an answer that arrives after the person moved on does not move them again.
+ */
 export function useGo() {
   const router = useRouter();
+  const onScreen = useOnScreen();
   return useCallback(
-    <Id extends RouteId>(
+    async <Id extends RouteId>(
       route: Id,
       params: ParamsOf<Id>,
       options: { search?: Search; replace?: boolean } = {},
-    ) =>
-      router.navigate({
+    ): Promise<void> => {
+      if (!onScreen.current) return;
+      await router.navigate({
         to: ROUTES[route].path,
         params,
         ...(options.search !== undefined && { search: options.search }),
         ...(options.replace !== undefined && { replace: options.replace }),
-      }),
-    [router],
+      });
+    },
+    [router, onScreen],
   );
 }
 
-/** Navigates to an address inside the web that was already checked (see `safeRedirect`). */
+/**
+ * Navigates to an address inside the web (see `safeRedirect`), under the same rule as `useGo`. An
+ * address that is not one is ignored.
+ */
 export function useGoToAddress() {
   const router = useRouter();
+  const onScreen = useOnScreen();
   return useCallback(
-    (address: string, options: { replace?: boolean } = {}) => {
-      const url = new URL(address, "https://vanr.invalid");
-      return router.navigate({
-        to: url.pathname,
-        search: Object.fromEntries(url.searchParams),
-        ...(url.hash !== "" && { hash: url.hash.slice(1) }),
+    async (address: string, options: { replace?: boolean } = {}): Promise<void> => {
+      const parts = addressParts(address);
+      if (parts === undefined || !onScreen.current) return;
+      await router.navigate({
+        to: parts.path,
+        search: parts.search,
+        ...(parts.hash !== "" && { hash: parts.hash }),
         ...(options.replace !== undefined && { replace: options.replace }),
       });
     },
-    [router],
+    [router, onScreen],
   );
 }
 

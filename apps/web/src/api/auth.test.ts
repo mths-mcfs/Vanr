@@ -82,12 +82,33 @@ describe("a failed sign-in call is the client's ApiError", () => {
     expect(error.rawCode).toBe("http_502");
   });
 
-  test("Retry-After is whole seconds or nothing", () => {
-    expect(parseRetryAfter("5")).toBe(5);
-    expect(parseRetryAfter(" 12 ")).toBe(12);
-    for (const header of [null, "", "soon", "-3", "1.5", "1e3"]) {
-      expect(parseRetryAfter(header)).toBeUndefined();
+  test("Retry-After is whole seconds, or a date counted from now; anything else is absent", () => {
+    const now = Date.UTC(2026, 10, 14, 12, 0, 0);
+    expect(parseRetryAfter("5", now)).toBe(5);
+    expect(parseRetryAfter(" 12 ", now)).toBe(12);
+    expect(parseRetryAfter("86400", now)).toBe(86_400);
+    expect(parseRetryAfter("Sat, 14 Nov 2026 12:00:10 GMT", now)).toBe(10);
+    // A date that already passed is a wait that is over, not a missing one.
+    expect(parseRetryAfter("Sat, 14 Nov 2026 11:59:00 GMT", now)).toBe(-60);
+    for (const header of [null, "", "soon", "-3", "1.5", "1e3", "12:00:10"]) {
+      expect(parseRetryAfter(header, now), String(header)).toBeUndefined();
     }
+  });
+
+  test("a date in Retry-After is counted on the clock the web was given", async () => {
+    const stamp = "Sat, 14 Nov 2026 12:00:07 GMT";
+    const fetch: FetchLike = async () =>
+      Response.json(
+        { error: { code: "signup_busy", message: "Busy" } },
+        { status: 503, headers: { "retry-after": stamp } },
+      );
+    const auth = createAuthApi(createFetchTransport({ fetch }), {
+      clock: { now: () => Date.UTC(2026, 10, 14, 12) },
+    });
+    const error = await failure(() =>
+      auth.signUp({ body: { name: "Mel", email: "mel@b.example", password: "x" } }),
+    );
+    expect(error.params).toEqual({ retryAfterSeconds: 7 });
   });
 
   test("no answer is a network error, worth retrying", async () => {
@@ -115,5 +136,36 @@ describe("a failed sign-in call is the client's ApiError", () => {
     const error = await call;
     expect(error.code).toBe("canceled");
     expect(error.retryable).toBe(false);
+  });
+
+  test("an answer that arrives after the call was given up on is discarded", async () => {
+    const stop = new AbortController();
+    let deliver: (response: Response) => void = () => {};
+    const fetch: FetchLike = () =>
+      new Promise<Response>((resolve) => {
+        deliver = resolve;
+      });
+    const auth = createAuthApi(createFetchTransport({ fetch }));
+    const call = failure(() =>
+      auth.signIn({ body: { email: "a@b.example", password: "x" } }, { signal: stop.signal }),
+    );
+    stop.abort();
+    deliver(Response.json({ ok: true }));
+    expect((await call).code).toBe("canceled");
+  });
+
+  test("a sign-in, sign-up or sign-out without an answer says the session is unknown; other calls do not", async () => {
+    let unknown = 0;
+    const fetch: FetchLike = async () => {
+      throw new TypeError("Failed to fetch");
+    };
+    const auth = createAuthApi(createFetchTransport({ fetch }), { onSessionUnknown: () => unknown++ });
+    await failure(() => auth.signIn({ body: { email: "a@b.example", password: "x" } }));
+    await failure(() => auth.signUp({ body: { name: "A", email: "a@b.example", password: "x" } }));
+    await failure(() => auth.signOut());
+    expect(unknown).toBe(3);
+    await failure(() => auth.verifyEmail({ query: { token: "t" } }));
+    await failure(() => auth.resetPassword({ body: { token: "t", newPassword: "x" } }));
+    expect(unknown).toBe(3);
   });
 });

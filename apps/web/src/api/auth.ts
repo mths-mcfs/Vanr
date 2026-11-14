@@ -5,8 +5,8 @@
 //
 // The service answers errors as `{ code, message }` with upper-case codes; the sign-up queue in
 // front of it answers the server's envelope. Both become an ApiError whose `rawCode` is the code in
-// lower case and whose `params.retryAfterSeconds` carries a Retry-After header.
-import { ApiError } from "@vanr/client";
+// lower case and whose `params.retryAfterSeconds` carries what a Retry-After header asked for.
+import { ApiError, type Clock } from "@vanr/client";
 import { z } from "zod";
 import type { WebTransport } from "./wire.ts";
 
@@ -47,21 +47,34 @@ const Envelope = z.object({
   }),
 });
 
-/** Whole seconds from a Retry-After header; a date or a malformed value counts as absent. */
-export function parseRetryAfter(header: string | null): number | undefined {
+/**
+ * The seconds a Retry-After header asks for, as whole seconds or as an HTTP date (counted from
+ * `now`). Anything else counts as absent. The answer is what the server said, not what the web
+ * will do with it: the caller keeps it within its own limits.
+ */
+export function parseRetryAfter(header: string | null, now: number): number | undefined {
   const text = header?.trim() ?? "";
-  return /^\d{1,6}$/.test(text) ? Number(text) : undefined;
+  if (/^\d{1,9}$/.test(text)) return Number(text);
+  // A date has letters; without that check, Date.parse reads a bare number as a year.
+  if (!/[A-Za-z]/.test(text)) return undefined;
+  const at = Date.parse(text);
+  return Number.isNaN(at) ? undefined : Math.ceil((at - now) / 1000);
 }
 
 /** The ApiError of a failed sign-in call, whichever of the two bodies it came with. */
-export function authError(status: number, text: string, retryAfter: string | null): ApiError {
+export function authError(
+  status: number,
+  text: string,
+  retryAfter: string | null,
+  now: number = Date.now(),
+): ApiError {
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch {
     raw = undefined;
   }
-  const seconds = parseRetryAfter(retryAfter);
+  const seconds = parseRetryAfter(retryAfter, now);
   const wait = seconds === undefined ? {} : { retryAfterSeconds: seconds };
   const envelope = Envelope.safeParse(raw);
   const service = ServiceError.safeParse(raw);
@@ -84,14 +97,36 @@ export function authError(status: number, text: string, retryAfter: string | nul
   });
 }
 
-export function createAuthApi(wire: WebTransport): AuthApi {
+/** The calls after which who is signed in may have changed. */
+const CHANGES_SESSION: readonly AuthMethod[] = ["signIn", "signUp", "signOut"];
+
+export function createAuthApi(
+  wire: WebTransport,
+  options: {
+    /** Tells the time a Retry-After date is counted from. */
+    clock?: Pick<Clock, "now">;
+    /** A call that changes the session ended without an answer: the server may have acted on it. */
+    onSessionUnknown?: () => void;
+  } = {},
+): AuthApi {
+  const now = () => options.clock?.now() ?? Date.now();
   const call = async (
     method: AuthMethod,
     args: { body?: unknown; query?: Record<string, string> } | undefined,
-    options: { signal?: AbortSignal } | undefined,
+    callOptions: { signal?: AbortSignal } | undefined,
   ): Promise<void> => {
     const { verb, path } = AUTH_ROUTES[method];
     const query = new URLSearchParams(args?.query).toString();
+    const signal = callOptions?.signal;
+    const unanswered = (code: "canceled" | "network", cause?: unknown) => {
+      if (CHANGES_SESSION.includes(method)) options.onSessionUnknown?.();
+      return new ApiError({
+        status: 0,
+        code,
+        message: code === "canceled" ? "Canceled" : "Could not reach the server",
+        cause,
+      });
+    };
     let response: Response;
     try {
       response = await wire.fetch(`${wire.baseUrl}${path}${query === "" ? "" : `?${query}`}`, {
@@ -102,19 +137,15 @@ export function createAuthApi(wire: WebTransport): AuthApi {
           ...wire.headers(),
         },
         ...(verb === "POST" && { body: JSON.stringify(args?.body ?? {}) }),
-        ...(options?.signal !== undefined && { signal: options.signal }),
+        ...(signal !== undefined && { signal }),
       });
     } catch (cause) {
-      const canceled = options?.signal?.aborted === true;
-      throw new ApiError({
-        status: 0,
-        code: canceled ? "canceled" : "network",
-        message: canceled ? "Canceled" : "Could not reach the server",
-        cause,
-      });
+      throw unanswered(signal?.aborted === true ? "canceled" : "network", cause);
     }
+    // Given up on while the answer was on its way: whoever asked is gone, so it counts as no answer.
+    if (signal?.aborted === true) throw unanswered("canceled");
     if (!response.ok) {
-      throw authError(response.status, await response.text(), response.headers.get("retry-after"));
+      throw authError(response.status, await response.text(), response.headers.get("retry-after"), now());
     }
   };
   return {

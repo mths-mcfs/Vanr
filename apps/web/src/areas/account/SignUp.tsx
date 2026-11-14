@@ -7,7 +7,7 @@ import { useRuntime } from "../../app/context.tsx";
 import { AppLink, useGoToAddress, useSearch } from "../../app/navigation.tsx";
 import { useMessages } from "../../i18n/react.tsx";
 import { useCompleteSignIn } from "../../session/react.tsx";
-import { safeRedirect } from "../../session/redirect.ts";
+import { invitationTokenIn, safeRedirect } from "../../session/redirect.ts";
 import { startAddress } from "../../session/session.ts";
 import {
   AccountForm,
@@ -23,12 +23,6 @@ import { WaitlistForm } from "./Waitlist.tsx";
 
 const Search = z.object({ redirect: z.string().optional(), email: z.string().optional() });
 const NO_SEARCH: z.infer<typeof Search> = {};
-
-/** The invitation token in an address like `/invite/<token>`, when the person came from one. */
-export function invitationTokenIn(address: string | undefined): string | undefined {
-  const match = /^\/invite\/([^/?#]+)/.exec(safeRedirect(address) ?? "");
-  return match?.[1] === undefined ? undefined : decodeURIComponent(match[1]);
-}
 
 export function SignUpScreen() {
   const t = useMessages("account");
@@ -91,8 +85,8 @@ function SignUpForm({
   const emailError = emailProblem(email);
   const passwordError = newPasswordProblem(password);
 
-  const submit = useSubmit(async () => {
-    await auth.signUp({ body: { name: name.trim(), email: email.trim(), password } });
+  const submit = useSubmit(async ({ signal }) => {
+    await auth.signUp({ body: { name: name.trim(), email: email.trim(), password } }, { signal });
     const me = await completeSignIn();
     if (me === null) throw new Error("signed up, but the server sees no session");
     await goToAddress(safeRedirect(redirect) ?? startAddress(store, me), { replace: true });
@@ -164,11 +158,7 @@ function SignUpForm({
             onChange={(event) => setPassword(event.target.value)}
           />
         </Field>
-        <ServerProblem
-          error={submit.error}
-          failureTime={submit.failureTime}
-          onRetry={() => void submit.run()}
-        />
+        <ServerProblem error={submit.error} waitUntil={submit.waitUntil} onRetry={() => void submit.run()} />
         <div className="acct__actions">
           <Button type="submit" variant="primary" size="lg" loading={submit.busy}>
             {t("signUp.submit")}

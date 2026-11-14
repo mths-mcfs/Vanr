@@ -101,6 +101,10 @@ function FrameBody({ me, workspace }: { me: Me; workspace: WorkspaceSummary }) {
   );
   const [drawerOpen, setDrawerOpen] = useState(false);
   const content = useRef<HTMLElement>(null);
+  // What opened the drawer, and whether a navigation is what closed it: where focus goes after.
+  const drawerOpener = useRef<HTMLElement | null>(null);
+  const drawerLeft = useRef(false);
+  const focusContent = useCallback(() => content.current?.focus(), []);
 
   const agents = useApiQuery("listAgents", scope, { staleTime: AGENTS_FRESH_MS });
   const runs = useApiQuery("listActiveRuns", scope, { staleTime: OVERVIEW_FRESH_MS });
@@ -113,7 +117,11 @@ function FrameBody({ me, workspace }: { me: Me; workspace: WorkspaceSummary }) {
   useInvalidateOn("approval.resolved", { method: "getOverview", args: scope });
 
   useEffect(() => rememberWorkspace(store, workspaceId), [store, workspaceId]);
-  useOnNavigate(() => setDrawerOpen(false));
+  useOnNavigate(() => {
+    // Opening the drawer clears this, so it only ever speaks for the drawer that is open now.
+    drawerLeft.current = true;
+    setDrawerOpen(false);
+  });
   useCommandKey(useCallback(() => void go("search", { workspaceId }), [go, workspaceId]));
 
   const routeId = useCurrentRouteId();
@@ -135,11 +143,14 @@ function FrameBody({ me, workspace }: { me: Me; workspace: WorkspaceSummary }) {
         void agents.refetch();
         void runs.refetch();
       }}
+      focusContent={focusContent}
     />
   );
   const sidebarOutOfSight = !docked || hidden;
-  const toggleSidebar = () => {
+  const toggleSidebar = (opener: HTMLElement) => {
     if (!docked) {
+      drawerOpener.current = opener;
+      drawerLeft.current = false;
       setDrawerOpen(true);
       return;
     }
@@ -159,7 +170,18 @@ function FrameBody({ me, workspace }: { me: Me; workspace: WorkspaceSummary }) {
       )}
       {!docked && (
         <Drawer open={drawerOpen} onOpenChange={setDrawerOpen}>
-          <DrawerContent title={t("sidebar.label")}>{sidebar}</DrawerContent>
+          <DrawerContent
+            title={t("sidebar.label")}
+            onCloseAutoFocus={(event) => {
+              // Dismissed (Escape, a press outside): back to what opened it. Closed by going
+              // somewhere: to the content of where the person went. Never left on the page itself.
+              event.preventDefault();
+              (drawerLeft.current ? content.current : drawerOpener.current)?.focus();
+              drawerLeft.current = false;
+            }}
+          >
+            {sidebar}
+          </DrawerContent>
         </Drawer>
       )}
       <div className="frame__main">
@@ -169,7 +191,7 @@ function FrameBody({ me, workspace }: { me: Me; workspace: WorkspaceSummary }) {
             icon={<Icon icon={docked ? PanelLeft : Menu} />}
             aria-label={docked ? t(hidden ? "sidebar.show" : "sidebar.hide") : t("sidebar.open")}
             aria-expanded={docked ? !hidden : drawerOpen}
-            onClick={toggleSidebar}
+            onClick={(event) => toggleSidebar(event.currentTarget)}
           />
           <p className="frame__title">{title ?? workspace.name}</p>
           {sidebarOutOfSight && Array.isArray(working) && working.length > 0 && (
@@ -177,7 +199,7 @@ function FrameBody({ me, workspace }: { me: Me; workspace: WorkspaceSummary }) {
               type="button"
               className="frame__working"
               aria-label={t("working.open", { count: working.length })}
-              onClick={toggleSidebar}
+              onClick={(event) => toggleSidebar(event.currentTarget)}
             >
               {working.slice(0, HEADER_SIGILS).map((agent) => (
                 <AgentSigil

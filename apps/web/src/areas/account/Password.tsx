@@ -7,6 +7,7 @@ import { useRuntime } from "../../app/context.tsx";
 import { AppLink, useGo, useSearch } from "../../app/navigation.tsx";
 import { useMessages } from "../../i18n/react.tsx";
 import { href } from "../../routes.ts";
+import { linkToken } from "../../session/redirect.ts";
 import {
   AccountForm,
   AccountPage,
@@ -30,10 +31,11 @@ export function ForgotPasswordScreen() {
   const [checked, setChecked] = useState(false);
   const [sentTo, setSentTo] = useState<string | undefined>();
   const emailError = emailProblem(email);
-  const submit = useSubmit(async () => {
-    await auth.requestPasswordReset({
-      body: { email: email.trim(), redirectTo: `${origin}${href("resetPassword", {})}` },
-    });
+  const submit = useSubmit(async ({ signal }) => {
+    await auth.requestPasswordReset(
+      { body: { email: email.trim(), redirectTo: `${origin}${href("resetPassword", {})}` } },
+      { signal },
+    );
     setSentTo(email.trim());
   });
   const back = (
@@ -72,11 +74,7 @@ export function ForgotPasswordScreen() {
             onChange={(event) => setEmail(event.target.value)}
           />
         </Field>
-        <ServerProblem
-          error={submit.error}
-          failureTime={submit.failureTime}
-          onRetry={() => void submit.run()}
-        />
+        <ServerProblem error={submit.error} waitUntil={submit.waitUntil} onRetry={() => void submit.run()} />
         <div className="acct__actions">
           <Button type="submit" variant="primary" size="lg" loading={submit.busy}>
             {t("forgot.submit")}
@@ -96,12 +94,12 @@ export function ResetPasswordScreen() {
   const auth = useAuth();
   const go = useGo();
   const search = useSearch(ResetSearch, NO_RESET);
-  const token = search.error === undefined ? search.token : undefined;
+  const token = search.error === undefined ? linkToken(search.token) : undefined;
   const [password, setPassword] = useState("");
   const [checked, setChecked] = useState(false);
   const passwordError = newPasswordProblem(password);
-  const submit = useSubmit(async () => {
-    await auth.resetPassword({ body: { token: token ?? "", newPassword: password } });
+  const submit = useSubmit(async ({ signal }) => {
+    await auth.resetPassword({ body: { token: token ?? "", newPassword: password } }, { signal });
     await go("login", {}, { search: { reason: "password_changed" }, replace: true });
   });
   const spent = isApiError(submit.error) && submit.error.rawCode === "invalid_token";
@@ -139,11 +137,7 @@ export function ResetPasswordScreen() {
             onChange={(event) => setPassword(event.target.value)}
           />
         </Field>
-        <ServerProblem
-          error={submit.error}
-          failureTime={submit.failureTime}
-          onRetry={() => void submit.run()}
-        />
+        <ServerProblem error={submit.error} waitUntil={submit.waitUntil} onRetry={() => void submit.run()} />
         <div className="acct__actions">
           <Button type="submit" variant="primary" size="lg" loading={submit.busy}>
             {t("reset.submit")}

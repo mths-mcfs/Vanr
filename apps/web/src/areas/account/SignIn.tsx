@@ -45,8 +45,8 @@ export function SignInScreen() {
     if (firstRun) void go("signup", {}, { replace: true });
   }, [firstRun, go]);
 
-  const submit = useSubmit(async () => {
-    await auth.signIn({ body: { email: email.trim(), password } });
+  const submit = useSubmit(async ({ signal }) => {
+    await auth.signIn({ body: { email: email.trim(), password } }, { signal });
     const me = await completeSignIn();
     if (me === null) throw new Error("signed in, but the server sees no session");
     await goToAddress(safeRedirect(search.redirect) ?? startAddress(store, me), { replace: true });
@@ -108,11 +108,7 @@ export function SignInScreen() {
             onChange={(event) => setPassword(event.target.value)}
           />
         </Field>
-        <ServerProblem
-          error={submit.error}
-          failureTime={submit.failureTime}
-          onRetry={() => void submit.run()}
-        />
+        <ServerProblem error={submit.error} waitUntil={submit.waitUntil} onRetry={() => void submit.run()} />
         <div className="acct__actions">
           <Button type="submit" variant="primary" size="lg" loading={submit.busy}>
             {t("signIn.submit")}

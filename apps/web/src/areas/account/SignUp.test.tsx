@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { screen } from "@testing-library/react";
 import { type App, renderApp } from "../../../test/app.tsx";
-import { invitationTokenIn } from "./SignUp.tsx";
+import { invitationTokenIn } from "../../session/redirect.ts";
 import { emailProblem, newPasswordProblem, PASSWORD_MAX, PASSWORD_MIN } from "./shared.tsx";
 
 const fill = async (app: App, fields: { name?: string; email?: string; password?: string }) => {
@@ -176,14 +176,26 @@ describe("the field rules", () => {
     expect(emailProblem(" ana@birchwood.example ")).toBeUndefined();
   });
 
+  test("a return address with a broken escape counts as none: the form opens as for anyone", async () => {
+    const app = await renderApp({ path: "/signup?redirect=%2Finvite%2F%25" });
+    await screen.findByLabelText("Password");
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Create your account");
+    expect(app.server.calls.some((call) => call.method === "getInvitation")).toBe(false);
+  });
+
   test("the invitation token is only read from an address inside the web", () => {
     expect(invitationTokenIn("/invite/inv-mel-pending")).toBe("inv-mel-pending");
-    expect(invitationTokenIn("/invite/a%20b?x=1")).toBe("a b");
+    expect(invitationTokenIn("/invite/a%2Bb?x=1")).toBe("a+b");
     for (const other of [
       undefined,
       "/onboarding",
       "https://evil.example/invite/x",
       "//evil.example/invite/x",
+      // An escape that is not one, and a token that cannot be one.
+      "/invite/%",
+      "/invite/%E0%A4%A",
+      "/invite/%20",
+      42,
     ]) {
       expect(invitationTokenIn(other), String(other)).toBeUndefined();
     }

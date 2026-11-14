@@ -63,7 +63,7 @@ describe("a protected address without a session", () => {
   test("a membership gained after the session was cached is found without a reload", async () => {
     const app = await renderApp({ path: "/onboarding", signedInAs: "usr_noor" });
     await screen.findByRole("heading", { level: 1, name: "Name your workspace" });
-    app.server.addMember("workspace_nightshift", "usr_noor", "member");
+    app.server.enroll("workspace_nightshift", "usr_noor", "member");
     await act(() => app.runtime.router.navigate({ to: "/workspace/workspace_nightshift" }));
     await screen.findByRole("heading", { level: 1, name: "Night Shift" });
   });

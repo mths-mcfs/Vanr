@@ -31,14 +31,17 @@ export function NewWorkspaceScreen() {
   const [checked, setChecked] = useState(false);
   const nameError = name.trim() === "" ? ("validation.workspaceNameRequired" as const) : undefined;
 
-  const submit = useSubmit(async () => {
-    const { workspace } = await api.createWorkspace({
-      body: {
-        name: name.trim(),
-        ...(context.trim() !== "" && { context: context.trim() }),
-        timezone: browserTimeZone(),
+  const submit = useSubmit(async ({ signal }) => {
+    const { workspace } = await api.createWorkspace(
+      {
+        body: {
+          name: name.trim(),
+          ...(context.trim() !== "" && { context: context.trim() }),
+          timezone: browserTimeZone(),
+        },
       },
-    });
+      { signal },
+    );
     discardName();
     discardContext();
     await completeSignIn();
@@ -87,11 +90,7 @@ export function NewWorkspaceScreen() {
             onChange={(event) => setContext(event.target.value)}
           />
         </Field>
-        <ServerProblem
-          error={submit.error}
-          failureTime={submit.failureTime}
-          onRetry={() => void submit.run()}
-        />
+        <ServerProblem error={submit.error} waitUntil={submit.waitUntil} onRetry={() => void submit.run()} />
         <div className="acct__actions">
           <Button type="submit" variant="primary" size="lg" loading={submit.busy}>
             {t("workspace.submit")}

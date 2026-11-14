@@ -207,6 +207,7 @@ export class FakeServer {
   private readonly sessions = new Map<string, string>();
   private readonly forced = new Map<FakeMethod, { answer: Forced; times: number }>();
   private readonly held = new Map<FakeMethod, Promise<void>>();
+  private readonly delayed = new Map<FakeMethod, Promise<void>>();
   private readonly slowed = new Map<FakeMethod, number>();
   private readonly sockets = new Set<ServedSocket>();
   private blocking = false;
@@ -256,12 +257,12 @@ export class FakeServer {
         settings: { timezone: "UTC" },
       },
     );
-    this.addMember("workspace_birchwood", "usr_ana", "owner");
-    this.addMember("workspace_birchwood", "usr_jonas", "admin");
-    this.addMember("workspace_birchwood", "usr_iris", "member");
-    this.addMember("workspace_birchwood", "usr_tomas", "member");
-    this.addMember("workspace_nightshift", "usr_jonas", "owner");
-    this.addMember("workspace_nightshift", "usr_ana", "member");
+    this.enroll("workspace_birchwood", "usr_ana", "owner");
+    this.enroll("workspace_birchwood", "usr_jonas", "admin");
+    this.enroll("workspace_birchwood", "usr_iris", "member");
+    this.enroll("workspace_birchwood", "usr_tomas", "member");
+    this.enroll("workspace_nightshift", "usr_jonas", "owner");
+    this.enroll("workspace_nightshift", "usr_ana", "member");
     this.approvals.set("workspace_birchwood", ["usr_ana", "usr_ana"]);
     this.agents = [
       agent("agt_scout", "workspace_birchwood", "Scout", "usr_ana"),
@@ -314,7 +315,7 @@ export class FakeServer {
   }
 
   /** Makes a person a member of a workspace. */
-  addMember(workspaceId: string, userId: string, role: T.Role): void {
+  enroll(workspaceId: string, userId: string, role: T.Role): void {
     const user = this.state.users.find((candidate) => candidate.id === userId);
     if (user === undefined) throw new Error(`fake server: no user ${userId}`);
     this.state.members.push({
@@ -354,6 +355,7 @@ export class FakeServer {
     this.sessions.clear();
     this.forced.clear();
     this.held.clear();
+    this.delayed.clear();
     this.slowed.clear();
     this.mail.length = 0;
     this.calls.length = 0;
@@ -385,6 +387,26 @@ export class FakeServer {
     return {
       release: () => {
         this.held.delete(method);
+        release();
+      },
+    };
+  }
+
+  /**
+   * Calls of an operation are answered at once, but the answer only arrives on `release()`: an
+   * answer that was right when the server gave it and reaches the browser late.
+   */
+  delay(method: FakeMethod): { release: () => void } {
+    let release = () => {};
+    this.delayed.set(
+      method,
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+    return {
+      release: () => {
+        this.delayed.delete(method);
         release();
       },
     };
@@ -426,7 +448,7 @@ export class FakeServer {
         if (this.sockets.delete(gone)) this.closed.push({ workspaceId, code: gone.closedWith?.code });
       });
       if (this.blocking || user === undefined || this.memberOf(workspaceId, user.id) === undefined) {
-        // A blocked or refused upgrade reaches the browser as an abnormal close.
+        // A blocked or rejected upgrade reaches the browser as an abnormal close.
         queueMicrotask(() => socket.drop(user === undefined && !this.blocking ? 4401 : 1006));
         return socket;
       }
@@ -552,6 +574,18 @@ export class FakeServer {
       return this.send(retryAfter === undefined ? answer : { ...answer, retryAfter }, jar);
     }
 
+    const answer = await this.answer(route, params, url, init, jar);
+    await this.delayed.get(route.name);
+    return answer;
+  }
+
+  private async answer(
+    route: Route,
+    params: Record<string, unknown>,
+    url: string,
+    init: RequestInit,
+    jar: CookieJar,
+  ): Promise<Response> {
     const own = this.operations[route.name];
     if (own !== undefined) return this.send(own(params, jar.session), jar);
 
@@ -757,7 +791,7 @@ export class FakeServer {
         });
       }
       if (invitation.email !== null) invitation.status = "accepted";
-      this.addMember(invitation.workspaceId, user.id, invitation.role);
+      this.enroll(invitation.workspaceId, user.id, invitation.role);
       return joined;
     },
     requestInvitationNew: (params) => {

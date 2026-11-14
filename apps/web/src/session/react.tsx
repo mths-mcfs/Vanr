@@ -1,11 +1,12 @@
 // The session for components: who is signed in, signing out, and drafts.
 
 import { useQuery } from "@tanstack/react-query";
+import { useVanrClient } from "@vanr/client/react";
 import type { Me } from "@vanr/contract";
 import { useCallback, useState } from "react";
 import { useAuth } from "../api/index.ts";
 import { useRuntime } from "../app/context.tsx";
-import { useGo } from "../app/navigation.tsx";
+import { href } from "../routes.ts";
 
 /** The signed-in person: undefined while unknown, null when nobody is signed in. */
 export function useSession(): {
@@ -15,6 +16,8 @@ export function useSession(): {
   retry: () => void;
 } {
   const { session } = useRuntime();
+  // The options follow the session generation; reading the client re-renders this when it changes.
+  useVanrClient();
   const query = useQuery(session.options);
   return {
     me: query.data,
@@ -42,8 +45,7 @@ export function useCompleteSignIn(): () => Promise<Me | null> {
  */
 export function useSignOut(): (search?: Record<string, string>) => Promise<void> {
   const auth = useAuth();
-  const { session, gate } = useRuntime();
-  const go = useGo();
+  const { session, gate, router } = useRuntime();
   return useCallback(
     async (search?: Record<string, string>) => {
       try {
@@ -53,9 +55,11 @@ export function useSignOut(): (search?: Record<string, string>) => Promise<void>
       }
       gate.leftOnPurpose();
       session.forget();
-      await go("login", {}, { search: search ?? { reason: "signed_out" } });
+      // Straight through the router, not through the screen: wherever the person went meanwhile,
+      // they are signed out, and no screen behind a session may stay open.
+      await router.navigate({ to: href("login", {}), search: search ?? { reason: "signed_out" } });
     },
-    [auth, session, gate, go],
+    [auth, session, gate, router],
   );
 }
 

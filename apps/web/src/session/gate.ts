@@ -17,23 +17,33 @@ export function createSessionGate(deps: {
   drafts: DraftStore;
   /** Sends the person to sign in, keeping where they were. */
   onEnded: () => void;
+  /**
+   * Ends the session generation: cancels every call in flight and drops everything cached, so
+   * nothing asked for by one person is answered to, or shown to, the next.
+   */
+  renew: () => void;
 }): SessionGate {
   let current: string | null = null;
   return {
     established(userId) {
+      const replaced = current !== null && current !== userId;
       // Whatever the last person was typing is not this person's to see.
       deps.drafts.claim(userId);
       current = userId;
+      // Someone else signed in while this page was open (in another tab, for one).
+      if (replaced) deps.renew();
     },
     ended() {
       // No session was open on this page: a visitor's 401 is for the route guard, not for this.
       if (current === null) return;
       current = null;
+      deps.renew();
       deps.onEnded();
     },
     leftOnPurpose() {
       current = null;
       deps.drafts.clear();
+      deps.renew();
     },
     userId: () => current,
   };

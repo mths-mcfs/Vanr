@@ -395,3 +395,132 @@ describe("the home of a workspace", () => {
     await screen.findByText(/4 people and 3 agents work here\./);
   });
 });
+
+describe("where focus goes when the drawer or a menu closes", () => {
+  const openDrawer = async (app: App, name = "Open navigation") => {
+    const opener = await screen.findByRole("button", { name });
+    await app.user.click(opener);
+    return { opener, drawer: await screen.findByRole("dialog", { name: "Workspace sidebar" }) };
+  };
+  const closed = () => waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  // What has focus, said shortly: a failed comparison of two elements prints the whole page.
+  const focused = () => {
+    const element = document.activeElement;
+    if (element === null || element === document.body) return "the page";
+    return element.getAttribute("aria-label") || element.id || element.textContent || element.tagName;
+  };
+
+  test("Escape gives focus back to the button that opened the drawer", async () => {
+    await setViewportWidth(390);
+    const app = await open();
+    const { opener, drawer } = await openDrawer(app);
+    expect(drawer.contains(document.activeElement)).toBe(true);
+    await app.user.keyboard("{Escape}");
+    await closed();
+    expect(focused()).toBe(opener.getAttribute("aria-label") ?? "");
+  });
+
+  test("the same when the count of working agents is what opened it", async () => {
+    await setViewportWidth(390);
+    const app = await open();
+    const { opener } = await openDrawer(app, "2 agents at work. Open navigation.");
+    await app.user.keyboard("{Escape}");
+    await closed();
+    expect(focused()).toBe(opener.getAttribute("aria-label") ?? "");
+  });
+
+  test("going somewhere from the drawer moves focus to the content of the new screen", async () => {
+    await setViewportWidth(390);
+    const app = await open();
+    const { drawer } = await openDrawer(app);
+    await app.user.click(within(drawer).getByRole("link", { name: "Routines" }));
+    await screen.findByRole("heading", { level: 1, name: "Routines" });
+    await closed();
+    expect(screen.getByRole("main").id).toBe("content");
+    expect(focused()).toBe("content");
+  });
+
+  test("going somewhere from a menu inside the drawer does the same", async () => {
+    await setViewportWidth(390);
+    const app = await open();
+    const { drawer } = await openDrawer(app);
+    await app.user.click(within(drawer).getByRole("button", { name: "Birchwood Labs, workspace menu" }));
+    await app.user.click(await screen.findByRole("menuitem", { name: "Members" }));
+    await waitFor(() => expect(app.address()).toBe("/workspace/workspace_birchwood/settings/members"));
+    await closed();
+    expect(focused()).toBe("content");
+  });
+
+  test("a menu that is dismissed gives focus back to its button", async () => {
+    const app = await open();
+    const button = await screen.findByRole("button", { name: "Ana Beatriz Souza, account menu" });
+    await app.user.click(button);
+    await screen.findByRole("menuitem", { name: "Profile" });
+    await app.user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    expect(focused()).toBe("Ana Beatriz Souza, account menu");
+  });
+
+  test.each([
+    [
+      "Birchwood Labs, workspace menu",
+      "menuitem",
+      "Members",
+      "/workspace/workspace_birchwood/settings/members",
+    ],
+    ["Birchwood Labs, workspace menu", "menuitemradio", "Night Shift", "/workspace/workspace_nightshift"],
+    [
+      "Ana Beatriz Souza, account menu",
+      "menuitem",
+      "Profile",
+      "/workspace/workspace_birchwood/settings/profile",
+    ],
+  ])(
+    "a menu item that goes somewhere moves focus to the content: %s, %s %s",
+    async (menu, role, item, address) => {
+      const app = await open();
+      await app.user.click(await screen.findByRole("button", { name: menu }));
+      await app.user.click(await screen.findByRole(role, { name: item }));
+      await waitFor(() => expect(app.address()).toBe(address));
+      await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+      await waitFor(() => expect(focused()).toBe("content"));
+    },
+  );
+
+  test("signing out from the menu leaves focus on the title of the sign-in screen", async () => {
+    const app = await open();
+    await app.user.click(await screen.findByRole("button", { name: "Ana Beatriz Souza, account menu" }));
+    await app.user.click(await screen.findByRole("menuitem", { name: "Sign out" }));
+    const title = await screen.findByRole("heading", { level: 1, name: "Sign in" });
+    await waitFor(() => expect(focused()).toBe(title.textContent));
+  });
+});
+
+describe("leaving a workspace", () => {
+  test("ends its connection, and the connection does not come back", async () => {
+    const app = await open();
+    await waitFor(() => expect(app.server.openSockets()).toHaveLength(1));
+    const asked = app.server.socketsAsked;
+    await app.user.click(await screen.findByRole("button", { name: "Ana Beatriz Souza, account menu" }));
+    await app.user.click(await screen.findByRole("menuitem", { name: "Sign out" }));
+    await screen.findByRole("heading", { level: 1, name: "Sign in" });
+    await waitFor(() => expect(app.server.openSockets()).toEqual([]));
+    expect(app.server.closed).toEqual([{ workspaceId: "workspace_birchwood", code: 1000 }]);
+    // Longer than the longest wait between two tries: nothing asks for a socket again.
+    await app.advance(120_000);
+    expect(app.server.socketsAsked).toBe(asked);
+    expect(app.clock.pending()).toEqual([]);
+  });
+
+  test("switching to another workspace closes the first connection and opens one for the second", async () => {
+    const app = await open();
+    await waitFor(() => expect(app.server.openSockets()).toHaveLength(1));
+    await app.user.click(await screen.findByRole("button", { name: "Birchwood Labs, workspace menu" }));
+    await app.user.click(await screen.findByRole("menuitemradio", { name: "Night Shift" }));
+    await screen.findByRole("heading", { level: 1, name: "Night Shift" });
+    await waitFor(() =>
+      expect(app.server.openSockets().map((socket) => socket.workspaceId)).toEqual(["workspace_nightshift"]),
+    );
+    expect(app.server.closed).toEqual([{ workspaceId: "workspace_birchwood", code: 1000 }]);
+  });
+});
