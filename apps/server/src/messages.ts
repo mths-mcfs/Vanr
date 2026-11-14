@@ -478,7 +478,14 @@ async function touchThread(deps: AppDeps, input: { root: MessageRow; reply: Mess
     .set({ replyCount: sql`${messages.replyCount} + 1`, lastReplyAt: at })
     .where(eq(messages.id, root.id));
   await ensureThread(db, { root, by: author, at });
-  await db.update(threads).set({ lastTouchedAt: at, lastMessageId: reply.id }).where(eq(threads.id, root.id));
+  await db
+    .update(threads)
+    .set({
+      firstReplyAt: sql`coalesce(${threads.firstReplyAt}, ${at.toISOString()}::timestamptz)`,
+      lastTouchedAt: at,
+      lastMessageId: reply.id,
+    })
+    .where(eq(threads.id, root.id));
   const followers = [author, { type: root.authorKind, id: root.authorId }].filter((a) => a.type === "person");
   for (const f of followers) {
     await db
@@ -522,6 +529,10 @@ export async function listMessages(
 ): Promise<MessageRow[]> {
   const where = [eq(messages.channelId, input.channelId)];
   where.push(input.threadId ? eq(messages.threadId, input.threadId) : isNull(messages.threadId));
+  if (!input.threadId) {
+    where.push(sql`not exists (
+      select 1 from ${threads} t where t.id = ${messages.id} and t.source_channel_id is not null)`);
+  }
   if (input.before) {
     const [cursor] = await db
       .select({ createdAt: messages.createdAt, id: messages.id })
