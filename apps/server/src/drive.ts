@@ -11,6 +11,7 @@ import { agentChannelsSql, canReadChannel, readableChannelsSql } from "./channel
 import type { AppDeps, WorkspaceMember } from "./context";
 import { extractable } from "./drive-extract";
 import { HttpError, notFound } from "./http";
+import { confirmBlobs, discardBlob } from "./integrations/storage";
 import { reindex, unindex } from "./search-index";
 
 const { files, fileVersions } = schema;
@@ -168,7 +169,8 @@ async function withBlob<T>(
   try {
     return await write();
   } catch (err) {
-    await deps.blobs.delete(key).catch(() => undefined);
+    // Deleted where it was sent, which is not always the destination saved now.
+    await discardBlob(deps.blobs, key);
     throw err;
   }
 }
@@ -273,6 +275,7 @@ export async function createFile(
   const file = "file" in input ? await prepareFile(input.file) : null;
   const result = await withBlob(deps, key, file, () =>
     db.transaction(async (tx) => {
+      await confirmBlobs(tx, [key]);
       const [row] = await tx
         .insert(files)
         .values({
@@ -356,6 +359,7 @@ export async function addVersion(
   const file = "file" in input ? await prepareFile(input.file) : null;
   const result = await withBlob(deps, key, file, () =>
     db.transaction(async (tx) => {
+      await confirmBlobs(tx, [key]);
       // Only goes up if nobody went up first (two saves at once don't become the same version).
       const [updated] = await tx
         .update(files)

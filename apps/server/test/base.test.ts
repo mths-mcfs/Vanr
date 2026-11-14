@@ -25,6 +25,7 @@ describe("base server", () => {
       edition: "selfhost",
       database: "ok",
       modules: [],
+      signup: { status: "ok" },
     });
   });
 

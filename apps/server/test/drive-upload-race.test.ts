@@ -8,7 +8,7 @@ import { schema } from "@vanr/engine/db";
 import { eq } from "drizzle-orm";
 import { createApp } from "../src/app";
 import type { RunningServer } from "../src/server";
-import { FirstUserPlace } from "../src/signup-queue";
+import { FirstUserPlace, SIGNUP_QUEUE_LIMITS } from "../src/signup-queue";
 import { body, signedIn, startTestServer } from "./harness";
 import { type Person, seedWorkspace } from "./seed";
 
@@ -21,7 +21,10 @@ beforeAll(async () => {
   // The same routes and dependencies as the running server, called in this process: the request body
   // reaches the handler as the very stream the test controls. This app only serves the upload routes; the
   // sign-up above went through the running server, so its first-user place here is never used.
-  app = createApp(server.deps, { firstUser: new FirstUserPlace() });
+  app = createApp(server.deps, {
+    firstUser: new FirstUserPlace(() => server.deps.now().getTime()),
+    signupQueue: SIGNUP_QUEUE_LIMITS,
+  });
   ana = await signedIn(server, "Ana", "ana@drive-upload-race.test");
   const { workspaceId } = await seedWorkspace(server, ana, "Race");
   base = `${server.url}/api/v1/workspaces/${workspaceId}/files/uploads`;

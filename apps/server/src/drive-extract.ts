@@ -9,7 +9,7 @@ import { and, asc, eq, inArray, lt, or, sql } from "drizzle-orm";
 import sharp from "sharp";
 import type { AppDeps } from "./context";
 import type { Page } from "./drive-extract-core";
-import { StorageUnavailable } from "./integrations/storage";
+import { confirmBlobs, DestinationChanged, discardBlob, StorageUnavailable } from "./integrations/storage";
 import { log } from "./logger";
 import { reindex } from "./search-index";
 
@@ -19,7 +19,26 @@ export const EXTRACT_TIMEOUT_MS = 60_000;
 /** A file larger than this is not read to extract (it stays without text and without a thumbnail). */
 export const MAX_EXTRACT_BYTES = 100 * 1024 * 1024;
 const STALE_MS = 10 * 60_000;
+/** Attempts for a failure OF THE FILE (its content breaks the extractor); storage outages don't count. */
 const MAX_ATTEMPTS = 3;
+/**
+ * The storage outage backoff: the first wait is 1 min, doubling up to 1 h per wait. After 24 h of waits the
+ * version is marked with STORAGE_GAVE_UP, and once an hour a new pass tries it again (ready once the bucket
+ * is back). The count of waits lives in the reason (`storage unavailable (wait N)`): the schema has no field
+ * for it.
+ */
+export const STORAGE_BACKOFF = {
+  firstMs: 60_000,
+  maxMs: 60 * 60_000,
+  giveUpMs: 24 * 60 * 60_000,
+  recheckMs: 60 * 60_000,
+};
+export const STORAGE_GAVE_UP = "storage unavailable for over 24 h";
+const STORAGE_WAIT = /^storage unavailable \(wait (\d+)\)$/;
+const waitOf = (n: number) => Math.min(STORAGE_BACKOFF.firstMs * 2 ** (n - 1), STORAGE_BACKOFF.maxMs);
+/** How long the first `n` waits add up to. */
+const waitedFor = (n: number) =>
+  Array.from({ length: n }, (_, i) => waitOf(i + 1)).reduce((a, b) => a + b, 0);
 /** An image with more pixels than this doesn't become a thumbnail (decompression bomb). */
 const MAX_THUMB_PIXELS = 40_000_000;
 const THUMB_TYPES = /^image\/(png|jpeg|gif|webp|avif)$/;
@@ -105,6 +124,12 @@ async function claim(deps: AppDeps, batch: number): Promise<VersionRow[]> {
             eq(fileVersions.extractStatus, "working"),
             lt(fileVersions.extractClaimedAt, new Date(now.getTime() - STALE_MS)),
           ),
+          // Marked after a long storage outage: tried again once an hour.
+          and(
+            eq(fileVersions.extractStatus, "failed"),
+            eq(fileVersions.extractError, STORAGE_GAVE_UP),
+            lt(fileVersions.extractClaimedAt, new Date(now.getTime() - STORAGE_BACKOFF.recheckMs)),
+          ),
         ),
       )
       .orderBy(asc(fileVersions.createdAt))
@@ -138,13 +163,50 @@ async function finish(
   set: Partial<VersionRow>,
   written: string[],
 ): Promise<void> {
-  const saved = await deps.db
-    .update(fileVersions)
-    .set({ ...set, extractClaimedAt: null })
-    .where(sameVersion(v))
-    .returning({ id: fileVersions.fileId });
+  // The thumbnail and the preview sent to a bucket are recorded only if it is still the saved destination.
+  const saved = await deps.db.transaction(async (tx) => {
+    await confirmBlobs(tx, written);
+    return tx
+      .update(fileVersions)
+      .set({ ...set, extractClaimedAt: null })
+      .where(sameVersion(v))
+      .returning({ id: fileVersions.fileId });
+  });
   // The version went away in the middle (the trash was emptied): what was written now would be orphaned.
-  if (!saved.length) for (const key of written) await deps.blobs.delete(key).catch(() => undefined);
+  if (!saved.length) for (const key of written) await discardBlob(deps.blobs, key);
+}
+
+/**
+ * The storage couldn't answer (or changed under the write): not the file's fault. The attempt is given back
+ * and the version waits for the next one (1 min, doubling to 1 h); after 24 h of waits it is marked with
+ * STORAGE_GAVE_UP, which a pass once an hour undoes when the bucket is back.
+ */
+async function waitForStorage(deps: AppDeps, v: VersionRow, written: string[]): Promise<void> {
+  for (const key of written) await discardBlob(deps.blobs, key);
+  const waits = Number(STORAGE_WAIT.exec(v.extractError ?? "")?.[1] ?? 0) + 1;
+  const now = deps.now().getTime();
+  const gaveUp = v.extractError === STORAGE_GAVE_UP || waitedFor(waits) > STORAGE_BACKOFF.giveUpMs;
+  log.warn("drive.extract_storage_unavailable", { fileId: v.fileId, version: v.version, waits, gaveUp });
+  const attempts = Math.max(0, v.extractAttempts - 1);
+  await deps.db
+    .update(fileVersions)
+    .set(
+      gaveUp
+        ? {
+            extractStatus: "failed",
+            extractError: STORAGE_GAVE_UP,
+            extractClaimedAt: new Date(now),
+            extractAttempts: attempts,
+          }
+        : {
+            extractStatus: "working",
+            extractError: `storage unavailable (wait ${waits})`,
+            // The stale-claim rule takes it back once the wait has passed.
+            extractClaimedAt: new Date(now - STALE_MS + waitOf(waits)),
+            extractAttempts: attempts,
+          },
+    )
+    .where(and(eq(fileVersions.fileId, v.fileId), eq(fileVersions.version, v.version)));
 }
 
 async function extractOne(deps: AppDeps, v: VersionRow, timeoutMs: number): Promise<void> {
@@ -187,11 +249,8 @@ async function extractOne(deps: AppDeps, v: VersionRow, timeoutMs: number): Prom
     }
     await finish(deps, v, set, written);
   } catch (err) {
-    if (err instanceof StorageUnavailable) {
-      // Not the file's fault: the claim stays and goes back to the queue once it is stale (the attempts
-      // still count, so a bucket that never comes back ends in "gave up").
-      log.warn("drive.extract_storage_unavailable", { fileId: v.fileId, version: v.version });
-      for (const key of written) await deps.blobs.delete(key).catch(() => undefined);
+    if (err instanceof StorageUnavailable || err instanceof DestinationChanged) {
+      await waitForStorage(deps, v, written);
       return;
     }
     const message = err instanceof Error ? err.message.slice(0, 300) : "extraction failed";

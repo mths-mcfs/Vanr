@@ -9,7 +9,7 @@ import { registerDriveUploads } from "./routes/drive-upload";
 import { registerSearch } from "./routes/search";
 import { registerWaitlist } from "./routes/waitlist";
 import { registerWiki } from "./routes/wiki";
-import { type FirstUserPlace, SIGNUP_QUEUE_LIMITS, type SignupQueueLimits, signupGate } from "./signup-queue";
+import { type FirstUserPlace, type SignupQueueLimits, signupGate } from "./signup-queue";
 import { createStatic } from "./static";
 import { registerWorkspaceScope } from "./workspace-scope";
 
@@ -25,7 +25,7 @@ const RAW_PART = /\/files\/uploads\/[^/]+$/;
 
 export function createApp(
   deps: AppDeps,
-  opts: { firstUser: FirstUserPlace; signupQueue?: Partial<SignupQueueLimits> },
+  opts: { firstUser: FirstUserPlace; signupQueue: SignupQueueLimits },
 ) {
   const app = new Hono<AppEnv>();
   const serveStatic = createStatic(deps.config.webDist);
@@ -46,7 +46,7 @@ export function createApp(
   // Better Auth answers at /api/auth/* in its own format. With closed sign-up, the requests that may
   // create a user pass the sign-up gate (signup-queue.ts): on a new installation, deciding that a person is
   // the first user and creating them is one step. With open sign-up, and for a sign-in, nothing waits.
-  const gate = signupGate(deps, { ...SIGNUP_QUEUE_LIMITS, ...opts.signupQueue }, opts.firstUser);
+  const gate = signupGate(deps, opts.signupQueue, opts.firstUser);
   app.on(["GET", "POST"], "/api/auth/*", (c) =>
     !deps.config.signupOpen && CREATES_USER.test(c.req.path) ? gate(c.req.raw) : deps.auth.handler(c.req.raw),
   );
@@ -64,6 +64,8 @@ export function createApp(
       edition: deps.config.edition,
       database,
       modules: [],
+      // A first user's INSERT that the database hasn't answered for too long holds sign-up closed.
+      signup: opts.firstUser.health(opts.signupQueue.stuckInsertMs),
     });
   });
 

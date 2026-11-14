@@ -26,6 +26,7 @@ import {
   visibleFilesSql,
 } from "../drive";
 import { conflict, forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
+import { log } from "../logger";
 import { requireMember, WORKSPACE } from "../workspace-scope";
 
 const { files, fileVersions, threads } = schema;
@@ -54,6 +55,33 @@ export function parseRange(
   }
   if (start >= size || end < start) return "invalid";
   return { start, end };
+}
+
+/**
+ * The file's stream with its first piece already read: a storage failure before any byte goes out still
+ * becomes an answer (503 `storage.unavailable`). After that the status is gone, so a failure ends the
+ * connection and is logged with its reason.
+ */
+async function startStream(body: globalThis.Blob, fileId: string): Promise<ReadableStream<Uint8Array>> {
+  const reader = body.stream().getReader();
+  const first = await reader.read();
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      if (first.done) controller.close();
+      else controller.enqueue(first.value);
+    },
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) controller.close();
+        else controller.enqueue(value);
+      } catch (err) {
+        log.warn("drive.download_interrupted", { fileId, err });
+        controller.error(err);
+      }
+    },
+    cancel: (reason) => reader.cancel(reason),
+  });
 }
 
 export async function placement(deps: AppDeps, me: WorkspaceMember, channelId?: string, threadId?: string) {
@@ -334,10 +362,11 @@ export function registerDrive(app: Hono<AppEnv>) {
     if (range) {
       headers["Content-Range"] = `bytes ${range.start}-${range.end}/${blob.size}`;
       headers["Content-Length"] = String(range.end - range.start + 1);
-      return new Response(blob.body.slice(range.start, range.end + 1).stream(), { status: 206, headers });
+      const part = await startStream(blob.body.slice(range.start, range.end + 1), row.id);
+      return new Response(part, { status: 206, headers });
     }
     headers["Content-Length"] = String(blob.size);
-    return new Response(blob.body.stream(), { headers });
+    return new Response(await startStream(blob.body, row.id), { headers });
   });
 
   app.delete(`${WORKSPACE}/files/:fileId`, async (c) => {

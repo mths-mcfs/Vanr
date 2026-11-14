@@ -365,7 +365,7 @@ export const sandboxOff = (): CommandSandbox => ({
   status: () => ({ state: "off", engine: null, reason: "Turned off in this environment" }),
   setMode: () => {},
   wrap: async () => {
-    throw new RunnerError("sandbox_unavailable", "The sandbox is turned off");
+    throw new RunnerError("sandbox_not_ready", "The sandbox is turned off");
   },
   close: async () => {},
 });
@@ -481,7 +481,7 @@ class SrtSandbox implements CommandSandbox {
   async wrap(input: WrapInput): Promise<Wrapped> {
     const srt = this.srt;
     if (!srt)
-      throw new RunnerError("sandbox_unavailable", this.state.reason ?? "No sandbox in this environment");
+      throw new RunnerError("sandbox_not_ready", this.state.reason ?? "No sandbox in this environment");
     const id = randomBytes(16).toString("base64url");
     const manager = srt.SandboxManager;
     manager.registerCommandNetworkLists(id, { allowedDomains: input.domains });
@@ -496,7 +496,7 @@ class SrtSandbox implements CommandSandbox {
       );
     } catch (err) {
       manager.unregisterCommandNetworkLists(id);
-      throw new RunnerError("sandbox_unavailable", err instanceof Error ? err.message : String(err));
+      throw new RunnerError("sandbox_not_ready", err instanceof Error ? err.message : String(err));
     }
     let released = false;
     return {
