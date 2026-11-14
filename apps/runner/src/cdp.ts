@@ -53,8 +53,6 @@ const BLOCKED_MAX = 10;
 const DIALOGS_MAX = 5;
 /** An action that does not come back (a page in a loop, a dialog nobody answered) releases the browser after this. */
 const OP_TIMEOUT_MS = 55_000;
-/** How long `browser.open` waits for the new document to commit and to finish loading. */
-const DOCUMENT_WAIT_MS = 10_000;
 const LAUNCH_TIMEOUT_MS = 20_000;
 
 interface Page {
@@ -187,12 +185,6 @@ const CDP_EVENTS = {
   }),
 } as const;
 
-// TEMPORARY diagnostics (CI run with VANR_TEST_TIMING=1): time of each step of browser.open.
-const TIMING = process.env.VANR_TEST_TIMING === "1";
-const timing = (step: string, since: number) => {
-  if (TIMING) console.error(`[timing] ${step} ${Date.now() - since} ms`);
-};
-
 const personDriving = () => new RunnerError("person_driving", "A person has control of this browser");
 
 export interface CdpBrowserOptions {
@@ -209,11 +201,6 @@ export interface CdpBrowserOptions {
   insecureTls?: boolean;
   /** Tests: a shorter deadline for an action that does not come back. */
   opTimeoutMs?: number;
-  /**
-   * Tests: a shorter wait for the new document after `browser.open` (production: 10 s). A navigation whose
-   * redirect the origin rule blocked never commits its own loader, so the open waits this long for it.
-   */
-  documentWaitMs?: number;
 }
 
 export class CdpBrowser implements BrowserDriver {
@@ -272,9 +259,7 @@ export class CdpBrowser implements BrowserDriver {
       case "browser.act": {
         const a = args as OpArgs<"browser.open"> | OpArgs<"browser.act">;
         const policy: BrowserPolicy = { ...a.policy, driver: "agent" };
-        const t0 = Date.now();
         const s = await this.session(agent, send, policy);
-        timing(`${op} session`, t0);
         const run = s.lock.then(async () => {
           // The person took over after the server checked: the action does not happen (the server waits for them to hand it back).
           if (s.policy.driver === "person") throw personDriving();
@@ -287,17 +272,9 @@ export class CdpBrowser implements BrowserDriver {
               op === "browser.open"
                 ? this.open(s, (a as OpArgs<"browser.open">).url)
                 : this.act(s, a as OpArgs<"browser.act">);
-            const t1 = Date.now();
             const r = await within(work, this.opts.opTimeoutMs ?? OP_TIMEOUT_MS);
-            timing(`${op} work`, t1);
             if (!r) throw new RunnerError("timeout", "The page did not answer in time");
-            const t2 = Date.now();
-            const evidence = await this.withEvidence(s, r);
-            timing(`${op} evidence (thumbnail)`, t2);
-            const t3 = Date.now();
-            const out = await this.forAgent(s, evidence);
-            timing(`${op} mask`, t3);
-            return out;
+            return await this.forAgent(s, await this.withEvidence(s, r));
           } finally {
             s.op = null;
           }
@@ -518,9 +495,7 @@ export class CdpBrowser implements BrowserDriver {
       }
       return false;
     };
-    const t0 = Date.now();
-    if (await ready(3000)) return timing("first page (auto-attached)", t0);
-    timing("first page: none auto-attached, creating one", t0);
+    if (await ready(3000)) return;
     await s.cdp.send("Target.createTarget", { url: "about:blank" });
     if (!(await ready(5000))) throw new RunnerError("browser_unavailable", "The browser has no page open");
   }
@@ -805,7 +780,7 @@ export class CdpBrowser implements BrowserDriver {
     return r.result.value as T;
   }
 
-  private async settle(s: Session, ms = DOCUMENT_WAIT_MS) {
+  private async settle(s: Session, ms = 10_000) {
     const end = Date.now() + ms;
     while (Date.now() < end) {
       const state = await this.eval<string>(s, "document.readyState").catch(() => "loading");
@@ -846,13 +821,11 @@ export class CdpBrowser implements BrowserDriver {
     const site = siteAccess(policyOf(s), url);
     if (site.kind === "blocked")
       throw new RunnerError("not_allowed", blockMessage(site.reason, hostOf(url), site.category));
-    const t0 = Date.now();
     const r = await s.cdp.send<{ errorText?: string; loaderId?: string }>(
       "Page.navigate",
       { url },
       this.page(s).sessionId,
     );
-    timing(`navigate (errorText=${r.errorText ?? "none"})`, t0);
     if (r.errorText) {
       const why = s.blocked.findLast((b) => !b.before);
       return {
@@ -864,24 +837,16 @@ export class CdpBrowser implements BrowserDriver {
           : `Could not open the page: ${r.errorText}`,
       };
     }
-    const wait = this.opts.documentWaitMs ?? DOCUMENT_WAIT_MS;
-    const t1 = Date.now();
-    if (r.loaderId) await this.committed(s, r.loaderId, wait);
-    timing("committed", t1);
-    const t2 = Date.now();
-    await this.settle(s, wait);
-    timing("settle", t2);
-    const t3 = Date.now();
-    const read = await this.readable(s);
-    timing("readable", t3);
-    return read;
+    if (r.loaderId) await this.committed(s, r.loaderId);
+    await this.settle(s);
+    return this.readable(s);
   }
 
   /**
    * Waits for the new document to enter the tab. Without it, the `readyState` read right after navigate may
    * be the old document's (an error page, for example) and the answer would go out with the wrong URL.
    */
-  private async committed(s: Session, loaderId: string, ms = DOCUMENT_WAIT_MS) {
+  private async committed(s: Session, loaderId: string, ms = 10_000) {
     const page = this.page(s);
     const end = Date.now() + ms;
     while (Date.now() < end) {

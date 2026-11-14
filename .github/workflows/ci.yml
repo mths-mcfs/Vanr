@@ -42,7 +42,7 @@ jobs:
       fail-fast: false
       matrix:
         # The shard count is the length of this list.
-        # Three keep the slowest one near 30 s: browser-guard.test.ts alone is about that.
+        # Three keep each one near 30 s with the times in scripts/ci/test-timings.json.
         shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -53,8 +53,6 @@ jobs:
         env:
           SHARD: ${{ matrix.shard }}
           SHARDS: ${{ strategy.job-total }}
-          # TEMPORARY: per-step times of the slow browser-guard test, to find what it waits for.
-          VANR_TEST_TIMING: "1"
 
   postgres:
     # The migration against a real Postgres (with pgvector, as in production); PGlite covers the rest.

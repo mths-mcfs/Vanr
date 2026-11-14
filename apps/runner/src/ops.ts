@@ -29,7 +29,7 @@ import {
   SESSION_ENV,
   type Wrapped,
 } from "./sandbox";
-import { type SecretStore, StreamMasker } from "./secrets";
+import { maskSecrets, type SecretStore, StreamMasker } from "./secrets";
 
 const OUTPUT_MAX = 2_000_000;
 const STREAM_EVERY_MS = 100;
@@ -283,7 +283,10 @@ const looksBinary = (buf: Buffer) => {
   }
 };
 
-export function readOp(ctx: OpContext, args: { path: string; maxBytes?: number }): ReadResult {
+/** The masks of the agent's secrets (none without an agent, or while the secrets are locked). */
+const masksOf = (ctx: OpContext) => (ctx.agent ? ctx.secrets.masks(ctx.agent) : Promise.resolve([]));
+
+export async function readOp(ctx: OpContext, args: { path: string; maxBytes?: number }): Promise<ReadResult> {
   ctx.access.requireActive();
   const path = ctx.access.resolve(ctx.agent, args.path);
   blockedSecretFile(ctx, path);
@@ -291,14 +294,29 @@ export function readOp(ctx: OpContext, args: { path: string; maxBytes?: number }
   const st = statSync(path);
   if (!st.isFile()) throw new RunnerError("bad_request", `${args.path} is not a file`);
   const max = Math.min(args.maxBytes ?? READ_MAX, READ_MAX);
-  const buf = readFileSync(path).subarray(0, max);
+  const all = readFileSync(path);
+  const buf = all.subarray(0, max);
   const binary = looksBinary(buf);
+  const masks = binary ? [] : await masksOf(ctx);
+  if (!masks.length)
+    return {
+      path: args.path,
+      content: binary ? buf.toString("base64") : buf.toString("utf8"),
+      encoding: binary ? "base64" : "utf8",
+      size: st.size,
+      truncated: st.size > max,
+    };
+  // Text the agent wrote may hold a secret's value: it is masked before the cut, like command output, over a
+  // window a little past the cut so a secret across it is replaced whole.
+  const longest = Math.max(...masks.map(([v]) => Buffer.byteLength(v)));
+  const window = all.subarray(0, max + longest);
+  const masked = Buffer.from(maskSecrets(window.toString("utf8"), masks), "utf8");
   return {
     path: args.path,
-    content: binary ? buf.toString("base64") : buf.toString("utf8"),
-    encoding: binary ? "base64" : "utf8",
+    content: masked.subarray(0, max).toString("utf8"),
+    encoding: "utf8",
     size: st.size,
-    truncated: st.size > max,
+    truncated: masked.byteLength > max || st.size > window.byteLength,
   };
 }
 
@@ -326,7 +344,7 @@ export function writeOp(
   return { path: args.path, bytes: data.byteLength };
 }
 
-export function listOp(ctx: OpContext, args: { path: string }): ListResult {
+export async function listOp(ctx: OpContext, args: { path: string }): Promise<ListResult> {
   ctx.access.requireActive();
   const path = ctx.access.resolve(ctx.agent, args.path);
   if (!existsSync(path)) throw new RunnerError("not_found", `${args.path} does not exist`);
@@ -335,6 +353,8 @@ export function listOp(ctx: OpContext, args: { path: string }): ListResult {
     ctx.agent ? ctx.secrets.secretFiles(ctx.agent, ctx.access.agentRoot(ctx.agent)) : [],
   );
   const names = readdirSync(path).sort();
+  // A file name can carry a secret's value too (`touch "$TOKEN"`).
+  const masks = await masksOf(ctx);
   const entries: ListResult["entries"] = [];
   for (const name of names) {
     if (entries.length >= LIST_MAX) break;
@@ -342,7 +362,7 @@ export function listOp(ctx: OpContext, args: { path: string }): ListResult {
     if (hidden.has(full)) continue;
     const st = lstatSync(full);
     entries.push({
-      name,
+      name: maskSecrets(name, masks),
       kind: st.isSymbolicLink() ? "link" : st.isDirectory() ? "dir" : st.isFile() ? "file" : "other",
       size: st.isFile() ? st.size : 0,
     });

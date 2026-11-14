@@ -57,7 +57,8 @@ const b64 = (b: ArrayBuffer | Uint8Array) =>
 const unb64 = (s: string) => new Uint8Array(Buffer.from(s, "base64"));
 /** An open request lasts 24 h; after that the private key goes away. */
 const PENDING_TTL_MS = 24 * 3600_000;
-const MIN_MASK = 4;
+/** Shorter values are not masked in command output: a short number shows up by chance. */
+export const MIN_MASK = 4;
 
 export interface SecretValue {
   name: string;
@@ -65,6 +66,13 @@ export interface SecretValue {
   browser: SecretBrowserBinding | null;
   value: string;
 }
+
+/** Each value of 4 characters or more becomes `[secret:NAME]`, longest first. */
+const masksOf = (values: readonly SecretValue[]): [string, string][] =>
+  values
+    .filter((v) => v.value.length >= MIN_MASK)
+    .sort((a, b) => b.value.length - a.value.length)
+    .map((v) => [v.value, `[secret:${v.name}]`]);
 
 export class SecretStore {
   private key: CryptoKey | null = null;
@@ -227,6 +235,12 @@ export class SecretStore {
   }
 
   /** The command's environment and the secret files created for it (they go away with `release`). */
+  /** The masks of what goes to the server, without writing any secret file; none while locked. */
+  async masks(agent: AgentRef): Promise<[string, string][]> {
+    if (!this.key) return [];
+    return masksOf(await this.values(agent));
+  }
+
   async materialize(
     agent: AgentRef,
     root: string,
@@ -252,10 +266,7 @@ export class SecretStore {
         files.push(path);
       }
     }
-    const masks = values
-      .filter((v) => v.value.length >= MIN_MASK)
-      .sort((a, b) => b.value.length - a.value.length)
-      .map((v) => [v.value, `[secret:${v.name}]`] as [string, string]);
+    const masks = masksOf(values);
     let released = false;
     return {
       env,

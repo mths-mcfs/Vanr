@@ -54,7 +54,6 @@
     "packages/engine/src/models/catalog.test.ts": 1,
     "packages/engine/src/models/anthropic-stream.test.ts": 27,
     "apps/runner/src/access.test.ts": 2,
-    "apps/runner/src/browser-guard.test.ts": 42544,
     "apps/runner/src/cdp.test.ts": 4246,
     "apps/runner/src/cli.test.ts": 1,
     "apps/runner/src/frame-gate.test.ts": 1,
@@ -68,6 +67,10 @@
     "apps/runner/src/ops.test.ts": 400,
     "apps/runner/src/jobs-start.test.ts": 100,
     "apps/runner/src/jobs-output.test.ts": 300,
-    "apps/runner/src/jobs-pem.test.ts": 600
+    "apps/runner/src/jobs-pem.test.ts": 600,
+    "apps/runner/src/browser-network.test.ts": 20930,
+    "apps/runner/src/browser-actions.test.ts": 26640,
+    "apps/runner/src/jobs-diff.test.ts": 300,
+    "apps/runner/src/jobs-names.test.ts": 200
   }
 }

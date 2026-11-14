@@ -29,7 +29,7 @@ import { ensureDir, writePrivate } from "./config";
 import { maybe } from "./lines";
 import { agentEnv, domainsFor, sandboxed } from "./ops";
 import { CLI_DOMAINS, type CommandSandbox, cliPaths, type PolicyContext, shellLine } from "./sandbox";
-import { maskSecrets, type SecretStore, StreamMasker } from "./secrets";
+import { MIN_MASK, maskSecrets, type SecretStore, StreamMasker } from "./secrets";
 
 const LINE_EVERY_MS = 2000;
 const PROGRESS_EVERY_MS = 30_000;
@@ -408,6 +408,7 @@ export function gitChanges(
   store: string,
   base: string,
   exclude: readonly string[] = [],
+  masks: [string, string][] = [],
 ): { files: string[]; diff: string | null } {
   const now = gitSnapshot(cwd, store, exclude);
   if (!now) return { files: [], diff: null };
@@ -424,7 +425,31 @@ export function gitChanges(
     base,
     now,
   ]);
-  return { files: files.slice(0, 200), diff: diff?.trim() ? clipMiddle(diff, DIFF_MAX) : null };
+  // Masked before it is cut, so a secret across the cut is replaced whole.
+  return {
+    files: files.slice(0, 200),
+    diff: diff?.trim() ? clipMiddle(maskDiff(diff, masks), DIFF_MAX) : null,
+  };
+}
+
+/**
+ * Masks a `git diff`. Each line of the diff starts with `+`, `-` or a space, so a secret of several lines that
+ * was added, removed or changed never shows up whole there: besides the whole value, each line of a
+ * multi-line secret (of 4 characters or more, like any mask) is masked on its own, with the same label.
+ */
+export function maskDiff(diff: string, masks: [string, string][]): string {
+  const lines = masks.flatMap(([value, label]) =>
+    value.includes("\n")
+      ? value
+          .split(/\r?\n/)
+          .filter((line) => line.length >= MIN_MASK)
+          .map((line): [string, string] => [line, label])
+      : [],
+  );
+  return maskSecrets(
+    diff,
+    [...masks, ...lines].sort((a, b) => b[0].length - a[0].length),
+  );
 }
 
 interface JobStartArgs {
@@ -669,7 +694,11 @@ export class Jobs {
               }
             : u;
       }
-      if (parsed.denied) entry.denied = [...new Set([...entry.denied, ...parsed.denied])].slice(0, 50);
+      if (parsed.denied) {
+        // The command the CLI wanted to run may hold a value it read from a secret file.
+        const denied = parsed.denied.map((c) => maskSecrets(c, secrets.masks));
+        entry.denied = [...new Set([...entry.denied, ...denied])].slice(0, 50);
+      }
       if (parsed.result !== undefined)
         entry.result = maskSecrets(parsed.result, secrets.masks).slice(0, RESULT_MAX);
       if (!parsed.text) return;
@@ -739,9 +768,10 @@ export class Jobs {
       if (usage) entry.usage = { model, ...usage };
       // Files and diff against the start of the job (the server stores them as proof for the assignment).
       if (base) {
-        const changes = gitChanges(cwd, snapStore, base, secretPaths);
-        entry.files = changes.files;
-        entry.diff = changes.diff ? maskSecrets(changes.diff, secrets.masks) : null;
+        const changes = gitChanges(cwd, snapStore, base, secretPaths, secrets.masks);
+        // A file name can carry a secret's value too.
+        entry.files = changes.files.map((f) => maskSecrets(f, secrets.masks));
+        entry.diff = changes.diff;
       }
       dropSnapshot();
       this.save();

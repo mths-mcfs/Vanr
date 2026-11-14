@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Access } from "./access";
-import { execOp, type OpContext } from "./ops";
+import { execOp, listOp, type OpContext, readOp } from "./ops";
 import { defaultPolicyContext, sandboxOff } from "./sandbox";
 import type { SecretStore } from "./secrets";
 
@@ -32,6 +32,7 @@ function ctx(streamed: string[]): OpContext {
       masks: [[SECRET, "[secret:S]"]] as [string, string][],
       release: () => {},
     }),
+    masks: async () => [[SECRET, "[secret:S]"]],
     secretFiles: () => [],
   } as unknown as SecretStore;
   return {
@@ -62,3 +63,24 @@ test("a secret across the cap of the captured output is masked before the cut, n
   expect(r.stdout.startsWith("x".repeat(1000))).toBe(true);
   expect(r.stdout.endsWith("y".repeat(1000))).toBe(true);
 }, 30_000);
+
+test("a file the agent reads, holding a secret's value, comes back masked, also when the read cuts it", async () => {
+  const c = ctx([]);
+  const root = c.access.agentRoot(c.agent);
+  writeFileSync(join(root, "notes.txt"), `token=${SECRET}\n`);
+  const whole = await readOp(c, { path: "notes.txt" });
+  expect(whole.content).toBe("token=[secret:S]\n");
+  // The cut falls inside the secret: no part of it shows.
+  const cut = await readOp(c, { path: "notes.txt", maxBytes: 9 });
+  expect(cut.content).not.toContain("abc");
+  expect(cut.truncated).toBe(true);
+});
+
+test("a file name that carries a secret's value is masked in the listing", async () => {
+  const c = ctx([]);
+  const root = c.access.agentRoot(c.agent);
+  writeFileSync(join(root, `${SECRET}.txt`), "x");
+  const names = (await listOp(c, { path: "." })).entries.map((e) => e.name);
+  expect(names).toContain("[secret:S].txt");
+  expect(names.join(" ")).not.toContain(SECRET);
+});
