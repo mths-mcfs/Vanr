@@ -38,3 +38,25 @@ export interface CalendarRange {
   proposals: CalendarProposal[];
   routines: { agentId: string; at: string; name: string; routineId: string; target: RoutineTarget }[];
 }
+
+/** Body of `createCalendarEvent`. */
+export interface CalendarEventInput {
+  allDay?: boolean;
+  description?: string | null;
+  end: string;
+  location?: string | null;
+  participants?: ActorRef[];
+  rule?: RecurrenceRule | null;
+  start: string;
+  timezone?: string;
+  title: string;
+}
+
+/** Which part of a series a change or a deletion reaches; `instanceStart` names the occurrence. */
+export interface SeriesScope {
+  instanceStart?: string;
+  scope?: "all" | "following" | "this";
+}
+
+/** Body of `updateCalendarEvent`. */
+export type CalendarEventPatch = Partial<CalendarEventInput> & SeriesScope;

@@ -6,8 +6,10 @@ import { newId } from "@vanr/engine/ids";
 import { and, asc, desc, eq, gte, inArray, isNull, lt, max, ne, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { AppDeps } from "./context";
-import { notFound } from "./http";
+import { HttpError, notFound } from "./http";
+import { log } from "./logger";
 import { notify } from "./notifications";
+import { fireRoutineEvent } from "./routines";
 import { reindex } from "./search-index";
 
 const { issues, boardColumns, issueTimeline, debates, messages, channels, members, agents, files } = schema;
@@ -59,7 +61,7 @@ export async function columnsOf(db: Db, workspaceId: string): Promise<ColumnRow[
 }
 
 /** Renumbers the positions and keeps the columns grouped in the order of the stages. */
-export async function saveColumnOrder(db: Db, ordered: ColumnRow[]): Promise<void> {
+export async function saveColumnOrder(db: Db | Tx, ordered: ColumnRow[]): Promise<void> {
   const sorted = [...ordered].sort((a, b) => STAGES.indexOf(a.stage) - STAGES.indexOf(b.stage));
   for (const [i, col] of sorted.entries()) {
     if (col.position !== i)
@@ -69,6 +71,121 @@ export async function saveColumnOrder(db: Db, ordered: ColumnRow[]): Promise<voi
 
 export function publishColumns(deps: AppDeps, workspaceId: string, rows: ColumnRow[]) {
   deps.hub.toWorkspace(workspaceId, { type: "issue_column.list_updated", columns: rows.map(toColumn) });
+}
+
+/**
+ * The lock of a workspace's column list: every change of the columns (add, rename, move, delete) reads the list,
+ * decides and writes under it, so two changes at once never lay out positions from a stale list. The seeding in
+ * `columnsOf` takes the same lock. A change that also moves issues takes the board's lock first.
+ */
+const lockColumns = (tx: Tx, workspaceId: string) =>
+  tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`board-columns:${workspaceId}`}))`);
+
+const columnsIn = (tx: Tx, workspaceId: string) =>
+  tx
+    .select()
+    .from(boardColumns)
+    .where(eq(boardColumns.workspaceId, workspaceId))
+    .orderBy(asc(boardColumns.position));
+
+/** Runs a change of the columns under their lock and answers the list as it ended. */
+async function changeColumns(
+  db: Db,
+  workspaceId: string,
+  change: (tx: Tx, cols: ColumnRow[]) => Promise<void>,
+  opts: { movesIssues?: boolean } = {},
+): Promise<ColumnRow[]> {
+  await columnsOf(db, workspaceId);
+  return db.transaction(async (tx) => {
+    if (opts.movesIssues) await lockBoard(tx, workspaceId);
+    await lockColumns(tx, workspaceId);
+    await change(tx, await columnsIn(tx, workspaceId));
+    return columnsIn(tx, workspaceId);
+  });
+}
+
+/** A new column right after `afterId` (of the same stage), or at the end of its stage's columns. */
+export function addColumn(
+  db: Db,
+  workspaceId: string,
+  input: { name: string; stage: IssueStage; afterId?: string },
+): Promise<ColumnRow[]> {
+  return changeColumns(db, workspaceId, async (tx, cols) => {
+    const after = input.afterId ? cols.find((x) => x.id === input.afterId) : undefined;
+    if (input.afterId && (!after || after.stage !== input.stage))
+      throw new HttpError(400, "issue.column_stage", "Put the column next to one of the same stage");
+    const [col] = await tx
+      .insert(boardColumns)
+      .values({ id: newId("col"), workspaceId, name: input.name, stage: input.stage, position: cols.length })
+      .returning();
+    if (!col) throw new Error("column insert returned nothing");
+    const sameStage = cols.filter((x) => x.stage === input.stage);
+    const anchor = after ?? sameStage[sameStage.length - 1];
+    const ordered = [...cols];
+    ordered.splice(anchor ? ordered.indexOf(anchor) + 1 : ordered.length, 0, col);
+    await saveColumnOrder(tx, ordered);
+  });
+}
+
+/** Renames a column and/or moves it to `index`; it only moves inside its own stage (the board stays grouped). */
+export function changeColumn(
+  db: Db,
+  workspaceId: string,
+  columnId: string,
+  input: { name?: string; index?: number },
+): Promise<ColumnRow[]> {
+  return changeColumns(db, workspaceId, async (tx, cols) => {
+    const col = cols.find((x) => x.id === columnId);
+    if (!col) throw notFound("Column not found");
+    if (input.name !== undefined)
+      await tx.update(boardColumns).set({ name: input.name }).where(eq(boardColumns.id, col.id));
+    if (input.index !== undefined) {
+      const ordered = cols.filter((x) => x.id !== col.id);
+      const first = cols.findIndex((x) => x.stage === col.stage);
+      const count = cols.filter((x) => x.stage === col.stage).length;
+      ordered.splice(Math.min(Math.max(input.index, first), first + count - 1), 0, col);
+      await saveColumnOrder(tx, ordered);
+    }
+  });
+}
+
+/**
+ * Deletes a column and moves its issues to `moveTo`, below the cards already there and in their order, under the
+ * board's lock (positions in a column stay unique). Each stage keeps at least one column.
+ */
+export function deleteColumn(
+  db: Db,
+  workspaceId: string,
+  columnId: string,
+  moveTo: string,
+): Promise<ColumnRow[]> {
+  return changeColumns(
+    db,
+    workspaceId,
+    async (tx, cols) => {
+      const col = cols.find((x) => x.id === columnId);
+      const target = cols.find((x) => x.id === moveTo);
+      if (!col) throw notFound("Column not found");
+      if (!target || target.id === col.id)
+        throw new HttpError(400, "issue.column_move_to", "Pick another column");
+      if (cols.filter((x) => x.stage === col.stage).length === 1)
+        throw new HttpError(409, "issue.column_last_of_stage", "Each stage keeps at least one column");
+      await tx.execute(sql`
+        update ${issues} set "column_id" = ${target.id}, "board_position" = m.top + v.rn
+        from (
+          select "id", row_number() over (order by "board_position", "number" desc) as rn
+          from ${issues} where "column_id" = ${col.id}
+        ) as v,
+        (select coalesce(max("board_position"), -1) as top from ${issues} where "column_id" = ${target.id}) as m
+        where ${issues.id} = v."id"`);
+      await tx.delete(boardColumns).where(eq(boardColumns.id, col.id));
+      await saveColumnOrder(
+        tx,
+        cols.filter((x) => x.id !== col.id),
+      );
+    },
+    { movesIssues: true },
+  );
 }
 
 export async function issueById(db: Db, workspaceId: string, id: string): Promise<IssueRow> {
@@ -477,7 +594,95 @@ export async function createIssue(deps: AppDeps, input: NewIssue): Promise<Issue
   });
   if (row.assignee) await notifyAssigned(deps, row, input.author);
   await reindex(deps, { kind: "issue", id: row.id });
+  await issueCreated(deps, row, input.author);
   return row;
+}
+
+/**
+ * Tells the routines subscribed to `issue.created`, once the issue is saved (never inside the transaction that
+ * could still undo it). Only an issue a person opened fires: one an agent opened doesn't (an agent that opens
+ * issues from a routine would feed itself forever). The issue's id is the event's id, so a routine runs once
+ * per issue. The issue already exists, so a failure here is logged and doesn't fail its creation.
+ */
+async function issueCreated(deps: AppDeps, row: IssueRow, by: ActorRef) {
+  if (by.type !== "person") return;
+  await fireRoutineEvent(deps, {
+    workspaceId: row.workspaceId,
+    event: "issue.created",
+    eventId: row.id,
+    context: `Issue #${row.number}: ${row.title}\n\n${row.description}`.trim(),
+  }).catch((err) => log.error("routine.issue_event_failed", { issueId: row.id, err }));
+}
+
+/**
+ * Checks or unchecks one acceptance criterion. The issue is read again under its row lock in the transaction that
+ * writes the list and the event, so two criteria changed at once both stay (neither writes the list it read
+ * before the other one's change).
+ */
+export async function setCriterion(
+  deps: AppDeps,
+  row: IssueRow,
+  criterionId: string,
+  done: boolean,
+  by: ActorRef,
+): Promise<IssueRow> {
+  const at = deps.now();
+  return deps.db.transaction(async (tx) => {
+    const [current] = await tx
+      .select()
+      .from(issues)
+      .where(and(eq(issues.id, row.id), eq(issues.workspaceId, row.workspaceId)))
+      .for("no key update");
+    if (!current) throw notFound("Issue not found");
+    const crit = current.criteria.find((x) => x.id === criterionId);
+    if (!crit) throw notFound("Criterion not found");
+    if (crit.done === done) return current;
+    const [updated] = await tx
+      .update(issues)
+      .set({ criteria: current.criteria.map((x) => (x.id === crit.id ? { ...x, done } : x)), updatedAt: at })
+      .where(eq(issues.id, current.id))
+      .returning();
+    if (!updated) throw notFound("Issue not found");
+    await tx.insert(issueTimeline).values(
+      eventValues(at, {
+        issueId: current.id,
+        author: by,
+        event: done ? "criterion_done" : "criterion_undone",
+        text: `${done ? "checked" : "unchecked"} "${crit.text}"`,
+        vars: { text: crit.text },
+      }),
+    );
+    return updated;
+  });
+}
+
+/** A comment on the timeline (with the files it attaches, already checked) and a notice to whoever follows the issue. */
+export async function addComment(
+  deps: AppDeps,
+  row: IssueRow,
+  input: { text: string; attachments: string[] },
+  by: ActorRef,
+): Promise<IssueActivity> {
+  const at = deps.now();
+  const act = await deps.db.transaction(async (tx) => {
+    const [inserted] = await tx
+      .insert(issueTimeline)
+      .values({
+        id: newId("iact"),
+        issueId: row.id,
+        kind: "comment",
+        text: input.text,
+        author: by,
+        attachments: input.attachments,
+        createdAt: at,
+      })
+      .returning();
+    if (!inserted) throw new Error("comment insert returned nothing");
+    await tx.update(issues).set({ updatedAt: at }).where(eq(issues.id, row.id));
+    return inserted;
+  });
+  await notifyComment(deps, row, by, input.text);
+  return toActivity(act);
 }
 
 const noticeSource = (row: IssueRow) => ({ issueId: row.id, issueSeq: row.number, label: `#${row.number}` });
