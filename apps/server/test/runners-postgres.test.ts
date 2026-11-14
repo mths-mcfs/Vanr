@@ -342,14 +342,19 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("forced: runner locks on Postgres
     "forced: a second person taking over waits on the agent's lock, so one intervention opens",
     async () => {
       // Two people take over the browser: the second waits on the agent's lock, so one intervention opens.
-      const starts = await forcedPair(admin, "intervention-start", "select", (side, hooks) =>
-        call(
-          withDb(hooks),
-          side === "A" ? ana.user : beto.user,
-          "POST",
-          `/agents/${agentId}/browser/interventions/start`,
-          {},
-        ),
+      const starts = await forcedPair(
+        admin,
+        "intervention-start",
+        "select",
+        (side, hooks) =>
+          call(
+            withDb(hooks),
+            side === "A" ? ana.user : beto.user,
+            "POST",
+            `/agents/${agentId}/browser/interventions/start`,
+            {},
+          ),
+        'from "browser_interventions"',
       );
       const open = await server.deps.db
         .select()
