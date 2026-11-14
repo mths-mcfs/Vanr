@@ -68,9 +68,9 @@ describe("realtime hub", () => {
     const caio = await connect("w1", "caio");
     hub.subscribe(ana.socket, "c1");
     hub.subscribe(bia.socket, "c1");
-    hub.toChannel("c1", event("message.created"), { exceptUserId: "bia" });
+    hub.toChannel("c1", event("message.posted"), { exceptUserId: "bia" });
     await settle();
-    expect(ana.frames).toEqual([{ type: "event", channelId: "c1", event: event("message.created") }]);
+    expect(ana.frames).toEqual([{ type: "event", channelId: "c1", event: event("message.posted") }]);
     expect(bia.frames).toEqual([]);
     expect(caio.frames).toEqual([]);
     hub.unsubscribe(ana.socket, "c1");
@@ -106,7 +106,7 @@ describe("realtime hub", () => {
     fabi.ws.close();
     await fabi.closed;
     while (hub.isOnline("w4", "fabi")) await Bun.sleep(1);
-    hub.toChannel("c4", event("message.created"));
+    hub.toChannel("c4", event("message.posted"));
     hub.toWorkspace("w4", event("agent.updated"));
     await settle();
     expect(fabi.frames).toEqual([]);
@@ -117,10 +117,10 @@ describe("realtime hub", () => {
     hub.subscribe(gabi.socket, "c5");
     hub.subscribe(gabi.socket, "c6");
     hub.dropUser("w5", "gabi", "c5");
-    hub.toChannel("c5", event("message.created"));
-    hub.toChannel("c6", event("message.created"));
+    hub.toChannel("c5", event("message.posted"));
+    hub.toChannel("c6", event("message.posted"));
     await settle();
-    expect(gabi.frames).toEqual([{ type: "event", channelId: "c6", event: event("message.created") }]);
+    expect(gabi.frames).toEqual([{ type: "event", channelId: "c6", event: event("message.posted") }]);
     hub.dropUser("w5", "gabi");
     expect(await gabi.closed).toBe(4003);
   });

@@ -157,7 +157,7 @@ export async function recordStep(deps: AppDeps, input: StepInput): Promise<void>
       at: deps.now(),
     });
   } catch (err) {
-    log.error("browser.step_record_failed", { err, agentId: input.agentId, tool: input.tool });
+    log.error("browser.log_entry_record_failed", { err, agentId: input.agentId, tool: input.tool });
   }
 }
 

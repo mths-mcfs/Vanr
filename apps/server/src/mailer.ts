@@ -34,7 +34,7 @@ function fileMailer(dir: string | null): Mailer {
   };
 }
 
-/** Production: Resend's HTTP API. No credential on this machine; not verified. */
+/** Production: Resend's HTTP API. Not verified here: there is no Resend credential in development. */
 function resendMailer(apiKey: string, from: string): Mailer {
   return {
     async send(mail) {
@@ -42,7 +42,7 @@ function resendMailer(apiKey: string, from: string): Mailer {
         method: "POST",
         headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
         body: JSON.stringify({ from, to: [mail.to], subject: mail.subject, text: mail.text }),
-        // Without a limit, a hung send holds the delivery until it goes back to the queue and out again.
+        // Without a limit, a hung send holds the email until the queue hands it out again.
         signal: AbortSignal.timeout(15_000),
       });
       if (!res.ok) log.error("mail.send_failed", { status: res.status, kind: mail.kind });

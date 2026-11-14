@@ -1,6 +1,6 @@
 // The assignment's plan as a table (`assignment_plan_items`), with a version and an author per edit. Person,
 // agent, verifier and engine write through the same path (`writePlan`), which locks the assignment row: two
-// edits at once lose no item, and whoever sent an old `baseVersion` gets 409.
+// edits at once lose no item, and whoever sent an old `parentVersion` gets 409.
 //
 // Rules:
 // - `passes` doesn't come in here: only the verifier writes it (verify.ts).

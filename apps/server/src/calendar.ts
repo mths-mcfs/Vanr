@@ -126,14 +126,14 @@ function audience(row: EventRow): string[] | null {
 }
 
 export function publishEvent(deps: AppDeps, row: EventRow) {
-  const event = { type: "calendar.event_updated", eventId: row.id, event: toEvent(row) };
+  const event = { type: "calendar_event.saved", eventId: row.id, event: toEvent(row) };
   const users = audience(row);
   if (!users) deps.hub.toWorkspace(row.workspaceId, event);
   else for (const u of users) deps.hub.toUser(row.workspaceId, u, event);
 }
 
 export function publishDeleted(deps: AppDeps, row: EventRow, scope: string, instanceStart: string | null) {
-  const event = { type: "calendar.event_deleted", eventId: row.id, scope, instanceStart };
+  const event = { type: "calendar_event.removed", eventId: row.id, scope, instanceStart };
   const users = audience(row);
   if (!users) deps.hub.toWorkspace(row.workspaceId, event);
   else for (const u of users) deps.hub.toUser(row.workspaceId, u, event);
