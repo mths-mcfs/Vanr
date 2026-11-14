@@ -6,7 +6,14 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["apps/**", "packages/**", "scripts/**", "*.json", "!**/dist"]
+    "includes": [
+      "apps/**",
+      "packages/**",
+      "scripts/**",
+      "*.json",
+      "!**/dist",
+      "!packages/client/src/contract-schemas.ts"
+    ]
   },
   "formatter": {
     "enabled": true,

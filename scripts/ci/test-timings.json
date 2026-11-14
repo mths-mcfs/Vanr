@@ -1,6 +1,14 @@
 {
   "version": 1,
   "files": {
+    "packages/client/test/fake-server.test.ts": 11,
+    "packages/client/test/http.test.ts": 7,
+    "packages/client/test/invalidation.test.ts": 4,
+    "packages/client/test/methods.test.ts": 11,
+    "packages/client/test/react.test.tsx": 294,
+    "packages/client/test/realtime.test.ts": 3,
+    "packages/client/test/schema.test.ts": 15,
+    "packages/client/test/upload.test.ts": 2,
     "packages/contract/src/permissions.test.ts": 5,
     "packages/contract/src/secret-box.test.ts": 90,
     "packages/engine/src/action-credential.test.ts": 7,
