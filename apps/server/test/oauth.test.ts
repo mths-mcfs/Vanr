@@ -1,7 +1,7 @@
 // The token response's lifetime read at the boundary, and the one door outside text goes through before it
 // reaches an error or a log line.
 import { describe, expect, test } from "bun:test";
-import { exchangeCode, MAX_EXPIRES_IN_S, needsRefresh } from "../src/integrations/oauth";
+import { discoverAuthServer, exchangeCode, MAX_EXPIRES_IN_S, needsRefresh } from "../src/integrations/oauth";
 import { OUTSIDE_TEXT_MAX, outsideText } from "../src/integrations/outside-text";
 
 const NOW = new Date("2026-11-14T12:00:00Z");
@@ -76,4 +76,23 @@ describe("outside text", () => {
     expect(cut.length).toBe(OUTSIDE_TEXT_MAX);
     expect(cut.endsWith("…")).toBe(true);
   });
+});
+
+test("resource metadata must identify the exact resource before its issuer is used", async () => {
+  for (const resource of [undefined, "https://resource.test/other-tenant"]) {
+    const fetcher = Object.assign(
+      async () =>
+        Response.json({
+          resource,
+          authorization_servers: ["https://issuer.test"],
+          issuer: "https://issuer.test",
+          authorization_endpoint: "https://issuer.test/auth",
+          token_endpoint: "https://issuer.test/token",
+        }),
+      { preconnect() {} },
+    );
+    await expect(
+      discoverAuthServer(fetcher, "https://resource.test/mcp", "https://resource.test/meta", false),
+    ).rejects.toThrow();
+  }
 });

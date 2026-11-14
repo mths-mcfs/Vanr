@@ -160,8 +160,11 @@ describe("SSRF attacks (cloud edition)", () => {
   test("OAuth metadata with an odd-scheme address brings the discovery down", async () => {
     for (const bad of ["javascript:alert(1)", "file:///etc/passwd", "http://93.184.216.34/authorize"]) {
       const { fetch: raw } = fakeFetch({
-        "https://93.184.216.34/.well-known/oauth-protected-resource": () =>
-          Response.json({ authorization_servers: ["https://93.184.216.34"] }),
+        "https://93.184.216.34/.well-known/oauth-protected-resource/mcp": () =>
+          Response.json({
+            resource: "https://93.184.216.34/mcp",
+            authorization_servers: ["https://93.184.216.34"],
+          }),
         "https://93.184.216.34/.well-known/oauth-authorization-server": () =>
           Response.json({
             issuer: "https://93.184.216.34",

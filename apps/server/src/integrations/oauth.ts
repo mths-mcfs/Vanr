@@ -7,7 +7,7 @@ import { parseServerUrl } from "./net";
 class OAuthError extends Error {}
 
 const protectedResource = z.object({
-  resource: z.string().optional(),
+  resource: z.string().url(),
   authorization_servers: z.array(z.string().url()).min(1),
   scopes_supported: z.array(z.string()).optional(),
 });
@@ -128,11 +128,16 @@ export async function discoverAuthServer(
 ): Promise<AuthServer> {
   let prm: z.infer<typeof protectedResource> | null = null;
   for (const url of resourceMetadataUrls(resourceUrl, resourceMetadataUrl)) {
-    const parsed = protectedResource.safeParse(await getJson(fetchFn, safeUrl(url, allowPrivate)));
-    if (parsed.success) {
-      prm = parsed.data;
-      break;
-    }
+    const document = await getJson(fetchFn, safeUrl(url, allowPrivate));
+    if (document === null) continue;
+    const parsed = protectedResource.safeParse(document);
+    const expected = resourceMetadataUrl
+      ? resourceUrl
+      : url.replace("/.well-known/oauth-protected-resource", "");
+    if (!parsed.success || parsed.data.resource !== expected)
+      throw new OAuthError("The protected resource metadata does not match the resource");
+    prm = parsed.data;
+    break;
   }
   // Old servers don't publish the resource: the domain itself plays the authorization server.
   const issuer = prm?.authorization_servers[0] ?? new URL(resourceUrl).origin;

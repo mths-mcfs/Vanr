@@ -84,9 +84,9 @@ export function startFakeMcp(opts: FakeMcpOptions = {}): FakeMcp {
       const url = new URL(req.url);
       const origin = url.origin;
       const issuer = `${origin}${path}`;
-      if (url.pathname === "/.well-known/oauth-protected-resource" && !opts.keyOnly) {
+      if (url.pathname.startsWith("/.well-known/oauth-protected-resource") && !opts.keyOnly) {
         return Response.json({
-          resource: `${origin}${mcpPath}`,
+          resource: `${origin}${url.pathname.replace("/.well-known/oauth-protected-resource", "")}`,
           authorization_servers: [issuer],
           ...(opts.scopesSupported ? { scopes_supported: opts.scopesSupported } : {}),
         });
@@ -185,7 +185,8 @@ export function startFakeMcp(opts: FakeMcpOptions = {}): FakeMcp {
         meta: body.params?._meta,
       });
       if (!opts.open && bearer !== apiKey && !issued.has(bearer)) {
-        const metadata = opts.resourceMetadataUrl ?? `${origin}/.well-known/oauth-protected-resource`;
+        const metadata =
+          opts.resourceMetadataUrl ?? `${origin}/.well-known/oauth-protected-resource${url.pathname}`;
         const scope = opts.challengeScope ? `, scope="${opts.challengeScope}"` : "";
         const header = opts.keyOnly ? 'Bearer realm="mcp"' : `Bearer resource_metadata="${metadata}"${scope}`;
         return new Response("unauthorized", { status: 401, headers: { "www-authenticate": header } });
@@ -248,7 +249,7 @@ export function startFakeMcp(opts: FakeMcpOptions = {}): FakeMcp {
         const needs = opts.toolScopes?.[name];
         const granted = (issued.get(bearer) ?? "").split(" ");
         if (needs && bearer !== apiKey && !granted.includes(needs)) {
-          const header = `Bearer error="insufficient_scope", scope="${needs}", resource_metadata="${origin}/.well-known/oauth-protected-resource", error_description="needs ${needs}"`;
+          const header = `Bearer error="insufficient_scope", scope="${needs}", resource_metadata="${origin}/.well-known/oauth-protected-resource${url.pathname}", error_description="needs ${needs}"`;
           return new Response("forbidden", { status: 403, headers: { "www-authenticate": header } });
         }
         toolCalls.push({ name, args: body.params?.arguments });

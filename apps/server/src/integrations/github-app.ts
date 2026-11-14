@@ -20,37 +20,52 @@ type AppConfig = NonNullable<AppDeps["config"]["integrations"]["githubApp"]>;
 /** Tools of the GitHub connector that touch no repository (they pass even with a restriction). */
 const REPO_FREE_TOOLS = new Set(["get_me"]);
 
-/**
- * Repositories a GitHub tool call names: `owner` + `repo`, a full name in `repository`/`full_name`/`repo`
- * ("owner/repo") and the `repo:owner/repo` qualifiers of a search. `org:` and `user:` in a search open all
- * the owner's repositories: they become `owner/*`.
- * A search with an operator (`NOT`, `OR`, parentheses) or a negated qualifier (`-repo:`) isn't held to the
- * repositories it names (`-repo:a/b` searches all the others): it goes in as an invalid target, and the call is
- * rejected. `owner` and `repo` always join, so an extra slash (`owner: "a/b/c"`) falls into the format check.
- */
-function repoTargets(args: Record<string, unknown>): string[] {
-  const out = new Set<string>();
-  const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
-  const owner = str(args.owner);
-  const repo = str(args.repo);
-  if (owner && repo) out.add(`${owner}/${repo}`);
-  else if (repo) out.add(repo);
-  else if (owner) out.add(`${owner}/*`);
-  for (const key of ["repository", "full_name", "repo_full_name", "repository_full_name"]) {
-    const v = str(args[key]);
-    if (v) out.add(v);
-  }
-  for (const key of ["q", "query"]) {
-    for (const token of str(args[key]).split(/\s+/)) {
-      if (!token) continue;
-      if (/^(NOT|OR|AND)$/.test(token) || /[()]/.test(token) || /^-(repo|org|user):/i.test(token)) {
-        out.add(`(search operator ${token})`);
-        continue;
-      }
-      const m = /^(repo|org|user):(.+)$/i.exec(token);
-      if (!m?.[2]) continue;
-      out.add(m[1]?.toLowerCase() === "repo" ? m[2] : `${m[2]}/*`);
+// These tools consume owner/repo directly. Unknown tools and implicit destinations are refused.
+const REPO_TOOLS = new Set([
+  "get_file_contents",
+  "get_commit",
+  "list_commits",
+  "list_branches",
+  "create_branch",
+  "list_tags",
+  "get_tag",
+  "list_releases",
+  "get_latest_release",
+  "get_release_by_tag",
+  "list_pull_requests",
+  "pull_request_read",
+  "issue_read",
+  "issue_write",
+  "add_issue_comment",
+  "create_or_update_file",
+  "push_files",
+  "delete_file",
+]);
+const SEARCH_TOOLS = new Set(["search_code", "search_issues", "search_pull_requests"]);
+const repoArgs = z.object({ owner: z.string().min(1), repo: z.string().min(1) });
+
+function repoTargets(tool: string, args: Record<string, unknown>): string[] {
+  if (REPO_TOOLS.has(tool)) {
+    const parsed = repoArgs.safeParse(args);
+    if (!parsed.success) return [];
+    const out = [`${parsed.data.owner}/${parsed.data.repo}`];
+    if (tool === "issue_write" && (args.parent_owner !== undefined || args.parent_repo !== undefined)) {
+      const parent = repoArgs.safeParse({ owner: args.parent_owner, repo: args.parent_repo });
+      out.push(parent.success ? `${parent.data.owner}/${parent.data.repo}` : "(invalid parent repository)");
     }
+    return out;
+  }
+  if (!SEARCH_TOOLS.has(tool) || typeof args.query !== "string") return [];
+  const out = new Set<string>();
+  // Quoted or boolean expressions can turn a qualifier into text or widen its scope.
+  if (/[()"\\]/.test(args.query)) return ["(search operator)"];
+  for (const token of args.query.split(/\s+/)) {
+    if (/^(NOT|OR|AND)$/.test(token) || /^-(repo|org|user):/i.test(token)) {
+      out.add(`(search operator ${token})`);
+      continue;
+    }
+    const m = /^(repo|org|user):(.+)$/i.exec(token);
+    if (m?.[2]) out.add(m[1]?.toLowerCase() === "repo" ? m[2] : `${m[2]}/*`);
   }
   return [...out];
 }
@@ -68,7 +83,7 @@ export function repoRefusal(
 ): string | null {
   if (patterns.length === 0 || REPO_FREE_TOOLS.has(tool)) return null;
   const allowed = patterns.join(", ");
-  const targets = repoTargets(args);
+  const targets = repoTargets(tool, args);
   if (targets.length === 0)
     return `This agent can only use these GitHub repositories: ${allowed}. Name one (owner and repo).`;
   const blocked = targets.filter((t) => !isRepoPattern(t) || !repoAllowed(patterns, t));
@@ -138,7 +153,9 @@ async function githubJson<T>(
 
 const installationInfo = z.object({
   id: z.number(),
-  account: z.object({ login: z.string() }).nullable(),
+  account: z
+    .object({ id: z.number().int(), login: z.string(), type: z.enum(["User", "Organization"]) })
+    .nullable(),
   repository_selection: z.enum(["all", "selected"]),
   suspended_at: z.string().nullable().optional(),
 });
@@ -174,13 +191,13 @@ function oauthClientOf(cfg: AppConfig) {
 const userToken = z.object({ access_token: z.string().min(1) });
 const userInstallations = z.object({
   total_count: z.number().int().min(0),
-  installations: z.array(z.object({ id: z.number().int() })),
+  installations: z.array(installationInfo),
 });
 
 /**
  * Proves the person who came back controls the installation: the `code` GitHub sends with the installation
- * (the App asks for user authorization on install) becomes a user token, and the installation has to be among
- * that user's. The token is only used here and then dropped.
+ * becomes a user token. Visibility alone is insufficient: require the personal account owner or an active
+ * organization owner. The token is only used here and then dropped.
  */
 async function controlsInstallation(
   deps: AppDeps,
@@ -213,7 +230,29 @@ async function controlsInstallation(
       userInstallations,
     ).catch(() => null);
     if (!out) return false;
-    if (out.installations.some((i) => i.id === installationId)) return true;
+    const installation = out.installations.find((i) => i.id === installationId);
+    if (installation) {
+      const account = installation.account;
+      if (!account) return false;
+      if (account.type === "User") {
+        const user = await githubJson(
+          deps,
+          cfg,
+          "/user",
+          { token },
+          z.object({ id: z.number().int() }),
+        ).catch(() => null);
+        return user?.id === account.id;
+      }
+      const membership = await githubJson(
+        deps,
+        cfg,
+        `/user/memberships/orgs/${encodeURIComponent(account.login)}`,
+        { token },
+        z.object({ state: z.string(), role: z.string() }),
+      ).catch(() => null);
+      return membership?.state === "active" && membership.role === "admin";
+    }
     if (page * 100 >= out.total_count || out.installations.length < 100) return false;
   }
   return false;
@@ -233,9 +272,8 @@ export async function installUrl(deps: AppDeps, me: Starter, nextPath: string): 
 
 /**
  * The return from the installation (the app's Setup URL). The state binds it to the workspace, to whoever
- * started and to that session; the person proves they control the installation (`code` -> their
- * installations), and only then it is read on GitHub's API with the app's JWT. Without that proof nothing is
- * kept (`github_app=unverified`). An installation belongs to a single workspace: the upsert only updates the
+ * started and to that session. Ownership of the account or organization is checked before reading with the
+ * app's JWT. Without that proof nothing is kept (`github_app=unverified`). An installation belongs to a single workspace: the upsert only updates the
  * row of the same workspace, in one statement.
  */
 export async function finishInstall(

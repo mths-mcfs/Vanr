@@ -9,6 +9,7 @@ import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import {
   connectCustom,
+  connectWithKey,
   disconnect,
   finishOAuth,
   integrationSealer,
@@ -17,12 +18,16 @@ import {
   refreshCustom,
   requestScope,
   type Starter,
+  saveCustomTools,
+  startCatalogOAuth,
+  startScopeStepUp,
 } from "../src/integrations/connectors";
 import { McpAuthRequired } from "../src/integrations/mcp";
 import { REFRESH_MARGIN_MS } from "../src/integrations/oauth";
 import type { RunningServer } from "../src/server";
 import { type FakeMcp, startFakeMcp } from "./fake-mcp";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
+import { gate } from "./lock-double";
 import { type Person, seedWorkspace } from "./seed";
 
 const { connections, oauthStates, members } = schema;
@@ -36,6 +41,7 @@ let server: RunningServer;
 let mcp: FakeMcp;
 let ana: Person;
 let workspaceId: string;
+let channelId: string;
 let me: Starter;
 
 beforeAll(async () => {
@@ -46,7 +52,7 @@ beforeAll(async () => {
     now: () => clock,
   });
   ana = await signedIn(server, "Ana", "ana@connectors.test");
-  ({ workspaceId } = await seedWorkspace(server, ana, "Connectors"));
+  ({ workspaceId, general: channelId } = await seedWorkspace(server, ana, "Connectors"));
   me = { workspaceId, userId: ana.user.id, role: "owner", handle: "ana", sessionId: "session-ana" };
 }, SERVER_TEST_MS);
 afterAll(async () => {
@@ -74,6 +80,60 @@ const connection = async (id: string) => {
 };
 const codeExchanges = () => mcp.tokenRequests.filter((f) => f.get("grant_type") === "authorization_code");
 const refreshes = () => mcp.tokenRequests.filter((f) => f.get("grant_type") === "refresh_token");
+
+/** Hold a real network reply while another workspace operation completes. */
+async function during(
+  method: string,
+  run: (deps: typeof server.deps) => Promise<unknown>,
+  concurrent: () => Promise<unknown>,
+  fail = false,
+): Promise<unknown> {
+  const entered = gate(),
+    release = gate();
+  const fetchExternal = Object.assign(
+    async (url: string | URL | Request, init?: RequestInit) => {
+      const response = await fetch(url, init);
+      const body = String(init?.body).startsWith("{") ? JSON.parse(String(init?.body)) : {};
+      if (String(url).endsWith(method) || body.method === method) {
+        entered.open();
+        await release.opened;
+        if (fail)
+          return Response.json({
+            jsonrpc: "2.0",
+            id: body.id,
+            error: {
+              code: -1,
+              message: `backend failure ${new Headers(init?.headers).get("authorization")}`,
+            },
+          });
+      }
+      return response;
+    },
+    { preconnect() {} },
+  );
+  const running = run({ ...server.deps, fetchExternal });
+  try {
+    await Promise.race([
+      entered.opened,
+      running.then(() => {
+        throw new Error("operation ended before the held reply");
+      }),
+    ]);
+    await concurrent();
+  } finally {
+    release.open();
+    await running.catch(() => undefined);
+  }
+  return running;
+}
+
+const decide = (row: Awaited<ReturnType<typeof connection>>, access: "off" | "write") =>
+  saveCustomTools(server.deps, row, {
+    label: row.label,
+    tools: row.tools.map((t) => ({ name: t.name, access, label: "kept label", confirmed: true })),
+  });
+const stepUp = async (id: string) =>
+  mcp.authorize(await startScopeStepUp(server.deps, me, await connection(id), "/back"));
 
 describe("the OAuth state", () => {
   test(
@@ -270,38 +330,17 @@ describe("the callback and the kept credential", () => {
     async () => {
       const back = await begin();
       const pending = await connection(back.serverId);
-      let entered!: () => void;
-      const entering = new Promise<void>((r) => {
-        entered = r;
-      });
-      let release!: () => void;
-      const released = new Promise<void>((r) => {
-        release = r;
-      });
-      const inner = server.deps.fetchExternal;
-      const held = Object.assign(
-        async (url: string | URL | Request, init?: RequestInit) => {
-          if (String(url).endsWith("/token")) {
-            entered();
-            await released;
-          }
-          return inner(url, init);
-        },
-        { preconnect: () => {} },
-      ) as typeof fetch;
-      const finishing = finishOAuth(
-        { ...server.deps, fetchExternal: held },
-        { userId: ana.user.id, sessionId: "session-ana" },
-        {
-          code: back.code,
-          state: back.state,
-          iss: back.iss ?? undefined,
-        },
+      const result = await during(
+        "/token",
+        (deps) =>
+          finishOAuth(deps, me, {
+            code: back.code,
+            state: back.state,
+            iss: back.iss ?? undefined,
+          }),
+        () => disconnect(server.deps, pending),
       );
-      await entering;
-      await disconnect(server.deps, pending);
-      release();
-      expect(await finishing).toBe("/back?connector_error=gone");
+      expect(result).toBe("/back?connector_error=gone");
       const after = await connection(back.serverId);
       expect(after.revokedAt).not.toBeNull();
       expect(after.secret).toBeNull();
@@ -373,3 +412,223 @@ describe("the callback and the kept credential", () => {
     SERVER_TEST_MS,
   );
 });
+
+test(
+  "revoked snapshots cannot start new MCP calls, with either OAuth or a key",
+  async () => {
+    const back = await begin();
+    await finish(back);
+    const keyed = await connectCustom(server.deps, me, {
+      serverUrl: mcp.url,
+      apiKey: mcp.apiKey,
+      nextPath: "/",
+    });
+    if (keyed.status !== "server") throw new Error("expected key connection");
+    for (const id of [back.serverId, keyed.server.id]) {
+      const stale = await connection(id);
+      await disconnect(server.deps, stale);
+      const calls = mcp.calls.length;
+      await expect(mcpFor(server.deps, stale)).rejects.toThrow();
+      expect(mcp.calls.length).toBe(calls);
+    }
+  },
+  SERVER_TEST_MS,
+);
+
+test(
+  "errors redact the refreshed token even after disconnect erases it",
+  async () => {
+    const back = await begin();
+    await finish(back);
+    const row = await connection(back.serverId);
+    advance(40_000);
+    const error = await during(
+      "tools/list",
+      (deps) => refreshCustom(deps, row),
+      () => disconnect(server.deps, row),
+      true,
+    ).catch((e: unknown) => e);
+    expect(error).toMatchObject({ code: "connector.unreachable" });
+    expect(error instanceof Error ? error.message : "").toContain("Bearer [redacted]");
+  },
+  SERVER_TEST_MS,
+);
+
+test(
+  "a pending tool list preserves the latest off decision, including in OAuth callbacks",
+  async () => {
+    const back = await begin();
+    await finish(back);
+    for (const callback of [false, true]) {
+      const row = await decide(await connection(back.serverId), "write");
+      await during(
+        "tools/list",
+        async (deps) => {
+          if (!callback) return refreshCustom(deps, row);
+          await requestScope(server.deps, row, "create_item", "items:write");
+          const next = await stepUp(row.id);
+          return finishOAuth(deps, me, { ...next, iss: next.iss ?? undefined });
+        },
+        () => decide(row, "off"),
+      );
+      expect(
+        (await connection(row.id)).tools.every(
+          (t) => t.access === "off" && t.confirmed && t.label === "kept label",
+        ),
+      ).toBe(true);
+    }
+  },
+  SERVER_TEST_MS,
+);
+
+test(
+  "a failed callback tool list preserves the saved tools and labels",
+  async () => {
+    const back = await begin();
+    await finish(back);
+    const row = await decide(await connection(back.serverId), "write");
+    await requestScope(server.deps, row, "create_item", "items:write");
+    const next = await stepUp(row.id);
+    expect(
+      await during(
+        "tools/list",
+        (deps) => finishOAuth(deps, me, { ...next, iss: next.iss ?? undefined }),
+        async () => {},
+        true,
+      ),
+    ).toContain("connector_error=tools");
+    expect((await connection(row.id)).tools).toEqual(row.tools);
+  },
+  SERVER_TEST_MS,
+);
+
+test(
+  "callback settlement checks the current request and each card's own scopes",
+  async () => {
+    const back = await begin();
+    await finish(back);
+    const row = await connection(back.serverId);
+    await requestScope(server.deps, row, "create_item", "items:write");
+    const next = await stepUp(row.id);
+    const ids = ["scope-write", "scope-admin"];
+    await server.deps.db.insert(schema.messages).values(
+      ids.map((id, i) => ({
+        id,
+        workspaceId,
+        channelId,
+        authorKind: "person" as const,
+        authorId: me.userId,
+        body: "Permission",
+        meta: {
+          connectorScope: {
+            connectionId: row.id,
+            connector: "custom",
+            label: "Stock",
+            owner: "workspace",
+            scopes: [i ? "items:admin" : "items:write"],
+            state: "pending",
+            tool: "create_item",
+          },
+        },
+      })),
+    );
+    await during(
+      "/token",
+      (deps) => finishOAuth(deps, me, { ...next, iss: next.iss ?? undefined }),
+      () => requestScope(server.deps, row, "create_item", "items:admin"),
+    );
+    expect((await connection(row.id)).scopeRequest?.scope).toContain("items:admin");
+    for (const [i, id] of ids.entries()) {
+      const [card] = await server.deps.db.select().from(schema.messages).where(eq(schema.messages.id, id));
+      expect(card?.meta.connectorScope).toMatchObject({ state: i ? "pending" : "granted" });
+    }
+  },
+  SERVER_TEST_MS,
+);
+
+test(
+  "an older callback cannot replace a newer broader authorization",
+  async () => {
+    const back = await begin();
+    await finish(back);
+    const row = await connection(back.serverId);
+    await requestScope(server.deps, row, "create_item", "items:write");
+    const first = await stepUp(row.id);
+    let newer: string | null = null;
+    await during(
+      "/token",
+      (deps) => finishOAuth(deps, me, { ...first, iss: first.iss ?? undefined }),
+      async () => {
+        await requestScope(server.deps, row, "create_item", "items:admin");
+        expect(await finish(await stepUp(row.id))).toContain("connected=");
+        newer = (await connection(row.id)).secret;
+      },
+    );
+    expect((await connection(row.id)).secret).toBe(newer);
+  },
+  SERVER_TEST_MS,
+);
+
+test(
+  "step-up and catalog OAuth use header-only resource discovery",
+  async () => {
+    const remote = startFakeMcp({ issuerPath: "/tenant" });
+    let resource = remote.url;
+    const fetchExternal = Object.assign(
+      async (url: string | URL | Request, init?: RequestInit) => {
+        if (String(url).includes("/.well-known/oauth-protected-resource"))
+          return new Response(null, { status: 404 });
+        if (String(url).endsWith("/metadata"))
+          return Response.json({ resource, authorization_servers: [remote.issuer] });
+        const response = await fetch(String(url) === "https://mcp.linear.app/mcp" ? remote.url : url, init);
+        if ([401, 403].includes(response.status))
+          response.headers.set("www-authenticate", `Bearer resource_metadata="${remote.origin}/metadata"`);
+        return response;
+      },
+      { preconnect() {} },
+    );
+    const deps = { ...server.deps, fetchExternal };
+    try {
+      const started = await connectCustom(deps, me, { serverUrl: remote.url, nextPath: "/back" });
+      if (started.status !== "oauth") throw new Error("expected OAuth");
+      await finish(await remote.authorize(started.consentUrl));
+      const row = await connection(started.serverId);
+      await requestScope(deps, row, "create_item", "items:write");
+      const url = await startScopeStepUp(deps, me, await connection(row.id), "/back");
+      expect(new URL(url).searchParams.get("scope")).toContain("items:write");
+      resource = "https://mcp.linear.app/mcp";
+      expect(await startCatalogOAuth(deps, me, "linear", "/back")).toContain(`${remote.origin}/authorize`);
+    } finally {
+      remote.stop();
+    }
+  },
+  SERVER_TEST_MS,
+);
+
+test(
+  "sensitive catalog tools require approval despite readOnlyHint",
+  async () => {
+    const fetchExternal = Object.assign(
+      async (_url: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body));
+        return Response.json({
+          jsonrpc: "2.0",
+          id: body.id,
+          result:
+            body.method === "tools/list"
+              ? { tools: [{ name: "delete_file", annotations: { readOnlyHint: true } }] }
+              : {
+                  protocolVersion: "2025-06-18",
+                  capabilities: {},
+                  serverInfo: { name: "fake", version: "1" },
+                },
+        });
+      },
+      { preconnect() {} },
+    );
+    const deps = { ...server.deps, fetchExternal };
+    const row = await connectWithKey(deps, me, { connector: "github", apiKey: "key" });
+    expect(row.tools[0]).toMatchObject({ access: "approval", confirmed: true });
+  },
+  SERVER_TEST_MS,
+);

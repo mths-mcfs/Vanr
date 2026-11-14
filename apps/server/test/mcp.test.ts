@@ -38,7 +38,7 @@ test("without a credential the server asks for authorization and says where the 
   const err = await client.listTools().catch((e: unknown) => e);
   expect(err).toBeInstanceOf(McpAuthRequired);
   expect((err as McpAuthRequired).resourceMetadata).toBe(
-    `${mcp.origin}/.well-known/oauth-protected-resource`,
+    `${mcp.origin}/.well-known/oauth-protected-resource/mcp`,
   );
 });
 

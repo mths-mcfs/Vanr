@@ -67,6 +67,7 @@ type ConnSecret = z.infer<typeof connSecret>;
 const stateBinding = z.object({ sessionId: z.string().min(1) });
 
 const stateSecret = stateBinding.extend({
+  credential: z.string().nullable(),
   verifier: z.string(),
   clientId: z.string(),
   clientSecret: z.string().nullable(),
@@ -237,12 +238,6 @@ export const toCustomServer = (row: ConnectionRow): CustomServer => ({
   })),
 });
 
-/** Proposal: read-only when the server says so; a sensitive action always asks for approval. */
-function proposeAccess(tool: McpTool): ToolAccessLevel {
-  if (tool.annotations?.readOnlyHint === true) return "read";
-  return "approval";
-}
-
 /**
  * Merges the new list with the decisions there already were. A catalog connector comes out decided (read for
  * what is read-only, approval for the sensitive, write for the rest). On an own MCP server, a new tool waits for
@@ -256,18 +251,16 @@ function mergeTools(
   const before = new Map(previous.map((t) => [t.name, t]));
   return fresh.map((t) => {
     const readOnly = t.annotations?.readOnlyHint === true;
-    const proposed = proposeAccess(t);
+    const sensitive = SENSITIVE_TOOL.test(t.name);
+    const proposed: ToolAccessLevel = readOnly && !sensitive ? "read" : "approval";
     const old = before.get(t.name);
-    const catalogAccess: ToolAccessLevel = readOnly
-      ? "read"
-      : SENSITIVE_TOOL.test(t.name)
-        ? "approval"
-        : "write";
+    const catalogAccess: ToolAccessLevel = sensitive ? "approval" : readOnly ? "read" : "write";
+    const access = old?.access ?? (custom ? proposed : catalogAccess);
     return {
       name: t.name,
       description: (t.description ?? t.annotations?.title ?? "").slice(0, 2000),
       label: old?.label ?? "",
-      access: old?.access ?? (custom ? proposed : catalogAccess),
+      access: sensitive && access !== "off" ? "approval" : access,
       proposedAccess: proposed,
       readOnlyHint: readOnly,
       inputSchema: t.inputSchema ?? { type: "object", properties: {} },
@@ -289,16 +282,20 @@ function headersFor(secret: ConnSecret): Record<string, string> {
  * never the server address, so two servers whose paths differ only in case never share a credential.
  */
 async function liveSecret(deps: AppDeps, row: ConnectionRow): Promise<ConnSecret> {
-  if (!row.secret) return { kind: "none" };
-  const seen = openSecret(deps, row.secret);
+  const currentRow = await connectionById(deps, row.workspaceId, row.id);
+  if (!currentRow.secret) {
+    if (currentRow.authKind !== "none") throw new McpAuthRequired(null);
+    return { kind: "none" };
+  }
+  const seen = openSecret(deps, currentRow.secret);
   if (seen.kind !== "oauth" || !needsRefresh(seen.tokens, deps.now())) return seen;
   return deps.db.transaction(async (tx): Promise<ConnSecret> => {
     const [locked] = await tx
-      .select({ secret: connections.secret })
+      .select({ secret: connections.secret, revokedAt: connections.revokedAt })
       .from(connections)
       .where(eq(connections.id, row.id))
       .for("update");
-    if (!locked?.secret) throw new McpAuthRequired(null);
+    if (!locked?.secret || locked.revokedAt) throw new McpAuthRequired(null);
     const current = openSecret(deps, locked.secret);
     if (current.kind !== "oauth" || !needsRefresh(current.tokens, deps.now())) return current;
     const tokens = await freshTokens(deps.fetchExternal, current.tokens, deps.now()).catch(() => null);
@@ -324,24 +321,22 @@ export async function markNeedsReconnect(deps: AppDeps, connectionId: string): P
   await deps.db
     .update(connections)
     .set({ status: "reauth_required" })
-    .where(eq(connections.id, connectionId));
+    .where(and(eq(connections.id, connectionId), isNull(connections.revokedAt)));
 }
 
 /** Lists the tools; a rejected credential marks the connection to reconnect. */
 async function listToolsOf(deps: AppDeps, row: ConnectionRow): Promise<McpTool[]> {
+  let used: ConnSecret | null = null;
   try {
-    return await (await mcpFor(deps, row)).listTools();
+    if (!row.serverUrl) throw new McpError("Connection has no server address");
+    used = await liveSecret(deps, row);
+    return await probe(deps, row.serverUrl, used);
   } catch (err) {
     if (err instanceof McpAuthRequired) {
       await markNeedsReconnect(deps, row.id);
       throw new HttpError(400, "connector.auth", "The server rejected the credential");
     }
-    // The row read now: a refresh may have put a new token in it since `row` was read.
-    const [now] = await deps.db
-      .select({ secret: connections.secret })
-      .from(connections)
-      .where(eq(connections.id, row.id));
-    throw unreachable(err, [...rowSecrets(deps, row), ...rowSecrets(deps, now ?? { secret: null })]);
+    throw unreachable(err, [...rowSecrets(deps, row), ...secretsOf(used)]);
   }
 }
 
@@ -430,6 +425,14 @@ async function beginOAuth(
   reuse: { issuer: string; clientId: string; clientSecret: string | null } | null = null,
 ): Promise<string> {
   const url = row.serverUrl ?? "";
+  if (!challenge.resourceMetadata) {
+    try {
+      await probe(deps, url, { kind: "none" });
+    } catch (err) {
+      if (err instanceof McpAuthRequired)
+        challenge = { resourceMetadata: err.resourceMetadata, scope: scopeUnion(challenge.scope, err.scope) };
+    }
+  }
   const server: AuthServer | null = await discoverAuthServer(
     deps.fetchExternal,
     url,
@@ -457,6 +460,7 @@ async function beginOAuth(
     throw new HttpError(400, "connector.oauth_unavailable", "The server rejected the client registration");
   const { verifier, challenge: pkce } = pkcePair();
   const secret: Omit<StateSecret, "sessionId"> = {
+    credential: row.secret,
     verifier,
     clientId: client.clientId,
     clientSecret: client.clientSecret,
@@ -654,18 +658,13 @@ export async function finishOAuth(
     );
     const secret: ConnSecret = { kind: "oauth", tokens };
     received.push(...secretsOf(secret));
-    // The scope request is only settled if the service gave what was asked. A partial consent keeps the
-    // request and the counter (the card keeps waiting and no other one is born on each return).
-    const granted = row.scopeRequest !== null && !widens(row.scopeRequest.scope, tokens.scope ?? null);
     // The exchange took a while: the connection is read again under its row lock and only written if it is
     // still as the start left it. Revoked or deleted meanwhile, the token received is dropped.
     const active = await deps.db.transaction(async (tx) => {
-      const [locked] = await tx
-        .select({ status: connections.status, revokedAt: connections.revokedAt })
-        .from(connections)
-        .where(eq(connections.id, row.id))
-        .for("update");
-      if (!locked || locked.revokedAt || locked.status !== row.status) return null;
+      const [locked] = await tx.select().from(connections).where(eq(connections.id, row.id)).for("update");
+      if (!locked || locked.revokedAt || locked.secret !== s.credential) return null;
+      const granted =
+        locked.scopeRequest !== null && !widens(locked.scopeRequest.scope, tokens.scope ?? null);
       const [written] = await tx
         .update(connections)
         .set({
@@ -679,12 +678,10 @@ export async function finishOAuth(
       return written ?? null;
     });
     if (!active) return back("connector_error=gone");
-    const tools = await listToolsOf(deps, active).catch(() => [] as McpTool[]);
-    await deps.db
-      .update(connections)
-      .set({ tools: mergeTools(tools, active.tools, active.custom) })
-      .where(eq(connections.id, row.id));
-    if (granted) await settleScopeCards(deps, row.id);
+    await settleScopeCards(deps, row.id, tokens.scope ?? null);
+    const tools = await listToolsOf(deps, active).catch(() => null);
+    if (tools === null) return back("connector_error=tools");
+    await saveDiscoveredTools(deps, active, tools);
   } catch (err) {
     log.warn("connector.oauth_failed", {
       connectionId: row.id,
@@ -707,14 +704,15 @@ const scopeCard = z.object({
 }) satisfies z.ZodType<NonNullable<MessageMeta["connectorScope"]>>;
 
 /** This connection's "needs permission" cards turn "granted" in the conversation. */
-async function settleScopeCards(deps: AppDeps, connectionId: string): Promise<void> {
+async function settleScopeCards(deps: AppDeps, connectionId: string, scope: string | null): Promise<void> {
   const rows = await deps.db
     .select({ id: messages.id, meta: messages.meta, channelId: messages.channelId })
     .from(messages)
     .where(sql`${messages.meta} -> 'connectorScope' ->> 'connectionId' = ${connectionId}`);
   for (const m of rows) {
     const parsed = scopeCard.safeParse(m.meta.connectorScope);
-    if (!parsed.success || parsed.data.state === "granted") continue;
+    if (!parsed.success || parsed.data.state === "granted" || widens(parsed.data.scopes.join(" "), scope))
+      continue;
     const card = parsed.data;
     const meta = { ...m.meta, connectorScope: { ...card, state: "granted" as const } };
     await deps.db.update(messages).set({ meta }).where(eq(messages.id, m.id));
@@ -804,12 +802,28 @@ export async function startScopeStepUp(
 
 export async function refreshCustom(deps: AppDeps, row: ConnectionRow): Promise<ConnectionRow> {
   const tools = await listToolsOf(deps, row);
-  const [updated] = await deps.db
-    .update(connections)
-    .set({ tools: mergeTools(tools, row.tools, true), status: "active", updatedAt: deps.now() })
-    .where(eq(connections.id, row.id))
-    .returning();
-  return updated ?? row;
+  return saveDiscoveredTools(deps, row, tools);
+}
+
+async function saveDiscoveredTools(
+  deps: AppDeps,
+  row: ConnectionRow,
+  tools: McpTool[],
+): Promise<ConnectionRow> {
+  return deps.db.transaction(async (tx) => {
+    const [current] = await tx.select().from(connections).where(eq(connections.id, row.id)).for("update");
+    if (!current || current.revokedAt) throw notFound("Connection not found");
+    const [updated] = await tx
+      .update(connections)
+      .set({
+        tools: mergeTools(tools, current.tools, current.custom),
+        status: "active",
+        updatedAt: deps.now(),
+      })
+      .where(eq(connections.id, row.id))
+      .returning();
+    return updated ?? current;
+  });
 }
 
 export async function saveCustomTools(
