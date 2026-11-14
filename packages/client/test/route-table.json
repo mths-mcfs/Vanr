@@ -1,0 +1,1495 @@
+{
+  "methods": [
+    {
+      "name": "acceptAssignmentSubmission",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/submissions/:submissionId/accept"
+    },
+    {
+      "name": "acceptDebateSuggestion",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/debate-suggestions/:messageId/accept"
+    },
+    { "name": "acceptInvitation", "verb": "POST", "path": "/api/v1/invitations/:invitationId/accept" },
+    {
+      "name": "acceptProposal",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/proposals/:proposalId/accept"
+    },
+    {
+      "name": "allowNetworkRequest",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/network-requests/:networkRequestId/allow"
+    },
+    {
+      "name": "answerQuestion",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/questions/:questionId/answer"
+    },
+    {
+      "name": "appendWikiPage",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/wiki/pages/:pageId/append"
+    },
+    {
+      "name": "applyAgentMemoryConsolidation",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/memory-consolidations/:memoryConsolidationId/apply"
+    },
+    {
+      "name": "approveApproval",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/approvals/:approvalId/approve"
+    },
+    {
+      "name": "approveAssignmentDecisionProvisional",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/decisions/approve-provisional"
+    },
+    {
+      "name": "approveMemoryReview",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/memory-reviews/:memoryReviewId/approve"
+    },
+    {
+      "name": "askIssueAgent",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/issues/:issueId/ask-agent"
+    },
+    { "name": "askSearch", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/search/ask" },
+    {
+      "name": "cancelBrowserIntervention",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/browser-interventions/:interventionId/cancel"
+    },
+    {
+      "name": "cancelDebate",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/debates/:debateId/cancel"
+    },
+    { "name": "cancelRun", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/runs/:runId/cancel" },
+    {
+      "name": "chooseAssignmentDecision",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/decisions/:decisionId/choose"
+    },
+    {
+      "name": "clearMessageReactions",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/messages/:messageId/reactions"
+    },
+    { "name": "clearPushSubscriptions", "verb": "DELETE", "path": "/api/v1/push/subscriptions" },
+    {
+      "name": "closeAssignment",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/close"
+    },
+    {
+      "name": "completeBrowserIntervention",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/browser-interventions/:interventionId/complete"
+    },
+    {
+      "name": "completeFileUpload",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/files/uploads/:uploadId/complete"
+    },
+    {
+      "name": "completeNotification",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/notifications/:notificationId/complete"
+    },
+    {
+      "name": "concludeDebate",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/debates/:debateId/conclude"
+    },
+    {
+      "name": "confirmCalendarProposal",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/calendar/proposals/:proposalId/confirm"
+    },
+    {
+      "name": "confirmRunnerPairing",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/runner-pairings/:pairingCode/confirm"
+    },
+    { "name": "confirmWaitlist", "verb": "POST", "path": "/api/v1/waitlist/confirm" },
+    {
+      "name": "controlBrowserIntervention",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/browser-interventions/:interventionId/control"
+    },
+    { "name": "createAgent", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/agents" },
+    {
+      "name": "createAgentBuilder",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/builder"
+    },
+    { "name": "createAgentDraft", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/agent-drafts" },
+    {
+      "name": "createAgentEval",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/evals"
+    },
+    {
+      "name": "createAgentIdentityConnection",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/identity/connections"
+    },
+    {
+      "name": "createAgentImportGithub",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/agent-imports/github"
+    },
+    {
+      "name": "createAgentMemoryConsolidation",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/memory-consolidations"
+    },
+    {
+      "name": "createAgentTestCase",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/test-cases"
+    },
+    { "name": "createAssignment", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/assignments" },
+    {
+      "name": "createAssignmentJoinRequest",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/join-requests"
+    },
+    {
+      "name": "createAssignmentMessage",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/messages"
+    },
+    { "name": "createBase", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/bases" },
+    {
+      "name": "createBaseFromFile",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/bases/from-file"
+    },
+    {
+      "name": "createBaseTableQuery",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/bases/:baseId/tables/:tableId/query"
+    },
+    {
+      "name": "createBaseTableRow",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/bases/:baseId/tables/:tableId/rows"
+    },
+    {
+      "name": "createBaseView",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/bases/:baseId/views"
+    },
+    {
+      "name": "createCalendarEvent",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/calendar/events"
+    },
+    { "name": "createChannel", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/channels" },
+    {
+      "name": "createChannelMember",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/channels/:channelId/members"
+    },
+    {
+      "name": "createChannelMessage",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/channels/:channelId/messages"
+    },
+    { "name": "createConnector", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/connectors" },
+    {
+      "name": "createConnectorCustom",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/connectors/custom"
+    },
+    {
+      "name": "createConnectorScope",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/connectors/:connectorId/scope"
+    },
+    { "name": "createCredential", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/credentials" },
+    { "name": "createDatabase", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/databases" },
+    { "name": "createDebate", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/debates" },
+    {
+      "name": "createDebateIssue",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/debates/:debateId/issues"
+    },
+    {
+      "name": "createDebatePost",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/debates/:debateId/posts"
+    },
+    { "name": "createDm", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/dms" },
+    { "name": "createFile", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/files" },
+    { "name": "createFileUpload", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/files/uploads" },
+    {
+      "name": "createFileVersion",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/files/:fileId/versions"
+    },
+    { "name": "createInvitation", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/invitations" },
+    {
+      "name": "createInvitationBulk",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/invitations/bulk"
+    },
+    { "name": "createInviteLink", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/invite-links" },
+    { "name": "createIssue", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/issues" },
+    { "name": "createIssueColumn", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/issue-columns" },
+    {
+      "name": "createIssueComment",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/issues/:issueId/comments"
+    },
+    {
+      "name": "createMailAccountComposio",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/mail/accounts/composio"
+    },
+    {
+      "name": "createMailAccountImap",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/mail/accounts/imap"
+    },
+    { "name": "createMemory", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/memories" },
+    {
+      "name": "createMessageFeedback",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/messages/:messageId/feedback"
+    },
+    {
+      "name": "createMessageReaction",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/messages/:messageId/reactions"
+    },
+    { "name": "createPushSubscription", "verb": "POST", "path": "/api/v1/push/subscriptions" },
+    { "name": "createReminder", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/reminders" },
+    { "name": "createRoutine", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/routines" },
+    {
+      "name": "createRoutineWebhookSecret",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/routines/:routineId/webhook-secret"
+    },
+    {
+      "name": "createRunSkillDraft",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/runs/:runId/skill-draft"
+    },
+    { "name": "createSkill", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/skills" },
+    { "name": "createThread", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/threads" },
+    { "name": "createWaitlist", "verb": "POST", "path": "/api/v1/waitlist" },
+    { "name": "createWikiPage", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/wiki/pages" },
+    { "name": "createWorkspace", "verb": "POST", "path": "/api/v1/workspaces" },
+    {
+      "name": "decideAssignmentCommand",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/commands/:commandId/decide"
+    },
+    {
+      "name": "declineSecretRequest",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/secret-requests/:secretRequestId/decline"
+    },
+    { "name": "deleteAgent", "verb": "DELETE", "path": "/api/v1/workspaces/:workspaceId/agents/:agentId" },
+    {
+      "name": "deleteAgentEnvironment",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/environment"
+    },
+    {
+      "name": "deleteAgentSecret",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/secrets/:secretId"
+    },
+    {
+      "name": "deleteAgentTestCase",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/test-cases/:testCaseId"
+    },
+    {
+      "name": "deleteApprovalRule",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/approval-rules/:approvalRuleId"
+    },
+    {
+      "name": "deleteAssignmentCommandRule",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/command-rules/:commandRuleId"
+    },
+    {
+      "name": "deleteAssignmentParticipant",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/participants/:participantId"
+    },
+    { "name": "deleteBase", "verb": "DELETE", "path": "/api/v1/workspaces/:workspaceId/bases/:baseId" },
+    {
+      "name": "deleteBaseRow",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/bases/:baseId/rows/:rowId"
+    },
+    {
+      "name": "deleteBaseView",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/bases/:baseId/views/:viewId"
+    },
+    {
+      "name": "deleteCalendarEvent",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/calendar/events/:eventId"
+    },
+    {
+      "name": "deleteChannelMemberAgent",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/channels/:channelId/members/agents/:agentId"
+    },
+    {
+      "name": "deleteChannelPinnedMessage",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/channels/:channelId/pinned-messages/:messageId"
+    },
+    {
+      "name": "deleteConnector",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/connectors/:connectorId"
+    },
+    {
+      "name": "deleteConnectorCustom",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/connectors/custom/:customId"
+    },
+    {
+      "name": "deleteCredential",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/credentials/:credentialId"
+    },
+    {
+      "name": "deleteDatabase",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/databases/:databaseId"
+    },
+    { "name": "deleteFile", "verb": "DELETE", "path": "/api/v1/workspaces/:workspaceId/files/:fileId" },
+    {
+      "name": "deleteFileUpload",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/files/uploads/:uploadId"
+    },
+    {
+      "name": "deleteGithubAppInstallation",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/github-app/installations/:installationId"
+    },
+    {
+      "name": "deleteInvitation",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/invitations/:invitationId"
+    },
+    {
+      "name": "deleteIssueColumn",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/issue-columns/:issueColumnId"
+    },
+    { "name": "deleteLogo", "verb": "DELETE", "path": "/api/v1/workspaces/:workspaceId/logo" },
+    {
+      "name": "deleteMailAccount",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/mail/accounts/:accountId"
+    },
+    { "name": "deleteMeAvatar", "verb": "DELETE", "path": "/api/v1/workspaces/:workspaceId/me/avatar" },
+    { "name": "deleteMember", "verb": "DELETE", "path": "/api/v1/workspaces/:workspaceId/members/:memberId" },
+    {
+      "name": "deleteNetworkRequest",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/network-requests/:networkRequestId"
+    },
+    {
+      "name": "deleteReminder",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/reminders/:reminderId"
+    },
+    {
+      "name": "deleteRoutine",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/routines/:routineId"
+    },
+    { "name": "deleteRunner", "verb": "DELETE", "path": "/api/v1/workspaces/:workspaceId/runners/:runnerId" },
+    { "name": "deleteSkill", "verb": "DELETE", "path": "/api/v1/workspaces/:workspaceId/skills/:skillId" },
+    { "name": "deleteThread", "verb": "DELETE", "path": "/api/v1/workspaces/:workspaceId/threads/:threadId" },
+    {
+      "name": "deleteWikiPage",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/wiki/pages/:pageId"
+    },
+    {
+      "name": "deleteWikiPageDraft",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/wiki/pages/:pageId/draft"
+    },
+    {
+      "name": "deleteWikiTrash",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/wiki/trash/:trashId"
+    },
+    {
+      "name": "deliverSecretRequest",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/secret-requests/:secretRequestId/deliver"
+    },
+    {
+      "name": "denyNetworkRequest",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/network-requests/:networkRequestId/deny"
+    },
+    { "name": "denyRunnerPairing", "verb": "POST", "path": "/api/v1/runner-pairings/:pairingCode/deny" },
+    {
+      "name": "describeRoutineRule",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/routines/describe-rule"
+    },
+    {
+      "name": "discardAgentMemoryConsolidation",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/memory-consolidations/:memoryConsolidationId/discard"
+    },
+    {
+      "name": "dismissCalendarProposal",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/calendar/proposals/:proposalId/dismiss"
+    },
+    {
+      "name": "dismissDebateSuggestion",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/debate-suggestions/:messageId/dismiss"
+    },
+    {
+      "name": "duplicateRoutine",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/routines/:routineId/duplicate"
+    },
+    {
+      "name": "editApproval",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/approvals/:approvalId/edit"
+    },
+    { "name": "estimateDebate", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/debates/estimate" },
+    {
+      "name": "estimateRoutine",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/routines/:routineId/estimate"
+    },
+    {
+      "name": "exportBaseTable",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/bases/:baseId/tables/:tableId/export"
+    },
+    { "name": "exportWiki", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/wiki/export" },
+    {
+      "name": "failBrowserIntervention",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/browser-interventions/:interventionId/fail"
+    },
+    {
+      "name": "followThread",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/threads/:threadId/follow"
+    },
+    { "name": "getAgent", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/agents/:agentId" },
+    {
+      "name": "getAgentAccess",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/access"
+    },
+    {
+      "name": "getAgentBrowser",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/browser"
+    },
+    {
+      "name": "getAgentBrowserLogEntryShot",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/browser/log/:entryId/shot"
+    },
+    {
+      "name": "getAgentEnvironment",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/environment"
+    },
+    {
+      "name": "getAgentEval",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/evals/:evalId"
+    },
+    {
+      "name": "getAgentIdentity",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/identity"
+    },
+    {
+      "name": "getAgentInbox",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/inbox"
+    },
+    { "name": "getAgentMail", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/mail" },
+    {
+      "name": "getAgentRuntime",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/runtime"
+    },
+    { "name": "getApproval", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/approvals/:approvalId" },
+    {
+      "name": "getAssignment",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId"
+    },
+    {
+      "name": "getAssignmentPlan",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/plan"
+    },
+    {
+      "name": "getAssignmentRuntime",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/runtime"
+    },
+    {
+      "name": "getAssignmentSettings",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/settings"
+    },
+    {
+      "name": "getAssignmentSummary",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/summary"
+    },
+    { "name": "getAuthConfig", "verb": "GET", "path": "/api/v1/auth/config" },
+    { "name": "getBase", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/bases/:baseId" },
+    {
+      "name": "getBaseRow",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/bases/:baseId/rows/:rowId"
+    },
+    {
+      "name": "getBrowserIntervention",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/browser-interventions/:interventionId"
+    },
+    { "name": "getCalendar", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/calendar" },
+    {
+      "name": "getChannelDirectory",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/channels/:channelId/directory"
+    },
+    { "name": "getConnectorCatalog", "verb": "GET", "path": "/api/v1/connectors/catalog" },
+    {
+      "name": "getConnectorCustom",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/connectors/custom"
+    },
+    {
+      "name": "getCredentialPlatform",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/credentials/platform"
+    },
+    { "name": "getDebate", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/debates/:debateId" },
+    { "name": "getDesktopReleaseLatest", "verb": "GET", "path": "/api/v1/desktop/releases/latest" },
+    { "name": "getDms", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/dms" },
+    { "name": "getFile", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/files/:fileId" },
+    { "name": "getFileBlob", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/files/:fileId/blob" },
+    {
+      "name": "getFileDownload",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/files/:fileId/download"
+    },
+    { "name": "getFileText", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/files/:fileId/text" },
+    { "name": "getFileTrash", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/files/trash" },
+    {
+      "name": "getFileUpload",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/files/uploads/:uploadId"
+    },
+    { "name": "getGithubApp", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/github-app" },
+    { "name": "getHealth", "verb": "GET", "path": "/api/v1/health" },
+    { "name": "getInvitation", "verb": "GET", "path": "/api/v1/invitations/:invitationId" },
+    {
+      "name": "getIssueActivity",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/issues/:issueId/activity"
+    },
+    {
+      "name": "getIssueByNumber",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/issues/number/:issueNumber"
+    },
+    { "name": "getJobOutput", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/jobs/:jobId/output" },
+    { "name": "getMe", "verb": "GET", "path": "/api/v1/me" },
+    { "name": "getMemoryMine", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/memories/mine" },
+    {
+      "name": "getMemoryWorkspace",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/memories/workspace"
+    },
+    {
+      "name": "getNotificationSettings",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/notifications/settings"
+    },
+    { "name": "getOverview", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/overview" },
+    { "name": "getPeople", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/people" },
+    { "name": "getPushKey", "verb": "GET", "path": "/api/v1/push/key" },
+    { "name": "getRun", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/runs/:runId" },
+    { "name": "getRunnerPairing", "verb": "GET", "path": "/api/v1/runner-pairings/:pairingCode" },
+    { "name": "getSearch", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/search" },
+    { "name": "getSearchPalette", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/search/palette" },
+    { "name": "getSettings", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/settings" },
+    { "name": "getSkill", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/skills/:skillId" },
+    {
+      "name": "getSkillSkillMd",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/skills/:skillId/skill-md"
+    },
+    { "name": "getStorage", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/storage" },
+    { "name": "getTeam", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/team" },
+    { "name": "getThread", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/threads/:threadId" },
+    {
+      "name": "getThreadAssignment",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/threads/:threadId/assignment"
+    },
+    { "name": "getUsage", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/usage" },
+    { "name": "getUsageReport", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/usage/report" },
+    { "name": "getWikiGraph", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/wiki/graph" },
+    { "name": "getWikiPage", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/wiki/pages/:pageId" },
+    {
+      "name": "getWikiPageDiff",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/wiki/pages/:pageId/diff"
+    },
+    {
+      "name": "getWikiPageHistory",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/wiki/pages/:pageId/history"
+    },
+    {
+      "name": "getWikiPagePanel",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/wiki/pages/:pageId/panel"
+    },
+    {
+      "name": "getWikiPageVersion",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/wiki/pages/:pageId/versions/:versionId"
+    },
+    { "name": "getWikiReads", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/wiki/reads" },
+    { "name": "getWikiSearch", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/wiki/search" },
+    { "name": "getWikiTrash", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/wiki/trash" },
+    { "name": "getWorkspace", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId" },
+    { "name": "importBase", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/bases/import" },
+    {
+      "name": "importBaseTable",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/bases/:baseId/tables/:tableId/import"
+    },
+    { "name": "importSkill", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/skills/import" },
+    { "name": "importWiki", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/wiki/import" },
+    {
+      "name": "importWikiVault",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/wiki/import/vault"
+    },
+    {
+      "name": "installGithubApp",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/github-app/install"
+    },
+    {
+      "name": "joinChannel",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/channels/:channelId/join"
+    },
+    { "name": "listActiveRuns", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/active-runs" },
+    {
+      "name": "listAgentBrowserInterventions",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/browser/interventions"
+    },
+    {
+      "name": "listAgentBrowserLog",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/browser/log"
+    },
+    {
+      "name": "listAgentChannels",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/channels"
+    },
+    {
+      "name": "listAgentDatabases",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/databases"
+    },
+    {
+      "name": "listAgentEnvironmentDomains",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/environment/domains"
+    },
+    {
+      "name": "listAgentEvals",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/evals"
+    },
+    {
+      "name": "listAgentInstructionVersions",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/instruction-versions"
+    },
+    {
+      "name": "listAgentMemories",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/memories"
+    },
+    {
+      "name": "listAgentMemoryConsolidations",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/memory-consolidations"
+    },
+    {
+      "name": "listAgentRepositories",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/repositories"
+    },
+    {
+      "name": "listAgentScopes",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/scopes"
+    },
+    {
+      "name": "listAgentSecrets",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/secrets"
+    },
+    {
+      "name": "listAgentSkills",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/skills"
+    },
+    {
+      "name": "listAgentTestCases",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/test-cases"
+    },
+    { "name": "listAgents", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/agents" },
+    {
+      "name": "listAllInvitations",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/invitations?scope=all"
+    },
+    { "name": "listApprovalRules", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/approval-rules" },
+    { "name": "listApprovalStats", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/approvals/stats" },
+    { "name": "listApprovals", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/approvals" },
+    {
+      "name": "listAssignmentCommands",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/commands"
+    },
+    {
+      "name": "listAssignmentDecisions",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/decisions"
+    },
+    {
+      "name": "listAssignmentEligibleAgents",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/eligible-agents"
+    },
+    {
+      "name": "listAssignmentEvents",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/events"
+    },
+    {
+      "name": "listAssignmentFiles",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/files"
+    },
+    {
+      "name": "listAssignmentJoinRequests",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/join-requests"
+    },
+    {
+      "name": "listAssignmentParticipants",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/participants"
+    },
+    {
+      "name": "listAssignmentPlanVersions",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/plan/versions"
+    },
+    {
+      "name": "listAssignmentProofs",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/proofs"
+    },
+    {
+      "name": "listAssignmentReviews",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/reviews"
+    },
+    {
+      "name": "listAssignmentSubmissions",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/submissions"
+    },
+    { "name": "listAssignments", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/assignments" },
+    { "name": "listBases", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/bases" },
+    {
+      "name": "listChannelActiveRuns",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/channels/:channelId/active-runs"
+    },
+    {
+      "name": "listChannelMembers",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/channels/:channelId/members"
+    },
+    {
+      "name": "listChannelMessages",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/channels/:channelId/messages"
+    },
+    {
+      "name": "listChannelPinnedMessages",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/channels/:channelId/pinned-messages"
+    },
+    {
+      "name": "listChannelThreads",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/channels/:channelId/threads"
+    },
+    { "name": "listChannels", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/channels" },
+    { "name": "listConnectors", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/connectors" },
+    { "name": "listCredentials", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/credentials" },
+    {
+      "name": "listDatabaseTables",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/databases/:databaseId/tables"
+    },
+    { "name": "listDatabases", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/databases" },
+    { "name": "listDebateMetrics", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/debates/metrics" },
+    { "name": "listDebates", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/debates" },
+    { "name": "listFileFiles", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/files/files" },
+    {
+      "name": "listFileVersions",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/files/:fileId/versions"
+    },
+    { "name": "listFiles", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/files" },
+    {
+      "name": "listGithubRepositories",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/github/repositories"
+    },
+    { "name": "listInvitations", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/invitations" },
+    { "name": "listIssueColumns", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/issue-columns" },
+    { "name": "listIssues", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/issues" },
+    {
+      "name": "listMailAccountFolders",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/mail/accounts/:accountId/folders"
+    },
+    { "name": "listMailAccounts", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/mail/accounts" },
+    { "name": "listMailProviders", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/mail/providers" },
+    { "name": "listMembers", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/members" },
+    { "name": "listMemoryReviews", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/memory-reviews" },
+    {
+      "name": "listMemoryVersions",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/memories/:memoryId/versions"
+    },
+    {
+      "name": "listMessageReactions",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/messages/:messageId/reactions"
+    },
+    { "name": "listModels", "verb": "GET", "path": "/api/v1/models" },
+    {
+      "name": "listNotificationCounts",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/notifications/counts"
+    },
+    { "name": "listNotifications", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/notifications" },
+    { "name": "listProposals", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/proposals" },
+    { "name": "listReminders", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/reminders" },
+    {
+      "name": "listRoutineRuns",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/routines/:routineId/runs"
+    },
+    { "name": "listRoutines", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/routines" },
+    { "name": "listRunnerOutages", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/runners/outages" },
+    { "name": "listRunners", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/runners" },
+    { "name": "listRuns", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/runs" },
+    {
+      "name": "listSandboxSettings",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/sandbox-settings"
+    },
+    { "name": "listSkills", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/skills" },
+    {
+      "name": "listStorageMigrationStatus",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/storage/migration-status"
+    },
+    {
+      "name": "listThreadJobs",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/threads/:threadId/jobs"
+    },
+    { "name": "listThreads", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/threads" },
+    {
+      "name": "listWikiAttachments",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/wiki/attachments"
+    },
+    { "name": "listWikiPages", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/wiki/pages" },
+    { "name": "listWikiProps", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/wiki/props" },
+    {
+      "name": "lockWikiPage",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/wiki/pages/:pageId/lock"
+    },
+    {
+      "name": "markAssignmentSeen",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/seen"
+    },
+    {
+      "name": "markChannelRead",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/channels/:channelId/read"
+    },
+    {
+      "name": "markNotificationAllRead",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/notifications/read-all"
+    },
+    {
+      "name": "markNotificationRead",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/notifications/:notificationId/read"
+    },
+    { "name": "migrateStorage", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/storage/migrate" },
+    {
+      "name": "moveRunnerAgents",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/runners/:runnerId/move-agents"
+    },
+    {
+      "name": "moveWikiPage",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/wiki/pages/:pageId/move"
+    },
+    {
+      "name": "opinionAssignmentDecision",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/decisions/:decisionId/opinion"
+    },
+    {
+      "name": "parseRoutineRule",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/routines/parse-rule"
+    },
+    {
+      "name": "parseRoutineSchedule",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/routines/parse-schedule"
+    },
+    {
+      "name": "pinWikiPage",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/wiki/pages/:pageId/pin"
+    },
+    {
+      "name": "publishWikiPageDraft",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/wiki/pages/:pageId/draft/publish"
+    },
+    {
+      "name": "redoAction",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/actions/:actionId/redo"
+    },
+    {
+      "name": "reduceRunnerAccess",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/runners/:runnerId/access/reduce"
+    },
+    {
+      "name": "refreshConnectorCustom",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/connectors/custom/:customId/refresh"
+    },
+    {
+      "name": "reimportSkill",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/skills/:skillId/reimport"
+    },
+    {
+      "name": "rejectApproval",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/approvals/:approvalId/reject"
+    },
+    {
+      "name": "rejectMemoryReview",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/memory-reviews/:memoryReviewId/reject"
+    },
+    {
+      "name": "rejectProposal",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/proposals/:proposalId/reject"
+    },
+    {
+      "name": "remindNotification",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/notifications/:notificationId/remind"
+    },
+    {
+      "name": "renameWikiPage",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/wiki/pages/:pageId/rename"
+    },
+    {
+      "name": "replaceAgentDatabase",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/databases/:databaseId"
+    },
+    {
+      "name": "replaceAgentMail",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/mail/:mailId"
+    },
+    {
+      "name": "replaceAssignmentSubmissionChecklist",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/submissions/:submissionId/checklist/:itemId"
+    },
+    {
+      "name": "replaceFileUpload",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/files/uploads/:uploadId"
+    },
+    {
+      "name": "replaceIssueCriterion",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/issues/:issueId/criteria/:criterionId"
+    },
+    {
+      "name": "replaceWikiPage",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/wiki/pages/:pageId"
+    },
+    {
+      "name": "requestAssignmentSubmissionChanges",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/submissions/:submissionId/request-changes"
+    },
+    {
+      "name": "requestInvitationNew",
+      "verb": "POST",
+      "path": "/api/v1/invitations/:invitationId/request-new"
+    },
+    {
+      "name": "resendInvitation",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/invitations/:invitationId/resend"
+    },
+    {
+      "name": "restoreAgentInstructionVersion",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/instruction-versions/:instructionVersionId/restore"
+    },
+    {
+      "name": "restoreFile",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/files/:fileId/restore"
+    },
+    {
+      "name": "restoreMemoryVersion",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/memories/:memoryId/versions/:versionId/restore"
+    },
+    {
+      "name": "restoreWikiPageVersion",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/wiki/pages/:pageId/versions/:versionId/restore"
+    },
+    {
+      "name": "restoreWikiTrash",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/wiki/trash/:trashId/restore"
+    },
+    {
+      "name": "resumeDebate",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/debates/:debateId/resume"
+    },
+    {
+      "name": "retryAssignmentCommand",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/commands/retry"
+    },
+    {
+      "name": "retryAssignmentItem",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/items/:itemId/retry"
+    },
+    {
+      "name": "revertMemory",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/memories/:memoryId/revert"
+    },
+    {
+      "name": "reviewDebate",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/debates/:debateId/review"
+    },
+    {
+      "name": "reviewDebatePickReview",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/debates/:debateId/review"
+    },
+    {
+      "name": "revokeAgentIdentity",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/identity/revoke"
+    },
+    {
+      "name": "revokeRunner",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/runners/:runnerId/revoke"
+    },
+    {
+      "name": "rotateCredential",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/credentials/:credentialId/rotate"
+    },
+    {
+      "name": "runActionOnAssignment",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/:action"
+    },
+    {
+      "name": "runActionOnAssignmentJoinRequest",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/join-requests/:joinRequestId/:action"
+    },
+    {
+      "name": "runActionOnAssignmentReview",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/reviews/:reviewId/:action"
+    },
+    {
+      "name": "runActionOnAssignmentSuggestion",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/suggestions/:suggestionId/:action"
+    },
+    {
+      "name": "runActionOnThread",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/threads/:threadId/:action"
+    },
+    {
+      "name": "runRoutine",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/routines/:routineId/run"
+    },
+    {
+      "name": "saveNotification",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/notifications/:notificationId/save"
+    },
+    {
+      "name": "setAgentAccess",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/access"
+    },
+    {
+      "name": "setAgentAssignmentCommandApproval",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/assignment-command-approval"
+    },
+    {
+      "name": "setAgentBrowser",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/browser"
+    },
+    {
+      "name": "setAgentBrowserPolicy",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/browser/policy"
+    },
+    {
+      "name": "setAgentChannels",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/channels"
+    },
+    {
+      "name": "setAgentEnvironmentTarget",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/environment/target"
+    },
+    {
+      "name": "setAgentIdentityChannels",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/identity/channels"
+    },
+    {
+      "name": "setAgentRepositories",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/repositories"
+    },
+    {
+      "name": "setAgentRuntime",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/runtime"
+    },
+    {
+      "name": "setAgentScopes",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/scopes"
+    },
+    {
+      "name": "setAgentSkills",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/skills"
+    },
+    {
+      "name": "setAssignmentCommandApproval",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/command-approval"
+    },
+    {
+      "name": "setAssignmentExecutor",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/executor"
+    },
+    {
+      "name": "setAssignmentPlan",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/plan"
+    },
+    {
+      "name": "setAssignmentResumeJobs",
+      "verb": "PATCH",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId"
+    },
+    {
+      "name": "setAssignmentRunner",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/runner"
+    },
+    {
+      "name": "setAssignmentRuntime",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/runtime"
+    },
+    {
+      "name": "setBaseTableSchema",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/bases/:baseId/tables/:tableId/schema"
+    },
+    {
+      "name": "setConnectorCustomTools",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/connectors/custom/:customId/tools"
+    },
+    {
+      "name": "setDebateParticipants",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/debates/:debateId/participants"
+    },
+    {
+      "name": "setDebateVerdict",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/debates/:debateId/verdict"
+    },
+    { "name": "setLogo", "verb": "PUT", "path": "/api/v1/workspaces/:workspaceId/logo" },
+    { "name": "setMeAvatar", "verb": "PUT", "path": "/api/v1/workspaces/:workspaceId/me/avatar" },
+    {
+      "name": "setMemoryArchived",
+      "verb": "PATCH",
+      "path": "/api/v1/workspaces/:workspaceId/memories/:memoryId"
+    },
+    {
+      "name": "setMemoryPinned",
+      "verb": "PATCH",
+      "path": "/api/v1/workspaces/:workspaceId/memories/:memoryId"
+    },
+    {
+      "name": "setNotificationSettings",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/notifications/settings"
+    },
+    {
+      "name": "setRoutineEnabled",
+      "verb": "PATCH",
+      "path": "/api/v1/workspaces/:workspaceId/routines/:routineId"
+    },
+    {
+      "name": "setSandboxSettings",
+      "verb": "PUT",
+      "path": "/api/v1/workspaces/:workspaceId/sandbox-settings"
+    },
+    { "name": "setStorage", "verb": "PUT", "path": "/api/v1/workspaces/:workspaceId/storage" },
+    { "name": "setWikiProps", "verb": "PUT", "path": "/api/v1/workspaces/:workspaceId/wiki/props" },
+    {
+      "name": "skipDebate",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/debates/:debateId/skip"
+    },
+    {
+      "name": "snoozeNotification",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/notifications/:notificationId/snooze"
+    },
+    {
+      "name": "startAgentBrowserIntervention",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/browser/interventions/start"
+    },
+    {
+      "name": "startAgentEnvironment",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/environment/start"
+    },
+    {
+      "name": "startConnectorOauth",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/connectors/:connectorId/oauth/start"
+    },
+    {
+      "name": "stopAgentBrowser",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/browser/stop"
+    },
+    {
+      "name": "stopAgentEnvironment",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/environment/stop"
+    },
+    { "name": "testStorage", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/storage/test" },
+    {
+      "name": "transferAssignment",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/transfer"
+    },
+    {
+      "name": "undoAction",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/actions/:actionId/undo"
+    },
+    {
+      "name": "undoMessageAction",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/messages/:messageId/actions/undo"
+    },
+    {
+      "name": "unfollowThread",
+      "verb": "DELETE",
+      "path": "/api/v1/workspaces/:workspaceId/threads/:threadId/follow"
+    },
+    { "name": "updateAgent", "verb": "PATCH", "path": "/api/v1/workspaces/:workspaceId/agents/:agentId" },
+    {
+      "name": "updateAgentTestCase",
+      "verb": "PATCH",
+      "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/test-cases/:testCaseId"
+    },
+    {
+      "name": "updateAssignment",
+      "verb": "PATCH",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId"
+    },
+    {
+      "name": "updateAssignmentParticipant",
+      "verb": "PATCH",
+      "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/participants/:participantId"
+    },
+    { "name": "updateBase", "verb": "PATCH", "path": "/api/v1/workspaces/:workspaceId/bases/:baseId" },
+    {
+      "name": "updateBaseRow",
+      "verb": "PATCH",
+      "path": "/api/v1/workspaces/:workspaceId/bases/:baseId/rows/:rowId"
+    },
+    {
+      "name": "updateBaseView",
+      "verb": "PATCH",
+      "path": "/api/v1/workspaces/:workspaceId/bases/:baseId/views/:viewId"
+    },
+    {
+      "name": "updateCalendarEvent",
+      "verb": "PATCH",
+      "path": "/api/v1/workspaces/:workspaceId/calendar/events/:eventId"
+    },
+    {
+      "name": "updateChannel",
+      "verb": "PATCH",
+      "path": "/api/v1/workspaces/:workspaceId/channels/:channelId"
+    },
+    {
+      "name": "updateChannelPinnedMessage",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/channels/:channelId/pinned-messages/:messageId"
+    },
+    {
+      "name": "updateDatabase",
+      "verb": "PATCH",
+      "path": "/api/v1/workspaces/:workspaceId/databases/:databaseId"
+    },
+    { "name": "updateIssue", "verb": "PATCH", "path": "/api/v1/workspaces/:workspaceId/issues/:issueId" },
+    {
+      "name": "updateIssueColumn",
+      "verb": "PATCH",
+      "path": "/api/v1/workspaces/:workspaceId/issue-columns/:issueColumnId"
+    },
+    {
+      "name": "updateMailAccount",
+      "verb": "PATCH",
+      "path": "/api/v1/workspaces/:workspaceId/mail/accounts/:accountId"
+    },
+    { "name": "updateMe", "verb": "PATCH", "path": "/api/v1/workspaces/:workspaceId/me" },
+    { "name": "updateMember", "verb": "PATCH", "path": "/api/v1/workspaces/:workspaceId/members/:memberId" },
+    { "name": "updateMemory", "verb": "PATCH", "path": "/api/v1/workspaces/:workspaceId/memories/:memoryId" },
+    {
+      "name": "updateMemoryText",
+      "verb": "PATCH",
+      "path": "/api/v1/workspaces/:workspaceId/memories/:memoryId"
+    },
+    {
+      "name": "updateRoutine",
+      "verb": "PATCH",
+      "path": "/api/v1/workspaces/:workspaceId/routines/:routineId"
+    },
+    { "name": "updateRunner", "verb": "PATCH", "path": "/api/v1/workspaces/:workspaceId/runners/:runnerId" },
+    { "name": "updateSettings", "verb": "PATCH", "path": "/api/v1/workspaces/:workspaceId/settings" },
+    { "name": "updateSkill", "verb": "PATCH", "path": "/api/v1/workspaces/:workspaceId/skills/:skillId" },
+    { "name": "updateThread", "verb": "PATCH", "path": "/api/v1/workspaces/:workspaceId/threads/:threadId" },
+    {
+      "name": "updateWikiPageMeta",
+      "verb": "PATCH",
+      "path": "/api/v1/workspaces/:workspaceId/wiki/pages/:pageId/meta"
+    },
+    { "name": "updateWorkspace", "verb": "PATCH", "path": "/api/v1/workspaces/:workspaceId" },
+    {
+      "name": "uploadFileVersion",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/files/:fileId/files"
+    }
+  ]
+}
