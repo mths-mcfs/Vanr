@@ -5,7 +5,7 @@
 // The runtime delivers: a timer set for `sendAt` and, if the server restarts in between, the tick's sweep
 // (both through `runtime.track`, so a stopping server waits for the pass before the database closes).
 // Delivering and canceling race for the same row on `status = 'pending'` in one conditional UPDATE: only one
-// wins, so undoing in the last second while it goes out never sends anything halfway. A delivery that broke in
+// wins, so undoing in the last second while it goes out never sends anything halfway. A send that broke in
 // the middle stays `sending` and is never repeated (for email, at most once is the safe side). With a window of
 // 0 (config), the tools send at once, without coming here.
 import { schema } from "@vanr/engine/db";
@@ -119,7 +119,7 @@ async function deliver(deps: AppDeps, id: string): Promise<boolean> {
       await db.update(outbox).set({ status: "sent", sentAt: deps.now(), error }).where(eq(outbox.id, row.id));
     } else {
       ok = false;
-      log.warn("outbox.delivery_failed", { id: row.id, kind: row.kind, error });
+      log.warn("outbox.send_failed", { id: row.id, kind: row.kind, error });
       await db.update(outbox).set({ status: "failed", error }).where(eq(outbox.id, row.id));
       await db
         .update(reversibleActions)
@@ -199,11 +199,11 @@ export async function cancelQueued(
   deps: AppDeps,
   workspaceId: string,
   id: string,
-  byUserId: string,
+  actorUserId: string,
 ): Promise<void> {
   const [row] = await deps.db
     .update(outbox)
-    .set({ status: "canceled", canceledByUserId: byUserId })
+    .set({ status: "canceled", canceledByUserId: actorUserId })
     .where(and(eq(outbox.id, id), eq(outbox.workspaceId, workspaceId), eq(outbox.status, "pending")))
     .returning();
   if (!row) throw new HttpError(409, "action.changed_since", "It already went out");

@@ -48,7 +48,7 @@ export const REMINDER_LIST_LIMIT = 500;
 
 /**
  * A memory item the person may see: in the agent's store (a workspace member), in the workspace's (a member) or
- * in their own store (only its owner; for anyone else, 404). `canEdit` says whether they may also change it.
+ * in their own store (only its owner; for anyone else, 404). `editable` says whether they may also change it.
  */
 async function memoryFor(deps: AppDeps, me: WorkspaceMember, id: string) {
   const [row] = await deps.db
@@ -58,16 +58,16 @@ async function memoryFor(deps: AppDeps, me: WorkspaceMember, id: string) {
   if (!row) throw notFound("Memory not found");
   if (row.scope === "person") {
     if (row.ownerUserId !== me.userId) throw notFound("Memory not found");
-    return { row, canEdit: true };
+    return { row, editable: true };
   }
-  if (row.scope === "workspace") return { row, canEdit: can(me.role, "manage_agents") };
+  if (row.scope === "workspace") return { row, editable: can(me.role, "manage_agents") };
   const agent = await agentInWorkspace(deps.db, me.workspaceId, row.agentId ?? "");
-  return { row, canEdit: can(me.role, "manage_agents") || agent.ownerUserId === me.userId };
+  return { row, editable: can(me.role, "manage_agents") || agent.ownerUserId === me.userId };
 }
 
 async function editableMemory(deps: AppDeps, me: WorkspaceMember, id: string) {
   const found = await memoryFor(deps, me, id);
-  if (!found.canEdit) throw forbidden();
+  if (!found.editable) throw forbidden();
   return found.row;
 }
 

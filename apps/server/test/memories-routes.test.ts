@@ -1,6 +1,6 @@
 // The memory routes (routes/memories.ts) one by one: who may call each (a workspace member, who edits the agent,
 // the store's owner, who decides a review, who writes in the channel), what of another workspace never answers,
-// the size limits refused before anything is written, two people deciding the same review at once, feedback on an
+// the size limits rejected before anything is written, two people deciding the same review at once, feedback on an
 // answer and reminders.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Memory, MemoryReview, Message, Reminder } from "@vanr/contract";
@@ -206,7 +206,7 @@ describe("who may call", () => {
   );
 });
 
-describe("size limits, refused before anything is written", () => {
+describe("size limits, rejected before anything is written", () => {
   test(
     "a store file, a short note, a reason: one past the limit is a 400 and nothing changes",
     async () => {
@@ -371,7 +371,7 @@ describe("feedback on an answer", () => {
   );
 
   test(
-    "refused: a person's message, a private channel the person isn't in, another workspace's message, a long body",
+    "rejected: a person's message, a private channel the person isn't in, another workspace's message, a long body",
     async () => {
       const t = await team();
       const secret = await seedChannel(server, t.workspaceId, {

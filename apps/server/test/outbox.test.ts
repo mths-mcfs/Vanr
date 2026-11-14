@@ -187,9 +187,10 @@ describe("a post with an undo window", () => {
       const posted = (
         await server.deps.db.select().from(messages).where(eq(messages.channelId, t.sales))
       ).find((m) => m.body === "Open on Saturday");
+      if (!posted) throw new Error("not posted");
       expect(posted).toMatchObject({ authorKind: "agent", authorId: t.agentId });
       expect(await rowOf(row.id)).toMatchObject({ status: "sent", sentAt: clock, error: null });
-      expect((await actionOf(row.id))?.target).toEqual({ type: "message", id: posted?.id, title: "#sales" });
+      expect((await actionOf(row.id))?.target).toEqual({ type: "message", id: posted.id, title: "#sales" });
       // Another pass doesn't send it again.
       expect(await deliverDue(server.deps)).toBe(0);
       expect((await bodiesIn(t.sales)).filter((b) => b === "Open on Saturday")).toHaveLength(1);
