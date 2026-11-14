@@ -101,6 +101,8 @@ interface Session {
   dialogs: { type: string; message: string }[];
   /** The signal of the op in progress (its request's); `null` between ops. */
   signal: AbortSignal | null;
+  /** The work of aborted ops still settling: no command that acts on the page goes meanwhile. */
+  unwinding: Set<Promise<void>>;
 }
 
 /**
@@ -120,24 +122,47 @@ const ACTING = new Set([
 ]);
 
 const canceled = () => new RunnerError("canceled", "Canceled");
+/** How long a new op waits for an aborted one to finish unwinding. */
+const UNWIND_WAIT_MS = 15_000;
 
 /**
- * Runs an op of the browser under its request's signal. Invariant: after the abort no step that acts on the
- * page starts (the guard on each command), the load in progress is stopped (`Page.stopLoading`) and no result
- * comes back. What the browser already got (a click already dispatched, a page already loaded) is not undone.
+ * Runs an op of the browser under its request's signal. Invariant: once the request is aborted, the op counts
+ * as aborted until all of its work has settled, not only until it answers: no command that acts on the page
+ * goes after the abort (the guard on each command, while the op is unwinding), the load in progress is
+ * stopped (`Page.stopLoading` still goes) and no result comes back. The next op waits for an aborted one to
+ * finish unwinding before it begins. What the browser already got (a click already dispatched, a page
+ * already loaded) is not undone. `timeoutMs`: the op answers `undefined` after it, as `within` does.
  */
 async function underSignal<T>(
   s: Session,
   signal: AbortSignal | undefined,
   page: string | undefined,
   work: () => Promise<T>,
-): Promise<T> {
-  if (!signal) return work();
+  timeoutMs?: number,
+): Promise<T | undefined> {
+  if (s.unwinding.size) {
+    const settled = await within(Promise.allSettled([...s.unwinding]), UNWIND_WAIT_MS);
+    if (!settled)
+      throw new RunnerError("timeout", "The browser is still stopping a canceled action; try again");
+  }
+  const bounded = (p: Promise<T>) => (timeoutMs === undefined ? p : within(p, timeoutMs));
+  if (!signal) return bounded(work());
   if (signal.aborted) throw canceled();
   s.signal = signal;
+  const inner = work();
+  // The op's own work, however long it takes after its answer: the signal stays on until it settles.
+  const unwind = inner.then(
+    () => {},
+    () => {},
+  );
+  void unwind.then(() => {
+    if (s.signal === signal) s.signal = null;
+  });
   let stop: () => void = () => {};
   const aborted = new Promise<never>((_, reject) => {
     stop = () => {
+      s.unwinding.add(unwind);
+      void unwind.then(() => s.unwinding.delete(unwind));
       void s.cdp.send("Page.stopLoading", {}, page).catch(() => {});
       reject(canceled());
     };
@@ -145,12 +170,11 @@ async function underSignal<T>(
   });
   aborted.catch(() => {});
   try {
-    const out = await Promise.race([work(), aborted]);
+    const out = await Promise.race([bounded(inner), aborted]);
     if (signal.aborted) throw canceled();
     return out;
   } finally {
     signal.removeEventListener("abort", stop);
-    if (s.signal === signal) s.signal = null;
   }
 }
 
@@ -313,8 +337,12 @@ export class CdpBrowser implements BrowserDriver {
         if (!s) throw new RunnerError("not_found", "Your browser is not open; call browser_navigate first");
         const run = s.lock.then(async () => {
           if (s.policy.driver === "person") throw personDriving();
-          const r = await underSignal(s, signal, this.page(s).sessionId, () =>
-            within(this.inspect(s, a), this.opts.opTimeoutMs ?? OP_TIMEOUT_MS),
+          const r = await underSignal(
+            s,
+            signal,
+            this.page(s).sessionId,
+            () => this.inspect(s, a),
+            this.opts.opTimeoutMs ?? OP_TIMEOUT_MS,
           );
           if (!r) throw new RunnerError("timeout", "The page did not answer in time");
           return r;
@@ -341,8 +369,12 @@ export class CdpBrowser implements BrowserDriver {
               op === "browser.open"
                 ? this.open(s, (a as OpArgs<"browser.open">).url)
                 : this.act(s, a as OpArgs<"browser.act">);
-            const r = await underSignal(s, signal, this.page(s).sessionId, () =>
-              within(work(), this.opts.opTimeoutMs ?? OP_TIMEOUT_MS),
+            const r = await underSignal(
+              s,
+              signal,
+              this.page(s).sessionId,
+              work,
+              this.opts.opTimeoutMs ?? OP_TIMEOUT_MS,
             );
             if (!r) throw new RunnerError("timeout", "The page did not answer in time");
             return await this.forAgent(s, await this.withEvidence(s, r));
@@ -521,9 +553,10 @@ export class CdpBrowser implements BrowserDriver {
         blocked: [],
         dialogs: [],
         signal: null,
+        unwinding: new Set(),
       };
       cdp.guard = (method) => {
-        if (s.signal?.aborted && ACTING.has(method)) throw canceled();
+        if (ACTING.has(method) && (s.signal?.aborted || s.unwinding.size > 0)) throw canceled();
       };
       ref = s;
       proc.on("exit", () => {
