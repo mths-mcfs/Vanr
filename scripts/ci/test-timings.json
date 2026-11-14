@@ -5,9 +5,10 @@
     "scripts/ci/gate.test.ts": 24,
     "packages/contract/src/secret-box.test.ts": 90,
     "packages/contract/src/permissions.test.ts": 5,
-    "packages/engine/src/db/catalog.test.ts": 3200,
+    "packages/engine/src/db/catalog.test.ts": 8000,
     "packages/engine/src/db/db.test.ts": 3000,
     "packages/engine/src/db/browser-log.test.ts": 3000,
-    "packages/engine/src/sqlconn.test.ts": 800
+    "packages/engine/src/sqlconn.test.ts": 800,
+    "packages/engine/src/db/open.test.ts": 20000
   }
 }

@@ -11,6 +11,8 @@ export interface CatalogColumn {
   type: string;
   notNull: boolean;
   default: string | null;
+  /** Collation when it differs from the type's default; null otherwise. */
+  collation: string | null;
 }
 
 export interface CatalogConstraint {
@@ -30,6 +32,8 @@ export interface CatalogTrigger {
   table: string;
   name: string;
   definition: string;
+  /** `pg_trigger.tgenabled`: O fires (origin), D disabled, R replica only, A always. */
+  enabled: string;
 }
 
 export interface CatalogFunction {
@@ -53,8 +57,11 @@ const QUERIES = {
   tables: `select c.relname as name from pg_class c join pg_namespace n on n.oid = c.relnamespace
     where n.nspname = 'public' and c.relkind = 'r'`,
   columns: `select c.relname as table, a.attname as name, format_type(a.atttypid, a.atttypmod) as type,
-      a.attnotnull as not_null, pg_get_expr(d.adbin, d.adrelid) as default
+      a.attnotnull as not_null, pg_get_expr(d.adbin, d.adrelid) as default,
+      case when a.attcollation <> ty.typcollation then co.collname end as collation
     from pg_attribute a
+    join pg_type ty on ty.oid = a.atttypid
+    left join pg_collation co on co.oid = a.attcollation
     join pg_class c on c.oid = a.attrelid
     join pg_namespace n on n.oid = c.relnamespace
     left join pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum
@@ -68,7 +75,8 @@ const QUERIES = {
   indexes: `select tablename as table, indexname as name, indexdef as definition
     from pg_indexes where schemaname = 'public'`,
   sequences: `select sequencename as name from pg_sequences where schemaname = 'public'`,
-  triggers: `select c.relname as table, t.tgname as name, pg_get_triggerdef(t.oid) as definition
+  triggers: `select c.relname as table, t.tgname as name, pg_get_triggerdef(t.oid) as definition,
+      t.tgenabled::text as enabled
     from pg_trigger t
     join pg_class c on c.oid = t.tgrelid
     join pg_namespace n on n.oid = c.relnamespace
@@ -120,6 +128,7 @@ export async function readCatalog(query: CatalogQuery): Promise<Catalog> {
         type: str(r, "type"),
         notNull: bool(r, "not_null"),
         default: strOrNull(r, "default"),
+        collation: strOrNull(r, "collation"),
       }))
       .sort(byKey((c) => `${c.table}.${c.name}`)),
     constraints: (await query(QUERIES.constraints))
@@ -135,7 +144,12 @@ export async function readCatalog(query: CatalogQuery): Promise<Catalog> {
       .sort(byKey((c) => `${c.table}.${c.name}`)),
     sequences: await names(QUERIES.sequences),
     triggers: (await query(QUERIES.triggers))
-      .map((r) => ({ table: str(r, "table"), name: str(r, "name"), definition: str(r, "definition") }))
+      .map((r) => ({
+        table: str(r, "table"),
+        name: str(r, "name"),
+        definition: str(r, "definition"),
+        enabled: str(r, "enabled"),
+      }))
       .sort(byKey((c) => `${c.table}.${c.name}`)),
     functions: (await query(QUERIES.functions))
       .map((r) => ({ name: str(r, "name"), definition: str(r, "definition") }))

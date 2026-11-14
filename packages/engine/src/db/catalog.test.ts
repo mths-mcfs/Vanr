@@ -41,6 +41,27 @@ describe("the initial migration", () => {
     }
   });
 
+  // The comparison has to see these drifts; each one leaves every other part of the catalog alone.
+  const drifts = [
+    ["a disabled trigger", "alter table browser_log_entries disable trigger user"],
+    ["a column collation", 'alter table browser_log_entries alter column url type text collate "C"'],
+  ] as const;
+  for (const [what, statement] of drifts) {
+    test(`notices ${what}`, async () => {
+      const pg = new PGlite({ extensions: { pg_trgm } });
+      try {
+        await migrate(drizzle({ client: pg }), { migrationsFolder: MIGRATIONS_DIR });
+        await pg.exec(statement);
+        const actual = await readCatalog(
+          async (text) => (await pg.query<Record<string, unknown>>(text)).rows,
+        );
+        expect(actual).not.toEqual(fixture);
+      } finally {
+        await pg.close();
+      }
+    });
+  }
+
   // Runs only where a disposable Postgres is available (the CI job starts one); never point it at a
   // database you care about: it applies the migrations there.
   const url = process.env.VANR_TEST_POSTGRES_URL;
