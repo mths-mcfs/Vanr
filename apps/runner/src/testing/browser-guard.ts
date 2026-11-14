@@ -9,6 +9,7 @@ import type { SecretBrowserBinding } from "@vanr/contract";
 import type { BrowserPolicy } from "@vanr/engine/browser-policy";
 import type {
   AgentRef,
+  BlockedLoad,
   BrowserActResult,
   BrowserInspectResult,
   OpArgs,
@@ -39,6 +40,12 @@ export function useGuardBrowser(secrets: () => SecretValue[]): void {
       noSandbox: true,
       resolve: (h) => sites.resolve(h),
       insecureTls: true,
+      onBlocked: (agentId, load) => {
+        for (const w of blockWaiters.splice(0)) {
+          if (w.agentId === agentId && w.match(load)) w.done(load);
+          else blockWaiters.push(w);
+        }
+      },
     });
   });
   afterAll(async () => {
@@ -63,6 +70,15 @@ export const policy = (over: Partial<BrowserPolicy> = {}): BrowserPolicy => ({
 });
 
 /** Live view frames per agent. A single send for everything, like the real runner's. */
+const blockWaiters: {
+  agentId: string;
+  match: (b: BlockedLoad) => boolean;
+  done: (b: BlockedLoad) => void;
+}[] = [];
+/** Resolves when the runner notes a block for the agent (call it before what makes the page run into it). */
+export const blockNoted = (agentId: string, match: (b: BlockedLoad) => boolean = () => true) =>
+  new Promise<BlockedLoad>((done) => blockWaiters.push({ agentId, match, done }));
+
 export const frames = new Map<string, string[]>();
 export const send = (f: RunnerFrame) => {
   if (f.type === "live_view.frame") frames.set(f.agentId, [...(frames.get(f.agentId) ?? []), f.data]);

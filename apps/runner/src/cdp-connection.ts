@@ -32,6 +32,8 @@ export class Cdp {
   private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private readonly listeners = new Set<Listener>();
   closed = false;
+  /** Called before each command: it throws to keep the command from going (an aborted action's next step). */
+  guard: ((method: string) => void) | null = null;
 
   private constructor(private readonly ws: WebSocket) {
     ws.onmessage = (ev) => {
@@ -73,6 +75,11 @@ export class Cdp {
     sessionId?: string,
   ): Promise<T> {
     if (this.closed) return Promise.reject(new Error("browser closed"));
+    try {
+      this.guard?.(method);
+    } catch (err) {
+      return Promise.reject(err);
+    }
     const id = ++this.seq;
     return new Promise<T>((resolve, reject) => {
       this.pending.set(id, { resolve: (v) => resolve(v as T), reject });

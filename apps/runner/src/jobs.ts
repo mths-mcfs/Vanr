@@ -841,7 +841,7 @@ export class Jobs {
       domains: [...domainsFor(network), ...(args.executor === "shell" ? [] : CLI_DOMAINS[args.executor])],
       network,
     });
-    const secrets = await this.opts.secrets.materialize(agent, root).catch((err) => {
+    const secrets = await this.opts.secrets.materialize(agent, root, signal).catch((err) => {
       wrapped?.release();
       dropSnapshot();
       throw err;
