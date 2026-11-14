@@ -8,7 +8,7 @@ import { useMessages } from "../../i18n/react.tsx";
 import { href } from "../../routes.ts";
 import { useSession } from "../../session/react.tsx";
 import { linkToken } from "../../session/redirect.ts";
-import { AccountPage, ServerProblem, useOnce, useSubmit } from "./shared.tsx";
+import { AccountPage, LoadFailed, ServerProblem, useOnce, useSubmit } from "./shared.tsx";
 
 const Search = z.object({ token: z.string().optional(), error: z.string().optional() });
 const NO_SEARCH: z.infer<typeof Search> = {};
@@ -50,9 +50,10 @@ export function VerifyEmailScreen() {
 
 function LinkFailed() {
   const t = useMessages("account");
+  const common = useMessages("common");
   const auth = useAuth();
   const { origin } = useRuntime();
-  const { me } = useSession();
+  const { me, isLoading, failed, error, retry } = useSession();
   const [sentTo, setSentTo] = useState<string | undefined>();
   const resend = useSubmit(async ({ signal }) => {
     if (me === null || me === undefined) return;
@@ -64,7 +65,11 @@ function LinkFailed() {
   });
   return (
     <AccountPage title={t("verify.failed.title")} why={t("verify.failed.body")}>
-      {sentTo !== undefined ? (
+      {isLoading ? (
+        <Spinner label={common("state.loading")} />
+      ) : failed ? (
+        <LoadFailed error={error} onRetry={retry} />
+      ) : sentTo !== undefined ? (
         <p role="status">{t("verify.resent", { email: sentTo })}</p>
       ) : me === null ? (
         <p>

@@ -13,9 +13,10 @@ export { Frame };
 export const Reserved = ReservedScreen;
 
 export function Pending() {
+  const t = useMessages("common");
   return (
     <div className="page" aria-busy="true">
-      <Spinner size="lg" />
+      <Spinner size="lg" label={t("state.loading")} />
     </div>
   );
 }

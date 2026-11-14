@@ -43,6 +43,34 @@ describe("navigation", () => {
     expect(within(areas()).getByRole("link", { name: "Threads" }).textContent).toBe("Threads");
   });
 
+  test("failed counter refreshes hide cached badges and can be retried", async () => {
+    const app = await open(`${HOME}/wiki`);
+    await within(areas()).findByRole("link", { name: "Inbox, 3 waiting" });
+    await within(areas()).findByRole("link", { name: "Approvals, 2 waiting" });
+    const counts = await app.runtime.api.client.api.listNotificationCounts({
+      workspaceId: "workspace_birchwood",
+    });
+    app.server.force("getOverview", { kind: "error", status: 200, code: "malformed" });
+    app.server.force("listNotificationCounts", { kind: "error", status: 200, code: "malformed" });
+    await act(async () => {
+      app.server.emit("workspace_birchwood", {
+        type: "approval.resolved",
+        approvalId: "appr_1",
+        agentId: "agt_scout",
+      });
+      app.server.emit("workspace_birchwood", {
+        type: "notification.counts_updated",
+        counts,
+      });
+    });
+    const error = await within(areas()).findByRole("alert");
+    expect(within(areas()).queryByRole("link", { name: "Inbox, 3 waiting" })).toBeNull();
+    expect(within(areas()).queryByRole("link", { name: "Approvals, 2 waiting" })).toBeNull();
+    await app.user.click(within(error).getByRole("button", { name: "Retry" }));
+    await within(areas()).findByRole("link", { name: "Inbox, 3 waiting" });
+    await within(areas()).findByRole("link", { name: "Approvals, 2 waiting" });
+  });
+
   test("the navigation has no icons: the only images in the sidebar are agents and the person", async () => {
     await open();
     await within(working()).findByRole("img", { name: "Scout, at work" });
@@ -367,6 +395,33 @@ describe("the sidebar on a wide screen", () => {
 });
 
 describe("the home of a workspace", () => {
+  test("a budget event refreshes the percentage shown on home", async () => {
+    const server = newServer();
+    let budgetSpentPct = 38;
+    const fetch = server.fetch.bind(server);
+    server.fetch = (jar) => {
+      const send = fetch(jar);
+      return async (url, init) => {
+        const response = await send(url, init);
+        return url.endsWith("/overview") && response.ok
+          ? Response.json({ ...(await response.json()), budgetSpentPct })
+          : response;
+      };
+    };
+    const app = await open(HOME, { server });
+    await screen.findByText(/38% of this month's agent budget/);
+    budgetSpentPct = 95;
+    await act(async () =>
+      app.server.emit("workspace_birchwood", {
+        type: "budget.threshold_reached",
+        agentId: "agt_scout",
+        spentUsd: 95,
+        budgetUsd: 100,
+      }),
+    );
+    await screen.findByText(/95% of this month's agent budget/);
+  });
+
   test("says who works here, who is working and what waits, in sentences", async () => {
     await open();
     expect(
@@ -388,7 +443,7 @@ describe("the home of a workspace", () => {
     const server = newServer();
     server.force("getOverview", { kind: "error", status: 403, code: "forbidden" });
     const app = await open(HOME, { server });
-    const alert = await screen.findByRole("alert");
+    const alert = await within(screen.getByRole("main")).findByRole("alert");
     expect(alert.textContent).toContain("This could not be loaded");
     expect(alert.textContent).toContain("You don't have permission to do that.");
     await app.user.click(within(alert).getByRole("button", { name: "Retry" }));

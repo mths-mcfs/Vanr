@@ -1,7 +1,7 @@
 import { isApiError } from "@vanr/client";
 import { useApiQuery, useVanrClient } from "@vanr/client/react";
 import type { InvitationPreview, Me } from "@vanr/contract";
-import { Button, Callout, Skeleton } from "@vanr/ui";
+import { Button, Callout, Spinner } from "@vanr/ui";
 import { useState } from "react";
 import { AppLink, useGo, useRouteParams } from "../../app/navigation.tsx";
 import { useErrorMessage } from "../../app/screens.tsx";
@@ -9,7 +9,7 @@ import { useLocale, useMessages } from "../../i18n/react.tsx";
 import { href } from "../../routes.ts";
 import { useCompleteSignIn, useSession, useSignOut } from "../../session/react.tsx";
 import { linkToken } from "../../session/redirect.ts";
-import { AccountPage, ServerProblem, useSubmit } from "./shared.tsx";
+import { AccountPage, LoadFailed, ServerProblem, useSubmit } from "./shared.tsx";
 
 /** A date for a person; the raw text when it is not a date. */
 function useDay() {
@@ -33,18 +33,21 @@ export function InvitationScreen() {
     enabled: token !== undefined,
     retry: false,
   });
-  const { me } = useSession();
+  const { me, isLoading, failed, error, retry } = useSession();
 
   if (token === undefined) return <Gone token={undefined} />;
 
-  if (invitation.isPending) {
+  if (invitation.isPending || isLoading) {
     return (
       <AccountPage title={t("invite.loading")}>
-        <div className="page__loading" aria-busy="true">
-          <Skeleton />
-          <Skeleton />
-          <Skeleton />
-        </div>
+        <Spinner label={common("state.loading")} />
+      </AccountPage>
+    );
+  }
+  if (failed) {
+    return (
+      <AccountPage title={t("invite.failed.title")}>
+        <LoadFailed error={error} onRetry={retry} />
       </AccountPage>
     );
   }
@@ -180,6 +183,11 @@ function Open({
               current: me.user.email,
             })}
           </Callout>
+          <ServerProblem
+            error={switchAccount.error}
+            waitUntil={switchAccount.waitUntil}
+            onRetry={() => void switchAccount.run()}
+          />
           <div className="acct__actions">
             <Button size="lg" loading={switchAccount.busy} onClick={() => void switchAccount.run()}>
               {t("invite.wrongEmail.action")}

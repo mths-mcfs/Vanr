@@ -21,6 +21,7 @@ import { type ComponentType, Suspense, use, useRef } from "react";
 import { loadSidebarChannels } from "../app/areas.ts";
 import { AppLink, useGo } from "../app/navigation.tsx";
 import { isTheme, THEMES, useTheme } from "../app/theme.tsx";
+import { ServerProblem, useSubmit } from "../areas/account/shared.tsx";
 import { LOCALES } from "../i18n/locales.ts";
 import { useLocale, useMessages } from "../i18n/react.tsx";
 import type { RouteId } from "../routes.ts";
@@ -40,7 +41,8 @@ export type SidebarProps = {
   me: Me;
   workspace: WorkspaceSummary;
   /** Counts shown beside an area, when there is something waiting. */
-  counts: Partial<Record<NavigationId, number>>;
+  counts: Partial<Record<NavigationId, number | "loading" | "failed">>;
+  onRetryCounts: () => void;
   /** The agents in the middle of a run; "loading" and "failed" while that is not known. */
   working: Agent[] | "loading" | "failed";
   onRetryWorking: () => void;
@@ -132,6 +134,7 @@ function PersonMenu({
   const go = useGo();
   const focus = useMenuFocus(focusContent);
   const signOut = useSignOut();
+  const leave = useSubmit(() => signOut());
   const { locale, setLocale } = useLocale();
   const { theme, setTheme } = useTheme();
   return (
@@ -186,8 +189,11 @@ function PersonMenu({
           ))}
         </MenuRadioGroup>
         <MenuSeparator />
-        <MenuItem onSelect={() => void signOut()}>{t("person.signOut")}</MenuItem>
+        <MenuItem disabled={leave.busy} onSelect={() => void leave.run()}>
+          {t("person.signOut")}
+        </MenuItem>
       </MenuContent>
+      <ServerProblem error={leave.error} waitUntil={leave.waitUntil} onRetry={() => void leave.run()} />
     </Menu>
   );
 }
@@ -262,8 +268,17 @@ function WorkingNow({
   );
 }
 
-export function Sidebar({ me, workspace, counts, working, onRetryWorking, focusContent }: SidebarProps) {
+export function Sidebar({
+  me,
+  workspace,
+  counts,
+  onRetryCounts,
+  working,
+  onRetryWorking,
+  focusContent,
+}: SidebarProps) {
   const t = useMessages("shell");
+  const common = useMessages("common");
   const workspaceId = workspace.id;
   const channelsId = "side-channels";
   return (
@@ -276,7 +291,7 @@ export function Sidebar({ me, workspace, counts, working, onRetryWorking, focusC
           {NAVIGATION.map((group) => (
             <ul key={group[0]} className="side__group">
               {group.map((id) => {
-                const count = counts[id] ?? 0;
+                const count = typeof counts[id] === "number" ? counts[id] : 0;
                 const label = t(`route.${id}`);
                 return (
                   <li key={id}>
@@ -295,6 +310,20 @@ export function Sidebar({ me, workspace, counts, working, onRetryWorking, focusC
               })}
             </ul>
           ))}
+          {Object.values(counts).includes("failed") ? (
+            <p className="side__quiet" role="alert">
+              {t("nav.countsFailed")}{" "}
+              <button type="button" className="app-link-button" onClick={onRetryCounts}>
+                {common("action.retry")}
+              </button>
+            </p>
+          ) : (
+            Object.values(counts).includes("loading") && (
+              <p className="side__quiet" role="status">
+                {common("state.loading")}
+              </p>
+            )
+          )}
         </nav>
         <section className="side__band" aria-labelledby={channelsId}>
           <h2 className="side__band-title" id={channelsId}>
@@ -304,8 +333,8 @@ export function Sidebar({ me, workspace, counts, working, onRetryWorking, focusC
             <SidebarChannels />
           </Suspense>
         </section>
+        <WorkingNow workspaceId={workspaceId} working={working} onRetry={onRetryWorking} />
       </div>
-      <WorkingNow workspaceId={workspaceId} working={working} onRetry={onRetryWorking} />
       <div className="side__person">
         <PersonMenu me={me} workspace={workspace} focusContent={focusContent} />
       </div>

@@ -14,6 +14,7 @@ export default {
   "workspace.create": "Criar um espaço de trabalho",
   "nav.label": "Áreas",
   "nav.count": "{label}, {count} esperando",
+  "nav.countsFailed": "Não foi possível carregar as contagens de espera.",
   "channels.title": "Canais",
   "channels.reserved": "A lista de canais ainda não faz parte desta versão.",
   "working.title": "Em atividade",

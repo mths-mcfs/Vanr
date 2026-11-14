@@ -6,6 +6,7 @@ import { useAuth } from "../../api/index.ts";
 import { useRuntime } from "../../app/context.tsx";
 import { AppLink, useGoToAddress, useSearch } from "../../app/navigation.tsx";
 import { useMessages } from "../../i18n/react.tsx";
+import { href } from "../../routes.ts";
 import { useCompleteSignIn } from "../../session/react.tsx";
 import { invitationTokenIn, safeRedirect } from "../../session/redirect.ts";
 import { startAddress } from "../../session/session.ts";
@@ -49,6 +50,22 @@ export function SignUpScreen() {
       </AccountPage>
     );
   }
+  if (invitation.isError) {
+    if (invitation.error.rawCode === "invitation.used") {
+      return (
+        <AccountPage title={t("invite.used.title")} why={t("invite.used.body")}>
+          <AppLink className="app-link" route="login" params={{}}>
+            {t("invite.used.action")}
+          </AppLink>
+        </AccountPage>
+      );
+    }
+    return (
+      <AccountPage title={t("signUp.title")}>
+        <LoadFailed error={invitation.error} onRetry={() => void invitation.refetch()} />
+      </AccountPage>
+    );
+  }
   // null: the invitation is gone, so the person is treated like anyone else.
   const invited = invitation.data ?? undefined;
   if (invited === undefined && !config.data.signupOpen && !config.data.firstRun) {
@@ -74,7 +91,7 @@ function SignUpForm({
 }) {
   const t = useMessages("account");
   const auth = useAuth();
-  const { store } = useRuntime();
+  const { store, origin } = useRuntime();
   const goToAddress = useGoToAddress();
   const completeSignIn = useCompleteSignIn();
   const [name, setName] = useState("");
@@ -86,7 +103,17 @@ function SignUpForm({
   const passwordError = newPasswordProblem(password);
 
   const submit = useSubmit(async ({ signal }) => {
-    await auth.signUp({ body: { name: name.trim(), email: email.trim(), password } }, { signal });
+    await auth.signUp(
+      {
+        body: {
+          name: name.trim(),
+          email: email.trim(),
+          password,
+          callbackURL: `${origin}${href("verifyEmail", {})}`,
+        },
+      },
+      { signal },
+    );
     const me = await completeSignIn();
     if (me === null) throw new Error("signed up, but the server sees no session");
     await goToAddress(safeRedirect(redirect) ?? startAddress(store, me), { replace: true });

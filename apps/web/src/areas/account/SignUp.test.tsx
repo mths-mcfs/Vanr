@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { screen } from "@testing-library/react";
-import { type App, renderApp } from "../../../test/app.tsx";
+import { type App, newServer, renderApp } from "../../../test/app.tsx";
 import { invitationTokenIn } from "../../session/redirect.ts";
 import { emailProblem, newPasswordProblem, PASSWORD_MAX, PASSWORD_MIN } from "./shared.tsx";
 
@@ -103,6 +103,22 @@ describe("create account", () => {
     await screen.findByRole("heading", { level: 1, name: "Name your workspace" });
     expect(app.address()).toBe("/onboarding");
     expect(app.server.mail.at(-1)).toMatchObject({ to: NEW.email, kind: "verify" });
+    expect(signUps(app)[0]?.params).toMatchObject({ callbackURL: "https://vanr.test/verify-email" });
+  });
+
+  test("an invitation lookup failure offers retry instead of the waitlist", async () => {
+    const server = newServer("closed");
+    server.force("getInvitation", { kind: "offline" });
+    const app = await renderApp({ path: "/signup?redirect=%2Finvite%2Finv-mel-pending", server });
+    await screen.findByRole("alert");
+    expect(screen.queryByRole("button", { name: "Join the waitlist" })).toBeNull();
+    await app.user.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByLabelText("Your name");
+    expect(screen.getByLabelText<HTMLInputElement>("Email").value).toBe("mel@birchwood.example");
+    app.unmount();
+    await renderApp({ path: "/signup?redirect=%2Finvite%2Finv-used", server });
+    await screen.findByRole("heading", { level: 1, name: "This invitation was already used" });
+    expect(screen.getByRole("link", { name: "Sign in" }).getAttribute("href")).toBe("/login");
   });
 
   test("closed sign-up without an invitation offers the waitlist: every state", async () => {

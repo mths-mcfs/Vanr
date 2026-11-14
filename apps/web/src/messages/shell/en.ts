@@ -14,6 +14,7 @@ export default {
   "workspace.create": "Create a workspace",
   "nav.label": "Areas",
   "nav.count": "{label}, {count} waiting",
+  "nav.countsFailed": "The waiting counts could not be loaded.",
   "channels.title": "Channels",
   "channels.reserved": "The channel list is not part of this build yet.",
   "working.title": "At work",

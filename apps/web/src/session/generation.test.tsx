@@ -21,6 +21,30 @@ async function codeOf(run: () => Promise<unknown>): Promise<string> {
 }
 
 describe("signing out ends the generation", () => {
+  test.each([
+    ["/onboarding", "Sign out"],
+    [`${HOME}/wiki`, "Sign out"],
+    ["/invite/inv-mel-pending", "Sign out and switch account"],
+  ])("a failed sign-out at %s keeps the session visible and can be retried", async (path, action) => {
+    const inFrame = path.startsWith(HOME);
+    const userId = inFrame ? "usr_ana" : "usr_noor";
+    const app = await renderApp({ path, signedInAs: userId });
+    if (inFrame) {
+      await app.user.click(await screen.findByRole("button", { name: "Ana Beatriz Souza, account menu" }));
+    }
+    const role = inFrame ? "menuitem" : "button";
+    app.server.force("signOut", { kind: "error", status: 503, code: "unavailable" });
+    await app.user.click(await screen.findByRole(role, { name: action }));
+    await screen.findByRole("alert");
+    expect(screen.queryByText("You signed out.")).toBeNull();
+    expect(app.address()).toBe(path);
+    expect(app.server.userOf(app.jar.session)?.id).toBe(userId);
+    await app.advance(2000);
+    await app.user.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByRole("heading", { level: 1, name: "Sign in" });
+    expect(app.jar.session).toBeUndefined();
+  });
+
   test("an answer to who is signed in that arrives after signing out does not bring the session back", async () => {
     const app = await renderApp({ path: "/onboarding", signedInAs: "usr_noor" });
     await screen.findByLabelText("Workspace name");
@@ -135,6 +159,9 @@ describe("two tabs of one browser", () => {
     const app = await renderApp({ path: HOME, signedInAs: "usr_ana" });
     await screen.findByText(/2 approvals are waiting for you/);
     app.runtime.drafts.write("note", "Ana's half sentence");
+    await act(() => app.runtime.router.navigate({ to: "/onboarding" }));
+    await app.user.type(await screen.findByLabelText("Workspace name"), "Private workspace");
+    await app.user.type(screen.getByLabelText("What does this team do?"), "Private context");
     const tab = otherTab(app);
     await tab.runtime.api.auth.signOut();
     await tab.runtime.api.auth.signIn({
@@ -146,6 +173,10 @@ describe("two tabs of one browser", () => {
     expect(app.runtime.gate.userId()).toBe("usr_jonas");
     expect(app.runtime.api.client).not.toBe(before);
     expect(app.runtime.drafts.read("note")).toBeUndefined();
+    await screen.findByText("Signed in as jonas@birchwood.example.");
+    expect(screen.getByLabelText<HTMLInputElement>("Workspace name").value).toBe("");
+    expect(screen.getByLabelText<HTMLTextAreaElement>("What does this team do?").value).toBe("");
+    await act(() => app.runtime.router.navigate({ to: HOME }));
     await screen.findByRole("button", { name: "Jonas Lind, account menu" });
     await waitFor(() => expect(screen.queryByText(/approvals are waiting for you/)).toBeNull());
   });

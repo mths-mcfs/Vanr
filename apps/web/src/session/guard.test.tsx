@@ -4,7 +4,7 @@
 import { describe, expect, test } from "bun:test";
 import { act, screen, waitFor } from "@testing-library/react";
 import { EXAMPLE_PASSWORD } from "../../dev/fake-server.ts";
-import { type App, renderApp } from "../../test/app.tsx";
+import { type App, newServer, renderApp } from "../../test/app.tsx";
 
 const signIn = async (app: App, email: string) => {
   await app.user.type(await screen.findByLabelText("Email"), email);
@@ -13,6 +13,18 @@ const signIn = async (app: App, email: string) => {
 };
 
 describe("a protected address without a session", () => {
+  test("a slow route guard announces that the session is loading", async () => {
+    const server = newServer();
+    const held = server.hold("getMe");
+    const app = await renderApp({ path: "/onboarding", server });
+    try {
+      expect((await screen.findByRole("status")).textContent).toBe("Loading");
+    } finally {
+      app.unmount();
+      held.release();
+    }
+  });
+
   test.each([
     ["/onboarding", "/login?redirect=%2Fonboarding"],
     ["/workspace/workspace_birchwood/agents", "/login?redirect=%2Fworkspace%2Fworkspace_birchwood%2Fagents"],

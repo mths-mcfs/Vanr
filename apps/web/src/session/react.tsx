@@ -13,6 +13,7 @@ export function useSession(): {
   me: Me | null | undefined;
   isLoading: boolean;
   failed: boolean;
+  error: unknown;
   retry: () => void;
 } {
   const { session } = useRuntime();
@@ -23,6 +24,7 @@ export function useSession(): {
     me: query.data,
     isLoading: query.isPending,
     failed: query.isError,
+    error: query.error,
     retry: () => void query.refetch(),
   };
 }
@@ -48,11 +50,7 @@ export function useSignOut(): (search?: Record<string, string>) => Promise<void>
   const { session, gate, router } = useRuntime();
   return useCallback(
     async (search?: Record<string, string>) => {
-      try {
-        await auth.signOut();
-      } catch {
-        // Without an answer the cookie may live on; the screens still forget the person.
-      }
+      await auth.signOut();
       gate.leftOnPurpose();
       session.forget();
       // Straight through the router, not through the screen: wherever the person went meanwhile,

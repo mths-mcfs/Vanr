@@ -5,6 +5,17 @@ import { type App, renderApp } from "../../../test/app.tsx";
 const create = (app: App) => app.user.click(screen.getByRole("button", { name: "Create workspace" }));
 
 describe("first workspace", () => {
+  test("retrying a failed session refresh opens the workspace without creating it again", async () => {
+    const app = await renderApp({ path: "/onboarding", signedInAs: "usr_noor" });
+    await app.user.type(await screen.findByLabelText("Workspace name"), "Elsewhere Press");
+    app.server.force("getMe", { kind: "offline" });
+    await create(app);
+    await screen.findByRole("alert");
+    await app.user.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByRole("heading", { level: 1, name: "Elsewhere Press" });
+    expect(app.server.calls.filter((call) => call.method === "createWorkspace")).toHaveLength(1);
+  });
+
   test("idle and field error", async () => {
     const app = await renderApp({ path: "/onboarding", signedInAs: "usr_noor" });
     await screen.findByRole("heading", { level: 1, name: "Name your workspace" });

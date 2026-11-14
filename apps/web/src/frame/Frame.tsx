@@ -110,11 +110,12 @@ function FrameBody({ me, workspace }: { me: Me; workspace: WorkspaceSummary }) {
   const runs = useApiQuery("listActiveRuns", scope, { staleTime: OVERVIEW_FRESH_MS });
   const overview = useApiQuery("getOverview", scope, { staleTime: OVERVIEW_FRESH_MS });
   const notices = useApiQuery("listNotificationCounts", scope, { staleTime: OVERVIEW_FRESH_MS });
-  // Run events refetch the active runs and the notice count through the client's invalidation
-  // table. The count of approvals waiting comes with the overview, which the table does not tie to
-  // the approval events.
+  // The client's table leaves these overview updates to the shell.
   useInvalidateOn("approval.requested", { method: "getOverview", args: scope });
   useInvalidateOn("approval.resolved", { method: "getOverview", args: scope });
+  useInvalidateOn("budget.threshold_reached", { method: "getOverview", args: scope });
+  useInvalidateOn("budget.cap_reached", { method: "getOverview", args: scope });
+  useInvalidateOn("run.completed", { method: "getOverview", args: scope });
 
   useEffect(() => rememberWorkspace(store, workspaceId), [store, workspaceId]);
   useOnNavigate(() => {
@@ -137,7 +138,18 @@ function FrameBody({ me, workspace }: { me: Me; workspace: WorkspaceSummary }) {
     <Sidebar
       me={me}
       workspace={workspace}
-      counts={{ notifications: notices.data?.badge ?? 0, approvals: overview.data?.myApprovalQueue ?? 0 }}
+      counts={{
+        notifications: notices.isError ? "failed" : notices.isPending ? "loading" : notices.data.badge,
+        approvals: overview.isError
+          ? "failed"
+          : overview.isPending
+            ? "loading"
+            : overview.data.myApprovalQueue,
+      }}
+      onRetryCounts={() => {
+        void notices.refetch();
+        void overview.refetch();
+      }}
       working={working}
       onRetryWorking={() => {
         void agents.refetch();

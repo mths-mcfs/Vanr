@@ -1,4 +1,5 @@
 import { useVanrClient } from "@vanr/client/react";
+import type { Me } from "@vanr/contract";
 import { Button, Field, Input, Textarea } from "@vanr/ui";
 import { useState } from "react";
 import { useGo } from "../../app/navigation.tsx";
@@ -20,32 +21,44 @@ function browserTimeZone(): string {
  * draft, so a session that ends in the middle does not cost the person the text.
  */
 export function NewWorkspaceScreen() {
+  const { me } = useSession();
+  return <NewWorkspaceForm key={me?.user.id} me={me} />;
+}
+
+function NewWorkspaceForm({ me }: { me: Me | null | undefined }) {
   const t = useMessages("account");
+  const common = useMessages("common");
   const { api } = useVanrClient();
   const go = useGo();
-  const { me } = useSession();
   const signOut = useSignOut();
+  const leave = useSubmit(() => signOut());
   const completeSignIn = useCompleteSignIn();
   const [name, setName, discardName] = useDraft("onboarding.name");
   const [context, setContext, discardContext] = useDraft("onboarding.context");
   const [checked, setChecked] = useState(false);
+  const [createdId, setCreatedId] = useState<string>();
   const nameError = name.trim() === "" ? ("validation.workspaceNameRequired" as const) : undefined;
 
   const submit = useSubmit(async ({ signal }) => {
-    const { workspace } = await api.createWorkspace(
-      {
-        body: {
-          name: name.trim(),
-          ...(context.trim() !== "" && { context: context.trim() }),
-          timezone: browserTimeZone(),
+    let workspaceId = createdId;
+    if (workspaceId === undefined) {
+      const { workspace } = await api.createWorkspace(
+        {
+          body: {
+            name: name.trim(),
+            ...(context.trim() !== "" && { context: context.trim() }),
+            timezone: browserTimeZone(),
+          },
         },
-      },
-      { signal },
-    );
+        { signal },
+      );
+      workspaceId = workspace.id;
+      setCreatedId(workspaceId);
+    }
+    await completeSignIn();
     discardName();
     discardContext();
-    await completeSignIn();
-    await go("home", { workspaceId: workspace.id }, { replace: true });
+    await go("home", { workspaceId }, { replace: true });
   });
 
   return (
@@ -57,17 +70,23 @@ export function NewWorkspaceScreen() {
         me !== undefined && (
           <>
             {t("workspace.signedInAs", { email: me.user.email })}{" "}
-            <button type="button" className="app-link-button" onClick={() => void signOut()}>
+            <button
+              type="button"
+              className="app-link-button"
+              disabled={leave.busy}
+              onClick={() => void leave.run()}
+            >
               {t("workspace.signOut")}
             </button>
           </>
         )
       }
     >
+      <ServerProblem error={leave.error} waitUntil={leave.waitUntil} onRetry={() => void leave.run()} />
       <AccountForm
         onSubmit={() => {
           setChecked(true);
-          if (nameError === undefined) void submit.run();
+          if (createdId !== undefined || nameError === undefined) void submit.run();
         }}
       >
         <Field
@@ -79,6 +98,7 @@ export function NewWorkspaceScreen() {
             name="workspace"
             autoComplete="off"
             value={name}
+            disabled={createdId !== undefined}
             onChange={(event) => setName(event.target.value)}
           />
         </Field>
@@ -87,13 +107,14 @@ export function NewWorkspaceScreen() {
             name="context"
             rows={3}
             value={context}
+            disabled={createdId !== undefined}
             onChange={(event) => setContext(event.target.value)}
           />
         </Field>
         <ServerProblem error={submit.error} waitUntil={submit.waitUntil} onRetry={() => void submit.run()} />
         <div className="acct__actions">
           <Button type="submit" variant="primary" size="lg" loading={submit.busy}>
-            {t("workspace.submit")}
+            {createdId === undefined ? t("workspace.submit") : common("action.retry")}
           </Button>
         </div>
       </AccountForm>

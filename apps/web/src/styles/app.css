@@ -151,6 +151,14 @@
   }
 
   @media (max-width: 480px) {
+    .acct__controls {
+      position: static;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      padding: var(--vr-space-3) var(--vr-space-4) 0;
+    }
+
     .acct__column {
       padding-top: var(--vr-space-4);
     }

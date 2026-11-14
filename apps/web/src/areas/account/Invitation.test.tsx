@@ -13,6 +13,22 @@ const facts = () => {
 };
 
 describe("invitation", () => {
+  test.each([
+    ["/invite/inv-open-link", "Sign in to accept"],
+    ["/verify-email?error=INVALID_TOKEN", "Sign in to get a new link"],
+  ])("unknown identity at %s shows loading and a failed session can be retried", async (path, action) => {
+    const server = newServer();
+    const held = server.hold("getMe");
+    server.force("getMe", { kind: "offline" }, 4);
+    const app = await renderApp({ path, server });
+    expect((await screen.findByRole("status")).textContent).toBe("Loading");
+    held.release();
+    await screen.findByRole("alert");
+    expect(screen.queryByText(action)).toBeNull();
+    await app.user.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText(action);
+  });
+
   test("loading, then what the invitation is", async () => {
     const server = newServer();
     const held = server.hold("getInvitation");

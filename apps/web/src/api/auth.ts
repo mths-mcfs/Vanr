@@ -29,7 +29,7 @@ type Call<Body> = (args: { body: Body }, options?: { signal?: AbortSignal }) => 
 
 export type AuthApi = {
   signIn: Call<{ email: string; password: string }>;
-  signUp: Call<{ name: string; email: string; password: string }>;
+  signUp: Call<{ name: string; email: string; password: string; callbackURL?: string }>;
   signOut: (args?: undefined, options?: { signal?: AbortSignal }) => Promise<void>;
   /** `redirectTo` is where the emailed link ends: the web's reset screen. */
   requestPasswordReset: Call<{ email: string; redirectTo: string }>;
