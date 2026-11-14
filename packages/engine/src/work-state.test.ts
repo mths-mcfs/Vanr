@@ -61,14 +61,14 @@ describe("activities from the steps", () => {
   test("speech, tool with result, question and final answer", () => {
     const acts = activitiesFromSteps("r1", [
       { seq: 1, kind: "text", at, data: { text: "vou ver" } },
-      { seq: 2, kind: "tool_call", at, data: { name: "read_wiki_page", toolUseId: "t1" } },
+      { seq: 2, kind: "tool_call", at, data: { name: "open_wiki_page", toolUseId: "t1" } },
       { seq: 3, kind: "tool_result", at, data: { toolUseId: "t1", isError: false } },
       { seq: 4, kind: "tool_call", at, data: { name: "ask_user", toolUseId: "t2" } },
       { seq: 5, kind: "tool_result", at, data: { toolUseId: "t2" } },
       { seq: 6, kind: "text", at, data: { text: "pronto" } },
     ]);
     expect(acts.map((a) => a.kind)).toEqual(["thought", "action", "elicitation", "response"]);
-    expect(acts[1]).toMatchObject({ tool: "read_wiki_page", ok: true });
+    expect(acts[1]).toMatchObject({ tool: "open_wiki_page", ok: true });
   });
 
   test("a failed run ends in error and the last speech does not become the answer", () => {
@@ -76,7 +76,7 @@ describe("activities from the steps", () => {
       "r1",
       [
         { seq: 1, kind: "text", at, data: { text: "tentando" } },
-        { seq: 2, kind: "tool_call", at, data: { name: "browser_open", toolUseId: "t1" } },
+        { seq: 2, kind: "tool_call", at, data: { name: "browser_navigate", toolUseId: "t1" } },
         { seq: 3, kind: "tool_result", at, data: { toolUseId: "t1", isError: true } },
       ],
       true,
