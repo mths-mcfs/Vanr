@@ -613,9 +613,9 @@ export async function trashPage(deps: AppDeps, row: WikiRow, me: WorkspaceMember
     await unindex(tx, deps, { kind: "wiki", id: r.id });
     return r;
   });
+  deps.wikiLive.pageClosed(trashed);
   // A link with the same name moves to another page outside the trash, if there is one.
   await reresolveLinks(deps.db, trashed.workspaceId, namesOf(trashed));
-  deps.wikiLive.pageClosed(trashed);
   return trashed;
 }
 
