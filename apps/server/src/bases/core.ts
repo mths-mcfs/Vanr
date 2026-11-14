@@ -282,7 +282,7 @@ export function rowChunks(
   table: TableRow,
   row: Pick<
     RowRow,
-    "id" | "workspaceId" | "props" | "computed" | "body" | "createdAt" | "createdBy" | "editedAt"
+    "id" | "workspaceId" | "props" | "computed" | "body" | "createdAt" | "createdBy" | "editedAt" | "editedBy"
   >,
   names: Names,
 ): ChunkInput[] {
@@ -310,15 +310,35 @@ export function rowChunks(
   ];
 }
 
-/** The text of a cell (a formula's too, by its computed value). */
-export function cellText(def: PropDef, row: Pick<RowRow, "props" | "computed">, names: Names): string {
-  if (def.type === "formula") {
-    const v = row.computed[def.id];
-    if (v === undefined || v === null) return "";
-    if (typeof v === "object" && !Array.isArray(v) && "err" in v) return `#${String(v.err)}`;
-    return formulaText(v, names);
+/** The columns of the row a cell can read: its values, its formulas and who created and edited it, when. */
+export type CellRow = Pick<
+  RowRow,
+  "props" | "computed" | "createdAt" | "createdBy" | "editedAt" | "editedBy"
+>;
+
+/**
+ * The text of a cell (a formula's too, by its computed value). The automatic properties live in the row's
+ * columns, not in `props`: the times go out as ISO instants, the people by name.
+ */
+export function cellText(def: PropDef, row: CellRow, names: Names): string {
+  switch (def.type) {
+    case "formula": {
+      const v = row.computed[def.id];
+      if (v === undefined || v === null) return "";
+      if (typeof v === "object" && !Array.isArray(v) && "err" in v) return `#${String(v.err)}`;
+      return formulaText(v, names);
+    }
+    case "created_time":
+      return row.createdAt.toISOString();
+    case "edited_time":
+      return row.editedAt.toISOString();
+    case "creator":
+      return propText(def, row.createdBy, names);
+    case "editor":
+      return propText(def, row.editedBy, names);
+    default:
+      return propText(def, row.props[def.id], names);
   }
-  return propText(def, row.props[def.id], names);
 }
 
 function formulaText(v: unknown, names: Names): string {

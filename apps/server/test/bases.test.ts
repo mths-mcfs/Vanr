@@ -13,8 +13,16 @@ import { newId } from "@vanr/engine/ids";
 import type { Props } from "@vanr/engine/props";
 import { and, eq, sql } from "drizzle-orm";
 import { MAX_ROWS, type TableRow } from "../src/bases/core";
+import { queryRows } from "../src/bases/query";
 import { BASE_UNDOERS } from "../src/bases/undo";
-import { createDatabase, importRows, resumeRecalcs, runRecalc } from "../src/bases/write";
+import {
+  createDatabase,
+  createView,
+  deleteView,
+  importRows,
+  resumeRecalcs,
+  runRecalc,
+} from "../src/bases/write";
 import type { AppDeps } from "../src/context";
 import { backfillSearch } from "../src/search-index";
 import type { RunningServer } from "../src/server";
@@ -1469,8 +1477,52 @@ describe("bases: adversarial review (each reproduced attack becomes a test)", ()
       const after = (await ana.api.get(workspaceId, base.id)).tables[0];
       expect(after?.defs.map((d) => d.name)).toEqual(table.defs.map((d) => d.name));
       expect(after?.schemaVersion).toBe(table.schemaVersion);
+      // one row left under the cap and five creations at once: exactly one goes in
+      const results = await Promise.allSettled(
+        Array.from({ length: 5 }, (_, i) =>
+          ana.api.createRow(workspaceId, base.id, table.id, { props: { [table.titlePropId]: `c${i}` } }),
+        ),
+      );
+      expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      for (const r of results.filter((x) => x.status === "rejected"))
+        expect(await apiError(Promise.reject(r.reason))).toEqual({ status: 409, code: "base.too_many_rows" });
+      expect((await ana.api.query(workspaceId, base.id, table.id, { limit: 1 })).total).toBe(MAX_ROWS);
     },
-    SERVER_TEST_MS * 2,
+    SERVER_TEST_MS * 3,
+  );
+
+  test(
+    "the read caps: a page is at most 500 rows whatever is asked, a group shows 100, a grouped answer 2,000",
+    async () => {
+      const { workspaceId, ana } = await team();
+      const base = await ana.api.create(workspaceId, { title: "Groups" });
+      const table = base.tables[0];
+      if (!table) throw new Error("no table");
+      const t = table.titlePropId;
+      // 2,100 rows: 2,000 in 20 groups of 100 plus 100 more, so each cap is passed by what is there
+      await server.deps.db.execute(sql`
+      insert into db_rows (id, workspace_id, table_id, position, props, computed, created_by, edited_by)
+      select 'dbr_grp' || g, ${workspaceId}, ${table.id}, 'a' || lpad(g::text, 6, '0'),
+             case when g <= 150 then '{}'::jsonb else jsonb_build_object(${t}::text, 'g' || lpad((g % 20)::text, 2, '0')) end,
+             '{}'::jsonb, '{"type":"person","id":"x"}'::jsonb, '{"type":"person","id":"x"}'::jsonb
+        from generate_series(1, 2100) g`);
+      const [stored] = await server.deps.db
+        .select()
+        .from(schema.dbTables)
+        .where(eq(schema.dbTables.id, table.id));
+      if (!stored) throw new Error("no table");
+      const me = { type: "person" as const, id: ana.user.id };
+      expect(
+        (await queryRows(server.deps.db, stored, { limit: 10_000 }, { now: clock, me })).rows,
+      ).toHaveLength(500);
+      const grouped = await ana.api.query(workspaceId, base.id, table.id, { groupBy: { prop: t } });
+      expect(grouped.groups?.length).toBe(21);
+      expect(grouped.groups?.[0]).toEqual({ key: null, count: 150 });
+      // the empty group first: 100 of its 150 rows, then 100 of each group until the 2,000 rows of the answer
+      expect(grouped.rows.filter((r) => r.props[t] === undefined)).toHaveLength(100);
+      expect(grouped.rows).toHaveLength(2_000);
+    },
+    SERVER_TEST_MS,
   );
 
   test(
@@ -1503,6 +1555,407 @@ describe("bases: adversarial review (each reproduced attack becomes a test)", ()
         f2: { err: "too_many_steps" },
         f3: { err: "too_many_steps" },
       });
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+/**
+ * The server's dependencies with the database's reads of `db_views` held until `parties` of them arrived (the
+ * SQL and its results are the real ones; only their arrival waits). A writer that counts the views outside a
+ * lock then reads the same count as every other writer: the race made deterministic.
+ */
+function heldViews(deps: AppDeps, parties: number): AppDeps {
+  let arrived = 0;
+  let release = () => {};
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  // biome-ignore lint/suspicious/noExplicitAny: a pass-through proxy over drizzle's query builder
+  const hold = (q: any, views: boolean): any =>
+    new Proxy(q, {
+      get(target, key) {
+        if (key === "then")
+          // biome-ignore lint/suspicious/noExplicitAny: the builder's own then
+          return (ok: any, bad: any) =>
+            target.then(async (v: unknown) => {
+              if (views && ++arrived <= parties) {
+                if (arrived === parties) release();
+                await gate;
+              }
+              return ok(v);
+            }, bad);
+        const item = target[key];
+        if (typeof item !== "function") return item;
+        return (...args: unknown[]) =>
+          hold(item.apply(target, args), views || (key === "from" && args[0] === schema.dbViews));
+      },
+    });
+  const db = new Proxy(deps.db, {
+    get(target, key) {
+      if (key === "select")
+        return (...args: Parameters<typeof target.select>) => hold(target.select(...args), false);
+      const value = Reflect.get(target, key);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { ...deps, db };
+}
+
+describe("bases: caps and checks at the same time", () => {
+  /** Extra views written as the view route writes them, to start next to the cap without 49 requests. */
+  async function addViews(workspaceId: string, databaseId: string, tableId: string, n: number) {
+    const at = new Date(clock);
+    await server.deps.db.insert(schema.dbViews).values(
+      Array.from({ length: n }, (_, i) => ({
+        id: newId("dbv"),
+        workspaceId,
+        databaseId,
+        tableId,
+        name: `v${i}`,
+        type: "table" as const,
+        position: `b${String(i).padStart(3, "0")}`,
+        config: {},
+        createdAt: at,
+        updatedAt: at,
+      })),
+    );
+  }
+
+  test(
+    "deleting the last views at once leaves one: the delete that would leave none is rejected",
+    async () => {
+      const { workspaceId, ana, beto } = await team();
+      const base = await ana.api.create(workspaceId, { title: "Two views" });
+      const table = base.tables[0];
+      const first = base.views[0];
+      if (!table || !first) throw new Error("no table");
+      const second = await ana.api.createView(workspaceId, base.id, {
+        tableId: table.id,
+        name: "2",
+        type: "table",
+      });
+      const two = await Promise.allSettled([
+        ana.api.deleteView(workspaceId, base.id, first.id),
+        beto.api.deleteView(workspaceId, base.id, second.id),
+      ]);
+      expect(two.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      const [rejected] = two.filter((r) => r.status === "rejected");
+      expect(await apiError(Promise.reject(rejected?.reason))).toEqual({
+        status: 409,
+        code: "base.last_view",
+      });
+      expect((await ana.api.get(workspaceId, base.id)).views).toHaveLength(1);
+      // five views, five deletes at once: four go, one stays
+      await addViews(workspaceId, base.id, table.id, 4);
+      const views = (await ana.api.get(workspaceId, base.id)).views;
+      expect(views).toHaveLength(5);
+      const five = await Promise.allSettled(views.map((v) => ana.api.deleteView(workspaceId, base.id, v.id)));
+      expect(five.filter((r) => r.status === "fulfilled")).toHaveLength(4);
+      expect((await ana.api.get(workspaceId, base.id)).views).toHaveLength(1);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "creating views at once from 49 stops at the cap of 50",
+    async () => {
+      const { workspaceId, ana } = await team();
+      const base = await ana.api.create(workspaceId, { title: "Many views" });
+      const table = base.tables[0];
+      if (!table) throw new Error("no table");
+      await addViews(workspaceId, base.id, table.id, 48);
+      expect((await ana.api.get(workspaceId, base.id)).views).toHaveLength(49);
+      const results = await Promise.allSettled(
+        Array.from({ length: 8 }, (_, i) =>
+          ana.api.createView(workspaceId, base.id, { tableId: table.id, name: `r${i}`, type: "table" }),
+        ),
+      );
+      expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      for (const r of results.filter((x) => x.status === "rejected"))
+        expect(await apiError(Promise.reject(r.reason))).toEqual({
+          status: 409,
+          code: "base.too_many_views",
+        });
+      expect((await ana.api.get(workspaceId, base.id)).views).toHaveLength(50);
+      // a linked view into another database counts in that database
+      const other = await ana.api.create(workspaceId, { title: "Other" });
+      expect(
+        (
+          await apiError(
+            ana.api.createView(workspaceId, base.id, {
+              tableId: String(other.tables[0]?.id),
+              name: "x",
+              type: "table",
+            }),
+          )
+        ).code,
+      ).toBe("base.too_many_views");
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "moving views at once gives each its own place",
+    async () => {
+      const { workspaceId, ana, beto } = await team();
+      const base = await ana.api.create(workspaceId, { title: "Tabs" });
+      const table = base.tables[0];
+      const first = base.views[0];
+      if (!table || !first) throw new Error("no table");
+      const made = [];
+      for (const name of ["b", "c", "d", "e"])
+        made.push(await ana.api.createView(workspaceId, base.id, { tableId: table.id, name, type: "table" }));
+      // three tabs moved right after the first one, at the same time
+      await Promise.all(
+        made
+          .slice(1)
+          .map((v, i) =>
+            (i % 2 ? ana : beto).api.updateView(workspaceId, base.id, v.id, { afterId: first.id }),
+          ),
+      );
+      const views = (await ana.api.get(workspaceId, base.id)).views;
+      expect(new Set(views.map((v) => v.position)).size).toBe(5);
+      expect(views[0]?.id).toBe(first.id);
+      expect(
+        views
+          .slice(1, 4)
+          .map((v) => v.name)
+          .sort(),
+      ).toEqual(["c", "d", "e"]);
+      expect(views[4]?.name).toBe("b");
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "the same races with each read of the views held until every writer has read: still one view, still 50",
+    async () => {
+      const { workspaceId, ana } = await team();
+      const { dbDatabases, dbTables, dbViews } = schema;
+      const rowOf = async (id: string) => {
+        const [row] = await server.deps.db.select().from(dbDatabases).where(eq(dbDatabases.id, id));
+        if (!row) throw new Error("no base");
+        return row;
+      };
+      // two deletes of the last two views
+      const two = await ana.api.create(workspaceId, { title: "Held deletes" });
+      const twoTable = two.tables[0];
+      if (!twoTable) throw new Error("no table");
+      await ana.api.createView(workspaceId, two.id, { tableId: twoTable.id, name: "2", type: "table" });
+      const views = await server.deps.db.select().from(dbViews).where(eq(dbViews.databaseId, two.id));
+      const twoRow = await rowOf(two.id);
+      const heldTwo = heldViews(server.deps, 2);
+      const deletes = await Promise.allSettled(views.map((v) => deleteView(heldTwo, twoRow, v)));
+      expect(deletes.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      expect(await server.deps.db.select().from(dbViews).where(eq(dbViews.databaseId, two.id))).toHaveLength(
+        1,
+      );
+      // four creations from 49
+      const cap = await ana.api.create(workspaceId, { title: "Held creations" });
+      const capTable = cap.tables[0];
+      if (!capTable) throw new Error("no table");
+      await addViews(workspaceId, cap.id, capTable.id, 48);
+      const [table] = await server.deps.db.select().from(dbTables).where(eq(dbTables.id, capTable.id));
+      if (!table) throw new Error("no table");
+      const capRow = await rowOf(cap.id);
+      const heldFour = heldViews(server.deps, 4);
+      const creations = await Promise.allSettled(
+        Array.from({ length: 4 }, () => createView(heldFour, capRow, table, { name: "race", type: "table" })),
+      );
+      expect(creations.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      expect(await server.deps.db.select().from(dbViews).where(eq(dbViews.databaseId, cap.id))).toHaveLength(
+        50,
+      );
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "the schema from the same version saved twice at once, and two imports adding columns at once: one each",
+    async () => {
+      const { workspaceId, ana, beto } = await team();
+      const { base, table } = await baseWithTypes(ana.api, workspaceId);
+      const saves = await Promise.allSettled([
+        ana.api.saveSchema(workspaceId, base.id, table.id, {
+          defs: [...table.defs, { id: "p_a", name: "A", type: "text" }],
+          parentVersion: table.schemaVersion,
+        }),
+        beto.api.saveSchema(workspaceId, base.id, table.id, {
+          defs: [...table.defs, { id: "p_b", name: "A", type: "number" }],
+          parentVersion: table.schemaVersion,
+        }),
+      ]);
+      expect(saves.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      const [lost] = saves.filter((r) => r.status === "rejected");
+      expect(await apiError(Promise.reject(lost?.reason))).toEqual({
+        status: 409,
+        code: "base.schema_conflict",
+      });
+      const now = (await ana.api.get(workspaceId, base.id)).tables[0];
+      expect(now?.defs.filter((d) => d.name === "A")).toHaveLength(1);
+      const imports = await Promise.allSettled([
+        ana.api.importCsv(workspaceId, base.id, table.id, { csv: "Name,Fresh\nx,1\n" }),
+        beto.api.importCsv(workspaceId, base.id, table.id, { csv: "Name,Fresh\ny,2\n" }),
+      ]);
+      // the second either read the first's column (and adds none) or lost the schema race (409, nothing in)
+      const done = imports.filter((r) => r.status === "fulfilled");
+      expect(done.length).toBeGreaterThanOrEqual(1);
+      for (const r of imports.filter((x) => x.status === "rejected"))
+        expect(await apiError(Promise.reject(r.reason))).toEqual({
+          status: 409,
+          code: "base.schema_conflict",
+        });
+      const after = (await ana.api.get(workspaceId, base.id)).tables[0];
+      expect(after?.defs.filter((d) => d.name === "Fresh")).toHaveLength(1);
+      expect((await ana.api.query(workspaceId, base.id, table.id)).total).toBe(done.length);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "the field cap holds for an import; options from a CSV stop at 200, with names cut at 100",
+    async () => {
+      const { workspaceId, ana } = await team();
+      const base = await ana.api.create(workspaceId, { title: "Wide" });
+      const table = base.tables[0];
+      if (!table) throw new Error("no table");
+      const full = await ana.api.saveSchema(workspaceId, base.id, table.id, {
+        parentVersion: table.schemaVersion,
+        defs: [
+          ...table.defs,
+          { id: "p_sel", name: "Phase", type: "select", options: [] },
+          ...Array.from({ length: 197 }, (_, i) => ({ id: `p_${i}`, name: `C${i}`, type: "text" as const })),
+        ],
+      });
+      expect(full.defs).toHaveLength(199);
+      const over = await apiError(
+        ana.api.importCsv(workspaceId, base.id, table.id, { csv: "Name,New one,New two\nx,1,2\n" }),
+      );
+      expect([over.status, over.code]).toEqual([400, "base.invalid_schema"]);
+      expect((await ana.api.get(workspaceId, base.id)).tables[0]?.defs).toHaveLength(199);
+      expect((await ana.api.query(workspaceId, base.id, table.id)).total).toBe(0);
+      const long = "L".repeat(150);
+      const csv = `Name,Phase\n${Array.from({ length: 250 }, (_, i) => `r${i},${i === 0 ? long : `o${i}`}`).join("\n")}\n`;
+      const imported = await ana.api.importCsv(workspaceId, base.id, table.id, { csv });
+      const phase = imported.table.defs.find((d) => d.id === "p_sel");
+      expect(phase?.options).toHaveLength(200);
+      expect(phase?.options?.[0]?.name).toBe("L".repeat(100));
+      expect(imported.created).toBe(250);
+    },
+    SERVER_TEST_MS * 2,
+  );
+
+  test(
+    "a row's body stops at 500,000 characters",
+    async () => {
+      const { workspaceId, ana } = await team();
+      const base = await ana.api.create(workspaceId, { title: "Body" });
+      const table = base.tables[0];
+      if (!table) throw new Error("no table");
+      const ok = await ana.api.createRow(workspaceId, base.id, table.id, {
+        props: {},
+        body: "b".repeat(500_000),
+      });
+      expect(ok.hasBody).toBe(true);
+      expect(
+        (await apiError(ana.api.createRow(workspaceId, base.id, table.id, { body: "b".repeat(500_001) })))
+          .status,
+      ).toBe(400);
+      expect(
+        (await apiError(ana.api.updateRow(workspaceId, base.id, ok.id, { body: "b".repeat(500_001) })))
+          .status,
+      ).toBe(400);
+      expect((await ana.api.query(workspaceId, base.id, table.id)).total).toBe(1);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("bases: automatic properties", () => {
+  test(
+    "created and edited, by whom and when: exported, filtered and sorted from the row's columns, and back in by CSV",
+    async () => {
+      const { workspaceId, ana, beto } = await team();
+      const base = await ana.api.create(workspaceId, { title: "Automatic" });
+      const table = base.tables[0];
+      if (!table) throw new Error("no table");
+      const t = table.titlePropId;
+      await ana.api.saveSchema(workspaceId, base.id, table.id, {
+        parentVersion: table.schemaVersion,
+        defs: [
+          ...table.defs,
+          { id: "a_ct", name: "Created", type: "created_time" },
+          { id: "a_cb", name: "Author", type: "creator" },
+          { id: "a_et", name: "Edited", type: "edited_time" },
+          { id: "a_eb", name: "Editor", type: "editor" },
+        ],
+      });
+      const start = clock;
+      try {
+        const first = await ana.api.createRow(workspaceId, base.id, table.id, { props: { [t]: "first" } });
+        clock += 60_000;
+        const second = await beto.api.createRow(workspaceId, base.id, table.id, { props: { [t]: "second" } });
+        clock += 60_000;
+        const edited = await beto.api.updateRow(workspaceId, base.id, first.id, { props: { [t]: "first!" } });
+        const out = await ana.api.exportCsv(workspaceId, base.id, table.id);
+        expect(out.csv.split("\r\n")).toEqual([
+          "Name,Created,Author,Edited,Editor",
+          `first!,${first.createdAt},Ana,${edited.editedAt},Beto`,
+          `second,${second.createdAt},Beto,${second.editedAt},Beto`,
+        ]);
+        // the search reads the same columns
+        const [chunk] = await indexed(first.id);
+        expect(chunk?.text).toContain("Author: Ana");
+        expect(chunk?.text).toContain("Editor: Beto");
+        // filter and order by them
+        const by = (filter: unknown, sorts?: { prop: string; dir: "asc" | "desc" }[]) =>
+          ana.api.query(workspaceId, base.id, table.id, { filter, ...(sorts ? { sorts } : {}) });
+        const names = (p: { rows: { props: Record<string, unknown> }[] }) => p.rows.map((r) => r.props[t]);
+        expect(
+          names(await by({ prop: "a_cb", op: "has", value: { type: "person", id: beto.user.id } })),
+        ).toEqual(["second"]);
+        expect(names(await by({ prop: "a_eb", op: "has", value: "me" }))).toEqual([]);
+        expect(names(await by(null, [{ prop: "a_et", dir: "desc" }]))).toEqual(["first!", "second"]);
+        expect(names(await by(null, [{ prop: "a_ct", dir: "desc" }]))).toEqual(["second", "first!"]);
+        expect(
+          names(await by({ prop: "a_ct", op: "on_or_after", value: first.createdAt.slice(0, 10) })),
+        ).toHaveLength(2);
+        // and back: a new base from the export keeps the values as text and dates
+        const back = await ana.api.createFromCsv(workspaceId, { title: "Back", csv: out.csv });
+        const backTable = back.tables[0];
+        if (!backTable) throw new Error("no table");
+        expect(backTable.defs.map((d) => d.name)).toEqual(["Name", "Created", "Author", "Edited", "Editor"]);
+        const again = await ana.api.exportCsv(workspaceId, back.id, backTable.id);
+        expect(
+          again.csv
+            .split("\r\n")
+            .slice(1)
+            .map((l) => l.split(",")[2]),
+        ).toEqual(["Ana", "Beto"]);
+      } finally {
+        clock = start;
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "exporting through a view of another source is rejected",
+    async () => {
+      const { workspaceId, ana } = await team();
+      const a = await ana.api.create(workspaceId, { title: "A" });
+      const b = await ana.api.create(workspaceId, { title: "B" });
+      const aTable = a.tables[0];
+      const bTable = b.tables[0];
+      if (!aTable || !bTable) throw new Error("no table");
+      const foreign = await ana.api.createView(workspaceId, a.id, {
+        tableId: bTable.id,
+        name: "B here",
+        type: "table",
+      });
+      const err = await apiError(ana.api.exportCsv(workspaceId, a.id, aTable.id, { viewId: foreign.id }));
+      expect(err).toEqual({ status: 400, code: "base.view_table" });
     },
     SERVER_TEST_MS,
   );

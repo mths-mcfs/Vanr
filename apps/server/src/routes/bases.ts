@@ -343,6 +343,8 @@ export function registerBases(app: Hono<AppEnv>) {
     const table = await tableIn(deps.db, me.workspaceId, row.id, idOf(c, "tableId"));
     const { viewId } = await readBody(c, z.object({ viewId: id.optional() }).strict());
     const view = viewId ? await viewIn(deps.db, row, viewId) : null;
+    if (view && view.tableId !== table.id)
+      throw new HttpError(400, "base.view_table", "This view shows another table");
     return c.json(await exportCsv(deps, table, view, me$(me)));
   });
 }

@@ -122,6 +122,16 @@ export async function createDatabase(deps: AppDeps, input: CreateDatabaseInput) 
     ? { actor: input.actor, names: await namesOf(db, input.workspaceId), at }
     : null;
   const { row, table, inserted } = await db.transaction(async (tx) => {
+    // the linked source is read again, locked until the commit: a delete of it meanwhile waits, then this
+    // answers 404 instead of a view pointing at nothing (a foreign key error)
+    if (linked) {
+      const [source] = await tx
+        .select({ id: dbTables.id })
+        .from(dbTables)
+        .where(eq(dbTables.id, linked.id))
+        .for("share");
+      if (!source) throw notFound("Table not found");
+    }
     const [created] = await tx
       .insert(dbDatabases)
       .values({
@@ -195,7 +205,7 @@ export async function touchDatabase(db: Db, id: string, at: Date) {
 
 /** A person must be a member or an agent of the workspace; a file, the workspace's Drive's and out of the trash. */
 async function checkRefs(
-  db: Db | Tx,
+  db: Tx,
   workspaceId: string,
   defs: readonly PropDef[],
   write: Props,
@@ -264,7 +274,7 @@ async function checkRefs(
 }
 
 async function validWrite(
-  db: Db | Tx,
+  db: Tx,
   table: TableRow,
   current: Props,
   write: Record<string, unknown>,
@@ -391,7 +401,7 @@ interface WriteCtx {
 /**
  * Locks the source until the commit. Creating a row, importing and undoing go through here: the row cap and
  * the schema read stay valid until the write (without it, 20 creations at the same time went past the cap).
- * Lock order: the source before a row, everywhere.
+ * Lock order: the source before its database's row, and the source before a row, everywhere.
  */
 async function lockTable(tx: Tx, tableId: string): Promise<TableRow> {
   const [t] = await tx.select().from(dbTables).where(eq(dbTables.id, tableId)).for("update");
@@ -1072,40 +1082,66 @@ function validateViewConfig(config: unknown, table: TableRow): ViewConfig {
   return cfg;
 }
 
+/**
+ * Locks the database's row until the commit. Creating, moving and deleting a view go through here: the view
+ * cap and "at least one view" are checked and written in the same transaction, one writer per database at a
+ * time (without it, two deletes at once took the last two views and four creations passed the cap).
+ */
+async function lockDatabase(tx: Tx, databaseId: string): Promise<void> {
+  const [row] = await tx
+    .select({ id: dbDatabases.id })
+    .from(dbDatabases)
+    .where(eq(dbDatabases.id, databaseId))
+    .for("update");
+  if (!row) throw notFound("Database not found");
+}
+
 export async function createView(
   deps: AppDeps,
   database: DatabaseRow,
   table: TableRow,
   input: { name: string; type: BaseViewType; config?: unknown },
 ): Promise<ViewRow> {
-  const { db } = deps;
   const config = validateViewConfig(input.config, table);
-  const existing = await db
-    .select({ position: dbViews.position })
-    .from(dbViews)
-    .where(eq(dbViews.databaseId, database.id))
-    .orderBy(desc(sql`${dbViews.position} collate "C"`));
-  if (existing.length >= MAX_VIEWS)
-    throw conflict("base.too_many_views", "Too many views", { max: MAX_VIEWS });
   const at = deps.now();
-  const [view] = await db
-    .insert(dbViews)
-    .values({
-      id: newId("dbv"),
-      workspaceId: database.workspaceId,
-      databaseId: database.id,
-      tableId: table.id,
-      name: input.name,
-      type: input.type,
-      position: keyBetween(existing[0]?.position ?? null, null),
-      config,
-      createdAt: at,
-      updatedAt: at,
-    })
-    .returning();
-  await touchDatabase(db, database.id, at);
+  const view = await deps.db.transaction(async (tx) => {
+    // the source first, then the database (the lock order of deleteDatabase and saveSchema): the source stays
+    // while the view goes in; one deleted meanwhile answers 404, not a view pointing at nothing
+    const [source] = await tx
+      .select({ id: dbTables.id })
+      .from(dbTables)
+      .where(eq(dbTables.id, table.id))
+      .for("share");
+    if (!source) throw notFound("Table not found");
+    await lockDatabase(tx, database.id);
+    const existing = await tx
+      .select({ position: dbViews.position })
+      .from(dbViews)
+      .where(eq(dbViews.databaseId, database.id))
+      .orderBy(desc(sql`${dbViews.position} collate "C"`));
+    if (existing.length >= MAX_VIEWS)
+      throw conflict("base.too_many_views", "Too many views", { max: MAX_VIEWS });
+    const [created] = await tx
+      .insert(dbViews)
+      .values({
+        id: newId("dbv"),
+        workspaceId: database.workspaceId,
+        databaseId: database.id,
+        tableId: table.id,
+        name: input.name,
+        type: input.type,
+        position: keyBetween(existing[0]?.position ?? null, null),
+        config,
+        createdAt: at,
+        updatedAt: at,
+      })
+      .returning();
+    await tx.update(dbDatabases).set({ updatedAt: at }).where(eq(dbDatabases.id, database.id));
+    if (!created) throw notFound("View not found");
+    return created;
+  });
   publishBase(deps, database.workspaceId, database.id);
-  return view as ViewRow;
+  return view;
 }
 
 export async function updateView(
@@ -1115,35 +1151,43 @@ export async function updateView(
   table: TableRow,
   input: { name?: string; type?: BaseViewType; config?: unknown; afterId?: string | null },
 ): Promise<ViewRow> {
-  const { db } = deps;
   const patch: Partial<typeof dbViews.$inferInsert> = { updatedAt: deps.now() };
   if (input.name !== undefined) patch.name = input.name;
   if (input.type !== undefined) patch.type = input.type;
   if (input.config !== undefined) patch.config = validateViewConfig(input.config, table);
-  if (input.afterId !== undefined) {
-    const all = await db
-      .select({ id: dbViews.id, position: dbViews.position })
-      .from(dbViews)
-      .where(eq(dbViews.databaseId, database.id))
-      .orderBy(sql`${dbViews.position} collate "C"`, dbViews.id);
-    const rest = all.filter((v) => v.id !== view.id);
-    const i = input.afterId === null ? -1 : rest.findIndex((v) => v.id === input.afterId);
-    if (input.afterId !== null && i < 0) throw bad("base.bad_position", "View not found");
-    const a = i >= 0 ? (rest[i]?.position ?? null) : null;
-    let b = rest[i + 1]?.position ?? null;
-    if (a !== null && b !== null && a >= b) b = null;
-    patch.position = keyBetween(a, b);
-  }
-  const [saved] = await db.update(dbViews).set(patch).where(eq(dbViews.id, view.id)).returning();
+  const saved = await deps.db.transaction(async (tx) => {
+    if (input.afterId !== undefined) {
+      // the neighbors are read and the new key written with the database locked: two moves at once don't
+      // compute their keys from the same neighbors
+      await lockDatabase(tx, database.id);
+      const all = await tx
+        .select({ id: dbViews.id, position: dbViews.position })
+        .from(dbViews)
+        .where(eq(dbViews.databaseId, database.id))
+        .orderBy(sql`${dbViews.position} collate "C"`, dbViews.id);
+      const rest = all.filter((v) => v.id !== view.id);
+      const i = input.afterId === null ? -1 : rest.findIndex((v) => v.id === input.afterId);
+      if (input.afterId !== null && i < 0) throw bad("base.bad_position", "View not found");
+      const a = i >= 0 ? (rest[i]?.position ?? null) : null;
+      let b = rest[i + 1]?.position ?? null;
+      if (a !== null && b !== null && a >= b) b = null;
+      patch.position = keyBetween(a, b);
+    }
+    const [row] = await tx.update(dbViews).set(patch).where(eq(dbViews.id, view.id)).returning();
+    if (!row) throw notFound("View not found");
+    return row;
+  });
   publishBase(deps, database.workspaceId, database.id);
-  return saved as ViewRow;
+  return saved;
 }
 
 export async function deleteView(deps: AppDeps, database: DatabaseRow, view: ViewRow) {
-  const { db } = deps;
-  const [n] = await db.select({ n: count() }).from(dbViews).where(eq(dbViews.databaseId, database.id));
-  if (Number(n?.n ?? 0) <= 1) throw conflict("base.last_view", "A database needs at least one view");
-  await db.delete(dbViews).where(eq(dbViews.id, view.id));
+  await deps.db.transaction(async (tx) => {
+    await lockDatabase(tx, database.id);
+    const [n] = await tx.select({ n: count() }).from(dbViews).where(eq(dbViews.databaseId, database.id));
+    if (Number(n?.n ?? 0) <= 1) throw conflict("base.last_view", "A database needs at least one view");
+    await tx.delete(dbViews).where(eq(dbViews.id, view.id));
+  });
   publishBase(deps, database.workspaceId, database.id);
 }
 
