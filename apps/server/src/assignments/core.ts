@@ -85,7 +85,7 @@ export async function roleOf(
 }
 
 export const canActRole = (role: AssignmentRole | null) => role === "owner" || role === "decide";
-export const canManage = (me: WorkspaceMember, row: AssignmentRow) =>
+export const managesAssignment = (me: WorkspaceMember, row: AssignmentRow) =>
   row.ownerId === me.userId || can(me.role, "configure");
 
 /** The assignment as the person may see it; 404 for whoever neither reads the channel nor takes part. */
@@ -324,7 +324,7 @@ export async function assignmentFor(
   me: WorkspaceMember,
 ): Promise<Assignment> {
   const m = await toAssignment(deps, row, me);
-  return { ...m, manageable: canManage(me, row) };
+  return { ...m, manageable: managesAssignment(me, row) };
 }
 
 export type AssignmentChange =

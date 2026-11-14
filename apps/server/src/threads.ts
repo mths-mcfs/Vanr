@@ -37,7 +37,7 @@ export const workingSql = () => sql`exists (
  * A thread waiting on the person: an approval they decide (they own the agent, or an admin when the owner
  * left), an agent question asked to them, or an open assignment they decide with something pending.
  */
-export const needsYouSql = (viewer: Viewer) => sql`(
+export const actionNeededSql = (viewer: Viewer) => sql`(
   exists (
     select 1 from ${approvals} a join ${agents} g on g.id = a.agent_id
     where a.thread_id = ${THREAD_ID} and a.status = 'pending'
@@ -115,7 +115,7 @@ export async function threadInfos(db: Db, viewer: Viewer, rows: ThreadRow[]): Pr
         .select({
           id: threads.id,
           working: workingSql().mapWith(Boolean),
-          needsYou: needsYouSql(viewer).mapWith(Boolean),
+          actionNeeded: actionNeededSql(viewer).mapWith(Boolean),
         })
         .from(threads)
         .where(inArray(threads.id, ids))
@@ -142,17 +142,17 @@ export async function threadInfos(db: Db, viewer: Viewer, rows: ThreadRow[]): Pr
     const chan = chans.get(row.channelId);
     const mine = replies.filter((r) => r.threadId === row.id);
     const last = mine.at(-1);
-    const rootAuthor: ActorRef = root
+    const opener: ActorRef = root
       ? { type: root.authorKind, id: root.authorId }
       : { type: row.createdByType, id: row.createdById };
     const participants: ActorRef[] = [];
-    for (const a of [rootAuthor, ...mine.map((m) => ({ type: m.authorKind, id: m.authorId }))]) {
+    for (const a of [opener, ...mine.map((m) => ({ type: m.authorKind, id: m.authorId }))]) {
       if (!participants.some((p) => p.type === a.type && p.id === a.id)) participants.push(a);
     }
     const createdBy: ActorRef = { type: row.createdByType, id: row.createdById };
     const isOwner =
       (createdBy.type === "person" && createdBy.id === viewer.userId) ||
-      (rootAuthor.type === "person" && rootAuthor.id === viewer.userId);
+      (opener.type === "person" && opener.id === viewer.userId);
     return {
       id: row.id,
       state: row.state,
@@ -162,7 +162,7 @@ export async function threadInfos(db: Db, viewer: Viewer, rows: ThreadRow[]): Pr
       channelName: chan?.name ?? "",
       venue: chan?.kind ?? "channel",
       createdBy,
-      opener: rootAuthor,
+      opener,
       lastMessage: last
         ? {
             author: { type: last.authorKind, id: last.authorId },
@@ -183,7 +183,7 @@ export async function threadInfos(db: Db, viewer: Viewer, rows: ThreadRow[]): Pr
       replyCount: root?.replyCount ?? mine.length,
       lastTouchedAt: row.lastTouchedAt.toISOString(),
       working: flags.get(row.id)?.working ?? false,
-      actionNeeded: flags.get(row.id)?.needsYou ?? false,
+      actionNeeded: flags.get(row.id)?.actionNeeded ?? false,
       resolvedSuggestion: row.resolvedSuggestion,
       following: follows.get(row.id) ?? false,
       manageable: isOwner || can(viewer.role, "configure"),

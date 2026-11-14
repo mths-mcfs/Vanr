@@ -129,7 +129,7 @@ describe("posting", () => {
   );
 
   test(
-    "a quote builds replyTo on the server; a quote or a thread of another channel is refused",
+    "a quote builds replyTo on the server; a quote or a thread of another channel is rejected",
     async () => {
       const { workspaceId, general, ana, beto } = await team();
       const sales = await seedChannel(server, workspaceId, { name: "sales", members: [ana, beto] });
@@ -204,7 +204,7 @@ describe("posting", () => {
   );
 
   test(
-    "the list pages with `before`, oldest first; an unknown cursor is refused",
+    "the list pages with `before`, oldest first; an unknown cursor is rejected",
     async () => {
       const { workspaceId, general, ana } = await team();
       for (let i = 1; i <= 5; i++) await post(workspaceId, general, person(ana), `m${i}`);

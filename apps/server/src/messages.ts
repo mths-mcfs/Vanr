@@ -347,7 +347,7 @@ export async function postMessage(deps: AppDeps, input: PostMessageInput): Promi
   if (input.replyTo) meta.replyTo = await replyRef(db, workspaceId, channel.id, input.replyTo);
 
   const handles = parseMentions(input.body);
-  const mentionedAgentIds = handles.length
+  const agentMentionIds = handles.length
     ? (
         await db
           .select({ id: agents.id })
@@ -389,7 +389,7 @@ export async function postMessage(deps: AppDeps, input: PostMessageInput): Promi
         meta,
         clientId: input.clientId,
         runId: input.runId ?? null,
-        agentMentionIds: mentionedAgentIds,
+        agentMentionIds,
         mentionedUserIds,
         usage: input.usage ?? null,
       })

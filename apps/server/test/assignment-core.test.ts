@@ -2,7 +2,7 @@
 // (assignments/verify.ts), on the rows the assignment routes (S5) will write: who sees and acts on an
 // assignment, its API shape, the status change that only one click wins, the thread's view of it, the
 // messages it posts, and the proofs a submission carries. A person's message reaches the agent through the
-// runtime (S6): until then it is refused before anything is written.
+// runtime (S6): until then it is rejected before anything is written.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
@@ -213,12 +213,12 @@ describe("who sees and acts on an assignment", () => {
           stepsTotal: 0,
         },
       });
-      expect(await thread(t.beto, "?needsYou=true")).toBeDefined();
+      expect(await thread(t.beto, "?actionNeeded=true")).toBeDefined();
       expect(await thread(t.caio)).toMatchObject({
         actionNeeded: false,
         assignment: { role: "view", blockedOnYou: false },
       });
-      expect(await thread(t.caio, "?needsYou=true")).toBeUndefined();
+      expect(await thread(t.caio, "?actionNeeded=true")).toBeUndefined();
     },
     SERVER_TEST_MS,
   );
@@ -263,7 +263,7 @@ describe("changing an assignment", () => {
   );
 
   test(
-    "a person's message waits for the runtime: refused before anything is written",
+    "a person's message waits for the runtime: rejected before anything is written",
     async () => {
       const t = await team();
       const before = await messagesIn(t.channelId);
@@ -331,7 +331,7 @@ describe("proofs", () => {
   });
 
   test(
-    "a screenshot must be a file the assignment's readers see; another channel's file is refused",
+    "a screenshot must be a file the assignment's readers see; another channel's file is rejected",
     async () => {
       const t = await team();
       const other = await seedChannel(server, t.workspaceId, { name: `other${n}`, members: [t.ana] });

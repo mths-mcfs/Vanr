@@ -8,8 +8,8 @@ import type { AppEnv, Ctx } from "../context";
 import { badRequest, conflict, forbidden, notFound, param, readJson, readQuery } from "../http";
 import { ensureThread, messageInWorkspace } from "../messages";
 import {
+  actionNeededSql,
   assignmentSql,
-  needsYouSql,
   publishThread,
   type ThreadRow,
   threadInfos,
@@ -25,7 +25,7 @@ const ThreadQuery = z.object({
   tab: z.enum(["all", "working", "closed", "archived", "assignments"]).default("all"),
   channelId: id.optional(),
   agentId: id.optional(),
-  needsYou: z.literal("true").optional(),
+  actionNeeded: z.literal("true").optional(),
   mine: z.literal("true").optional(),
   q: z.string().trim().max(200).optional(),
   cursor: z.string().max(200).optional(),
@@ -76,7 +76,7 @@ async function listThreads(db: Db, viewer: Viewer, q: z.infer<typeof ThreadQuery
       select 1 from ${messages} m where (m.id = ${threads.id} or m.thread_id = ${threads.id})
         and m.author_kind = 'agent' and m.author_id = ${q.agentId})`);
   }
-  if (q.needsYou) where.push(needsYouSql(viewer));
+  if (q.actionNeeded) where.push(actionNeededSql(viewer));
   if (q.mine) {
     where.push(sql`(
       (${threads.createdByType} = 'person' and ${threads.createdById} = ${viewer.userId})
