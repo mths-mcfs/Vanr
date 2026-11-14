@@ -155,9 +155,10 @@ export class SecretStore {
   }
 
   /** Generates the request's key pair: the public one goes to the server, the private one stays encrypted until the value arrives. */
-  async prepare(requestId: string): Promise<{ publicKey: string }> {
+  async prepare(requestId: string, signal?: AbortSignal): Promise<{ publicKey: string }> {
     const r = await createRecipient();
     const sealed = await this.seal(await exportRecipient(r.privateKey), `pending|${requestId}`);
+    if (signal?.aborted) throw new RunnerError("canceled", "Canceled");
     ensureDir(join(this.home, "secrets", "pending"));
     writePrivate(this.pendingPath(requestId), JSON.stringify({ ...sealed, createdAt: Date.now() }));
     return { publicKey: r.publicKey };
@@ -174,6 +175,7 @@ export class SecretStore {
       box: SealedBox;
       browser?: SecretBrowserBinding | null;
     },
+    signal?: AbortSignal,
   ): Promise<{ stored: true }> {
     // An API key as a variable secret would make Claude Code/Codex bill the API instead of the plan.
     if (input.target === "env" && reservedSecretName(input.name))
@@ -204,6 +206,8 @@ export class SecretStore {
       updatedAt: new Date().toISOString(),
     };
     file.entries = [...file.entries.filter((e) => e.name !== input.name), entry];
+    // Aborted while the value was opened and sealed: the store does not change.
+    if (signal?.aborted) throw new RunnerError("canceled", "Canceled");
     this.write(agent, file);
     unlinkSync(path);
     return { stored: true };

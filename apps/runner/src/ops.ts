@@ -1,6 +1,7 @@
 // File and command ops the server asks for. Each one gets the agent (to find its folder and its
 // secrets) and returns the protocol result; an error becomes a RunnerError with the code.
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import {
   appendFileSync,
   existsSync,
@@ -8,10 +9,12 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type {
   AgentRef,
   ExecResult,
@@ -180,6 +183,12 @@ export async function execOp(
         throw err;
       })
     : { env: {}, masks: [] as [string, string][], release: () => {} };
+  // Aborted while preparing (the sandbox, the secrets): no process starts.
+  if (ctx.signal.aborted) {
+    secrets.release();
+    wrapped?.release();
+    throw new RunnerError("canceled", "Canceled");
+  }
   const started = Date.now();
   const timeoutMs = (args.timeoutSeconds ?? 60) * 1000;
   try {
@@ -328,8 +337,19 @@ export function writeOp(
     args.encoding === "base64" ? Buffer.from(args.content, "base64") : Buffer.from(args.content, "utf8");
   if (data.byteLength > READ_MAX) throw new RunnerError("too_large", "File is larger than 5 MB");
   mkdirSync(dirname(path), { recursive: true });
+  // Aborted: nothing is written. A whole write goes to a temporary file renamed into place only if the
+  // request was not aborted meanwhile, so the file is either the old one or the new one.
+  if (ctx.signal.aborted) throw new RunnerError("canceled", "Canceled");
   if (args.append) appendFileSync(path, data);
-  else writeFileSync(path, data);
+  else {
+    const tmp = join(dirname(path), `.${basename(path)}.${randomBytes(6).toString("hex")}.tmp`);
+    writeFileSync(tmp, data);
+    if (ctx.signal.aborted) {
+      rmSync(tmp, { force: true });
+      throw new RunnerError("canceled", "Canceled");
+    }
+    renameSync(tmp, path);
+  }
   return { path: args.path, bytes: data.byteLength };
 }
 
