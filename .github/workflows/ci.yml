@@ -144,6 +144,25 @@ jobs:
           grep -q ' 3 fail' <<< "$none"
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # Relation and rollup on Postgres: the propagation between linked sources never waits for a lock.
+      - run: bun test apps/server/test/bases-relations-postgres.test.ts --test-name-pattern "on Postgres"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # The same forced interleaving with the propagation's first lock swapped for a double that takes the
+      # dependent rows before their source (VANR_TEST_BASES_LINKS=late): it must FAIL because the propagation
+      # waited for the held source. Nothing else counts.
+      - name: The bases links test fails when the propagation locks the rows before the source
+        run: |
+          if out=$(VANR_TEST_BASES_LINKS=late bun test apps/server/test/bases-relations-postgres.test.ts --test-name-pattern "forced interleaving: links" 2>&1); then
+            echo "$out"
+            echo "::error::the bases links test passed with the rows locked before the source"
+            exit 1
+          fi
+          echo "$out"
+          grep -q 'Expected: false' <<< "$out"
+          grep -q ' 1 fail' <<< "$out"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
 
   sandbox:
     # The runner's real sandbox (bubblewrap + socat): the attack tests of the isolation of the agent's

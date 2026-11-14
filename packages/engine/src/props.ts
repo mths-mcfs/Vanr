@@ -2,7 +2,9 @@
 // definition (PropDef), the value stored in `props jsonb` keyed by the property id (so a rename does
 // not break anything), validation on write and formatting on read.
 //
-// Formulas are a property type here; their engine lives in `formula/`.
+// Formulas are a property type here; their engine lives in `formula/`. Relation and rollup only make sense
+// in a database (the wiki and the issues don't offer them): a relation keeps the ids of rows of another
+// source, and a rollup is computed from them, like a formula.
 import { z } from "zod";
 
 export const PROP_TYPES = [
@@ -21,6 +23,8 @@ export const PROP_TYPES = [
   "edited_time",
   "editor",
   "formula",
+  "relation",
+  "rollup",
 ] as const;
 export type PropType = (typeof PROP_TYPES)[number];
 
@@ -31,7 +35,38 @@ export const COMPUTED_TYPES: ReadonlySet<PropType> = new Set([
   "edited_time",
   "editor",
   "formula",
+  "rollup",
 ]);
+
+/** Linked rows per relation cell. */
+export const MAX_RELATED = 100;
+
+/** Rollup functions, over the value of a property of the linked rows. */
+export const ROLLUP_FNS = [
+  "show_original",
+  "show_unique",
+  "count",
+  "count_values",
+  "count_unique",
+  "count_empty",
+  "count_not_empty",
+  "percent_empty",
+  "percent_not_empty",
+  "sum",
+  "average",
+  "median",
+  "min",
+  "max",
+  "range",
+  "earliest",
+  "latest",
+  "date_range",
+  "checked",
+  "unchecked",
+  "percent_checked",
+  "percent_unchecked",
+] as const;
+export type RollupFn = (typeof ROLLUP_FNS)[number];
 
 export interface PropOption {
   id: string;
@@ -59,6 +94,13 @@ export interface PropDef {
    * lives in `computed`, not in `props` (engine in `formula/`).
    */
   formula?: { expression: string; resultType?: FormulaResultType };
+  /** relation: the source (`dbt_…`) of the linked rows; the value is the list of row ids (`dbr_…`). */
+  relation?: { tableId: string };
+  /**
+   * rollup: `fn` over the property `targetPropId` of the rows linked by the relation `relationPropId`.
+   * The value lives in `computed`, like a formula's; `resultType` is saved with the schema.
+   */
+  rollup?: { relationPropId: string; targetPropId: string; fn: RollupFn; resultType?: FormulaResultType };
 }
 
 /** Type of a formula result (the same as in `formula/index.ts`). */
@@ -161,6 +203,11 @@ function schemaFor(def: PropDef): z.ZodType<PropValue> {
     case "file":
       // ids of files in the Drive
       return z.array(z.string().min(1)).max(100);
+    case "relation":
+      return z
+        .array(z.string().regex(/^dbr_[a-z0-9]{1,64}$/))
+        .max(MAX_RELATED)
+        .refine((ids) => new Set(ids).size === ids.length);
     default:
       return z.never();
   }
@@ -238,6 +285,7 @@ export function propText(
       return list.map((a) => names?.(a) ?? `${a.type}:${a.id}`).join(", ");
     }
     case "file":
+    case "relation":
       return (value as string[]).join(", ");
     default:
       return String(value);
@@ -312,6 +360,19 @@ export const propDefSchema = z
       })
       .strict()
       .optional(),
+    relation: z
+      .object({ tableId: z.string().regex(/^[\w-]{1,64}$/) })
+      .strict()
+      .optional(),
+    rollup: z
+      .object({
+        relationPropId: z.string().regex(/^[\w-]{1,64}$/),
+        targetPropId: z.string().regex(/^[\w-]{1,64}$/),
+        fn: z.enum(ROLLUP_FNS),
+        resultType: z.enum(["number", "text", "boolean", "date", "person", "list", "any"]).optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -321,12 +382,15 @@ export type DefsError =
   | { code: "duplicate_option"; propId: string }
   | { code: "unknown_group_option"; propId: string }
   | { code: "missing_formula"; propId: string }
+  | { code: "missing_relation"; propId: string }
+  | { code: "bad_rollup"; propId: string }
   | { code: "too_many_props" };
 
 /**
  * Checks a whole schema: unique ids and names (names compared without case), unique options, status
- * groups only with options that exist, formulas with an expression. Formula types belong to the engine
- * (`formula/`).
+ * groups only with options that exist, formulas with an expression, a relation with its source and a rollup
+ * over a relation of the same schema. Formula types belong to the engine (`formula/`); whether the source
+ * and the rollup's target exist is checked by the server, which reads the other source.
  */
 export function checkDefs(defs: readonly PropDef[]): DefsError[] {
   const errors: DefsError[] = [];
@@ -352,6 +416,12 @@ export function checkDefs(defs: readonly PropDef[]): DefsError[] {
     }
     if (d.type === "formula" && !d.formula?.expression.trim())
       errors.push({ code: "missing_formula", propId: d.id });
+    if (d.type === "relation" && !d.relation?.tableId)
+      errors.push({ code: "missing_relation", propId: d.id });
+    if (d.type === "rollup") {
+      const rel = d.rollup && defs.find((x) => x.id === d.rollup?.relationPropId);
+      if (rel?.type !== "relation") errors.push({ code: "bad_rollup", propId: d.id });
+    }
   }
   return errors;
 }

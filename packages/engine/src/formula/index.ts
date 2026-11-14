@@ -76,8 +76,32 @@ export function propFType(def: PropDef, formulaTypes?: ReadonlyMap<string, FType
       return T.person;
     case "formula":
       return formulaTypes?.get(def.id) ?? T.any;
+    case "relation":
+      return T.list(T.text);
+    case "rollup":
+      return typeOfResult(def.rollup?.resultType);
     default:
       return T.text;
+  }
+}
+
+/** The type saved in the schema (`resultType`) back as a formula type. */
+function typeOfResult(r: FormulaResultType | undefined): FType {
+  switch (r) {
+    case "number":
+      return T.number;
+    case "text":
+      return T.text;
+    case "boolean":
+      return T.boolean;
+    case "date":
+      return T.date;
+    case "person":
+      return T.person;
+    case "list":
+      return T.list(T.any);
+    default:
+      return T.any;
   }
 }
 
@@ -355,6 +379,11 @@ export interface RowData {
   createdBy: PropActor | null;
   editedAt: string;
   editedBy: PropActor | null;
+  /**
+   * What comes from other rows: the titles of the linked rows (relation) and the rollup's value, by the
+   * property id. Whoever runs the formula loads them first; without them a relation is an empty list.
+   */
+  extra?: Readonly<Record<string, FValue>>;
 }
 
 export interface EvalContext {
@@ -386,6 +415,10 @@ export function propValue(def: PropDef, row: RowData, names?: (a: PropActor) => 
       return row.createdBy ? actorValue(row.createdBy, names) : null;
     case "editor":
       return row.editedBy ? actorValue(row.editedBy, names) : null;
+    case "relation":
+      return row.extra?.[def.id] ?? [];
+    case "rollup":
+      return row.extra?.[def.id] ?? null;
     default:
       break;
   }

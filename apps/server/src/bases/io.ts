@@ -10,7 +10,15 @@ import type { AppDeps } from "../context";
 import { isUniqueViolation } from "../db-errors";
 import { canSeeFile, contentOf, versionOf } from "../drive";
 import { forbidden, HttpError, notFound } from "../http";
-import { cellText, type DatabaseRow, databaseById, namesOf, type TableRow, type ViewRow } from "./core";
+import {
+  cellText,
+  type DatabaseRow,
+  databaseById,
+  linkedTitles,
+  namesOf,
+  type TableRow,
+  type ViewRow,
+} from "./core";
 import { queryRows } from "./query";
 import { createDatabase, importRows, newOptionId, newPropId } from "./write";
 
@@ -193,7 +201,9 @@ export async function exportCsv(deps: AppDeps, table: TableRow, view: ViewRow | 
       { filter, sorts: cfg.sorts, limit: 500, cursor },
       { now: deps.now().getTime(), me },
     );
-    for (const r of page.rows) lines.push(cols.map((d) => cellText(d, r, names)));
+    // a relation goes out as the titles of the linked rows (an id says nothing in a spreadsheet)
+    const linked = await linkedTitles(deps.db, table, page.rows);
+    for (const r of page.rows) lines.push(cols.map((d) => cellText(d, r, names, linked)));
     cursor = page.nextCursor;
   } while (cursor);
   const [db] = await deps.db

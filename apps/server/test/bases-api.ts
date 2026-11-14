@@ -3,8 +3,16 @@
 // browser's session, and a rejected one throws `ApiError` with the status and the code of the envelope.
 import type {
   Base,
+  BaseAggregateInput,
+  BaseAggregateResult,
+  BaseBulkOp,
+  BaseBulkResult,
+  BaseLinkedRow,
   BasePropDef,
   BaseRow,
+  BaseRowDetail,
+  BaseSummariesInput,
+  BaseSummariesResult,
   BaseSummary,
   BaseTable,
   BaseView,
@@ -44,11 +52,13 @@ export interface RowPage {
   total: number;
   nextCursor: string | null;
   groups?: { key: string | null; count: number }[];
+  linked: Record<string, BaseLinkedRow>;
 }
 
 export interface QueryInput {
   viewId?: string;
   filter?: unknown;
+  within?: unknown;
   sorts?: { prop: string; dir: "asc" | "desc" }[];
   groupBy?: { prop: string; hideEmpty?: boolean } | null;
   search?: string;
@@ -98,7 +108,7 @@ export function basesApi(browser: Browser) {
       call("POST", `${B(ws)}/${id}/tables/${tableId}/query`, input),
     createRow: (ws: string, id: string, tableId: string, input: RowInput): Promise<BaseRow> =>
       call("POST", `${B(ws)}/${id}/tables/${tableId}/rows`, input),
-    getRow: (ws: string, id: string, rowId: string): Promise<BaseRow & { body: string }> =>
+    getRow: (ws: string, id: string, rowId: string): Promise<BaseRowDetail> =>
       call("GET", `${B(ws)}/${id}/rows/${rowId}`),
     updateRow: (
       ws: string,
@@ -108,6 +118,24 @@ export function basesApi(browser: Browser) {
     ): Promise<BaseRow> => call("PATCH", `${B(ws)}/${id}/rows/${rowId}`, input),
     deleteRow: (ws: string, id: string, rowId: string): Promise<null> =>
       call("DELETE", `${B(ws)}/${id}/rows/${rowId}`),
+    summaries: (
+      ws: string,
+      id: string,
+      tableId: string,
+      input: BaseSummariesInput | Record<string, unknown>,
+    ): Promise<BaseSummariesResult> => call("POST", `${B(ws)}/${id}/tables/${tableId}/summaries`, input),
+    aggregate: (
+      ws: string,
+      id: string,
+      tableId: string,
+      input: BaseAggregateInput | Record<string, unknown>,
+    ): Promise<BaseAggregateResult> => call("POST", `${B(ws)}/${id}/tables/${tableId}/aggregate`, input),
+    bulkRows: (
+      ws: string,
+      id: string,
+      tableId: string,
+      input: { ops: (BaseBulkOp | Record<string, unknown>)[] },
+    ): Promise<BaseBulkResult> => call("POST", `${B(ws)}/${id}/tables/${tableId}/rows/bulk`, input),
     createView: (
       ws: string,
       id: string,
@@ -228,7 +256,11 @@ export async function fuzzAgainstOracle(
     if (rnd() < 0.7) props.p_sel = pick(["o_a", "o_b"]);
     if (rnd() < 0.7) props.p_multi = pick([[], ["t_x"], ["t_y"], ["t_x", "t_y"]]);
     if (rnd() < 0.7) props.p_status = pick(["s_todo", "s_doing", "s_done"]);
-    if (rnd() < 0.7) props.p_due = { start: pick(days) };
+    if (rnd() < 0.7) {
+      const start = pick(days);
+      const end = pick([undefined, undefined, ...days.filter((d) => d >= start)]);
+      props.p_due = end ? { start, end } : { start };
+    }
     if (rnd() < 0.7) props.p_ok = rnd() < 0.5;
     if (rnd() < 0.5) props.p_who = pick([[], [me]]);
     return { props: props as never };
@@ -294,6 +326,15 @@ export async function fuzzAgainstOracle(
           },
         ],
         ["between", () => ["2026-10-01", { rel: "one_month_from_now" }]],
+        [
+          "overlaps",
+          () =>
+            pick([
+              ["2026-10-22", "2026-10-22"],
+              ["2026-10-02", "2026-10-21"],
+              [{ rel: "today" }, "2026-12-01"],
+            ]),
+        ],
         ["empty", () => undefined],
       ],
       checkbox: [["eq", () => rnd() < 0.5]],
