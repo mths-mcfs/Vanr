@@ -110,6 +110,28 @@ describe("answers", () => {
     expect(await (await file.blob()).text()).toBe("hello");
   });
 
+  test("the caller's signal still cancels a download after its headers arrived", async () => {
+    const controller = new AbortController();
+    const client = createClient({
+      fetch: async (_url, init) =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(c) {
+              c.enqueue(new TextEncoder().encode("part"));
+              init.signal?.addEventListener("abort", () =>
+                c.error(new DOMException("aborted", "AbortError")),
+              );
+            },
+          }),
+        ),
+    });
+    const file = await client.api.exportWiki({ workspaceId: "w" }, { signal: controller.signal });
+    const reader = file.body.getReader();
+    expect((await reader.read()).done).toBe(false);
+    controller.abort();
+    await expect(reader.read()).rejects.toThrow();
+  });
+
   test("a multipart upload sends the file with its name and the other fields", async () => {
     const { client, calls } = clientAnswering(() =>
       json({ error: { code: "file.too_large", message: "Too big" } }, 413),

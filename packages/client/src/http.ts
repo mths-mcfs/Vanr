@@ -204,6 +204,7 @@ export function createTransport(options: TransportOptions = {}): Transport {
       throw failure(err);
     }
 
+    let streaming = false;
     try {
       if (!res.ok && endpoint.nullOn.includes(res.status)) return null;
       if (!res.ok) {
@@ -211,7 +212,9 @@ export function createTransport(options: TransportOptions = {}): Transport {
         throw errorFromBody(res.status, res.statusText, text);
       }
       if (endpoint.reply.kind === "download") {
-        stop();
+        // The deadline covers the headers only; the caller's signal keeps canceling the stream itself.
+        streaming = true;
+        cancelTimer();
         const stream = res.body ?? new Blob([]).stream();
         const download: Download = {
           body: stream,
@@ -249,7 +252,8 @@ export function createTransport(options: TransportOptions = {}): Transport {
       if (err instanceof ApiError) throw err;
       throw failure(err);
     } finally {
-      stop();
+      if (streaming) cancelTimer();
+      else stop();
     }
   }
 
