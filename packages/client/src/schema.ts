@@ -124,6 +124,18 @@ export function tuple<const S extends readonly AnySchema[]>(...items: S): Schema
 const isPlainObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 
+/**
+ * Sets an own property whatever its name. A plain `out[k] = v` with k = "__proto__" would replace the
+ * object's prototype instead (and drop the key); defining the property keeps it as data, like JSON.parse.
+ */
+function put(out: object, key: string, value: unknown): void {
+  Object.defineProperty(out, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
+/** The value of `key` only when the object has it itself (never one inherited from Object.prototype). */
+const own = (v: Record<string, unknown>, key: string): unknown =>
+  Object.hasOwn(v, key) ? v[key] : undefined;
+
 export function record<T>(value: Schema<T>): Schema<Record<string, T>> {
   return {
     get expected() {
@@ -135,7 +147,7 @@ export function record<T>(value: Schema<T>): Schema<Record<string, T>> {
       for (const [k, item] of Object.entries(v)) {
         const r = value.check(item, `${path}.${k}`);
         if (!r.ok) return r;
-        out[k] = r.value;
+        put(out, k, r.value);
       }
       return ok(out);
     },
@@ -162,7 +174,7 @@ export function partialRecord<K extends string, T>(
         if (!key.ok) continue;
         const r = value.check(item, `${path}.${k}`);
         if (!r.ok) return r;
-        out[key.value] = r.value;
+        put(out, key.value, r.value);
       }
       return ok(out);
     },
@@ -193,16 +205,16 @@ export function object(shape: Shape, rest?: AnySchema): Schema<Record<string, un
       if (!isPlainObject(v)) return fail(path, "object");
       const out: Record<string, unknown> = {};
       for (const [k, s] of entries) {
-        const r = s.check(v[k], `${path}.${k}`);
+        const r = s.check(own(v, k), `${path}.${k}`);
         if (!r.ok) return r;
-        if (r.value !== undefined) out[k] = r.value;
+        if (r.value !== undefined) put(out, k, r.value);
       }
       if (rest) {
         for (const [k, item] of Object.entries(v)) {
-          if (k in shape) continue;
+          if (Object.hasOwn(shape, k)) continue;
           const r = rest.check(item, `${path}.${k}`);
           if (!r.ok) return r;
-          out[k] = r.value;
+          put(out, k, r.value);
         }
       }
       return ok(out);
@@ -246,6 +258,7 @@ export function merge<A extends object, B extends object>(a: Schema<A>, b: Schem
       if (!ra.ok) return ra;
       const rb = b.check(v, path);
       if (!rb.ok) return rb;
+      // Spreading defines own properties (it never runs the __proto__ setter), so every key survives.
       return ok({ ...ra.value, ...rb.value });
     },
   };

@@ -53,12 +53,10 @@ describe("answers", () => {
   test("path parameters are encoded and query values serialized; empty ones are left out", async () => {
     const { client, calls } = clientAnswering(() => json({ hits: [] }));
     await client.api.getSearch({
-      workspaceId: "w/1 ?",
+      workspaceId: "w 1+",
       query: { q: "a b", kinds: ["file", "wiki"], limit: undefined },
     });
-    expect(calls[0]?.url).toBe(
-      "http://vanr.test/api/v1/workspaces/w%2F1%20%3F/search?q=a+b&kinds=file%2Cwiki",
-    );
+    expect(calls[0]?.url).toBe("http://vanr.test/api/v1/workspaces/w%201%2B/search?q=a+b&kinds=file%2Cwiki");
     expect(calls[0]?.init.method).toBe("GET");
     expect(calls[0]?.init.body).toBeUndefined();
   });
@@ -108,28 +106,6 @@ describe("answers", () => {
     expect(file.size).toBe(5);
     expect(file.fileName).toBe("notes v2.txt");
     expect(await (await file.blob()).text()).toBe("hello");
-  });
-
-  test("the caller's signal still cancels a download after its headers arrived", async () => {
-    const controller = new AbortController();
-    const client = createClient({
-      fetch: async (_url, init) =>
-        new Response(
-          new ReadableStream<Uint8Array>({
-            start(c) {
-              c.enqueue(new TextEncoder().encode("part"));
-              init.signal?.addEventListener("abort", () =>
-                c.error(new DOMException("aborted", "AbortError")),
-              );
-            },
-          }),
-        ),
-    });
-    const file = await client.api.exportWiki({ workspaceId: "w" }, { signal: controller.signal });
-    const reader = file.body.getReader();
-    expect((await reader.read()).done).toBe(false);
-    controller.abort();
-    await expect(reader.read()).rejects.toThrow();
   });
 
   test("a multipart upload sends the file with its name and the other fields", async () => {
@@ -278,5 +254,206 @@ describe("failures", () => {
     const client = createClient({ clock, fetch: async () => json({ channels: [] }) });
     await client.api.listChannels({ workspaceId: "w" });
     expect(clock.pending()).toEqual([]);
+  });
+});
+
+/** Lets pending promise callbacks and stream steps run (no timers, no real time). */
+async function flush(rounds = 20) {
+  for (let i = 0; i < rounds; i++) await Promise.resolve();
+}
+
+/**
+ * The test's own deadline on the fake clock: `p`, or a clear failure if it is still pending once the
+ * test has let everything settle (so a broken cancel fails the test instead of hanging it).
+ */
+async function settled<T>(clock: ManualClock, p: Promise<T>, what: string): Promise<T> {
+  const deadline = new Promise<never>((_resolve, reject) =>
+    clock.setTimer(() => reject(new Error(`${what}: still pending after the abort`)), 60_000),
+  );
+  const raced = Promise.race([p, deadline]);
+  await flush(50);
+  clock.advance(60_000);
+  return raced;
+}
+
+const encoder = new TextEncoder();
+
+type Phase =
+  | "before the fetch"
+  | "waiting for headers"
+  | "reading a success body"
+  | "reading an error body"
+  | "reading an error body the source finishes anyway";
+
+describe("why the call ended decides the error, in every phase", () => {
+  const phases: Phase[] = [
+    "before the fetch",
+    "waiting for headers",
+    "reading a success body",
+    "reading an error body",
+    "reading an error body the source finishes anyway",
+  ];
+  const cases = phases.flatMap((phase) =>
+    (["canceled", "timeout"] as const)
+      // A deadline can't pass before the fetch starts: the fetch is called in the same step the timer is set.
+      .filter((why) => !(phase === "before the fetch" && why === "timeout"))
+      .map((why) => ({ phase, why })),
+  );
+
+  test.each(cases)("$phase, $why", async ({ phase, why }) => {
+    const clock = new ManualClock();
+    const controller = new AbortController();
+    const fetch = (_url: string, init: RequestInit): Promise<Response> => {
+      const onAbort = (fn: () => void) => init.signal?.addEventListener("abort", fn);
+      if (phase === "waiting for headers") {
+        return new Promise((_resolve, reject) => onAbort(() => reject(new Error("aborted"))));
+      }
+      const status = phase === "reading a success body" ? 200 : 500;
+      const body = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(encoder.encode('{"error":{"code":"internal",'));
+          onAbort(() => {
+            if (phase === "reading an error body the source finishes anyway") {
+              c.enqueue(encoder.encode('"message":"x"}}'));
+              c.close();
+            } else c.error(new Error("aborted"));
+          });
+        },
+      });
+      return Promise.resolve(new Response(body, { status }));
+    };
+    const client = createClient({ clock, timeoutMs: 1000, fetch });
+    if (phase === "before the fetch") controller.abort();
+    const pending = failure(client.api.listChannels({ workspaceId: "w" }, { signal: controller.signal }));
+    await flush();
+    if (phase !== "before the fetch") {
+      if (why === "canceled") controller.abort();
+      else clock.advance(1000);
+    }
+    const err = await pending;
+    expect({ code: err.code, status: err.status, retryable: err.retryable }).toEqual({
+      code: why,
+      status: 0,
+      retryable: why === "timeout",
+    });
+  });
+});
+
+describe("path parameters", () => {
+  const bad = [
+    "",
+    ".",
+    "..",
+    "%2e%2e",
+    "a/b",
+    "%2Fetc",
+    "a\\b",
+    "a?b",
+    "a#b",
+    "a%23b",
+    "a\u0000b",
+    "line\nbreak",
+  ];
+
+  test.each(bad.map((v) => [JSON.stringify(v), v]))(
+    "%s is rejected before any request",
+    async (_label, value) => {
+      const { client, calls } = clientAnswering(() => json({}));
+      const err = await failure(client.api.getFile({ workspaceId: "w", fileId: value }));
+      expect(err).toMatchObject({
+        status: 0,
+        code: "invalid_request",
+        retryable: false,
+        params: { param: "fileId" },
+      });
+      expect(calls).toHaveLength(0);
+    },
+  );
+
+  test("an odd but harmless id reaches exactly its route", async () => {
+    const { client, calls } = clientAnswering(() => json({ error: { code: "not_found", message: "" } }, 404));
+    await client.api.getFile({ workspaceId: "w", fileId: "a b+ç%" }).catch(() => {});
+    const received = new URL(calls[0]?.url ?? "");
+    expect(received.pathname).toBe("/api/v1/workspaces/w/files/a%20b%2B%C3%A7%25");
+  });
+});
+
+describe("download failures", () => {
+  /** A download whose stream the test drives: `push` a chunk, `fail` it, or leave it hanging. */
+  function streamingClient(options: { ignoresAbort?: boolean } = {}) {
+    const clock = new ManualClock();
+    let control: ReadableStreamDefaultController<Uint8Array> | null = null;
+    let sourceCanceled = false;
+    const client = createClient({
+      clock,
+      fetch: async (_url, init) =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(c) {
+              control = c;
+              c.enqueue(encoder.encode("part"));
+              if (!options.ignoresAbort) {
+                init.signal?.addEventListener("abort", () =>
+                  c.error(new DOMException("aborted", "AbortError")),
+                );
+              }
+            },
+            cancel() {
+              sourceCanceled = true;
+            },
+          }),
+        ),
+    });
+    return {
+      clock,
+      client,
+      fail: (err: unknown) => control?.error(err),
+      sourceCanceled: () => sourceCanceled,
+    };
+  }
+
+  test("a dropped connection mid-stream is a retryable network ApiError", async () => {
+    const t = streamingClient();
+    const file = await t.client.api.exportWiki({ workspaceId: "w" });
+    const reader = file.body.getReader();
+    await reader.read();
+    t.fail(new TypeError("connection lost"));
+    const err = await settled(t.clock, reader.read(), "read").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err).toMatchObject({ code: "network", retryable: true });
+  });
+
+  test("blob() fails with the same ApiError", async () => {
+    const t = streamingClient();
+    const file = await t.client.api.exportWiki({ workspaceId: "w" });
+    const whole = file.blob();
+    await flush();
+    t.fail(new TypeError("connection lost"));
+    const err = await settled(t.clock, whole, "blob").catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: "network" });
+  });
+
+  test("the caller's signal cancels the stream after the headers: canceled, and the source is canceled", async () => {
+    const t = streamingClient();
+    const controller = new AbortController();
+    const file = await t.client.api.exportWiki({ workspaceId: "w" }, { signal: controller.signal });
+    const reader = file.body.getReader();
+    expect((await reader.read()).done).toBe(false);
+    controller.abort();
+    const err = await settled(t.clock, reader.read(), "read after abort").catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: "canceled", retryable: false });
+  });
+
+  test("an abort ends the stream even when the source never notices it", async () => {
+    const t = streamingClient({ ignoresAbort: true });
+    const controller = new AbortController();
+    const file = await t.client.api.exportWiki({ workspaceId: "w" }, { signal: controller.signal });
+    const reader = file.body.getReader();
+    await reader.read();
+    const pendingRead = reader.read();
+    controller.abort();
+    const err = await settled(t.clock, pendingRead, "read pending at the abort").catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: "canceled" });
+    expect(t.sourceCanceled()).toBe(true);
   });
 });

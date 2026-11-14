@@ -83,3 +83,49 @@ describe("contract schemas", () => {
     expect(C.FileContent.check({ kind: "diagram" }, "$").ok).toBe(false);
   });
 });
+
+describe("keys from outside", () => {
+  const tricky = '{"__proto__":{"injected":true},"constructor":"c","toString":"t","plain":1}';
+  const row = (props: unknown) => ({
+    id: "r",
+    computed: {},
+    createdAt: "x",
+    createdBy: { id: "p", type: "person" },
+    databaseId: "d",
+    editedAt: "x",
+    editedBy: { id: "p", type: "person" },
+    hasBody: false,
+    position: "x",
+    props,
+    tableId: "t",
+    version: 1,
+  });
+
+  test("a map keeps __proto__, constructor and toString as its own keys and its prototype stays put", () => {
+    const out = s.parse(s.record(s.unknown), JSON.parse(tricky));
+    expect(Object.keys(out)).toEqual(["__proto__", "constructor", "toString", "plain"]);
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect(Object.hasOwn(out, "__proto__")).toBe(true);
+    expect((out as { injected?: unknown }).injected).toBeUndefined();
+  });
+
+  test("a contract map (BaseRow.props) does the same", () => {
+    const out = s.parse(C.BaseRow, row(JSON.parse(tricky)));
+    expect(Object.hasOwn(out.props, "__proto__")).toBe(true);
+    expect((out.props as { injected?: unknown }).injected).toBeUndefined();
+    expect(Object.getOwnPropertyDescriptor(out.props, "toString")?.value).toBe("t");
+  });
+
+  test("merged objects (BaseRowDetail) and index signatures (MessageMeta) keep them too", () => {
+    const detail = s.parse(C.BaseRow, row(JSON.parse(tricky)));
+    expect(Object.hasOwn(detail.props, "constructor")).toBe(true);
+    const meta = s.parse(C.MessageMeta, JSON.parse('{"toString":"x","__proto__":{"injected":true}}'));
+    expect(Object.keys(meta)).toEqual(["toString", "__proto__"]);
+    expect(Object.getPrototypeOf(meta)).toBe(Object.prototype);
+  });
+
+  test("a declared field is never read from Object.prototype", () => {
+    const schema = s.object({ toString: s.optional(s.string) });
+    expect(Object.keys(s.parse(schema, {}))).toEqual([]);
+  });
+});

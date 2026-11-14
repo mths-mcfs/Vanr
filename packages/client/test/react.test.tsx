@@ -18,7 +18,7 @@ if (process.env.VANR_CLIENT_DOM_TEST !== "1") {
   const { GlobalRegistrator } = await import("@happy-dom/global-registrator");
   GlobalRegistrator.register({ url: "http://localhost" });
   Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", true);
-  const { act } = await import("react");
+  const { act, StrictMode } = await import("react");
   const { createRoot } = await import("react-dom/client");
   const { QueryClient } = await import("@tanstack/react-query");
   const { createClient } = await import("../src/client.ts");
@@ -142,5 +142,23 @@ if (process.env.VANR_CLIENT_DOM_TEST !== "1") {
     );
     expect(heard).toEqual(["rnr_1"]);
     await act(() => t.root.unmount());
+  });
+
+  test("under StrictMode the provider opens one socket", async () => {
+    const t = setup();
+    await act(() =>
+      t.root.render(
+        <StrictMode>
+          <VanrProvider client={t.client} realtime={t.realtime} queryClient={t.queryClient}>
+            <p>ok</p>
+          </VanrProvider>
+        </StrictMode>,
+      ),
+    );
+    await settle();
+    expect(t.sockets.sockets).toHaveLength(1);
+    expect(t.realtime.status).toBe("connecting");
+    await act(() => t.root.unmount());
+    expect(t.realtime.status).toBe("stopped");
   });
 }

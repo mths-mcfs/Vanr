@@ -32,6 +32,11 @@ export const RECONNECT_CAP_MS = 30_000;
 export const PING_EVERY_MS = 25_000;
 /** With no frame at all for this long the connection is taken as dead and replaced. */
 export const SILENCE_LIMIT_MS = 60_000;
+/**
+ * A connection counts as healthy once it has stayed open this long; only then does the wait go back to the
+ * base. One that drops sooner (accepted, then cut right away) counts as a failed attempt.
+ */
+export const STABLE_AFTER_MS = 30_000;
 
 export type RealtimeStatus = "connecting" | "open" | "reconnecting" | "removed" | "signed_out" | "stopped";
 
@@ -119,6 +124,7 @@ export class RealtimeClient {
   private everOpened = false;
   private cancelRetry: (() => void) | null = null;
   private cancelPing: (() => void) | null = null;
+  private cancelStable: (() => void) | null = null;
   private lastFrameAt = 0;
   private readonly channels = new Set<string>();
   private readonly liveViews = new Set<string>();
@@ -233,6 +239,8 @@ export class RealtimeClient {
     this.cancelRetry = null;
     this.cancelPing?.();
     this.cancelPing = null;
+    this.cancelStable?.();
+    this.cancelStable = null;
   }
 
   private connect(status: "connecting" | "reconnecting") {
@@ -316,7 +324,11 @@ export class RealtimeClient {
       case "ready": {
         const reconnected = this.everOpened;
         this.everOpened = true;
-        this.attempt = 0;
+        this.cancelStable?.();
+        this.cancelStable = this.clock.setTimer(() => {
+          this.cancelStable = null;
+          this.attempt = 0;
+        }, STABLE_AFTER_MS);
         this.setStatus("open");
         if (reconnected) {
           this.options.onReconnect?.();

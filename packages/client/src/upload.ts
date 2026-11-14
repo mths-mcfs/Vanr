@@ -47,7 +47,13 @@ function wait(clock: Clock, ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-const retryable = (err: unknown) => !(err instanceof ApiError) || err.retryable;
+/** Anything a part's call throws, as the client's one error (a raw error counts as the network failing). */
+const asApiError = (err: unknown): ApiError =>
+  err instanceof ApiError
+    ? err
+    : new ApiError({ status: 0, code: "network", message: "The upload failed on the way", cause: err });
+
+const retryable = (err: unknown) => asApiError(err).retryable;
 
 /** The right offset a 409 `upload.offset_mismatch` carries, when it carries one. */
 function mismatchOffset(err: unknown): number | null {
@@ -57,6 +63,24 @@ function mismatchOffset(err: unknown): number | null {
 }
 
 export async function uploadInParts(
+  api: UploadApi,
+  workspaceId: string,
+  file: Blob,
+  start: Omit<StartUploadBody, "size">,
+  options: UploadOptions = {},
+): Promise<T.FileDetail> {
+  try {
+    return await sendParts(api, workspaceId, file, start, options);
+  } catch (err) {
+    // Whatever went wrong comes out as the one error; an abort by the caller is always `canceled`.
+    if (options.signal?.aborted && !(err instanceof ApiError && err.code === "canceled")) {
+      throw new ApiError({ status: 0, code: "canceled", message: "Canceled", cause: err });
+    }
+    throw asApiError(err);
+  }
+}
+
+async function sendParts(
   api: UploadApi,
   workspaceId: string,
   file: Blob,

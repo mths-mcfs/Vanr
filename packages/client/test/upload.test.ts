@@ -119,3 +119,64 @@ describe("uploadInParts", () => {
     expect(tries).toBe(3);
   });
 });
+
+describe("uploadInParts failures", () => {
+  test("a raw error from a part comes out as a network ApiError once the retries run out", async () => {
+    const file = new Blob(["0123456789"]);
+    const { api } = fakeApi(file, () => null);
+    const raw = new TypeError("socket hang up");
+    const failing = { ...api, replaceFileUpload: async () => Promise.reject(raw) };
+    const err = await uploadInParts(
+      failing,
+      "w",
+      file,
+      { fileName: "a.txt" },
+      { clock: instantClock, retries: 1 },
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err).toMatchObject({ code: "network", retryable: true, cause: raw });
+  });
+
+  test("an abort in the middle of a part is canceled, not retried", async () => {
+    const file = new Blob(["0123456789"]);
+    const { api } = fakeApi(file, () => null);
+    const controller = new AbortController();
+    let parts = 0;
+    const hanging = {
+      ...api,
+      replaceFileUpload: () => {
+        parts++;
+        controller.abort();
+        return Promise.reject(new TypeError("aborted"));
+      },
+    };
+    const err = await uploadInParts(
+      hanging,
+      "w",
+      file,
+      { fileName: "a.txt" },
+      { signal: controller.signal },
+    ).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: "canceled", retryable: false });
+    expect(parts).toBe(1);
+  });
+
+  test("parts go one at a time (the next starts only after the previous answered)", async () => {
+    const file = new Blob(["0123456789"]);
+    const { api } = fakeApi(file, () => null);
+    let inFlight = 0;
+    let most = 0;
+    const counting = {
+      ...api,
+      replaceFileUpload: async (args: { query?: { offset: number }; body: Blob }) => {
+        inFlight++;
+        most = Math.max(most, inFlight);
+        await Promise.resolve();
+        inFlight--;
+        return api.replaceFileUpload(args);
+      },
+    };
+    await uploadInParts(counting, "w", file, { fileName: "a.txt" });
+    expect(most).toBe(1);
+  });
+});

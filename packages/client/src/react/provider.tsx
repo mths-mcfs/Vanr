@@ -45,8 +45,14 @@ function RealtimeBridge({ realtime }: { realtime: RealtimeClient | null }) {
     const offReconnect = realtime.onReconnect(() => {
       void qc.invalidateQueries({ queryKey: [KEY_ROOT] });
     });
-    realtime.start();
+    // Started a microtask later: StrictMode mounts, unmounts and mounts again in one go, and connecting
+    // right away would open a socket only to close it.
+    let live = true;
+    queueMicrotask(() => {
+      if (live) realtime.start();
+    });
     return () => {
+      live = false;
       offEvent();
       offReconnect();
       realtime.stop();

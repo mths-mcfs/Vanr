@@ -12,6 +12,7 @@ import {
   type RealtimeStatus,
   reconnectDelay,
   SILENCE_LIMIT_MS,
+  STABLE_AFTER_MS,
 } from "../src/realtime/socket.ts";
 import { fakeSockets } from "../src/testing/fake-socket.ts";
 import table from "./event-table.json";
@@ -67,7 +68,7 @@ describe("connection", () => {
     expect(reconnectDelay(0, () => 0)).toBe(RECONNECT_BASE_MS / 2);
   });
 
-  test("reconnects after a drop, waiting longer each time, and resets once it is back", () => {
+  test("reconnects after a drop, waiting longer each time", () => {
     const { rt, sockets, clock } = setup();
     rt.start();
     sockets.last.open();
@@ -78,8 +79,37 @@ describe("connection", () => {
     expect(sockets.sockets).toHaveLength(2);
     sockets.last.drop();
     expect(clock.pending()).toEqual([1000]);
-    clock.advance(1000);
+  });
+
+  test("connections that are accepted and cut right away keep the wait growing up to the cap", () => {
+    const { rt, sockets, clock } = setup();
+    rt.start();
+    const delays: number[] = [];
+    for (let i = 0; i < 8; i++) {
+      sockets.last.open();
+      sockets.last.drop();
+      const delay = clock.pending()[0] ?? -1;
+      delays.push(delay);
+      clock.advance(delay);
+    }
+    expect(delays).toEqual([500, 1000, 2000, 4000, 8000, 16000, 30000, 30000]);
+  });
+
+  test("only a connection that stayed open long enough brings the wait back to the base", () => {
+    const { rt, sockets, clock } = setup();
+    rt.start();
+    for (const wait of [500, 1000, 2000]) {
+      sockets.last.open();
+      sockets.last.drop();
+      clock.advance(wait);
+    }
     sockets.last.open();
+    clock.advance(STABLE_AFTER_MS - 1);
+    sockets.last.drop();
+    expect(clock.pending()).toEqual([4000]);
+    clock.advance(4000);
+    sockets.last.open();
+    clock.advance(STABLE_AFTER_MS);
     sockets.last.drop();
     expect(clock.pending()).toEqual([500]);
   });

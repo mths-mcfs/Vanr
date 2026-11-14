@@ -49,12 +49,48 @@ export function encodeQuery(query: QueryParams | undefined, into = new URLSearch
   return into;
 }
 
+/** Control characters, which no id has and which some URL parsers drop or rewrite. */
+const hasControl = (v: string) =>
+  [...v].some((ch) => {
+    const code = ch.charCodeAt(0);
+    return code < 0x20 || code === 0x7f;
+  });
+
+/**
+ * Why a path parameter can't be sent, or null when it can. A value that the URL parser would resolve
+ * (`.`, `..`) or split (`/`, `\`, `?`, `#`) changes which route the call hits, so it is rejected before
+ * anything is sent; the same after percent-decoding, since some servers decode before routing.
+ */
+export function badPathParam(value: unknown): string | null {
+  if (typeof value !== "string" || value === "") return "is missing";
+  let decoded = value;
+  try {
+    decoded = decodeURIComponent(value);
+  } catch {
+    // Not valid percent-encoding: it is sent encoded as typed, so check it as typed.
+  }
+  for (const v of new Set([value, decoded])) {
+    if (v === "." || v === "..") return "is a dot segment";
+    if (/[/\\?#]/.test(v)) return "contains a URL separator";
+    if (hasControl(v)) return "contains a control character";
+  }
+  return null;
+}
+
 function fillPath(path: string, args: Record<string, unknown>): { path: string; fixed: string } {
   const [base = "", fixed = ""] = path.split("?");
   let out = base;
   for (const name of pathParamNames(base)) {
     const value = args[name];
-    if (typeof value !== "string" || value === "") throw new TypeError(`Missing path parameter ${name}`);
+    const bad = badPathParam(value);
+    if (bad || typeof value !== "string") {
+      throw new ApiError({
+        status: 0,
+        code: "invalid_request",
+        message: `Path parameter ${name} ${bad ?? "is missing"}`,
+        params: { param: name },
+      });
+    }
     out = out.replace(`:${name}`, encodeURIComponent(value));
   }
   return { path: out, fixed };
@@ -117,6 +153,70 @@ export function errorFromBody(status: number, statusText: string, text: string):
     message,
     ...(params ? { params } : {}),
   });
+}
+
+/**
+ * The download's stream as the caller sees it: every failure comes out as the ApiError `fail` makes (abort,
+ * deadline or network), an abort ends it at once even if the source never notices, and ending it either
+ * way cancels the source.
+ */
+function guardStream(
+  source: ReadableStream<Uint8Array>,
+  signal: AbortSignal,
+  fail: (cause: unknown) => ApiError,
+  done: () => void,
+): ReadableStream<Uint8Array> {
+  const reader = source.getReader();
+  let finished = false;
+  let onAbort: () => void = () => {};
+  const finish = () => {
+    finished = true;
+    signal.removeEventListener("abort", onAbort);
+    done();
+  };
+  return new ReadableStream<Uint8Array>({
+    start(c) {
+      onAbort = () => {
+        if (finished) return;
+        finish();
+        c.error(fail(signal.reason));
+        reader.cancel().catch(() => {});
+      };
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    },
+    async pull(c) {
+      try {
+        const chunk = await reader.read();
+        if (finished) return;
+        if (chunk.done) {
+          finish();
+          c.close();
+        } else c.enqueue(chunk.value);
+      } catch (err) {
+        if (finished) return;
+        finish();
+        c.error(fail(err));
+        reader.cancel().catch(() => {});
+      }
+    },
+    cancel(why) {
+      if (!finished) finish();
+      return reader.cancel(why);
+    },
+  });
+}
+
+async function readAll(stream: ReadableStream<Uint8Array>, type: string | null): Promise<Blob> {
+  const parts: Uint8Array<ArrayBuffer>[] = [];
+  const reader = stream.getReader();
+  for (;;) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    // A copy on a plain ArrayBuffer (a chunk may sit on a shared one, which Blob doesn't take).
+    parts.push(new Uint8Array(chunk.value));
+  }
+  return new Blob(parts, type ? { type } : {});
 }
 
 export function createTransport(options: TransportOptions = {}): Transport {
@@ -208,24 +308,30 @@ export function createTransport(options: TransportOptions = {}): Transport {
     try {
       if (!res.ok && endpoint.nullOn.includes(res.status)) return null;
       if (!res.ok) {
-        const text = await res.text().catch(() => "");
+        const text = await res.text();
+        // Why the call ended outranks what was read: an abort while reading the body is still an abort.
+        if (reason) throw failure(null);
         throw errorFromBody(res.status, res.statusText, text);
       }
       if (endpoint.reply.kind === "download") {
         // The deadline covers the headers only; the caller's signal keeps canceling the stream itself.
         streaming = true;
         cancelTimer();
-        const stream = res.body ?? new Blob([]).stream();
+        const stream = guardStream(res.body ?? new Blob([]).stream(), controller.signal, failure, () =>
+          external?.removeEventListener("abort", onAbort),
+        );
+        const type = res.headers.get("content-type");
         const download: Download = {
           body: stream,
-          contentType: res.headers.get("content-type"),
+          contentType: type,
           size: sizeOf(res.headers.get("content-length")),
           fileName: fileNameOf(res.headers.get("content-disposition")),
-          blob: () => new Response(stream).blob(),
+          blob: () => readAll(stream, type),
         };
         return download;
       }
       const text = await res.text();
+      if (reason) throw failure(null);
       if (endpoint.reply.kind === "none") return undefined;
       let raw: unknown;
       try {
@@ -239,6 +345,7 @@ export function createTransport(options: TransportOptions = {}): Transport {
         });
       }
       const r = endpoint.reply.schema.check(raw, "$");
+      if (reason) throw failure(null);
       if (!r.ok) {
         throw new ApiError({
           status: res.status,
@@ -249,6 +356,7 @@ export function createTransport(options: TransportOptions = {}): Transport {
       }
       return r.value;
     } catch (err) {
+      if (reason) throw err instanceof ApiError && err.code === reason ? err : failure(err);
       if (err instanceof ApiError) throw err;
       throw failure(err);
     } finally {
