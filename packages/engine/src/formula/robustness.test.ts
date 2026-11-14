@@ -139,3 +139,68 @@ describe("every list that enters the evaluation pays for its items", () => {
     expect(items.computed.f).toHaveLength(100);
   });
 });
+
+test("repeated numeric conversion pays for a long string variable", () => {
+  expect(
+    rowResult(
+      'lets(s, repeat(" ", 99999) + "1", xs, split(repeat("x,", 9999), ","), sum(map(xs, toNumber(s))))',
+    ).computed.f,
+  ).toEqual({ err: "too_many_steps" });
+});
+
+test("unary plus is bounded before exhausting the runtime stack", () => {
+  const source = `${"+".repeat(9900)}1`;
+  expect(checkFormula(source, []).errors[0]?.code).toBe("too_deep");
+  expect(run(source)).toBe("#too_deep");
+});
+
+test("discarded output leaves room for independent formulas but errors its dependents", () => {
+  const defs: PropDef[] = ['repeat("x", 60000)', 'repeat("y", 60000)', "42", 'prop("f1")'].map(
+    (expression, i) => ({ id: `f${i}`, name: `F${i}`, type: "formula", formula: { expression } }),
+  );
+  const { computed } = evaluateRow(planFormulas(defs), defs, ROW, { now: NOW });
+  expect(computed.f0).toBe("x".repeat(60000));
+  expect(computed.f1).toEqual({ err: "too_large" });
+  expect(computed.f2).toBe(42);
+  expect(computed.f3).toEqual({ err: "dependency_error" });
+});
+
+test("person output accounts for maximum length ids and JSON escapes", () => {
+  const defs: PropDef[] = [
+    { id: "who", name: "Who", type: "person" },
+    {
+      id: "f",
+      name: "F",
+      type: "formula",
+      formula: { expression: 'let(p, first(prop("Who")), map(split(repeat("x,", 1199), ","), p))' },
+    },
+  ];
+  for (const id of ["u".repeat(100), '\\"'.repeat(50)]) {
+    const row = { ...ROW, props: { who: [{ type: "person" as const, id }] } };
+    expect(applyProps(defs, {}, row.props).ok).toBe(true);
+    expect(evaluateRow(planFormulas(defs), defs, row, { now: NOW }).computed.f).toEqual({ err: "too_large" });
+  }
+});
+
+test("predicates require booleans even for empty lists; map and sort allow other types", () => {
+  for (const fn of ["filter", "find", "findIndex", "some", "every"]) {
+    for (const args of ["[1,2], current", "[], 1"])
+      expect(checkFormula(`${fn}(${args})`, []).errors[0]?.code).toBe("type_mismatch");
+  }
+  expect(run("map([2,1], current)")).toEqual([2, 1]);
+  expect(run("sort([2,1], current)")).toEqual([1, 2]);
+});
+
+test("date arithmetic and JSON preserve hours, milliseconds and both endpoints", () => {
+  expect(run('dateAdd(parseDate("2026-01-01"), 12, "hours")')).toEqual({ start: "2026-01-01T12:00:00Z" });
+  const defs: PropDef[] = [{ id: "d", name: "D", type: "date" }];
+  const stored = applyProps(defs, {}, { d: run("dateRange(fromTimestamp(123), fromTimestamp(456))") });
+  if (!stored.ok) throw new Error("Serialized date must be accepted on write");
+  for (const [part, expected] of [
+    ["dateStart", 123],
+    ["dateEnd", 456],
+  ] as const)
+    expect(
+      previewFormula(`timestamp(${part}(prop("D")))`, defs, { ...ROW, props: stored.props }, { now: NOW }),
+    ).toMatchObject({ ok: true, value: expected });
+});

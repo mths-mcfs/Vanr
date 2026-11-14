@@ -355,8 +355,13 @@ class Parser {
       }
     }
     if (this.isOp("+")) {
-      this.next();
-      return this.unary();
+      const t = this.next();
+      this.enter(t.at);
+      try {
+        return this.unary();
+      } finally {
+        this.leave();
+      }
     }
     return this.pow();
   }

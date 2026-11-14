@@ -127,16 +127,16 @@ export function isCalendarDay(year: number, month: number, day: number): boolean
   return d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day;
 }
 
-/** The `YYYY-MM-DD` at the start of an ISO text names a day that exists. */
+/** A calendar day, or an ISO instant with valid clock fields and an explicit offset. */
 export function isCalendarIso(text: string): boolean {
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(text);
+  const m =
+    /^(\d{4})-(\d{2})-(\d{2})(?:T([01]\d|2[0-3]):([0-5]\d)(?::([0-5]\d)(?:\.\d+)?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d))?$/.exec(
+      text,
+    );
   return !!m && isCalendarDay(Number(m[1]), Number(m[2]), Number(m[3]));
 }
 
-const isoDate = z
-  .string()
-  .regex(/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2}))?$/)
-  .refine(isCalendarIso);
+const isoDate = z.string().refine(isCalendarIso);
 const actor = z.object({ type: z.enum(["person", "agent"]), id: z.string().min(1).max(100) }).strict();
 
 function schemaFor(def: PropDef): z.ZodType<PropValue> {
@@ -224,7 +224,7 @@ export function propText(
     case "status":
       return option(String(value));
     case "multi_select":
-      return (value as string[]).map(option).join(", ");
+      return JSON.stringify((value as string[]).map(option));
     case "checkbox":
       return value ? "true" : "false";
     case "date": {
@@ -235,10 +235,10 @@ export function propText(
     case "creator":
     case "editor": {
       const list = Array.isArray(value) ? (value as PropActor[]) : [value as PropActor];
-      return list.map((a) => names?.(a) ?? `${a.type}:${a.id}`).join(", ");
+      return names ? list.map(names).join(", ") : JSON.stringify(list);
     }
     case "file":
-      return (value as string[]).join(", ");
+      return JSON.stringify(value);
     default:
       return String(value);
   }
@@ -246,11 +246,12 @@ export function propText(
 
 /** Reads text (CSV, front matter): the inverse of propText for the editable types. */
 export function parsePropText(def: PropDef, text: string): PropValue | undefined {
+  // Empty text is a value; an empty cell of another type means no value.
+  if (def.type === "text") return text;
   const t = text.trim();
   if (t === "") return undefined;
   const byName = (name: string) => def.options?.find((o) => o.name.toLowerCase() === name.toLowerCase())?.id;
   switch (def.type) {
-    case "text":
     case "url":
       return t;
     case "number": {
@@ -258,13 +259,31 @@ export function parsePropText(def: PropDef, text: string): PropValue | undefined
       return Number.isFinite(n) ? n : undefined;
     }
     case "checkbox":
-      return isChecked(t);
+      return isCheckboxWord(t) ? isChecked(t) : undefined;
     case "select":
     case "status":
       return byName(t);
     case "multi_select": {
-      const ids = t.split(",").map((s) => byName(s.trim()));
+      let names = t.split(",").map((s) => s.trim());
+      if (t.startsWith("[")) {
+        try {
+          const parsed: unknown = JSON.parse(t);
+          if (Array.isArray(parsed) && parsed.every((name) => typeof name === "string")) names = parsed;
+        } catch {
+          // A literal option name, such as [Review], need not be JSON.
+        }
+      }
+      const ids = names.map(byName);
       return ids.every((id) => id) ? (ids as string[]) : undefined;
+    }
+    case "person":
+    case "file": {
+      try {
+        const parsed = schemaFor(def).safeParse(JSON.parse(t));
+        return parsed.success ? parsed.data : undefined;
+      } catch {
+        return undefined;
+      }
     }
     case "date": {
       const [start, end] = t.split(/\s*→\s*/);
