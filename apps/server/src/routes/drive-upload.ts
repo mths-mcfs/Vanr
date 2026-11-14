@@ -3,12 +3,12 @@
 // connection drops and completes. Completing writes the blob as a stream and creates the file (or the new
 // version); repeating "complete" returns the same result.
 
-import { mkdir, open, rm, statfs } from "node:fs/promises";
+import { mkdir, open, readdir, rm, statfs } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { UploadSession } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
-import { newId } from "@vanr/engine/ids";
+import { newId, randomId } from "@vanr/engine/ids";
 import { and, count, eq, inArray, lt, or, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
@@ -68,8 +68,28 @@ async function sessionFor(deps: AppDeps, me: WorkspaceMember, id: string): Promi
 const offsetMismatch = (row: SessionRow) =>
   new HttpError(409, "upload.offset_mismatch", "The server expects another offset", { offset: row.received });
 
+/** Where one part arrives before it is accepted (each request has a file of its own). */
+const partPath = (deps: AppDeps, id: string) => `${stagingPath(deps, id)}.part-${randomId(8)}`;
+
+/** Writes all of `bytes` at `position` of the file. */
+async function writeAt(path: string, bytes: Uint8Array, position: number): Promise<void> {
+  const fh = await open(path, "r+");
+  try {
+    for (let done = 0; done < bytes.length; ) {
+      const { bytesWritten } = await fh.write(bytes, done, bytes.length - done, position + done);
+      done += bytesWritten;
+    }
+  } finally {
+    await fh.close();
+  }
+}
+
 async function dropSession(deps: AppDeps, id: string): Promise<void> {
   await rm(stagingPath(deps, id), { force: true });
+  // Parts a crash left behind (a part still arriving deletes its own file when it ends).
+  const leftovers = await readdir(uploadDir(deps)).catch(() => [] as string[]);
+  for (const name of leftovers)
+    if (name.startsWith(`${id}.part-`)) await rm(join(uploadDir(deps), name), { force: true });
   await deps.db.delete(uploadSessions).where(eq(uploadSessions.id, id));
 }
 
@@ -171,8 +191,10 @@ export function registerDriveUploads(app: Hono<AppEnv>) {
     return c.json(toSession(await sessionFor(c.get("deps"), me, param(c, "uploadId"))));
   });
 
-  // A part, from the offset the server expects. The bytes are streamed to the work file; only afterwards
-  // does the offset move (conditionally: two equal parts at once don't count twice).
+  // A part, from the offset the server expects. Its bytes are streamed to a file of the part's own; only
+  // the part that wins the offset goes into the work file, inside the transaction that locks the session and
+  // moves the offset. A part that loses (another one at the same offset finished first), drops in the middle
+  // or goes past the limit never touches the work file, so the file is always exactly the accepted parts.
   app.put(`${WORKSPACE}/files/uploads/:uploadId`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
@@ -182,41 +204,60 @@ export function registerDriveUploads(app: Hono<AppEnv>) {
     if (offset !== row.received) throw offsetMismatch(row);
     const body = c.req.raw.body;
     if (!body) throw new HttpError(400, "upload.empty_part", "The part is empty");
-    const fh = await open(stagingPath(deps, row.id), "r+").catch(() => null);
-    if (!fh) throw notFound("Upload not found");
-    let n = 0;
+    const part = partPath(deps, row.id);
     try {
-      const reader = body.getReader();
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        n += value.length;
-        if (n > MAX_PART_BYTES || offset + n > row.size) {
-          await reader.cancel();
-          throw new HttpError(413, "upload.part_too_large", "The part goes past the limit or the file size", {
-            maxBytes: Math.min(MAX_PART_BYTES, row.size - offset),
-          });
+      const fh = await open(part, "wx");
+      let n = 0;
+      try {
+        const reader = body.getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          n += value.length;
+          if (n > MAX_PART_BYTES || offset + n > row.size) {
+            await reader.cancel();
+            throw new HttpError(
+              413,
+              "upload.part_too_large",
+              "The part goes past the limit or the file size",
+              {
+                maxBytes: Math.min(MAX_PART_BYTES, row.size - offset),
+              },
+            );
+          }
+          await fh.write(value, 0, value.length, n - value.length);
         }
-        await fh.write(value, 0, value.length, offset + n - value.length);
+      } finally {
+        await fh.close();
       }
+      if (n === 0 && row.size > 0) throw new HttpError(400, "upload.empty_part", "The part is empty");
+      const bytes = await Bun.file(part).bytes();
+      const now = deps.now();
+      const moved = await deps.db.transaction(async (tx) => {
+        const [current] = await tx
+          .select()
+          .from(uploadSessions)
+          .where(eq(uploadSessions.id, row.id))
+          .for("update");
+        if (!current || current.expiresAt <= now) throw notFound("Upload not found");
+        if (current.status !== "open")
+          throw new HttpError(409, "upload.closed", "This upload is already finishing");
+        if (current.received !== offset) throw offsetMismatch(current);
+        await writeAt(stagingPath(deps, row.id), bytes, offset).catch(() => {
+          throw notFound("Upload not found");
+        });
+        const [updated] = await tx
+          .update(uploadSessions)
+          .set({ received: offset + n, updatedAt: now, expiresAt: new Date(now.getTime() + SESSION_MS) })
+          .where(eq(uploadSessions.id, row.id))
+          .returning();
+        if (!updated) throw new Error("upload update failed");
+        return updated;
+      });
+      return c.json(toSession(moved));
     } finally {
-      await fh.close();
+      await rm(part, { force: true });
     }
-    if (n === 0 && row.size > 0) throw new HttpError(400, "upload.empty_part", "The part is empty");
-    const now = deps.now();
-    const [moved] = await deps.db
-      .update(uploadSessions)
-      .set({ received: offset + n, updatedAt: now, expiresAt: new Date(now.getTime() + SESSION_MS) })
-      .where(
-        and(
-          eq(uploadSessions.id, row.id),
-          eq(uploadSessions.received, offset),
-          eq(uploadSessions.status, "open"),
-        ),
-      )
-      .returning();
-    if (!moved) throw offsetMismatch(await sessionFor(deps, me, row.id));
-    return c.json(toSession(moved));
   });
 
   app.post(`${WORKSPACE}/files/uploads/:uploadId/complete`, async (c) => {
