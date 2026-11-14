@@ -7,11 +7,13 @@ import { postgresConnector, type SqlConnector } from "@vanr/engine/sqlconn";
 import { count } from "drizzle-orm";
 import { createApp } from "./app";
 import { createAuth, type SignupDecision } from "./auth";
+import { resumeRecalcs, stopRecalcs } from "./bases/write";
 import type { Config } from "./config";
 import { ABSENT, type AppDeps, type RuntimePort } from "./context";
 import { HttpError } from "./http";
 import { holdInstanceLock } from "./instance-lock";
 import { guardedFetch } from "./integrations/net";
+import { routedBlobs } from "./integrations/storage";
 import { log } from "./logger";
 import { createMailer, type Mailer } from "./mailer";
 import { testModelCheck } from "./models";
@@ -25,13 +27,23 @@ import {
   revalidateBrowsers,
 } from "./realtime/browser-socket";
 import { type BrowserSocket, type BrowserSocketData, Hub } from "./realtime/hub";
+import { isTransfer, TRANSFER_IDLE_SECONDS } from "./routes/drive";
 import { hasPendingInvite, INVITE_COOKIE } from "./routes/invitations";
 import { dropAllLiveViews } from "./runners/browser-live";
 import { RunnerHub, type RunnerSocketData } from "./runners/hub";
 import { runnerClose, runnerMessage, runnerOpen, runnerSocketData } from "./runners/socket";
 import { BackgroundWork } from "./runtime/background";
+import { createSearchIndex } from "./search-index";
 import { FirstUserPlace, SIGNUP_QUEUE_LIMITS, type SignupQueueLimits, signupDecision } from "./signup-queue";
 import { postgresLedger } from "./usage-ledger";
+import {
+  COLLAB_PATH,
+  type CollabSocketData,
+  checkCollabUpgrade,
+  createWikiCollab,
+  MAX_FRAME as WIKI_MAX_FRAME,
+} from "./wiki-collab";
+import { wikiMarkdown } from "./wiki-md";
 
 interface StartOptions {
   config: Config;
@@ -49,8 +61,13 @@ interface StartOptions {
   onInstanceLockLost?: () => void;
   /** Tests: shorter limits for the closed sign-up queue (signup-queue.ts). */
   signupQueue?: Partial<SignupQueueLimits>;
+  /** Tests: the inactivity limit of every request (Bun's default is 10 s); the Drive's transfers keep theirs. */
+  idleTimeoutSeconds?: number;
   /** Tests: replaces a step of the boot that touches the outside, to break it or hold it. */
   steps?: Partial<BootSteps>;
+  /** The live wiki: the quiet before the draft publishes itself (default 5 min) and the autosave debounce. */
+  wikiIdlePublishMs?: number;
+  wikiDebounceMs?: number;
 }
 
 /** The boot's steps that touch the outside: the instance lock, the database and the VAPID keys. */
@@ -129,22 +146,34 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   // After the listener's stop in the undo (its close handlers queue the runners' last transitions) and before
   // the database closes: those transitions run to the end.
   undo.push(() => runnersHub.settled());
-  // Slice S3 (wiki-collab) adds here the wiki editor (wikiMarkdown) and the live wiki sessions.
+  // The wiki editor (Milkdown without a browser) comes up before accepting connections.
+  await wikiMarkdown();
   // The sockets answer only once the deps exist; until then an upgrade gets the 503 of `handler`.
   let depsRef: AppDeps | null = null;
   let origins: string[] = [];
-  // Slice S3 (wiki-collab) adds CollabSocketData to the union and its upgrade and handlers below.
-  type SocketData = BrowserSocketData | RunnerSocketData;
+  const collab = createWikiCollab(
+    () => {
+      if (!depsRef) throw new Error("server not started");
+      return depsRef;
+    },
+    { idlePublishMs: opts.wikiIdlePublishMs, debounceMs: opts.wikiDebounceMs },
+  );
+  type SocketData = BrowserSocketData | RunnerSocketData | CollabSocketData;
   const isRunner = (ws: Bun.ServerWebSocket<SocketData>): ws is Bun.ServerWebSocket<RunnerSocketData> =>
     ws.data.kind === "runner";
   const isBrowser = (ws: Bun.ServerWebSocket<SocketData>): ws is BrowserSocket => ws.data.kind === "browser";
+  const isWiki = (ws: Bun.ServerWebSocket<SocketData>): ws is Bun.ServerWebSocket<CollabSocketData> =>
+    ws.data.kind === "wiki";
   const upgradeRequired = () =>
     Response.json({ error: { code: "upgrade_required", message: "Use WebSocket" } }, { status: 426 });
 
   const server = Bun.serve<SocketData>({
     port: config.port,
+    ...(opts.idleTimeoutSeconds !== undefined ? { idleTimeout: opts.idleTimeoutSeconds } : {}),
     async fetch(req, srv) {
       const path = new URL(req.url).pathname;
+      // Large bodies (Drive downloads and uploads) get a longer inactivity limit than the rest.
+      if (isTransfer(path)) srv.timeout(req, TRANSFER_IDLE_SECONDS);
       // The browser's real time: the session cookie and the origin are checked before the upgrade.
       if (depsRef && path === "/api/v1/realtime") {
         const check = await checkBrowserUpgrade(depsRef, req, origins);
@@ -157,17 +186,31 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
         if (srv.upgrade(req, { data: runnerSocketData() })) return undefined;
         return upgradeRequired();
       }
+      // The live wiki: the session cookie, the origin and the page's right are checked before the upgrade.
+      if (depsRef && path === COLLAB_PATH) {
+        const check = await checkCollabUpgrade(depsRef, req, origins);
+        if (!check.ok) return check.response;
+        if (srv.upgrade(req, { data: check.data })) return undefined;
+        return upgradeRequired();
+      }
       return handler(req);
     },
     websocket: {
-      // The biggest frame either side may send (a runner's live view frame); each handler has its own limit.
-      maxPayloadLength: 8 * 1024 * 1024,
+      // The biggest frame any side may send (a runner's live view frame); each handler has its own limit.
+      maxPayloadLength: Math.max(8 * 1024 * 1024, WIKI_MAX_FRAME),
       open(ws) {
+        if (isWiki(ws)) return collab.socket.open(ws);
         if (!depsRef) return;
         if (isRunner(ws)) runnerOpen(depsRef, ws);
         else if (isBrowser(ws)) browserOpen(depsRef, ws);
       },
       async message(ws, raw) {
+        if (isWiki(ws)) {
+          // The wiki's own frame cap: a larger frame never reaches the live session.
+          if ((typeof raw === "string" ? Buffer.byteLength(raw) : raw.byteLength) > WIKI_MAX_FRAME)
+            return ws.close(1009, "frame too large");
+          return collab.socket.message(ws, raw);
+        }
         if (!depsRef) return;
         try {
           if (isRunner(ws)) await runnerMessage(depsRef, ws, raw);
@@ -177,7 +220,8 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
           if (isBrowser(ws)) ws.send(JSON.stringify({ type: "error", code: "internal" }));
         }
       },
-      close(ws) {
+      close(ws, code, reason) {
+        if (isWiki(ws)) return collab.socket.close(ws, code, reason);
         if (!depsRef) return;
         if (isRunner(ws)) {
           const deps = depsRef;
@@ -191,7 +235,9 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   undo.push(() => dropAllLiveViews());
   undo.push(() => server.stop(true));
   // Before the listener in the undo (as in stop): closes the runners' connections. Before the listener is
-  // up there is no connection to close. Slice S3 (wiki-collab) also saves here what the wiki held in memory.
+  // up there is no connection to close. Before that, the wiki closes its live sessions, saving the drafts it
+  // held in memory (publishing them as versions where it can), while the listener and the database are up.
+  undo.push(() => collab.live.close());
   undo.push(() => runnersHub.closeAll());
   const port = server.port ?? config.port;
   const publicUrl = config.port === 0 ? `http://localhost:${port}` : config.publicUrl;
@@ -199,8 +245,14 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
 
   const db = opened.db;
   const localBlobs = config.dataDir === "memory" ? memoryBlobs() : diskBlobs(join(config.dataDir, "blobs"));
-  // Slice S2 (integrations/storage) wraps this in routedBlobs (Drive files go to the workspace's S3).
-  const blobs = localBlobs;
+  // Drive files go to the workspace's S3 when it configured one; everything else stays local.
+  // A bucket call that ends after its deadline is undone as background work (the stop waits for it).
+  const blobs = routedBlobs(localBlobs, () => ({
+    db,
+    authSecret: effective.authSecret,
+    track: (work, what) => deps.runtime.track(work, what),
+    now,
+  }));
   const now = opts.now ?? (() => new Date());
   // Closed sign-up still accepts the installation's first user and whoever has a pending invite. The first
   // user's place (signup-queue.ts) lets one sign-up section at a time become it; an invite doesn't need it.
@@ -233,8 +285,12 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     mailer,
     trustedOrigins: origins,
     signupAllowed,
-    // A signed-out or revoked session closes the sockets it opened at once.
-    onSessionEnded: (sessionId) => hub.dropSession(sessionId),
+    // A signed-out or revoked session closes at once every socket it opened: the browser's real time and
+    // the live wiki. This is the one place Better Auth's session end reaches.
+    onSessionEnded: (sessionId) => {
+      hub.dropSession(sessionId);
+      collab.live.sessionEnded(sessionId);
+    },
   });
   // Background work (the notification queue today); stopping waits for what is running. Slice S6
   // (runtime/runtime) creates the AgentRuntime here instead, which takes this work over.
@@ -251,7 +307,7 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     now,
     hub,
     ledger,
-    // Slice S2 (search-index) adds `search` (createSearchIndex).
+    search: createSearchIndex({ db, config: effective, ledger, now }, opts.fetchExternal),
     sealer: createSealer(effective.authSecret, "credentials"),
     // Every integration fetch checks the destination (and each redirect) against the internal network.
     fetchExternal: guardedFetch(opts.fetchExternal ?? fetch, effective.integrations.allowPrivateNetworks),
@@ -262,21 +318,29 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     push: webPushSender(await steps.loadVapid(effective), opts.fetchExternal ?? fetch),
     runtime: runtimePort(background),
     testModelFor: (workspaceId) => testModelCheck(deps, workspaceId, opts.forceFakeModels === true),
-    // S3 (wiki-collab) adds `wikiLive` and S5 (assignments/motor, assignments/verify) adds
-    // `assignmentEngine` and `assignmentVerifier`.
+    wikiLive: collab.live,
+    // S5 (assignments/motor, assignments/verify) adds `assignmentEngine` and `assignmentVerifier`.
   };
-  // Here, in this order: the undo of stopRecalcs (S2, bases/write) and of the assignment engine's stop
-  // (S5); the provider lookup (S6); search.ensureVector (S2, search-index); runtime.start (S6), the
-  // engine's start (S5) and resumeRecalcs (S2), all before the app takes requests.
-  const app = createApp(deps, { firstUser, signupQueue: signupLimits });
-  handler = (req) => app.fetch(req);
-  depsRef = deps;
-  // A session that expires, or a membership or channel lost outside this server's routes, is caught here.
+  // A session that expires, or a membership or channel lost outside this server's routes, is caught here. It
+  // comes before the recalculations so that their halt is the first step of the stop, in the same tick.
   const sweep = setInterval(() => {
     void revalidateBrowsers(deps).catch((err) => log.warn("ws.revalidate_failed", { err }));
   }, REVALIDATE_MS);
   sweep.unref?.();
   undo.push(() => clearInterval(sweep));
+  // Here, in this order: the undo of stopRecalcs (S2, bases/write) and of the assignment engine's stop
+  // (S5); the provider lookup (S6); runtime.start (S6), the engine's start (S5) and resumeRecalcs (S2),
+  // all before the app takes requests.
+  // The vector leg only with an embedder and pgvector in the database; without them the search is lexical
+  // and by name. It acquires nothing, so there is nothing to undo.
+  if (effective.search.embedder.kind !== "off") await deps.search.ensureVector();
+  // The formula recalculations: halted before the database closes, then the ones a crash or a deploy left
+  // halfway resume in the background.
+  undo.push(() => stopRecalcs(deps));
+  await resumeRecalcs(deps);
+  const app = createApp(deps, { firstUser, signupQueue: signupLimits });
+  handler = (req) => app.fetch(req);
+  depsRef = deps;
   log.info("server.started", { url: publicUrl, db: opened.kind });
 
   // Every stop, at once or later, gets the same shutdown: it ends (or fails) once for all of them.

@@ -7,12 +7,7 @@ import type { Preview } from "@vanr/engine/effects";
 import type { ModelProvider } from "@vanr/engine/models/types";
 import type { BudgetScope } from "@vanr/engine/usage";
 import type { AgentRow } from "./agents";
-
-/** From `wiki`. */
-export type WikiRow = typeof schema.knowledgePages.$inferSelect;
-
-/** From `assignments/core`. */
-export type AssignmentRow = typeof schema.assignments.$inferSelect;
+import type { AppDeps } from "./context";
 
 /** From `runtime/tools`: what the model reviewer sees of the call, the exact effect, never the agent's reasoning. */
 export interface ReviewRequest {
@@ -30,11 +25,17 @@ export type ProviderLookup = (
   agent: Pick<AgentRow, "workspaceId" | "credentialId">,
 ) => Promise<ModelProvider | ProviderUnavailable>;
 
-/** From `messages`. */
-export type MessageRow = typeof schema.messages.$inferSelect;
-
 /** From `control`. */
 export type QuestionRow = typeof schema.questions.$inferSelect;
+
+/** From `control`: an agent action a person can undo and redo. */
+export type ActionRow = typeof schema.reversibleActions.$inferSelect;
+
+/** From `control`: what undoing and redoing one kind of action does. */
+export type Undoer = {
+  undo(deps: AppDeps, row: ActionRow, actorUserId: string): Promise<void>;
+  redo(deps: AppDeps, row: ActionRow, actorUserId: string): Promise<void>;
+};
 
 /** From `runtime/tools`: the "always allow" predicate a person can remember for a call. */
 export interface StandingRuleKey {

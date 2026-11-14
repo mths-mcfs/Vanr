@@ -3,6 +3,7 @@ import type { BlobStore } from "@vanr/engine/blobs";
 import type { Db } from "@vanr/engine/db";
 import type { ModelProvider } from "@vanr/engine/models/types";
 import type { Sealer } from "@vanr/engine/seal";
+import type { PgSearchIndex } from "@vanr/engine/search-pg";
 import type { SqlConnector } from "@vanr/engine/sqlconn";
 import type { BudgetScope, UsageLedger, UsageSource } from "@vanr/engine/usage";
 import type { Context } from "hono";
@@ -10,23 +11,17 @@ import type { AgentRow } from "./agents";
 import type { Auth } from "./auth";
 import type { ChannelRow } from "./channels";
 import type { Config } from "./config";
-import type {
-  ApprovalOutcome,
-  MessageRow,
-  QuestionRow,
-  RevisedApproval,
-  RunEnd,
-  RunLimits,
-} from "./forward-types";
+import type { ApprovalOutcome, QuestionRow, RevisedApproval, RunEnd, RunLimits } from "./forward-types";
 import { unauthorized } from "./http";
 import type { Mailer } from "./mailer";
+import type { MessageRow } from "./messages";
 import type { PushSender } from "./push";
 import type { Hub } from "./realtime/hub";
 import type { RunnerHub } from "./runners/hub";
+import type { WikiLive } from "./wiki-collab";
 
 /**
- * Everything the routes need. Each slice of the server adds what it uses: S2 adds `search` (search-index),
- * S3 adds `wikiLive` (wiki-collab) and S5 adds `assignmentEngine` and `assignmentVerifier` (assignments/motor,
+ * Everything the routes need. Each slice of the server adds what it uses: S5 adds `assignmentEngine` and `assignmentVerifier` (assignments/motor,
  * assignments/verify). The runtime is already here as a port; S6 puts the real one behind it.
  */
 export interface AppDeps {
@@ -41,6 +36,11 @@ export interface AppDeps {
   now: () => Date;
   /** Real time: who is connected and where each event goes. */
   hub: Hub;
+  /**
+   * The search index (Postgres). Whoever saves a source calls `reindex`, which reads the source back from the
+   * database (search-index.ts); whoever hides it calls `unindex` in the same transaction.
+   */
+  search: PgSearchIndex;
   /**
    * Usage ledger and cap: every model call reserves before and records after. Routines, assignments,
    * debates and teams use it through here, with their own scopes.
@@ -58,6 +58,8 @@ export interface AppDeps {
   push: PushSender;
   /** Agents: routing, runs and reminders, as the modules outside runtime/ see them. */
   runtime: RuntimePort;
+  /** The wiki's live sessions (wiki-collab): every saved version reaches the open editors. */
+  wikiLive: WikiLive;
   /** For each agent of the workspace, whether the test model answers it now (no key). */
   testModelFor: (
     workspaceId: string,

@@ -4,12 +4,18 @@ import type { AppDeps, AppEnv } from "./context";
 import { errorBody, HttpError } from "./http";
 import { log } from "./logger";
 import { registerAccount } from "./routes/account";
+import { registerBases } from "./routes/bases";
+import { registerDrive } from "./routes/drive";
+import { registerDriveUploads } from "./routes/drive-upload";
 import { registerInvitations } from "./routes/invitations";
 import { registerNotifications } from "./routes/notifications";
 import { registerPush } from "./routes/push";
 import { registerRunnerRequests } from "./routes/runner-requests";
 import { registerRunners } from "./routes/runners";
+import { registerSearch } from "./routes/search";
+import { registerThreads } from "./routes/threads";
 import { registerWaitlist } from "./routes/waitlist";
+import { registerWiki } from "./routes/wiki";
 import { type FirstUserPlace, type SignupQueueLimits, signupGate } from "./signup-queue";
 import { createStatic } from "./static";
 import { registerWorkspaceScope } from "./workspace-scope";
@@ -105,13 +111,19 @@ export function createApp(
   registerWaitlist(app);
   registerAccount(app);
   // The remaining registrars enter here, in this order, each with the slice that ports it (S2 to S6 of the
-  // server port): workspaces S4, chat S6, threads S3, agents S5, agent lab S5, skills S4, memories S3,
-  // control S5, invitations S2, notifications S2, push S2, drive uploads S3, drive S2, wiki S4, bases S3,
-  // issues S4, debates S4, routines S4, calendar S4, search S2, connectors S6, integrations S5, runners S2,
-  // runner pairings S3, assignments S5.
+  // server port): workspaces S4, chat S6, then the threads below; agents S5, agent lab S5, skills S4, memories S3,
+  // control S5, then invitations, notifications and push below, then the Drive, the wiki and the bases below;
+  // issues S4, debates S4, routines S4, calendar S4, then the search below; connectors S6, integrations S5,
+  // then the runners and their requests below; assignments S5.
+  registerThreads(app);
   registerInvitations(app);
   registerNotifications(app);
   registerPush(app);
+  registerDriveUploads(app);
+  registerDrive(app);
+  registerWiki(app);
+  registerBases(app);
+  registerSearch(app);
   registerRunners(app);
   registerRunnerRequests(app);
 
