@@ -55,7 +55,7 @@ function findControls(children: ReactNode, found: FoundControl[] = []): FoundCon
 
 /**
  * single: one labelable control, the target of the Field's `<label for>`.
- * group: a radio group, or several controls; the Field label names them, no control takes its id.
+ * group: a radio group, or several controls; the Field label names the group, no control takes its id.
  * unseen: no package control in sight; `for` only comes from an explicit controlId.
  */
 type FieldMode = "single" | "group" | "unseen";
@@ -94,10 +94,8 @@ export function joinIds(...ids: Array<string | false | null | undefined>): strin
  * - id: the single control takes the Field's id; any other control keeps its own.
  * - aria-describedby: the caller's is kept and the Field's hint and error are added (in a group
  *   the group element carries them instead).
- * - aria-labelledby: the caller's is kept; the Field label is added whenever it would otherwise
- *   not name the control (a group control, a text control in a group, or when the caller's
- *   aria-labelledby would override the `<label for>`). A choice control in a group keeps its own
- *   visible label and is not named by the Field.
+ * - aria-labelledby: the Field label names group controls, or joins the caller's when it would
+ *   override the single control's `<label for>`. Individual controls in a group keep their names.
  */
 export function useFieldControl(
   own: FieldControlProps,
@@ -106,8 +104,7 @@ export function useFieldControl(
   const field = useContext(FieldContext);
   if (field === null) return own;
   const caller = own["aria-labelledby"];
-  const namedByField =
-    field.mode === "single" ? caller !== undefined : options.kind === "group" || options.kind === "text";
+  const namedByField = field.mode === "single" ? caller !== undefined : options.kind === "group";
   return {
     id: field.mode === "single" ? field.controlId : own.id,
     "aria-describedby":

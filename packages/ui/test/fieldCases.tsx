@@ -213,7 +213,7 @@ export function fieldCases(expect: Expect): Case[] {
       },
     },
     {
-      name: "two inputs: a named group, each input named by the Field label",
+      name: "two inputs: the group name preserves each input's aria-label",
       element: (
         <Field label="Full name">
           <Input aria-label="First" />
@@ -226,8 +226,30 @@ export function fieldCases(expect: Expect): Case[] {
         const inputs = [...f.html.matchAll(/<input[^>]*>/g)].map((m) => m[0]);
         expect(inputs.length).toBe(2);
         for (const input of inputs) {
-          expect(input).toContain(`aria-labelledby="${f.fieldLabelId}"`);
+          expect(input).not.toContain("aria-labelledby=");
           expect(input.includes(" id=")).toBe(false);
+        }
+        expect(inputs[0]).toContain('aria-label="First"');
+        expect(inputs[1]).toContain('aria-label="Last"');
+      },
+    },
+    {
+      name: "grouped inputs keep their native labels",
+      element: (
+        <Field label="Destination">
+          <label htmlFor="street">Street</label>
+          <Input id="street" />
+          <label htmlFor="town">Town</label>
+          <Input id="town" />
+        </Field>
+      ),
+      expect: (f) => {
+        expect(groupOf(f)).toContain(`aria-labelledby="${f.fieldLabelId}"`);
+        expect(f.controls).toEqual(["street", "town"]);
+        expect(f.html).toContain('for="street">Street</label>');
+        expect(f.html).toContain('for="town">Town</label>');
+        for (const [input] of f.html.matchAll(/<input[^>]*>/g)) {
+          expect(input).not.toContain("aria-labelledby=");
         }
       },
     },

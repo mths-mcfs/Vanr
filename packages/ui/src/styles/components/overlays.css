@@ -70,6 +70,11 @@
     background-color: var(--vr-bg-hover);
   }
 
+  .vr-menu-item:focus-visible {
+    outline: var(--vr-ring) solid var(--vr-focus);
+    outline-offset: calc(-1 * var(--vr-ring));
+  }
+
   .vr-menu-item[data-tone="danger"] {
     color: var(--vr-danger-fg);
   }

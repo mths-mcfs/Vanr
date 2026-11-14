@@ -112,6 +112,11 @@ export function App() {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
+  useEffect(() => {
+    document.getElementById(page)?.focus({ preventScroll: true });
+    window.scrollTo(0, 0);
+  }, [page]);
+
   return (
     <ToastProvider label={t.notifications.regionName} closeLabel={t.notifications.dismissButton}>
       <header className="g-bar">
@@ -149,7 +154,7 @@ export function App() {
           </Select>
         </div>
       </header>
-      <main className="g-main">
+      <main className="g-main" id={page} tabIndex={-1}>
         {page === "components" ? <ComponentsPage t={t} /> : <StatesPage t={t} />}
       </main>
     </ToastProvider>
@@ -422,7 +427,10 @@ function OverlaysSection({ t }: { t: Copy }) {
       </div>
       <ContextMenu>
         <ContextMenuTrigger asChild>
-          <div className="g-context">{t.threadMenu.rightClickTarget}</div>
+          {/* biome-ignore lint/a11y/noNoninteractiveTabindex: Context-menu targets accept keyboard focus for Shift+F10. */}
+          <div className="g-context" tabIndex={0}>
+            {t.threadMenu.rightClickTarget}
+          </div>
         </ContextMenuTrigger>
         <ContextMenuContent>
           <ContextMenuItem icon={<Icon icon={Pencil} />}>{t.threadMenu.renameThread}</ContextMenuItem>
@@ -672,7 +680,9 @@ const COLUMNS: Column[] = ["default", "hover", "focus", "active", "disabled", "l
 type Row = { name: string; render: (state: Column) => ReactNode | null };
 
 function pointer(state: Column): { "data-gallery-state"?: string } {
-  return state === "hover" || state === "focus" || state === "active" ? { "data-gallery-state": state } : {};
+  return state === "hover" || state === "focus" || state === "active"
+    ? { "data-gallery-state": state === "active" ? "hover active" : state }
+    : {};
 }
 
 function StatesPage({ t }: { t: Copy }) {
@@ -727,6 +737,7 @@ function StatesPage({ t }: { t: Copy }) {
       render: (state) =>
         state === "loading" || state === "active" ? null : (
           <Textarea
+            key={t.typeSpecimen.paragraph}
             aria-label={t.agentForm.promptLabel}
             rows={2}
             defaultValue={t.typeSpecimen.paragraph}
@@ -830,7 +841,10 @@ function StatesPage({ t }: { t: Copy }) {
             onRemove={() => undefined}
             removeLabel={t.filterTags.removeButtonName(t.filterTags.designTopic)}
             disabled={state === "disabled"}
-            {...pointer(state)}
+            ref={(chip) => {
+              const button = chip?.querySelector("button");
+              if (button) button.dataset.galleryState = pointer(state)["data-gallery-state"] ?? "";
+            }}
           >
             {t.filterTags.designTopic}
           </Chip>
@@ -928,7 +942,7 @@ function StatesPage({ t }: { t: Copy }) {
               hint={t.stateMatrix.longSampleText}
               error={t.agentForm.digestChannelGone}
             >
-              <Input defaultValue={t.stateMatrix.longSampleText} />
+              <Input key={t.stateMatrix.longSampleText} defaultValue={t.stateMatrix.longSampleText} />
             </Field>
             <Callout tone="warning" title={t.stateMatrix.longSampleText}>
               {t.agentForm.digestChannelGone}

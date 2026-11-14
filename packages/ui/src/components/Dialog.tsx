@@ -84,7 +84,7 @@ export function ConfirmDialog({
   cancelLabel,
   onConfirm,
   tone = "default",
-  confirming = false,
+  confirming,
 }: ConfirmDialogProps) {
   return (
     <AlertPrimitive.Root
@@ -106,13 +106,21 @@ export function ConfirmDialog({
             <AlertPrimitive.Cancel asChild>
               <Button variant="secondary">{cancelLabel}</Button>
             </AlertPrimitive.Cancel>
-            <Button
-              variant={tone === "danger" ? "danger" : "primary"}
-              loading={confirming}
-              onClick={onConfirm}
+            <AlertPrimitive.Action
+              asChild
+              onClick={(event) => {
+                // Caller-managed open/busy flows decide when the action is complete.
+                if (open !== undefined || confirming !== undefined) event.preventDefault();
+              }}
             >
-              {confirmLabel}
-            </Button>
+              <Button
+                variant={tone === "danger" ? "danger" : "primary"}
+                loading={confirming}
+                onClick={onConfirm}
+              >
+                {confirmLabel}
+              </Button>
+            </AlertPrimitive.Action>
           </footer>
         </AlertPrimitive.Content>
       </AlertPrimitive.Portal>
