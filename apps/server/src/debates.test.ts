@@ -7,6 +7,7 @@ import type { ActorRef, DebateClaim } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { answerKey } from "@vanr/engine/debate-protocol";
 import { newId } from "@vanr/engine/ids";
+import { emptyUsage } from "@vanr/engine/models/types";
 import { and, eq } from "drizzle-orm";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "../test/harness";
 import { memberOf, type Person, seedChannel, seedWorkspace } from "../test/seed";
@@ -466,6 +467,68 @@ describe("anonymity until the debate closes", () => {
       );
       for (const p of revealed) expect(toPost(p, closed)).toMatchObject({ author: p.author, runId: p.runId });
       expect(toDebate(closed).pseudonyms).toEqual(closed.pseudonyms);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("the debate's spend at once", () => {
+  test(
+    "two turns spending at once: the debate's cap admits only what fits, and the spend shown adds both settled calls",
+    async () => {
+      const a1 = await newAgent("spender-one");
+      const a2 = await newAgent("spender-two");
+      const opened = await openDebate(server.deps, {
+        workspaceId,
+        title: "Spend",
+        goal: "Cost",
+        agentIds: [a1.id, a2.id],
+        createdBy: person(ana),
+        requesterUserId: ana.user.id,
+        origin: { kind: "manual" },
+        spendCapPercent: 1,
+      });
+      await server.deps.runtime.settle();
+      const cap = opened.spendCapUsd ?? 0;
+      expect(cap).toBeGreaterThan(0);
+      // The scope every turn of this debate reserves on (the same one `toDetail` reads the spend from).
+      const scope = { kind: "debate" as const, id: opened.id, limitUsd: cap, period: "total" as const };
+      const at = new Date();
+      const reserve = (share: number) =>
+        Promise.all(
+          [a1, a2].map(() =>
+            server.deps.ledger.reserve({ workspaceId, scopes: [scope], estimateUsd: cap * share, at }),
+          ),
+        );
+      // Each fits alone, the two together don't: one of the two concurrent turns is turned away.
+      const big = await reserve(0.6);
+      expect(big.filter((r) => r.ok)).toHaveLength(1);
+      const small = await reserve(0.15);
+      const usage = { ...emptyUsage(), inputTokens: 1000, outputTokens: 100 };
+      const costs = await Promise.all(
+        [...big, ...small].flatMap((r, i) =>
+          r.ok
+            ? [
+                server.deps.ledger.settle(r.reservation, {
+                  workspaceId,
+                  agentId: i % 2 ? a2.id : a1.id,
+                  userId: ana.user.id,
+                  runId: null,
+                  source: "debate",
+                  model: "claude-haiku-5-5",
+                  usage,
+                  at,
+                }),
+              ]
+            : [],
+        ),
+      );
+      // Two calls settled at once on the same debate: the spend counts every one of them.
+      expect(costs).toHaveLength(3);
+      const total = costs.reduce((sum, c) => sum + c.costUsd, 0);
+      expect(total).toBeGreaterThan(0);
+      const detail = await toDetail(server.deps, await fresh(opened.id));
+      expect(detail.spentUsd).toBeCloseTo(Math.round(total * 10_000) / 10_000, 4);
     },
     SERVER_TEST_MS,
   );

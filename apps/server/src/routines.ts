@@ -39,6 +39,13 @@ import { PERSONAL_PLAN_TEXT, withPlanOwner } from "./runners/plans";
 const { routines, routineExecutions, agents, messages, runs, mailConnections } = schema;
 export type RoutineRow = typeof routines.$inferSelect;
 type ExecutionRow = typeof routineExecutions.$inferSelect;
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/**
+ * `pausedReason` of a routine that turned itself off because its series ended (the last time of a schedule, or the
+ * one time of "once"). It isn't a pause: a fire recorded before the end still runs.
+ */
+export const SERIES_ENDED = "ended";
 
 /**
  * Events that fire a routine. Only what people do fires one (keeps a routine from firing a routine). The producers:
@@ -421,24 +428,7 @@ export async function registerFire(
   fire: Fire,
 ): Promise<{ run: ExecutionRow; duplicate: false } | { run: ExecutionRow | null; duplicate: true }> {
   const { db } = deps;
-  const payload = fire.context
-    ? { ...fire.context, text: fire.context.text.slice(0, ROUTINE_CONTEXT_CHARS) }
-    : null;
-  const [run] = await db
-    .insert(routineExecutions)
-    .values({
-      id: newId("rrun"),
-      routineId,
-      at: deps.now(),
-      status: "pending",
-      trigger: fire.trigger,
-      scheduledFor: fire.scheduledFor ?? null,
-      dedupeKey: fire.key ?? null,
-      payload,
-      summaryVars: fire.params ?? null,
-    })
-    .onConflictDoNothing()
-    .returning();
+  const run = await insertFire(db, deps.now(), routineId, fire);
   if (run) return { run, duplicate: false };
   const [existing] = await db
     .select()
@@ -452,6 +442,34 @@ export async function registerFire(
       ),
     );
   return { run: existing ?? null, duplicate: true };
+}
+
+/** The `pending` row of a fire, or null when one with the same time or key exists (in the caller's transaction). */
+async function insertFire(
+  db: Db | Tx,
+  at: Date,
+  routineId: string,
+  fire: Fire,
+): Promise<ExecutionRow | null> {
+  const payload = fire.context
+    ? { ...fire.context, text: fire.context.text.slice(0, ROUTINE_CONTEXT_CHARS) }
+    : null;
+  const [run] = await db
+    .insert(routineExecutions)
+    .values({
+      id: newId("rrun"),
+      routineId,
+      at,
+      status: "pending",
+      trigger: fire.trigger,
+      scheduledFor: fire.scheduledFor ?? null,
+      dedupeKey: fire.key ?? null,
+      payload,
+      summaryVars: fire.params ?? null,
+    })
+    .onConflictDoNothing()
+    .returning();
+  return run ?? null;
 }
 
 /** Records and runs (waits for the end). For whoever needs the result: email, tests. */
@@ -555,11 +573,12 @@ export async function startRoutineRun(
     run = owned;
   }
   const policy = policyOf(routine);
-  // Queued, or an orphan the sweep took, from before the pause: it doesn't run any more, and the key goes (the
-  // sender delivers again once it is turned on). The one recorded now runs: the last time of a series turns the
-  // routine off in the same CAS that records it. "Run now" and "once" (and their retries) were asked for already,
-  // so they run with the routine paused.
-  if (!routine.active && (run.status === "queued" || opts.orphan) && !(await askedExplicitly(deps, run)))
+  // Queued, or an orphan the sweep took, from before a person's pause: it doesn't run any more, and the key goes
+  // (the sender delivers again once it is turned on). A routine whose series ended isn't paused: the fire recorded
+  // before the end (in the same transaction that turned it off) runs, even as an orphan after a fall. "Run now" and
+  // "once" (and their retries) were asked for already, so they run with the routine paused.
+  const paused = !routine.active && routine.pausedReason !== SERIES_ENDED;
+  if (paused && (run.status === "queued" || opts.orphan) && !(await askedExplicitly(deps, run)))
     return (
       (await finishRun(
         deps,
@@ -1067,11 +1086,54 @@ const LIMIT_REASONS: Record<string, string> = {
   time_limit: "time_limit",
 };
 
+/** The most occurrences counted one by one for the record of the times missed in a row (past it: "at least"). */
+export const MISSED_COUNT_CAP = 1000;
+
 /**
- * Routines that came due (the runtime's tick, slice S6). Each one is reserved by moving its next time before it runs
- * (compare-and-swap on `nextFireAt`, across instances) and the execution is recorded with the scheduled time (unique
- * per routine). A time missed beyond the window: `skip` writes `missed`; `once` runs once, late (up to 7 days). The
- * times older than the last become a single `missed`, with the count.
+ * The latest occurrence of the rule in [notBefore, before), or null. It looks back in windows that double (1 minute,
+ * 2, 4...), so a routine late by months costs a few dozen small expansions, never one per missed time.
+ */
+function latestBefore(rule: RecurrenceRule, anchor: Date, before: Date, notBefore: Date): Date | null {
+  const end = before.getTime();
+  const floor = notBefore.getTime();
+  for (let span = 60_000; ; span *= 2) {
+    const from = Math.max(floor, end - span);
+    const found = occurrences(rule, { from: new Date(from), to: before, anchor, limit: 100_000 });
+    const last = found.at(-1);
+    if (last) return last;
+    if (from <= floor) return null;
+  }
+}
+
+/**
+ * How many occurrences fall in [first, last] (both occurrences of the rule). A fixed step (minutely, hourly) is
+ * counted by arithmetic; the rest one by one up to MISSED_COUNT_CAP.
+ */
+function countBetween(
+  rule: RecurrenceRule,
+  anchor: Date,
+  first: Date,
+  last: Date,
+): { count: number; atLeast: boolean } {
+  if ((rule.freq === "minutely" || rule.freq === "hourly") && !rule.count) {
+    const step = Math.max(1, rule.interval ?? 1) * (rule.freq === "minutely" ? 60_000 : 3_600_000);
+    return { count: Math.round((last.getTime() - first.getTime()) / step) + 1, atLeast: false };
+  }
+  const found = occurrences(rule, {
+    from: first,
+    to: new Date(last.getTime() + 1),
+    anchor,
+    limit: MISSED_COUNT_CAP,
+  });
+  return { count: found.length, atLeast: found.length >= MISSED_COUNT_CAP };
+}
+
+/**
+ * Routines that came due (the runtime's tick, slice S6). For each one, moving its next time and recording what it owes
+ * happen in one transaction (the compare-and-swap on `nextFireAt` keeps two instances apart): after a fall at any
+ * point, either the time is still due or its fire is recorded. The time that runs is the latest one already due;
+ * the older ones missed while the server was off become one `missed` record with how many and from when to when.
+ * The latest one itself, missed beyond the window, is `missed` under `skip`; under `once` it runs late, up to 7 days.
  */
 export async function dueRoutines(deps: AppDeps): Promise<number> {
   const { db } = deps;
@@ -1088,59 +1150,75 @@ export async function dueRoutines(deps: AppDeps): Promise<number> {
     if (!first) continue;
     const trigger = triggerOf(row);
     const policy = policyOf(row);
-    const slots =
-      trigger.kind === "schedule"
-        ? [
-            first,
-            ...occurrences(seriesRule(trigger.rule, anchorOf(row)), {
-              from: new Date(first.getTime() + 1),
-              to: new Date(at.getTime() + 1),
-              anchor: anchorOf(row),
-              limit: 1000,
-            }),
-          ]
-        : [first];
-    const latest = slots.at(-1) ?? first;
-    const next = trigger.kind === "schedule" ? nextRunFor(trigger, at, anchorOf(row)) : null;
-    const [claimed] = await db
-      .update(routines)
-      // Without a next time ("once", a series that ended), the routine turns itself off: nothing more to run.
-      .set({ nextFireAt: next, ...(next ? {} : { active: false }) })
-      .where(and(eq(routines.id, row.id), sql`${routines.nextFireAt} = ${first.toISOString()}::timestamptz`))
-      .returning({ id: routines.id });
-    if (!claimed) continue;
+    const anchor = anchorOf(row);
+    const rule = trigger.kind === "schedule" ? seriesRule(trigger.rule, anchor) : null;
+    const after = new Date(at.getTime() + 1);
+    const latest = rule ? (latestBefore(rule, anchor, after, first) ?? first) : first;
+    const previous = rule && latest > first ? (latestBefore(rule, anchor, latest, first) ?? first) : null;
+    const next = trigger.kind === "schedule" ? nextRunFor(trigger, at, anchor) : null;
     const kind = trigger.kind === "once" ? "once" : "schedule";
-    const missed = (scheduledFor: Date, count: number) =>
-      db
-        .insert(routineExecutions)
-        .values({
-          id: newId("rrun"),
-          routineId: row.id,
-          at,
-          status: "skipped",
-          trigger: kind,
-          scheduledFor,
-          reason: "missed",
-          summary: `Missed ${count} time(s) while the server was off`,
-          summaryKey: "routines.run.missed",
-          summaryVars: { count },
-          finishedAt: at,
-        })
-        .onConflictDoNothing();
-    if (slots.length > 1) await missed(slots.at(-2) ?? first, slots.length - 1);
     const lateMs = at.getTime() - latest.getTime();
     const late = lateMs > policy.missedWindowMin * 60_000;
-    if (late && (policy.missed === "skip" || lateMs > CATCH_UP_MAX_MS)) {
-      await missed(latest, 1);
-      continue;
-    }
-    const reg = await registerFire(deps, row.id, {
-      trigger: kind,
-      scheduledFor: latest,
-      ...(late ? { params: { lateMin: Math.round(lateMs / 60_000) } } : {}),
+    const skipLatest = late && (policy.missed === "skip" || lateMs > CATCH_UP_MAX_MS);
+    const fire = await db.transaction(async (tx) => {
+      const [claimed] = await tx
+        .update(routines)
+        // Without a next time ("once", a series that ended), the routine turns itself off: nothing more to run.
+        .set({ nextFireAt: next, ...(next ? {} : { active: false, pausedReason: SERIES_ENDED }) })
+        .where(
+          and(eq(routines.id, row.id), sql`${routines.nextFireAt} = ${first.toISOString()}::timestamptz`),
+        )
+        .returning({ id: routines.id });
+      if (!claimed) return null;
+      const missed = (
+        scheduledFor: Date,
+        vars: Record<string, string | number>,
+        count: number,
+        atLeast = false,
+      ) =>
+        tx
+          .insert(routineExecutions)
+          .values({
+            id: newId("rrun"),
+            routineId: row.id,
+            at,
+            status: "skipped",
+            trigger: kind,
+            scheduledFor,
+            reason: "missed",
+            summary: `Missed ${atLeast ? "at least " : ""}${count} time(s) while the server was off`,
+            summaryKey: "routines.run.missed",
+            summaryVars: vars,
+            finishedAt: at,
+          })
+          .onConflictDoNothing();
+      if (rule && previous) {
+        const { count, atLeast } = countBetween(rule, anchor, first, previous);
+        await missed(
+          previous,
+          {
+            count,
+            from: first.toISOString(),
+            to: previous.toISOString(),
+            ...(atLeast ? { atLeast: 1 } : {}),
+          },
+          count,
+          atLeast,
+        );
+      }
+      if (skipLatest) {
+        await missed(latest, { count: 1 }, 1);
+        return null;
+      }
+      return insertFire(tx, at, row.id, {
+        trigger: kind,
+        scheduledFor: latest,
+        ...(late ? { params: { lateMin: Math.round(lateMs / 60_000) } } : {}),
+      });
     });
-    if (reg.duplicate) continue;
-    deps.runtime.track(startRoutineRun(deps, reg.run), "routine.scheduled");
+    if (!fire) continue;
+    // A fall from here on leaves the fire `pending`: the queue's sweep runs it after PENDING_STALE_MS.
+    deps.runtime.track(startRoutineRun(deps, fire), "routine.scheduled");
     started++;
   }
   return started;

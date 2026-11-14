@@ -3,7 +3,7 @@
 // anything is written. A routine whose target is a debate only opens one, so it runs to the end here; the fire, the
 // schedule, the queue, the overlap, the retries and the recovery of an interrupted execution work on their own. An
 // interrupted execution is saved the way the execution saves it while it runs.
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { RoutineTrigger } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
@@ -18,6 +18,7 @@ import {
   drainQueues,
   dueRoutines,
   fireRoutineEvent,
+  MISSED_COUNT_CAP,
   nextRunFor,
   PENDING_STALE_MS,
   RETRY_BASE_MS,
@@ -26,6 +27,7 @@ import {
   registerFire,
   retryDelayMs,
   runtimeFor,
+  SERIES_ENDED,
   STALE_GRACE_MS,
   seriesRule,
   startRoutineRun,
@@ -514,7 +516,12 @@ describe("the schedule", () => {
       await watch.failures();
       const rows = await executionsOf(routine.id);
       expect(rows.map((r) => [r.status, r.reason, r.summaryVars, r.scheduledFor?.toISOString()])).toEqual([
-        ["skipped", "missed", { count: 4 }, "2026-11-14T11:00:00.000Z"],
+        [
+          "skipped",
+          "missed",
+          { count: 4, from: "2026-11-14T08:00:00.000Z", to: "2026-11-14T11:00:00.000Z" },
+          "2026-11-14T11:00:00.000Z",
+        ],
         ["ok", null, expect.not.objectContaining({ lateMin: expect.anything() }), "2026-11-14T12:00:00.000Z"],
       ]);
       expect((await routineRow(routine.id)).nextFireAt?.toISOString()).toBe("2026-11-14T13:00:00.000Z");
@@ -564,6 +571,225 @@ describe("the schedule", () => {
       expect((await executionsOf(routine.id)).map((r) => [r.status, r.summaryVars?.lateMin])).toEqual([
         ["ok", undefined],
       ]);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("a fall while a time comes due", () => {
+  // Only the routine under test comes due in these ticks: the earlier tests' routines are switched off.
+  beforeEach(() =>
+    server.deps.db
+      .update(routines)
+      .set({ active: false })
+      .then(() => undefined),
+  );
+
+  /**
+   * The database as `dueRoutines` sees it, falling at its `at`-th write inside a transaction (0: the move of the
+   * next time, 1: the first record...): the transaction rolls back, as a process that died would leave it.
+   */
+  function fallingAt(at: number): AppDeps["db"] {
+    const db = server.deps.db;
+    return new Proxy(db, {
+      get(target, prop) {
+        if (prop !== "transaction") return Reflect.get(target, prop, target);
+        return (fn: (tx: unknown) => Promise<unknown>) =>
+          target.transaction((tx) => {
+            let writes = 0;
+            const falling = new Proxy(tx, {
+              get(t, p) {
+                const value = Reflect.get(t, p, t);
+                if (p !== "insert" && p !== "update")
+                  return typeof value === "function" ? value.bind(t) : value;
+                return (...args: unknown[]) => {
+                  if (writes++ === at) throw new Error("FALL");
+                  return value.apply(t, args);
+                };
+              },
+            });
+            return fn(falling) as never;
+          });
+      },
+    });
+  }
+
+  /** After the fall: the next tick, then the queue's sweep past PENDING_STALE_MS. */
+  async function recover(at: Date) {
+    const tick = observed(at);
+    await dueRoutines(tick.deps);
+    await tick.failures();
+    const sweep = observed(new Date(at.getTime() + PENDING_STALE_MS + MIN));
+    await drainQueues(sweep.deps);
+    await sweep.failures();
+  }
+
+  const ran = async (id: string) => (await executionsOf(id)).filter((r) => r.status !== "skipped");
+
+  test(
+    "a fall before, between or after moving the time and recording the fire: the time runs exactly once",
+    async () => {
+      const at = new Date("2026-12-01T12:00:00Z");
+      const cases: { trigger: Record<string, unknown>; slot: Date; writes: number }[] = [
+        { trigger: { kind: "once", at: at.toISOString(), timezone: "UTC" }, slot: at, writes: 2 },
+        // Two hours late: the move, the record of the missed times, the fire.
+        {
+          trigger: { kind: "schedule", rule: { freq: "hourly", timezone: "UTC" } },
+          slot: new Date(at.getTime() - 120 * MIN),
+          writes: 3,
+        },
+      ];
+      for (const c of cases)
+        for (let fall = 0; fall <= c.writes; fall++) {
+          const routine = await newRoutine({
+            trigger: c.trigger,
+            nextFireAt: c.slot,
+            createdAt: new Date("2026-11-01T00:00:00Z"),
+          });
+          const crash = observed(at);
+          const deps =
+            fall < c.writes
+              ? { ...crash.deps, db: fallingAt(fall) }
+              : // After the commit: the process dies before the execution starts.
+                {
+                  ...crash.deps,
+                  runtime: {
+                    ...crash.deps.runtime,
+                    track(work: Promise<unknown>, what: string) {
+                      if (what === "routine.scheduled") throw new Error("FALL");
+                      crash.deps.runtime.track(work, what);
+                    },
+                  },
+                };
+          await expect(dueRoutines(deps)).rejects.toThrow("FALL");
+          await recover(at);
+          expect([c.trigger.kind, fall, (await ran(routine.id)).map((r) => r.status)]).toEqual([
+            c.trigger.kind,
+            fall,
+            ["ok"],
+          ]);
+          await drop(routine);
+        }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "the last time of a series that fell after its fire was recorded still runs; a person's pause still skips",
+    async () => {
+      const at = new Date("2026-12-02T12:00:00Z");
+      const last = await newRoutine({
+        trigger: {
+          kind: "schedule",
+          rule: { freq: "hourly", timezone: "UTC", start: at.toISOString(), count: 1 },
+        },
+        nextFireAt: at,
+      });
+      const crash = observed(at);
+      const dying = {
+        ...crash.deps,
+        runtime: {
+          ...crash.deps.runtime,
+          track(work: Promise<unknown>, what: string) {
+            if (what === "routine.scheduled") throw new Error("FALL");
+            crash.deps.runtime.track(work, what);
+          },
+        },
+      };
+      await expect(dueRoutines(dying)).rejects.toThrow("FALL");
+      expect(await routineRow(last.id)).toMatchObject({
+        active: false,
+        pausedReason: SERIES_ENDED,
+        nextFireAt: null,
+      });
+      await recover(at);
+      expect((await executionsOf(last.id)).map((r) => [r.status, r.reason])).toEqual([["ok", null]]);
+
+      // The same orphan when a person paused the routine: it doesn't run.
+      const pausedByPerson = await newRoutine({
+        trigger: { kind: "schedule", rule: { freq: "hourly", timezone: "UTC" } },
+        nextFireAt: at,
+      });
+      const reg = await registerFire(server.deps, pausedByPerson.id, {
+        trigger: "schedule",
+        scheduledFor: at,
+      });
+      if (reg.duplicate) throw new Error("duplicate");
+      await server.deps.db
+        .update(routines)
+        .set({ active: false, nextFireAt: null })
+        .where(eq(routines.id, pausedByPerson.id));
+      await recover(at);
+      expect((await executionsOf(pausedByPerson.id)).map((r) => [r.status, r.reason])).toEqual([
+        ["skipped", "paused"],
+      ]);
+      await drop(last, pausedByPerson);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a routine every 5 minutes, 90 days late: the missed times are one record and the current time runs, quickly",
+    async () => {
+      expect(MISSED_COUNT_CAP).toBe(1000);
+      const at = new Date("2026-12-03T12:00:00Z");
+      const lag = 90 * 24 * 60 * MIN;
+      for (const missed of ["skip", "once"] as const) {
+        const routine = await newRoutine({
+          trigger: { kind: "schedule", rule: { freq: "minutely", interval: 5, timezone: "UTC" } },
+          nextFireAt: new Date(at.getTime() - lag),
+          createdAt: new Date(at.getTime() - lag),
+          policy: { missed },
+        });
+        const watch = observed(at);
+        const heap = process.memoryUsage().heapUsed;
+        const began = performance.now();
+        await dueRoutines(watch.deps);
+        const ms = performance.now() - began;
+        await watch.failures();
+        expect(ms).toBeLessThan(2000);
+        expect(process.memoryUsage().heapUsed - heap).toBeLessThan(64 * 1024 * 1024);
+        const rows = await executionsOf(routine.id);
+        expect(rows.map((r) => [r.status, r.reason, r.scheduledFor?.toISOString()])).toEqual([
+          ["skipped", "missed", new Date(at.getTime() - 5 * MIN).toISOString()],
+          ["ok", null, at.toISOString()],
+        ]);
+        // Every 5 minutes from 90 days ago up to 5 minutes ago.
+        expect(rows[0]?.summaryVars).toEqual({
+          count: lag / (5 * MIN),
+          from: new Date(at.getTime() - lag).toISOString(),
+          to: new Date(at.getTime() - 5 * MIN).toISOString(),
+        });
+        expect((await routineRow(routine.id)).nextFireAt?.toISOString()).toBe(
+          new Date(at.getTime() + 5 * MIN).toISOString(),
+        );
+        await drop(routine);
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a rule without a fixed step counts its missed times one by one up to MISSED_COUNT_CAP, then says at least",
+    async () => {
+      const at = new Date("2026-12-04T09:30:00Z");
+      const lag = 1500 * 24 * 60 * MIN;
+      const routine = await newRoutine({
+        trigger: { kind: "schedule", rule: { freq: "daily", times: ["09:00"], timezone: "UTC" } },
+        nextFireAt: new Date("2022-10-26T09:00:00Z"),
+        createdAt: new Date(at.getTime() - lag),
+      });
+      const watch = observed(at);
+      await dueRoutines(watch.deps);
+      await watch.failures();
+      const [missed, current] = await executionsOf(routine.id);
+      expect(missed?.summaryVars).toMatchObject({ count: MISSED_COUNT_CAP, atLeast: 1 });
+      expect(missed?.summary).toContain("at least 1000");
+      expect([current?.status, current?.scheduledFor?.toISOString()]).toEqual([
+        "ok",
+        "2026-12-04T09:00:00.000Z",
+      ]);
+      await drop(routine);
     },
     SERVER_TEST_MS,
   );
