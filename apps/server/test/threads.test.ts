@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { eq } from "drizzle-orm";
 import { channelInWorkspace } from "../src/channels";
-import { postMessage } from "../src/messages";
+import { listMessages, postMessage } from "../src/messages";
 import type { RealtimeEvent } from "../src/realtime/hub";
 import type { RunningServer } from "../src/server";
 import { Browser, body, SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
@@ -65,6 +65,81 @@ const ok = async (res: Response, status = 200) => {
 const failure = async (res: Response) => ({ status: res.status, code: (await body(res)).error?.code });
 
 describe("threads", () => {
+  test(
+    "moving hides the root before the channel page limit, preserves the thread, and return restores it",
+    async () => {
+      const { workspaceId, general, ana } = await team();
+      const older = await post(workspaceId, general, ana, "Earlier channel message");
+      const root = await post(workspaceId, general, ana, "Move this topic");
+      const reply = await post(workspaceId, general, ana, "Keep this reply", { threadId: root.id });
+      const path = `${W(workspaceId)}/threads/${root.id}`;
+      const channelPage = () => listMessages(server.deps.db, { channelId: general, limit: 1 });
+      expect((await channelPage()).map((m) => m.id)).toEqual([root.id]);
+      expect((await ok(await call(ana, `${path}/move`, "POST"))).context.moved).toBe(true);
+      expect((await channelPage()).map((m) => m.id)).toEqual([older.id]);
+      expect(await ok(await call(ana, path))).toMatchObject({
+        openingText: "Move this topic",
+        replyCount: 1,
+        context: { moved: true },
+      });
+      expect((await ok(await call(ana, `${W(workspaceId)}/threads`))).threads).toContainEqual(
+        expect.objectContaining({ id: root.id }),
+      );
+      expect(
+        (await listMessages(server.deps.db, { channelId: general, threadId: root.id, limit: 1 })).map(
+          (m) => m.id,
+        ),
+      ).toEqual([reply.id]);
+      expect((await ok(await call(ana, `${path}/return`, "POST"))).context.moved).toBe(false);
+      expect((await channelPage()).map((m) => m.id)).toEqual([root.id]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "an explicitly opened thread records its first reply once, including concurrent replies",
+    async () => {
+      const { workspaceId, general, ana } = await team();
+      const root = await post(workspaceId, general, ana, "Opened before replies");
+      const path = `${W(workspaceId)}/threads/${root.id}`;
+      const opened = await ok(
+        await call(ana, `${W(workspaceId)}/threads`, "POST", {
+          channelId: general,
+          messageId: root.id,
+          title: "Topic",
+        }),
+        201,
+      );
+      expect(opened.firstReplyAt).toBeNull();
+      const channel = await channelInWorkspace(server.deps.db, workspaceId, general);
+      if (!channel) throw new Error("no channel");
+      const replyAt = (at: string) =>
+        postMessage(
+          { ...server.deps, now: () => new Date(at) },
+          {
+            workspaceId,
+            channel,
+            author: { type: "person", id: ana.user.id },
+            body: "Reply",
+            clientId: null,
+            threadId: root.id,
+          },
+        );
+      const firstTimes = ["2030-01-01T00:00:00.000Z", "2030-01-01T00:00:01.000Z"];
+      await Promise.all(firstTimes.map(replyAt));
+      const first = await ok(await call(ana, path));
+      expect(first.replyCount).toBe(2);
+      expect(firstTimes).toContain(first.firstReplyAt);
+      await replyAt("2030-01-02T00:00:00.000Z");
+      await Promise.all([replyAt("2030-01-03T00:00:00.000Z"), replyAt("2030-01-04T00:00:00.000Z")]);
+      expect(await ok(await call(ana, path))).toMatchObject({
+        replyCount: 5,
+        firstReplyAt: first.firstReplyAt,
+      });
+    },
+    SERVER_TEST_MS,
+  );
+
   test(
     "create, edit, close, move, archive, list and remove",
     async () => {

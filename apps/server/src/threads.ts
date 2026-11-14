@@ -4,6 +4,8 @@ import { can, type Role } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { canActRole, isClosed, roleOf, waitingFor } from "./assignments/core";
+import { planOf } from "./assignments/plan";
+import { MAX_ROUNDS, MAX_TURNS } from "./assignments/state";
 import type { AppDeps } from "./context";
 import { excerpt } from "./messages";
 
@@ -19,6 +21,8 @@ const {
   members,
   assignments,
   assignmentParticipants,
+  assignmentJoinRequests,
+  assignmentPlanItems,
   assignmentDecisions,
   assignmentReviews,
   assignmentCommands,
@@ -53,10 +57,17 @@ export const actionNeededSql = (viewer: Viewer) => sql`(
       and (mi.owner_id = ${viewer.userId} or exists (
         select 1 from ${assignmentParticipants} mp
         where mp.assignment_id = mi.id and mp.user_id = ${viewer.userId} and mp.role = 'decide'))
-      and (exists (select 1 from ${assignmentDecisions} d where d.assignment_id = mi.id and d.status = 'pending')
+      and ((mi.owner_id = ${viewer.userId} and (
+          (mi.status = 'paused' and mi.ceiling is not null)
+          or exists (select 1 from ${assignmentJoinRequests} j where j.assignment_id = mi.id and j.status = 'pending')))
+        or exists (select 1 from ${assignmentDecisions} d where d.assignment_id = mi.id and d.status = 'pending')
         or exists (select 1 from ${assignmentReviews} v where v.assignment_id = mi.id and v.status = 'pending')
         or exists (select 1 from ${assignmentCommands} c where c.assignment_id = mi.id and c.state = 'pending')
-        or exists (select 1 from ${assignmentSubmissions} l where l.assignment_id = mi.id and l.status = 'pending'))))`;
+        or exists (select 1 from ${assignmentSubmissions} l where l.assignment_id = mi.id and l.status = 'pending')
+        or exists (select 1 from ${assignmentPlanItems} i where i.assignment_id = mi.id
+          and (i.status = 'blocked_on_you'
+            or (i.status not in ('done','dropped') and i.turns >= ${MAX_TURNS})
+            or (i.status = 'done' and i.kind <> 'fix' and i.passes is not true and i.checks >= ${MAX_ROUNDS}))))))`;
 
 /** An assignment's thread ("assignments" tab). */
 export const assignmentSql = () =>
@@ -124,7 +135,7 @@ export async function threadInfos(db: Db, viewer: Viewer, rows: ThreadRow[]): Pr
 
   const assignmentInfo = new Map<string, NonNullable<ThreadInfo["assignment"]>>();
   for (const m of await db.select().from(assignments).where(inArray(assignments.threadId, ids))) {
-    const live = m.plan.items.filter((i) => i.status !== "dropped");
+    const live = (await planOf({ db }, m.id)).filter((i) => i.status !== "dropped");
     const role = await roleOf(db, viewer, m);
     assignmentInfo.set(m.threadId, {
       assignmentId: m.id,

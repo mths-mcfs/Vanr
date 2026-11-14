@@ -18,6 +18,7 @@ import {
   visibleAssignments,
   waitingFor,
 } from "../src/assignments/core";
+import { type PlanItemRow, writePlan } from "../src/assignments/plan";
 import {
   addJobProofs,
   addProofs,
@@ -30,7 +31,7 @@ import {
 import { modelVerifier } from "../src/assignments/verify";
 import { channelInWorkspace } from "../src/channels";
 import type { WorkspaceMember } from "../src/context";
-import { postMessage } from "../src/messages";
+import { ensureThread, postMessage } from "../src/messages";
 import type { RealtimeEvent } from "../src/realtime/hub";
 import type { RunningServer } from "../src/server";
 import { body, SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
@@ -126,6 +127,135 @@ const messagesIn = (channelId: string) =>
   server.deps.db.select().from(schema.messages).where(eq(schema.messages.channelId, channelId));
 
 describe("who sees and acts on an assignment", () => {
+  test(
+    "the thread counts the current plan and excludes dropped items",
+    async () => {
+      const t = await team();
+      await writePlan(server.deps, t.row.id, {
+        author: { type: "agent", id: t.agentId },
+        mode: "agent",
+        items: [
+          { id: "done", title: "Shipped", status: "done" },
+          { id: "todo", title: "Next", status: "todo" },
+          { id: "dropped", title: "Removed" },
+        ],
+      });
+      await writePlan(server.deps, t.row.id, {
+        author: { type: "agent", id: t.agentId },
+        mode: "agent",
+        items: [
+          { id: "done", title: "Shipped" },
+          { id: "todo", title: "Next" },
+        ],
+      });
+      const assignment = await assignmentFor(server.deps, await reload(t.row), t.member(t.ana));
+      expect(assignment.plan).toMatchObject({ done: 1, total: 2 });
+      const res = await t.ana.browser.fetch(`/api/v1/workspaces/${t.workspaceId}/threads/${t.root.id}`);
+      expect(res.status).toBe(200);
+      expect((await body(res)).assignment).toMatchObject({ stepsDone: 1, stepsTotal: 2 });
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "action-needed filtering matches assignment waits and owner restrictions before pagination",
+    async () => {
+      const t = await team();
+      const { db } = server.deps;
+      const channel = await channelInWorkspace(db, t.workspaceId, t.channelId);
+      if (!channel) throw new Error("no channel");
+      for (let i = 0; i < 2; i++) {
+        const { message } = await postMessage(server.deps, {
+          workspaceId: t.workspaceId,
+          channel,
+          author: { type: "agent", id: t.agentId },
+          body: "Nothing pending",
+          clientId: null,
+        });
+        const [root] = await db.select().from(schema.messages).where(eq(schema.messages.id, message.id));
+        if (!root) throw new Error("no root");
+        await ensureThread(db, {
+          root,
+          by: { type: "agent", id: t.agentId },
+          at: new Date("2030-01-01T00:00:00Z"),
+          title: "Quiet",
+        });
+      }
+      const actor = { type: "agent", id: t.agentId } satisfies schema.AssignmentActor;
+      await db.insert(schema.assignmentPlanItems).values({
+        assignmentId: t.row.id,
+        id: "item",
+        ord: 0,
+        title: "Work",
+        createdBy: actor,
+        updatedBy: actor,
+      });
+      await db.insert(schema.assignmentJoinRequests).values({
+        assignmentId: t.row.id,
+        userId: t.caio.user.id,
+        status: "declined",
+      });
+      const cases: {
+        assignment?: Partial<AssignmentRow>;
+        item?: Partial<PlanItemRow>;
+        join?: boolean;
+        owner: boolean;
+        decider: boolean;
+      }[] = [
+        { assignment: { status: "paused", ceiling: "dollars" }, owner: true, decider: false },
+        { join: true, owner: true, decider: false },
+        { item: { status: "blocked_on_you" }, owner: true, decider: true },
+        { item: { turns: 4 }, owner: true, decider: true },
+        { item: { status: "done", checks: 3 }, owner: true, decider: true },
+        { item: { status: "done", checks: 3, passes: false }, owner: true, decider: true },
+        { item: { turns: 3, checks: 3 }, owner: false, decider: false },
+        { item: { status: "done", turns: 4, checks: 2 }, owner: false, decider: false },
+        { item: { status: "done", checks: 3, passes: true }, owner: false, decider: false },
+        { item: { status: "done", checks: 3, kind: "fix" }, owner: false, decider: false },
+        { item: { status: "dropped", turns: 4, checks: 3 }, owner: false, decider: false },
+        { assignment: { status: "done" }, item: { turns: 4 }, join: true, owner: false, decider: false },
+        { assignment: { status: "canceled" }, item: { turns: 4 }, join: true, owner: false, decider: false },
+      ];
+      const path = `/api/v1/workspaces/${t.workspaceId}/threads`;
+      for (const c of cases) {
+        await db
+          .update(schema.assignments)
+          .set({ status: "active", ceiling: null, ...c.assignment })
+          .where(eq(schema.assignments.id, t.row.id));
+        await db
+          .update(schema.assignmentPlanItems)
+          .set({ status: "todo", turns: 0, checks: 0, passes: null, kind: "work", ...c.item })
+          .where(eq(schema.assignmentPlanItems.assignmentId, t.row.id));
+        await db
+          .update(schema.assignmentJoinRequests)
+          .set({ status: c.join ? "pending" : "declined" })
+          .where(eq(schema.assignmentJoinRequests.assignmentId, t.row.id));
+        const row = await reload(t.row);
+        for (const [who, expected] of [
+          [t.ana, c.owner],
+          [t.beto, c.decider],
+          [t.caio, false],
+        ] as const) {
+          expect(await waitingFor(db, t.member(who), row)).toBe(expected);
+          const detail = await who.browser.fetch(`${path}/${t.root.id}`);
+          expect(detail.status).toBe(200);
+          expect(await body(detail)).toMatchObject({
+            actionNeeded: expected,
+            assignment: { blockedOnYou: expected },
+          });
+          const filtered = await who.browser.fetch(`${path}?actionNeeded=true&limit=1`);
+          expect(filtered.status).toBe(200);
+          const page = await body(filtered);
+          expect(page.threads.map((thread: { id: string }) => thread.id)).toEqual(
+            expected ? [t.root.id] : [],
+          );
+          expect(page.nextCursor).toBeNull();
+        }
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
   test(
     "the owner, a participant who decides, a reader of the public channel; a private channel hides it",
     async () => {
