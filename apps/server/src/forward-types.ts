@@ -9,9 +9,6 @@ import type { BudgetScope } from "@vanr/engine/usage";
 import type { AgentRow } from "./agents";
 import type { AppDeps } from "./context";
 
-/** From `assignments/core`. */
-export type AssignmentRow = typeof schema.assignments.$inferSelect;
-
 /** From `runtime/tools`: what the model reviewer sees of the call, the exact effect, never the agent's reasoning. */
 export interface ReviewRequest {
   tool: string;
@@ -27,9 +24,6 @@ export type ProviderUnavailable = { error: "no_credential" | "unsupported_provid
 export type ProviderLookup = (
   agent: Pick<AgentRow, "workspaceId" | "credentialId">,
 ) => Promise<ModelProvider | ProviderUnavailable>;
-
-/** From `messages`. */
-export type MessageRow = typeof schema.messages.$inferSelect;
 
 /** From `control`. */
 export type QuestionRow = typeof schema.questions.$inferSelect;
