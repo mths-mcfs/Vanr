@@ -7,6 +7,7 @@
     "apps/runner/src/cdp.test.ts": 4246,
     "apps/runner/src/cli.test.ts": 1,
     "apps/runner/src/client-send.test.ts": 500,
+    "apps/runner/src/effects.test.ts": 500,
     "apps/runner/src/frame-gate.test.ts": 1,
     "apps/runner/src/harness.test.ts": 817,
     "apps/runner/src/jobs-diff.test.ts": 18000,

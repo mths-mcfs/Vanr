@@ -356,3 +356,46 @@ describe("CSV", () => {
     expect(matchHeader([" value ", "X"], DEFS).map((d) => d?.id ?? null)).toEqual(["n", null]);
   });
 });
+
+describe("CSV formula protection behind leading whitespace", () => {
+  const back = (cell: string) => parseCsv(toCsv([["h"], [cell]]))[1]?.[0];
+
+  test("a formula after leading whitespace is protected", () => {
+    for (const cell of [" =1+1", " =1", "\n=SUM(A1)", "﻿+1", " \t@x", "  -x", " =1", "\r\n-1+1"]) {
+      expect([cell, protectCell(cell).startsWith("'")]).toEqual([cell, true]);
+      expect([cell, back(cell)]).toEqual([cell, cell]);
+    }
+  });
+
+  test("numbers, plain text and whitespace-only cells stay as they are", () => {
+    for (const cell of [" -5", "-5,5", " -5", " 3e2", "text", "   ", "", "'90s", "a=b"])
+      expect([cell, protectCell(cell)]).toEqual([cell, cell]);
+  });
+
+  test("a cell that already starts with an apostrophe before a formula keeps its apostrophe", () => {
+    expect(protectCell("'=x")).toBe("''=x");
+    expect(back("'=x")).toBe("'=x");
+    expect(back("'' =x")).toBe("'' =x");
+    expect(back("' =x")).toBe("' =x");
+  });
+
+  test("property: any cell comes back from toCsv and parseCsv unchanged (20 thousand cells)", () => {
+    const alphabet = ["'", "=", "+", "-", "@", " ", "\t", "\r", "\n", " ", "﻿", "1", "5", ",", ".", "a"];
+    // 32-bit LCG with Math.imul: a plain multiply passes 2^53 and loses the low bits
+    let seed = 20_261_114;
+    const next = () => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed >>> 8;
+    };
+    let checked = 0;
+    const failures: string[] = [];
+    for (let k = 0; k < 20_000; k++) {
+      const len = 1 + (next() % 8);
+      let cell = "";
+      for (let i = 0; i < len; i++) cell += alphabet[next() % alphabet.length];
+      checked++;
+      if (back(cell) !== cell) failures.push(JSON.stringify(cell));
+    }
+    expect({ checked, failures: failures.slice(0, 5) }).toEqual({ checked: 20_000, failures: [] });
+  });
+});
