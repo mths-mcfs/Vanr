@@ -118,7 +118,12 @@ export async function pair(opts: PairOptions): Promise<RunnerConfig> {
         workDir: opts.workDir ?? previous?.workDir ?? join(homedir(), PRODUCT.slug),
         access:
           previous?.runnerId === body.runnerId
-            ? previous.access
+            ? {
+                ...previous.access,
+                ...(execOn
+                  ? {}
+                  : { tools: { claude: false, codex: false, commands: false, browser: false } }),
+              }
             : {
                 folders: [],
                 tools: { claude: execOn, codex: execOn, commands: execOn, browser: execOn && !!findChrome() },

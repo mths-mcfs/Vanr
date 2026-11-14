@@ -35,7 +35,7 @@ describe("classify", () => {
       expect(classify({ kind, waiting: false }, []).tab).toBe("fyi");
   });
 
-  test("critical only with an open request and a critical reason (approval, question, failure)", () => {
+  test("critical with an open request and a critical reason, or an explicit critical priority", () => {
     expect(classify({ kind: "question_for_you", waiting: true }, []).critical).toBe(true);
     expect(classify({ kind: "question_for_you", reason: "secret_prompt", waiting: true }, []).critical).toBe(
       false,
@@ -44,8 +44,22 @@ describe("classify", () => {
     expect(classify({ kind: "debate_turn", waiting: true, priority: "critical" }, []).critical).toBe(true);
     expect(classify({ kind: "dm", waiting: false, priority: "critical" }, [])).toMatchObject({
       tab: "action_needed",
-      critical: false,
+      critical: true,
     });
+    const input = {
+      kind: "routine_alert",
+      reason: "agent_failed",
+      waiting: false,
+      priority: "critical",
+    } as const;
+    for (const rules of [[], [{ id: "a", tab: "fyi" as const }]]) {
+      const notice = classify(input, rules);
+      expect(notice.critical).toBe(true);
+      const now = new Date("2026-10-22T23:00:00Z");
+      expect(
+        dueAt("push", notice, s({ quietHours: { enabled: true, start: "22:00", end: "08:00" } }), "UTC", now),
+      ).toEqual(now);
+    }
   });
 
   test("the first matching rule wins; an open request ignores rules; the requested priority applies without a rule", () => {
@@ -110,6 +124,16 @@ describe("wantsChannel (conservative default)", () => {
 
 describe("quiet", () => {
   const at = (iso: string) => new Date(iso);
+  test("DND ending inside a later quiet window waits for that window's exit", () => {
+    const settings = s({
+      dndUntil: "2026-10-22T23:00:00Z",
+      quietHours: { enabled: true, start: "22:00", end: "08:00" },
+    });
+    const due = dueAt("push", { critical: false }, settings, "UTC", at("2026-10-22T21:00:00Z"));
+    expect(due.toISOString()).toBe("2026-10-23T08:00:00.000Z");
+    expect(silenceUntil(settings, "UTC", due)).toBeNull();
+  });
+
   test("do not disturb until the set time; an expired one does not count", () => {
     expect(
       silenceUntil(s({ dndUntil: "2026-10-22T15:00:00Z" }), "UTC", at("2026-10-22T14:00:00Z"))?.toISOString(),

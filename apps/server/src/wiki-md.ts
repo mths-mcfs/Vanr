@@ -113,37 +113,11 @@ export function wikiMarkdown(): Promise<WikiMarkdown> {
       return doc;
     };
     const ser = (doc: PMNode) => finishMarkdown(serialize(doc));
-    /**
-     * The document after going through Yjs. y-prosemirror 1.3.7 does not keep a mark on an inline node
-     * that is not text: an image inside a link, a line break in italics, a [[link]] in bold
-     * come back without the mark. Whatever comes from the live session arrives like this.
-     */
-    const viaY = (doc: PMNode): PMNode => {
-      const fragment = new Y.Doc().getXmlFragment(YFRAGMENT);
-      prosemirrorToYXmlFragment(doc, fragment);
-      return yXmlFragmentToProseMirrorRootNode(fragment, schema);
-    };
-    /** Only an inline node that is not text and has a mark changes in Yjs: the rest does not need the second form. */
-    const lossyInY = (doc: PMNode): boolean => {
-      let hit = false;
-      doc.descendants((n) => {
-        if (n.isInline && !n.isText && n.marks.length > 0) hit = true;
-        return !hit;
-      });
-      return hit;
-    };
-    /** Canonical forms of a block alone: what the editor would write, directly and after Yjs. */
-    const canon = (text: string): string[] => {
-      const doc = toDoc(text);
-      const direct = ser(doc).trim();
-      if (!lossyInY(doc)) return [direct];
-      const live = ser(viaY(doc)).trim();
-      return live === direct ? [direct] : [direct, live];
-    };
+    const canon = (text: string): string => ser(toDoc(text)).trim();
 
     // Canonical forms of the blocks of each base, cached: autosave serializes the same base
     // many times and each form costs one parse + serialize of the block.
-    const baseCache = new Map<string, { origs: Block[]; keys: string[][] }>();
+    const baseCache = new Map<string, { origs: Block[]; keys: string[] }>();
     const baseInfo = (base: string) => {
       const hit = baseCache.get(base);
       if (hit) {
@@ -167,14 +141,10 @@ export function wikiMarkdown(): Promise<WikiMarkdown> {
       // Queue of original indexes per canonical form; matches in ascending order. The output block already
       // is the serializer's form: its key is the text itself (the guard at the end covers the rest).
       const pool = new Map<string, number[]>();
-      // A block can match by the direct form or by the one that comes back from Yjs; the ascending order keeps
-      // the same original block from matching twice.
-      keys.forEach((forms, i) => {
-        for (const k of forms) {
-          const list = pool.get(k) ?? [];
-          list.push(i);
-          pool.set(k, list);
-        }
+      keys.forEach((key, i) => {
+        const list = pool.get(key) ?? [];
+        list.push(i);
+        pool.set(key, list);
       });
       let lastOrig = -1;
       const picked: (number | null)[] = outs.map((b) => {
@@ -203,11 +173,8 @@ export function wikiMarkdown(): Promise<WikiMarkdown> {
         lastPick != null && lastPick === origs.length - 1
           ? base.slice((origs[lastPick] as Block).end)
           : full.slice((outs[outs.length - 1] as Block).end);
-      // Guard: the preserved text has to re-read as the same document (directly, or after Yjs
-      // when the document came from the live session). If not, the serialized one wins (e.g. two neighbouring
-      // lists that, with the original marker, become one).
-      const reread = toDoc(out);
-      return ser(reread) === full || (lossyInY(reread) && ser(viaY(reread)) === full) ? out : full;
+      // The preserved text must serialize as the edited document, including its marks.
+      return ser(toDoc(out)) === full ? out : full;
     };
 
     return {

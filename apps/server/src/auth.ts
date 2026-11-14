@@ -12,7 +12,7 @@ export type SignupDecision = "allow" | "closed" | "busy";
 
 export interface AuthDeps {
   db: Db;
-  config: Pick<Config, "publicUrl" | "authSecret" | "social">;
+  config: Pick<Config, "publicUrl" | "authSecret" | "social" | "authRateLimit">;
   mailer: Mailer;
   trustedOrigins: string[];
   /**
@@ -21,6 +21,23 @@ export interface AuthDeps {
    */
   signupAllowed: (email: string, headers: Headers | null) => Promise<SignupDecision>;
 }
+
+/**
+ * Requests per IP (the first `x-forwarded-for` address) in each window, in seconds, on the routes that guess
+ * passwords, create accounts or send email. The rest of /api/auth gets the global limit. The counters live in
+ * the process: the server is a single instance per database.
+ */
+export const AUTH_RATE_LIMITS = {
+  global: { window: 60, max: 100 },
+  rules: {
+    "/sign-in/*": { window: 60, max: 5 },
+    "/sign-up/*": { window: 60, max: 5 },
+    "/request-password-reset": { window: 300, max: 3 },
+    "/reset-password": { window: 300, max: 5 },
+    "/send-verification-email": { window: 300, max: 3 },
+    "/verify-email": { window: 60, max: 10 },
+  },
+} as const;
 
 /**
  * Better Auth with the Drizzle adapter. Email and password always; GitHub and Google only with their
@@ -75,6 +92,12 @@ export function createAuth(deps: AuthDeps) {
       ...(google ? { google: { clientId: google.clientId, clientSecret: google.clientSecret } } : {}),
     },
     advanced: { cookiePrefix: PRODUCT.slug },
+    rateLimit: {
+      enabled: deps.config.authRateLimit,
+      storage: "memory",
+      ...AUTH_RATE_LIMITS.global,
+      customRules: AUTH_RATE_LIMITS.rules,
+    },
     logger: { level: "error" },
     databaseHooks: {
       user: {

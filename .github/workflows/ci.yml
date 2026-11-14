@@ -34,6 +34,8 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup
       - run: bun run typecheck
+      # The component gallery is the visual proof sheet for @vanr/ui; it must keep building.
+      - run: bun run --cwd packages/ui gallery:build
 
   test:
     runs-on: ubuntu-latest
@@ -77,7 +79,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
-      - run: bun test packages/engine/src/db/catalog.test.ts --test-name-pattern Postgres
+      - run: bun test packages/engine/src/db/catalog.test.ts packages/engine/src/sqlconn.test.ts --test-name-pattern Postgres
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
       # Search with the vector leg (pgvector), each index in a database of its own.
@@ -112,7 +114,7 @@ jobs:
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
-      - run: bun test apps/runner/src/sandbox.test.ts --reporter=junit --reporter-outfile=sandbox-junit.xml
+      - run: bun test apps/runner/src/sandbox.test.ts apps/runner/src/cli-state.test.ts apps/runner/src/net-mode.test.ts --reporter=junit --reporter-outfile=sandbox-junit.xml
         env:
           # Makes the test fail if any real srt test would be skipped.
           VANR_SANDBOX_REQUIRED: "1"

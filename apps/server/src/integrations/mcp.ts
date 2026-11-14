@@ -3,6 +3,8 @@
 
 import { PRODUCT } from "@vanr/product";
 import { z } from "zod";
+import { HttpError } from "../http";
+import { guardedFetch, type NetPolicy } from "./net";
 
 export const MCP_PROTOCOL = "2025-06-18";
 const CLIENT_INFO = { name: `${PRODUCT.slug}-server`, version: "1.0.0" };
@@ -74,10 +76,21 @@ const rpcResponse = z.object({
 export interface McpClientOptions {
   url: string;
   fetch: typeof fetch;
+  /**
+   * Where the requests may go: every request and every redirect passes `guardedFetch` (the address checked
+   * after resolving the name, the connection to that IP, https unless plain text is allowed).
+   */
+  policy: NetPolicy;
   /** E.g. Authorization: Bearer <key or token>. */
   headers?: Record<string, string>;
+  /** Time a request may take, its body included (default 20 s). */
   timeoutMs?: number;
+  /** Bytes a response body may hold (default `MCP_MAX_RESPONSE_BYTES`). */
+  maxResponseBytes?: number;
 }
+
+/** A tool list or a tool result above 8 MiB is a server misbehaving: the client stops reading. */
+export const MCP_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 /** Reads `resource_metadata="…"` from WWW-Authenticate (RFC 9728). */
 export function resourceMetadataFrom(header: string | null): string | null {
@@ -116,10 +129,51 @@ export class McpClient {
   private sessionId: string | null = null;
   private nextId = 1;
   private ready: Promise<void> | null = null;
+  private readonly fetch: typeof fetch;
 
-  constructor(private readonly opts: McpClientOptions) {}
+  constructor(private readonly opts: McpClientOptions) {
+    const { allowPrivate, allowPlaintext, resolve } = opts.policy;
+    this.fetch = guardedFetch(opts.fetch, allowPrivate, resolve, allowPlaintext);
+  }
 
-  private async post(body: unknown): Promise<Response> {
+  /**
+   * The body as text within the byte cap and the request's deadline; past either, the read stops (a server
+   * that trickles or never ends the stream holds nothing).
+   */
+  private async text(res: Response, deadline: number): Promise<string> {
+    const max = this.opts.maxResponseBytes ?? MCP_MAX_RESPONSE_BYTES;
+    if (Number(res.headers.get("content-length") ?? 0) > max)
+      throw new McpError("MCP server sent a response that is too large");
+    if (!res.body) return "";
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<"late">((resolve) => {
+      timer = setTimeout(() => resolve("late"), Math.max(0, deadline - Date.now()));
+    });
+    try {
+      for (;;) {
+        const next = await Promise.race([reader.read(), late]);
+        if (next === "late") throw new McpError("MCP server did not answer in time");
+        if (next.done) break;
+        size += next.value.byteLength;
+        if (size > max) throw new McpError("MCP server sent a response that is too large");
+        chunks.push(next.value);
+      }
+    } catch (err) {
+      if (err instanceof McpError) throw err;
+      throw new McpError(
+        `Could not read the MCP server's answer: ${err instanceof Error ? err.message : err}`,
+      );
+    } finally {
+      clearTimeout(timer);
+      reader.cancel().catch(() => {});
+    }
+    return Buffer.concat(chunks, size).toString("utf8");
+  }
+
+  private async post(body: unknown): Promise<{ res: Response; deadline: number }> {
     const headers: Record<string, string> = {
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
@@ -128,14 +182,18 @@ export class McpClient {
     };
     if (this.sessionId) headers["mcp-session-id"] = this.sessionId;
     let res: Response;
+    const timeoutMs = this.opts.timeoutMs ?? 20_000;
+    const deadline = Date.now() + timeoutMs;
     try {
-      res = await this.opts.fetch(this.opts.url, {
+      res = await this.fetch(this.opts.url, {
         method: "POST",
         headers,
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(this.opts.timeoutMs ?? 20_000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
+      // The address the guard rejected keeps its code (`blocked_host`, `invalid_url`, `unreachable`).
+      if (err instanceof HttpError) throw err;
       throw new McpError(
         `Could not reach the MCP server: ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -146,16 +204,16 @@ export class McpClient {
     if (res.status === 403 && challengeParam(challenge, "error") === "insufficient_scope")
       throw new McpInsufficientScope(challengeParam(challenge, "scope"), resourceMetadataFrom(challenge));
     if (!res.ok && res.status !== 202) throw new McpError(`MCP server answered ${res.status}`, res.status);
-    return res;
+    return { res, deadline };
   }
 
   private async request(method: string, params: Record<string, unknown>): Promise<unknown> {
     const id = this.nextId++;
-    const res = await this.post({ jsonrpc: "2.0", id, method, params });
+    const { res, deadline } = await this.post({ jsonrpc: "2.0", id, method, params });
     const session = res.headers.get("mcp-session-id");
     if (session) this.sessionId = session;
     const type = res.headers.get("content-type") ?? "";
-    const text = await res.text();
+    const text = await this.text(res, deadline);
     let messages: unknown[];
     if (type.includes("text/event-stream")) messages = parseSse(text);
     else {
@@ -181,7 +239,8 @@ export class McpClient {
         capabilities: {},
         clientInfo: CLIENT_INFO,
       });
-      await this.post({ jsonrpc: "2.0", method: "notifications/initialized" });
+      const { res } = await this.post({ jsonrpc: "2.0", method: "notifications/initialized" });
+      await res.body?.cancel().catch(() => {});
     })().catch((err) => {
       this.ready = null;
       throw err;

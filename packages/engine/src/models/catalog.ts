@@ -1,5 +1,7 @@
 // Models offered to agents and the cost of each call.
 // Prices in USD per million tokens (October 2026 reference). Writing to the 5 min cache costs 1.25x the input.
+import { costUsd } from "../usage";
+import { PRICES } from "./prices";
 import type { Usage } from "./types";
 
 interface ModelPrice {
@@ -48,7 +50,6 @@ export const ADVISOR_MAX_TOKENS = 2048;
 export function advisorPairOk(executor: string, advisor: string): boolean {
   return ADVISOR_PAIRS[executor]?.includes(advisor) ?? false;
 }
-const CACHE_WRITE_FACTOR = 1.25;
 
 export function findModel(id: string): CatalogModel | null {
   return MODELS.find((m) => m.id === id) ?? null;
@@ -56,14 +57,5 @@ export function findModel(id: string): CatalogModel | null {
 
 /** Cost of a call. The long prompt tier applies per call, not to the run's total. */
 export function callCostUsd(modelId: string, usage: Usage): number {
-  const model = findModel(modelId) ?? findModel(DEFAULT_MODEL);
-  if (!model) return 0;
-  const prompt = usage.inputTokens + usage.cachedTokens + usage.cacheWriteTokens;
-  const p = model.longPrompt && prompt > model.longPrompt.above ? model.longPrompt.price : model.price;
-  const usd =
-    usage.inputTokens * p.input +
-    usage.cacheWriteTokens * p.input * CACHE_WRITE_FACTOR +
-    usage.cachedTokens * p.cacheRead +
-    usage.outputTokens * p.output;
-  return usd / 1_000_000;
+  return costUsd(PRICES, { model: findModel(modelId)?.id ?? DEFAULT_MODEL, usage, at: new Date() });
 }

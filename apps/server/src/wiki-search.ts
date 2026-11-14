@@ -18,7 +18,9 @@ export function wikiChunks(
   const code = codeRanges(body).filter(([a, b]) => /^ {0,3}(```|~~~)/.test(body.slice(a, b)));
   const inCode = (i: number) => code.some(([a, b]) => i > a && i < b);
   // Cut points: start of a heading or of a paragraph, outside code blocks.
-  const cuts: { at: number; heading: string | null }[] = [{ at: 0, heading: null }];
+  const cuts: { at: number; heading: string | null }[] = [
+    { at: 0, heading: /^#{1,6}[ \t]+([^\n]*)/.exec(body)?.[1]?.trim() ?? null },
+  ];
   const re = /\n(?=(#{1,6})[ \t]+([^\n]*)|\n)/g;
   for (let m = re.exec(body); m; m = re.exec(body)) {
     const at = m.index + 1;
@@ -57,7 +59,7 @@ export function wikiChunks(
     text,
     scope: { kind: "workspace" },
     url: `/workspace/${encodeURIComponent(row.workspaceId)}/wiki/${encodeURIComponent(row.slug)}`,
-    authorId: row.updatedBy.id,
+    authorId: `${row.updatedBy.type === "person" ? "user" : "agent"}:${row.updatedBy.id}`,
     updatedAt,
   }));
   return chunks;

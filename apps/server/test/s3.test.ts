@@ -4,6 +4,8 @@ import { startFakeS3 } from "./fake-s3";
 
 const s3 = startFakeS3();
 afterAll(() => s3.stop());
+/** The fake S3 listens on localhost over http: the installation allows both. */
+const LOCAL = { allowPrivate: true, allowPlaintext: true };
 const cfg = (extra: Partial<S3Settings> = {}): S3Settings => ({
   endpoint: s3.endpoint,
   region: "us-east-1",
@@ -16,7 +18,7 @@ const cfg = (extra: Partial<S3Settings> = {}): S3Settings => ({
 });
 
 test("stores, reads with the type, lists without the prefix and deletes, with a signed request", async () => {
-  const store = s3Blobs(cfg());
+  const store = s3Blobs(cfg(), LOCAL);
   await store.put("workspaces/o1/a.txt", new TextEncoder().encode("hi"), "text/plain");
   expect([...s3.objects.keys()]).toEqual(["vanr/workspaces/o1/a.txt"]);
   const got = await store.get("workspaces/o1/a.txt");
@@ -30,7 +32,7 @@ test("stores, reads with the type, lists without the prefix and deletes, with a 
 });
 
 test("connection test goes through the four steps and stops at the first that fails", async () => {
-  expect(await testS3(cfg(), "p1")).toEqual({
+  expect(await testS3(cfg(), "p1", LOCAL)).toEqual({
     ok: true,
     steps: [
       { step: "write", ok: true },
@@ -40,7 +42,7 @@ test("connection test goes through the four steps and stops at the first that fa
     ],
   });
   s3.failOn.add("LIST");
-  const failed = await testS3(cfg(), "p2");
+  const failed = await testS3(cfg(), "p2", LOCAL);
   s3.failOn.clear();
   expect(failed.ok).toBe(false);
   expect(failed.steps.map((s) => [s.step, s.ok])).toEqual([
@@ -48,7 +50,7 @@ test("connection test goes through the four steps and stops at the first that fa
     ["read", true],
     ["list", false],
   ]);
-  const wrongBucket = await testS3(cfg({ bucket: "outro" }), "p3");
+  const wrongBucket = await testS3(cfg({ bucket: "outro" }), "p3", LOCAL);
   expect(wrongBucket.steps).toHaveLength(1);
   expect(wrongBucket.steps[0]?.ok).toBe(false);
 });

@@ -18772,7 +18772,7 @@
     {
       "table": "routine_executions",
       "name": "routine_executions_queued_uq",
-      "definition": "CREATE UNIQUE INDEX routine_executions_queued_uq ON public.routine_executions USING btree (routine_id) WHERE ((status = 'queued'::text) AND (trigger <> 'retry'::text))"
+      "definition": "CREATE UNIQUE INDEX routine_executions_queued_uq ON public.routine_executions USING btree (routine_id) WHERE ((status = 'queued'::text) AND (trigger IS DISTINCT FROM 'retry'::text))"
     },
     {
       "table": "routine_executions",

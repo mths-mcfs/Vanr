@@ -32,13 +32,10 @@ export function createProviderLookup(deps: AppDeps, opts: { forceFake?: boolean 
       const [cred] = await deps.db
         .select()
         .from(credentials)
-        .where(
-          and(
-            eq(credentials.id, credentialId),
-            eq(credentials.workspaceId, agent.workspaceId),
-            isNull(credentials.revokedAt),
-          ),
-        );
+        .where(and(eq(credentials.id, credentialId), eq(credentials.workspaceId, agent.workspaceId)));
+      // A revoked credential stops the run: falling back to the platform key would spend the installation's
+      // money on a workspace that turned its own key off.
+      if (cred?.revokedAt) return { error: "no_credential" };
       if (cred) {
         if (cred.provider !== "anthropic") return { error: "unsupported_provider" };
         const cacheKey = `${cred.id}:${cred.secret}`;

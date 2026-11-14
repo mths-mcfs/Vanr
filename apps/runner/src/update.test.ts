@@ -9,6 +9,8 @@ import {
   signManifest,
   verifyManifest,
 } from "@vanr/engine/runner-update";
+import { bundleRunner } from "./bundle";
+import { RUNNER_VERSION } from "./config";
 import { TEST_UPDATE_PUBLIC_KEY, TEST_UPDATE_SEED } from "./testing/update-keys";
 import { checkUpdate, rollbackUpdate, UpdateError, update } from "./update";
 
@@ -107,7 +109,7 @@ test("signed new version: downloads, checks, runs `version` and swaps the bundle
   expect(await update(opts(path))).toBe("0.3.0");
   expect(readFileSync(path, "utf8")).toContain('"0.3.0"');
   expect(readFileSync(`${path}.prev`, "utf8")).toContain('"0.2.0"');
-  expect(existsSync(`${path}.new`)).toBe(false);
+  expect(existsSync(`${path}.new.mjs`)).toBe(false);
   // Go back to the previous one.
   expect(rollbackUpdate(path)).toBe(true);
   expect(readFileSync(path, "utf8")).toContain('"0.2.0"');
@@ -150,7 +152,7 @@ test("attack: a bundle different from the signed one (sha256 or size) is rejecte
   offer.bundle = script("0.3.0").map((b, i) => (i === 0 ? b ^ 1 : b));
   expect(await refusal(update(opts(path)))).toBe("bad_bundle");
   expect(readFileSync(path, "utf8")).toContain('"0.2.0"');
-  expect(existsSync(`${path}.new`)).toBe(false);
+  expect(existsSync(`${path}.new.mjs`)).toBe(false);
 });
 
 test("a signed bundle that does not start (or reports another version) does not take the place of the current one", async () => {
@@ -158,7 +160,7 @@ test("a signed bundle that does not start (or reports another version) does not 
   serve("0.3.0", { bytes: script("0.2.5") });
   expect(await refusal(update(opts(path)))).toBe("broken_bundle");
   expect(readFileSync(path, "utf8")).toContain('"0.2.0"');
-  expect(existsSync(`${path}.new`)).toBe(false);
+  expect(existsSync(`${path}.new.mjs`)).toBe(false);
 });
 
 test("running from source, the updater swaps nothing; a server without a key says there is no update", async () => {
@@ -166,4 +168,12 @@ test("running from source, the updater swaps nothing; a server without a key say
   expect(await refusal(update(opts(null)))).toBe("not_installed");
   offer.manifest = null;
   expect(await refusal(update(opts(installed("0.2.0"))))).toBe("off");
+});
+
+test("the real ESM bundle installs under Node", async () => {
+  const path = installed("0.1.0");
+  serve(RUNNER_VERSION, { bytes: await bundleRunner() });
+  expect(await update({ ...opts(path, "0.1.0"), runtime: Bun.which("node") ?? "node" })).toBe(RUNNER_VERSION);
+  expect(existsSync(`${path}.prev`)).toBe(true);
+  expect(existsSync(`${path}.new.mjs`)).toBe(false);
 });

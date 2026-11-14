@@ -29,7 +29,14 @@ import { ensureDir, writePrivate } from "./config";
 import { maybe } from "./lines";
 import { agentEnv, domainsFor, sandboxed } from "./ops";
 import { assemble, assembleSnapshot, type Masks } from "./outbound";
-import { CLI_DOMAINS, type CommandSandbox, cliPaths, type PolicyContext, shellLine } from "./sandbox";
+import {
+  agentCli,
+  CLI_DOMAINS,
+  type CommandSandbox,
+  isolated,
+  type PolicyContext,
+  shellLine,
+} from "./sandbox";
 import { MIN_MASK, maskBytes, maskSecrets, type SecretStore, StreamMasker } from "./secrets";
 
 const LINE_EVERY_MS = 2000;
@@ -98,14 +105,24 @@ export function which(bin: string, env: Record<string, string | undefined> = pro
   return null;
 }
 
-function executorCommand(
+export function executorCommand(
   executor: "claude_code" | "codex" | "shell",
   input: { prompt: string; cwd: string; model?: string; session?: string; allow?: string[] },
   bins: { claude: string; codex: string },
 ): { cmd: string; args: string[]; stdin: string | null } {
   if (executor === "shell") return { cmd: "/bin/sh", args: ["-c", input.prompt], stdin: null };
   if (executor === "claude_code") {
-    const args = ["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits"];
+    const args = [
+      "-p",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--permission-mode",
+      "acceptEdits",
+      // Without the person's settings, hooks and instructions (`user`); the project's own still apply.
+      "--setting-sources",
+      "project,local",
+    ];
     // The assignment rule `npm test *` becomes `Bash(npm test:*)` for Claude Code.
     if (input.allow?.length)
       args.push("--allowedTools", input.allow.map((r) => `Bash(${r.replace(/ \*$/, ":*")})`).join(","));
@@ -121,6 +138,9 @@ function executorCommand(
     input.cwd,
     "--sandbox",
     "workspace-write",
+    // Without the person's config.toml (their MCP servers, another model provider) nor their rules.
+    "--ignore-user-config",
+    "--ignore-rules",
     // Only with the ChatGPT login: with an API key Codex will not run.
     "-c",
     'forced_login_method="chatgpt"',
@@ -816,20 +836,30 @@ export class Jobs {
     // same as a command: the agent's folders and the workspace's network.
     const network = args.network ?? { mode: "off" as const, domains: [] };
     const folders = [root, ...this.opts.access.foldersFor(agent)];
+    // Claude Code and Codex use the agent's own state (sessions, memories, configuration) with the person's
+    // login read-only; a session is resumed from there.
     const cli =
       args.executor === "shell"
         ? null
-        : cliPaths(
+        : agentCli(
             args.executor,
             this.opts.policy,
             args.executor === "codex" ? this.opts.bins.codex : this.opts.bins.claude,
+            agent,
             inside(cwd, root) ? cwd : null,
+            isolated(this.opts.sandbox.status()),
           );
     for (const d of cli?.ensure ?? []) mkdirSync(d, { recursive: true, mode: 0o700 });
     // The starting snapshot before the secret becomes a file in the folder: that way it does not enter the diff.
     const snapStore = join(this.dir, args.jobId, "snapshot.git");
     const secretPaths = this.opts.secrets.secretFiles(agent, root);
-    const base = args.executor === "shell" ? null : gitSnapshot(cwd, snapStore, secretPaths);
+    let base: ReturnType<typeof gitSnapshot> | null;
+    try {
+      base = args.executor === "shell" ? null : gitSnapshot(cwd, snapStore, secretPaths);
+    } catch (err) {
+      cli?.release();
+      throw err;
+    }
     const dropSnapshot = () => rmSync(snapStore, { recursive: true, force: true });
     const wrapped = await sandboxed(this.opts, {
       command: shellLine(cmd, argv),
@@ -838,11 +868,21 @@ export class Jobs {
       liberated: folders.slice(1),
       denyRead: cli?.denyRead ?? [],
       denyWrite: cli?.denyWrite ?? [],
+      runnerInner: { read: [], write: cli?.innerWrite ?? [] },
       domains: [...domainsFor(network), ...(args.executor === "shell" ? [] : CLI_DOMAINS[args.executor])],
       network,
+    }).catch((err) => {
+      cli?.release();
+      dropSnapshot();
+      throw err;
     });
-    const secrets = await this.opts.secrets.materialize(agent, root, signal).catch((err) => {
+    // The process's sandbox and the agent's CLI login link go together.
+    const releaseBox = () => {
       wrapped?.release();
+      cli?.release();
+    };
+    const secrets = await this.opts.secrets.materialize(agent, root, signal).catch((err) => {
+      releaseBox();
       dropSnapshot();
       throw err;
     });
@@ -850,7 +890,7 @@ export class Jobs {
     // nothing of it is kept.
     if (signal?.aborted) {
       secrets.release();
-      wrapped?.release();
+      releaseBox();
       dropSnapshot();
       throw new RunnerError("canceled", "Canceled");
     }
@@ -886,7 +926,7 @@ export class Jobs {
     if (canceledEarly) {
       // Canceled before its process started: nothing runs, the slot goes back, the job ends as canceled.
       secrets.release();
-      wrapped?.release();
+      releaseBox();
       dropSnapshot();
       entry.endedAt = startedAt;
       this.journal.push(entry);
@@ -905,14 +945,11 @@ export class Jobs {
       // A shell job does not use the plan of whoever paired; Claude Code and Codex do (checked above).
       env: agentEnv(root, {
         secrets: secrets.env,
-        ...(args.executor === "shell" ? { internal: noPlanEnv(root) } : {}),
+        internal: args.executor === "shell" ? noPlanEnv(root) : (cli?.env ?? {}),
       }),
       stdio: [stdin === null ? "ignore" : "pipe", "pipe", "pipe"],
       detached: process.platform !== "win32",
     });
-    if (stdin !== null && child.stdin) {
-      child.stdin.end(stdin);
-    }
     let lastSent = 0;
     let tailLine = "";
     let sentLine = "";
@@ -1035,6 +1072,8 @@ export class Jobs {
         );
       }
     }, PROGRESS_EVERY_MS);
+    child.stdin?.on("error", fail);
+    if (stdin !== null) child.stdin?.end(stdin);
     child.on("error", (e) => guarded(`error: ${e.message}`));
     child.on("close", (code) => {
       clearTimeout(timer);
@@ -1051,7 +1090,7 @@ export class Jobs {
         }
         secrets.release();
         if (network.mode === "allowlist") entry.blocked = (wrapped?.blocked() ?? []).slice(0, 50);
-        wrapped?.release();
+        releaseBox();
         entry.exitCode = code;
         entry.status =
           handlerError !== null

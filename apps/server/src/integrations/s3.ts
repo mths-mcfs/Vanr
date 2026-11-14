@@ -2,6 +2,7 @@
 // Works with AWS, R2, MinIO and the like (custom endpoint, optional path style).
 import type { BlobStore } from "@vanr/engine/blobs";
 import { PRODUCT } from "@vanr/product";
+import { checkServerUrl, type NetPolicy } from "./net";
 
 export interface S3Settings {
   endpoint: string;
@@ -29,8 +30,42 @@ function client(cfg: S3Settings) {
 
 const join = (prefix: string, key: string) => (prefix ? `${prefix}/${key}` : key);
 
-export function s3Blobs(cfg: S3Settings): BlobStore {
-  const s3 = client(cfg);
+/**
+ * The host the requests go to: the endpoint's, or `<bucket>.<endpoint host>` in virtual-hosted style (the
+ * bucket name is part of the address), checked by the same rule as every integration before each operation.
+ * Bun's S3Client resolves the name again when it connects: unlike `guardedFetch`, it can't be pinned to the
+ * checked IP, so a name that changes its answer between the check and the connection is the remaining gap.
+ */
+async function checkEndpoint(cfg: S3Settings, policy: NetPolicy) {
+  const url = await checkServerUrl(cfg.endpoint, policy.allowPrivate, policy.resolve, policy.allowPlaintext);
+  if (!cfg.pathAddressing) {
+    url.hostname = `${cfg.bucket}.${url.hostname}`;
+    await checkServerUrl(url.toString(), policy.allowPrivate, policy.resolve, policy.allowPlaintext);
+  }
+}
+
+export function s3Blobs(cfg: S3Settings, policy: NetPolicy): BlobStore {
+  const raw = client(cfg);
+  // Every operation checks the endpoint first; the calls stay the same as the client's.
+  const guard = async <T>(run: () => Promise<T>): Promise<T> => {
+    await checkEndpoint(cfg, policy);
+    return run();
+  };
+  const s3 = {
+    write: (...a: Parameters<typeof raw.write>) => guard(() => raw.write(...a)),
+    delete: (...a: Parameters<typeof raw.delete>) => guard(() => raw.delete(...a)),
+    list: (...a: Parameters<typeof raw.list>) => guard(() => raw.list(...a)),
+    file: (path: string) => {
+      const file = raw.file(path);
+      return {
+        exists: () => guard(() => file.exists()),
+        stat: () => guard(() => file.stat()),
+        bytes: () => guard(() => file.bytes()),
+        /** The S3File itself, streamed by whoever serves it: `exists` above already checked the endpoint. */
+        file,
+      };
+    },
+  };
   return {
     // With a Blob (local file), Bun uploads in parts (multipart) and does not load it all.
     async put(key, data, contentType) {
@@ -40,7 +75,7 @@ export function s3Blobs(cfg: S3Settings): BlobStore {
       const file = s3.file(join(cfg.prefix, key));
       if (!(await file.exists())) return null;
       const stat = await file.stat();
-      return { size: stat.size, contentType: stat.type || "application/octet-stream", body: file };
+      return { size: stat.size, contentType: stat.type || "application/octet-stream", body: file.file };
     },
     async get(key) {
       const file = s3.file(join(cfg.prefix, key));
@@ -70,8 +105,9 @@ export function s3Blobs(cfg: S3Settings): BlobStore {
 export async function testS3(
   cfg: S3Settings,
   probeId: string,
+  policy: NetPolicy,
 ): Promise<{ ok: boolean; steps: { step: S3Step; ok: boolean; error?: string }[] }> {
-  const store = s3Blobs(cfg);
+  const store = s3Blobs(cfg, policy);
   const key = `.${PRODUCT.slug}-probe-${probeId}`;
   const body = new TextEncoder().encode(`probe ${probeId}`);
   const steps: { step: S3Step; ok: boolean; error?: string }[] = [];

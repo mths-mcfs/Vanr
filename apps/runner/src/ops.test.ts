@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Access } from "./access";
 import { execOp, listOp, type OpContext, readOp } from "./ops";
+import { serialize } from "./outbound";
 import { defaultPolicyContext, sandboxOff } from "./sandbox";
 import { maskBytes, type SecretStore } from "./secrets";
 import { seeded } from "./testing/random";
@@ -161,5 +162,23 @@ test("a cut right after a masked secret never shows the start of the next one (1
   for (let maxBytes = 1; maxBytes < 64; maxBytes++) {
     const r = await readOp(c, { path: "twice", maxBytes });
     expect([maxBytes, r.content]).toEqual([maxBytes, "[secret:S][secret:S]".slice(0, maxBytes)]);
+  }
+});
+
+test("serialized JSON masks escaped secrets in every file encoding", async () => {
+  const c = ctx([]);
+  const secret = 'line\n"quoted"\\path';
+  Reflect.set(c.secrets, "masks", async () => [[secret, "[secret:S]"]]);
+  for (const encoding of ["utf8", "utf16le", "utf16be", "latin1"] as const) {
+    const encode = (s: string) =>
+      encoding === "utf16be" ? Buffer.from(s, "utf16le").swap16() : Buffer.from(s, encoding);
+    writeFileSync(join(c.access.agentRoot(c.agent), "escaped.json"), encode(JSON.stringify({ key: secret })));
+    const data = await readOp(c, { path: "escaped.json" });
+    const frame = JSON.parse(
+      serialize({ type: "result", id: "read", ok: true, data }, [[secret, "[secret:S]"]]) ?? "null",
+    );
+    const bytes = Buffer.from(frame.data.content, frame.data.encoding);
+    const text = encoding === "utf16be" ? bytes.swap16().toString("utf16le") : bytes.toString(encoding);
+    expect(JSON.parse(text)).toEqual({ key: "[secret:S]" });
   }
 });
