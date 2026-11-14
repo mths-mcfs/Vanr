@@ -8,6 +8,7 @@ import { registerBases } from "./routes/bases";
 import { registerDrive } from "./routes/drive";
 import { registerDriveUploads } from "./routes/drive-upload";
 import { registerInvitations } from "./routes/invitations";
+import { registerMemories } from "./routes/memories";
 import { registerNotifications } from "./routes/notifications";
 import { registerPush } from "./routes/push";
 import { registerRunnerRequests } from "./routes/runner-requests";
@@ -116,6 +117,7 @@ export function createApp(
   // issues S4, debates S4, routines S4, calendar S4, then the search below; connectors S6, integrations S5,
   // then the runners and their requests below; assignments S5.
   registerThreads(app);
+  registerMemories(app);
   registerInvitations(app);
   registerNotifications(app);
   registerPush(app);

@@ -128,6 +128,11 @@ jobs:
       - run: bun test apps/server/test/messages-postgres.test.ts
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # One delivery per queued send and canceled-or-sent, never both, with passes on several connections at once.
+      # Each guard is one conditional UPDATE (no lock to take out); outbox.test.ts fails on the same race without it.
+      - run: bun test apps/server/test/outbox-postgres.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
       # One runner per pairing code, one open browser intervention per agent and one answer per secret request.
       - run: bun test apps/server/test/runners-postgres.test.ts
         env:
