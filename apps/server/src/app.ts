@@ -5,6 +5,7 @@ import { errorBody, HttpError } from "./http";
 import { log } from "./logger";
 import { registerAccount } from "./routes/account";
 import { registerBases } from "./routes/bases";
+import { registerControl } from "./routes/control";
 import { registerDrive } from "./routes/drive";
 import { registerDriveUploads } from "./routes/drive-upload";
 import { registerInvitations } from "./routes/invitations";
@@ -118,6 +119,7 @@ export function createApp(
   // then the runners and their requests below; assignments S5.
   registerThreads(app);
   registerMemories(app);
+  registerControl(app);
   registerInvitations(app);
   registerNotifications(app);
   registerPush(app);

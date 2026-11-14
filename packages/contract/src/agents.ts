@@ -200,6 +200,12 @@ export interface AgentAction {
   target: { id: string; number?: number; slug?: string; title?: string; type: string };
 }
 
+/** Undo everything a message did: what was undone and what could not be, with the error code. */
+export interface UndoAllResult {
+  actions: AgentAction[];
+  failed: { actionId: string; code: string }[];
+}
+
 export interface AgentInbox {
   recent: {
     at: string;

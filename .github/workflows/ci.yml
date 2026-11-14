@@ -242,6 +242,47 @@ jobs:
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_DROP_LOCKS: "1"
+      # Undo against another undo, a person's edit and the send: one result each, nothing a person wrote lost (the
+      # action's row lock and the content's row lock in the undo's transaction).
+      - run: bun test apps/server/test/control-postgres.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      - name: The forced undo lock tests fail without the locks
+        run: |
+          set +e
+          bun test apps/server/test/control-postgres.test.ts --test-name-pattern forced > forced-undo.log 2>&1
+          status=$?
+          cat forced-undo.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the forced undo lock tests passed without the locks"
+            exit 1
+          fi
+          for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -aqF "$broken" forced-undo.log; then
+              echo "::error::the forced undo lock tests broke ($broken) instead of failing on their outcome"
+              exit 1
+            fi
+          done
+          set -- undo-twice undo-vs-edit
+          for label in "$@"; do
+            if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" forced-undo.log; then
+              echo "::error::the forced $label test did not fail on its outcome without the lock"
+              exit 1
+            fi
+          done
+          failed=$(grep -a '^(fail) ' forced-undo.log | sed -E 's/^\(fail\) //; s/ \[[0-9.]+m?s\]$//' | sort -u)
+          if printf '%s\n' "$failed" | grep -qv forced; then
+            echo "::error::a test outside the forced ones failed without the locks: $failed"
+            exit 1
+          fi
+          count=$(printf '%s\n' "$failed" | grep -c .)
+          if [ "$count" -ne "$#" ]; then
+            echo "::error::$count distinct forced tests failed without the locks, expected $#"
+            exit 1
+          fi
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_DROP_LOCKS: "1"
       # Every answer of a round kept once and an answer that meets the stop finds the queue closed (the debate's row
       # lock); one routine execution per fire, scheduled time and queued run, with callers on several connections.
       - run: bun test apps/server/test/debates-postgres.test.ts
