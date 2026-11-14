@@ -21,29 +21,11 @@ import { notify } from "../src/notifications";
 import { registerInvitations } from "../src/routes/invitations";
 import type { RunningServer } from "../src/server";
 import { Browser, body, signedIn, startTestServer } from "./harness";
-import { instrumented } from "./lock-double";
+import { forcedPair, instrumented, outcome } from "./lock-double";
 import { NO_POSTGRES, TEST_POSTGRES_URL, testDatabaseUrl } from "./postgres";
 
 const onPostgres = (name: string) => (TEST_POSTGRES_URL ? name : `${name} (skipped: ${NO_POSTGRES})`);
 const N = 20;
-
-/** Resolves when `check` is true, polling; fails after 15 s. */
-async function until(check: () => Promise<boolean> | boolean, what: string) {
-  const deadline = Date.now() + 15_000;
-  while (!(await check())) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-    await Bun.sleep(20);
-  }
-}
-
-/** A gate the first transaction waits on. */
-function gate() {
-  let open!: () => void;
-  const opened = new Promise<void>((r) => {
-    open = r;
-  });
-  return { open, opened };
-}
 
 async function withServer(
   prefix: string,
@@ -58,14 +40,6 @@ async function withServer(
     await server.stop();
     await admin.end({ timeout: 5 });
   }
-}
-
-/** Locks of this database that some transaction waits for. */
-async function waitingLocks(admin: postgres.Sql, locktype?: string) {
-  const rows = await admin<{ n: number }[]>`
-    select count(*)::int as n from pg_locks l join pg_database d on d.oid = l.database
-    where not l.granted and d.datname = current_database() and (${locktype ?? null}::text is null or l.locktype = ${locktype ?? null})`;
-  return rows[0]?.n ?? 0;
 }
 
 describe.skipIf(!TEST_POSTGRES_URL)(
@@ -142,44 +116,29 @@ describe.skipIf(!TEST_POSTGRES_URL)(
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ email: "pia@forced.test", role }),
           });
-        const pids = new Set<number>();
-        const held = gate();
-        const release = gate();
-        // A holds right after revoking the pending ones, before inserting its own.
-        const a = post(
-          {
-            ...server.deps,
-            db: instrumented(server.deps.db, {
-              pids,
-              after: {
-                kind: "update",
-                run: async () => {
-                  held.open();
-                  await release.opened;
-                },
-              },
-            }),
-          },
-          "member",
+        // A holds right after revoking the pending ones, before inserting its own. With the lock B waits on
+        // it; without it, B revokes nothing (A's isn't in yet) and both insert.
+        const run = await forcedPair(admin, "invite", "update", (side, hooks) =>
+          post(
+            { ...server.deps, db: instrumented(server.deps.db, hooks) },
+            side === "A" ? "member" : "admin",
+          ),
         );
-        await held.opened;
-        let bDone = false;
-        const b = post({ ...server.deps, db: instrumented(server.deps.db, { pids }) }, "admin").then((r) => {
-          bDone = true;
-          return r;
-        });
-        // With the lock B waits on it; without it, B revokes nothing, inserts and commits before A inserts.
-        await until(async () => bDone || (await waitingLocks(admin, "advisory")) > 0, "B to wait or finish");
-        release.open();
-        const [ra, rb] = await Promise.all([a, b]);
-        expect([ra.status, rb.status]).toEqual([201, 201]);
-        expect(pids.size).toBe(2);
+        expect([run.a.status, run.b.status]).toEqual([201, 201]);
+        expect(run.aPids.length).toBe(1);
+        expect(run.bPids.length).toBe(1);
+        expect(run.aPids[0]).not.toBe(run.bPids[0]);
         const pending = await server.deps.db
           .select()
           .from(schema.invitations)
           .where(
             and(eq(schema.invitations.email, "pia@forced.test"), eq(schema.invitations.status, "pending")),
           );
+        outcome(
+          "invite",
+          pending.map((r) => r.role),
+          ["admin"],
+        );
         expect(pending.map((r) => r.role)).toEqual(["admin"]);
       });
     }, 60_000);
@@ -212,50 +171,19 @@ describe.skipIf(!TEST_POSTGRES_URL)(
           });
         // The group's row exists: both notices take the read-merge-write path.
         await from(server.deps, beto.user.id, "first");
-        const pids = new Set<number>();
-        const held = gate();
-        const release = gate();
-        let bRead = false;
-        const a = from(
-          {
-            ...server.deps,
-            db: instrumented(server.deps.db, {
-              pids,
-              after: {
-                kind: "select",
-                run: async () => {
-                  held.open();
-                  await release.opened;
-                },
-              },
-            }),
-          },
-          ana.user.id,
-          "from ana",
+        // A holds right after reading the group's row (FOR UPDATE). With the lock B waits for A's row; without
+        // it, B reads the row as it was before A and one of the two writes loses the other's actor.
+        const run = await forcedPair(admin, "notice", "select", (side, hooks) =>
+          from(
+            { ...server.deps, db: instrumented(server.deps.db, hooks) },
+            side === "A" ? ana.user.id : caio.user.id,
+            side === "A" ? "from ana" : "from caio",
+          ),
         );
-        await held.opened;
-        const b = from(
-          {
-            ...server.deps,
-            db: instrumented(server.deps.db, {
-              pids,
-              after: {
-                kind: "select",
-                run: async () => {
-                  bRead = true;
-                },
-              },
-            }),
-          },
-          caio.user.id,
-          "from caio",
-        );
-        // With FOR UPDATE, B waits for A's row; without it, B reads the row as it was before A.
-        await until(async () => bRead || (await waitingLocks(admin)) > 0, "B to wait or read");
-        release.open();
-        await Promise.all([a, b]);
+        expect(run.aPids.length).toBe(1);
+        expect(run.bPids.length).toBe(1);
+        expect(run.aPids[0]).not.toBe(run.bPids[0]);
         await server.deps.runtime.settle();
-        expect(pids.size).toBe(2);
         const [row, ...rest] = await server.deps.db
           .select()
           .from(schema.notifications)
@@ -267,9 +195,11 @@ describe.skipIf(!TEST_POSTGRES_URL)(
           );
         expect(rest).toEqual([]);
         // Serially: first, then Ana's, then Caio's (who waited for Ana).
-        expect(row?.count).toBe(3);
-        expect(row?.actors.map((x) => x.id)).toEqual([caio.user.id, ana.user.id, beto.user.id]);
-        expect(row?.latest.text).toBe("from caio");
+        outcome(
+          "notice",
+          { count: row?.count, actors: row?.actors.map((x) => x.id), latest: row?.latest.text },
+          { count: 3, actors: [caio.user.id, ana.user.id, beto.user.id], latest: "from caio" },
+        );
       });
     }, 60_000);
   },

@@ -93,8 +93,10 @@ jobs:
       - run: bun test apps/server/test/concurrency-postgres.test.ts
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
-      # The same forced tests with the locks left out by the test's own double: both must fail, or they
-      # would pass without the locks too and prove nothing.
+      # The same forced tests with the locks left out by the test's own double: both must fail on the outcome
+      # the lock is for (LOCK_OUTCOME_MISMATCH), or they would pass without the locks too and prove nothing.
+      # A failure for any other reason (the wait timed out, a connection closed, an error between tests)
+      # proves nothing either, so this step fails then.
       - name: The forced lock tests fail without the locks
         run: |
           set +e
@@ -105,9 +107,15 @@ jobs:
             echo "::error::the forced lock tests passed without the locks"
             exit 1
           fi
-          for name in "the invitee's lock" "the row lock"; do
-            if ! grep -F "(fail)" forced.log | grep -qF "$name"; then
-              echo "::error::the forced test of $name did not fail without the lock"
+          for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -qF "$broken" forced.log; then
+              echo "::error::the forced lock tests broke ($broken) instead of failing on their outcome"
+              exit 1
+            fi
+          done
+          for label in invite notice; do
+            if ! grep -qF "LOCK_OUTCOME_MISMATCH($label)" forced.log; then
+              echo "::error::the forced $label test did not fail on its outcome without the lock"
               exit 1
             fi
           done
