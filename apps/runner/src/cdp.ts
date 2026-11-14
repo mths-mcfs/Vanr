@@ -53,6 +53,8 @@ const BLOCKED_MAX = 10;
 const DIALOGS_MAX = 5;
 /** An action that does not come back (a page in a loop, a dialog nobody answered) releases the browser after this. */
 const OP_TIMEOUT_MS = 55_000;
+/** How long `browser.open` waits for the new document to commit and to finish loading. */
+const DOCUMENT_WAIT_MS = 10_000;
 const LAUNCH_TIMEOUT_MS = 20_000;
 
 interface Page {
@@ -201,6 +203,11 @@ export interface CdpBrowserOptions {
   insecureTls?: boolean;
   /** Tests: a shorter deadline for an action that does not come back. */
   opTimeoutMs?: number;
+  /**
+   * Tests: a shorter wait for the new document after `browser.open` (production: 10 s). A navigation whose
+   * redirect the origin rule blocked never commits its own loader, so the open waits this long for it.
+   */
+  documentWaitMs?: number;
 }
 
 export class CdpBrowser implements BrowserDriver {
@@ -780,7 +787,7 @@ export class CdpBrowser implements BrowserDriver {
     return r.result.value as T;
   }
 
-  private async settle(s: Session, ms = 10_000) {
+  private async settle(s: Session, ms = DOCUMENT_WAIT_MS) {
     const end = Date.now() + ms;
     while (Date.now() < end) {
       const state = await this.eval<string>(s, "document.readyState").catch(() => "loading");
@@ -837,8 +844,9 @@ export class CdpBrowser implements BrowserDriver {
           : `Could not open the page: ${r.errorText}`,
       };
     }
-    if (r.loaderId) await this.committed(s, r.loaderId);
-    await this.settle(s);
+    const wait = this.opts.documentWaitMs ?? DOCUMENT_WAIT_MS;
+    if (r.loaderId) await this.committed(s, r.loaderId, wait);
+    await this.settle(s, wait);
     return this.readable(s);
   }
 
@@ -846,7 +854,7 @@ export class CdpBrowser implements BrowserDriver {
    * Waits for the new document to enter the tab. Without it, the `readyState` read right after navigate may
    * be the old document's (an error page, for example) and the answer would go out with the wrong URL.
    */
-  private async committed(s: Session, loaderId: string, ms = 10_000) {
+  private async committed(s: Session, loaderId: string, ms = DOCUMENT_WAIT_MS) {
     const page = this.page(s);
     const end = Date.now() + ms;
     while (Date.now() < end) {

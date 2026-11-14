@@ -42,7 +42,8 @@ jobs:
       fail-fast: false
       matrix:
         # The shard count is the length of this list.
-        shard: [1, 2]
+        # Three keep the slowest one near 30 s: browser-guard.test.ts alone is about that.
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -83,6 +84,38 @@ jobs:
       - run: bun test packages/engine/src/search-pg.test.ts --test-name-pattern "real Postgres"
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+
+  sandbox:
+    # The runner's real sandbox (bubblewrap + socat): the attack tests of the isolation of the agent's
+    # processes. They skip where bubblewrap or socat is missing, so this job installs both and fails on a skip.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Install bubblewrap and socat
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap socat
+      - name: Allow unprivileged user namespaces
+        # Ubuntu 23.10+ restricts them through AppArmor and bubblewrap cannot start without them.
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - run: bun test apps/runner/src/sandbox.test.ts --reporter=junit --reporter-outfile=sandbox-junit.xml
+        env:
+          # Makes the test fail if any real srt test would be skipped.
+          VANR_SANDBOX_REQUIRED: "1"
+      - name: No test skipped
+        run: |
+          if grep -q "<skipped" sandbox-junit.xml; then
+            grep -B1 "<skipped" sandbox-junit.xml
+            echo "::error::a sandbox test was skipped"
+            exit 1
+          fi
 
   workflows:
     runs-on: ubuntu-latest
@@ -157,7 +190,7 @@ jobs:
 
   ci-ok:
     if: always()
-    needs: [lint, typecheck, test, postgres, workflows, secrets]
+    needs: [lint, typecheck, test, postgres, sandbox, workflows, secrets]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -165,6 +198,6 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
-      - run: bun scripts/ci/gate.ts lint typecheck test postgres workflows secrets
+      - run: bun scripts/ci/gate.ts lint typecheck test postgres sandbox workflows secrets
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}

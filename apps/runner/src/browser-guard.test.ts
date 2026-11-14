@@ -38,6 +38,8 @@ beforeAll(() => {
     noSandbox: true,
     resolve: (h) => sites.resolve(h),
     insecureTls: true,
+    // A blocked redirect never commits; production waits 10 s for it, the tests do not need to.
+    documentWaitMs: 2000,
   });
 });
 

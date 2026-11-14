@@ -297,6 +297,17 @@ describe("real srt", async () => {
   const on = sandbox.status().state === "on";
   if (!on) console.warn(`sandbox unavailable on this host: ${sandbox.status().reason}`);
 
+  // The CI sandbox job sets VANR_SANDBOX_REQUIRED=1: there a skipped attack test is a failure, not a pass.
+  test("where the sandbox is required, every real srt test runs", () => {
+    if (process.env.VANR_SANDBOX_REQUIRED !== "1") return;
+    expect({ on, reason: sandbox.status().reason, git: !!which("git"), curl: !!which("curl") }).toEqual({
+      on: true,
+      reason: null,
+      git: true,
+      curl: true,
+    });
+  });
+
   test("the sandbox starts on this host (or says why not)", () => {
     if (!on) {
       expect(sandbox.status().reason).toBeTruthy();
