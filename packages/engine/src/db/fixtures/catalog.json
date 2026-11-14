@@ -2,16 +2,12 @@
   "extensions": ["pg_trgm"],
   "tables": [
     "accounts",
-    "agent_actions",
-    "agent_browser_settings",
     "agent_channel_access",
     "agent_databases",
     "agent_environments",
     "agent_evals",
     "agent_grants",
     "agent_mailboxes",
-    "agent_secrets",
-    "agent_skills",
     "agent_test_cases",
     "agents",
     "approval_rules",
@@ -31,16 +27,18 @@
     "assignment_submissions",
     "assignment_work",
     "assignments",
+    "board_columns",
     "browser_interventions",
     "browser_log_entries",
+    "browser_policies",
     "budget_counters",
-    "calendar_events",
+    "calendar_entries",
     "calendar_proposals",
-    "channel_members",
+    "channel_memberships",
     "channels",
     "connections",
     "credentials",
-    "database_connections",
+    "data_sources",
     "db_databases",
     "db_rows",
     "db_tables",
@@ -49,23 +47,24 @@
     "debates",
     "delegations",
     "effect_keys",
+    "emoji_reactions",
     "file_versions",
     "files",
+    "gate_decisions",
     "github_installations",
     "instruction_versions",
     "integration_usage",
     "invitations",
-    "issue_columns",
     "issue_timeline",
     "issues",
-    "mail_accounts",
+    "knowledge_pages",
+    "mail_connections",
     "members",
     "memories",
     "memory_consolidations",
     "memory_reviews",
     "memory_versions",
-    "message_reactions",
-    "message_receipts",
+    "message_dispatches",
     "messages",
     "network_requests",
     "notification_deliveries",
@@ -73,27 +72,31 @@
     "notifications",
     "oauth_states",
     "outbox",
+    "page_links",
+    "page_revisions",
     "pins",
     "proposals",
     "push_subscriptions",
     "questions",
     "reminders",
-    "routine_runs",
+    "reversible_actions",
+    "routine_executions",
     "routines",
-    "run_steps",
+    "run_events",
     "runner_jobs",
     "runner_pairings",
+    "runner_secrets",
     "runner_sessions",
     "runners",
     "runs",
-    "sandbox_settings",
+    "sandbox_policies",
     "search_chunks",
-    "secret_requests",
+    "secret_prompts",
     "sessions",
+    "skill_grants",
     "skills",
     "thread_subscriptions",
     "threads",
-    "tool_decisions",
     "upload_sessions",
     "usage_lines",
     "usage_reservation_scopes",
@@ -102,12 +105,9 @@
     "verifications",
     "waitlist",
     "wiki_attachments",
-    "wiki_links",
     "wiki_page_docs",
     "wiki_page_views",
-    "wiki_pages",
     "wiki_prop_schemas",
-    "wiki_versions",
     "workspace_storage",
     "workspaces"
   ],
@@ -199,153 +199,6 @@
     {
       "table": "accounts",
       "name": "user_id",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "agent_actions",
-      "name": "agent_id",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "agent_actions",
-      "name": "created_at",
-      "type": "timestamp with time zone",
-      "notNull": true,
-      "default": "now()"
-    },
-    {
-      "table": "agent_actions",
-      "name": "id",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "agent_actions",
-      "name": "kind",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "agent_actions",
-      "name": "message_id",
-      "type": "text",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "agent_actions",
-      "name": "params",
-      "type": "jsonb",
-      "notNull": true,
-      "default": "'{}'::jsonb"
-    },
-    {
-      "table": "agent_actions",
-      "name": "requester_user_id",
-      "type": "text",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "agent_actions",
-      "name": "reverted_at",
-      "type": "timestamp with time zone",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "agent_actions",
-      "name": "reverter_user_id",
-      "type": "text",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "agent_actions",
-      "name": "revertible_until",
-      "type": "timestamp with time zone",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "agent_actions",
-      "name": "run_id",
-      "type": "text",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "agent_actions",
-      "name": "target",
-      "type": "jsonb",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "agent_actions",
-      "name": "workspace_id",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "agent_browser_settings",
-      "name": "agent_id",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "agent_browser_settings",
-      "name": "level",
-      "type": "text",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "agent_browser_settings",
-      "name": "permitted_domains",
-      "type": "jsonb",
-      "notNull": true,
-      "default": "'[]'::jsonb"
-    },
-    {
-      "table": "agent_browser_settings",
-      "name": "private_ranges",
-      "type": "jsonb",
-      "notNull": true,
-      "default": "'[]'::jsonb"
-    },
-    {
-      "table": "agent_browser_settings",
-      "name": "private_ranges_runner_id",
-      "type": "text",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "agent_browser_settings",
-      "name": "read_domains",
-      "type": "jsonb",
-      "notNull": true,
-      "default": "'[]'::jsonb"
-    },
-    {
-      "table": "agent_browser_settings",
-      "name": "updated_at",
-      "type": "timestamp with time zone",
-      "notNull": true,
-      "default": "now()"
-    },
-    {
-      "table": "agent_browser_settings",
-      "name": "workspace_id",
       "type": "text",
       "notNull": true,
       "default": null
@@ -626,90 +479,6 @@
     {
       "table": "agent_mailboxes",
       "name": "workspace_id",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "agent_secrets",
-      "name": "agent_id",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "agent_secrets",
-      "name": "browser",
-      "type": "jsonb",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "agent_secrets",
-      "name": "delivered_by",
-      "type": "text",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "agent_secrets",
-      "name": "file_path",
-      "type": "text",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "agent_secrets",
-      "name": "name",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "agent_secrets",
-      "name": "runner_id",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "agent_secrets",
-      "name": "target",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "agent_secrets",
-      "name": "updated_at",
-      "type": "timestamp with time zone",
-      "notNull": true,
-      "default": "now()"
-    },
-    {
-      "table": "agent_secrets",
-      "name": "workspace_id",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "agent_skills",
-      "name": "agent_id",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "agent_skills",
-      "name": "enabled",
-      "type": "boolean",
-      "notNull": true,
-      "default": "true"
-    },
-    {
-      "table": "agent_skills",
-      "name": "skill_id",
       "type": "text",
       "notNull": true,
       "default": null
@@ -2465,6 +2234,41 @@
       "default": null
     },
     {
+      "table": "board_columns",
+      "name": "id",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "board_columns",
+      "name": "name",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "board_columns",
+      "name": "position",
+      "type": "integer",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "board_columns",
+      "name": "stage",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "board_columns",
+      "name": "workspace_id",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
       "table": "browser_interventions",
       "name": "agent_id",
       "type": "text",
@@ -2689,6 +2493,62 @@
       "default": null
     },
     {
+      "table": "browser_policies",
+      "name": "agent_id",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "browser_policies",
+      "name": "level",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "browser_policies",
+      "name": "permitted_domains",
+      "type": "jsonb",
+      "notNull": true,
+      "default": "'[]'::jsonb"
+    },
+    {
+      "table": "browser_policies",
+      "name": "private_ranges",
+      "type": "jsonb",
+      "notNull": true,
+      "default": "'[]'::jsonb"
+    },
+    {
+      "table": "browser_policies",
+      "name": "private_ranges_runner_id",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "browser_policies",
+      "name": "read_domains",
+      "type": "jsonb",
+      "notNull": true,
+      "default": "'[]'::jsonb"
+    },
+    {
+      "table": "browser_policies",
+      "name": "updated_at",
+      "type": "timestamp with time zone",
+      "notNull": true,
+      "default": "now()"
+    },
+    {
+      "table": "browser_policies",
+      "name": "workspace_id",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
       "table": "budget_counters",
       "name": "period",
       "type": "text",
@@ -2717,112 +2577,112 @@
       "default": null
     },
     {
-      "table": "calendar_events",
+      "table": "calendar_entries",
       "name": "all_day",
       "type": "boolean",
       "notNull": true,
       "default": "false"
     },
     {
-      "table": "calendar_events",
+      "table": "calendar_entries",
       "name": "created_at",
       "type": "timestamp with time zone",
       "notNull": true,
       "default": "now()"
     },
     {
-      "table": "calendar_events",
+      "table": "calendar_entries",
       "name": "created_by",
       "type": "jsonb",
       "notNull": true,
       "default": null
     },
     {
-      "table": "calendar_events",
+      "table": "calendar_entries",
       "name": "description",
       "type": "text",
       "notNull": false,
       "default": null
     },
     {
-      "table": "calendar_events",
+      "table": "calendar_entries",
       "name": "end",
       "type": "timestamp with time zone",
       "notNull": true,
       "default": null
     },
     {
-      "table": "calendar_events",
+      "table": "calendar_entries",
       "name": "exdates",
       "type": "jsonb",
       "notNull": true,
       "default": "'[]'::jsonb"
     },
     {
-      "table": "calendar_events",
+      "table": "calendar_entries",
       "name": "id",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "calendar_events",
+      "table": "calendar_entries",
       "name": "location",
       "type": "text",
       "notNull": false,
       "default": null
     },
     {
-      "table": "calendar_events",
+      "table": "calendar_entries",
       "name": "participants",
       "type": "jsonb",
       "notNull": true,
       "default": "'[]'::jsonb"
     },
     {
-      "table": "calendar_events",
+      "table": "calendar_entries",
       "name": "rule",
       "type": "jsonb",
       "notNull": false,
       "default": null
     },
     {
-      "table": "calendar_events",
+      "table": "calendar_entries",
       "name": "series_id",
       "type": "text",
       "notNull": false,
       "default": null
     },
     {
-      "table": "calendar_events",
+      "table": "calendar_entries",
       "name": "start",
       "type": "timestamp with time zone",
       "notNull": true,
       "default": null
     },
     {
-      "table": "calendar_events",
+      "table": "calendar_entries",
       "name": "timezone",
       "type": "text",
       "notNull": true,
       "default": "'UTC'::text"
     },
     {
-      "table": "calendar_events",
+      "table": "calendar_entries",
       "name": "title",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "calendar_events",
+      "table": "calendar_entries",
       "name": "updated_at",
       "type": "timestamp with time zone",
       "notNull": true,
       "default": "now()"
     },
     {
-      "table": "calendar_events",
+      "table": "calendar_entries",
       "name": "workspace_id",
       "type": "text",
       "notNull": true,
@@ -2906,49 +2766,49 @@
       "default": null
     },
     {
-      "table": "channel_members",
+      "table": "channel_memberships",
       "name": "auto_answer",
       "type": "boolean",
       "notNull": true,
       "default": "false"
     },
     {
-      "table": "channel_members",
+      "table": "channel_memberships",
       "name": "channel_id",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "channel_members",
+      "table": "channel_memberships",
       "name": "last_read_at",
       "type": "timestamp with time zone",
       "notNull": false,
       "default": null
     },
     {
-      "table": "channel_members",
+      "table": "channel_memberships",
       "name": "last_read_message_id",
       "type": "text",
       "notNull": false,
       "default": null
     },
     {
-      "table": "channel_members",
+      "table": "channel_memberships",
       "name": "member_id",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "channel_members",
+      "table": "channel_memberships",
       "name": "member_since",
       "type": "timestamp with time zone",
       "notNull": true,
       "default": "now()"
     },
     {
-      "table": "channel_members",
+      "table": "channel_memberships",
       "name": "member_type",
       "type": "text",
       "notNull": true,
@@ -3235,119 +3095,119 @@
       "default": null
     },
     {
-      "table": "database_connections",
+      "table": "data_sources",
       "name": "can_write",
       "type": "boolean",
       "notNull": true,
       "default": "false"
     },
     {
-      "table": "database_connections",
+      "table": "data_sources",
       "name": "created_at",
       "type": "timestamp with time zone",
       "notNull": true,
       "default": "now()"
     },
     {
-      "table": "database_connections",
+      "table": "data_sources",
       "name": "created_by",
       "type": "text",
       "notNull": false,
       "default": null
     },
     {
-      "table": "database_connections",
+      "table": "data_sources",
       "name": "database",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "database_connections",
+      "table": "data_sources",
       "name": "disabled_actions",
       "type": "jsonb",
       "notNull": true,
       "default": "'[]'::jsonb"
     },
     {
-      "table": "database_connections",
+      "table": "data_sources",
       "name": "hidden_suggestion",
       "type": "jsonb",
       "notNull": true,
       "default": "'[]'::jsonb"
     },
     {
-      "table": "database_connections",
+      "table": "data_sources",
       "name": "host",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "database_connections",
+      "table": "data_sources",
       "name": "id",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "database_connections",
+      "table": "data_sources",
       "name": "label",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "database_connections",
+      "table": "data_sources",
       "name": "port",
       "type": "integer",
       "notNull": true,
       "default": "5432"
     },
     {
-      "table": "database_connections",
+      "table": "data_sources",
       "name": "provider",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "database_connections",
+      "table": "data_sources",
       "name": "secret",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "database_connections",
+      "table": "data_sources",
       "name": "sslmode",
       "type": "text",
       "notNull": true,
       "default": "'require'::text"
     },
     {
-      "table": "database_connections",
+      "table": "data_sources",
       "name": "status",
       "type": "text",
       "notNull": true,
       "default": "'active'::text"
     },
     {
-      "table": "database_connections",
+      "table": "data_sources",
       "name": "updated_at",
       "type": "timestamp with time zone",
       "notNull": true,
       "default": "now()"
     },
     {
-      "table": "database_connections",
+      "table": "data_sources",
       "name": "username",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "database_connections",
+      "table": "data_sources",
       "name": "workspace_id",
       "type": "text",
       "notNull": true,
@@ -4110,6 +3970,41 @@
       "default": null
     },
     {
+      "table": "emoji_reactions",
+      "name": "actor_id",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "emoji_reactions",
+      "name": "actor_type",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "emoji_reactions",
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "notNull": true,
+      "default": "now()"
+    },
+    {
+      "table": "emoji_reactions",
+      "name": "message_id",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "emoji_reactions",
+      "name": "reaction",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
       "table": "file_versions",
       "name": "author",
       "type": "jsonb",
@@ -4342,6 +4237,111 @@
     },
     {
       "table": "files",
+      "name": "workspace_id",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "gate_decisions",
+      "name": "agent_id",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "gate_decisions",
+      "name": "approval_id",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "gate_decisions",
+      "name": "by",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "gate_decisions",
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "notNull": true,
+      "default": "now()"
+    },
+    {
+      "table": "gate_decisions",
+      "name": "credential",
+      "type": "jsonb",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "gate_decisions",
+      "name": "decision",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "gate_decisions",
+      "name": "effect",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "gate_decisions",
+      "name": "flags",
+      "type": "jsonb",
+      "notNull": true,
+      "default": "'[]'::jsonb"
+    },
+    {
+      "table": "gate_decisions",
+      "name": "id",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "gate_decisions",
+      "name": "initiated_by",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "gate_decisions",
+      "name": "reason",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "gate_decisions",
+      "name": "rule_id",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "gate_decisions",
+      "name": "run_id",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "gate_decisions",
+      "name": "tool",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "gate_decisions",
       "name": "workspace_id",
       "type": "text",
       "notNull": true,
@@ -4607,41 +4607,6 @@
       "default": null
     },
     {
-      "table": "issue_columns",
-      "name": "id",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "issue_columns",
-      "name": "name",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "issue_columns",
-      "name": "position",
-      "type": "integer",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "issue_columns",
-      "name": "stage",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "issue_columns",
-      "name": "workspace_id",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
       "table": "issue_timeline",
       "name": "attachments",
       "type": "jsonb",
@@ -4873,98 +4838,231 @@
       "default": null
     },
     {
-      "table": "mail_accounts",
-      "name": "address",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "mail_accounts",
-      "name": "confirm_actions",
+      "table": "knowledge_pages",
+      "name": "aliases",
       "type": "jsonb",
       "notNull": true,
       "default": "'[]'::jsonb"
     },
     {
-      "table": "mail_accounts",
+      "table": "knowledge_pages",
+      "name": "body",
+      "type": "text",
+      "notNull": true,
+      "default": "''::text"
+    },
+    {
+      "table": "knowledge_pages",
       "name": "created_at",
       "type": "timestamp with time zone",
       "notNull": true,
       "default": "now()"
     },
     {
-      "table": "mail_accounts",
-      "name": "created_by",
-      "type": "text",
+      "table": "knowledge_pages",
+      "name": "deleted_at",
+      "type": "timestamp with time zone",
       "notNull": false,
       "default": null
     },
     {
-      "table": "mail_accounts",
-      "name": "disabled_actions",
+      "table": "knowledge_pages",
+      "name": "deleted_by",
       "type": "jsonb",
-      "notNull": true,
-      "default": "'[]'::jsonb"
+      "notNull": false,
+      "default": null
     },
     {
-      "table": "mail_accounts",
+      "table": "knowledge_pages",
+      "name": "expunge_at",
+      "type": "timestamp with time zone",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "knowledge_pages",
+      "name": "folder",
+      "type": "text",
+      "notNull": true,
+      "default": "''::text"
+    },
+    {
+      "table": "knowledge_pages",
       "name": "id",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "mail_accounts",
-      "name": "label",
+      "table": "knowledge_pages",
+      "name": "locked",
+      "type": "boolean",
+      "notNull": true,
+      "default": "false"
+    },
+    {
+      "table": "knowledge_pages",
+      "name": "pinned",
+      "type": "boolean",
+      "notNull": true,
+      "default": "false"
+    },
+    {
+      "table": "knowledge_pages",
+      "name": "props",
+      "type": "jsonb",
+      "notNull": true,
+      "default": "'{}'::jsonb"
+    },
+    {
+      "table": "knowledge_pages",
+      "name": "slug",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "mail_accounts",
-      "name": "preset",
+      "table": "knowledge_pages",
+      "name": "source_type",
       "type": "text",
       "notNull": false,
       "default": null
     },
     {
-      "table": "mail_accounts",
-      "name": "provider",
+      "table": "knowledge_pages",
+      "name": "tags",
+      "type": "jsonb",
+      "notNull": true,
+      "default": "'[]'::jsonb"
+    },
+    {
+      "table": "knowledge_pages",
+      "name": "title",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "mail_accounts",
-      "name": "secret",
-      "type": "text",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "mail_accounts",
-      "name": "status",
-      "type": "text",
-      "notNull": true,
-      "default": "'active'::text"
-    },
-    {
-      "table": "mail_accounts",
+      "table": "knowledge_pages",
       "name": "updated_at",
       "type": "timestamp with time zone",
       "notNull": true,
       "default": "now()"
     },
     {
-      "table": "mail_accounts",
+      "table": "knowledge_pages",
+      "name": "updated_by",
+      "type": "jsonb",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "knowledge_pages",
+      "name": "version",
+      "type": "integer",
+      "notNull": true,
+      "default": "1"
+    },
+    {
+      "table": "knowledge_pages",
+      "name": "workspace_id",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "mail_connections",
+      "name": "address",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "mail_connections",
+      "name": "confirm_actions",
+      "type": "jsonb",
+      "notNull": true,
+      "default": "'[]'::jsonb"
+    },
+    {
+      "table": "mail_connections",
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "notNull": true,
+      "default": "now()"
+    },
+    {
+      "table": "mail_connections",
+      "name": "created_by",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "mail_connections",
+      "name": "disabled_actions",
+      "type": "jsonb",
+      "notNull": true,
+      "default": "'[]'::jsonb"
+    },
+    {
+      "table": "mail_connections",
+      "name": "id",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "mail_connections",
+      "name": "label",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "mail_connections",
+      "name": "preset",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "mail_connections",
+      "name": "provider",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "mail_connections",
+      "name": "secret",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "mail_connections",
+      "name": "status",
+      "type": "text",
+      "notNull": true,
+      "default": "'active'::text"
+    },
+    {
+      "table": "mail_connections",
+      "name": "updated_at",
+      "type": "timestamp with time zone",
+      "notNull": true,
+      "default": "now()"
+    },
+    {
+      "table": "mail_connections",
       "name": "via",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "mail_accounts",
+      "table": "mail_connections",
       "name": "workspace_id",
       "type": "text",
       "notNull": true,
@@ -5573,84 +5671,49 @@
       "default": null
     },
     {
-      "table": "message_reactions",
-      "name": "actor_id",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "message_reactions",
-      "name": "actor_type",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "message_reactions",
-      "name": "created_at",
-      "type": "timestamp with time zone",
-      "notNull": true,
-      "default": "now()"
-    },
-    {
-      "table": "message_reactions",
-      "name": "message_id",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "message_reactions",
-      "name": "reaction",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "message_receipts",
+      "table": "message_dispatches",
       "name": "agent_id",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "message_receipts",
+      "table": "message_dispatches",
       "name": "created_at",
       "type": "timestamp with time zone",
       "notNull": true,
       "default": "now()"
     },
     {
-      "table": "message_receipts",
+      "table": "message_dispatches",
       "name": "message_id",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "message_receipts",
+      "table": "message_dispatches",
       "name": "reason",
       "type": "text",
       "notNull": false,
       "default": null
     },
     {
-      "table": "message_receipts",
+      "table": "message_dispatches",
       "name": "run_id",
       "type": "text",
       "notNull": false,
       "default": null
     },
     {
-      "table": "message_receipts",
+      "table": "message_dispatches",
       "name": "state",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "message_receipts",
+      "table": "message_dispatches",
       "name": "status",
       "type": "text",
       "notNull": false,
@@ -6287,6 +6350,125 @@
       "default": null
     },
     {
+      "table": "page_links",
+      "name": "anchor",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "page_links",
+      "name": "embed",
+      "type": "boolean",
+      "notNull": true,
+      "default": "false"
+    },
+    {
+      "table": "page_links",
+      "name": "link_text",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "page_links",
+      "name": "ordinal",
+      "type": "integer",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "page_links",
+      "name": "source_id",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "page_links",
+      "name": "target_id",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "page_links",
+      "name": "target_slug",
+      "type": "text",
+      "notNull": true,
+      "default": "''::text"
+    },
+    {
+      "table": "page_links",
+      "name": "target_text",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "page_links",
+      "name": "workspace_id",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "page_revisions",
+      "name": "author",
+      "type": "jsonb",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "page_revisions",
+      "name": "body",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "page_revisions",
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "notNull": true,
+      "default": "now()"
+    },
+    {
+      "table": "page_revisions",
+      "name": "note",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "page_revisions",
+      "name": "page_id",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "page_revisions",
+      "name": "props",
+      "type": "jsonb",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "page_revisions",
+      "name": "title",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "page_revisions",
+      "name": "version",
+      "type": "integer",
+      "notNull": true,
+      "default": null
+    },
+    {
       "table": "pins",
       "name": "channel_id",
       "type": "text",
@@ -6700,161 +6882,252 @@
       "default": null
     },
     {
-      "table": "routine_runs",
-      "name": "at",
-      "type": "timestamp with time zone",
+      "table": "reversible_actions",
+      "name": "agent_id",
+      "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "routine_runs",
-      "name": "attempt",
-      "type": "integer",
+      "table": "reversible_actions",
+      "name": "created_at",
+      "type": "timestamp with time zone",
       "notNull": true,
-      "default": "1"
+      "default": "now()"
     },
     {
-      "table": "routine_runs",
-      "name": "channel_id",
-      "type": "text",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "routine_runs",
-      "name": "deadline_at",
-      "type": "timestamp with time zone",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "routine_runs",
-      "name": "dedupe_key",
-      "type": "text",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "routine_runs",
-      "name": "finished_at",
-      "type": "timestamp with time zone",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "routine_runs",
+      "table": "reversible_actions",
       "name": "id",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "routine_runs",
+      "table": "reversible_actions",
+      "name": "kind",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "reversible_actions",
       "name": "message_id",
       "type": "text",
       "notNull": false,
       "default": null
     },
     {
-      "table": "routine_runs",
-      "name": "not_before",
+      "table": "reversible_actions",
+      "name": "params",
+      "type": "jsonb",
+      "notNull": true,
+      "default": "'{}'::jsonb"
+    },
+    {
+      "table": "reversible_actions",
+      "name": "requester_user_id",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "reversible_actions",
+      "name": "reverted_at",
       "type": "timestamp with time zone",
       "notNull": false,
       "default": null
     },
     {
-      "table": "routine_runs",
-      "name": "payload",
-      "type": "jsonb",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "routine_runs",
-      "name": "reason",
+      "table": "reversible_actions",
+      "name": "reverter_user_id",
       "type": "text",
       "notNull": false,
       "default": null
     },
     {
-      "table": "routine_runs",
-      "name": "retried",
-      "type": "boolean",
-      "notNull": true,
-      "default": "false"
-    },
-    {
-      "table": "routine_runs",
-      "name": "retry_of",
-      "type": "text",
+      "table": "reversible_actions",
+      "name": "revertible_until",
+      "type": "timestamp with time zone",
       "notNull": false,
       "default": null
     },
     {
-      "table": "routine_runs",
-      "name": "routine_id",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "routine_runs",
+      "table": "reversible_actions",
       "name": "run_id",
       "type": "text",
       "notNull": false,
       "default": null
     },
     {
-      "table": "routine_runs",
+      "table": "reversible_actions",
+      "name": "target",
+      "type": "jsonb",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "reversible_actions",
+      "name": "workspace_id",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "routine_executions",
+      "name": "at",
+      "type": "timestamp with time zone",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "routine_executions",
+      "name": "attempt",
+      "type": "integer",
+      "notNull": true,
+      "default": "1"
+    },
+    {
+      "table": "routine_executions",
+      "name": "channel_id",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "routine_executions",
+      "name": "deadline_at",
+      "type": "timestamp with time zone",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "routine_executions",
+      "name": "dedupe_key",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "routine_executions",
+      "name": "finished_at",
+      "type": "timestamp with time zone",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "routine_executions",
+      "name": "id",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "routine_executions",
+      "name": "message_id",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "routine_executions",
+      "name": "not_before",
+      "type": "timestamp with time zone",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "routine_executions",
+      "name": "payload",
+      "type": "jsonb",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "routine_executions",
+      "name": "reason",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "routine_executions",
+      "name": "retried",
+      "type": "boolean",
+      "notNull": true,
+      "default": "false"
+    },
+    {
+      "table": "routine_executions",
+      "name": "retry_of",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "routine_executions",
+      "name": "routine_id",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "routine_executions",
+      "name": "run_id",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "routine_executions",
       "name": "scheduled_for",
       "type": "timestamp with time zone",
       "notNull": false,
       "default": null
     },
     {
-      "table": "routine_runs",
+      "table": "routine_executions",
       "name": "started_at",
       "type": "timestamp with time zone",
       "notNull": false,
       "default": null
     },
     {
-      "table": "routine_runs",
+      "table": "routine_executions",
       "name": "status",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "routine_runs",
+      "table": "routine_executions",
       "name": "summary",
       "type": "text",
       "notNull": false,
       "default": null
     },
     {
-      "table": "routine_runs",
+      "table": "routine_executions",
       "name": "summary_key",
       "type": "text",
       "notNull": false,
       "default": null
     },
     {
-      "table": "routine_runs",
+      "table": "routine_executions",
       "name": "summary_vars",
       "type": "jsonb",
       "notNull": false,
       "default": null
     },
     {
-      "table": "routine_runs",
+      "table": "routine_executions",
       "name": "thread_id",
       "type": "text",
       "notNull": false,
       "default": null
     },
     {
-      "table": "routine_runs",
+      "table": "routine_executions",
       "name": "trigger",
       "type": "text",
       "notNull": false,
@@ -6994,35 +7267,35 @@
       "default": null
     },
     {
-      "table": "run_steps",
+      "table": "run_events",
       "name": "created_at",
       "type": "timestamp with time zone",
       "notNull": true,
       "default": "now()"
     },
     {
-      "table": "run_steps",
+      "table": "run_events",
       "name": "data",
       "type": "jsonb",
       "notNull": true,
       "default": null
     },
     {
-      "table": "run_steps",
+      "table": "run_events",
       "name": "kind",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "run_steps",
+      "table": "run_events",
       "name": "run_id",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "run_steps",
+      "table": "run_events",
       "name": "seq",
       "type": "integer",
       "notNull": true,
@@ -7355,6 +7628,69 @@
       "name": "workspace_id",
       "type": "text",
       "notNull": false,
+      "default": null
+    },
+    {
+      "table": "runner_secrets",
+      "name": "agent_id",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "runner_secrets",
+      "name": "browser",
+      "type": "jsonb",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "runner_secrets",
+      "name": "delivered_by",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "runner_secrets",
+      "name": "file_path",
+      "type": "text",
+      "notNull": false,
+      "default": null
+    },
+    {
+      "table": "runner_secrets",
+      "name": "name",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "runner_secrets",
+      "name": "runner_id",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "runner_secrets",
+      "name": "target",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "runner_secrets",
+      "name": "updated_at",
+      "type": "timestamp with time zone",
+      "notNull": true,
+      "default": "now()"
+    },
+    {
+      "table": "runner_secrets",
+      "name": "workspace_id",
+      "type": "text",
+      "notNull": true,
       "default": null
     },
     {
@@ -7743,56 +8079,56 @@
       "default": null
     },
     {
-      "table": "sandbox_settings",
+      "table": "sandbox_policies",
       "name": "command_timeout_sec",
       "type": "integer",
       "notNull": true,
       "default": "120"
     },
     {
-      "table": "sandbox_settings",
+      "table": "sandbox_policies",
       "name": "enabled",
       "type": "boolean",
       "notNull": true,
       "default": "false"
     },
     {
-      "table": "sandbox_settings",
+      "table": "sandbox_policies",
       "name": "minutes_per_day",
       "type": "integer",
       "notNull": true,
       "default": "120"
     },
     {
-      "table": "sandbox_settings",
+      "table": "sandbox_policies",
       "name": "network",
       "type": "text",
       "notNull": true,
       "default": "'allowlist'::text"
     },
     {
-      "table": "sandbox_settings",
+      "table": "sandbox_policies",
       "name": "permitted_domains",
       "type": "jsonb",
       "notNull": true,
       "default": "'[]'::jsonb"
     },
     {
-      "table": "sandbox_settings",
+      "table": "sandbox_policies",
       "name": "require_approval",
       "type": "boolean",
       "notNull": true,
       "default": "false"
     },
     {
-      "table": "sandbox_settings",
+      "table": "sandbox_policies",
       "name": "updated_at",
       "type": "timestamp with time zone",
       "notNull": true,
       "default": "now()"
     },
     {
-      "table": "sandbox_settings",
+      "table": "sandbox_policies",
       "name": "workspace_id",
       "type": "text",
       "notNull": true,
@@ -7967,140 +8303,140 @@
       "default": null
     },
     {
-      "table": "secret_requests",
+      "table": "secret_prompts",
       "name": "agent_id",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "secret_requests",
+      "table": "secret_prompts",
       "name": "browser",
       "type": "jsonb",
       "notNull": false,
       "default": null
     },
     {
-      "table": "secret_requests",
+      "table": "secret_prompts",
       "name": "channel_id",
       "type": "text",
       "notNull": false,
       "default": null
     },
     {
-      "table": "secret_requests",
+      "table": "secret_prompts",
       "name": "created_at",
       "type": "timestamp with time zone",
       "notNull": true,
       "default": "now()"
     },
     {
-      "table": "secret_requests",
+      "table": "secret_prompts",
       "name": "decided_by",
       "type": "text",
       "notNull": false,
       "default": null
     },
     {
-      "table": "secret_requests",
+      "table": "secret_prompts",
       "name": "expires_at",
       "type": "timestamp with time zone",
       "notNull": true,
       "default": null
     },
     {
-      "table": "secret_requests",
+      "table": "secret_prompts",
       "name": "file_path",
       "type": "text",
       "notNull": false,
       "default": null
     },
     {
-      "table": "secret_requests",
+      "table": "secret_prompts",
       "name": "fulfilled_at",
       "type": "timestamp with time zone",
       "notNull": false,
       "default": null
     },
     {
-      "table": "secret_requests",
+      "table": "secret_prompts",
       "name": "id",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "secret_requests",
+      "table": "secret_prompts",
       "name": "message_id",
       "type": "text",
       "notNull": false,
       "default": null
     },
     {
-      "table": "secret_requests",
+      "table": "secret_prompts",
       "name": "name",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "secret_requests",
+      "table": "secret_prompts",
       "name": "public_key",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "secret_requests",
+      "table": "secret_prompts",
       "name": "purpose",
       "type": "text",
       "notNull": true,
       "default": "''::text"
     },
     {
-      "table": "secret_requests",
+      "table": "secret_prompts",
       "name": "run_id",
       "type": "text",
       "notNull": false,
       "default": null
     },
     {
-      "table": "secret_requests",
+      "table": "secret_prompts",
       "name": "runner_id",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "secret_requests",
+      "table": "secret_prompts",
       "name": "status",
       "type": "text",
       "notNull": true,
       "default": "'pending'::text"
     },
     {
-      "table": "secret_requests",
+      "table": "secret_prompts",
       "name": "target",
       "type": "text",
       "notNull": true,
       "default": null
     },
     {
-      "table": "secret_requests",
+      "table": "secret_prompts",
       "name": "target_user_id",
       "type": "text",
       "notNull": false,
       "default": null
     },
     {
-      "table": "secret_requests",
+      "table": "secret_prompts",
       "name": "thread_id",
       "type": "text",
       "notNull": false,
       "default": null
     },
     {
-      "table": "secret_requests",
+      "table": "secret_prompts",
       "name": "workspace_id",
       "type": "text",
       "notNull": true,
@@ -8158,6 +8494,27 @@
     {
       "table": "sessions",
       "name": "user_id",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "skill_grants",
+      "name": "agent_id",
+      "type": "text",
+      "notNull": true,
+      "default": null
+    },
+    {
+      "table": "skill_grants",
+      "name": "enabled",
+      "type": "boolean",
+      "notNull": true,
+      "default": "true"
+    },
+    {
+      "table": "skill_grants",
+      "name": "skill_id",
       "type": "text",
       "notNull": true,
       "default": null
@@ -8388,111 +8745,6 @@
     },
     {
       "table": "threads",
-      "name": "workspace_id",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "tool_decisions",
-      "name": "agent_id",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "tool_decisions",
-      "name": "approval_id",
-      "type": "text",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "tool_decisions",
-      "name": "by",
-      "type": "text",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "tool_decisions",
-      "name": "created_at",
-      "type": "timestamp with time zone",
-      "notNull": true,
-      "default": "now()"
-    },
-    {
-      "table": "tool_decisions",
-      "name": "credential",
-      "type": "jsonb",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "tool_decisions",
-      "name": "decision",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "tool_decisions",
-      "name": "effect",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "tool_decisions",
-      "name": "flags",
-      "type": "jsonb",
-      "notNull": true,
-      "default": "'[]'::jsonb"
-    },
-    {
-      "table": "tool_decisions",
-      "name": "id",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "tool_decisions",
-      "name": "initiated_by",
-      "type": "text",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "tool_decisions",
-      "name": "reason",
-      "type": "text",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "tool_decisions",
-      "name": "rule_id",
-      "type": "text",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "tool_decisions",
-      "name": "run_id",
-      "type": "text",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "tool_decisions",
-      "name": "tool",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "tool_decisions",
       "name": "workspace_id",
       "type": "text",
       "notNull": true,
@@ -9052,69 +9304,6 @@
       "default": null
     },
     {
-      "table": "wiki_links",
-      "name": "anchor",
-      "type": "text",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "wiki_links",
-      "name": "embed",
-      "type": "boolean",
-      "notNull": true,
-      "default": "false"
-    },
-    {
-      "table": "wiki_links",
-      "name": "link_text",
-      "type": "text",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "wiki_links",
-      "name": "ordinal",
-      "type": "integer",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "wiki_links",
-      "name": "source_id",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "wiki_links",
-      "name": "target_id",
-      "type": "text",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "wiki_links",
-      "name": "target_slug",
-      "type": "text",
-      "notNull": true,
-      "default": "''::text"
-    },
-    {
-      "table": "wiki_links",
-      "name": "target_text",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "wiki_links",
-      "name": "workspace_id",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
       "table": "wiki_page_docs",
       "name": "dirty",
       "type": "boolean",
@@ -9199,139 +9388,6 @@
       "default": null
     },
     {
-      "table": "wiki_pages",
-      "name": "aliases",
-      "type": "jsonb",
-      "notNull": true,
-      "default": "'[]'::jsonb"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "body",
-      "type": "text",
-      "notNull": true,
-      "default": "''::text"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "created_at",
-      "type": "timestamp with time zone",
-      "notNull": true,
-      "default": "now()"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "deleted_at",
-      "type": "timestamp with time zone",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "wiki_pages",
-      "name": "deleted_by",
-      "type": "jsonb",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "wiki_pages",
-      "name": "expunge_at",
-      "type": "timestamp with time zone",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "wiki_pages",
-      "name": "folder",
-      "type": "text",
-      "notNull": true,
-      "default": "''::text"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "id",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "wiki_pages",
-      "name": "locked",
-      "type": "boolean",
-      "notNull": true,
-      "default": "false"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "pinned",
-      "type": "boolean",
-      "notNull": true,
-      "default": "false"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "props",
-      "type": "jsonb",
-      "notNull": true,
-      "default": "'{}'::jsonb"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "slug",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "wiki_pages",
-      "name": "source_type",
-      "type": "text",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "wiki_pages",
-      "name": "tags",
-      "type": "jsonb",
-      "notNull": true,
-      "default": "'[]'::jsonb"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "title",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "wiki_pages",
-      "name": "updated_at",
-      "type": "timestamp with time zone",
-      "notNull": true,
-      "default": "now()"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "updated_by",
-      "type": "jsonb",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "wiki_pages",
-      "name": "version",
-      "type": "integer",
-      "notNull": true,
-      "default": "1"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "workspace_id",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
       "table": "wiki_prop_schemas",
       "name": "defs",
       "type": "jsonb",
@@ -9356,62 +9412,6 @@
       "table": "wiki_prop_schemas",
       "name": "workspace_id",
       "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "wiki_versions",
-      "name": "author",
-      "type": "jsonb",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "wiki_versions",
-      "name": "body",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "wiki_versions",
-      "name": "created_at",
-      "type": "timestamp with time zone",
-      "notNull": true,
-      "default": "now()"
-    },
-    {
-      "table": "wiki_versions",
-      "name": "note",
-      "type": "text",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "wiki_versions",
-      "name": "page_id",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "wiki_versions",
-      "name": "props",
-      "type": "jsonb",
-      "notNull": false,
-      "default": null
-    },
-    {
-      "table": "wiki_versions",
-      "name": "title",
-      "type": "text",
-      "notNull": true,
-      "default": null
-    },
-    {
-      "table": "wiki_versions",
-      "name": "version",
-      "type": "integer",
       "notNull": true,
       "default": null
     },
@@ -9599,120 +9599,6 @@
       "definition": "FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
     },
     {
-      "table": "agent_actions",
-      "name": "agent_actions_agent_id_agents_id_fk",
-      "type": "f",
-      "definition": "FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE"
-    },
-    {
-      "table": "agent_actions",
-      "name": "agent_actions_agent_id_not_null",
-      "type": "n",
-      "definition": "NOT NULL agent_id"
-    },
-    {
-      "table": "agent_actions",
-      "name": "agent_actions_created_at_not_null",
-      "type": "n",
-      "definition": "NOT NULL created_at"
-    },
-    {
-      "table": "agent_actions",
-      "name": "agent_actions_id_not_null",
-      "type": "n",
-      "definition": "NOT NULL id"
-    },
-    {
-      "table": "agent_actions",
-      "name": "agent_actions_kind_not_null",
-      "type": "n",
-      "definition": "NOT NULL kind"
-    },
-    {
-      "table": "agent_actions",
-      "name": "agent_actions_params_not_null",
-      "type": "n",
-      "definition": "NOT NULL params"
-    },
-    {
-      "table": "agent_actions",
-      "name": "agent_actions_pkey",
-      "type": "p",
-      "definition": "PRIMARY KEY (id)"
-    },
-    {
-      "table": "agent_actions",
-      "name": "agent_actions_target_not_null",
-      "type": "n",
-      "definition": "NOT NULL target"
-    },
-    {
-      "table": "agent_actions",
-      "name": "agent_actions_workspace_id_not_null",
-      "type": "n",
-      "definition": "NOT NULL workspace_id"
-    },
-    {
-      "table": "agent_actions",
-      "name": "agent_actions_workspace_id_workspaces_id_fk",
-      "type": "f",
-      "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
-    },
-    {
-      "table": "agent_browser_settings",
-      "name": "agent_browser_settings_agent_id_agents_id_fk",
-      "type": "f",
-      "definition": "FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE"
-    },
-    {
-      "table": "agent_browser_settings",
-      "name": "agent_browser_settings_agent_id_not_null",
-      "type": "n",
-      "definition": "NOT NULL agent_id"
-    },
-    {
-      "table": "agent_browser_settings",
-      "name": "agent_browser_settings_permitted_domains_not_null",
-      "type": "n",
-      "definition": "NOT NULL permitted_domains"
-    },
-    {
-      "table": "agent_browser_settings",
-      "name": "agent_browser_settings_pkey",
-      "type": "p",
-      "definition": "PRIMARY KEY (agent_id)"
-    },
-    {
-      "table": "agent_browser_settings",
-      "name": "agent_browser_settings_private_ranges_not_null",
-      "type": "n",
-      "definition": "NOT NULL private_ranges"
-    },
-    {
-      "table": "agent_browser_settings",
-      "name": "agent_browser_settings_read_domains_not_null",
-      "type": "n",
-      "definition": "NOT NULL read_domains"
-    },
-    {
-      "table": "agent_browser_settings",
-      "name": "agent_browser_settings_updated_at_not_null",
-      "type": "n",
-      "definition": "NOT NULL updated_at"
-    },
-    {
-      "table": "agent_browser_settings",
-      "name": "agent_browser_settings_workspace_id_not_null",
-      "type": "n",
-      "definition": "NOT NULL workspace_id"
-    },
-    {
-      "table": "agent_browser_settings",
-      "name": "agent_browser_settings_workspace_id_workspaces_id_fk",
-      "type": "f",
-      "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
-    },
-    {
       "table": "agent_channel_access",
       "name": "agent_channel_access_agent_id_agents_id_fk",
       "type": "f",
@@ -9780,9 +9666,9 @@
     },
     {
       "table": "agent_databases",
-      "name": "agent_databases_connection_id_database_connections_id_fk",
+      "name": "agent_databases_connection_id_data_sources_id_fk",
       "type": "f",
-      "definition": "FOREIGN KEY (connection_id) REFERENCES database_connections(id) ON DELETE CASCADE"
+      "definition": "FOREIGN KEY (connection_id) REFERENCES data_sources(id) ON DELETE CASCADE"
     },
     {
       "table": "agent_databases",
@@ -9978,9 +9864,9 @@
     },
     {
       "table": "agent_mailboxes",
-      "name": "agent_mailboxes_account_id_mail_accounts_id_fk",
+      "name": "agent_mailboxes_account_id_mail_connections_id_fk",
       "type": "f",
-      "definition": "FOREIGN KEY (account_id) REFERENCES mail_accounts(id) ON DELETE CASCADE"
+      "definition": "FOREIGN KEY (account_id) REFERENCES mail_connections(id) ON DELETE CASCADE"
     },
     {
       "table": "agent_mailboxes",
@@ -10035,96 +9921,6 @@
       "name": "agent_mailboxes_workspace_id_workspaces_id_fk",
       "type": "f",
       "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
-    },
-    {
-      "table": "agent_secrets",
-      "name": "agent_secrets_agent_id_agents_id_fk",
-      "type": "f",
-      "definition": "FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE"
-    },
-    {
-      "table": "agent_secrets",
-      "name": "agent_secrets_agent_id_not_null",
-      "type": "n",
-      "definition": "NOT NULL agent_id"
-    },
-    {
-      "table": "agent_secrets",
-      "name": "agent_secrets_agent_id_runner_id_name_pk",
-      "type": "p",
-      "definition": "PRIMARY KEY (agent_id, runner_id, name)"
-    },
-    {
-      "table": "agent_secrets",
-      "name": "agent_secrets_name_not_null",
-      "type": "n",
-      "definition": "NOT NULL name"
-    },
-    {
-      "table": "agent_secrets",
-      "name": "agent_secrets_runner_id_not_null",
-      "type": "n",
-      "definition": "NOT NULL runner_id"
-    },
-    {
-      "table": "agent_secrets",
-      "name": "agent_secrets_target_not_null",
-      "type": "n",
-      "definition": "NOT NULL target"
-    },
-    {
-      "table": "agent_secrets",
-      "name": "agent_secrets_updated_at_not_null",
-      "type": "n",
-      "definition": "NOT NULL updated_at"
-    },
-    {
-      "table": "agent_secrets",
-      "name": "agent_secrets_workspace_id_not_null",
-      "type": "n",
-      "definition": "NOT NULL workspace_id"
-    },
-    {
-      "table": "agent_secrets",
-      "name": "agent_secrets_workspace_id_workspaces_id_fk",
-      "type": "f",
-      "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
-    },
-    {
-      "table": "agent_skills",
-      "name": "agent_skills_agent_id_agents_id_fk",
-      "type": "f",
-      "definition": "FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE"
-    },
-    {
-      "table": "agent_skills",
-      "name": "agent_skills_agent_id_not_null",
-      "type": "n",
-      "definition": "NOT NULL agent_id"
-    },
-    {
-      "table": "agent_skills",
-      "name": "agent_skills_agent_id_skill_id_pk",
-      "type": "p",
-      "definition": "PRIMARY KEY (agent_id, skill_id)"
-    },
-    {
-      "table": "agent_skills",
-      "name": "agent_skills_enabled_not_null",
-      "type": "n",
-      "definition": "NOT NULL enabled"
-    },
-    {
-      "table": "agent_skills",
-      "name": "agent_skills_skill_id_not_null",
-      "type": "n",
-      "definition": "NOT NULL skill_id"
-    },
-    {
-      "table": "agent_skills",
-      "name": "agent_skills_skill_id_skills_id_fk",
-      "type": "f",
-      "definition": "FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE"
     },
     {
       "table": "agent_test_cases",
@@ -11333,6 +11129,48 @@
       "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
     },
     {
+      "table": "board_columns",
+      "name": "board_columns_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL id"
+    },
+    {
+      "table": "board_columns",
+      "name": "board_columns_name_not_null",
+      "type": "n",
+      "definition": "NOT NULL name"
+    },
+    {
+      "table": "board_columns",
+      "name": "board_columns_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "table": "board_columns",
+      "name": "board_columns_position_not_null",
+      "type": "n",
+      "definition": "NOT NULL \"position\""
+    },
+    {
+      "table": "board_columns",
+      "name": "board_columns_stage_not_null",
+      "type": "n",
+      "definition": "NOT NULL stage"
+    },
+    {
+      "table": "board_columns",
+      "name": "board_columns_workspace_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL workspace_id"
+    },
+    {
+      "table": "board_columns",
+      "name": "board_columns_workspace_id_workspaces_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
+    },
+    {
       "table": "browser_interventions",
       "name": "browser_interventions_agent_id_agents_id_fk",
       "type": "f",
@@ -11465,6 +11303,60 @@
       "definition": "NOT NULL workspace_id"
     },
     {
+      "table": "browser_policies",
+      "name": "browser_policies_agent_id_agents_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "browser_policies",
+      "name": "browser_policies_agent_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL agent_id"
+    },
+    {
+      "table": "browser_policies",
+      "name": "browser_policies_permitted_domains_not_null",
+      "type": "n",
+      "definition": "NOT NULL permitted_domains"
+    },
+    {
+      "table": "browser_policies",
+      "name": "browser_policies_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (agent_id)"
+    },
+    {
+      "table": "browser_policies",
+      "name": "browser_policies_private_ranges_not_null",
+      "type": "n",
+      "definition": "NOT NULL private_ranges"
+    },
+    {
+      "table": "browser_policies",
+      "name": "browser_policies_read_domains_not_null",
+      "type": "n",
+      "definition": "NOT NULL read_domains"
+    },
+    {
+      "table": "browser_policies",
+      "name": "browser_policies_updated_at_not_null",
+      "type": "n",
+      "definition": "NOT NULL updated_at"
+    },
+    {
+      "table": "browser_policies",
+      "name": "browser_policies_workspace_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL workspace_id"
+    },
+    {
+      "table": "browser_policies",
+      "name": "browser_policies_workspace_id_workspaces_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
+    },
+    {
       "table": "budget_counters",
       "name": "budget_counters_period_not_null",
       "type": "n",
@@ -11501,86 +11393,86 @@
       "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
     },
     {
-      "table": "calendar_events",
-      "name": "calendar_events_all_day_not_null",
+      "table": "calendar_entries",
+      "name": "calendar_entries_all_day_not_null",
       "type": "n",
       "definition": "NOT NULL all_day"
     },
     {
-      "table": "calendar_events",
-      "name": "calendar_events_created_at_not_null",
+      "table": "calendar_entries",
+      "name": "calendar_entries_created_at_not_null",
       "type": "n",
       "definition": "NOT NULL created_at"
     },
     {
-      "table": "calendar_events",
-      "name": "calendar_events_created_by_not_null",
+      "table": "calendar_entries",
+      "name": "calendar_entries_created_by_not_null",
       "type": "n",
       "definition": "NOT NULL created_by"
     },
     {
-      "table": "calendar_events",
-      "name": "calendar_events_end_not_null",
+      "table": "calendar_entries",
+      "name": "calendar_entries_end_not_null",
       "type": "n",
       "definition": "NOT NULL \"end\""
     },
     {
-      "table": "calendar_events",
-      "name": "calendar_events_exdates_not_null",
+      "table": "calendar_entries",
+      "name": "calendar_entries_exdates_not_null",
       "type": "n",
       "definition": "NOT NULL exdates"
     },
     {
-      "table": "calendar_events",
-      "name": "calendar_events_id_not_null",
+      "table": "calendar_entries",
+      "name": "calendar_entries_id_not_null",
       "type": "n",
       "definition": "NOT NULL id"
     },
     {
-      "table": "calendar_events",
-      "name": "calendar_events_participants_not_null",
+      "table": "calendar_entries",
+      "name": "calendar_entries_participants_not_null",
       "type": "n",
       "definition": "NOT NULL participants"
     },
     {
-      "table": "calendar_events",
-      "name": "calendar_events_pkey",
+      "table": "calendar_entries",
+      "name": "calendar_entries_pkey",
       "type": "p",
       "definition": "PRIMARY KEY (id)"
     },
     {
-      "table": "calendar_events",
-      "name": "calendar_events_start_not_null",
+      "table": "calendar_entries",
+      "name": "calendar_entries_start_not_null",
       "type": "n",
       "definition": "NOT NULL start"
     },
     {
-      "table": "calendar_events",
-      "name": "calendar_events_timezone_not_null",
+      "table": "calendar_entries",
+      "name": "calendar_entries_timezone_not_null",
       "type": "n",
       "definition": "NOT NULL timezone"
     },
     {
-      "table": "calendar_events",
-      "name": "calendar_events_title_not_null",
+      "table": "calendar_entries",
+      "name": "calendar_entries_title_not_null",
       "type": "n",
       "definition": "NOT NULL title"
     },
     {
-      "table": "calendar_events",
-      "name": "calendar_events_updated_at_not_null",
+      "table": "calendar_entries",
+      "name": "calendar_entries_updated_at_not_null",
       "type": "n",
       "definition": "NOT NULL updated_at"
     },
     {
-      "table": "calendar_events",
-      "name": "calendar_events_workspace_id_not_null",
+      "table": "calendar_entries",
+      "name": "calendar_entries_workspace_id_not_null",
       "type": "n",
       "definition": "NOT NULL workspace_id"
     },
     {
-      "table": "calendar_events",
-      "name": "calendar_events_workspace_id_workspaces_id_fk",
+      "table": "calendar_entries",
+      "name": "calendar_entries_workspace_id_workspaces_id_fk",
       "type": "f",
       "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
     },
@@ -11657,44 +11549,44 @@
       "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
     },
     {
-      "table": "channel_members",
-      "name": "channel_members_auto_answer_not_null",
+      "table": "channel_memberships",
+      "name": "channel_memberships_auto_answer_not_null",
       "type": "n",
       "definition": "NOT NULL auto_answer"
     },
     {
-      "table": "channel_members",
-      "name": "channel_members_channel_id_channels_id_fk",
+      "table": "channel_memberships",
+      "name": "channel_memberships_channel_id_channels_id_fk",
       "type": "f",
       "definition": "FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE"
     },
     {
-      "table": "channel_members",
-      "name": "channel_members_channel_id_member_type_member_id_pk",
+      "table": "channel_memberships",
+      "name": "channel_memberships_channel_id_member_type_member_id_pk",
       "type": "p",
       "definition": "PRIMARY KEY (channel_id, member_type, member_id)"
     },
     {
-      "table": "channel_members",
-      "name": "channel_members_channel_id_not_null",
+      "table": "channel_memberships",
+      "name": "channel_memberships_channel_id_not_null",
       "type": "n",
       "definition": "NOT NULL channel_id"
     },
     {
-      "table": "channel_members",
-      "name": "channel_members_member_id_not_null",
+      "table": "channel_memberships",
+      "name": "channel_memberships_member_id_not_null",
       "type": "n",
       "definition": "NOT NULL member_id"
     },
     {
-      "table": "channel_members",
-      "name": "channel_members_member_since_not_null",
+      "table": "channel_memberships",
+      "name": "channel_memberships_member_since_not_null",
       "type": "n",
       "definition": "NOT NULL member_since"
     },
     {
-      "table": "channel_members",
-      "name": "channel_members_member_type_not_null",
+      "table": "channel_memberships",
+      "name": "channel_memberships_member_type_not_null",
       "type": "n",
       "definition": "NOT NULL member_type"
     },
@@ -11891,110 +11783,110 @@
       "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
     },
     {
-      "table": "database_connections",
-      "name": "database_connections_can_write_not_null",
+      "table": "data_sources",
+      "name": "data_sources_can_write_not_null",
       "type": "n",
       "definition": "NOT NULL can_write"
     },
     {
-      "table": "database_connections",
-      "name": "database_connections_created_at_not_null",
+      "table": "data_sources",
+      "name": "data_sources_created_at_not_null",
       "type": "n",
       "definition": "NOT NULL created_at"
     },
     {
-      "table": "database_connections",
-      "name": "database_connections_database_not_null",
+      "table": "data_sources",
+      "name": "data_sources_database_not_null",
       "type": "n",
       "definition": "NOT NULL database"
     },
     {
-      "table": "database_connections",
-      "name": "database_connections_disabled_actions_not_null",
+      "table": "data_sources",
+      "name": "data_sources_disabled_actions_not_null",
       "type": "n",
       "definition": "NOT NULL disabled_actions"
     },
     {
-      "table": "database_connections",
-      "name": "database_connections_hidden_suggestion_not_null",
+      "table": "data_sources",
+      "name": "data_sources_hidden_suggestion_not_null",
       "type": "n",
       "definition": "NOT NULL hidden_suggestion"
     },
     {
-      "table": "database_connections",
-      "name": "database_connections_host_not_null",
+      "table": "data_sources",
+      "name": "data_sources_host_not_null",
       "type": "n",
       "definition": "NOT NULL host"
     },
     {
-      "table": "database_connections",
-      "name": "database_connections_id_not_null",
+      "table": "data_sources",
+      "name": "data_sources_id_not_null",
       "type": "n",
       "definition": "NOT NULL id"
     },
     {
-      "table": "database_connections",
-      "name": "database_connections_label_not_null",
+      "table": "data_sources",
+      "name": "data_sources_label_not_null",
       "type": "n",
       "definition": "NOT NULL label"
     },
     {
-      "table": "database_connections",
-      "name": "database_connections_pkey",
+      "table": "data_sources",
+      "name": "data_sources_pkey",
       "type": "p",
       "definition": "PRIMARY KEY (id)"
     },
     {
-      "table": "database_connections",
-      "name": "database_connections_port_not_null",
+      "table": "data_sources",
+      "name": "data_sources_port_not_null",
       "type": "n",
       "definition": "NOT NULL port"
     },
     {
-      "table": "database_connections",
-      "name": "database_connections_provider_not_null",
+      "table": "data_sources",
+      "name": "data_sources_provider_not_null",
       "type": "n",
       "definition": "NOT NULL provider"
     },
     {
-      "table": "database_connections",
-      "name": "database_connections_secret_not_null",
+      "table": "data_sources",
+      "name": "data_sources_secret_not_null",
       "type": "n",
       "definition": "NOT NULL secret"
     },
     {
-      "table": "database_connections",
-      "name": "database_connections_sslmode_not_null",
+      "table": "data_sources",
+      "name": "data_sources_sslmode_not_null",
       "type": "n",
       "definition": "NOT NULL sslmode"
     },
     {
-      "table": "database_connections",
-      "name": "database_connections_status_not_null",
+      "table": "data_sources",
+      "name": "data_sources_status_not_null",
       "type": "n",
       "definition": "NOT NULL status"
     },
     {
-      "table": "database_connections",
-      "name": "database_connections_updated_at_not_null",
+      "table": "data_sources",
+      "name": "data_sources_updated_at_not_null",
       "type": "n",
       "definition": "NOT NULL updated_at"
     },
     {
-      "table": "database_connections",
-      "name": "database_connections_username_not_null",
+      "table": "data_sources",
+      "name": "data_sources_username_not_null",
       "type": "n",
       "definition": "NOT NULL username"
     },
     {
-      "table": "database_connections",
-      "name": "database_connections_workspace_id_not_null",
+      "table": "data_sources",
+      "name": "data_sources_workspace_id_not_null",
       "type": "n",
       "definition": "NOT NULL workspace_id"
     },
     {
-      "table": "database_connections",
-      "name": "database_connections_workspace_id_workspaces_id_fk",
+      "table": "data_sources",
+      "name": "data_sources_workspace_id_workspaces_id_fk",
       "type": "f",
       "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
     },
@@ -12605,6 +12497,48 @@
       "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
     },
     {
+      "table": "emoji_reactions",
+      "name": "emoji_reactions_actor_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL actor_id"
+    },
+    {
+      "table": "emoji_reactions",
+      "name": "emoji_reactions_actor_type_not_null",
+      "type": "n",
+      "definition": "NOT NULL actor_type"
+    },
+    {
+      "table": "emoji_reactions",
+      "name": "emoji_reactions_created_at_not_null",
+      "type": "n",
+      "definition": "NOT NULL created_at"
+    },
+    {
+      "table": "emoji_reactions",
+      "name": "emoji_reactions_message_id_messages_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "emoji_reactions",
+      "name": "emoji_reactions_message_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL message_id"
+    },
+    {
+      "table": "emoji_reactions",
+      "name": "emoji_reactions_message_id_reaction_actor_type_actor_id_pk",
+      "type": "p",
+      "definition": "PRIMARY KEY (message_id, reaction, actor_type, actor_id)"
+    },
+    {
+      "table": "emoji_reactions",
+      "name": "emoji_reactions_reaction_not_null",
+      "type": "n",
+      "definition": "NOT NULL reaction"
+    },
+    {
       "table": "file_versions",
       "name": "file_versions_author_not_null",
       "type": "n",
@@ -12715,6 +12649,66 @@
     {
       "table": "files",
       "name": "files_workspace_id_workspaces_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "gate_decisions",
+      "name": "gate_decisions_agent_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL agent_id"
+    },
+    {
+      "table": "gate_decisions",
+      "name": "gate_decisions_created_at_not_null",
+      "type": "n",
+      "definition": "NOT NULL created_at"
+    },
+    {
+      "table": "gate_decisions",
+      "name": "gate_decisions_decision_not_null",
+      "type": "n",
+      "definition": "NOT NULL decision"
+    },
+    {
+      "table": "gate_decisions",
+      "name": "gate_decisions_effect_not_null",
+      "type": "n",
+      "definition": "NOT NULL effect"
+    },
+    {
+      "table": "gate_decisions",
+      "name": "gate_decisions_flags_not_null",
+      "type": "n",
+      "definition": "NOT NULL flags"
+    },
+    {
+      "table": "gate_decisions",
+      "name": "gate_decisions_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL id"
+    },
+    {
+      "table": "gate_decisions",
+      "name": "gate_decisions_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "table": "gate_decisions",
+      "name": "gate_decisions_tool_not_null",
+      "type": "n",
+      "definition": "NOT NULL tool"
+    },
+    {
+      "table": "gate_decisions",
+      "name": "gate_decisions_workspace_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL workspace_id"
+    },
+    {
+      "table": "gate_decisions",
+      "name": "gate_decisions_workspace_id_workspaces_id_fk",
       "type": "f",
       "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
     },
@@ -12953,48 +12947,6 @@
       "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
     },
     {
-      "table": "issue_columns",
-      "name": "issue_columns_id_not_null",
-      "type": "n",
-      "definition": "NOT NULL id"
-    },
-    {
-      "table": "issue_columns",
-      "name": "issue_columns_name_not_null",
-      "type": "n",
-      "definition": "NOT NULL name"
-    },
-    {
-      "table": "issue_columns",
-      "name": "issue_columns_pkey",
-      "type": "p",
-      "definition": "PRIMARY KEY (id)"
-    },
-    {
-      "table": "issue_columns",
-      "name": "issue_columns_position_not_null",
-      "type": "n",
-      "definition": "NOT NULL \"position\""
-    },
-    {
-      "table": "issue_columns",
-      "name": "issue_columns_stage_not_null",
-      "type": "n",
-      "definition": "NOT NULL stage"
-    },
-    {
-      "table": "issue_columns",
-      "name": "issue_columns_workspace_id_not_null",
-      "type": "n",
-      "definition": "NOT NULL workspace_id"
-    },
-    {
-      "table": "issue_columns",
-      "name": "issue_columns_workspace_id_workspaces_id_fk",
-      "type": "f",
-      "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
-    },
-    {
       "table": "issue_timeline",
       "name": "issue_timeline_attachments_not_null",
       "type": "n",
@@ -13163,80 +13115,182 @@
       "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
     },
     {
-      "table": "mail_accounts",
-      "name": "mail_accounts_address_not_null",
+      "table": "knowledge_pages",
+      "name": "knowledge_pages_aliases_not_null",
       "type": "n",
-      "definition": "NOT NULL address"
+      "definition": "NOT NULL aliases"
     },
     {
-      "table": "mail_accounts",
-      "name": "mail_accounts_confirm_actions_not_null",
+      "table": "knowledge_pages",
+      "name": "knowledge_pages_body_not_null",
       "type": "n",
-      "definition": "NOT NULL confirm_actions"
+      "definition": "NOT NULL body"
     },
     {
-      "table": "mail_accounts",
-      "name": "mail_accounts_created_at_not_null",
+      "table": "knowledge_pages",
+      "name": "knowledge_pages_created_at_not_null",
       "type": "n",
       "definition": "NOT NULL created_at"
     },
     {
-      "table": "mail_accounts",
-      "name": "mail_accounts_disabled_actions_not_null",
+      "table": "knowledge_pages",
+      "name": "knowledge_pages_folder_not_null",
       "type": "n",
-      "definition": "NOT NULL disabled_actions"
+      "definition": "NOT NULL folder"
     },
     {
-      "table": "mail_accounts",
-      "name": "mail_accounts_id_not_null",
+      "table": "knowledge_pages",
+      "name": "knowledge_pages_id_not_null",
       "type": "n",
       "definition": "NOT NULL id"
     },
     {
-      "table": "mail_accounts",
-      "name": "mail_accounts_label_not_null",
+      "table": "knowledge_pages",
+      "name": "knowledge_pages_locked_not_null",
       "type": "n",
-      "definition": "NOT NULL label"
+      "definition": "NOT NULL locked"
     },
     {
-      "table": "mail_accounts",
-      "name": "mail_accounts_pkey",
+      "table": "knowledge_pages",
+      "name": "knowledge_pages_pinned_not_null",
+      "type": "n",
+      "definition": "NOT NULL pinned"
+    },
+    {
+      "table": "knowledge_pages",
+      "name": "knowledge_pages_pkey",
       "type": "p",
       "definition": "PRIMARY KEY (id)"
     },
     {
-      "table": "mail_accounts",
-      "name": "mail_accounts_provider_not_null",
+      "table": "knowledge_pages",
+      "name": "knowledge_pages_props_not_null",
       "type": "n",
-      "definition": "NOT NULL provider"
+      "definition": "NOT NULL props"
     },
     {
-      "table": "mail_accounts",
-      "name": "mail_accounts_status_not_null",
+      "table": "knowledge_pages",
+      "name": "knowledge_pages_slug_not_null",
       "type": "n",
-      "definition": "NOT NULL status"
+      "definition": "NOT NULL slug"
     },
     {
-      "table": "mail_accounts",
-      "name": "mail_accounts_updated_at_not_null",
+      "table": "knowledge_pages",
+      "name": "knowledge_pages_tags_not_null",
+      "type": "n",
+      "definition": "NOT NULL tags"
+    },
+    {
+      "table": "knowledge_pages",
+      "name": "knowledge_pages_title_not_null",
+      "type": "n",
+      "definition": "NOT NULL title"
+    },
+    {
+      "table": "knowledge_pages",
+      "name": "knowledge_pages_updated_at_not_null",
       "type": "n",
       "definition": "NOT NULL updated_at"
     },
     {
-      "table": "mail_accounts",
-      "name": "mail_accounts_via_not_null",
+      "table": "knowledge_pages",
+      "name": "knowledge_pages_updated_by_not_null",
       "type": "n",
-      "definition": "NOT NULL via"
+      "definition": "NOT NULL updated_by"
     },
     {
-      "table": "mail_accounts",
-      "name": "mail_accounts_workspace_id_not_null",
+      "table": "knowledge_pages",
+      "name": "knowledge_pages_version_not_null",
+      "type": "n",
+      "definition": "NOT NULL version"
+    },
+    {
+      "table": "knowledge_pages",
+      "name": "knowledge_pages_workspace_id_not_null",
       "type": "n",
       "definition": "NOT NULL workspace_id"
     },
     {
-      "table": "mail_accounts",
-      "name": "mail_accounts_workspace_id_workspaces_id_fk",
+      "table": "knowledge_pages",
+      "name": "knowledge_pages_workspace_id_workspaces_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "mail_connections",
+      "name": "mail_connections_address_not_null",
+      "type": "n",
+      "definition": "NOT NULL address"
+    },
+    {
+      "table": "mail_connections",
+      "name": "mail_connections_confirm_actions_not_null",
+      "type": "n",
+      "definition": "NOT NULL confirm_actions"
+    },
+    {
+      "table": "mail_connections",
+      "name": "mail_connections_created_at_not_null",
+      "type": "n",
+      "definition": "NOT NULL created_at"
+    },
+    {
+      "table": "mail_connections",
+      "name": "mail_connections_disabled_actions_not_null",
+      "type": "n",
+      "definition": "NOT NULL disabled_actions"
+    },
+    {
+      "table": "mail_connections",
+      "name": "mail_connections_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL id"
+    },
+    {
+      "table": "mail_connections",
+      "name": "mail_connections_label_not_null",
+      "type": "n",
+      "definition": "NOT NULL label"
+    },
+    {
+      "table": "mail_connections",
+      "name": "mail_connections_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "table": "mail_connections",
+      "name": "mail_connections_provider_not_null",
+      "type": "n",
+      "definition": "NOT NULL provider"
+    },
+    {
+      "table": "mail_connections",
+      "name": "mail_connections_status_not_null",
+      "type": "n",
+      "definition": "NOT NULL status"
+    },
+    {
+      "table": "mail_connections",
+      "name": "mail_connections_updated_at_not_null",
+      "type": "n",
+      "definition": "NOT NULL updated_at"
+    },
+    {
+      "table": "mail_connections",
+      "name": "mail_connections_via_not_null",
+      "type": "n",
+      "definition": "NOT NULL via"
+    },
+    {
+      "table": "mail_connections",
+      "name": "mail_connections_workspace_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL workspace_id"
+    },
+    {
+      "table": "mail_connections",
+      "name": "mail_connections_workspace_id_workspaces_id_fk",
       "type": "f",
       "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
     },
@@ -13625,74 +13679,32 @@
       "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
     },
     {
-      "table": "message_reactions",
-      "name": "message_reactions_actor_id_not_null",
-      "type": "n",
-      "definition": "NOT NULL actor_id"
-    },
-    {
-      "table": "message_reactions",
-      "name": "message_reactions_actor_type_not_null",
-      "type": "n",
-      "definition": "NOT NULL actor_type"
-    },
-    {
-      "table": "message_reactions",
-      "name": "message_reactions_created_at_not_null",
-      "type": "n",
-      "definition": "NOT NULL created_at"
-    },
-    {
-      "table": "message_reactions",
-      "name": "message_reactions_message_id_messages_id_fk",
-      "type": "f",
-      "definition": "FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE"
-    },
-    {
-      "table": "message_reactions",
-      "name": "message_reactions_message_id_not_null",
-      "type": "n",
-      "definition": "NOT NULL message_id"
-    },
-    {
-      "table": "message_reactions",
-      "name": "message_reactions_message_id_reaction_actor_type_actor_id_pk",
-      "type": "p",
-      "definition": "PRIMARY KEY (message_id, reaction, actor_type, actor_id)"
-    },
-    {
-      "table": "message_reactions",
-      "name": "message_reactions_reaction_not_null",
-      "type": "n",
-      "definition": "NOT NULL reaction"
-    },
-    {
-      "table": "message_receipts",
-      "name": "message_receipts_agent_id_not_null",
+      "table": "message_dispatches",
+      "name": "message_dispatches_agent_id_not_null",
       "type": "n",
       "definition": "NOT NULL agent_id"
     },
     {
-      "table": "message_receipts",
-      "name": "message_receipts_created_at_not_null",
+      "table": "message_dispatches",
+      "name": "message_dispatches_created_at_not_null",
       "type": "n",
       "definition": "NOT NULL created_at"
     },
     {
-      "table": "message_receipts",
-      "name": "message_receipts_message_id_agent_id_pk",
+      "table": "message_dispatches",
+      "name": "message_dispatches_message_id_agent_id_pk",
       "type": "p",
       "definition": "PRIMARY KEY (message_id, agent_id)"
     },
     {
-      "table": "message_receipts",
-      "name": "message_receipts_message_id_not_null",
+      "table": "message_dispatches",
+      "name": "message_dispatches_message_id_not_null",
       "type": "n",
       "definition": "NOT NULL message_id"
     },
     {
-      "table": "message_receipts",
-      "name": "message_receipts_state_not_null",
+      "table": "message_dispatches",
+      "name": "message_dispatches_state_not_null",
       "type": "n",
       "definition": "NOT NULL state"
     },
@@ -14171,6 +14183,114 @@
       "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
     },
     {
+      "table": "page_links",
+      "name": "page_links_embed_not_null",
+      "type": "n",
+      "definition": "NOT NULL embed"
+    },
+    {
+      "table": "page_links",
+      "name": "page_links_ordinal_not_null",
+      "type": "n",
+      "definition": "NOT NULL ordinal"
+    },
+    {
+      "table": "page_links",
+      "name": "page_links_source_id_knowledge_pages_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (source_id) REFERENCES knowledge_pages(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "page_links",
+      "name": "page_links_source_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL source_id"
+    },
+    {
+      "table": "page_links",
+      "name": "page_links_source_id_ordinal_pk",
+      "type": "p",
+      "definition": "PRIMARY KEY (source_id, ordinal)"
+    },
+    {
+      "table": "page_links",
+      "name": "page_links_target_id_knowledge_pages_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (target_id) REFERENCES knowledge_pages(id) ON DELETE SET NULL"
+    },
+    {
+      "table": "page_links",
+      "name": "page_links_target_slug_not_null",
+      "type": "n",
+      "definition": "NOT NULL target_slug"
+    },
+    {
+      "table": "page_links",
+      "name": "page_links_target_text_not_null",
+      "type": "n",
+      "definition": "NOT NULL target_text"
+    },
+    {
+      "table": "page_links",
+      "name": "page_links_workspace_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL workspace_id"
+    },
+    {
+      "table": "page_links",
+      "name": "page_links_workspace_id_workspaces_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "page_revisions",
+      "name": "page_revisions_author_not_null",
+      "type": "n",
+      "definition": "NOT NULL author"
+    },
+    {
+      "table": "page_revisions",
+      "name": "page_revisions_body_not_null",
+      "type": "n",
+      "definition": "NOT NULL body"
+    },
+    {
+      "table": "page_revisions",
+      "name": "page_revisions_created_at_not_null",
+      "type": "n",
+      "definition": "NOT NULL created_at"
+    },
+    {
+      "table": "page_revisions",
+      "name": "page_revisions_page_id_knowledge_pages_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (page_id) REFERENCES knowledge_pages(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "page_revisions",
+      "name": "page_revisions_page_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL page_id"
+    },
+    {
+      "table": "page_revisions",
+      "name": "page_revisions_page_id_version_pk",
+      "type": "p",
+      "definition": "PRIMARY KEY (page_id, version)"
+    },
+    {
+      "table": "page_revisions",
+      "name": "page_revisions_title_not_null",
+      "type": "n",
+      "definition": "NOT NULL title"
+    },
+    {
+      "table": "page_revisions",
+      "name": "page_revisions_version_not_null",
+      "type": "n",
+      "definition": "NOT NULL version"
+    },
+    {
       "table": "pins",
       "name": "pins_channel_id_channels_id_fk",
       "type": "f",
@@ -14489,50 +14609,110 @@
       "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
     },
     {
-      "table": "routine_runs",
-      "name": "routine_runs_at_not_null",
-      "type": "n",
-      "definition": "NOT NULL at"
+      "table": "reversible_actions",
+      "name": "reversible_actions_agent_id_agents_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE"
     },
     {
-      "table": "routine_runs",
-      "name": "routine_runs_attempt_not_null",
+      "table": "reversible_actions",
+      "name": "reversible_actions_agent_id_not_null",
       "type": "n",
-      "definition": "NOT NULL attempt"
+      "definition": "NOT NULL agent_id"
     },
     {
-      "table": "routine_runs",
-      "name": "routine_runs_id_not_null",
+      "table": "reversible_actions",
+      "name": "reversible_actions_created_at_not_null",
+      "type": "n",
+      "definition": "NOT NULL created_at"
+    },
+    {
+      "table": "reversible_actions",
+      "name": "reversible_actions_id_not_null",
       "type": "n",
       "definition": "NOT NULL id"
     },
     {
-      "table": "routine_runs",
-      "name": "routine_runs_pkey",
+      "table": "reversible_actions",
+      "name": "reversible_actions_kind_not_null",
+      "type": "n",
+      "definition": "NOT NULL kind"
+    },
+    {
+      "table": "reversible_actions",
+      "name": "reversible_actions_params_not_null",
+      "type": "n",
+      "definition": "NOT NULL params"
+    },
+    {
+      "table": "reversible_actions",
+      "name": "reversible_actions_pkey",
       "type": "p",
       "definition": "PRIMARY KEY (id)"
     },
     {
-      "table": "routine_runs",
-      "name": "routine_runs_retried_not_null",
+      "table": "reversible_actions",
+      "name": "reversible_actions_target_not_null",
+      "type": "n",
+      "definition": "NOT NULL target"
+    },
+    {
+      "table": "reversible_actions",
+      "name": "reversible_actions_workspace_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL workspace_id"
+    },
+    {
+      "table": "reversible_actions",
+      "name": "reversible_actions_workspace_id_workspaces_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "routine_executions",
+      "name": "routine_executions_at_not_null",
+      "type": "n",
+      "definition": "NOT NULL at"
+    },
+    {
+      "table": "routine_executions",
+      "name": "routine_executions_attempt_not_null",
+      "type": "n",
+      "definition": "NOT NULL attempt"
+    },
+    {
+      "table": "routine_executions",
+      "name": "routine_executions_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL id"
+    },
+    {
+      "table": "routine_executions",
+      "name": "routine_executions_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "table": "routine_executions",
+      "name": "routine_executions_retried_not_null",
       "type": "n",
       "definition": "NOT NULL retried"
     },
     {
-      "table": "routine_runs",
-      "name": "routine_runs_routine_id_not_null",
+      "table": "routine_executions",
+      "name": "routine_executions_routine_id_not_null",
       "type": "n",
       "definition": "NOT NULL routine_id"
     },
     {
-      "table": "routine_runs",
-      "name": "routine_runs_routine_id_routines_id_fk",
+      "table": "routine_executions",
+      "name": "routine_executions_routine_id_routines_id_fk",
       "type": "f",
       "definition": "FOREIGN KEY (routine_id) REFERENCES routines(id) ON DELETE CASCADE"
     },
     {
-      "table": "routine_runs",
-      "name": "routine_runs_status_not_null",
+      "table": "routine_executions",
+      "name": "routine_executions_status_not_null",
       "type": "n",
       "definition": "NOT NULL status"
     },
@@ -14621,44 +14801,44 @@
       "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
     },
     {
-      "table": "run_steps",
-      "name": "run_steps_created_at_not_null",
+      "table": "run_events",
+      "name": "run_events_created_at_not_null",
       "type": "n",
       "definition": "NOT NULL created_at"
     },
     {
-      "table": "run_steps",
-      "name": "run_steps_data_not_null",
+      "table": "run_events",
+      "name": "run_events_data_not_null",
       "type": "n",
       "definition": "NOT NULL data"
     },
     {
-      "table": "run_steps",
-      "name": "run_steps_kind_not_null",
+      "table": "run_events",
+      "name": "run_events_kind_not_null",
       "type": "n",
       "definition": "NOT NULL kind"
     },
     {
-      "table": "run_steps",
-      "name": "run_steps_run_id_not_null",
+      "table": "run_events",
+      "name": "run_events_run_id_not_null",
       "type": "n",
       "definition": "NOT NULL run_id"
     },
     {
-      "table": "run_steps",
-      "name": "run_steps_run_id_runs_id_fk",
+      "table": "run_events",
+      "name": "run_events_run_id_runs_id_fk",
       "type": "f",
       "definition": "FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE"
     },
     {
-      "table": "run_steps",
-      "name": "run_steps_run_id_seq_pk",
+      "table": "run_events",
+      "name": "run_events_run_id_seq_pk",
       "type": "p",
       "definition": "PRIMARY KEY (run_id, seq)"
     },
     {
-      "table": "run_steps",
-      "name": "run_steps_seq_not_null",
+      "table": "run_events",
+      "name": "run_events_seq_not_null",
       "type": "n",
       "definition": "NOT NULL seq"
     },
@@ -14823,6 +15003,60 @@
       "name": "runner_pairings_version_not_null",
       "type": "n",
       "definition": "NOT NULL version"
+    },
+    {
+      "table": "runner_secrets",
+      "name": "runner_secrets_agent_id_agents_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "runner_secrets",
+      "name": "runner_secrets_agent_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL agent_id"
+    },
+    {
+      "table": "runner_secrets",
+      "name": "runner_secrets_agent_id_runner_id_name_pk",
+      "type": "p",
+      "definition": "PRIMARY KEY (agent_id, runner_id, name)"
+    },
+    {
+      "table": "runner_secrets",
+      "name": "runner_secrets_name_not_null",
+      "type": "n",
+      "definition": "NOT NULL name"
+    },
+    {
+      "table": "runner_secrets",
+      "name": "runner_secrets_runner_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL runner_id"
+    },
+    {
+      "table": "runner_secrets",
+      "name": "runner_secrets_target_not_null",
+      "type": "n",
+      "definition": "NOT NULL target"
+    },
+    {
+      "table": "runner_secrets",
+      "name": "runner_secrets_updated_at_not_null",
+      "type": "n",
+      "definition": "NOT NULL updated_at"
+    },
+    {
+      "table": "runner_secrets",
+      "name": "runner_secrets_workspace_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL workspace_id"
+    },
+    {
+      "table": "runner_secrets",
+      "name": "runner_secrets_workspace_id_workspaces_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
     },
     {
       "table": "runner_sessions",
@@ -15059,62 +15293,62 @@
       "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
     },
     {
-      "table": "sandbox_settings",
-      "name": "sandbox_settings_command_timeout_sec_not_null",
+      "table": "sandbox_policies",
+      "name": "sandbox_policies_command_timeout_sec_not_null",
       "type": "n",
       "definition": "NOT NULL command_timeout_sec"
     },
     {
-      "table": "sandbox_settings",
-      "name": "sandbox_settings_enabled_not_null",
+      "table": "sandbox_policies",
+      "name": "sandbox_policies_enabled_not_null",
       "type": "n",
       "definition": "NOT NULL enabled"
     },
     {
-      "table": "sandbox_settings",
-      "name": "sandbox_settings_minutes_per_day_not_null",
+      "table": "sandbox_policies",
+      "name": "sandbox_policies_minutes_per_day_not_null",
       "type": "n",
       "definition": "NOT NULL minutes_per_day"
     },
     {
-      "table": "sandbox_settings",
-      "name": "sandbox_settings_network_not_null",
+      "table": "sandbox_policies",
+      "name": "sandbox_policies_network_not_null",
       "type": "n",
       "definition": "NOT NULL network"
     },
     {
-      "table": "sandbox_settings",
-      "name": "sandbox_settings_permitted_domains_not_null",
+      "table": "sandbox_policies",
+      "name": "sandbox_policies_permitted_domains_not_null",
       "type": "n",
       "definition": "NOT NULL permitted_domains"
     },
     {
-      "table": "sandbox_settings",
-      "name": "sandbox_settings_pkey",
+      "table": "sandbox_policies",
+      "name": "sandbox_policies_pkey",
       "type": "p",
       "definition": "PRIMARY KEY (workspace_id)"
     },
     {
-      "table": "sandbox_settings",
-      "name": "sandbox_settings_require_approval_not_null",
+      "table": "sandbox_policies",
+      "name": "sandbox_policies_require_approval_not_null",
       "type": "n",
       "definition": "NOT NULL require_approval"
     },
     {
-      "table": "sandbox_settings",
-      "name": "sandbox_settings_updated_at_not_null",
+      "table": "sandbox_policies",
+      "name": "sandbox_policies_updated_at_not_null",
       "type": "n",
       "definition": "NOT NULL updated_at"
     },
     {
-      "table": "sandbox_settings",
-      "name": "sandbox_settings_workspace_id_not_null",
+      "table": "sandbox_policies",
+      "name": "sandbox_policies_workspace_id_not_null",
       "type": "n",
       "definition": "NOT NULL workspace_id"
     },
     {
-      "table": "sandbox_settings",
-      "name": "sandbox_settings_workspace_id_workspaces_id_fk",
+      "table": "sandbox_policies",
+      "name": "sandbox_policies_workspace_id_workspaces_id_fk",
       "type": "f",
       "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
     },
@@ -15239,86 +15473,86 @@
       "definition": "NOT NULL workspace_id"
     },
     {
-      "table": "secret_requests",
-      "name": "secret_requests_agent_id_agents_id_fk",
+      "table": "secret_prompts",
+      "name": "secret_prompts_agent_id_agents_id_fk",
       "type": "f",
       "definition": "FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE"
     },
     {
-      "table": "secret_requests",
-      "name": "secret_requests_agent_id_not_null",
+      "table": "secret_prompts",
+      "name": "secret_prompts_agent_id_not_null",
       "type": "n",
       "definition": "NOT NULL agent_id"
     },
     {
-      "table": "secret_requests",
-      "name": "secret_requests_created_at_not_null",
+      "table": "secret_prompts",
+      "name": "secret_prompts_created_at_not_null",
       "type": "n",
       "definition": "NOT NULL created_at"
     },
     {
-      "table": "secret_requests",
-      "name": "secret_requests_expires_at_not_null",
+      "table": "secret_prompts",
+      "name": "secret_prompts_expires_at_not_null",
       "type": "n",
       "definition": "NOT NULL expires_at"
     },
     {
-      "table": "secret_requests",
-      "name": "secret_requests_id_not_null",
+      "table": "secret_prompts",
+      "name": "secret_prompts_id_not_null",
       "type": "n",
       "definition": "NOT NULL id"
     },
     {
-      "table": "secret_requests",
-      "name": "secret_requests_name_not_null",
+      "table": "secret_prompts",
+      "name": "secret_prompts_name_not_null",
       "type": "n",
       "definition": "NOT NULL name"
     },
     {
-      "table": "secret_requests",
-      "name": "secret_requests_pkey",
+      "table": "secret_prompts",
+      "name": "secret_prompts_pkey",
       "type": "p",
       "definition": "PRIMARY KEY (id)"
     },
     {
-      "table": "secret_requests",
-      "name": "secret_requests_public_key_not_null",
+      "table": "secret_prompts",
+      "name": "secret_prompts_public_key_not_null",
       "type": "n",
       "definition": "NOT NULL public_key"
     },
     {
-      "table": "secret_requests",
-      "name": "secret_requests_purpose_not_null",
+      "table": "secret_prompts",
+      "name": "secret_prompts_purpose_not_null",
       "type": "n",
       "definition": "NOT NULL purpose"
     },
     {
-      "table": "secret_requests",
-      "name": "secret_requests_runner_id_not_null",
+      "table": "secret_prompts",
+      "name": "secret_prompts_runner_id_not_null",
       "type": "n",
       "definition": "NOT NULL runner_id"
     },
     {
-      "table": "secret_requests",
-      "name": "secret_requests_status_not_null",
+      "table": "secret_prompts",
+      "name": "secret_prompts_status_not_null",
       "type": "n",
       "definition": "NOT NULL status"
     },
     {
-      "table": "secret_requests",
-      "name": "secret_requests_target_not_null",
+      "table": "secret_prompts",
+      "name": "secret_prompts_target_not_null",
       "type": "n",
       "definition": "NOT NULL target"
     },
     {
-      "table": "secret_requests",
-      "name": "secret_requests_workspace_id_not_null",
+      "table": "secret_prompts",
+      "name": "secret_prompts_workspace_id_not_null",
       "type": "n",
       "definition": "NOT NULL workspace_id"
     },
     {
-      "table": "secret_requests",
-      "name": "secret_requests_workspace_id_workspaces_id_fk",
+      "table": "secret_prompts",
+      "name": "secret_prompts_workspace_id_workspaces_id_fk",
       "type": "f",
       "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
     },
@@ -15375,6 +15609,42 @@
       "name": "sessions_user_id_users_id_fk",
       "type": "f",
       "definition": "FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "skill_grants",
+      "name": "skill_grants_agent_id_agents_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "skill_grants",
+      "name": "skill_grants_agent_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL agent_id"
+    },
+    {
+      "table": "skill_grants",
+      "name": "skill_grants_agent_id_skill_id_pk",
+      "type": "p",
+      "definition": "PRIMARY KEY (agent_id, skill_id)"
+    },
+    {
+      "table": "skill_grants",
+      "name": "skill_grants_enabled_not_null",
+      "type": "n",
+      "definition": "NOT NULL enabled"
+    },
+    {
+      "table": "skill_grants",
+      "name": "skill_grants_skill_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL skill_id"
+    },
+    {
+      "table": "skill_grants",
+      "name": "skill_grants_skill_id_skills_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE"
     },
     {
       "table": "skills",
@@ -15577,66 +15847,6 @@
     {
       "table": "threads",
       "name": "threads_workspace_id_workspaces_id_fk",
-      "type": "f",
-      "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
-    },
-    {
-      "table": "tool_decisions",
-      "name": "tool_decisions_agent_id_not_null",
-      "type": "n",
-      "definition": "NOT NULL agent_id"
-    },
-    {
-      "table": "tool_decisions",
-      "name": "tool_decisions_created_at_not_null",
-      "type": "n",
-      "definition": "NOT NULL created_at"
-    },
-    {
-      "table": "tool_decisions",
-      "name": "tool_decisions_decision_not_null",
-      "type": "n",
-      "definition": "NOT NULL decision"
-    },
-    {
-      "table": "tool_decisions",
-      "name": "tool_decisions_effect_not_null",
-      "type": "n",
-      "definition": "NOT NULL effect"
-    },
-    {
-      "table": "tool_decisions",
-      "name": "tool_decisions_flags_not_null",
-      "type": "n",
-      "definition": "NOT NULL flags"
-    },
-    {
-      "table": "tool_decisions",
-      "name": "tool_decisions_id_not_null",
-      "type": "n",
-      "definition": "NOT NULL id"
-    },
-    {
-      "table": "tool_decisions",
-      "name": "tool_decisions_pkey",
-      "type": "p",
-      "definition": "PRIMARY KEY (id)"
-    },
-    {
-      "table": "tool_decisions",
-      "name": "tool_decisions_tool_not_null",
-      "type": "n",
-      "definition": "NOT NULL tool"
-    },
-    {
-      "table": "tool_decisions",
-      "name": "tool_decisions_workspace_id_not_null",
-      "type": "n",
-      "definition": "NOT NULL workspace_id"
-    },
-    {
-      "table": "tool_decisions",
-      "name": "tool_decisions_workspace_id_workspaces_id_fk",
       "type": "f",
       "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
     },
@@ -16085,66 +16295,6 @@
       "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
     },
     {
-      "table": "wiki_links",
-      "name": "wiki_links_embed_not_null",
-      "type": "n",
-      "definition": "NOT NULL embed"
-    },
-    {
-      "table": "wiki_links",
-      "name": "wiki_links_ordinal_not_null",
-      "type": "n",
-      "definition": "NOT NULL ordinal"
-    },
-    {
-      "table": "wiki_links",
-      "name": "wiki_links_source_id_not_null",
-      "type": "n",
-      "definition": "NOT NULL source_id"
-    },
-    {
-      "table": "wiki_links",
-      "name": "wiki_links_source_id_ordinal_pk",
-      "type": "p",
-      "definition": "PRIMARY KEY (source_id, ordinal)"
-    },
-    {
-      "table": "wiki_links",
-      "name": "wiki_links_source_id_wiki_pages_id_fk",
-      "type": "f",
-      "definition": "FOREIGN KEY (source_id) REFERENCES wiki_pages(id) ON DELETE CASCADE"
-    },
-    {
-      "table": "wiki_links",
-      "name": "wiki_links_target_id_wiki_pages_id_fk",
-      "type": "f",
-      "definition": "FOREIGN KEY (target_id) REFERENCES wiki_pages(id) ON DELETE SET NULL"
-    },
-    {
-      "table": "wiki_links",
-      "name": "wiki_links_target_slug_not_null",
-      "type": "n",
-      "definition": "NOT NULL target_slug"
-    },
-    {
-      "table": "wiki_links",
-      "name": "wiki_links_target_text_not_null",
-      "type": "n",
-      "definition": "NOT NULL target_text"
-    },
-    {
-      "table": "wiki_links",
-      "name": "wiki_links_workspace_id_not_null",
-      "type": "n",
-      "definition": "NOT NULL workspace_id"
-    },
-    {
-      "table": "wiki_links",
-      "name": "wiki_links_workspace_id_workspaces_id_fk",
-      "type": "f",
-      "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
-    },
-    {
       "table": "wiki_page_docs",
       "name": "wiki_page_docs_dirty_not_null",
       "type": "n",
@@ -16158,15 +16308,15 @@
     },
     {
       "table": "wiki_page_docs",
-      "name": "wiki_page_docs_page_id_not_null",
-      "type": "n",
-      "definition": "NOT NULL page_id"
+      "name": "wiki_page_docs_page_id_knowledge_pages_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (page_id) REFERENCES knowledge_pages(id) ON DELETE CASCADE"
     },
     {
       "table": "wiki_page_docs",
-      "name": "wiki_page_docs_page_id_wiki_pages_id_fk",
-      "type": "f",
-      "definition": "FOREIGN KEY (page_id) REFERENCES wiki_pages(id) ON DELETE CASCADE"
+      "name": "wiki_page_docs_page_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL page_id"
     },
     {
       "table": "wiki_page_docs",
@@ -16206,6 +16356,12 @@
     },
     {
       "table": "wiki_page_views",
+      "name": "wiki_page_views_page_id_knowledge_pages_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (page_id) REFERENCES knowledge_pages(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "wiki_page_views",
       "name": "wiki_page_views_page_id_not_null",
       "type": "n",
       "definition": "NOT NULL page_id"
@@ -16218,12 +16374,6 @@
     },
     {
       "table": "wiki_page_views",
-      "name": "wiki_page_views_page_id_wiki_pages_id_fk",
-      "type": "f",
-      "definition": "FOREIGN KEY (page_id) REFERENCES wiki_pages(id) ON DELETE CASCADE"
-    },
-    {
-      "table": "wiki_page_views",
       "name": "wiki_page_views_reader_id_not_null",
       "type": "n",
       "definition": "NOT NULL reader_id"
@@ -16233,108 +16383,6 @@
       "name": "wiki_page_views_reader_type_not_null",
       "type": "n",
       "definition": "NOT NULL reader_type"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "wiki_pages_aliases_not_null",
-      "type": "n",
-      "definition": "NOT NULL aliases"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "wiki_pages_body_not_null",
-      "type": "n",
-      "definition": "NOT NULL body"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "wiki_pages_created_at_not_null",
-      "type": "n",
-      "definition": "NOT NULL created_at"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "wiki_pages_folder_not_null",
-      "type": "n",
-      "definition": "NOT NULL folder"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "wiki_pages_id_not_null",
-      "type": "n",
-      "definition": "NOT NULL id"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "wiki_pages_locked_not_null",
-      "type": "n",
-      "definition": "NOT NULL locked"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "wiki_pages_pinned_not_null",
-      "type": "n",
-      "definition": "NOT NULL pinned"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "wiki_pages_pkey",
-      "type": "p",
-      "definition": "PRIMARY KEY (id)"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "wiki_pages_props_not_null",
-      "type": "n",
-      "definition": "NOT NULL props"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "wiki_pages_slug_not_null",
-      "type": "n",
-      "definition": "NOT NULL slug"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "wiki_pages_tags_not_null",
-      "type": "n",
-      "definition": "NOT NULL tags"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "wiki_pages_title_not_null",
-      "type": "n",
-      "definition": "NOT NULL title"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "wiki_pages_updated_at_not_null",
-      "type": "n",
-      "definition": "NOT NULL updated_at"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "wiki_pages_updated_by_not_null",
-      "type": "n",
-      "definition": "NOT NULL updated_by"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "wiki_pages_version_not_null",
-      "type": "n",
-      "definition": "NOT NULL version"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "wiki_pages_workspace_id_not_null",
-      "type": "n",
-      "definition": "NOT NULL workspace_id"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "wiki_pages_workspace_id_workspaces_id_fk",
-      "type": "f",
-      "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
     },
     {
       "table": "wiki_prop_schemas",
@@ -16371,54 +16419,6 @@
       "name": "wiki_prop_schemas_workspace_id_workspaces_id_fk",
       "type": "f",
       "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
-    },
-    {
-      "table": "wiki_versions",
-      "name": "wiki_versions_author_not_null",
-      "type": "n",
-      "definition": "NOT NULL author"
-    },
-    {
-      "table": "wiki_versions",
-      "name": "wiki_versions_body_not_null",
-      "type": "n",
-      "definition": "NOT NULL body"
-    },
-    {
-      "table": "wiki_versions",
-      "name": "wiki_versions_created_at_not_null",
-      "type": "n",
-      "definition": "NOT NULL created_at"
-    },
-    {
-      "table": "wiki_versions",
-      "name": "wiki_versions_page_id_not_null",
-      "type": "n",
-      "definition": "NOT NULL page_id"
-    },
-    {
-      "table": "wiki_versions",
-      "name": "wiki_versions_page_id_version_pk",
-      "type": "p",
-      "definition": "PRIMARY KEY (page_id, version)"
-    },
-    {
-      "table": "wiki_versions",
-      "name": "wiki_versions_page_id_wiki_pages_id_fk",
-      "type": "f",
-      "definition": "FOREIGN KEY (page_id) REFERENCES wiki_pages(id) ON DELETE CASCADE"
-    },
-    {
-      "table": "wiki_versions",
-      "name": "wiki_versions_title_not_null",
-      "type": "n",
-      "definition": "NOT NULL title"
-    },
-    {
-      "table": "wiki_versions",
-      "name": "wiki_versions_version_not_null",
-      "type": "n",
-      "definition": "NOT NULL version"
     },
     {
       "table": "workspace_storage",
@@ -16517,26 +16517,6 @@
       "definition": "CREATE INDEX accounts_user_idx ON public.accounts USING btree (user_id)"
     },
     {
-      "table": "agent_actions",
-      "name": "agent_actions_message_idx",
-      "definition": "CREATE INDEX agent_actions_message_idx ON public.agent_actions USING btree (message_id)"
-    },
-    {
-      "table": "agent_actions",
-      "name": "agent_actions_pkey",
-      "definition": "CREATE UNIQUE INDEX agent_actions_pkey ON public.agent_actions USING btree (id)"
-    },
-    {
-      "table": "agent_actions",
-      "name": "agent_actions_run_idx",
-      "definition": "CREATE INDEX agent_actions_run_idx ON public.agent_actions USING btree (run_id)"
-    },
-    {
-      "table": "agent_browser_settings",
-      "name": "agent_browser_settings_pkey",
-      "definition": "CREATE UNIQUE INDEX agent_browser_settings_pkey ON public.agent_browser_settings USING btree (agent_id)"
-    },
-    {
       "table": "agent_channel_access",
       "name": "agent_channel_access_agent_id_channel_id_connection_id_pk",
       "definition": "CREATE UNIQUE INDEX agent_channel_access_agent_id_channel_id_connection_id_pk ON public.agent_channel_access USING btree (agent_id, channel_id, connection_id)"
@@ -16575,16 +16555,6 @@
       "table": "agent_mailboxes",
       "name": "agent_mailboxes_agent_id_account_id_pk",
       "definition": "CREATE UNIQUE INDEX agent_mailboxes_agent_id_account_id_pk ON public.agent_mailboxes USING btree (agent_id, account_id)"
-    },
-    {
-      "table": "agent_secrets",
-      "name": "agent_secrets_agent_id_runner_id_name_pk",
-      "definition": "CREATE UNIQUE INDEX agent_secrets_agent_id_runner_id_name_pk ON public.agent_secrets USING btree (agent_id, runner_id, name)"
-    },
-    {
-      "table": "agent_skills",
-      "name": "agent_skills_agent_id_skill_id_pk",
-      "definition": "CREATE UNIQUE INDEX agent_skills_agent_id_skill_id_pk ON public.agent_skills USING btree (agent_id, skill_id)"
     },
     {
       "table": "agent_test_cases",
@@ -16787,6 +16757,16 @@
       "definition": "CREATE INDEX assignments_workspace_idx ON public.assignments USING btree (workspace_id)"
     },
     {
+      "table": "board_columns",
+      "name": "board_columns_pkey",
+      "definition": "CREATE UNIQUE INDEX board_columns_pkey ON public.board_columns USING btree (id)"
+    },
+    {
+      "table": "board_columns",
+      "name": "board_columns_workspace_idx",
+      "definition": "CREATE INDEX board_columns_workspace_idx ON public.board_columns USING btree (workspace_id, \"position\")"
+    },
+    {
       "table": "browser_interventions",
       "name": "browser_interventions_agent_idx",
       "definition": "CREATE INDEX browser_interventions_agent_idx ON public.browser_interventions USING btree (agent_id)"
@@ -16812,19 +16792,24 @@
       "definition": "CREATE INDEX browser_log_entries_run_idx ON public.browser_log_entries USING btree (run_id)"
     },
     {
+      "table": "browser_policies",
+      "name": "browser_policies_pkey",
+      "definition": "CREATE UNIQUE INDEX browser_policies_pkey ON public.browser_policies USING btree (agent_id)"
+    },
+    {
       "table": "budget_counters",
       "name": "budget_counters_scope_period_pk",
       "definition": "CREATE UNIQUE INDEX budget_counters_scope_period_pk ON public.budget_counters USING btree (scope, period)"
     },
     {
-      "table": "calendar_events",
-      "name": "calendar_events_pkey",
-      "definition": "CREATE UNIQUE INDEX calendar_events_pkey ON public.calendar_events USING btree (id)"
+      "table": "calendar_entries",
+      "name": "calendar_entries_pkey",
+      "definition": "CREATE UNIQUE INDEX calendar_entries_pkey ON public.calendar_entries USING btree (id)"
     },
     {
-      "table": "calendar_events",
-      "name": "calendar_events_workspace_idx",
-      "definition": "CREATE INDEX calendar_events_workspace_idx ON public.calendar_events USING btree (workspace_id, start)"
+      "table": "calendar_entries",
+      "name": "calendar_entries_workspace_idx",
+      "definition": "CREATE INDEX calendar_entries_workspace_idx ON public.calendar_entries USING btree (workspace_id, start)"
     },
     {
       "table": "calendar_proposals",
@@ -16837,14 +16822,14 @@
       "definition": "CREATE INDEX calendar_proposals_workspace_idx ON public.calendar_proposals USING btree (workspace_id, start)"
     },
     {
-      "table": "channel_members",
-      "name": "channel_members_channel_id_member_type_member_id_pk",
-      "definition": "CREATE UNIQUE INDEX channel_members_channel_id_member_type_member_id_pk ON public.channel_members USING btree (channel_id, member_type, member_id)"
+      "table": "channel_memberships",
+      "name": "channel_memberships_channel_id_member_type_member_id_pk",
+      "definition": "CREATE UNIQUE INDEX channel_memberships_channel_id_member_type_member_id_pk ON public.channel_memberships USING btree (channel_id, member_type, member_id)"
     },
     {
-      "table": "channel_members",
-      "name": "channel_members_member_idx",
-      "definition": "CREATE INDEX channel_members_member_idx ON public.channel_members USING btree (member_type, member_id)"
+      "table": "channel_memberships",
+      "name": "channel_memberships_member_idx",
+      "definition": "CREATE INDEX channel_memberships_member_idx ON public.channel_memberships USING btree (member_type, member_id)"
     },
     {
       "table": "channels",
@@ -16892,14 +16877,14 @@
       "definition": "CREATE INDEX credentials_workspace_idx ON public.credentials USING btree (workspace_id)"
     },
     {
-      "table": "database_connections",
-      "name": "database_connections_pkey",
-      "definition": "CREATE UNIQUE INDEX database_connections_pkey ON public.database_connections USING btree (id)"
+      "table": "data_sources",
+      "name": "data_sources_pkey",
+      "definition": "CREATE UNIQUE INDEX data_sources_pkey ON public.data_sources USING btree (id)"
     },
     {
-      "table": "database_connections",
-      "name": "database_connections_workspace_idx",
-      "definition": "CREATE INDEX database_connections_workspace_idx ON public.database_connections USING btree (workspace_id)"
+      "table": "data_sources",
+      "name": "data_sources_workspace_idx",
+      "definition": "CREATE INDEX data_sources_workspace_idx ON public.data_sources USING btree (workspace_id)"
     },
     {
       "table": "db_databases",
@@ -17002,6 +16987,11 @@
       "definition": "CREATE UNIQUE INDEX effect_keys_pkey ON public.effect_keys USING btree (key)"
     },
     {
+      "table": "emoji_reactions",
+      "name": "emoji_reactions_message_id_reaction_actor_type_actor_id_pk",
+      "definition": "CREATE UNIQUE INDEX emoji_reactions_message_id_reaction_actor_type_actor_id_pk ON public.emoji_reactions USING btree (message_id, reaction, actor_type, actor_id)"
+    },
+    {
       "table": "file_versions",
       "name": "file_versions_extract_idx",
       "definition": "CREATE INDEX file_versions_extract_idx ON public.file_versions USING btree (extract_status) WHERE (extract_status = ANY (ARRAY['pending'::text, 'working'::text]))"
@@ -17025,6 +17015,26 @@
       "table": "files",
       "name": "files_workspace_idx",
       "definition": "CREATE INDEX files_workspace_idx ON public.files USING btree (workspace_id, updated_at)"
+    },
+    {
+      "table": "gate_decisions",
+      "name": "gate_decisions_approval_idx",
+      "definition": "CREATE INDEX gate_decisions_approval_idx ON public.gate_decisions USING btree (approval_id)"
+    },
+    {
+      "table": "gate_decisions",
+      "name": "gate_decisions_pkey",
+      "definition": "CREATE UNIQUE INDEX gate_decisions_pkey ON public.gate_decisions USING btree (id)"
+    },
+    {
+      "table": "gate_decisions",
+      "name": "gate_decisions_reviewer_idx",
+      "definition": "CREATE INDEX gate_decisions_reviewer_idx ON public.gate_decisions USING btree (agent_id, created_at) WHERE (by = 'reviewer'::text)"
+    },
+    {
+      "table": "gate_decisions",
+      "name": "gate_decisions_workspace_idx",
+      "definition": "CREATE INDEX gate_decisions_workspace_idx ON public.gate_decisions USING btree (workspace_id, created_at)"
     },
     {
       "table": "github_installations",
@@ -17077,16 +17087,6 @@
       "definition": "CREATE INDEX invitations_workspace_idx ON public.invitations USING btree (workspace_id)"
     },
     {
-      "table": "issue_columns",
-      "name": "issue_columns_pkey",
-      "definition": "CREATE UNIQUE INDEX issue_columns_pkey ON public.issue_columns USING btree (id)"
-    },
-    {
-      "table": "issue_columns",
-      "name": "issue_columns_workspace_idx",
-      "definition": "CREATE INDEX issue_columns_workspace_idx ON public.issue_columns USING btree (workspace_id, \"position\")"
-    },
-    {
       "table": "issue_timeline",
       "name": "issue_timeline_issue_idx",
       "definition": "CREATE INDEX issue_timeline_issue_idx ON public.issue_timeline USING btree (issue_id, seq)"
@@ -17112,14 +17112,34 @@
       "definition": "CREATE UNIQUE INDEX issues_pkey ON public.issues USING btree (id)"
     },
     {
-      "table": "mail_accounts",
-      "name": "mail_accounts_address_uq",
-      "definition": "CREATE UNIQUE INDEX mail_accounts_address_uq ON public.mail_accounts USING btree (workspace_id, address)"
+      "table": "knowledge_pages",
+      "name": "knowledge_pages_pkey",
+      "definition": "CREATE UNIQUE INDEX knowledge_pages_pkey ON public.knowledge_pages USING btree (id)"
     },
     {
-      "table": "mail_accounts",
-      "name": "mail_accounts_pkey",
-      "definition": "CREATE UNIQUE INDEX mail_accounts_pkey ON public.mail_accounts USING btree (id)"
+      "table": "knowledge_pages",
+      "name": "knowledge_pages_purge_idx",
+      "definition": "CREATE INDEX knowledge_pages_purge_idx ON public.knowledge_pages USING btree (expunge_at) WHERE (deleted_at IS NOT NULL)"
+    },
+    {
+      "table": "knowledge_pages",
+      "name": "knowledge_pages_slug_uq",
+      "definition": "CREATE UNIQUE INDEX knowledge_pages_slug_uq ON public.knowledge_pages USING btree (workspace_id, slug)"
+    },
+    {
+      "table": "knowledge_pages",
+      "name": "knowledge_pages_workspace_idx",
+      "definition": "CREATE INDEX knowledge_pages_workspace_idx ON public.knowledge_pages USING btree (workspace_id)"
+    },
+    {
+      "table": "mail_connections",
+      "name": "mail_connections_address_uq",
+      "definition": "CREATE UNIQUE INDEX mail_connections_address_uq ON public.mail_connections USING btree (workspace_id, address)"
+    },
+    {
+      "table": "mail_connections",
+      "name": "mail_connections_pkey",
+      "definition": "CREATE UNIQUE INDEX mail_connections_pkey ON public.mail_connections USING btree (id)"
     },
     {
       "table": "members",
@@ -17197,14 +17217,9 @@
       "definition": "CREATE UNIQUE INDEX memory_versions_uq ON public.memory_versions USING btree (memory_id, seq)"
     },
     {
-      "table": "message_reactions",
-      "name": "message_reactions_message_id_reaction_actor_type_actor_id_pk",
-      "definition": "CREATE UNIQUE INDEX message_reactions_message_id_reaction_actor_type_actor_id_pk ON public.message_reactions USING btree (message_id, reaction, actor_type, actor_id)"
-    },
-    {
-      "table": "message_receipts",
-      "name": "message_receipts_message_id_agent_id_pk",
-      "definition": "CREATE UNIQUE INDEX message_receipts_message_id_agent_id_pk ON public.message_receipts USING btree (message_id, agent_id)"
+      "table": "message_dispatches",
+      "name": "message_dispatches_message_id_agent_id_pk",
+      "definition": "CREATE UNIQUE INDEX message_dispatches_message_id_agent_id_pk ON public.message_dispatches USING btree (message_id, agent_id)"
     },
     {
       "table": "messages",
@@ -17307,6 +17322,31 @@
       "definition": "CREATE UNIQUE INDEX outbox_pkey ON public.outbox USING btree (id)"
     },
     {
+      "table": "page_links",
+      "name": "page_links_source_id_ordinal_pk",
+      "definition": "CREATE UNIQUE INDEX page_links_source_id_ordinal_pk ON public.page_links USING btree (source_id, ordinal)"
+    },
+    {
+      "table": "page_links",
+      "name": "page_links_target_idx",
+      "definition": "CREATE INDEX page_links_target_idx ON public.page_links USING btree (target_id)"
+    },
+    {
+      "table": "page_links",
+      "name": "page_links_workspace_idx",
+      "definition": "CREATE INDEX page_links_workspace_idx ON public.page_links USING btree (workspace_id)"
+    },
+    {
+      "table": "page_links",
+      "name": "page_links_workspace_slug_idx",
+      "definition": "CREATE INDEX page_links_workspace_slug_idx ON public.page_links USING btree (workspace_id, target_slug)"
+    },
+    {
+      "table": "page_revisions",
+      "name": "page_revisions_page_id_version_pk",
+      "definition": "CREATE UNIQUE INDEX page_revisions_page_id_version_pk ON public.page_revisions USING btree (page_id, version)"
+    },
+    {
       "table": "pins",
       "name": "pins_channel_id_message_id_pk",
       "definition": "CREATE UNIQUE INDEX pins_channel_id_message_id_pk ON public.pins USING btree (channel_id, message_id)"
@@ -17352,34 +17392,49 @@
       "definition": "CREATE UNIQUE INDEX reminders_pkey ON public.reminders USING btree (id)"
     },
     {
-      "table": "routine_runs",
-      "name": "routine_runs_dedupe_uq",
-      "definition": "CREATE UNIQUE INDEX routine_runs_dedupe_uq ON public.routine_runs USING btree (routine_id, dedupe_key) WHERE (dedupe_key IS NOT NULL)"
+      "table": "reversible_actions",
+      "name": "reversible_actions_message_idx",
+      "definition": "CREATE INDEX reversible_actions_message_idx ON public.reversible_actions USING btree (message_id)"
     },
     {
-      "table": "routine_runs",
-      "name": "routine_runs_pkey",
-      "definition": "CREATE UNIQUE INDEX routine_runs_pkey ON public.routine_runs USING btree (id)"
+      "table": "reversible_actions",
+      "name": "reversible_actions_pkey",
+      "definition": "CREATE UNIQUE INDEX reversible_actions_pkey ON public.reversible_actions USING btree (id)"
     },
     {
-      "table": "routine_runs",
-      "name": "routine_runs_queue_idx",
-      "definition": "CREATE INDEX routine_runs_queue_idx ON public.routine_runs USING btree (not_before) WHERE (status = 'queued'::text)"
+      "table": "reversible_actions",
+      "name": "reversible_actions_run_idx",
+      "definition": "CREATE INDEX reversible_actions_run_idx ON public.reversible_actions USING btree (run_id)"
     },
     {
-      "table": "routine_runs",
-      "name": "routine_runs_queued_uq",
-      "definition": "CREATE UNIQUE INDEX routine_runs_queued_uq ON public.routine_runs USING btree (routine_id) WHERE ((status = 'queued'::text) AND (trigger <> 'retry'::text))"
+      "table": "routine_executions",
+      "name": "routine_executions_dedupe_uq",
+      "definition": "CREATE UNIQUE INDEX routine_executions_dedupe_uq ON public.routine_executions USING btree (routine_id, dedupe_key) WHERE (dedupe_key IS NOT NULL)"
     },
     {
-      "table": "routine_runs",
-      "name": "routine_runs_routine_idx",
-      "definition": "CREATE INDEX routine_runs_routine_idx ON public.routine_runs USING btree (routine_id, at)"
+      "table": "routine_executions",
+      "name": "routine_executions_pkey",
+      "definition": "CREATE UNIQUE INDEX routine_executions_pkey ON public.routine_executions USING btree (id)"
     },
     {
-      "table": "routine_runs",
-      "name": "routine_runs_slot_uq",
-      "definition": "CREATE UNIQUE INDEX routine_runs_slot_uq ON public.routine_runs USING btree (routine_id, scheduled_for) WHERE (scheduled_for IS NOT NULL)"
+      "table": "routine_executions",
+      "name": "routine_executions_queue_idx",
+      "definition": "CREATE INDEX routine_executions_queue_idx ON public.routine_executions USING btree (not_before) WHERE (status = 'queued'::text)"
+    },
+    {
+      "table": "routine_executions",
+      "name": "routine_executions_queued_uq",
+      "definition": "CREATE UNIQUE INDEX routine_executions_queued_uq ON public.routine_executions USING btree (routine_id) WHERE ((status = 'queued'::text) AND (trigger <> 'retry'::text))"
+    },
+    {
+      "table": "routine_executions",
+      "name": "routine_executions_routine_idx",
+      "definition": "CREATE INDEX routine_executions_routine_idx ON public.routine_executions USING btree (routine_id, at)"
+    },
+    {
+      "table": "routine_executions",
+      "name": "routine_executions_slot_uq",
+      "definition": "CREATE UNIQUE INDEX routine_executions_slot_uq ON public.routine_executions USING btree (routine_id, scheduled_for) WHERE (scheduled_for IS NOT NULL)"
     },
     {
       "table": "routines",
@@ -17402,9 +17457,9 @@
       "definition": "CREATE INDEX routines_workspace_idx ON public.routines USING btree (workspace_id)"
     },
     {
-      "table": "run_steps",
-      "name": "run_steps_run_id_seq_pk",
-      "definition": "CREATE UNIQUE INDEX run_steps_run_id_seq_pk ON public.run_steps USING btree (run_id, seq)"
+      "table": "run_events",
+      "name": "run_events_run_id_seq_pk",
+      "definition": "CREATE UNIQUE INDEX run_events_run_id_seq_pk ON public.run_events USING btree (run_id, seq)"
     },
     {
       "table": "runner_jobs",
@@ -17435,6 +17490,11 @@
       "table": "runner_pairings",
       "name": "runner_pairings_pkey",
       "definition": "CREATE UNIQUE INDEX runner_pairings_pkey ON public.runner_pairings USING btree (user_code)"
+    },
+    {
+      "table": "runner_secrets",
+      "name": "runner_secrets_agent_id_runner_id_name_pk",
+      "definition": "CREATE UNIQUE INDEX runner_secrets_agent_id_runner_id_name_pk ON public.runner_secrets USING btree (agent_id, runner_id, name)"
     },
     {
       "table": "runner_sessions",
@@ -17487,9 +17547,9 @@
       "definition": "CREATE UNIQUE INDEX runs_pkey ON public.runs USING btree (id)"
     },
     {
-      "table": "sandbox_settings",
-      "name": "sandbox_settings_pkey",
-      "definition": "CREATE UNIQUE INDEX sandbox_settings_pkey ON public.sandbox_settings USING btree (workspace_id)"
+      "table": "sandbox_policies",
+      "name": "sandbox_policies_pkey",
+      "definition": "CREATE UNIQUE INDEX sandbox_policies_pkey ON public.sandbox_policies USING btree (workspace_id)"
     },
     {
       "table": "search_chunks",
@@ -17527,14 +17587,14 @@
       "definition": "CREATE INDEX search_chunks_workspace_idx ON public.search_chunks USING btree (workspace_id, created_at)"
     },
     {
-      "table": "secret_requests",
-      "name": "secret_requests_agent_idx",
-      "definition": "CREATE INDEX secret_requests_agent_idx ON public.secret_requests USING btree (agent_id)"
+      "table": "secret_prompts",
+      "name": "secret_prompts_agent_idx",
+      "definition": "CREATE INDEX secret_prompts_agent_idx ON public.secret_prompts USING btree (agent_id)"
     },
     {
-      "table": "secret_requests",
-      "name": "secret_requests_pkey",
-      "definition": "CREATE UNIQUE INDEX secret_requests_pkey ON public.secret_requests USING btree (id)"
+      "table": "secret_prompts",
+      "name": "secret_prompts_pkey",
+      "definition": "CREATE UNIQUE INDEX secret_prompts_pkey ON public.secret_prompts USING btree (id)"
     },
     {
       "table": "sessions",
@@ -17550,6 +17610,11 @@
       "table": "sessions",
       "name": "sessions_user_idx",
       "definition": "CREATE INDEX sessions_user_idx ON public.sessions USING btree (user_id)"
+    },
+    {
+      "table": "skill_grants",
+      "name": "skill_grants_agent_id_skill_id_pk",
+      "definition": "CREATE UNIQUE INDEX skill_grants_agent_id_skill_id_pk ON public.skill_grants USING btree (agent_id, skill_id)"
     },
     {
       "table": "skills",
@@ -17575,26 +17640,6 @@
       "table": "threads",
       "name": "threads_workspace_activity_idx",
       "definition": "CREATE INDEX threads_workspace_activity_idx ON public.threads USING btree (workspace_id, last_touched_at)"
-    },
-    {
-      "table": "tool_decisions",
-      "name": "tool_decisions_approval_idx",
-      "definition": "CREATE INDEX tool_decisions_approval_idx ON public.tool_decisions USING btree (approval_id)"
-    },
-    {
-      "table": "tool_decisions",
-      "name": "tool_decisions_pkey",
-      "definition": "CREATE UNIQUE INDEX tool_decisions_pkey ON public.tool_decisions USING btree (id)"
-    },
-    {
-      "table": "tool_decisions",
-      "name": "tool_decisions_reviewer_idx",
-      "definition": "CREATE INDEX tool_decisions_reviewer_idx ON public.tool_decisions USING btree (agent_id, created_at) WHERE (by = 'reviewer'::text)"
-    },
-    {
-      "table": "tool_decisions",
-      "name": "tool_decisions_workspace_idx",
-      "definition": "CREATE INDEX tool_decisions_workspace_idx ON public.tool_decisions USING btree (workspace_id, created_at)"
     },
     {
       "table": "upload_sessions",
@@ -17687,26 +17732,6 @@
       "definition": "CREATE UNIQUE INDEX wiki_attachments_workspace_id_path_key_pk ON public.wiki_attachments USING btree (workspace_id, path_key)"
     },
     {
-      "table": "wiki_links",
-      "name": "wiki_links_source_id_ordinal_pk",
-      "definition": "CREATE UNIQUE INDEX wiki_links_source_id_ordinal_pk ON public.wiki_links USING btree (source_id, ordinal)"
-    },
-    {
-      "table": "wiki_links",
-      "name": "wiki_links_target_idx",
-      "definition": "CREATE INDEX wiki_links_target_idx ON public.wiki_links USING btree (target_id)"
-    },
-    {
-      "table": "wiki_links",
-      "name": "wiki_links_workspace_idx",
-      "definition": "CREATE INDEX wiki_links_workspace_idx ON public.wiki_links USING btree (workspace_id)"
-    },
-    {
-      "table": "wiki_links",
-      "name": "wiki_links_workspace_slug_idx",
-      "definition": "CREATE INDEX wiki_links_workspace_slug_idx ON public.wiki_links USING btree (workspace_id, target_slug)"
-    },
-    {
       "table": "wiki_page_docs",
       "name": "wiki_page_docs_pkey",
       "definition": "CREATE UNIQUE INDEX wiki_page_docs_pkey ON public.wiki_page_docs USING btree (page_id)"
@@ -17717,34 +17742,9 @@
       "definition": "CREATE UNIQUE INDEX wiki_page_views_page_id_reader_type_reader_id_pk ON public.wiki_page_views USING btree (page_id, reader_type, reader_id)"
     },
     {
-      "table": "wiki_pages",
-      "name": "wiki_pages_pkey",
-      "definition": "CREATE UNIQUE INDEX wiki_pages_pkey ON public.wiki_pages USING btree (id)"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "wiki_pages_purge_idx",
-      "definition": "CREATE INDEX wiki_pages_purge_idx ON public.wiki_pages USING btree (expunge_at) WHERE (deleted_at IS NOT NULL)"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "wiki_pages_slug_uq",
-      "definition": "CREATE UNIQUE INDEX wiki_pages_slug_uq ON public.wiki_pages USING btree (workspace_id, slug)"
-    },
-    {
-      "table": "wiki_pages",
-      "name": "wiki_pages_workspace_idx",
-      "definition": "CREATE INDEX wiki_pages_workspace_idx ON public.wiki_pages USING btree (workspace_id)"
-    },
-    {
       "table": "wiki_prop_schemas",
       "name": "wiki_prop_schemas_pkey",
       "definition": "CREATE UNIQUE INDEX wiki_prop_schemas_pkey ON public.wiki_prop_schemas USING btree (workspace_id)"
-    },
-    {
-      "table": "wiki_versions",
-      "name": "wiki_versions_page_id_version_pk",
-      "definition": "CREATE UNIQUE INDEX wiki_versions_page_id_version_pk ON public.wiki_versions USING btree (page_id, version)"
     },
     {
       "table": "workspace_storage",

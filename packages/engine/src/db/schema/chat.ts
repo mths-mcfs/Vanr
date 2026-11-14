@@ -45,8 +45,8 @@ export const channels = pgTable(
   ],
 );
 
-export const channelMembers = pgTable(
-  "channel_members",
+export const channelMemberships = pgTable(
+  "channel_memberships",
   {
     channelId: text("channel_id")
       .notNull()
@@ -61,7 +61,7 @@ export const channelMembers = pgTable(
   },
   (t) => [
     primaryKey({ columns: [t.channelId, t.memberType, t.memberId] }),
-    index("channel_members_member_idx").on(t.memberType, t.memberId),
+    index("channel_memberships_member_idx").on(t.memberType, t.memberId),
   ],
 );
 
@@ -98,8 +98,8 @@ export const messages = pgTable(
   ],
 );
 
-export const messageReactions = pgTable(
-  "message_reactions",
+export const emojiReactions = pgTable(
+  "emoji_reactions",
   {
     messageId: text("message_id")
       .notNull()

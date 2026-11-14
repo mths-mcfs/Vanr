@@ -123,8 +123,8 @@ export const budgetCounters = pgTable(
  * Gate telemetry: one row per tool call that went through it (class, decision, reason, flags). The outcome
  * of the request and the decision time come from the linked approval.
  */
-export const toolDecisions = pgTable(
-  "tool_decisions",
+export const gateDecisions = pgTable(
+  "gate_decisions",
   {
     id: text("id").primaryKey(),
     workspaceId: workspace(),
@@ -145,8 +145,8 @@ export const toolDecisions = pgTable(
     createdAt: createdAt(),
   },
   (t) => [
-    index("tool_decisions_workspace_idx").on(t.workspaceId, t.createdAt),
-    index("tool_decisions_approval_idx").on(t.approvalId),
-    index("tool_decisions_reviewer_idx").on(t.agentId, t.createdAt).where(sql`by = 'reviewer'`),
+    index("gate_decisions_workspace_idx").on(t.workspaceId, t.createdAt),
+    index("gate_decisions_approval_idx").on(t.approvalId),
+    index("gate_decisions_reviewer_idx").on(t.agentId, t.createdAt).where(sql`by = 'reviewer'`),
   ],
 );

@@ -153,8 +153,8 @@ export const questions = pgTable(
 );
 
 /** Something the agent changed outside the conversation that can be undone for a while. */
-export const agentActions = pgTable(
-  "agent_actions",
+export const reversibleActions = pgTable(
+  "reversible_actions",
   {
     id: text("id").primaryKey(),
     workspaceId: workspace(),
@@ -173,7 +173,10 @@ export const agentActions = pgTable(
     revertedAt: ts("reverted_at"),
     reverterUserId: text("reverter_user_id"),
   },
-  (t) => [index("agent_actions_message_idx").on(t.messageId), index("agent_actions_run_idx").on(t.runId)],
+  (t) => [
+    index("reversible_actions_message_idx").on(t.messageId),
+    index("reversible_actions_run_idx").on(t.runId),
+  ],
 );
 
 /**

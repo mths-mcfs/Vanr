@@ -133,8 +133,8 @@ export const runs = pgTable(
   ],
 );
 
-export const runSteps = pgTable(
-  "run_steps",
+export const runEvents = pgTable(
+  "run_events",
   {
     runId: text("run_id")
       .notNull()
@@ -148,8 +148,8 @@ export const runSteps = pgTable(
 );
 
 /** Who picked up each message: routed, claimed, handled (with status) or blocked (audience, budget). */
-export const messageReceipts = pgTable(
-  "message_receipts",
+export const messageDispatches = pgTable(
+  "message_dispatches",
   {
     messageId: text("message_id").notNull(),
     agentId: text("agent_id").notNull(),
@@ -263,8 +263,8 @@ export const skills = pgTable(
   (t) => [uniqueIndex("skills_name_uq").on(t.workspaceId, t.name)],
 );
 
-export const agentSkills = pgTable(
-  "agent_skills",
+export const skillGrants = pgTable(
+  "skill_grants",
   {
     agentId: text("agent_id")
       .notNull()

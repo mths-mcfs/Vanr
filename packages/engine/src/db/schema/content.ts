@@ -140,8 +140,8 @@ export const uploadSessions = pgTable(
 
 // ---- Wiki ----
 
-export const wikiPages = pgTable(
-  "wiki_pages",
+export const knowledgePages = pgTable(
+  "knowledge_pages",
   {
     id: text("id").primaryKey(),
     workspaceId: workspace(),
@@ -168,18 +168,18 @@ export const wikiPages = pgTable(
     expungeAt: ts("expunge_at"),
   },
   (t) => [
-    uniqueIndex("wiki_pages_slug_uq").on(t.workspaceId, t.slug),
-    index("wiki_pages_workspace_idx").on(t.workspaceId),
-    index("wiki_pages_purge_idx").on(t.expungeAt).where(sql`deleted_at is not null`),
+    uniqueIndex("knowledge_pages_slug_uq").on(t.workspaceId, t.slug),
+    index("knowledge_pages_workspace_idx").on(t.workspaceId),
+    index("knowledge_pages_purge_idx").on(t.expungeAt).where(sql`deleted_at is not null`),
   ],
 );
 
-export const wikiVersions = pgTable(
-  "wiki_versions",
+export const pageRevisions = pgTable(
+  "page_revisions",
   {
     pageId: text("page_id")
       .notNull()
-      .references(() => wikiPages.id, { onDelete: "cascade" }),
+      .references(() => knowledgePages.id, { onDelete: "cascade" }),
     version: integer("version").notNull(),
     title: text("title").notNull(),
     body: text("body").notNull(),
@@ -196,15 +196,15 @@ export const wikiVersions = pgTable(
  * [[ ]] links of each page, extracted on save: backlinks, graph, mentions and renames without reading every
  * page. A null `targetId` is a link to a page that does not exist (yet).
  */
-export const wikiLinks = pgTable(
-  "wiki_links",
+export const pageLinks = pgTable(
+  "page_links",
   {
     sourceId: text("source_id")
       .notNull()
-      .references(() => wikiPages.id, { onDelete: "cascade" }),
+      .references(() => knowledgePages.id, { onDelete: "cascade" }),
     ordinal: integer("ordinal").notNull(),
     workspaceId: workspace(),
-    targetId: text("target_id").references(() => wikiPages.id, { onDelete: "set null" }),
+    targetId: text("target_id").references(() => knowledgePages.id, { onDelete: "set null" }),
     /** Target as written in the text (without anchor and label). */
     targetText: text("target_text").notNull(),
     /** `slugify` of the target: finds the link when a new page gets that slug (`[[Foo_Bar]]` → `foo-bar`). */
@@ -215,9 +215,9 @@ export const wikiLinks = pgTable(
   },
   (t) => [
     primaryKey({ columns: [t.sourceId, t.ordinal] }),
-    index("wiki_links_target_idx").on(t.targetId),
-    index("wiki_links_workspace_idx").on(t.workspaceId),
-    index("wiki_links_workspace_slug_idx").on(t.workspaceId, t.targetSlug),
+    index("page_links_target_idx").on(t.targetId),
+    index("page_links_workspace_idx").on(t.workspaceId),
+    index("page_links_workspace_slug_idx").on(t.workspaceId, t.targetSlug),
   ],
 );
 
@@ -239,7 +239,7 @@ export const wikiPropSchemas = pgTable("wiki_prop_schemas", {
 export const wikiPageDocs = pgTable("wiki_page_docs", {
   pageId: text("page_id")
     .primaryKey()
-    .references(() => wikiPages.id, { onDelete: "cascade" }),
+    .references(() => knowledgePages.id, { onDelete: "cascade" }),
   state: text("state").notNull(),
   parentVersion: integer("parent_version").notNull(),
   dirty: boolean("dirty").notNull().default(false),
@@ -273,7 +273,7 @@ export const wikiPageViews = pgTable(
   {
     pageId: text("page_id")
       .notNull()
-      .references(() => wikiPages.id, { onDelete: "cascade" }),
+      .references(() => knowledgePages.id, { onDelete: "cascade" }),
     readerType: text("reader_type", { enum: ["person", "agent"] }).notNull(),
     readerId: text("reader_id").notNull(),
     count: integer("count").notNull().default(0),

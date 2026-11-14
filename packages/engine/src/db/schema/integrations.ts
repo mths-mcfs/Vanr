@@ -158,8 +158,8 @@ export interface MailPolicyRow {
   senderAddress: string | null;
 }
 
-export const mailAccounts = pgTable(
-  "mail_accounts",
+export const mailConnections = pgTable(
+  "mail_connections",
   {
     id: text("id").primaryKey(),
     workspaceId: workspace(),
@@ -179,7 +179,7 @@ export const mailAccounts = pgTable(
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (t) => [uniqueIndex("mail_accounts_address_uq").on(t.workspaceId, t.address)],
+  (t) => [uniqueIndex("mail_connections_address_uq").on(t.workspaceId, t.address)],
 );
 
 export const agentMailboxes = pgTable(
@@ -190,7 +190,7 @@ export const agentMailboxes = pgTable(
       .references(() => agents.id, { onDelete: "cascade" }),
     accountId: text("account_id")
       .notNull()
-      .references(() => mailAccounts.id, { onDelete: "cascade" }),
+      .references(() => mailConnections.id, { onDelete: "cascade" }),
     workspaceId: workspace(),
     level: text("level", { enum: ["none", "read", "read_write"] }).notNull(),
     deletable: boolean("deletable").notNull().default(false),
@@ -206,8 +206,8 @@ export interface DatabasePolicyRow {
   timeoutSeconds: 15 | 30 | 60;
 }
 
-export const databaseConnections = pgTable(
-  "database_connections",
+export const dataSources = pgTable(
+  "data_sources",
   {
     id: text("id").primaryKey(),
     workspaceId: workspace(),
@@ -233,7 +233,7 @@ export const databaseConnections = pgTable(
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (t) => [index("database_connections_workspace_idx").on(t.workspaceId)],
+  (t) => [index("data_sources_workspace_idx").on(t.workspaceId)],
 );
 
 export const agentDatabases = pgTable(
@@ -244,7 +244,7 @@ export const agentDatabases = pgTable(
       .references(() => agents.id, { onDelete: "cascade" }),
     connectionId: text("connection_id")
       .notNull()
-      .references(() => databaseConnections.id, { onDelete: "cascade" }),
+      .references(() => dataSources.id, { onDelete: "cascade" }),
     workspaceId: workspace(),
     level: text("level", { enum: ["none", "read"] }).notNull(),
     policy: jsonb("policy").$type<DatabasePolicyRow>().notNull(),

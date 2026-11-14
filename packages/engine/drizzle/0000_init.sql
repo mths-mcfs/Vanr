@@ -1,12 +1,5 @@
 -- Trigram search (gin_trgm_ops below) needs pg_trgm; it ships in the contrib of every Postgres.
 CREATE EXTENSION IF NOT EXISTS pg_trgm;--> statement-breakpoint
-CREATE TABLE "agent_skills" (
-	"agent_id" text NOT NULL,
-	"skill_id" text NOT NULL,
-	"enabled" boolean DEFAULT true NOT NULL,
-	CONSTRAINT "agent_skills_agent_id_skill_id_pk" PRIMARY KEY("agent_id","skill_id")
-);
---> statement-breakpoint
 CREATE TABLE "agents" (
 	"id" text PRIMARY KEY NOT NULL,
 	"workspace_id" text NOT NULL,
@@ -90,7 +83,7 @@ CREATE TABLE "memories" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "message_receipts" (
+CREATE TABLE "message_dispatches" (
 	"message_id" text NOT NULL,
 	"agent_id" text NOT NULL,
 	"state" text NOT NULL,
@@ -98,7 +91,7 @@ CREATE TABLE "message_receipts" (
 	"status" text,
 	"reason" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "message_receipts_message_id_agent_id_pk" PRIMARY KEY("message_id","agent_id")
+	CONSTRAINT "message_dispatches_message_id_agent_id_pk" PRIMARY KEY("message_id","agent_id")
 );
 --> statement-breakpoint
 CREATE TABLE "reminders" (
@@ -116,13 +109,13 @@ CREATE TABLE "reminders" (
 	"sent_at" timestamp with time zone
 );
 --> statement-breakpoint
-CREATE TABLE "run_steps" (
+CREATE TABLE "run_events" (
 	"run_id" text NOT NULL,
 	"seq" integer NOT NULL,
 	"kind" text NOT NULL,
 	"data" jsonb NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "run_steps_run_id_seq_pk" PRIMARY KEY("run_id","seq")
+	CONSTRAINT "run_events_run_id_seq_pk" PRIMARY KEY("run_id","seq")
 );
 --> statement-breakpoint
 CREATE TABLE "runs" (
@@ -148,6 +141,13 @@ CREATE TABLE "runs" (
 	"started_at" timestamp with time zone,
 	"last_ping_at" timestamp with time zone,
 	"finished_at" timestamp with time zone
+);
+--> statement-breakpoint
+CREATE TABLE "skill_grants" (
+	"agent_id" text NOT NULL,
+	"skill_id" text NOT NULL,
+	"enabled" boolean DEFAULT true NOT NULL,
+	CONSTRAINT "skill_grants_agent_id_skill_id_pk" PRIMARY KEY("agent_id","skill_id")
 );
 --> statement-breakpoint
 CREATE TABLE "skills" (
@@ -495,7 +495,7 @@ CREATE TABLE "db_views" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "channel_members" (
+CREATE TABLE "channel_memberships" (
 	"channel_id" text NOT NULL,
 	"member_type" text NOT NULL,
 	"member_id" text NOT NULL,
@@ -503,7 +503,7 @@ CREATE TABLE "channel_members" (
 	"last_read_at" timestamp with time zone,
 	"last_read_message_id" text,
 	"member_since" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "channel_members_channel_id_member_type_member_id_pk" PRIMARY KEY("channel_id","member_type","member_id")
+	CONSTRAINT "channel_memberships_channel_id_member_type_member_id_pk" PRIMARY KEY("channel_id","member_type","member_id")
 );
 --> statement-breakpoint
 CREATE TABLE "channels" (
@@ -521,13 +521,13 @@ CREATE TABLE "channels" (
 	"budget_notice" text
 );
 --> statement-breakpoint
-CREATE TABLE "message_reactions" (
+CREATE TABLE "emoji_reactions" (
 	"message_id" text NOT NULL,
 	"reaction" text NOT NULL,
 	"actor_type" text NOT NULL,
 	"actor_id" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "message_reactions_message_id_reaction_actor_type_actor_id_pk" PRIMARY KEY("message_id","reaction","actor_type","actor_id")
+	CONSTRAINT "emoji_reactions_message_id_reaction_actor_type_actor_id_pk" PRIMARY KEY("message_id","reaction","actor_type","actor_id")
 );
 --> statement-breakpoint
 CREATE TABLE "messages" (
@@ -676,6 +676,53 @@ CREATE TABLE "files" (
 	"expunge_at" timestamp with time zone
 );
 --> statement-breakpoint
+CREATE TABLE "knowledge_pages" (
+	"id" text PRIMARY KEY NOT NULL,
+	"workspace_id" text NOT NULL,
+	"slug" text NOT NULL,
+	"title" text NOT NULL,
+	"folder" text DEFAULT '' NOT NULL,
+	"tags" jsonb DEFAULT '[]'::jsonb NOT NULL,
+	"body" text DEFAULT '' NOT NULL,
+	"version" integer DEFAULT 1 NOT NULL,
+	"pinned" boolean DEFAULT false NOT NULL,
+	"locked" boolean DEFAULT false NOT NULL,
+	"source_type" text,
+	"updated_by" jsonb NOT NULL,
+	"props" jsonb DEFAULT '{}'::jsonb NOT NULL,
+	"aliases" jsonb DEFAULT '[]'::jsonb NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"deleted_at" timestamp with time zone,
+	"deleted_by" jsonb,
+	"expunge_at" timestamp with time zone
+);
+--> statement-breakpoint
+CREATE TABLE "page_links" (
+	"source_id" text NOT NULL,
+	"ordinal" integer NOT NULL,
+	"workspace_id" text NOT NULL,
+	"target_id" text,
+	"target_text" text NOT NULL,
+	"target_slug" text DEFAULT '' NOT NULL,
+	"anchor" text,
+	"link_text" text,
+	"embed" boolean DEFAULT false NOT NULL,
+	CONSTRAINT "page_links_source_id_ordinal_pk" PRIMARY KEY("source_id","ordinal")
+);
+--> statement-breakpoint
+CREATE TABLE "page_revisions" (
+	"page_id" text NOT NULL,
+	"version" integer NOT NULL,
+	"title" text NOT NULL,
+	"body" text NOT NULL,
+	"props" jsonb,
+	"author" jsonb NOT NULL,
+	"note" text,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "page_revisions_page_id_version_pk" PRIMARY KEY("page_id","version")
+);
+--> statement-breakpoint
 CREATE TABLE "upload_sessions" (
 	"id" text PRIMARY KEY NOT NULL,
 	"workspace_id" text NOT NULL,
@@ -708,19 +755,6 @@ CREATE TABLE "wiki_attachments" (
 	CONSTRAINT "wiki_attachments_workspace_id_path_key_pk" PRIMARY KEY("workspace_id","path_key")
 );
 --> statement-breakpoint
-CREATE TABLE "wiki_links" (
-	"source_id" text NOT NULL,
-	"ordinal" integer NOT NULL,
-	"workspace_id" text NOT NULL,
-	"target_id" text,
-	"target_text" text NOT NULL,
-	"target_slug" text DEFAULT '' NOT NULL,
-	"anchor" text,
-	"link_text" text,
-	"embed" boolean DEFAULT false NOT NULL,
-	CONSTRAINT "wiki_links_source_id_ordinal_pk" PRIMARY KEY("source_id","ordinal")
-);
---> statement-breakpoint
 CREATE TABLE "wiki_page_docs" (
 	"page_id" text PRIMARY KEY NOT NULL,
 	"state" text NOT NULL,
@@ -740,61 +774,11 @@ CREATE TABLE "wiki_page_views" (
 	CONSTRAINT "wiki_page_views_page_id_reader_type_reader_id_pk" PRIMARY KEY("page_id","reader_type","reader_id")
 );
 --> statement-breakpoint
-CREATE TABLE "wiki_pages" (
-	"id" text PRIMARY KEY NOT NULL,
-	"workspace_id" text NOT NULL,
-	"slug" text NOT NULL,
-	"title" text NOT NULL,
-	"folder" text DEFAULT '' NOT NULL,
-	"tags" jsonb DEFAULT '[]'::jsonb NOT NULL,
-	"body" text DEFAULT '' NOT NULL,
-	"version" integer DEFAULT 1 NOT NULL,
-	"pinned" boolean DEFAULT false NOT NULL,
-	"locked" boolean DEFAULT false NOT NULL,
-	"source_type" text,
-	"updated_by" jsonb NOT NULL,
-	"props" jsonb DEFAULT '{}'::jsonb NOT NULL,
-	"aliases" jsonb DEFAULT '[]'::jsonb NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"deleted_at" timestamp with time zone,
-	"deleted_by" jsonb,
-	"expunge_at" timestamp with time zone
-);
---> statement-breakpoint
 CREATE TABLE "wiki_prop_schemas" (
 	"workspace_id" text PRIMARY KEY NOT NULL,
 	"defs" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	"version" integer DEFAULT 1 NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
-);
---> statement-breakpoint
-CREATE TABLE "wiki_versions" (
-	"page_id" text NOT NULL,
-	"version" integer NOT NULL,
-	"title" text NOT NULL,
-	"body" text NOT NULL,
-	"props" jsonb,
-	"author" jsonb NOT NULL,
-	"note" text,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "wiki_versions_page_id_version_pk" PRIMARY KEY("page_id","version")
-);
---> statement-breakpoint
-CREATE TABLE "agent_actions" (
-	"id" text PRIMARY KEY NOT NULL,
-	"workspace_id" text NOT NULL,
-	"agent_id" text NOT NULL,
-	"run_id" text,
-	"message_id" text,
-	"requester_user_id" text,
-	"kind" text NOT NULL,
-	"target" jsonb NOT NULL,
-	"params" jsonb DEFAULT '{}'::jsonb NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"revertible_until" timestamp with time zone,
-	"reverted_at" timestamp with time zone,
-	"reverter_user_id" text
 );
 --> statement-breakpoint
 CREATE TABLE "approval_rules" (
@@ -909,6 +893,22 @@ CREATE TABLE "questions" (
 	"answered_at" timestamp with time zone
 );
 --> statement-breakpoint
+CREATE TABLE "reversible_actions" (
+	"id" text PRIMARY KEY NOT NULL,
+	"workspace_id" text NOT NULL,
+	"agent_id" text NOT NULL,
+	"run_id" text,
+	"message_id" text,
+	"requester_user_id" text,
+	"kind" text NOT NULL,
+	"target" jsonb NOT NULL,
+	"params" jsonb DEFAULT '{}'::jsonb NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"revertible_until" timestamp with time zone,
+	"reverted_at" timestamp with time zone,
+	"reverter_user_id" text
+);
+--> statement-breakpoint
 CREATE TABLE "agent_channel_access" (
 	"agent_id" text NOT NULL,
 	"workspace_id" text NOT NULL,
@@ -966,7 +966,7 @@ CREATE TABLE "connections" (
 	"revoked_at" timestamp with time zone
 );
 --> statement-breakpoint
-CREATE TABLE "database_connections" (
+CREATE TABLE "data_sources" (
 	"id" text PRIMARY KEY NOT NULL,
 	"workspace_id" text NOT NULL,
 	"label" text NOT NULL,
@@ -1005,7 +1005,7 @@ CREATE TABLE "integration_usage" (
 	"at" timestamp with time zone NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "mail_accounts" (
+CREATE TABLE "mail_connections" (
 	"id" text PRIMARY KEY NOT NULL,
 	"workspace_id" text NOT NULL,
 	"provider" text NOT NULL,
@@ -1153,36 +1153,12 @@ CREATE TABLE "memory_versions" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "agent_browser_settings" (
-	"agent_id" text PRIMARY KEY NOT NULL,
-	"workspace_id" text NOT NULL,
-	"permitted_domains" jsonb DEFAULT '[]'::jsonb NOT NULL,
-	"read_domains" jsonb DEFAULT '[]'::jsonb NOT NULL,
-	"level" text,
-	"private_ranges" jsonb DEFAULT '[]'::jsonb NOT NULL,
-	"private_ranges_runner_id" text,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
-);
---> statement-breakpoint
 CREATE TABLE "agent_environments" (
 	"agent_id" text PRIMARY KEY NOT NULL,
 	"workspace_id" text NOT NULL,
 	"status" text DEFAULT 'none' NOT NULL,
 	"last_used_at" timestamp with time zone,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
-);
---> statement-breakpoint
-CREATE TABLE "agent_secrets" (
-	"agent_id" text NOT NULL,
-	"runner_id" text NOT NULL,
-	"name" text NOT NULL,
-	"workspace_id" text NOT NULL,
-	"target" text NOT NULL,
-	"file_path" text,
-	"delivered_by" text,
-	"browser" jsonb,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "agent_secrets_agent_id_runner_id_name_pk" PRIMARY KEY("agent_id","runner_id","name")
 );
 --> statement-breakpoint
 CREATE TABLE "browser_interventions" (
@@ -1221,6 +1197,17 @@ CREATE TABLE "browser_log_entries" (
 	"blocked" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	"shot_key" text,
 	"at" timestamp with time zone NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "browser_policies" (
+	"agent_id" text PRIMARY KEY NOT NULL,
+	"workspace_id" text NOT NULL,
+	"permitted_domains" jsonb DEFAULT '[]'::jsonb NOT NULL,
+	"read_domains" jsonb DEFAULT '[]'::jsonb NOT NULL,
+	"level" text,
+	"private_ranges" jsonb DEFAULT '[]'::jsonb NOT NULL,
+	"private_ranges_runner_id" text,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "network_requests" (
@@ -1292,6 +1279,19 @@ CREATE TABLE "runner_pairings" (
 	"expires_at" timestamp with time zone NOT NULL
 );
 --> statement-breakpoint
+CREATE TABLE "runner_secrets" (
+	"agent_id" text NOT NULL,
+	"runner_id" text NOT NULL,
+	"name" text NOT NULL,
+	"workspace_id" text NOT NULL,
+	"target" text NOT NULL,
+	"file_path" text,
+	"delivered_by" text,
+	"browser" jsonb,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "runner_secrets_agent_id_runner_id_name_pk" PRIMARY KEY("agent_id","runner_id","name")
+);
+--> statement-breakpoint
 CREATE TABLE "runner_sessions" (
 	"token_hash" text PRIMARY KEY NOT NULL,
 	"runner_id" text NOT NULL,
@@ -1331,7 +1331,7 @@ CREATE TABLE "runners" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "sandbox_settings" (
+CREATE TABLE "sandbox_policies" (
 	"workspace_id" text PRIMARY KEY NOT NULL,
 	"enabled" boolean DEFAULT false NOT NULL,
 	"network" text DEFAULT 'allowlist' NOT NULL,
@@ -1342,7 +1342,7 @@ CREATE TABLE "sandbox_settings" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "secret_requests" (
+CREATE TABLE "secret_prompts" (
 	"id" text PRIMARY KEY NOT NULL,
 	"workspace_id" text NOT NULL,
 	"agent_id" text NOT NULL,
@@ -1400,7 +1400,7 @@ CREATE TABLE "budget_counters" (
 	CONSTRAINT "budget_counters_scope_period_pk" PRIMARY KEY("scope","period")
 );
 --> statement-breakpoint
-CREATE TABLE "tool_decisions" (
+CREATE TABLE "gate_decisions" (
 	"id" text PRIMARY KEY NOT NULL,
 	"workspace_id" text NOT NULL,
 	"agent_id" text NOT NULL,
@@ -1464,7 +1464,15 @@ CREATE TABLE "usage_reservations" (
 	"expires_at" timestamp with time zone NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "calendar_events" (
+CREATE TABLE "board_columns" (
+	"id" text PRIMARY KEY NOT NULL,
+	"workspace_id" text NOT NULL,
+	"name" text NOT NULL,
+	"stage" text NOT NULL,
+	"position" integer NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "calendar_entries" (
 	"id" text PRIMARY KEY NOT NULL,
 	"workspace_id" text NOT NULL,
 	"title" text NOT NULL,
@@ -1505,14 +1513,6 @@ CREATE TABLE "effect_keys" (
 	"status" text NOT NULL,
 	"output" jsonb,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
-);
---> statement-breakpoint
-CREATE TABLE "issue_columns" (
-	"id" text PRIMARY KEY NOT NULL,
-	"workspace_id" text NOT NULL,
-	"name" text NOT NULL,
-	"stage" text NOT NULL,
-	"position" integer NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "issue_timeline" (
@@ -1614,7 +1614,7 @@ CREATE TABLE "push_subscriptions" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "routine_runs" (
+CREATE TABLE "routine_executions" (
 	"id" text PRIMARY KEY NOT NULL,
 	"routine_id" text NOT NULL,
 	"at" timestamp with time zone NOT NULL,
@@ -1704,17 +1704,17 @@ CREATE TABLE "workspaces" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-ALTER TABLE "agent_skills" ADD CONSTRAINT "agent_skills_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "agent_skills" ADD CONSTRAINT "agent_skills_skill_id_skills_id_fk" FOREIGN KEY ("skill_id") REFERENCES "public"."skills"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "agents" ADD CONSTRAINT "agents_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "credentials" ADD CONSTRAINT "credentials_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "delegations" ADD CONSTRAINT "delegations_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "memories" ADD CONSTRAINT "memories_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "memories" ADD CONSTRAINT "memories_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "reminders" ADD CONSTRAINT "reminders_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "run_steps" ADD CONSTRAINT "run_steps_run_id_runs_id_fk" FOREIGN KEY ("run_id") REFERENCES "public"."runs"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "run_events" ADD CONSTRAINT "run_events_run_id_runs_id_fk" FOREIGN KEY ("run_id") REFERENCES "public"."runs"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "runs" ADD CONSTRAINT "runs_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "runs" ADD CONSTRAINT "runs_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "skill_grants" ADD CONSTRAINT "skill_grants_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "skill_grants" ADD CONSTRAINT "skill_grants_skill_id_skills_id_fk" FOREIGN KEY ("skill_id") REFERENCES "public"."skills"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "skills" ADD CONSTRAINT "skills_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "assignment_command_rules" ADD CONSTRAINT "assignment_command_rules_assignment_id_assignments_id_fk" FOREIGN KEY ("assignment_id") REFERENCES "public"."assignments"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "assignment_command_stats" ADD CONSTRAINT "assignment_command_stats_assignment_id_assignments_id_fk" FOREIGN KEY ("assignment_id") REFERENCES "public"."assignments"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
@@ -1742,9 +1742,9 @@ ALTER TABLE "db_tables" ADD CONSTRAINT "db_tables_database_id_db_databases_id_fk
 ALTER TABLE "db_views" ADD CONSTRAINT "db_views_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "db_views" ADD CONSTRAINT "db_views_database_id_db_databases_id_fk" FOREIGN KEY ("database_id") REFERENCES "public"."db_databases"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "db_views" ADD CONSTRAINT "db_views_table_id_db_tables_id_fk" FOREIGN KEY ("table_id") REFERENCES "public"."db_tables"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "channel_members" ADD CONSTRAINT "channel_members_channel_id_channels_id_fk" FOREIGN KEY ("channel_id") REFERENCES "public"."channels"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "channel_memberships" ADD CONSTRAINT "channel_memberships_channel_id_channels_id_fk" FOREIGN KEY ("channel_id") REFERENCES "public"."channels"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "channels" ADD CONSTRAINT "channels_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "message_reactions" ADD CONSTRAINT "message_reactions_message_id_messages_id_fk" FOREIGN KEY ("message_id") REFERENCES "public"."messages"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "emoji_reactions" ADD CONSTRAINT "emoji_reactions_message_id_messages_id_fk" FOREIGN KEY ("message_id") REFERENCES "public"."messages"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "messages" ADD CONSTRAINT "messages_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "messages" ADD CONSTRAINT "messages_channel_id_channels_id_fk" FOREIGN KEY ("channel_id") REFERENCES "public"."channels"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "pins" ADD CONSTRAINT "pins_channel_id_channels_id_fk" FOREIGN KEY ("channel_id") REFERENCES "public"."channels"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
@@ -1757,19 +1757,17 @@ ALTER TABLE "debate_posts" ADD CONSTRAINT "debate_posts_debate_id_debates_id_fk"
 ALTER TABLE "debates" ADD CONSTRAINT "debates_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "file_versions" ADD CONSTRAINT "file_versions_file_id_files_id_fk" FOREIGN KEY ("file_id") REFERENCES "public"."files"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "files" ADD CONSTRAINT "files_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "knowledge_pages" ADD CONSTRAINT "knowledge_pages_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "page_links" ADD CONSTRAINT "page_links_source_id_knowledge_pages_id_fk" FOREIGN KEY ("source_id") REFERENCES "public"."knowledge_pages"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "page_links" ADD CONSTRAINT "page_links_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "page_links" ADD CONSTRAINT "page_links_target_id_knowledge_pages_id_fk" FOREIGN KEY ("target_id") REFERENCES "public"."knowledge_pages"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "page_revisions" ADD CONSTRAINT "page_revisions_page_id_knowledge_pages_id_fk" FOREIGN KEY ("page_id") REFERENCES "public"."knowledge_pages"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "upload_sessions" ADD CONSTRAINT "upload_sessions_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "wiki_attachments" ADD CONSTRAINT "wiki_attachments_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "wiki_attachments" ADD CONSTRAINT "wiki_attachments_file_id_files_id_fk" FOREIGN KEY ("file_id") REFERENCES "public"."files"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "wiki_links" ADD CONSTRAINT "wiki_links_source_id_wiki_pages_id_fk" FOREIGN KEY ("source_id") REFERENCES "public"."wiki_pages"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "wiki_links" ADD CONSTRAINT "wiki_links_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "wiki_links" ADD CONSTRAINT "wiki_links_target_id_wiki_pages_id_fk" FOREIGN KEY ("target_id") REFERENCES "public"."wiki_pages"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "wiki_page_docs" ADD CONSTRAINT "wiki_page_docs_page_id_wiki_pages_id_fk" FOREIGN KEY ("page_id") REFERENCES "public"."wiki_pages"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "wiki_page_views" ADD CONSTRAINT "wiki_page_views_page_id_wiki_pages_id_fk" FOREIGN KEY ("page_id") REFERENCES "public"."wiki_pages"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "wiki_pages" ADD CONSTRAINT "wiki_pages_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "wiki_page_docs" ADD CONSTRAINT "wiki_page_docs_page_id_knowledge_pages_id_fk" FOREIGN KEY ("page_id") REFERENCES "public"."knowledge_pages"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "wiki_page_views" ADD CONSTRAINT "wiki_page_views_page_id_knowledge_pages_id_fk" FOREIGN KEY ("page_id") REFERENCES "public"."knowledge_pages"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "wiki_prop_schemas" ADD CONSTRAINT "wiki_prop_schemas_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "wiki_versions" ADD CONSTRAINT "wiki_versions_page_id_wiki_pages_id_fk" FOREIGN KEY ("page_id") REFERENCES "public"."wiki_pages"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "agent_actions" ADD CONSTRAINT "agent_actions_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "agent_actions" ADD CONSTRAINT "agent_actions_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "approval_rules" ADD CONSTRAINT "approval_rules_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "approval_rules" ADD CONSTRAINT "approval_rules_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "approvals" ADD CONSTRAINT "approvals_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
@@ -1780,22 +1778,24 @@ ALTER TABLE "proposals" ADD CONSTRAINT "proposals_workspace_id_workspaces_id_fk"
 ALTER TABLE "proposals" ADD CONSTRAINT "proposals_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "questions" ADD CONSTRAINT "questions_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "questions" ADD CONSTRAINT "questions_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "reversible_actions" ADD CONSTRAINT "reversible_actions_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "reversible_actions" ADD CONSTRAINT "reversible_actions_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "agent_channel_access" ADD CONSTRAINT "agent_channel_access_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "agent_channel_access" ADD CONSTRAINT "agent_channel_access_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "agent_databases" ADD CONSTRAINT "agent_databases_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "agent_databases" ADD CONSTRAINT "agent_databases_connection_id_database_connections_id_fk" FOREIGN KEY ("connection_id") REFERENCES "public"."database_connections"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "agent_databases" ADD CONSTRAINT "agent_databases_connection_id_data_sources_id_fk" FOREIGN KEY ("connection_id") REFERENCES "public"."data_sources"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "agent_databases" ADD CONSTRAINT "agent_databases_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "agent_grants" ADD CONSTRAINT "agent_grants_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "agent_grants" ADD CONSTRAINT "agent_grants_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "agent_mailboxes" ADD CONSTRAINT "agent_mailboxes_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "agent_mailboxes" ADD CONSTRAINT "agent_mailboxes_account_id_mail_accounts_id_fk" FOREIGN KEY ("account_id") REFERENCES "public"."mail_accounts"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "agent_mailboxes" ADD CONSTRAINT "agent_mailboxes_account_id_mail_connections_id_fk" FOREIGN KEY ("account_id") REFERENCES "public"."mail_connections"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "agent_mailboxes" ADD CONSTRAINT "agent_mailboxes_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "connections" ADD CONSTRAINT "connections_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "connections" ADD CONSTRAINT "connections_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "database_connections" ADD CONSTRAINT "database_connections_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "data_sources" ADD CONSTRAINT "data_sources_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "github_installations" ADD CONSTRAINT "github_installations_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "integration_usage" ADD CONSTRAINT "integration_usage_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "mail_accounts" ADD CONSTRAINT "mail_accounts_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "mail_connections" ADD CONSTRAINT "mail_connections_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "oauth_states" ADD CONSTRAINT "oauth_states_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "workspace_storage" ADD CONSTRAINT "workspace_storage_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "agent_evals" ADD CONSTRAINT "agent_evals_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
@@ -1810,33 +1810,33 @@ ALTER TABLE "memory_reviews" ADD CONSTRAINT "memory_reviews_workspace_id_workspa
 ALTER TABLE "memory_reviews" ADD CONSTRAINT "memory_reviews_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "memory_versions" ADD CONSTRAINT "memory_versions_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "memory_versions" ADD CONSTRAINT "memory_versions_memory_id_memories_id_fk" FOREIGN KEY ("memory_id") REFERENCES "public"."memories"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "agent_browser_settings" ADD CONSTRAINT "agent_browser_settings_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "agent_browser_settings" ADD CONSTRAINT "agent_browser_settings_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "agent_environments" ADD CONSTRAINT "agent_environments_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "agent_environments" ADD CONSTRAINT "agent_environments_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "agent_secrets" ADD CONSTRAINT "agent_secrets_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "agent_secrets" ADD CONSTRAINT "agent_secrets_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "browser_interventions" ADD CONSTRAINT "browser_interventions_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "browser_interventions" ADD CONSTRAINT "browser_interventions_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "browser_policies" ADD CONSTRAINT "browser_policies_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "browser_policies" ADD CONSTRAINT "browser_policies_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "network_requests" ADD CONSTRAINT "network_requests_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "network_requests" ADD CONSTRAINT "network_requests_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "runner_jobs" ADD CONSTRAINT "runner_jobs_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "runner_jobs" ADD CONSTRAINT "runner_jobs_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "runner_secrets" ADD CONSTRAINT "runner_secrets_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "runner_secrets" ADD CONSTRAINT "runner_secrets_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "runner_sessions" ADD CONSTRAINT "runner_sessions_runner_id_runners_id_fk" FOREIGN KEY ("runner_id") REFERENCES "public"."runners"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "runners" ADD CONSTRAINT "runners_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "sandbox_settings" ADD CONSTRAINT "sandbox_settings_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "secret_requests" ADD CONSTRAINT "secret_requests_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "secret_requests" ADD CONSTRAINT "secret_requests_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "sandbox_policies" ADD CONSTRAINT "sandbox_policies_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "secret_prompts" ADD CONSTRAINT "secret_prompts_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "secret_prompts" ADD CONSTRAINT "secret_prompts_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "budget_counters" ADD CONSTRAINT "budget_counters_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "tool_decisions" ADD CONSTRAINT "tool_decisions_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "gate_decisions" ADD CONSTRAINT "gate_decisions_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "usage_lines" ADD CONSTRAINT "usage_lines_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "usage_reservation_scopes" ADD CONSTRAINT "usage_reservation_scopes_reservation_id_usage_reservations_id_fk" FOREIGN KEY ("reservation_id") REFERENCES "public"."usage_reservations"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "usage_reservations" ADD CONSTRAINT "usage_reservations_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "calendar_events" ADD CONSTRAINT "calendar_events_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "board_columns" ADD CONSTRAINT "board_columns_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "calendar_entries" ADD CONSTRAINT "calendar_entries_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "calendar_proposals" ADD CONSTRAINT "calendar_proposals_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "calendar_proposals" ADD CONSTRAINT "calendar_proposals_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "effect_keys" ADD CONSTRAINT "effect_keys_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "issue_columns" ADD CONSTRAINT "issue_columns_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "issue_timeline" ADD CONSTRAINT "issue_timeline_issue_id_issues_id_fk" FOREIGN KEY ("issue_id") REFERENCES "public"."issues"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "issues" ADD CONSTRAINT "issues_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "notification_deliveries" ADD CONSTRAINT "notification_deliveries_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
@@ -1844,7 +1844,7 @@ ALTER TABLE "notification_deliveries" ADD CONSTRAINT "notification_deliveries_no
 ALTER TABLE "notification_settings" ADD CONSTRAINT "notification_settings_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "notifications" ADD CONSTRAINT "notifications_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "push_subscriptions" ADD CONSTRAINT "push_subscriptions_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "routine_runs" ADD CONSTRAINT "routine_runs_routine_id_routines_id_fk" FOREIGN KEY ("routine_id") REFERENCES "public"."routines"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "routine_executions" ADD CONSTRAINT "routine_executions_routine_id_routines_id_fk" FOREIGN KEY ("routine_id") REFERENCES "public"."routines"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "routines" ADD CONSTRAINT "routines_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "routines" ADD CONSTRAINT "routines_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "invitations" ADD CONSTRAINT "invitations_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
@@ -1890,7 +1890,7 @@ CREATE INDEX "db_tables_database_idx" ON "db_tables" USING btree ("database_id")
 CREATE INDEX "db_tables_pending_idx" ON "db_tables" USING btree ("workspace_id") WHERE calc_done_version < calc_version;--> statement-breakpoint
 CREATE INDEX "db_views_database_idx" ON "db_views" USING btree ("database_id");--> statement-breakpoint
 CREATE INDEX "db_views_table_idx" ON "db_views" USING btree ("table_id");--> statement-breakpoint
-CREATE INDEX "channel_members_member_idx" ON "channel_members" USING btree ("member_type","member_id");--> statement-breakpoint
+CREATE INDEX "channel_memberships_member_idx" ON "channel_memberships" USING btree ("member_type","member_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "channels_name_uq" ON "channels" USING btree ("workspace_id","name") WHERE kind = 'channel';--> statement-breakpoint
 CREATE UNIQUE INDEX "channels_dm_uq" ON "channels" USING btree ("workspace_id","dm_key");--> statement-breakpoint
 CREATE INDEX "channels_workspace_idx" ON "channels" USING btree ("workspace_id");--> statement-breakpoint
@@ -1903,15 +1903,13 @@ CREATE INDEX "debates_workspace_idx" ON "debates" USING btree ("workspace_id","u
 CREATE INDEX "file_versions_extract_idx" ON "file_versions" USING btree ("extract_status") WHERE extract_status in ('pending', 'working');--> statement-breakpoint
 CREATE INDEX "files_workspace_idx" ON "files" USING btree ("workspace_id","updated_at");--> statement-breakpoint
 CREATE INDEX "files_purge_idx" ON "files" USING btree ("expunge_at") WHERE deleted_at is not null;--> statement-breakpoint
+CREATE UNIQUE INDEX "knowledge_pages_slug_uq" ON "knowledge_pages" USING btree ("workspace_id","slug");--> statement-breakpoint
+CREATE INDEX "knowledge_pages_workspace_idx" ON "knowledge_pages" USING btree ("workspace_id");--> statement-breakpoint
+CREATE INDEX "knowledge_pages_purge_idx" ON "knowledge_pages" USING btree ("expunge_at") WHERE deleted_at is not null;--> statement-breakpoint
+CREATE INDEX "page_links_target_idx" ON "page_links" USING btree ("target_id");--> statement-breakpoint
+CREATE INDEX "page_links_workspace_idx" ON "page_links" USING btree ("workspace_id");--> statement-breakpoint
+CREATE INDEX "page_links_workspace_slug_idx" ON "page_links" USING btree ("workspace_id","target_slug");--> statement-breakpoint
 CREATE INDEX "upload_sessions_expires_idx" ON "upload_sessions" USING btree ("expires_at");--> statement-breakpoint
-CREATE INDEX "wiki_links_target_idx" ON "wiki_links" USING btree ("target_id");--> statement-breakpoint
-CREATE INDEX "wiki_links_workspace_idx" ON "wiki_links" USING btree ("workspace_id");--> statement-breakpoint
-CREATE INDEX "wiki_links_workspace_slug_idx" ON "wiki_links" USING btree ("workspace_id","target_slug");--> statement-breakpoint
-CREATE UNIQUE INDEX "wiki_pages_slug_uq" ON "wiki_pages" USING btree ("workspace_id","slug");--> statement-breakpoint
-CREATE INDEX "wiki_pages_workspace_idx" ON "wiki_pages" USING btree ("workspace_id");--> statement-breakpoint
-CREATE INDEX "wiki_pages_purge_idx" ON "wiki_pages" USING btree ("expunge_at") WHERE deleted_at is not null;--> statement-breakpoint
-CREATE INDEX "agent_actions_message_idx" ON "agent_actions" USING btree ("message_id");--> statement-breakpoint
-CREATE INDEX "agent_actions_run_idx" ON "agent_actions" USING btree ("run_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "approval_rules_match_uq" ON "approval_rules" USING btree ("agent_id","tool","rule_key") WHERE revoked_at is null;--> statement-breakpoint
 CREATE INDEX "approval_rules_workspace_idx" ON "approval_rules" USING btree ("workspace_id","created_at");--> statement-breakpoint
 CREATE INDEX "approvals_workspace_idx" ON "approvals" USING btree ("workspace_id","created_at");--> statement-breakpoint
@@ -1919,12 +1917,14 @@ CREATE INDEX "approvals_pending_idx" ON "approvals" USING btree ("expires_at") W
 CREATE INDEX "outbox_pending_idx" ON "outbox" USING btree ("send_at") WHERE status = 'pending';--> statement-breakpoint
 CREATE INDEX "proposals_workspace_idx" ON "proposals" USING btree ("workspace_id","created_at");--> statement-breakpoint
 CREATE INDEX "questions_workspace_idx" ON "questions" USING btree ("workspace_id","created_at");--> statement-breakpoint
+CREATE INDEX "reversible_actions_message_idx" ON "reversible_actions" USING btree ("message_id");--> statement-breakpoint
+CREATE INDEX "reversible_actions_run_idx" ON "reversible_actions" USING btree ("run_id");--> statement-breakpoint
 CREATE INDEX "connections_workspace_idx" ON "connections" USING btree ("workspace_id");--> statement-breakpoint
 CREATE INDEX "connections_agent_idx" ON "connections" USING btree ("agent_id");--> statement-breakpoint
-CREATE INDEX "database_connections_workspace_idx" ON "database_connections" USING btree ("workspace_id");--> statement-breakpoint
+CREATE INDEX "data_sources_workspace_idx" ON "data_sources" USING btree ("workspace_id");--> statement-breakpoint
 CREATE INDEX "github_installations_workspace_idx" ON "github_installations" USING btree ("workspace_id");--> statement-breakpoint
 CREATE INDEX "integration_usage_idx" ON "integration_usage" USING btree ("agent_id","resource_id","kind","at");--> statement-breakpoint
-CREATE UNIQUE INDEX "mail_accounts_address_uq" ON "mail_accounts" USING btree ("workspace_id","address");--> statement-breakpoint
+CREATE UNIQUE INDEX "mail_connections_address_uq" ON "mail_connections" USING btree ("workspace_id","address");--> statement-breakpoint
 CREATE INDEX "oauth_states_exp_idx" ON "oauth_states" USING btree ("expires_at");--> statement-breakpoint
 CREATE INDEX "agent_evals_agent_idx" ON "agent_evals" USING btree ("agent_id","created_at");--> statement-breakpoint
 CREATE UNIQUE INDEX "agent_evals_running_uq" ON "agent_evals" USING btree ("agent_id") WHERE status = 'running';--> statement-breakpoint
@@ -1948,16 +1948,16 @@ CREATE UNIQUE INDEX "runners_token_uq" ON "runners" USING btree ("token_hash");-
 CREATE INDEX "runners_token_pending_idx" ON "runners" USING btree ("token_pending_hash");--> statement-breakpoint
 CREATE INDEX "runners_token_prev_idx" ON "runners" USING btree ("token_prev_hash");--> statement-breakpoint
 CREATE INDEX "runners_workspace_idx" ON "runners" USING btree ("workspace_id");--> statement-breakpoint
-CREATE INDEX "secret_requests_agent_idx" ON "secret_requests" USING btree ("agent_id");--> statement-breakpoint
+CREATE INDEX "secret_prompts_agent_idx" ON "secret_prompts" USING btree ("agent_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "search_chunks_source_uq" ON "search_chunks" USING btree ("source_kind","source_id","ordinal");--> statement-breakpoint
 CREATE INDEX "search_chunks_workspace_idx" ON "search_chunks" USING btree ("workspace_id","created_at");--> statement-breakpoint
 CREATE INDEX "search_chunks_tsv_idx" ON "search_chunks" USING gin ("tsv");--> statement-breakpoint
 CREATE INDEX "search_chunks_title_trgm_idx" ON "search_chunks" USING gin ("title_fold" gin_trgm_ops);--> statement-breakpoint
 CREATE INDEX "search_chunks_channel_idx" ON "search_chunks" USING btree ("channel_id");--> statement-breakpoint
 CREATE INDEX "search_chunks_embed_idx" ON "search_chunks" USING btree ("embed_state") WHERE embed_state in ('pending', 'working');--> statement-breakpoint
-CREATE INDEX "tool_decisions_workspace_idx" ON "tool_decisions" USING btree ("workspace_id","created_at");--> statement-breakpoint
-CREATE INDEX "tool_decisions_approval_idx" ON "tool_decisions" USING btree ("approval_id");--> statement-breakpoint
-CREATE INDEX "tool_decisions_reviewer_idx" ON "tool_decisions" USING btree ("agent_id","created_at") WHERE by = 'reviewer';--> statement-breakpoint
+CREATE INDEX "gate_decisions_workspace_idx" ON "gate_decisions" USING btree ("workspace_id","created_at");--> statement-breakpoint
+CREATE INDEX "gate_decisions_approval_idx" ON "gate_decisions" USING btree ("approval_id");--> statement-breakpoint
+CREATE INDEX "gate_decisions_reviewer_idx" ON "gate_decisions" USING btree ("agent_id","created_at") WHERE by = 'reviewer';--> statement-breakpoint
 CREATE INDEX "usage_lines_workspace_idx" ON "usage_lines" USING btree ("workspace_id","at");--> statement-breakpoint
 CREATE INDEX "usage_lines_agent_idx" ON "usage_lines" USING btree ("agent_id","at");--> statement-breakpoint
 CREATE INDEX "usage_lines_run_idx" ON "usage_lines" USING btree ("run_id");--> statement-breakpoint
@@ -1965,9 +1965,9 @@ CREATE INDEX "usage_lines_channel_idx" ON "usage_lines" USING btree ("channel_id
 CREATE UNIQUE INDEX "usage_lines_reservation_uq" ON "usage_lines" USING btree ("reservation_id","seq") WHERE reservation_id is not null;--> statement-breakpoint
 CREATE INDEX "usage_reservation_scopes_idx" ON "usage_reservation_scopes" USING btree ("scope","period");--> statement-breakpoint
 CREATE INDEX "usage_reservations_open_idx" ON "usage_reservations" USING btree ("expires_at") WHERE status = 'open';--> statement-breakpoint
-CREATE INDEX "calendar_events_workspace_idx" ON "calendar_events" USING btree ("workspace_id","start");--> statement-breakpoint
+CREATE INDEX "board_columns_workspace_idx" ON "board_columns" USING btree ("workspace_id","position");--> statement-breakpoint
+CREATE INDEX "calendar_entries_workspace_idx" ON "calendar_entries" USING btree ("workspace_id","start");--> statement-breakpoint
 CREATE INDEX "calendar_proposals_workspace_idx" ON "calendar_proposals" USING btree ("workspace_id","start");--> statement-breakpoint
-CREATE INDEX "issue_columns_workspace_idx" ON "issue_columns" USING btree ("workspace_id","position");--> statement-breakpoint
 CREATE INDEX "issue_timeline_issue_idx" ON "issue_timeline" USING btree ("issue_id","seq");--> statement-breakpoint
 CREATE UNIQUE INDEX "issues_number_uq" ON "issues" USING btree ("workspace_id","number");--> statement-breakpoint
 CREATE INDEX "issues_column_idx" ON "issues" USING btree ("column_id");--> statement-breakpoint
@@ -1979,11 +1979,11 @@ CREATE INDEX "notifications_user_idx" ON "notifications" USING btree ("workspace
 CREATE INDEX "notifications_waiting_idx" ON "notifications" USING btree ("id") WHERE "notifications"."waiting";--> statement-breakpoint
 CREATE INDEX "notifications_remind_idx" ON "notifications" USING btree ("remind_at") WHERE "notifications"."remind_at" is not null;--> statement-breakpoint
 CREATE UNIQUE INDEX "push_subscriptions_uq" ON "push_subscriptions" USING btree ("user_id","endpoint");--> statement-breakpoint
-CREATE INDEX "routine_runs_routine_idx" ON "routine_runs" USING btree ("routine_id","at");--> statement-breakpoint
-CREATE UNIQUE INDEX "routine_runs_slot_uq" ON "routine_runs" USING btree ("routine_id","scheduled_for") WHERE scheduled_for is not null;--> statement-breakpoint
-CREATE UNIQUE INDEX "routine_runs_dedupe_uq" ON "routine_runs" USING btree ("routine_id","dedupe_key") WHERE dedupe_key is not null;--> statement-breakpoint
-CREATE UNIQUE INDEX "routine_runs_queued_uq" ON "routine_runs" USING btree ("routine_id") WHERE status = 'queued' and trigger <> 'retry';--> statement-breakpoint
-CREATE INDEX "routine_runs_queue_idx" ON "routine_runs" USING btree ("not_before") WHERE status = 'queued';--> statement-breakpoint
+CREATE INDEX "routine_executions_routine_idx" ON "routine_executions" USING btree ("routine_id","at");--> statement-breakpoint
+CREATE UNIQUE INDEX "routine_executions_slot_uq" ON "routine_executions" USING btree ("routine_id","scheduled_for") WHERE scheduled_for is not null;--> statement-breakpoint
+CREATE UNIQUE INDEX "routine_executions_dedupe_uq" ON "routine_executions" USING btree ("routine_id","dedupe_key") WHERE dedupe_key is not null;--> statement-breakpoint
+CREATE UNIQUE INDEX "routine_executions_queued_uq" ON "routine_executions" USING btree ("routine_id") WHERE status = 'queued' and trigger <> 'retry';--> statement-breakpoint
+CREATE INDEX "routine_executions_queue_idx" ON "routine_executions" USING btree ("not_before") WHERE status = 'queued';--> statement-breakpoint
 CREATE INDEX "routines_workspace_idx" ON "routines" USING btree ("workspace_id");--> statement-breakpoint
 CREATE INDEX "routines_due_idx" ON "routines" USING btree ("next_fire_at") WHERE active;--> statement-breakpoint
 CREATE UNIQUE INDEX "routines_hook_uq" ON "routines" USING btree ("webhook_token");--> statement-breakpoint

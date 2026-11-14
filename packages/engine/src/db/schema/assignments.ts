@@ -91,7 +91,7 @@ export const assignments = pgTable(
       .notNull()
       .default({ dollars: 5, minutes: 480, steps: 30 }),
     /** Cap that paused the assignment (null: not paused by a cap). */
-    ceiling: text("ceiling", { enum: ["usd", "minutes", "steps"] }),
+    ceiling: text("ceiling", { enum: ["dollars", "minutes", "steps"] }),
     /** Assignment deadline (optional): once passed, the owner is notified. */
     dueAt: ts("due_at"),
     /** The engine waits until this time (the agent asked to come back later, decision deadline). */

@@ -26,8 +26,8 @@ const workspace = () =>
 
 // ---- Issues ----
 
-export const issueColumns = pgTable(
-  "issue_columns",
+export const boardColumns = pgTable(
+  "board_columns",
   {
     id: text("id").primaryKey(),
     workspaceId: workspace(),
@@ -35,7 +35,7 @@ export const issueColumns = pgTable(
     stage: text("stage", { enum: ["todo", "in_progress", "reviewing", "done", "canceled"] }).notNull(),
     position: integer("position").notNull(),
   },
-  (t) => [index("issue_columns_workspace_idx").on(t.workspaceId, t.position)],
+  (t) => [index("board_columns_workspace_idx").on(t.workspaceId, t.position)],
 );
 
 export const issues = pgTable(
@@ -151,8 +151,8 @@ export const routines = pgTable(
   ],
 );
 
-export const routineRuns = pgTable(
-  "routine_runs",
+export const routineExecutions = pgTable(
+  "routine_executions",
   {
     id: text("id").primaryKey(),
     routineId: text("routine_id")
@@ -197,14 +197,18 @@ export const routineRuns = pgTable(
     runId: text("run_id"),
   },
   (t) => [
-    index("routine_runs_routine_idx").on(t.routineId, t.at),
-    uniqueIndex("routine_runs_slot_uq").on(t.routineId, t.scheduledFor).where(sql`scheduled_for is not null`),
-    uniqueIndex("routine_runs_dedupe_uq").on(t.routineId, t.dedupeKey).where(sql`dedupe_key is not null`),
+    index("routine_executions_routine_idx").on(t.routineId, t.at),
+    uniqueIndex("routine_executions_slot_uq")
+      .on(t.routineId, t.scheduledFor)
+      .where(sql`scheduled_for is not null`),
+    uniqueIndex("routine_executions_dedupe_uq")
+      .on(t.routineId, t.dedupeKey)
+      .where(sql`dedupe_key is not null`),
     // "Queue one": at most one execution waiting for the previous one (retries are not counted).
-    uniqueIndex("routine_runs_queued_uq")
+    uniqueIndex("routine_executions_queued_uq")
       .on(t.routineId)
       .where(sql`status = 'queued' and trigger <> 'retry'`),
-    index("routine_runs_queue_idx").on(t.notBefore).where(sql`status = 'queued'`),
+    index("routine_executions_queue_idx").on(t.notBefore).where(sql`status = 'queued'`),
   ],
 );
 
@@ -225,8 +229,8 @@ export const effectKeys = pgTable("effect_keys", {
 
 // ---- Calendar ----
 
-export const calendarEvents = pgTable(
-  "calendar_events",
+export const calendarEntries = pgTable(
+  "calendar_entries",
   {
     id: text("id").primaryKey(),
     workspaceId: workspace(),
@@ -247,7 +251,7 @@ export const calendarEvents = pgTable(
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (t) => [index("calendar_events_workspace_idx").on(t.workspaceId, t.start)],
+  (t) => [index("calendar_entries_workspace_idx").on(t.workspaceId, t.start)],
 );
 
 export const calendarProposals = pgTable(

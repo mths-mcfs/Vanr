@@ -240,7 +240,7 @@ export const agentEnvironments = pgTable("agent_environments", {
 });
 
 /** Cloud environment of the workspace (sandbox). This installation has no provider: it stays unavailable. */
-export const sandboxSettings = pgTable("sandbox_settings", {
+export const sandboxPolicies = pgTable("sandbox_policies", {
   workspaceId: text("workspace_id")
     .primaryKey()
     .references(() => workspaces.id, { onDelete: "cascade" }),
@@ -256,8 +256,8 @@ export const sandboxSettings = pgTable("sandbox_settings", {
 });
 
 /** Secret request: the public key belongs to the runner; the server only relays the sealed box. */
-export const secretRequests = pgTable(
-  "secret_requests",
+export const secretPrompts = pgTable(
+  "secret_prompts",
   {
     id: text("id").primaryKey(),
     workspaceId: workspace(),
@@ -286,12 +286,12 @@ export const secretRequests = pgTable(
     expiresAt: ts("expires_at").notNull(),
     fulfilledAt: ts("fulfilled_at"),
   },
-  (t) => [index("secret_requests_agent_idx").on(t.agentId)],
+  (t) => [index("secret_prompts_agent_idx").on(t.agentId)],
 );
 
 /** What the agent has stored on each runner (name only: the value never passes here in the clear). */
-export const agentSecrets = pgTable(
-  "agent_secrets",
+export const runnerSecrets = pgTable(
+  "runner_secrets",
   {
     agentId: text("agent_id")
       .notNull()
@@ -338,7 +338,7 @@ export const browserInterventions = pgTable(
   (t) => [index("browser_interventions_agent_idx").on(t.agentId)],
 );
 
-export const agentBrowserSettings = pgTable("agent_browser_settings", {
+export const browserPolicies = pgTable("browser_policies", {
   agentId: text("agent_id")
     .primaryKey()
     .references(() => agents.id, { onDelete: "cascade" }),
