@@ -303,14 +303,23 @@ export class SecretStore {
 }
 
 /**
- * The masks as the scan uses them: no empty value, and a value with line breaks also in its `\r\n` form
- * (what a terminal sends back), under the same label.
+ * The text forms of each secret the masks look for, under its label: the value itself; its escaped form inside
+ * a JSON string (the middle of `JSON.stringify(value)`), for a JSON line cut midway; and, for a value with line
+ * breaks, the same two with `\r\n` (what a terminal sends back). Any other transformation (another escape, a
+ * base64 the command makes itself) stays out on purpose: the mask is against accidental leaks.
  */
+export function secretTextForms(value: string): string[] {
+  const forms = new Set([value, JSON.stringify(value).slice(1, -1)]);
+  if (value.includes("\n")) {
+    const crlf = value.replace(/\r?\n/g, "\r\n");
+    forms.add(crlf);
+    forms.add(JSON.stringify(crlf).slice(1, -1));
+  }
+  return [...forms].filter((f) => f.length > 0);
+}
+
 function prepare(masks: readonly [string, string][]): [string, string][] {
-  const crlf = masks
-    .filter(([v]) => v.includes("\n"))
-    .map(([v, label]): [string, string] => [v.replace(/\r?\n/g, "\r\n"), label]);
-  return [...masks, ...crlf].filter(([v]) => v.length > 0);
+  return masks.flatMap(([v, label]) => secretTextForms(v).map((f): [string, string] => [f, label]));
 }
 
 /**
@@ -346,7 +355,7 @@ function scan(
   return { out: out + text.slice(plain, i), rest: text.slice(i) };
 }
 
-/** Replaces each secret value with its label: leftmost match first, the longest one there, no overlap. */
+/** Replaces each secret (in all its forms) with its label: leftmost match first, the longest one there, no overlap. */
 export function maskSecrets(text: string, masks: [string, string][]): string {
   const prepared = prepare(masks);
   return prepared.length ? scan(text, prepared, true).out : text;
@@ -355,7 +364,7 @@ export function maskSecrets(text: string, masks: [string, string][]): string {
 /**
  * Mask for output that arrives in pieces (the stream of a command, the capture that cuts it). What it
  * returns, concatenated, is `maskSecrets` of the whole output. It holds only the end of the text where a
- * secret could still start, so at most the longest secret minus one character; `end` releases it, masked.
+ * secret could still start, so at most the longest form of a secret minus one character; `end` releases it.
  */
 export class StreamMasker {
   private held = "";
@@ -379,13 +388,60 @@ export class StreamMasker {
   }
 }
 
-/** `maskSecrets` over bytes: each UTF-8 occurrence of a secret becomes the bytes of its label. */
+const latin1 = (b: Uint8Array) => Buffer.from(b).toString("latin1");
+const utf16be = (s: string) => Buffer.from(s, "utf16le").swap16();
+
+/**
+ * The byte forms of each secret, as one latin1 character per byte, with the label in the same encoding: the
+ * UTF-8 of each text form, and the value in UTF-16LE, UTF-16BE and, when every character fits, Latin-1 (a
+ * legacy file).
+ */
+function byteForms(masks: readonly [string, string][]): [string, string][] {
+  const out: [string, string][] = [];
+  for (const [value, label] of masks) {
+    for (const f of secretTextForms(value))
+      out.push([latin1(Buffer.from(f, "utf8")), latin1(Buffer.from(label, "utf8"))]);
+    const plain = [value, ...(value.includes("\n") ? [value.replace(/\r?\n/g, "\r\n")] : [])];
+    for (const f of plain) {
+      out.push([latin1(Buffer.from(f, "utf16le")), latin1(Buffer.from(label, "utf16le"))]);
+      out.push([latin1(utf16be(f)), latin1(utf16be(label))]);
+      if ([...f].every((c) => c.charCodeAt(0) <= 0xff))
+        out.push([latin1(Buffer.from(f, "latin1")), latin1(Buffer.from(label, "latin1"))]);
+    }
+  }
+  const seen = new Set<string>();
+  return out.filter(([v]) => v.length > 0 && !seen.has(v) && seen.add(v) !== undefined);
+}
+
+/** `maskSecrets` over bytes: each byte form of a secret becomes the bytes of its label in that encoding. */
 export function maskBytes(data: Uint8Array, masks: [string, string][]): Buffer {
-  if (!masks.length) return Buffer.from(data);
-  // One latin1 character per byte: the same scan, byte for byte.
-  const bytes = (s: string) => Buffer.from(s, "utf8").toString("latin1");
-  const asBytes = masks.map(([v, label]): [string, string] => [bytes(v), bytes(label)]);
-  return Buffer.from(maskSecrets(Buffer.from(data).toString("latin1"), asBytes), "latin1");
+  const forms = byteForms(masks);
+  if (!forms.length) return Buffer.from(data);
+  return Buffer.from(scan(latin1(data), forms, true).out, "latin1");
+}
+
+/**
+ * The first `max` bytes of `maskBytes(data)`, without masking all of a large file: it masks a growing window
+ * that stops where a secret could still go on, which is always a prefix of the mask of the whole file.
+ */
+export function maskBytesPrefix(
+  data: Uint8Array,
+  masks: [string, string][],
+  max: number,
+): { bytes: Buffer; truncated: boolean } {
+  const forms = byteForms(masks);
+  const text = latin1(data);
+  if (!forms.length)
+    return { bytes: Buffer.from(text.slice(0, max), "latin1"), truncated: text.length > max };
+  const longest = Math.max(...forms.map(([v]) => v.length));
+  for (let end = Math.min(text.length, max + longest); ; end = Math.min(text.length, end * 2)) {
+    if (end >= text.length) {
+      const out = scan(text, forms, true).out;
+      return { bytes: Buffer.from(out.slice(0, max), "latin1"), truncated: out.length > max };
+    }
+    const { out } = scan(text.slice(0, end), forms, false);
+    if (out.length >= max) return { bytes: Buffer.from(out.slice(0, max), "latin1"), truncated: true };
+  }
 }
 
 const escapeRe = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

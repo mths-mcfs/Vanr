@@ -64,14 +64,15 @@
     "apps/runner/src/sandbox.test.ts": 9,
     "apps/runner/src/update.test.ts": 24,
     "apps/runner/src/secrets.test.ts": 300,
-    "apps/runner/src/ops.test.ts": 400,
+    "apps/runner/src/ops.test.ts": 700,
     "apps/runner/src/jobs-start.test.ts": 100,
-    "apps/runner/src/jobs-output.test.ts": 300,
+    "apps/runner/src/jobs-output.test.ts": 500,
     "apps/runner/src/jobs-pem.test.ts": 600,
     "apps/runner/src/browser-network.test.ts": 20930,
     "apps/runner/src/browser-actions.test.ts": 26640,
-    "apps/runner/src/jobs-diff.test.ts": 3000,
+    "apps/runner/src/jobs-diff.test.ts": 15000,
     "apps/runner/src/jobs-names.test.ts": 200,
-    "apps/runner/src/jobs-json.test.ts": 300
+    "apps/runner/src/jobs-json.test.ts": 400,
+    "apps/runner/src/outbound.test.ts": 900
   }
 }

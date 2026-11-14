@@ -44,6 +44,7 @@ import { Harnesses } from "./harness";
 import { Jobs, which } from "./jobs";
 import { McpBridge, type ToolOutcome } from "./mcp";
 import { execOp, listOp, type OpContext, readOp, writeOp } from "./ops";
+import { assemble, type Masks, maskResult } from "./outbound";
 import { type CommandSandbox, defaultPolicyContext, openSandbox, type PolicyContext } from "./sandbox";
 import { SecretStore } from "./secrets";
 import { runningBundle, UpdateError, update } from "./update";
@@ -252,9 +253,18 @@ export class RunnerClient {
     this.exit(reason);
   }
 
-  private send(frame: RunnerFrame): boolean {
+  /**
+   * The one way out to the server: the frame is assembled (free text masked with `masks`, cut to the schema,
+   * validated) in outbound.ts; a frame that cannot be made valid is not sent.
+   */
+  private send(frame: RunnerFrame, masks: Masks = []): boolean {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
-    this.ws.send(JSON.stringify(frame));
+    const out = assemble(frame, masks);
+    if (!out) {
+      this.log(`did not send an invalid ${frame.type} frame`);
+      return false;
+    }
+    this.ws.send(JSON.stringify(out));
     return true;
   }
 
@@ -434,8 +444,8 @@ export class RunnerClient {
     }
   }
 
-  private fail(id: string, error: RunnerErrorBody) {
-    this.send({ type: "result", id, ok: false, error });
+  private fail(id: string, error: RunnerErrorBody, masks: Masks = []) {
+    this.send({ type: "result", id, ok: false, error }, masks);
   }
 
   private async onRequest(frame: Extract<ServerFrame, { type: "request" }>) {
@@ -450,6 +460,8 @@ export class RunnerClient {
       return this.fail(id, { code: "bad_request", message: parsed.error.issues[0]?.message ?? "" });
     const controller = new AbortController();
     this.inflight.set(id, controller);
+    // The agent's secrets, for every frame this request sends.
+    const masks = frame.agent ? await this.secrets.masks(frame.agent).catch(() => []) : [];
     const ctx: OpContext = {
       access: this.access,
       secrets: this.secrets,
@@ -458,7 +470,7 @@ export class RunnerClient {
       agent: frame.agent,
       signal: controller.signal,
       ...(frame.stream
-        ? { onOutput: (stream, chunk) => this.send({ type: "output", id, stream, chunk }) }
+        ? { onOutput: (stream, chunk) => this.send({ type: "output", id, stream, chunk }, masks) }
         : {}),
     };
     try {
@@ -466,25 +478,26 @@ export class RunnerClient {
         op === "harness.turn"
           ? await this.harnesses.turn(this.needAgent(ctx.agent), parsed.data as never, {
               signal: controller.signal,
-              emit: (event) => this.send({ type: "harness.event", id, event }),
-              callTool: (name, input) => this.callTool(id, name, input),
+              emit: (event) => this.send({ type: "harness.event", id, event }, masks),
+              callTool: (name, input) => this.callTool(id, name, input, masks),
             })
-          : await this.run(op as RunnerOp, parsed.data, ctx);
-      this.send({ type: "result", id, ok: true, data });
+          : await this.run(op as RunnerOp, parsed.data, ctx, masks);
+      this.send({ type: "result", id, ok: true, data: maskResult(op as RunnerOp, data, masks) }, masks);
     } catch (err) {
-      if (err instanceof RunnerError) this.fail(id, { code: err.code, message: err.message });
-      else this.fail(id, { code: "internal", message: err instanceof Error ? err.message : String(err) });
+      if (err instanceof RunnerError) this.fail(id, { code: err.code, message: err.message }, masks);
+      else
+        this.fail(id, { code: "internal", message: err instanceof Error ? err.message : String(err) }, masks);
     } finally {
       this.inflight.delete(id);
     }
   }
 
   /** An agent tool asked for by the harness: it runs on the server, which returns `harness.tool_result`. */
-  private callTool(id: string, name: string, input: unknown): Promise<ToolOutcome> {
+  private callTool(id: string, name: string, input: unknown, masks: Masks): Promise<ToolOutcome> {
     const callId = randomUUID();
     return new Promise((resolve) => {
       this.toolCalls.set(callId, resolve);
-      if (!this.send({ type: "harness.tool", id, callId, name, input })) {
+      if (!this.send({ type: "harness.tool", id, callId, name, input }, masks)) {
         this.toolCalls.delete(callId);
         resolve({ content: "The server is not reachable right now", isError: true });
       }
@@ -514,7 +527,7 @@ export class RunnerClient {
   }
 
   // biome-ignore lint/suspicious/noExplicitAny: each op validates its own args with the schema before getting here
-  private async run(op: RunnerOp, args: any, ctx: OpContext): Promise<unknown> {
+  private async run(op: RunnerOp, args: any, ctx: OpContext, masks: Masks): Promise<unknown> {
     switch (op) {
       case "exec":
         return execOp(ctx, args);
@@ -556,7 +569,7 @@ export class RunnerClient {
         const driver = this.browser;
         if (!driver) throw new RunnerError("browser_unavailable", "No browser in this environment");
         this.access.requireTool("browser");
-        return driver.handle(op, this.needAgent(ctx.agent), args, (frame) => this.send(frame));
+        return driver.handle(op, this.needAgent(ctx.agent), args, (frame) => this.send(frame, masks));
       }
     }
   }

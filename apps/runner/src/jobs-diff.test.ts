@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { diffMasks, gitChanges, gitSnapshot } from "./jobs";
-import { maskSecrets } from "./secrets";
+import { dirname, join } from "node:path";
+import { diffMasks, gitChanges, gitSnapshot, maskDiff } from "./jobs";
+import { maskBytes, maskSecrets } from "./secrets";
+import { seeded } from "./testing/random";
 
 // The diff a job sends to the server: a secret of several lines written to a file (not a secret file) does
 // not come out line by line just because each line of the diff starts with `+`, `-` or a space.
@@ -116,3 +117,87 @@ test("property: the diff sent is the diff between the masked old file and the ma
   }
   expect(cases).toBeGreaterThan(80);
 }, 60_000);
+
+test("property: every changed file is in the diff, whatever its name, and the diff is that of the masked files", () => {
+  const masks: [string, string][] = [
+    ["TOKEN-0042", "[secret:T]"],
+    ["ab\ncd", "[secret:M]"],
+  ];
+  const names = [
+    "é.txt",
+    " lead",
+    "trail ",
+    "new\nline",
+    "TOKEN-0042.txt",
+    "dir/sub é",
+    "plain.txt",
+    'q"uote',
+  ];
+  const contents = [
+    "TOKEN-0042\n",
+    "ab\ncd\n",
+    "x\nab\ncd",
+    "plain\n",
+    "",
+    "\0bin TOKEN-0042 \0",
+    "ab\ncx\n",
+  ];
+  const r = seeded(9001);
+  let cases = 0;
+  for (let round = 0; round < 60; round++) {
+    const before = new Map<string, string>();
+    const after = new Map<string, string>();
+    for (const name of names) {
+      if (r.int(2, "before")) before.set(name, r.pick(contents, "content"));
+      if (r.int(2, "after"))
+        after.set(name, r.int(3) ? r.pick(contents, "content") : (before.get(name) ?? "same\n"));
+    }
+    const write = (dir: string, files: Map<string, string>, mask: boolean) => {
+      for (const [name, body] of files) {
+        mkdirSync(dirname(join(dir, name)), { recursive: true });
+        writeFileSync(join(dir, name), mask ? maskBytes(Buffer.from(body), diffMasks(masks)) : body);
+      }
+    };
+    // The job's folder, raw.
+    const dir = mkdtempSync(join(tmpdir(), "runner-diff-names-"));
+    git(dir, "init", "-q");
+    write(dir, before, false);
+    const store = join(mkdtempSync(join(tmpdir(), "runner-diff-names-store-")), "snapshot.git");
+    const base = gitSnapshot(dir, store) as string;
+    for (const name of before.keys()) rmSync(join(dir, name), { force: true });
+    write(dir, after, false);
+    const got = gitChanges(dir, store, base, [], masks);
+    // The oracle: plain git on the masked files, with the names in the header lines masked.
+    const oracle = mkdtempSync(join(tmpdir(), "runner-diff-names-oracle-"));
+    git(oracle, "init", "-q");
+    writeFileSync(join(oracle, ".keep"), "");
+    write(oracle, before, true);
+    git(oracle, "add", "-A");
+    git(oracle, "commit", "-qm", "base");
+    for (const name of before.keys()) rmSync(join(oracle, name), { force: true });
+    write(oracle, after, true);
+    git(oracle, "add", "-A");
+    const expected = git(
+      oracle,
+      "-c",
+      "core.quotePath=false",
+      "diff",
+      "--cached",
+      "--no-color",
+      "--no-ext-diff",
+      "--no-textconv",
+      "--no-renames",
+    );
+    const changed = names.filter((n) => before.get(n) !== after.get(n)).map((n) => maskSecrets(n, masks));
+    expect([...got.files].sort()).toEqual(changed.sort());
+    expect(got.diff ?? "").toBe(expected.trim() ? maskDiff(expected, masks) : "");
+    for (const leak of ["TOKEN-0042", "ab\ncd"]) expect((got.diff ?? "").includes(leak)).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(oracle, { recursive: true, force: true });
+    cases++;
+  }
+  console.log(
+    `[diff] ${cases} rounds of ${names.length} names; contents ${JSON.stringify(r.spread("content"))}`,
+  );
+  expect(Math.min(...r.spread("content"))).toBeGreaterThan(30);
+}, 120_000);

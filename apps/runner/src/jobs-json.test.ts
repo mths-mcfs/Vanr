@@ -17,7 +17,13 @@ const dir = mkdtempSync(join(tmpdir(), "runner-jobs-json-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 const agent = { id: "agt_0000000012345678", handle: "lia" };
 
-function run(masks: [string, string][], lines: unknown[]) {
+function run(
+  masks: [string, string][],
+  lines: unknown[],
+  seen?: (jobs: Jobs) => void,
+  raw?: string,
+  before = "",
+) {
   const home = mkdtempSync(join(dir, "home-"));
   const tools = { claude: true, codex: false, commands: true, browser: false };
   const access = new Access(() => ({
@@ -27,9 +33,9 @@ function run(masks: [string, string][], lines: unknown[]) {
   }));
   execFileSync("git", ["init", "-q"], { cwd: access.agentRoot(agent) });
   const out = join(home, "out.jsonl");
-  writeFileSync(out, `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`);
+  writeFileSync(out, raw ?? `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`);
   const claude = join(home, "claude");
-  writeFileSync(claude, `#!/bin/sh\ncat > /dev/null\ncat '${out}'\n`);
+  writeFileSync(claude, `#!/bin/sh\ncat > /dev/null\n${before}cat '${out}'\n`);
   chmodSync(claude, 0o755);
   const events: JobEvent[] = [];
   let finished: () => void = () => {};
@@ -55,6 +61,7 @@ function run(masks: [string, string][], lines: unknown[]) {
     sandbox: sandboxOff(),
     policy: defaultPolicyContext(home),
   });
+  seen?.(jobs);
   return jobs
     .start(agent, { jobId: "job_00000001", executor: "claude_code", title: "t", prompt: "go" })
     .then(() => done)
@@ -85,4 +92,34 @@ test("a secret equal to a word of the protocol does not hide an API key from the
     expect(done.job.status).toBe("failed");
     expect(done.job.result).toContain("would use environment instead of your plan");
   }
+});
+
+test("an event nested a hundred thousand times does not blow the stack: the job ends, job.done goes, the slot is free", async () => {
+  let jobs: Jobs | undefined;
+  const deep = `${"[".repeat(100_000)}"x"${"]".repeat(100_000)}`;
+  const raw = `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":${deep}}]}}\n{"type":"result","result":"ok","session_id":"s1"}\n`;
+  const events = await run([["abcd-0001", "[secret:S]"]], [], (j) => (jobs = j), raw);
+  const done = events.find((e) => e.type === "job.done");
+  expect(done?.type === "job.done" && ["done", "failed"].includes(done.job.status)).toBe(true);
+  expect(jobs?.runningCount()).toBe(0);
+});
+
+test("any exception while handling a job's output ends the job as failed, sends job.done and frees the slot", async () => {
+  let jobs: Jobs | undefined;
+  // The CLI turns the job's output log into a folder: the handler throws (EISDIR) on the first line.
+  const events = await run(
+    [["abcd-0001", "[secret:S]"]],
+    [{ type: "assistant", message: { content: [{ type: "text", text: "hi" }] } }],
+    (j) => {
+      jobs = j;
+    },
+    undefined,
+    `LOG="$(dirname "$0")/jobs/job_00000001/output.log"; rm -f "$LOG"; mkdir "$LOG"\n`,
+  );
+  const done = events.find((e) => e.type === "job.done");
+  expect(done?.type === "job.done" && [done.job.status, done.job.result?.slice(0, 27)]).toEqual([
+    "failed",
+    "The runner stopped this job",
+  ]);
+  expect(jobs?.runningCount()).toBe(0);
 });
