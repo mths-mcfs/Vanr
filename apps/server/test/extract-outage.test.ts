@@ -104,7 +104,7 @@ describe("the extraction queue during an outage", () => {
     return v;
   };
 
-  test("a refused GET (HEAD fine) or a body that breaks: back in the queue, the attempt given back, no hot loop", async () => {
+  test("a rejected GET (HEAD fine) or a body that breaks: back in the queue, the attempt given back, no hot loop", async () => {
     const { workspaceId, ana } = await team();
     const size = 2 * 1024 * 1024 + 1;
     const big = await uploaded(ana, workspaceId, "x".repeat(size), "large.txt");

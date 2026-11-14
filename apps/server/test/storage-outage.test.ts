@@ -1,5 +1,5 @@
 // A bucket that fails, operation by operation and moment by moment (the fake S3's `override` answers in its
-// place): a HEAD that works and a GET refused, a body that breaks in the middle, 403, 500, 301. Every route
+// place): a HEAD that works and a GET rejected, a body that breaks in the middle, 403, 500, 301. Every route
 // that touches a stored file answers a typed error (never 500 `internal`, never "not found" for a 403),.
 // The extraction queue's side of an outage is in extract-outage.test.ts.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -112,7 +112,7 @@ describe("a bucket that fails, route by route", () => {
         });
         expect([status, ranged.status]).toEqual([status, 503]);
       }
-      // HEAD refused too: the same answer.
+      // HEAD rejected too: the same answer.
       failing((req) => req.method === "HEAD", getFails["403"] as () => Response);
       const head = await ana.browser.fetch(`${W(workspaceId)}/files/${file.id}/blob`);
       expect([head.status, (await failure(head)).code]).toEqual([503, "storage.unavailable"]);
@@ -204,7 +204,7 @@ describe("a bucket that fails, route by route", () => {
     expect(await rows()).toBe(before);
   });
 
-  test("trash and restore don't touch the bucket; the purge with DELETE refused stops and retries later", async () => {
+  test("trash and restore don't touch the bucket; the purge with DELETE rejected stops and retries later", async () => {
     const { workspaceId, ana } = await team();
     const file = await uploaded(ana, workspaceId, "to delete", "d.txt");
     failing(() => true, getFails["403"] as () => Response);
