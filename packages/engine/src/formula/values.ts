@@ -1,6 +1,6 @@
 // Formulas, part 2: static types (checked while typing) and runtime values, with the conversion to and
 // from the JSON stored in `computed`. Dates in UTC.
-import { type PropActor, storableText } from "../props";
+import { isCalendarDay, type PropActor, storableText } from "../props";
 
 export type FType =
   | { k: "number" }
@@ -80,24 +80,32 @@ const pad = (n: number, w = 2) => String(n).padStart(w, "0");
 
 export function isoOf(ms: number, time: boolean): string {
   const d = new Date(ms);
-  const day = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+  const day = `${pad(d.getUTCFullYear(), 4)}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
   if (!time) return day;
   return `${day}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}Z`;
+}
+
+/**
+ * `Date.UTC` without its 1900 shift: `Date.UTC(1, 0, 1)` is 1901, this is year 1. Month and day overflow
+ * carry over as in `Date.UTC` (month 0-based).
+ */
+export function utcMs(year: number, month: number, day: number, h = 0, min = 0, s = 0, ms = 0): number {
+  const d = new Date(0);
+  d.setUTCFullYear(year, month, day);
+  d.setUTCHours(h, min, s, ms);
+  return d.getTime();
 }
 
 /** ISO (`2026-10-22`, `2026-10-22T10:00Z`, with an offset) → ms; invalid → null. */
 export function parseIso(text: string): { ms: number; time: boolean } | null {
   const m = /^(\d{4})-(\d{2})-(\d{2})(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})?)?$/.exec(text.trim());
   if (!m) return null;
-  const ms = m[4]
-    ? Date.parse(m[7] ? text.trim() : `${text.trim()}Z`)
-    : Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  // the day as written must exist, with or without a time: Date.parse and Date.UTC turn 2026-02-31 into
+  // March, and Date.UTC turns 0001 into 1901
+  const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (!isCalendarDay(year, month, day)) return null;
+  const ms = m[4] ? Date.parse(m[7] ? text.trim() : `${text.trim()}Z`) : utcMs(year, month - 1, day);
   if (!Number.isFinite(ms)) return null;
-  // Date.UTC turns 2026-02-31 into March: reject it
-  if (!m[4]) {
-    const d = new Date(ms);
-    if (d.getUTCMonth() !== Number(m[2]) - 1 || d.getUTCDate() !== Number(m[3])) return null;
-  }
   return { ms, time: Boolean(m[4]) };
 }
 

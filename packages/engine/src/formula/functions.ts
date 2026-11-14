@@ -17,9 +17,18 @@ import {
   typeName,
   typeOf,
   unify,
+  utcMs,
 } from "./values";
 
 export type TScope = ReadonlyMap<string, FType>;
+
+/**
+ * A table looked up by a name the user wrote (function, unit): no prototype, so `toString` or
+ * `constructor` are unknown names like any other, not inherited functions.
+ */
+function lookup<T>(entries: Record<string, T>): Readonly<Record<string, T>> {
+  return Object.freeze(Object.assign(Object.create(null) as Record<string, T>, entries));
+}
 export type VScope = ReadonlyMap<string, FValue>;
 
 export interface Checker {
@@ -103,9 +112,9 @@ export function textOk(s: string, e: Evaluator, at: Span): string {
   if (s.length > FORMULA_LIMITS.maxText) e.fail("text_too_long", at, { max: FORMULA_LIMITS.maxText });
   return s;
 }
+/** Length limit of a list being built. Its cost is charged once, on the finished value (`made` in index.ts). */
 export function listOk(l: FValue[], e: Evaluator, at: Span): FValue[] {
   if (l.length > FORMULA_LIMITS.maxList) e.fail("list_too_long", at, { max: FORMULA_LIMITS.maxList });
-  e.tick(l.length);
   return l;
 }
 function dateOk(ms: number, e: Evaluator, at: Span): number {
@@ -270,7 +279,8 @@ function numbers(vals: FValue[], e: Evaluator, at: Span): number[] {
   for (const v of vals) {
     if (Array.isArray(v)) for (const x of v) out.push(num(x, e, at));
     else if (v !== null) out.push(num(v, e, at));
-    e.tick();
+    // the numbers are copied out of the lists: one step per item, as for any list built
+    e.tick(Array.isArray(v) ? v.length : 1);
   }
   return out;
 }
@@ -283,7 +293,7 @@ const aggregate = (fn: (ns: number[]) => FValue): FnSpec =>
 
 // ---------- dates ----------
 
-const UNITS: Record<string, string> = {
+const UNITS = lookup<string>({
   year: "years",
   years: "years",
   quarter: "quarters",
@@ -302,15 +312,15 @@ const UNITS: Record<string, string> = {
   seconds: "seconds",
   millisecond: "milliseconds",
   milliseconds: "milliseconds",
-};
-const FIXED_MS: Record<string, number> = {
+});
+const FIXED_MS = lookup<number>({
   weeks: 7 * 864e5,
   days: 864e5,
   hours: 36e5,
   minutes: 6e4,
   seconds: 1e3,
   milliseconds: 1,
-};
+});
 
 function unitOf(v: FValue, e: Evaluator, at: Span): string {
   const u = UNITS[str(v, e, at)];
@@ -328,9 +338,9 @@ function addMonths(ms: number, months: number): number {
   const y = d.getUTCFullYear();
   const m = d.getUTCMonth() + months;
   const target = new Date(
-    Date.UTC(y, m, 1, d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds()),
+    utcMs(y, m, 1, d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds()),
   );
-  const last = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+  const last = new Date(utcMs(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
   target.setUTCDate(Math.min(d.getUTCDate(), last));
   return target.getTime();
 }
@@ -362,9 +372,9 @@ function between(a: number, b: number, unit: string): number {
 function isoWeek(ms: number): number {
   const d = new Date(ms);
   const day = (d.getUTCDay() + 6) % 7; // Monday = 0
-  const thursday = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - day + 3);
+  const thursday = utcMs(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - day + 3);
   const year = new Date(thursday).getUTCFullYear();
-  const firstThursday = Date.UTC(year, 0, 4);
+  const firstThursday = utcMs(year, 0, 4);
   const firstDay = (new Date(firstThursday).getUTCDay() + 6) % 7;
   return 1 + Math.round((thursday - (firstThursday - firstDay * 864e5 + 3 * 864e5)) / (7 * 864e5));
 }
@@ -833,7 +843,7 @@ const EAGER: Record<string, FnSpec> = {
       const d = new Date(e.now());
       return {
         kind: "date",
-        start: Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()),
+        start: utcMs(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()),
         time: false,
       };
     },
@@ -971,5 +981,5 @@ function dateShift(sign: 1 | -1): FnSpec {
   };
 }
 
-export const FUNCTIONS: Readonly<Record<string, FnSpec>> = { ...EAGER, ...LAZY };
+export const FUNCTIONS = lookup<FnSpec>({ ...EAGER, ...LAZY });
 export const FUNCTION_NAMES = Object.keys(FUNCTIONS).sort();

@@ -438,10 +438,17 @@ class RowEvaluator implements Evaluator {
       this.fail("too_many_steps", [0, 0], { max: FORMULA_LIMITS.maxSteps });
   }
 
-  /** New text costs by its length: without this, `map(list, repeat("b", 100000))` fit in the steps. */
-  private made(v: FValue): FValue {
+  /**
+   * The single check on every value a function or operator makes. New text costs by its length: without
+   * this, `map(list, repeat("b", 100000))` fit in the steps. A new list costs one step per item, whichever
+   * function copied it: without this, `map(xs, reverse(xs))` copied millions of items for a few thousand
+   * steps. A number that is not finite is an error, never a value (it would be stored as null).
+   */
+  private made(v: FValue, at: Span): FValue {
     if (typeof v === "string" && v.length >= FORMULA_LIMITS.textPerStep)
       this.tick(Math.floor(v.length / FORMULA_LIMITS.textPerStep));
+    else if (Array.isArray(v)) this.tick(v.length);
+    else if (typeof v === "number" && !Number.isFinite(v)) this.fail("not_finite", at);
     return v;
   }
   now() {
@@ -484,7 +491,7 @@ class RowEvaluator implements Evaluator {
       case "call": {
         const fn = FUNCTIONS[n.name];
         if (!fn) return this.fail("invalid_argument", n.at, { name: n.name });
-        return this.made(fn.run(n.args, this, scope, n.at));
+        return this.made(fn.run(n.args, this, scope, n.at), n.at);
       }
       case "unary": {
         const v = this.eval(n.arg, scope);
@@ -504,7 +511,7 @@ class RowEvaluator implements Evaluator {
         return t ? this.eval(n.then, scope) : this.eval(n.else, scope);
       }
       case "binary":
-        return this.made(this.binary(n, scope));
+        return this.made(this.binary(n, scope), n.at);
     }
   }
 

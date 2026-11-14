@@ -3,7 +3,8 @@
 // oracle of the same rule (the server test compares the two by fuzzing) and lets the front end update the
 // screen before the response arrives.
 import { z } from "zod";
-import type { PropActor, PropDef } from "../props";
+import { utcMs } from "../formula/values";
+import { isCalendarIso, type PropActor, type PropDef } from "../props";
 
 export const VIEW_TYPES = [
   "table",
@@ -93,7 +94,10 @@ export const RELATIVE_DATES = [
 ] as const;
 export type RelativeDate = (typeof RELATIVE_DATES)[number];
 
-const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+const day = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .refine(isCalendarIso);
 const dateValue = z.union([day, z.object({ rel: z.enum(RELATIVE_DATES) }).strict()]);
 const actor = z.object({ type: z.enum(["person", "agent"]), id: z.string().min(1).max(100) }).strict();
 
@@ -313,10 +317,10 @@ export interface RowView {
   editedBy: PropActor | null;
 }
 
-const pad = (n: number) => String(n).padStart(2, "0");
+const pad = (n: number, w = 2) => String(n).padStart(w, "0");
 function isoDay(ms: number): string {
   const d = new Date(ms);
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+  return `${pad(d.getUTCFullYear(), 4)}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 }
 
 /** The day (UTC) of a date filter value, absolute or relative to `now`. */
@@ -325,7 +329,7 @@ export function resolveDay(value: unknown, now: number): string | null {
   if (!value || typeof value !== "object" || !("rel" in value)) return null;
   const d = new Date(now);
   const at = (days: number, months = 0) =>
-    isoDay(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + months, d.getUTCDate() + days));
+    isoDay(utcMs(d.getUTCFullYear(), d.getUTCMonth() + months, d.getUTCDate() + days));
   switch ((value as { rel: RelativeDate }).rel) {
     case "today":
       return at(0);
@@ -450,7 +454,9 @@ export function rowMatches(
         case "not_in":
           return s === null || !list.includes(s);
         case "group": {
-          const g = def.groups?.[want as "todo" | "inProgress" | "done"] ?? [];
+          // the group name comes from the filter: only the three own keys, never an inherited one
+          const g =
+            want === "todo" || want === "inProgress" || want === "done" ? (def.groups?.[want] ?? []) : [];
           return s !== null && g.includes(s);
         }
       }

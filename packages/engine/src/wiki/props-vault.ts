@@ -4,6 +4,7 @@
 import { newId } from "../ids";
 import {
   COMPUTED_TYPES,
+  isChecked,
   type PropDef,
   type PropOption,
   type Props,
@@ -107,7 +108,7 @@ export function frontmatterToProps(
         break;
       }
       case "checkbox":
-        value = typeof raw === "boolean" ? raw : /^(true|sim|yes|x|1)$/i.test(String(raw).trim());
+        value = typeof raw === "boolean" ? raw : isChecked(String(raw));
         break;
       case "date": {
         const s = scalar(raw);

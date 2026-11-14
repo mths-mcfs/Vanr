@@ -43,7 +43,8 @@ export type FormulaErrorCode =
   | "type_mismatch"
   | "bad_variable"
   | "cycle"
-  | "invalid_unit";
+  | "invalid_unit"
+  | "invalid_number";
 
 export interface FormulaError {
   code: FormulaErrorCode;
@@ -424,7 +425,10 @@ class Parser {
     const t = this.peek();
     if (t.kind === "num") {
       this.next();
-      return this.node({ t: "num", value: Number(t.value), at: t.at });
+      const value = Number(t.value);
+      // `1e309` is Infinity in JS: a number literal must fit a finite number
+      if (!Number.isFinite(value)) throw new FormulaSyntaxError({ code: "invalid_number", at: t.at });
+      return this.node({ t: "num", value, at: t.at });
     }
     if (t.kind === "str") {
       this.next();

@@ -83,6 +83,20 @@ export type PropValue =
 /** Stored value: `{ [propId]: value }`. A property without a value is absent (not `null`). */
 export type Props = Record<string, PropValue>;
 
+/**
+ * Checkbox words, one list for every reader (CSV inference and parsing, front matter). Case is ignored.
+ * Portuguese yes/no stay accepted on import.
+ */
+export const CHECKED_WORDS = ["true", "yes", "sim", "x", "1", "✓", "✔"] as const;
+export const UNCHECKED_WORDS = ["false", "no", "não", "nao", "0"] as const;
+const CHECKED: ReadonlySet<string> = new Set(CHECKED_WORDS);
+const CHECKBOX_WORDS: ReadonlySet<string> = new Set([...CHECKED_WORDS, ...UNCHECKED_WORDS]);
+
+/** The text means a checked box. */
+export const isChecked = (text: string) => CHECKED.has(text.trim().toLowerCase());
+/** The text is a checkbox word, checked or not. */
+export const isCheckboxWord = (text: string) => CHECKBOX_WORDS.has(text.trim().toLowerCase());
+
 export type PropError = { propId: string; code: "unknown_prop" | "read_only" | "invalid" | "unknown_option" };
 
 // NUL and a lone surrogate half: Postgres rejects them in text and jsonb, and the insert would fail with a 500.
@@ -104,7 +118,25 @@ export function storableText(s: string): string {
   return s.replace(BAD_TEXT_ALL, (c) => (c === "\u0000" ? "" : "\uFFFD"));
 }
 
-const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2}))?$/);
+/** Does the day exist in the (proleptic Gregorian) calendar? Years 0 to 9999 as written, no shift. */
+export function isCalendarDay(year: number, month: number, day: number): boolean {
+  if (month < 1 || month > 12 || day < 1) return false;
+  const d = new Date(0);
+  // setUTCFullYear, unlike Date.UTC, does not turn years 0 to 99 into 1900 to 1999
+  d.setUTCFullYear(year, month - 1, day);
+  return d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day;
+}
+
+/** The `YYYY-MM-DD` at the start of an ISO text names a day that exists. */
+export function isCalendarIso(text: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(text);
+  return !!m && isCalendarDay(Number(m[1]), Number(m[2]), Number(m[3]));
+}
+
+const isoDate = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2}))?$/)
+  .refine(isCalendarIso);
 const actor = z.object({ type: z.enum(["person", "agent"]), id: z.string().min(1).max(100) }).strict();
 
 function schemaFor(def: PropDef): z.ZodType<PropValue> {
@@ -226,7 +258,7 @@ export function parsePropText(def: PropDef, text: string): PropValue | undefined
       return Number.isFinite(n) ? n : undefined;
     }
     case "checkbox":
-      return /^(true|sim|yes|x|1)$/i.test(t);
+      return isChecked(t);
     case "select":
     case "status":
       return byName(t);
