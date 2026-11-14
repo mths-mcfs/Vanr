@@ -10,19 +10,19 @@ export interface ThreadAssignmentInfo {
   waitingYou: boolean;
 }
 
-export type AssignmentStatus = "active" | "awaiting_close" | "canceled" | "done" | "paused" | "proposed";
+export type AssignmentStatus = "active" | "canceled" | "done" | "paused" | "proposed" | "wrapping_up";
 
 export type AssignmentExecutor = "agent" | "claude_code" | "codex";
 
-/** always: always ask; low_risk_auto: allow what is low risk; never: never ask. */
-export type CommandPolicy = "always" | "low_risk_auto" | "never";
+/** always: always ask; when_safe: allow what is low risk; never: never ask. */
+export type CommandPolicy = "always" | "never" | "when_safe";
 
 /** Role of whoever is viewing the assignment: owner, participant who decides or comments, or read-only. */
 export type AssignmentRole = "comment" | "decide" | "owner" | "view";
 
 export type ParticipantRole = "comment" | "decide";
 
-export type PlanItemStatus = "doing" | "done" | "dropped" | "todo" | "waiting_you";
+export type PlanItemStatus = "blocked_on_you" | "doing" | "done" | "dropped" | "todo";
 
 export interface Assignment {
   id: string;
@@ -179,7 +179,7 @@ export interface AssignmentReview {
 }
 
 /** Same as the engine's work state (the contract does not depend on the engine). */
-export type AssignmentWorkState = "done" | "due" | "failed" | "running" | "stopped" | "waiting_you";
+export type AssignmentWorkState = "blocked_on_you" | "done" | "due" | "failed" | "running" | "stopped";
 
 export type AssignmentLimitKind = "minutes" | "steps" | "usd";
 
@@ -294,4 +294,4 @@ export interface AssignmentProof {
 }
 
 /** The six work states. */
-export type WorkStateName = "done" | "due" | "failed" | "running" | "stopped" | "waiting_you";
+export type WorkStateName = "blocked_on_you" | "done" | "due" | "failed" | "running" | "stopped";

@@ -175,16 +175,16 @@ export type AgentActionKind =
   | "file_created"
   | "file_updated"
   | "issue_commented"
-  | "issue_created"
-  | "issue_updated"
+  | "issue_edited"
+  | "issue_opened"
   | "mail_sent"
-  | "memory_saved"
+  | "memory_recorded"
   | "message_posted"
   | "proposal_applied"
   | "reminder_created"
-  | "routine_created"
-  | "wiki_created"
-  | "wiki_updated";
+  | "routine_scheduled"
+  | "wiki_updated"
+  | "wiki_written";
 
 export interface AgentAction {
   id: string;

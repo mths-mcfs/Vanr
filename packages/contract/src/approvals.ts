@@ -114,7 +114,7 @@ export interface ApprovalTrailEntry {
 }
 
 export type ProposalTarget =
-  | { agentId: string; kind: "agent_instructions" }
+  | { agentId: string; kind: "agent_prompt" }
   | { kind: "workspace_context" }
   /** Workspace memory file (empty `before` = new file). */
   | { kind: "workspace_memory"; path: string };

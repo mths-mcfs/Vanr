@@ -98,7 +98,7 @@ export interface InvitationPreview {
   workspaceName: string;
 }
 
-export type BatchInviteStatus = "already_invited" | "already_member" | "invalid_email" | "invited";
+export type BatchInviteStatus = "already_invited" | "already_member" | "bad_email" | "invited";
 
 export interface BatchInviteResult {
   email: string;

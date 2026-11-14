@@ -13,7 +13,7 @@ export interface ConnectorDef {
   category: string;
   description: string;
   iconUrl: string | null;
-  kind: "api_key" | "builtin" | "oauth" | "remote_mcp";
+  kind: "api_key" | "builtin" | "hosted_mcp" | "oauth";
   label: string;
   needsServerUrl: boolean;
   oauthConfigured: boolean;
@@ -36,8 +36,8 @@ export interface Connection {
   revokedAt: string | null;
   /** The service asked for more scope and nobody granted it yet (extra step after `insufficient_scope`). */
   scopeRequest?: { scope: string; tool: string } | null;
-  /** needs_reconnect: the service rejected the stored credential. */
-  status: "active" | "needs_reconnect";
+  /** reauth_required: the service rejected the stored credential. */
+  status: "active" | "reauth_required";
 }
 
 /** Restriction of an agent in a channel: `connectionId` is a connection or `*` (all). */
@@ -88,7 +88,7 @@ export interface CustomServer {
 
 export type CustomConnectStart =
   | { authorizeUrl: string; serverId: string; status: "oauth" }
-  | { serverId: string | null; status: "needs_key" }
+  | { serverId: string | null; status: "key_missing" }
   | { server: CustomServer; status: "server" };
 
 export interface SaveToolsInput {
@@ -154,7 +154,7 @@ export interface MailAccount {
   label: string;
   preset: string | null;
   provider: string;
-  status: "active" | "needs_reconnect" | "pending";
+  status: "active" | "pending" | "reauth_required";
   via: "composio" | "imap";
 }
 
@@ -219,7 +219,7 @@ export interface DatabaseConnection {
   host: string;
   label: string;
   provider: DatabaseProvider;
-  status: "active" | "needs_reconnect";
+  status: "active" | "reauth_required";
   username: string;
 }
 

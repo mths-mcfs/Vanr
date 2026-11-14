@@ -4,7 +4,6 @@ import type { WorkStateName } from "./assignments.ts";
 import type { ActorRef } from "./common.ts";
 
 export type NotificationKind =
-  | "agent_question"
   | "approval"
   | "assignment_finished"
   | "assignment_stopped"
@@ -12,27 +11,28 @@ export type NotificationKind =
   | "debate_synthesis"
   | "debate_turn"
   | "dm"
-  | "issue_assigned"
-  | "issue_comment"
-  | "issue_status"
+  | "issue_discussion"
+  | "issue_ownership"
+  | "issue_progress"
   | "mention"
+  | "question_for_you"
   | "reaction"
-  | "routine_failed"
-  | "routine_finished"
+  | "routine_alert"
+  | "routine_report"
   | "runner_connected"
-  | "thread_reply";
+  | "thread_followup";
 
 export type NotificationFilter =
+  | "action_needed"
   | "all"
   | "fyi"
   | "mentions"
-  | "needs_you"
   | "reactions"
   | "unread"
   | "waiting";
 
-/** Inbox tab: "Needs you" (open request, DM, mention) or "FYI" (everything else). */
-export type NotificationTab = "fyi" | "needs_you";
+/** Inbox tab: "Action needed" (open request, DM, mention) or "FYI" (everything else). */
+export type NotificationTab = "action_needed" | "fyi";
 
 /** Reason for the notice, shown on the row ("asked for approval", "mentioned you", "failed"). */
 export type NotificationReason =
@@ -46,25 +46,25 @@ export type NotificationReason =
   | "dm"
   | "join_requested"
   | "mentioned"
-  | "question_asked"
+  | "question_raised"
   | "reacted"
   | "reminder"
   | "review_requested"
-  | "routine_failed"
-  | "routine_finished"
+  | "routine_alert"
+  | "routine_report"
   | "runner_connected"
-  | "secret_requested"
+  | "secret_prompt"
   | "status_changed"
   | "synthesis_ready"
-  | "thread_reply"
+  | "thread_followup"
   | "turn_requested";
 
 /** Priority requested by the notifier. `critical` breaks through quiet hours. */
-export type NotificationPriority = "critical" | "fyi" | "needs_you";
+export type NotificationPriority = "action_needed" | "critical" | "fyi";
 
 /**
  * The person's rule: what matches (kind, channel, agent; empty matches everything) goes to the chosen tab.
- * The first match wins. An open request (`waiting`) always stays in "Needs you".
+ * The first match wins. An open request (`waiting`) always stays in "Action needed".
  */
 export interface NotificationRule {
   id: string;
@@ -91,7 +91,7 @@ export interface NotificationSettings {
   kinds: Partial<Record<NotificationKind, NotifyToggle>>;
   /** Language of the emails. */
   locale: "en" | "pt-BR";
-  /** Push on this and other subscribed devices ("Needs you"). */
+  /** Push on this and other subscribed devices ("Action needed"). */
   push: boolean;
   /** Daily quiet hours, in the person's time zone for the workspace. `start` == `end` turns it off. */
   quietHours: { enabled: boolean; end: string; start: string };
@@ -158,14 +158,14 @@ export interface AppNotification {
 export interface NotificationCounts {
   all: number;
   /**
-   * Sidebar badge: "Needs you" items that are waiting or unread, excluding approvals and assignment
+   * Sidebar badge: "Action needed" items that are waiting or unread, excluding approvals and assignment
    * requests, which have their own badge.
    */
   badge: number;
   /** "FYI" tab: unread. */
   fyi: number;
   mentions: number;
-  /** "Needs you" tab: open and unread requests (what asks for action). */
+  /** "Action needed" tab: open and unread requests (what asks for action). */
   needsYou: number;
   reactions: number;
   unread: number;

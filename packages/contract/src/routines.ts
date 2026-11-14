@@ -34,7 +34,7 @@ export type RoutineTrigger =
       folder: string;
       kind: "email";
       /** Response only: the mailbox went down or was disconnected. */
-      status?: "active" | "disconnected" | "needs_reconnect";
+      status?: "active" | "disconnected" | "reauth_required";
     }
   | { kind: "webhook" };
 

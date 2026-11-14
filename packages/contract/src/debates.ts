@@ -34,7 +34,7 @@ export interface Debate {
     issueNumber?: number;
     kind: "issue" | "manual" | "routine" | "suggestion";
   } | null;
-  phase: "debating" | "synthesizing" | "waiting_person" | null;
+  phase: "concluding" | "debating" | "human_turn" | null;
   /** Pseudonym of each agent, only after it is revealed. */
   pseudonyms: Record<string, string> | null;
   requesterUserId: string | null;
@@ -71,7 +71,7 @@ export interface DebatePost {
   body: string;
   claimData: DebateClaim | null;
   createdAt: string;
-  kind: "comment" | "free" | "skipped_budget" | "speaker" | "synthesis" | "turn";
+  kind: "comment" | "free" | "out_of_budget" | "speaker" | "synthesis" | "turn";
   meta: Record<string, unknown>;
   /** The agent's pseudonym in the debate (A, B...). */
   pseudonym: string | null;

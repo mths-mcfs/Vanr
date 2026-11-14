@@ -4,11 +4,11 @@ import type { ActorRef } from "./common.ts";
 
 export type BasePropType =
   | "checkbox"
-  | "created_by"
   | "created_time"
+  | "creator"
   | "date"
-  | "edited_by"
   | "edited_time"
+  | "editor"
   | "file"
   | "formula"
   | "multi_select"

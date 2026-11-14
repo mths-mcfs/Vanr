@@ -2,7 +2,7 @@
 
 import type { ActorRef } from "./common.ts";
 
-export type IssueStage = "canceled" | "done" | "in_progress" | "in_review" | "todo";
+export type IssueStage = "canceled" | "done" | "in_progress" | "reviewing" | "todo";
 
 export type IssuePriority = "high" | "low" | "medium" | "none" | "urgent";
 

@@ -4,10 +4,10 @@ export type RunStatus =
   | "canceled"
   | "done"
   | "failed"
+  | "paused_for_approval"
+  | "paused_for_input"
   | "queued"
-  | "running"
-  | "waiting_approval"
-  | "waiting_input";
+  | "running";
 
 export interface Run {
   id: string;
