@@ -35,7 +35,7 @@ const MAX_ATTEMPTS = 3;
  * age counts from the delivery's `createdAt`, an upper bound of the first attempt (the exact time of the
  * first attempt needs a column, for when the schema opens): after a very long postponement (quiet hours, do
  * not disturb) a retry of a first attempt that failed in a retryable way is dropped, and the person goes
- * without that email (the notification stays in the app). The first attempt is never refused for its age.
+ * without that email (the notification stays in the app). The first attempt is never rejected for its age.
  * The hour of margin covers the backoff between attempts and the clocks.
  */
 const EMAIL_RETRY_MAX_AGE_MS = 23 * 3600_000;
