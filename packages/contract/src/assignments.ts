@@ -3,11 +3,11 @@
 export interface ThreadAssignmentInfo {
   agentId: string;
   assignmentId: string;
-  planDone: number;
-  planTotal: number;
+  blockedOnYou: boolean;
   role: string | null;
   status: string;
-  waitingYou: boolean;
+  stepsDone: number;
+  stepsTotal: number;
 }
 
 export type AssignmentStatus = "active" | "canceled" | "done" | "paused" | "proposed" | "wrapping_up";
@@ -26,12 +26,12 @@ export type PlanItemStatus = "blocked_on_you" | "doing" | "done" | "dropped" | "
 
 export interface Assignment {
   id: string;
+  actionable: boolean;
   agentId: string;
-  canAct: boolean;
-  canManage: boolean;
   /** Limit that paused the assignment. */
   ceiling: AssignmentLimitKind | null;
   channelId: string;
+  checkoutPath: string | null;
   closedAt: string | null;
   commandPolicy: CommandPolicy;
   createdAt: string;
@@ -39,11 +39,10 @@ export interface Assignment {
   executor: AssignmentExecutor;
   findings: string[];
   goal: string;
-  joinRequested: boolean;
-  lastActivityAt: string | null;
+  lastTouchedAt: string | null;
   limits: AssignmentLimits;
+  manageable: boolean;
   needsEnvironment: boolean;
-  openQuestion: string | null;
   outcome: "canceled" | "done" | null;
   overdue: boolean;
   ownerId: string;
@@ -56,6 +55,8 @@ export interface Assignment {
     reviews: number;
     submissions: number;
   };
+  pendingJoin: boolean;
+  pendingQuestion: string | null;
   plan: {
     done: number;
     items: AssignmentPlanItem[];
@@ -65,7 +66,6 @@ export interface Assignment {
     version: number;
     waiting: number;
   };
-  repoDir: string | null;
   resumeJobs: boolean;
   role: AssignmentRole | null;
   runner: { id: string; executors: AssignmentExecutor[]; name: string; online: boolean } | null;
@@ -88,9 +88,9 @@ export interface Assignment {
 
 export interface AssignmentEligibleAgent {
   agentId: string;
-  canManage: boolean;
-  eligible: boolean;
   executors: AssignmentExecutor[];
+  manageable: boolean;
+  qualifies: boolean;
   reason: string | null;
   runner: { id: string; name: string; online: boolean } | null;
 }
@@ -116,30 +116,30 @@ export interface AssignmentCommandRule {
 }
 
 export interface AssignmentSettings {
-  agentDefault: { canSet: boolean; commandPolicy: CommandPolicy };
+  agentBaseline: { adjustable: boolean; commandPolicy: CommandPolicy };
   rules: AssignmentCommandRule[];
   stats: { asked: number; auto: number; blocked: number };
 }
 
 export interface AssignmentHarness {
-  canSetModel: boolean;
   effectiveHarness: AssignmentExecutor;
-  effectiveModel: string;
+  modelAdjustable: boolean;
   options: { kind: AssignmentExecutor; models: { label: string; recommended?: boolean; value: string }[] }[];
+  resolvedModel: string;
 }
 
 export interface AssignmentDecision {
   id: string;
   blocking: boolean;
   chosen: string | null;
-  chosenAt: string | null;
-  chosenBy: string | null;
   impact: string | null;
   messageId: string | null;
   opinions: { at: string; option: string; userId: string }[];
   options: string[];
   question: string;
   recommendation: string | null;
+  selectedAt: string | null;
+  selectedBy: string | null;
   status: "pending" | "provisional" | "taken";
   why: string | null;
 }
@@ -159,7 +159,7 @@ export interface AssignmentSubmission {
   id: string;
   auto: boolean;
   changesNote: string | null;
-  checklist: { id: string; checkedBy: string | null; text: string }[];
+  checklist: { id: string; text: string; verifiedBy: string | null }[];
   createdAt: string;
   fileIds: string[];
   note: string;
@@ -212,10 +212,10 @@ export interface AssignmentPlanItem {
   milestone: string | null;
   /** null: not verified. Only the verifier writes it. */
   passes: boolean | null;
+  /** Stuck: the attempts (`turns`) or the validation rounds (`rounds`) ran out; waits for the person. */
+  stallReason: "rounds" | "turns" | null;
   state: AssignmentWorkState;
   status: PlanItemStatus;
-  /** Stuck: the attempts (`turns`) or the validation rounds (`rounds`) ran out; waits for the person. */
-  stuck: "rounds" | "turns" | null;
   summary: string | null;
   title: string;
   updatedAt: string;
@@ -225,12 +225,14 @@ export interface AssignmentPlanItem {
 }
 
 export interface AssignmentLimits {
+  dollars: number | null;
   minutes: number | null;
   steps: number | null;
-  usd: number | null;
 }
 
 export interface AssignmentUsage {
+  /** USD spent by the harness through the API (ledger). */
+  dollars: number;
   /** Tokens reported by Claude Code/Codex (the pairing person's plan: no USD). */
   jobTokens: number;
   /** Job minutes on the environment. */
@@ -239,8 +241,6 @@ export interface AssignmentUsage {
   steps: number;
   /** Jobs that finished without reporting usage ("cost not measured"). */
   unmeasuredJobs: number;
-  /** USD spent by the harness through the API (ledger). */
-  usd: number;
 }
 
 export type AssignmentEventKind =

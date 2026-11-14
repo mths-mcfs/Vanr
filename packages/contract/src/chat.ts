@@ -37,7 +37,7 @@ export interface ChannelMember {
 
 export interface DirectoryMember {
   id: string;
-  autoReply?: boolean;
+  autoAnswer?: boolean;
   handle: string | null;
   name: string;
   type: ActorType;
@@ -60,10 +60,10 @@ export type HandledStatus = "answered" | "blocked" | "canceled" | "failed" | "si
 
 export interface MessageReceipts {
   blocked?: { agentId: string; reason: string }[];
+  claimedBy: string[];
   handled: { agentId: string; runId: string; status: HandledStatus }[];
-  pickedBy: string[];
   referenced?: string[];
-  seenBy: string[];
+  viewedBy: string[];
 }
 
 export interface MessageUsage {
@@ -113,7 +113,7 @@ export interface MessageMeta {
   toolSteps?: number;
   /** Written by the test model (no Anthropic key), not by the agent's model. */
   testModel?: boolean;
-  memoryUpdates?: { itemId: string; kind: string; text: string }[];
+  memoryEdits?: { itemId: string; kind: string; text: string }[];
   debate?: { debateId: string; title: string };
   debateSuggestion?: {
     agentIds: string[];
@@ -140,14 +140,14 @@ export interface MessageMeta {
   /** Turn sent by the assignment engine (the agent works on an item; "" is the planning turn). */
   assignmentTurn?: { assignmentId: string; itemId: string; n: number };
   job?: { assignmentId?: string; jobId: string };
-  consulted?: { agentId: string };
-  /** The agent joined the conversation on its own (nobody called it: it came through `autoReply`). */
+  delegation?: { agentId: string };
+  /** The agent joined the conversation on its own (nobody called it: it came through `autoAnswer`). */
   joined?: boolean;
-  issueWork?: { issueId: string; number: number };
-  issueTaken?: { issueId: string; number: number };
-  bodyCode?: string;
-  bodyParams?: Record<string, string | number>;
-  /** Notice that the environment's Claude Code/Codex could not answer (`bodyCode` `harness.*`). */
+  workedIssue?: { issueId: string; number: number };
+  claimedIssue?: { issueId: string; number: number };
+  bodyTemplate?: string;
+  templateVars?: Record<string, string | number>;
+  /** Notice that the environment's Claude Code/Codex could not answer (`bodyTemplate` `harness.*`). */
   harnessUnavailable?: {
     agentId: string;
     code: string;
@@ -161,14 +161,14 @@ export interface MessageMeta {
   routine?: { name: string; routineId: string };
   /** Outside content pasted into the message (email, routine webhook): the run that reads it raises flag A with this source. */
   untrusted?: string;
-  viaRoutine?: { name: string; routineId: string };
-  threadStart?: boolean;
-  referencedAgentIds?: string[];
-  openThread?: boolean;
+  fromRoutine?: { name: string; routineId: string };
+  isThreadRoot?: boolean;
+  citedAgentIds?: string[];
+  spawnsThread?: boolean;
   /** Feedback on an agent's answer (it becomes a lesson for the agent). */
   feedback?: { agentId: string; messageId: string };
   /** Message posted by an agent and undone (action `message_posted`): the body is hidden on screen. */
-  retracted?: { at: string; byUserId: string };
+  retracted?: { actorUserId: string; at: string };
   [key: string]: unknown;
 }
 
@@ -213,10 +213,9 @@ export type ThreadState = "archived" | "closed" | "open";
 
 export interface ThreadInfo {
   id: string;
+  actionNeeded: boolean;
   assignment: ThreadAssignmentInfo | null;
-  canManage: boolean;
   channelId: string;
-  channelKind: "channel" | "dm";
   channelName: string;
   context: {
     channelId: string;
@@ -227,18 +226,19 @@ export interface ThreadInfo {
     rootMessageId: string | null;
   };
   createdBy: ActorRef;
+  firstReplyAt: string | null;
   following: boolean;
-  lastActivityAt: string;
   lastMessage: { author: ActorRef; createdAt: string; excerpt: string } | null;
-  needsYou: boolean;
-  openedByReplyAt: string | null;
+  lastTouchedAt: string;
+  manageable: boolean;
+  opener: ActorRef;
+  openingText: string;
   participants: ActorRef[];
   replyCount: number;
   resolvedSuggestion: boolean;
-  rootAuthor: ActorRef;
-  rootText: string;
   state: ThreadState;
   title: string;
+  venue: "channel" | "dm";
   working: boolean;
 }
 

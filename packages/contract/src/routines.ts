@@ -6,7 +6,6 @@ export interface RecurrenceRule {
   byMonth?: number[];
   byMonthDay?: number[];
   bySetPos?: number[];
-  byWeekday?: Weekday[];
   count?: number;
   freq: "daily" | "hourly" | "minutely" | "monthly" | "weekly" | "yearly";
   interval?: number;
@@ -14,6 +13,7 @@ export interface RecurrenceRule {
   times?: string[];
   timezone: string;
   until?: string;
+  weekdays?: Weekday[];
 }
 
 /** Email trigger filter: every condition present must match. */
@@ -80,12 +80,12 @@ export interface Routine {
   createdBy: string;
   lastRun: { at: string; status: RoutineRunStatus } | null;
   name: string;
-  nextRunAt: string | null;
+  nextFireAt: string | null;
   /** Why it turned itself off (`failures`: N failures in a row). */
   pausedReason: "failures" | null;
   policy: RoutinePolicy;
   prompt: string;
-  recentRuns: { at: string; status: RoutineRunStatus }[];
+  recentFires: { at: string; status: RoutineRunStatus }[];
   running: boolean;
   target: RoutineTarget;
   trigger: RoutineTrigger;
@@ -134,17 +134,17 @@ export interface RuleInfo {
   code: string | null;
   description: string | null;
   error: string | null;
-  nextRuns: string[];
   ok: boolean;
   rule: RecurrenceRule | null;
+  upcomingFireTimes: string[];
 }
 
 export interface ScheduleParse {
   description: string | null;
   error: string | null;
-  nextRuns: string[];
   ok: boolean;
   trigger: RoutineTrigger | null;
+  upcomingFireTimes: string[];
 }
 
 /**

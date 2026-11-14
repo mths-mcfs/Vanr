@@ -10,8 +10,8 @@ export interface CalendarEvent {
   description: string | null;
   end: string;
   endDate: string | null;
+  instanceStart: string | null;
   location: string | null;
-  occurrenceStart: string | null;
   participants: ActorRef[];
   recurrence: string | null;
   rule: RecurrenceRule | null;
@@ -33,7 +33,7 @@ export interface CalendarProposal {
 }
 
 export interface CalendarRange {
-  deadlines: { date: string; issueId: string; number: number; title: string }[];
+  dueItems: { date: string; issueId: string; number: number; title: string }[];
   events: CalendarEvent[];
   proposals: CalendarProposal[];
   routines: { agentId: string; at: string; name: string; routineId: string; target: RoutineTarget }[];

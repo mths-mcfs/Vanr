@@ -36,10 +36,11 @@ export interface EffectPreview {
 export interface Approval {
   id: string;
   agentId: string;
-  canDecide: boolean;
+  appliedAt: string | null;
   channelId: string | null;
   connector: string | null;
   createdAt: string;
+  decidable: boolean;
   decidedAt: string | null;
   deciderUserId: string | null;
   detail: string;
@@ -49,7 +50,6 @@ export interface Approval {
   edited: boolean;
   /** Effect class; null for approvals older than the gate. */
   effect: EffectClass | null;
-  executedAt: string | null;
   expiresAt: string;
   /** Flags raised in the run, each with its reason. */
   flags: RiskReason[];
@@ -126,10 +126,10 @@ export interface Proposal {
   after: string;
   agentId: string;
   before: string;
-  canDecide: boolean;
   /** The person can undo (or redo) now: whoever accepted, the lead or an admin, within the time limit. */
   canUndo: boolean;
   createdAt: string;
+  decidable: boolean;
   decidedAt: string | null;
   decidedBy: string | null;
   evidence: string;

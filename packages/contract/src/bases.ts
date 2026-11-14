@@ -30,7 +30,7 @@ export type BaseFormulaResultType = "any" | "boolean" | "date" | "list" | "numbe
 export interface BasePropDef {
   id: string;
   formula?: { expression: string; resultType?: BaseFormulaResultType };
-  groups?: { doing: string[]; done: string[]; todo: string[] };
+  groups?: { done: string[]; inProgress: string[]; todo: string[] };
   name: string;
   numberFormat?: "currency_brl" | "currency_usd" | "percent" | "plain";
   options?: BasePropOption[];
@@ -98,7 +98,7 @@ export interface BaseViewConfig {
   formProps?: string[];
   frozen?: number;
   groupBy?: { hideEmpty?: boolean; prop: string } | null;
-  openIn?: "center" | "full" | "side";
+  openMode?: "center" | "full" | "side";
   quickFilters?: { op?: string; prop: string; value?: BaseFilterValue }[];
   sorts?: BaseSort[];
   summaries?: Record<string, string>;
@@ -147,7 +147,7 @@ export interface BaseSummary {
 }
 
 export interface Base extends BaseSummary {
-  canDelete: boolean;
+  deletable: boolean;
   /** The database's sources and, in the linked view, the sources of other databases the views show. */
   tables: BaseTable[];
   views: BaseView[];

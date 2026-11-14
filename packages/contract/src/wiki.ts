@@ -15,39 +15,39 @@ export interface WikiPageSummary {
   tags: string[];
   title: string;
   updatedAt: string;
-  updatedBy: ActorRef & { onBehalfOf?: string };
+  updatedBy: ActorRef & { actingFor?: string };
   version: number;
 }
 
 export interface WikiVersion {
   at: string;
-  author: ActorRef & { onBehalfOf?: string };
+  author: ActorRef & { actingFor?: string };
   note: string | null;
   version: number;
 }
 
 export interface WikiPage extends WikiPageSummary {
   authors: ActorRef[];
-  backlinks: { slug: string; title: string }[];
   body: string;
-  canEdit: boolean;
   /** Live draft not yet published as a version. */
   draft: WikiDraft | null;
+  editable: boolean;
   history: WikiVersion[];
+  inboundLinks: { slug: string; title: string }[];
   reads: { agents: string[]; last: string | null; total: number };
   /** Only on rename: pages whose [[links]] were rewritten and the ones left alone (locked). */
-  renamed?: { rewritten: { slug: string; title: string }[]; skipped: { slug: string; title: string }[] };
+  relinked?: { rewritten: { slug: string; title: string }[]; skipped: { slug: string; title: string }[] };
 }
 
 export interface WikiDraft {
-  baseVersion: number;
   dirty: boolean;
   editedAt: string | null;
   editors: ActorRef[];
+  parentVersion: number;
 }
 
 export interface WikiPanel {
-  backlinks: { count: number; slug: string; snippet: string; title: string }[];
+  inboundLinks: { count: number; slug: string; snippet: string; title: string }[];
   /** Pages that mention the title (or an alternate title) without a [[link]]. */
   mentions: { slug: string; snippet: string; title: string }[];
   outgoing: {
@@ -81,8 +81,8 @@ export interface WikiTrashedPage {
   canPurge: boolean;
   deletedAt: string;
   deletedBy: ActorRef | null;
+  expungeAt: string;
   folder: string;
-  purgeAt: string;
   slug: string;
   title: string;
 }
@@ -90,7 +90,7 @@ export interface WikiTrashedPage {
 /** Property definition, as the contract sees it. */
 export interface WikiPropDef {
   id: string;
-  groups?: { doing: string[]; done: string[]; todo: string[] };
+  groups?: { done: string[]; inProgress: string[]; todo: string[] };
   name: string;
   numberFormat?: "currency_brl" | "currency_usd" | "percent" | "plain";
   options?: { id: string; color?: string; name: string }[];

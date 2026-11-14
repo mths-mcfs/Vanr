@@ -41,7 +41,6 @@ export interface Runner {
   agents: string[];
   arch: string;
   browser: boolean;
-  canManage: boolean;
   /** Login of each CLI: `subscription` is the pairing person's plan (`plan`: pro, max, chatgpt...). */
   cli: {
     claude_code?: RunnerCli;
@@ -50,11 +49,11 @@ export interface Runner {
   createdAt: string;
   /** Last rotation of the runner's credential (it rotates on every connection). */
   credentialRotatedAt: string | null;
-  execAllowed: boolean;
   /** Executors installed and allowed on the runner. */
   executors: ("claude_code" | "codex")[];
   hostname: string;
-  lastSeenAt: string | null;
+  lastOnlineAt: string | null;
+  manageable: boolean;
   name: string;
   online: boolean;
   os: string;
@@ -65,15 +64,16 @@ export interface Runner {
   /** Revoked credential: the runner does not connect until it is paired again. */
   revokedAt: string | null;
   revokedReason: "manual" | "reuse" | null;
-  runnerVersion: string;
+  runnerRelease: string;
   /** `null`: older runner that does not report isolation. */
   sandbox: RunnerSandbox | null;
+  shellAllowed: boolean;
   workDir: string | null;
 }
 
 export interface RunnerPairing {
-  approxLocation: string | null;
   arch: string;
+  coarseLocation: string | null;
   createdAt: string;
   expiresAt: string;
   hostname: string;
@@ -85,9 +85,9 @@ export interface RunnerPairing {
 
 export interface MoveAgentsResult {
   moved: string[];
-  resumed: number;
+  queued: number;
+  restarted: number;
   skipped: string[];
-  stillWaiting: number;
 }
 
 export interface EnvironmentTarget {
@@ -98,10 +98,10 @@ export interface EnvironmentTarget {
 }
 
 export interface AgentEnvironment {
-  diskUsedGib: number;
   lastUsedAt: string | null;
   network: "allowlist" | "off" | "open";
   status: "archived" | "none" | "running" | "stopped";
+  storageGib: number;
   target: EnvironmentTarget | null;
 }
 
@@ -109,11 +109,11 @@ export interface SandboxSettings {
   available: boolean;
   commandTimeoutSec: number;
   enabled: boolean;
-  maxTimeoutSeconds: number;
   minutesPerDay: number;
   network: "allowlist" | "off" | "open";
   permittedDomains: string[];
   requireApproval: boolean;
+  timeoutCeilingSec: number;
 }
 
 export interface JobOutput {
@@ -132,7 +132,7 @@ export interface Job {
   endedAt: string | null;
   exitCode: number | null;
   files: string[];
-  lastEventAt: string | null;
+  lastSignalAt: string | null;
   prUrl: string | null;
   resumedJobId: string | null;
   runnerId: string;

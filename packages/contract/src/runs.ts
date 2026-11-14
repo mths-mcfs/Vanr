@@ -12,11 +12,11 @@ export type RunStatus =
 export interface Run {
   id: string;
   agentId: string;
+  blockedRepo: string | null;
   cachedTokens: number;
   channelId: string | null;
   costUsd: number;
   createdAt: string;
-  deniedRepo: string | null;
   error: string | null;
   errorCode: string | null;
   errorVars: Record<string, string | number> | null;
@@ -53,9 +53,9 @@ export interface ActiveRun {
   /** The agent used the browser in this run and did not close it. */
   browser: boolean;
   channelId: string;
-  heartbeatAt: string;
   /** Person who asked for this work; null when it came from a routine (schedule, event, email). */
-  requestedBy: string | null;
+  initiatedBy: string | null;
+  lastPingAt: string;
   runId: string;
   sourceMessageId: string | null;
   startedAt: string;

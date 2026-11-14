@@ -13,15 +13,16 @@ export interface DebateSpeaker {
 
 export interface Debate {
   id: string;
-  activeAgentIds: string[];
   agentIds: string[];
   /** true while the debate is open: agent posts show only the pseudonym. */
   anonymous: boolean;
+  awaitedUserId: string | null;
   channelId: string | null;
   createdAt: string;
   createdBy: ActorRef;
   deadline: string | null;
   endReason: DebateEndReason | null;
+  engagedAgentIds: string[];
   format: DebateFormat;
   goal: string;
   leadAgentId: string | null;
@@ -31,7 +32,7 @@ export interface Debate {
   origin: {
     agentId?: string;
     channelId?: string;
-    issueNumber?: number;
+    issueSeq?: number;
     kind: "issue" | "manual" | "routine" | "suggestion";
   } | null;
   phase: "concluding" | "debating" | "human_turn" | null;
@@ -49,7 +50,6 @@ export interface Debate {
   updatedAt: string;
   userIds: string[];
   verdictState: DebateVerdict | null;
-  waitingUserId: string | null;
   /** People who still owe their position in this round (rounds run in parallel). */
   waitingUserIds: string[];
 }
@@ -134,7 +134,7 @@ export interface DebateRoundView {
 
 export interface DebateVerdict {
   acceptedAt: string;
-  acceptedBy: string;
+  endorsedBy: string;
   revertedAt?: string;
   revertedBy?: string;
   state: "accepted" | "reverted";
@@ -158,12 +158,12 @@ export interface DebateMetrics {
   challenged: number;
   /** Share of debates with a challenge round in which some position changed (theater alarm if low). */
   changedDebates: number;
-  concluded: number;
   days: number;
   endReasons: Partial<Record<DebateEndReason, number>>;
   /** Mean cost per concluded debate (USD). */
   meanCostUsd: number;
   reverted30: number;
+  settled: number;
   /** Few position changes across many debates: cut down to round 0 + synthesis. */
   theater: boolean;
 }
@@ -173,8 +173,8 @@ export interface DebateSuggestion {
   debateId: string | null;
   goal: string;
   messageId: string;
+  proposerAgentId: string;
   state: "accepted" | "dismissed" | "pending";
-  suggestedByAgentId: string;
   title: string;
 }
 

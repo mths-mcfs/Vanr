@@ -16,8 +16,8 @@ export interface SecretRequest {
   channelId: string | null;
   createdAt: string;
   deciderUserId: string | null;
-  deliveredAt: string | null;
   expiresAt: string;
+  fulfilledAt: string | null;
   name: string;
   publicKey: string;
   purpose: string;
@@ -37,8 +37,8 @@ export interface SecretBox {
 
 export interface AgentSecret {
   browser: SecretBrowserBinding | null;
-  deliveredAt: string;
-  deliveredByUserId: string;
+  fulfilledAt: string;
+  fulfilledByUserId: string;
   name: string;
   runnerId: string;
   target: SecretTarget;

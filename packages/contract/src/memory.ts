@@ -57,11 +57,11 @@ export interface Memory {
   /** File in the store (`clients/acme.md`); null for short notes saved by `remember`. */
   path: string | null;
   pinned: boolean;
+  replaces: string | null;
   scope: MemoryScope;
   /** SHA-256 of the text: send it back in `updateMemory` so you do not overwrite someone else's change. */
   sha256: string;
   source: string | null;
-  supersedes: string | null;
   text: string;
   untrustedSource: boolean;
   updatedAt: string;

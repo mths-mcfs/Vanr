@@ -4,27 +4,27 @@ export type ToolAccess = "approval" | "off" | "read" | "write";
 
 export interface ConnectorDef {
   id: string;
+  accentColor: string | null;
+  askServerUrl: boolean;
   auth: "api_key" | "none" | "oauth";
   /** Every accepted method (a connector can accept OAuth and a key). */
   authMethods: ("api_key" | "oauth")[];
   /** false: shown as "coming soon". */
   available: boolean;
-  brandColor: string | null;
   category: string;
   description: string;
   iconUrl: string | null;
   kind: "api_key" | "builtin" | "hosted_mcp" | "oauth";
   label: string;
-  needsServerUrl: boolean;
-  oauthConfigured: boolean;
+  oauthReady: boolean;
   scopes: { id: string; access: "read" | "write"; label: string }[];
   serverUrl: string | null;
   tools: { name: string; scope: string; sensitive: boolean }[];
 }
 
 export interface ConnectorCatalog {
-  builtinScopes: { id: string; access: "read" | "write"; label: string }[];
   connectors: ConnectorDef[];
+  nativeScopes: { id: string; access: "read" | "write"; label: string }[];
 }
 
 export interface Connection {
@@ -59,12 +59,12 @@ export interface IdentityConnectInput {
   /** With a key it connects right away; without one, OAuth (the person signs in to the agent's account on the service). */
   apiKey?: string;
   connector: string;
-  returnTo: string;
+  nextPath: string;
 }
 
 export type IdentityConnectStart =
   | { connection: Connection; status: "connected" }
-  | { authorizeUrl: string; status: "oauth" };
+  | { consentUrl: string; status: "oauth" };
 
 export interface CustomServerTool {
   access: ToolAccess;
@@ -73,21 +73,21 @@ export interface CustomServerTool {
   description: string;
   label: string;
   name: string;
+  proposedAccess: ToolAccess;
   readOnlyHint: boolean;
-  suggestedAccess: ToolAccess;
 }
 
 export interface CustomServer {
   id: string;
   createdAt: string;
   label: string;
-  reviewedAt: string | null;
   serverUrl: string;
   tools: CustomServerTool[];
+  vettedAt: string | null;
 }
 
 export type CustomConnectStart =
-  | { authorizeUrl: string; serverId: string; status: "oauth" }
+  | { consentUrl: string; serverId: string; status: "oauth" }
   | { serverId: string | null; status: "key_missing" }
   | { server: CustomServer; status: "server" };
 
@@ -140,7 +140,7 @@ export interface MailProviders {
   /** Providers Composio serves on this server (each needs its own auth config). */
   composio: ("gmail" | "outlook")[];
   imap: boolean;
-  presets: { id: string; appPasswordUrl: string | null; host: string; label: string; port: number }[];
+  presets: { id: string; appPasswordGuide: string | null; host: string; label: string; port: number }[];
 }
 
 export type MailLevel = "none" | "read" | "read_write";
@@ -165,19 +165,19 @@ export interface MailFolder {
 }
 
 export interface MailPolicy {
-  allowedRecipients: string[];
-  dailySendCap: number;
+  autoSend: boolean;
   folders: string[];
-  fromAddress: string | null;
-  senders: string[];
-  sendWithoutAsking: boolean;
   /** null = no day limit. */
-  windowDays: number | null;
+  lookbackDays: number | null;
+  recipientAllowlist: string[];
+  senderAddress: string | null;
+  senderAllowlist: string[];
+  sendsPerDay: number;
 }
 
 export interface AgentMailbox {
   accountId: string;
-  canDelete: boolean;
+  deletable: boolean;
   level: MailLevel;
   policy: MailPolicy;
 }
@@ -202,7 +202,7 @@ export interface MailUpdateInput {
 }
 
 export interface SetAgentMailInput {
-  canDelete?: boolean;
+  deletable?: boolean;
   level: MailLevel;
   policy?: Partial<MailPolicy>;
 }
@@ -229,9 +229,9 @@ export interface DatabaseTable {
 }
 
 export interface DatabasePolicy {
+  maskedColumns: string[];
   /** null = no limit. */
-  dailyQueryCap: number | null;
-  hiddenColumns: string[];
+  queriesPerDay: number | null;
   tables: string[];
   timeoutSeconds: 15 | 30 | 60;
 }
@@ -268,7 +268,7 @@ export interface SetAgentDatabaseInput {
 export interface S3Config {
   bucket: string;
   endpoint: string;
-  pathStyle: boolean;
+  pathAddressing: boolean;
   prefix: string | null;
   region: string;
 }
@@ -285,8 +285,8 @@ export interface StorageMigration {
 
 export interface StorageConfig {
   kind: "builtin" | "s3";
-  migration: StorageMigration | null;
   s3: (S3Config & { accessKeyIdPreview: string; secretPreview: string }) | null;
+  transfer: StorageMigration | null;
 }
 
 export type StorageInput = { kind: "builtin" } | { kind: "s3"; s3: S3Input };

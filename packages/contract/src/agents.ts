@@ -20,7 +20,7 @@ export type AgentRole =
   | "support";
 
 export interface AgentAppearance {
-  accessory: string;
+  adornment: string;
   color: string;
   eyes: string;
 }
@@ -52,7 +52,6 @@ export interface Agent {
   archivedAt: string | null;
   audience: AgentAudience;
   busy: boolean;
-  canTalk: boolean;
   createdAt: string;
   handle: string;
   harness: AgentHarnessRef;
@@ -60,6 +59,7 @@ export interface Agent {
   model: string;
   name: string;
   ownerUserId: string;
+  reachable: boolean;
   role: AgentRole;
   /** No Anthropic key (workspace or platform): the test model is answering for the agent right now. */
   testModel: boolean;
@@ -67,20 +67,20 @@ export interface Agent {
 
 export interface AgentChannel {
   id: string;
-  autoReply: boolean;
+  autoAnswer: boolean;
 }
 
 export interface AgentDetail extends Agent {
-  budgetIsDefault: boolean;
+  budgetInherited: boolean;
   budgetPerMonthUsd: number;
-  budgetUsedPercent: number;
+  budgetSpentPct: number;
   channels: AgentChannel[];
   costThisMonthUsd: number;
   credentialId: string | null;
-  defaultBudgetUsd: number;
-  pendingApprovals: number;
-  runsThisMonth: number;
-  tokensThisMonth: number;
+  inheritedBudgetUsd: number;
+  monthRuns: number;
+  monthTokens: number;
+  queuedApprovals: number;
 }
 
 export type HarnessUnavailableReason =
@@ -102,11 +102,11 @@ export interface HarnessOption {
 }
 
 export interface AgentHarness {
-  effectiveModel: string;
   environment: string | null;
   fallback: boolean;
   harness: HarnessKind;
   options: HarnessOption[];
+  resolvedModel: string;
   runners: { name: string; online: boolean; options: HarnessOption[]; runnerId: string }[];
 }
 
@@ -115,9 +115,9 @@ export interface Model {
   /** Advisors this model accepts (empty: no advisor). */
   advisors: string[];
   available: boolean;
-  inputUsdPerMTok: number;
+  inputPricePerMillion: number;
   label: string;
-  outputUsdPerMTok: number;
+  outputPricePerMillion: number;
   provider: "anthropic" | "fake";
 }
 
@@ -125,13 +125,13 @@ export interface TeamAgent {
   id: string;
   appearance: AgentAppearance;
   busy: boolean;
-  callFor: string;
-  canTalk: boolean;
   capabilities: string[];
   handle: string;
   name: string;
   ownerUserId: string;
+  reachable: boolean;
   role: AgentRole;
+  useWhen: string;
 }
 
 export interface Team {
@@ -194,10 +194,10 @@ export interface AgentAction {
   messageId: string | null;
   params: Record<string, unknown>;
   requesterUserId: string | null;
+  revertedAt: string | null;
   reverterUserId: string | null;
+  revertibleUntil: string | null;
   target: { id: string; number?: number; slug?: string; title?: string; type: string };
-  undoableUntil: string | null;
-  undoneAt: string | null;
 }
 
 export interface AgentInbox {

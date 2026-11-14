@@ -110,16 +110,17 @@ export interface AppNotification {
   latest: {
     emojis?: string[];
     expiresAt?: string;
+    newStatus?: string;
+    previousStatus?: string;
     quote?: string;
     round?: number;
     rounds?: number;
-    statusFrom?: string;
-    statusTo?: string;
     steps?: number;
     suggestions?: string[];
     text?: string;
     title?: string;
   };
+  mutedUntil: string | null;
   readAt: string | null;
   reason: NotificationReason;
   /** Reminder: comes back to the top at this time, without disappearing before (unlike snooze). */
@@ -128,7 +129,6 @@ export interface AppNotification {
   ruleId: string | null;
   /** Saved by the person: excluded from the 3-month retention. */
   savedAt: string | null;
-  snoozedUntil: string | null;
   source: {
     approvalId?: string;
     assignmentId?: string;
@@ -137,7 +137,7 @@ export interface AppNotification {
     dmId?: string;
     interventionId?: string;
     issueId?: string;
-    issueNumber?: number;
+    issueSeq?: number;
     label?: string;
     messageId?: string;
     /** Hash of the approval's effect: approving from the notification sends this hash (`approveApproval`). */
@@ -156,6 +156,8 @@ export interface AppNotification {
 }
 
 export interface NotificationCounts {
+  /** "Action needed" tab: open and unread requests (what asks for action). */
+  actionNeeded: number;
   all: number;
   /**
    * Sidebar badge: "Action needed" items that are waiting or unread, excluding approvals and assignment
@@ -165,8 +167,6 @@ export interface NotificationCounts {
   /** "FYI" tab: unread. */
   fyi: number;
   mentions: number;
-  /** "Action needed" tab: open and unread requests (what asks for action). */
-  needsYou: number;
   reactions: number;
   unread: number;
   waiting: number;

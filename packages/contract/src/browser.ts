@@ -11,10 +11,10 @@ export interface BrowserIntervention {
   controllingUserId: string | null;
   createdAt: string;
   expiresAt: string;
+  handledAt: string | null;
   instructions: string;
   kind: "captcha" | "confirm" | "intervention" | "login" | "other";
   note: string | null;
-  resolvedAt: string | null;
   runnerId: string | null;
   status: InterventionStatus;
   targetUserId: string | null;

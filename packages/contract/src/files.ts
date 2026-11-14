@@ -29,10 +29,10 @@ export type FileContent =
       hasThumb: boolean;
       kind: "file";
       name: string;
-      /** Pages of extracted text (PDF, slides, sheets). */
-      pageCount: number;
       size: number;
       text: string | null;
+      /** Pages of extracted text (PDF, slides, sheets). */
+      totalPages: number;
     };
 
 /** Extraction queue for the version: text per page and thumbnail. */
@@ -40,10 +40,10 @@ export type ExtractStatus = "failed" | "none" | "pending" | "ready" | "working";
 
 export interface File {
   id: string;
-  canDelete: boolean;
   channelId: string | null;
   createdAt: string;
   createdBy: ActorRef;
+  deletable: boolean;
   /** Drive listing: the current version has a thumbnail. */
   hasThumb?: boolean;
   kind: FileKind;
@@ -55,17 +55,17 @@ export interface File {
 }
 
 export interface FileDetail extends File {
-  canEdit: boolean;
   content: FileContent;
-  shownVersion: number;
+  editable: boolean;
+  viewVersion: number;
 }
 
 export interface TrashedFile {
   id: string;
   createdBy: ActorRef;
   deletedAt: string;
+  expungeAt: string;
   kind: FileKind;
-  purgeAt: string;
   title: string;
 }
 

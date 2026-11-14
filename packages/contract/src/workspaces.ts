@@ -43,8 +43,8 @@ export interface WorkspaceSettings {
 
 export interface WorkspaceOverview {
   agents: number;
-  approvalsWaitingForMe: number;
-  budgetUsedPercent: number;
+  budgetSpentPct: number;
+  myApprovalQueue: number;
   people: number;
 }
 
@@ -64,8 +64,8 @@ export interface Person {
   email: string;
   handle: string;
   image: string | null;
-  joinedAt: string;
-  lastSeenAt: string | null;
+  lastOnlineAt: string | null;
+  memberSince: string;
   name: string;
   online: boolean;
   role: Role;
@@ -109,13 +109,13 @@ export interface BatchInviteResult {
 export interface UsageReport {
   agents: {
     agentId: string;
-    budgetIsDefault: boolean;
+    budgetInherited: boolean;
     budgetPerMonthUsd: number;
-    budgetUsedPercent: number;
+    budgetSpentPct: number;
     costUsd: number;
     name: string;
   }[];
-  byKind: { calls: number; costUsd: number; kind: string }[];
+  perKind: { calls: number; costUsd: number; kind: string }[];
   since: string;
-  totalUsd: number;
+  spendUsd: number;
 }
