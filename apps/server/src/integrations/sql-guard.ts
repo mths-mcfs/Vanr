@@ -205,6 +205,13 @@ export function guardStatement(sql: string): { statement: string } | { failure: 
   if (!lastCode || !READ_KEYWORDS.has(keyword)) return { failure: { reason: "statement", keyword } };
   for (let k = 0; k < code.length; k++) {
     const t = code[k];
+    // A schema-qualified call (`pg_catalog.lower(…)`, `extra.fn(…)`): rejected as written, even when the plan
+    // would print it without the schema.
+    if (t?.kind === "punct" && text(t) === "(" && text(code[k - 2]) === ".") {
+      const fn = code[k - 1];
+      if (fn?.kind === "word" || fn?.kind === "quoted")
+        return { failure: { reason: "function", name: `${text(code[k - 3])}.${text(fn)}` } };
+    }
     if (t?.kind !== "word") continue;
     const word = text(t);
     const before = code[k - 1];
@@ -260,6 +267,118 @@ export const qualified = (name: string) => (name.includes(".") ? name : `public.
  */
 const BLOCKED_FUNCTION =
   /\b(pg_\w+|lo_\w+|dblink\w*|nextval|setval|set_config|current_setting|ts_stat|ts_rewrite|inet_(?:server|client)_\w+|(?:query|cursor|table|schema|database)_to_xml\w*)\s*\(/i;
+
+/**
+ * The functions a query may call: built-ins that only compute on what they receive, by family. A name outside
+ * this list (a function of the customer's own, which can read any table; `xpath`; `xmltable`) is rejected: a
+ * function the guard doesn't know reads what the plan doesn't show. The names come from what the tests and the
+ * data sources of the origin use, plus the rest of each family.
+ */
+const ALLOWED_FUNCTIONS = new Set([
+  // aggregates
+  ...["count", "sum", "avg", "min", "max", "bool_and", "bool_or", "every", "string_agg", "array_agg"],
+  ...["json_agg", "jsonb_agg", "json_object_agg", "jsonb_object_agg", "stddev", "stddev_pop"],
+  ...["stddev_samp", "variance", "var_pop", "var_samp", "percentile_cont", "percentile_disc", "mode"],
+  ...["corr", "covar_pop", "covar_samp", "regr_slope", "regr_intercept", "regr_count", "grouping"],
+  // window
+  ...["row_number", "rank", "dense_rank", "percent_rank", "cume_dist", "ntile", "lag", "lead"],
+  ...["first_value", "last_value", "nth_value"],
+  // text
+  ...["lower", "upper", "initcap", "length", "char_length", "character_length", "octet_length"],
+  ...["bit_length", "substring", "substr", "position", "strpos", "trim", "btrim", "ltrim", "rtrim"],
+  ...["lpad", "rpad", "replace", "translate", "concat", "concat_ws", "left", "right", "repeat"],
+  ...["reverse", "split_part", "starts_with", "format", "regexp_replace", "regexp_match"],
+  ...["regexp_matches", "regexp_split_to_array", "regexp_split_to_table", "regexp_count"],
+  ...["regexp_instr", "regexp_like", "regexp_substr", "to_char", "to_number", "to_date"],
+  ...["to_timestamp", "ascii", "chr", "encode", "decode", "overlay", "string_to_array"],
+  ...["string_to_table", "array_to_string", "md5", "quote_literal", "quote_ident", "quote_nullable"],
+  ...["normalize", "unistr", "like_escape", "textlen"],
+  // full-text search on what the query passes
+  ...["to_tsvector", "to_tsquery", "plainto_tsquery", "phraseto_tsquery", "websearch_to_tsquery"],
+  ...["ts_rank", "ts_rank_cd", "ts_headline", "setweight", "strip", "numnode", "querytree"],
+  // date and time
+  ...["now", "date_trunc", "date_part", "extract", "age", "make_date", "make_time", "make_timestamp"],
+  ...["make_timestamptz", "make_interval", "justify_days", "justify_hours", "justify_interval"],
+  ...["isfinite", "timezone", "date_bin", "date_add", "date_subtract", "current_date"],
+  ...["current_time", "current_timestamp", "localtime", "localtimestamp", "statement_timestamp"],
+  ...["transaction_timestamp", "clock_timestamp", "timeofday"],
+  // math
+  ...["abs", "ceil", "ceiling", "floor", "round", "trunc", "sign", "sqrt", "cbrt", "power", "pow"],
+  ...["exp", "ln", "log", "log10", "mod", "div", "pi", "degrees", "radians", "sin", "cos", "tan"],
+  ...["asin", "acos", "atan", "atan2", "cot", "sinh", "cosh", "tanh", "width_bucket", "random"],
+  ...["gcd", "lcm", "factorial", "scale", "min_scale", "trim_scale", "numeric"],
+  // conditionals
+  ...["coalesce", "nullif", "greatest", "least"],
+  // json
+  ...["json_build_object", "jsonb_build_object", "json_build_array", "jsonb_build_array", "to_json"],
+  ...["to_jsonb", "json_array_length", "jsonb_array_length", "json_extract_path", "jsonb_extract_path"],
+  ...["json_extract_path_text", "jsonb_extract_path_text", "jsonb_set", "jsonb_set_lax", "jsonb_insert"],
+  ...["json_strip_nulls", "jsonb_strip_nulls", "jsonb_pretty", "json_typeof", "jsonb_typeof"],
+  ...["jsonb_path_exists", "jsonb_path_match", "jsonb_path_query", "jsonb_path_query_array"],
+  ...["jsonb_path_query_first", "json_array_elements", "jsonb_array_elements", "json_object"],
+  ...["json_array_elements_text", "jsonb_array_elements_text", "json_each", "jsonb_each", "json_array"],
+  ...["json_each_text", "jsonb_each_text", "json_object_keys", "jsonb_object_keys", "json_to_record"],
+  ...["jsonb_to_record", "json_to_recordset", "jsonb_to_recordset", "json_populate_record"],
+  ...["jsonb_populate_record", "json_populate_recordset", "jsonb_populate_recordset", "row_to_json"],
+  ...["array_to_json", "jsonb_object", "json_scalar", "json_serialize"],
+  // arrays and sets
+  ...["array_length", "array_upper", "array_lower", "array_ndims", "array_dims", "cardinality"],
+  ...["array_position", "array_positions", "array_append", "array_prepend", "array_cat"],
+  ...["array_remove", "array_replace", "array_fill", "trim_array", "unnest", "generate_series"],
+  ...["generate_subscripts", "num_nulls", "num_nonnulls"],
+]);
+
+/** SQL keywords that come before a parenthesis without being a call (`IN (…)`, `OVER (…)`, `ROW(…)`). */
+const NOT_A_CALL = new Set([
+  ...["and", "or", "not", "any", "all", "some", "in", "exists", "array", "row", "filter", "over"],
+  ...["group", "within", "distinct", "from", "where", "when", "then", "else", "case", "end", "is"],
+  ...["as", "between", "like", "ilike", "similar", "using", "on", "by", "order", "partition"],
+  ...["rows", "range", "groups", "values", "operator", "cast", "escape", "with", "ordinality"],
+  ...["lateral", "select", "sets", "rollup", "cube", "nulls", "asc", "desc", "collate", "for"],
+]);
+
+/**
+ * The first function call of a plan expression (its literals already blanked) that the list doesn't allow,
+ * or null. Rejected as they stand: a schema-qualified name (`pg_catalog.lower(…)`) and a quoted one, except the
+ * quoted form of an allowed name, which is how Postgres itself prints a function named like a keyword
+ * (`"left"(…)`). A type with a modifier after `::` or `AS` (`::numeric(10,2)`) is not a call. An expression
+ * that doesn't lex counts as rejected.
+ */
+function disallowedCall(text: string): string | null {
+  const tokens = lex(text, true);
+  if (!tokens) return "unreadable expression";
+  const word = (t: Token | undefined) =>
+    t?.kind === "word" ? text.slice(t.start, t.end).toLowerCase() : null;
+  const isPunct = (t: Token | undefined, c: string) => t?.kind === "punct" && text[t.start] === c;
+  const castAt = (j: number) =>
+    (isPunct(tokens[j - 1], ":") && isPunct(tokens[j - 2], ":")) || word(tokens[j - 1]) === "as";
+  for (let k = 0; k + 1 < tokens.length; k++) {
+    if (!isPunct(tokens[k + 1], "(")) continue;
+    const t = tokens[k] as Token;
+    const raw = text.slice(t.start, t.end);
+    const qualifiedCall = isPunct(tokens[k - 1], ".");
+    if (t.kind === "quoted") {
+      const name = raw.slice(1, -1).replace(/""/g, '"');
+      if (qualifiedCall || !ALLOWED_FUNCTIONS.has(name)) return raw;
+      continue;
+    }
+    const name = word(t);
+    if (!name) continue;
+    if (qualifiedCall) {
+      const owner = tokens[k - 2];
+      return `${owner ? text.slice(owner.start, owner.end) : ""}.${raw}`.toLowerCase();
+    }
+    if (NOT_A_CALL.has(name)) continue;
+    // `::numeric(10,2)`, `AS varchar(20)`, `::character varying(20)`, `::bit varying(8)`.
+    if (
+      castAt(k) ||
+      (name === "varying" && /^(character|bit)$/.test(word(tokens[k - 1]) ?? "") && castAt(k - 1))
+    )
+      continue;
+    if (!ALLOWED_FUNCTIONS.has(name)) return name;
+  }
+  return null;
+}
 
 /** In FROM (Function Scan), only set-returning functions that work on what they receive. */
 const SAFE_SET_FUNCTION =
@@ -341,6 +460,8 @@ export function checkPlan(
   for (const node of nodes) {
     const type = node["Node Type"] ?? "";
     if (type === "ModifyTable" || type === "LockRows") return { reason: "write" };
+    // XMLTABLE and JSON_TABLE: their own node, with the call outside the expressions.
+    if (type === "Table Function Scan") return { reason: "function", name: "table function" };
     if (type === "Function Scan") {
       const name = node["Function Name"];
       if (typeof name !== "string" || !SAFE_SET_FUNCTION.test(name))
@@ -349,6 +470,8 @@ export function checkPlan(
     for (const text of expressions(node)) {
       const fn = BLOCKED_FUNCTION.exec(text);
       if (fn?.[1]) return { reason: "function", name: fn[1].toLowerCase() };
+      const unknown = disallowedCall(text);
+      if (unknown) return { reason: "function", name: unknown };
     }
     const rel = node["Relation Name"];
     if (!rel) continue;

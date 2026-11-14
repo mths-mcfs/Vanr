@@ -2,6 +2,7 @@
 // search, read, flag and move. Direct TLS (993) or plain text in the tests.
 import { connect as netConnect, type Socket } from "node:net";
 import { connect as tlsConnect } from "node:tls";
+import { type NetPolicy, socketAddress } from "./net";
 
 export class ImapError extends Error {
   constructor(
@@ -15,14 +16,23 @@ export class ImapError extends Error {
 
 export interface ImapOptions {
   host: string;
-  /** IP already checked to connect to (`host` stays the TLS name). */
-  address?: string;
   port: number;
+  /** Direct TLS; `false` (plain text) only when the installation allows it (`policy.allowPlaintext`). */
   secure: boolean;
+  /** Where the connection may go: checked by `socketAddress` before connecting, to the IP it checked. */
+  policy: NetPolicy;
   user: string;
   password: string;
+  /** Silence the server may keep while a reply is due. */
   timeoutMs?: number;
+  /** Time a whole command's reply may take, however the server trickles it (default 120 s). */
+  commandMs?: number;
+  /** Bytes a reply may hold, literals included (default `IMAP_MAX_REPLY_BYTES`). */
+  maxReplyBytes?: number;
 }
+
+/** A reply above 32 MiB is a server misbehaving: the client stops reading and closes. */
+export const IMAP_MAX_REPLY_BYTES = 32 * 1024 * 1024;
 
 export interface ImapFolder {
   name: string;
@@ -44,8 +54,15 @@ interface Reply {
   text: string;
 }
 
-/** IMAP quoting: escapes \ and ". */
-export const quote = (s: string) => `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+/**
+ * IMAP quoting: escapes \ and ". A quoted string can't hold CR, LF or NUL (RFC 9051): a line break would end
+ * the command and start another one, so the value is rejected instead of cleaned.
+ */
+export const quote = (s: string) => {
+  if (/[\r\n]/.test(s) || s.includes("\0"))
+    throw new ImapError("A folder or login has a line break", "protocol");
+  return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+};
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 /** Date in the SEARCH SINCE format: 1-Oct-2026. */
@@ -82,6 +99,12 @@ export class ImapClient {
   private waiters: (() => void)[] = [];
   private closed = false;
   private tag = 0;
+  /** Why the client closed the connection itself: past the byte cap or the command's deadline. */
+  private stopped: ImapError | null = null;
+  /** When the current command's reply has to be complete. */
+  private deadline = Number.POSITIVE_INFINITY;
+  /** Bytes of the current reply read so far. */
+  private replyBytes = 0;
 
   private constructor(private readonly opts: ImapOptions) {}
 
@@ -91,9 +114,20 @@ export class ImapClient {
     return client;
   }
 
-  private connect(): Promise<void> {
+  private get maxReplyBytes() {
+    return this.opts.maxReplyBytes ?? IMAP_MAX_REPLY_BYTES;
+  }
+
+  /** Closes the connection on the client's side; whoever waits for a reply gets `reason`. */
+  private stop(reason: ImapError) {
+    this.stopped ??= reason;
+    this.socket?.destroy();
+  }
+
+  private async connect(): Promise<void> {
     const { host, port, secure } = this.opts;
-    const to = this.opts.address ?? host;
+    const to = await socketAddress(host, secure, this.opts.policy);
+    this.deadline = Date.now() + (this.opts.commandMs ?? 120_000);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.socket?.destroy();
@@ -105,6 +139,9 @@ export class ImapClient {
       this.socket = socket;
       socket.on("data", (chunk: Buffer) => {
         this.buffer = Buffer.concat([this.buffer, chunk]);
+        // Bytes waiting to be read count against the cap too: a server that never ends a line can't grow it.
+        if (this.buffer.length > this.maxReplyBytes)
+          this.stop(new ImapError("The mail server sent a reply that is too large", "protocol"));
         for (const w of this.waiters.splice(0)) w();
       });
       socket.on("close", () => {
@@ -133,9 +170,22 @@ export class ImapClient {
   }
 
   private async waitData(): Promise<void> {
+    if (this.stopped) throw this.stopped;
     if (this.closed) throw new ImapError("Connection closed", "protocol");
+    const left = this.deadline - Date.now();
+    if (left <= 0) {
+      this.stop(new ImapError("Mail server did not answer in time", "unreachable"));
+      throw this.stopped;
+    }
+    const idle = this.opts.timeoutMs ?? 15_000;
     await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => this.socket?.destroy(), this.opts.timeoutMs ?? 15_000);
+      const timer = setTimeout(
+        () =>
+          left < idle
+            ? this.stop(new ImapError("Mail server did not answer in time", "unreachable"))
+            : this.socket?.destroy(),
+        Math.min(idle, left),
+      );
       this.waiters.push(() => {
         clearTimeout(timer);
         resolve();
@@ -149,13 +199,25 @@ export class ImapClient {
       if (at >= 0) {
         const line = this.buffer.subarray(0, at).toString("utf8");
         this.buffer = this.buffer.subarray(at + 2);
+        this.count(at + 2);
         return line;
       }
       await this.waitData();
     }
   }
 
+  /** Counts `n` bytes of the current reply; past the cap, the connection closes. */
+  private count(n: number) {
+    this.replyBytes += n;
+    if (this.replyBytes > this.maxReplyBytes) {
+      this.stop(new ImapError("The mail server sent a reply that is too large", "protocol"));
+      throw this.stopped;
+    }
+  }
+
   private async readBytes(n: number): Promise<string> {
+    // The size comes from the server: check it before waiting for that many bytes.
+    this.count(n);
     while (this.buffer.length < n) await this.waitData();
     const out = this.buffer.subarray(0, n).toString("utf8");
     this.buffer = this.buffer.subarray(n);
@@ -174,9 +236,16 @@ export class ImapClient {
     }
   }
 
+  /** A command starts: its reply gets the whole byte budget and a deadline of its own. */
+  private startReply() {
+    this.replyBytes = 0;
+    this.deadline = Date.now() + (this.opts.commandMs ?? 120_000);
+  }
+
   async command(text: string): Promise<Reply> {
     if (!this.socket || this.closed) throw new ImapError("Not connected", "protocol");
     const tag = `A${++this.tag}`;
+    this.startReply();
     this.socket.write(`${tag} ${text}\r\n`);
     const untagged: Reply["untagged"] = [];
     for (;;) {
@@ -270,6 +339,7 @@ export class ImapClient {
   async append(folder: string, raw: string, flags = "\\Seen"): Promise<void> {
     if (!this.socket) throw new ImapError("Not connected", "protocol");
     const tag = `A${++this.tag}`;
+    this.startReply();
     const size = Buffer.byteLength(raw, "utf8");
     this.socket.write(`${tag} APPEND ${quote(folder)} (${flags}) {${size}}\r\n`);
     const go = await this.readLine();

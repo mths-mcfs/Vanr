@@ -11,10 +11,14 @@ beforeAll(async () => {
 });
 afterAll(() => mail.stop());
 
+/** The fake servers listen on localhost without TLS: the installation allows both. */
+const LOCAL = { allowPrivate: true, allowPlaintext: true };
+
 const imapOpts = () => ({
   host: mail.host,
   port: mail.imapPort,
   secure: false,
+  policy: LOCAL,
   user: mail.user,
   password: mail.password,
 });
@@ -93,6 +97,7 @@ test("SMTP: authenticates, sends with a dot at the start of a line and rejects a
     host: mail.host,
     port: mail.smtpPort,
     security: "none" as const,
+    policy: LOCAL,
     user: mail.user,
     password: mail.password,
   };
@@ -169,7 +174,7 @@ test.each([true, false])("mail response timeout closes the socket (IMAP=%s)", as
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const addr = server.address();
   if (!addr || typeof addr === "string") throw new Error("no address");
-  const opts = { host: "127.0.0.1", port: addr.port, user: "u", password: "p", timeoutMs: 20 };
+  const opts = { host: "127.0.0.1", port: addr.port, user: "u", password: "p", timeoutMs: 20, policy: LOCAL };
   const timer = setTimeout(() => {
     forced = true;
     peer?.destroy();

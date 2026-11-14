@@ -31,6 +31,23 @@ export const PUBLIC_MAIL_DOMAINS = new Set([
   "bol.com.br",
   "terra.com.br",
   "ig.com.br",
+  "mail.ru",
+  "inbox.ru",
+  "list.ru",
+  "bk.ru",
+  "yandex.ru",
+  "yandex.com",
+  "ya.ru",
+  "fastmail.com",
+  "fastmail.fm",
+  "protonmail.ch",
+  "pm.me",
+  "gmx.net",
+  "gmx.de",
+  "mac.com",
+  "zohomail.com",
+  "aim.com",
+  "hey.com",
 ]);
 
 export const domainOf = (address: string) => address.slice(address.lastIndexOf("@") + 1).toLowerCase();

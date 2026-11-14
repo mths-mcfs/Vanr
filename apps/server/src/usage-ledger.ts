@@ -24,6 +24,43 @@ const { usageLines: lines, usageReservations, usageReservationScopes, budgetCoun
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
 const toMicros = (amountUsd: number) => Math.round(amountUsd * 1_000_000);
+
+/**
+ * Bounds of what enters the ledger. One reservation or call above $10,000, or above 100 million tokens in
+ * one field, is a bug or an attack, not usage; a negative or non-finite value would lower the spending (a
+ * negative reservation frees room under the cap). Both are rejected before touching the database. A cap only
+ * has to be a finite number of at least 0.
+ */
+export const LEDGER_LIMITS = { maxUsd: 10_000, maxTokens: 100_000_000 } as const;
+
+const TOKEN_FIELDS = [
+  "inputTokens",
+  "cachedTokens",
+  "cacheWrite5mTokens",
+  "cacheWrite1hTokens",
+  "outputTokens",
+] as const;
+
+function assertUsd(name: string, value: number) {
+  if (!Number.isFinite(value) || value < 0 || value > LEDGER_LIMITS.maxUsd)
+    throw new RangeError(`${name} must be a number between 0 and ${LEDGER_LIMITS.maxUsd} (got ${value})`);
+}
+
+/** The call's lines, rejected when a count or a cost is negative, non-finite, fractional or absurd. */
+function checkedLines(book: PriceBook, call: ModelCall) {
+  const out = usageLines(book, call);
+  for (const line of out) {
+    for (const field of TOKEN_FIELDS) {
+      const n = line[field];
+      if (!Number.isSafeInteger(n) || n < 0 || n > LEDGER_LIMITS.maxTokens)
+        throw new RangeError(
+          `${field} must be a whole number between 0 and ${LEDGER_LIMITS.maxTokens} (got ${n})`,
+        );
+    }
+    assertUsd("costUsd", line.costUsd);
+  }
+  return out;
+}
 const scopeKey = (s: Pick<BudgetScope, "kind" | "id">) => `${s.kind}:${s.id}`;
 
 /**
@@ -101,7 +138,7 @@ async function writeLines(
   call: ModelCall,
   reservationId: string | null,
 ): Promise<number> {
-  const out = usageLines(book, call);
+  const out = checkedLines(book, call);
   if (out.length === 0) return 0;
   const inserted = await tx
     .insert(lines)
@@ -142,6 +179,10 @@ async function writeLines(
 export function postgresLedger(db: Db, book: PriceBook): UsageLedger {
   return {
     async reserve({ workspaceId, scopes, estimateUsd, at }) {
+      assertUsd("estimateUsd", estimateUsd);
+      for (const { limitUsd } of scopes)
+        if (!Number.isFinite(limitUsd) || limitUsd < 0)
+          throw new RangeError(`limitUsd must be a finite number of at least 0 (got ${limitUsd})`);
       const estimate = Math.ceil(estimateUsd * 1_000_000);
       return db.transaction(async (tx) => {
         for (const scope of byKey(scopes)) {
@@ -200,6 +241,7 @@ export function postgresLedger(db: Db, book: PriceBook): UsageLedger {
     },
 
     async settle(reservation, call) {
+      checkedLines(book, call);
       return db.transaction(async (tx) => {
         const [claimed] = await tx
           .update(usageReservations)
@@ -224,6 +266,7 @@ export function postgresLedger(db: Db, book: PriceBook): UsageLedger {
     },
 
     async record(call, scopes) {
+      checkedLines(book, call);
       return db.transaction(async (tx) => {
         await lockCounters(tx, call.workspaceId, scopes, call.at);
         const micros = await writeLines(tx, book, call, null);
