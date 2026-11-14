@@ -10,7 +10,7 @@ import { z } from "zod";
 import { agentInWorkspace, requireAgentEditor } from "../agents";
 import { type AppDeps, type AppEnv, requireUser } from "../context";
 import { conflict, forbidden, HttpError, notFound, param, readJson } from "../http";
-import { endLiveView, endLiveViewsOf, invalidateRunnerAccess } from "../runners/browser-live";
+import { endLiveView, endLiveViewsOf, updateRunnerAccess } from "../runners/browser-live";
 import { mintSession, revokeRunner } from "../runners/credentials";
 import { RunnerCallError } from "../runners/hub";
 import { installScript, runnerBundle } from "../runners/install";
@@ -314,13 +314,7 @@ export function registerRunners(app: Hono<AppEnv>) {
         timeoutMs: 15_000,
       })
       .catch(runnerError);
-    await deps.db
-      .update(runners)
-      .set({ access: res.access, updatedAt: deps.now() })
-      .where(eq(runners.id, row.id));
-    deps.hub.toWorkspace(me.workspaceId, { type: "runner.access", runnerId: row.id, access: res.access });
-    // What was running started under the wider access: it stops, and so does a live view without the browser.
-    invalidateRunnerAccess(deps, row.id, res.access);
+    await updateRunnerAccess(deps, row.id, res.access);
     return c.json({ access: res.access });
   });
 

@@ -288,6 +288,8 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   sweep.unref?.();
   undo.push(async () => {
     clearInterval(sweep);
+    // A sweep may be awaiting an RPC slot: cancel the hub before waiting, with the database still open.
+    runnersHub.closeAll();
     await sweeping;
   });
   log.info("server.started", { url: publicUrl, db: opened.kind });

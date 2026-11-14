@@ -320,6 +320,30 @@ describe("runner hub", () => {
     await r.closed;
   });
 
+  test("access reduction preserves its in-flight result while canceling old calls and the queue", async () => {
+    const r = await runner("access-reduce");
+    const reduction = hub
+      .call("access-reduce", "access.reduce", { disableTool: "commands" })
+      .catch((err) => err);
+    const calls = Array.from({ length: MAX_INFLIGHT - 1 }, () =>
+      failure(hub.call("access-reduce", "list", { path: "." })),
+    );
+    await r.until(MAX_INFLIGHT);
+    // Even another management operation that has not started must lose its old authorization.
+    calls.push(failure(hub.call("access-reduce", "access.reduce", { disableTool: "browser" })));
+    hub.cancelPending("access-reduce", undefined, "access.reduce");
+    expect((await Promise.all(calls)).map((err) => err.code)).toEqual(Array(MAX_INFLIGHT).fill("canceled"));
+    await r.until(MAX_INFLIGHT * 2 - 1);
+    expect(r.frames.filter((f) => f.type === "request")).toHaveLength(MAX_INFLIGHT);
+    const management = r.frames.find((f) => f.type === "request" && f.op === "access.reduce");
+    expect(management).toBeDefined();
+    expect(r.frames.some((f) => f.type === "cancel" && f.id === management?.id)).toBe(false);
+    hub.onResult(socketOf("access-reduce"), { id: management?.id ?? "", ok: true, data: { reduced: true } });
+    expect(await reduction).toEqual({ reduced: true });
+    r.ws.close();
+    await r.closed;
+  });
+
   test("closeAll closes every runner connection", async () => {
     hub = new RunnerHub();
     const a = await runner("ra");

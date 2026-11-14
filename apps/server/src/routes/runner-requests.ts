@@ -12,7 +12,7 @@ import {
 } from "@vanr/engine/browser-policy";
 import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
-import { and, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, lte, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
 import { type AgentRow, agentInWorkspace, requireAgentEditor } from "../agents";
@@ -670,7 +670,7 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
             and(
               eq(browserInterventions.agentId, agent.id),
               inArray(browserInterventions.status, ["pending", "active"]),
-              sql`${browserInterventions.expiresAt} <= ${deps.now()}`,
+              lte(browserInterventions.expiresAt, deps.now()),
             ),
           )
           .returning()),

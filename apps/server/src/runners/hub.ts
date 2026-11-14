@@ -45,6 +45,7 @@ type HarnessToolHandler = (name: string, input: unknown) => Promise<{ content: s
 
 interface Pending {
   runnerId: string;
+  op: RunnerOp;
   /** The connection the request went out on: only frames from it count for the request. */
   socket: RunnerSocket;
   /** The agent the request is for (null: the runner itself). */
@@ -251,6 +252,7 @@ export class RunnerHub {
         }
         this.pending.set(id, {
           runnerId,
+          op,
           socket,
           agentId: opts.agent?.id ?? null,
           resolve: (d) => resolve(d as T),
@@ -349,15 +351,16 @@ export class RunnerHub {
   /**
    * The right a request ran under ended (the agent moved to another runner or lost it, the runner's access was
    * reduced): its pending requests fail with `canceled` and the runner is told to stop them. With no `agentId`,
-   * every pending request of the runner.
+   * every pending request of the runner. `exceptOp` preserves only results already in flight, never queued work.
    */
-  cancelPending(runnerId: string, agentId?: string) {
+  cancelPending(runnerId: string, agentId?: string, exceptOp?: "access.reduce") {
     this.grants.set(agentId === undefined ? runnerId : `${runnerId}/${agentId}`, {});
     for (const w of [...(this.waiting.get(runnerId) ?? [])])
       if (agentId === undefined || w.agentId === agentId)
         w.cancel(new RunnerCallError("canceled", "Canceled: the access it ran under changed"));
     for (const [id, p] of this.pending) {
-      if (p.runnerId !== runnerId || (agentId !== undefined && p.agentId !== agentId)) continue;
+      if (p.runnerId !== runnerId || (agentId !== undefined && p.agentId !== agentId) || p.op === exceptOp)
+        continue;
       this.pending.delete(id);
       clearTimeout(p.timer);
       this.send(runnerId, { type: "cancel", id });

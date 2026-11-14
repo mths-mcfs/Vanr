@@ -22,7 +22,8 @@ interface Stream {
   runnerId: string;
   workspaceId: string;
   watchers: Set<BrowserSocket>;
-  fps: number;
+  /** null: an active stream lost its runner connection; zero: not streaming. */
+  fps: number | null;
   seq: number;
   stopTimer: ReturnType<typeof setTimeout> | null;
   /**
@@ -138,7 +139,7 @@ export async function refreshStream(deps: AppDeps, agentId: string) {
       { agent: { id: agentId, handle: agent?.handle ?? "" }, timeoutMs: 20_000 },
     );
   } catch (err) {
-    s.fps = 0;
+    if (s.fps === fps) s.fps = 0;
     for (const w of s.watchers) send(w, { type: "live_view.unavailable", agentId, reason: "unavailable" });
     log.warn("live_view.stream_failed", { err, agentId });
   }
@@ -230,18 +231,39 @@ export function endLiveViewsOf(deps: AppDeps, runnerId: string) {
   for (const [agentId, s] of [...streams]) if (s.runnerId === runnerId) endLiveView(deps, agentId);
 }
 
-/** The connection that owned the screencast ended or was replaced; a later subscription starts it again. */
+/** Only an active screencast needs resuming when its connection ends or is replaced. */
 export function resetLiveViewsOf(runnerId: string) {
   for (const s of streams.values())
     if (s.runnerId === runnerId) {
-      s.fps = 0;
+      if (s.fps !== 0) s.fps = null;
       s.lastFrame = null;
     }
 }
 
-export function invalidateRunnerAccess(deps: AppDeps, runnerId: string, access: RunnerAccess) {
-  deps.runners.cancelPending(runnerId);
-  if (!access.tools.browser) endLiveViewsOf(deps, runnerId);
+/** Both the notification and the management result report the same change; apply each reduction once. */
+export async function updateRunnerAccess(deps: AppDeps, runnerId: string, access: RunnerAccess) {
+  const workspaceId = await deps.db.transaction(async (tx) => {
+    const [runner] = await tx.select().from(runners).where(eq(runners.id, runnerId)).for("update");
+    if (!runner) return null;
+    const toolsReduced = (["browser", "claude", "codex", "commands"] as const).some(
+      (tool) => runner.access.tools[tool] && !access.tools[tool],
+    );
+    const foldersReduced = runner.access.folders.some((folder) => {
+      const grants = access.folders.filter((grant) => grant.path === folder.path);
+      if (folder.agents.length === 0) return !grants.some((grant) => grant.agents.length === 0);
+      return folder.agents.some(
+        (id) => !grants.some((grant) => grant.agents.length === 0 || grant.agents.includes(id)),
+      );
+    });
+    await tx.update(runners).set({ access, updatedAt: deps.now() }).where(eq(runners.id, runnerId));
+    if (toolsReduced || foldersReduced) {
+      // The runner announces the change before answering the access.reduce that made it.
+      deps.runners.cancelPending(runnerId, undefined, "access.reduce");
+      if (!access.tools.browser) endLiveViewsOf(deps, runnerId);
+    }
+    return runner.workspaceId;
+  });
+  if (workspaceId) deps.hub.toWorkspace(workspaceId, { type: "runner.access", runnerId, access });
 }
 
 /**
@@ -269,6 +291,6 @@ export async function recheckLiveViews(deps: AppDeps, only?: BrowserSocket) {
       liveViewUnsubscribe(deps, w, agentId);
       send(w, { type: "live_view.unavailable", agentId, reason: "forbidden" });
     }
-    if (s.fps === 0 && deps.runners.isOnline(s.runnerId)) await refreshStream(deps, agentId);
+    if (s.fps === null && deps.runners.isOnline(s.runnerId)) await refreshStream(deps, agentId);
   }
 }

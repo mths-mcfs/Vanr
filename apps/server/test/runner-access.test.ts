@@ -6,6 +6,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
+import { MAX_INFLIGHT } from "@vanr/engine/runner-protocol";
 import { and, eq, inArray } from "drizzle-orm";
 import { log } from "../src/logger";
 import { createWorkspace, joinWorkspace } from "../src/members";
@@ -1234,6 +1235,47 @@ describe("a secret delivered against a decline", () => {
 
 describe("live view regressions", () => {
   test(
+    "stopping the browser keeps it stopped across sweeps while other viewers remain subscribed",
+    async () => {
+      const t = await team();
+      const paired = await pairOverHttp(t, t.ana);
+      let runner = await online(paired, { browser: true });
+      await lend(t.lia.id, runner.runnerId);
+      const sockets = await Promise.all([
+        TestSocket.open(t.ana.browser, t.workspaceId),
+        TestSocket.open(t.ana.browser, t.workspaceId),
+      ]);
+      try {
+        for (const socket of sockets) {
+          socket.send({ type: "live_view.subscribe", agentId: t.lia.id });
+          await socket.event("live_view.status");
+        }
+        await runner.request("live_view.start");
+        expect((await api(t.ana.browser, "POST", `${t.ws}/agents/${t.lia.id}/browser/stop`, {})).status).toBe(
+          204,
+        );
+        await runner.request("browser.close");
+        runner.send({ type: "live_view.stream_ended", agentId: t.lia.id, reason: "closed" });
+        for (const socket of sockets) await socket.event("live_view.ended");
+        await revalidateBrowsers(server.deps);
+        await revalidateBrowsers(server.deps);
+        expect(runner.frames.filter((f) => f.type === "request" && f.op === "live_view.start")).toEqual([]);
+        await runner.close();
+        runner = await online(paired, { browser: true });
+        await revalidateBrowsers(server.deps);
+        expect(runner.frames.filter((f) => f.type === "request" && f.op === "live_view.start")).toEqual([]);
+        // An explicit subscription can still start a new browser session.
+        sockets[0]?.send({ type: "live_view.subscribe", agentId: t.lia.id });
+        await runner.request("live_view.start");
+      } finally {
+        for (const socket of sockets) socket.close();
+        await Promise.all(sockets.map((socket) => socket.closed));
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "CLI access changes cancel calls and stop the browser stream",
     async () => {
       const t = await team();
@@ -1288,7 +1330,7 @@ describe("live view regressions", () => {
             await server.deps.runners.settled();
           }
           runner = await online(paired, { browser: true });
-          socket.send({ type: "live_view.subscribe", agentId: t.lia.id });
+          await revalidateBrowsers(server.deps);
           await runner.request("live_view.start");
           runner.send({ type: "live_view.frame", agentId: t.lia.id, data: "NEW", width: 1, height: 1 });
           expect((await socket.event("live_view.frame")).event.data).toBe("NEW");
@@ -2383,10 +2425,13 @@ describe("partial changes at once", () => {
 
 describe("stopping the server", () => {
   test(
-    "closes the runners' and the browsers' connections",
+    "cancels RPCs before awaiting a production sweep blocked on a slot, then closes connections and the database",
     async () => {
       const local = await startTestServer();
       let stopped = false;
+      let runner: ProtocolRunner | undefined;
+      let stopping: Promise<void> | undefined;
+      const calls: Promise<unknown>[] = [];
       try {
         const ana = await signedIn(local, "Ana", email("ana"));
         const { workspaceId } = await createWorkspace(local.deps.db, {
@@ -2410,15 +2455,67 @@ describe("stopping the server", () => {
           body: JSON.stringify({ deviceCode: start.deviceCode }),
         }).then(body);
         const minted = await mintSession(local.url, token.token);
-        const runner = await connectProtocolRunner(local.url, minted.body.session, { browser: true });
+        runner = await connectProtocolRunner(local.url, minted.body.session, {
+          browser: true,
+          answer: () => new Promise(() => {}),
+        });
         const socket = await TestSocket.open(ana.browser, workspaceId);
-        await local.stop();
+        const agentId = newId("agt");
+        await local.deps.db.insert(schema.agents).values({
+          id: agentId,
+          workspaceId,
+          name: "Ivy",
+          handle: "ivy",
+          model: "claude-haiku-5-5",
+          ownerUserId: ana.user.id,
+          environmentId: runner.runnerId,
+          appearance: { color: "blue", eyes: "dot", adornment: "none" },
+        });
+        for (let i = 0; i < MAX_INFLIGHT; i++) {
+          calls.push(
+            local.deps.runners.call(runner.runnerId, "exec", { command: "pwd" }).catch((err) => err.code),
+          );
+          await runner.request("exec");
+        }
+        const interventionId = newId("bi");
+        await local.deps.db.insert(schema.browserInterventions).values({
+          id: interventionId,
+          workspaceId,
+          agentId,
+          runnerId: runner.runnerId,
+          kind: "login",
+          targetUserId: ana.user.id,
+          expiresAt: new Date(Date.now() - 1),
+        });
+        // The real interval expires this request, then waits to publish its policy behind the eight RPCs.
+        await socket.event("browser_intervention.updated", 17_000);
+        expect(runner.frames.some((f) => f.type === "request" && f.op === "browser.policy")).toBe(false);
+        stopping = local.stop();
+        let deadline: ReturnType<typeof setTimeout> | undefined;
+        try {
+          expect(
+            await Promise.race([
+              stopping.then(() => "stopped"),
+              new Promise<string>((resolve) => {
+                deadline = setTimeout(() => resolve("blocked"), 2000);
+              }),
+            ]),
+          ).toBe("stopped");
+        } finally {
+          clearTimeout(deadline);
+        }
         stopped = true;
         expect((await runner.closed).code).toBe(1001);
         await socket.closed;
         expect(local.deps.runners.isOnline(runner.runnerId)).toBe(false);
+        expect(await Promise.all(calls)).toEqual(Array(MAX_INFLIGHT).fill("offline"));
+        await expect(Promise.resolve(local.deps.db.select().from(schema.agents))).rejects.toThrow();
       } finally {
-        if (!stopped) await local.stop();
+        if (!stopped) {
+          await runner?.close();
+          await (stopping ?? local.stop());
+        }
+        await Promise.all(calls);
       }
     },
     // It boots and stops a server of its own besides the file's one.

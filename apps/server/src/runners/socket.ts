@@ -16,12 +16,7 @@ import {
 import { eq } from "drizzle-orm";
 import type { AppDeps } from "../context";
 import { log } from "../logger";
-import {
-  invalidateRunnerAccess,
-  onLiveViewFrame,
-  onLiveViewStreamEnded,
-  resetLiveViewsOf,
-} from "./browser-live";
+import { onLiveViewFrame, onLiveViewStreamEnded, resetLiveViewsOf, updateRunnerAccess } from "./browser-live";
 import { CONNECTION_MAX_MS, consumeSession } from "./credentials";
 import type { RunnerSocket, RunnerSocketData } from "./hub";
 import { applyJobEvent, finishJob } from "./jobs";
@@ -135,12 +130,7 @@ export async function runnerMessage(deps: AppDeps, ws: RunnerSocket, raw: string
       return;
     }
     case "access.changed": {
-      await deps.db
-        .update(runners)
-        .set({ access: frame.access, updatedAt: deps.now() })
-        .where(eq(runners.id, runnerId));
-      invalidateRunnerAccess(deps, runnerId, frame.access);
-      deps.hub.toWorkspace(workspaceId, { type: "runner.access", runnerId, access: frame.access });
+      await updateRunnerAccess(deps, runnerId, frame.access);
       return;
     }
     case "live_view.frame":
