@@ -122,6 +122,12 @@ jobs:
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_DROP_LOCKS: "1"
+      # One message per resend, every thread reply counted and one winner per thread state action, with
+      # requests on several connections at once. Each guard is one statement (no lock to take out); the PGlite
+      # run of threads.test.ts fails on the same race without the conditional UPDATE.
+      - run: bun test apps/server/test/messages-postgres.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
       # One runner per pairing code, one open browser intervention per agent and one answer per secret request.
       - run: bun test apps/server/test/runners-postgres.test.ts
         env:
