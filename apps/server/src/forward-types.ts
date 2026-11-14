@@ -7,6 +7,7 @@ import type { Preview } from "@vanr/engine/effects";
 import type { ModelProvider } from "@vanr/engine/models/types";
 import type { BudgetScope } from "@vanr/engine/usage";
 import type { AgentRow } from "./agents";
+import type { AppDeps } from "./context";
 
 /** From `wiki`. */
 export type WikiRow = typeof schema.knowledgePages.$inferSelect;
@@ -35,6 +36,15 @@ export type MessageRow = typeof schema.messages.$inferSelect;
 
 /** From `control`. */
 export type QuestionRow = typeof schema.questions.$inferSelect;
+
+/** From `control`: an agent action a person can undo and redo. */
+export type ActionRow = typeof schema.reversibleActions.$inferSelect;
+
+/** From `control`: what undoing and redoing one kind of action does. */
+export type Undoer = {
+  undo(deps: AppDeps, row: ActionRow, actorUserId: string): Promise<void>;
+  redo(deps: AppDeps, row: ActionRow, actorUserId: string): Promise<void>;
+};
 
 /** From `runtime/tools`: the "always allow" predicate a person can remember for a call. */
 export interface StandingRuleKey {

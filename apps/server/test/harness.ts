@@ -19,6 +19,8 @@ export interface TestServerOptions {
   sql?: SqlConnector;
   /** No forcing of the fake provider: the production rule of the lookup applies (production tests). */
   realModels?: boolean;
+  /** The inactivity limit of every request, in seconds (Bun's default is 10). */
+  idleTimeoutSeconds?: number;
 }
 
 /**
@@ -47,6 +49,7 @@ export async function startTestServer(opts: TestServerOptions = {}): Promise<Run
     forceFakeModels: opts.realModels !== true,
     steps: opts.steps,
     signupQueue: opts.signupQueue,
+    idleTimeoutSeconds: opts.idleTimeoutSeconds,
   });
 }
 
