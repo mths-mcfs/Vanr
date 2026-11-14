@@ -12,7 +12,7 @@ import {
 import { realSandbox } from "./testing/sandbox";
 
 // The network mode belongs to each process: nothing global carries an `open` from one process to the ones
-// running next to it or after it, and in every mode a name that resolves to a private range is refused by
+// running next to it or after it, and in every mode a name that resolves to a private range is rejected by
 // the address the proxy is about to dial.
 
 test("an unlisted host goes through only while every live process is open, and a mode ends with its process", () => {
@@ -67,7 +67,7 @@ describe("real srt", async () => {
   const on = sandbox.status().state === "on";
 
   test.if(on)(
-    "the proxy refuses a name that resolves to RFC 1918, CGNAT or ULA by its resolved address",
+    "the proxy rejects a name that resolves to RFC 1918, CGNAT or ULA by its resolved address",
     () => {
       const denied = SandboxManager.getConfig()?.network.deniedResolvedAddresses ?? [];
       expect(denied).toEqual(DENIED_RESOLVED_ADDRESSES);

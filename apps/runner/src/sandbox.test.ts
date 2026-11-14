@@ -267,7 +267,7 @@ test("attack: write_file into a git hook, .mcp.json or .bashrc of the agent's fo
   expect(writeOp(ctx, { path: "notes.md", content: "ok", encoding: "utf8", append: false }).bytes).toBe(2);
 });
 
-test("one rule for .git: in an allowed folder and in the agent's, write_file refuses what the sandbox makes read-only, and only that", () => {
+test("one rule for .git: in an allowed folder and in the agent's, write_file rejects what the sandbox makes read-only, and only that", () => {
   const lib = mkdtempSync(join(dir, "allowed-git-"));
   const libAccess = new Access(() => ({
     access: { folders: [{ path: lib, agents: [] }], tools } as RunnerAccess,
@@ -315,7 +315,7 @@ test("one rule for .git: in an allowed folder and in the agent's, write_file ref
         if (!(err instanceof RunnerError) || err.code !== "not_allowed") throw err;
         byWrite = true;
       }
-      expect({ path, refused: byWrite }).toEqual({ path, refused: bySandbox });
+      expect({ path, rejected: byWrite }).toEqual({ path, rejected: bySandbox });
       expect(readFileSync(path, "utf8")).toBe(byWrite ? "original" : "changed");
     }
   }

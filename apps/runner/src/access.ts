@@ -90,7 +90,7 @@ const GIT_ALWAYS = new Set<string>(["hooks", "config"]);
 
 /**
  * Rejection reason if the path is an escalation one; `null` if it may be written. It is the same rule the
- * sandbox applies (`protectedUnder`): the file ops and the commands refuse the same paths. `wholeGit` are the
+ * sandbox applies (`protectedUnder`): the file ops and the commands reject the same paths. `wholeGit` are the
  * folders the person allowed: there the whole `.git` of a repository is read-only, index and HEAD included.
  */
 export function protectedPath(path: string, wholeGit: readonly string[] = []): string | null {

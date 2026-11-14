@@ -67,7 +67,7 @@ const codeOf = (p: Promise<unknown>) =>
     (e: unknown) => (e instanceof RunnerError ? e.code : String(e)),
   );
 
-test("the upload refuses what read_file refuses, before any command reaches the browser", async () => {
+test("the upload rejects what read_file rejects, before any command reaches the browser", async () => {
   const ctx = {
     access,
     secrets,
