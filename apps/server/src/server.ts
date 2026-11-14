@@ -12,6 +12,7 @@ import type { AppDeps, RuntimePort } from "./context";
 import { HttpError } from "./http";
 import { holdInstanceLock } from "./instance-lock";
 import { guardedFetch } from "./integrations/net";
+import { routedBlobs } from "./integrations/storage";
 import { log } from "./logger";
 import { createMailer, type Mailer } from "./mailer";
 import { testModelCheck } from "./models";
@@ -19,6 +20,7 @@ import { loadVapid, webPushSender } from "./push";
 import { Hub } from "./realtime/hub";
 import { RunnerHub } from "./runners/hub";
 import { BackgroundWork } from "./runtime/background";
+import { createSearchIndex } from "./search-index";
 import { postgresLedger } from "./usage-ledger";
 
 interface StartOptions {
@@ -132,8 +134,8 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
 
   const db = opened.db;
   const localBlobs = config.dataDir === "memory" ? memoryBlobs() : diskBlobs(join(config.dataDir, "blobs"));
-  // Slice S2 (integrations/storage) wraps this in routedBlobs (Drive files go to the workspace's S3).
-  const blobs = localBlobs;
+  // Drive files go to the workspace's S3 when it configured one; everything else stays local.
+  const blobs = routedBlobs(localBlobs, () => ({ db, authSecret: effective.authSecret }));
   const now = opts.now ?? (() => new Date());
   // Closed sign-up still accepts the installation's first user and whoever has a pending invite.
   const signupAllowed = async (email: string, headers: Headers | null) => {
@@ -159,7 +161,7 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     now,
     hub,
     ledger,
-    // Slice S2 (search-index) adds `search` (createSearchIndex).
+    search: createSearchIndex({ db, config: effective, ledger, now }, opts.fetchExternal),
     sealer: createSealer(effective.authSecret, "credentials"),
     // Every integration fetch checks the destination (and each redirect) against the internal network.
     fetchExternal: guardedFetch(opts.fetchExternal ?? fetch, effective.integrations.allowPrivateNetworks),
@@ -174,8 +176,11 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     // `assignmentEngine` and `assignmentVerifier`.
   };
   // Here, in this order: the undo of stopRecalcs (S2, bases/write) and of the assignment engine's stop
-  // (S5); the provider lookup (S6); search.ensureVector (S2, search-index); runtime.start (S6), the
-  // engine's start (S5) and resumeRecalcs (S2), all before the app takes requests.
+  // (S5); the provider lookup (S6); runtime.start (S6), the engine's start (S5) and resumeRecalcs (S2),
+  // all before the app takes requests.
+  // The vector leg only with an embedder and pgvector in the database; without them the search is lexical
+  // and by name. It acquires nothing, so there is nothing to undo.
+  if (effective.search.embedder.kind !== "off") await deps.search.ensureVector();
   const app = createApp(deps);
   handler = (req) => app.fetch(req);
   log.info("server.started", { url: publicUrl, db: opened.kind });

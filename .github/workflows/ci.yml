@@ -89,6 +89,10 @@ jobs:
       - run: bun test apps/server/test/production.test.ts apps/server/test/usage-ledger.test.ts
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # The server's search with the vector leg the boot turns on (ensureVector) and the embedding tick.
+      - run: bun test apps/server/test/search-postgres.test.ts --test-name-pattern "on Postgres"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
 
   sandbox:
     # The runner's real sandbox (bubblewrap + socat): the attack tests of the isolation of the agent's

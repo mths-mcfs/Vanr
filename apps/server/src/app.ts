@@ -4,6 +4,9 @@ import type { AppDeps, AppEnv } from "./context";
 import { errorBody, HttpError } from "./http";
 import { log } from "./logger";
 import { registerAccount } from "./routes/account";
+import { registerDrive } from "./routes/drive";
+import { registerDriveUploads } from "./routes/drive-upload";
+import { registerSearch } from "./routes/search";
 import { registerWaitlist } from "./routes/waitlist";
 import { createStatic } from "./static";
 import { registerWorkspaceScope } from "./workspace-scope";
@@ -98,9 +101,12 @@ export function createApp(deps: AppDeps) {
   registerAccount(app);
   // The remaining registrars enter here, in this order, each with the slice that ports it (S2 to S6 of the
   // server port): workspaces S4, chat S6, threads S3, agents S5, agent lab S5, skills S4, memories S3,
-  // control S5, invitations S2, notifications S2, push S2, drive uploads S3, drive S2, wiki S4, bases S3,
-  // issues S4, debates S4, routines S4, calendar S4, search S2, connectors S6, integrations S5, runners S2,
-  // runner pairings S3, assignments S5.
+  // control S5, invitations S2, notifications S2, push S2, then the Drive below; wiki S4, bases S3,
+  // issues S4, debates S4, routines S4, calendar S4, then the search below; connectors S6, integrations S5,
+  // runners S2, runner pairings S3, assignments S5.
+  registerDriveUploads(app);
+  registerDrive(app);
+  registerSearch(app);
 
   app.all("/api/*", (c) =>
     c.json(errorBody("route_not_found", `No route for ${c.req.method} ${c.req.path}`), 404),
