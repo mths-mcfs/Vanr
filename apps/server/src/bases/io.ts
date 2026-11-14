@@ -20,7 +20,7 @@ import {
   type ViewRow,
 } from "./core";
 import { queryRows } from "./query";
-import { createDatabase, importRows, newOptionId, newPropId } from "./write";
+import { createDatabase, importRows, newOptionId, newPropId, refreshVolatile, scheduleRecalc } from "./write";
 
 const { dbDatabases, files } = schema;
 
@@ -181,6 +181,8 @@ async function createWithRows(
 
 /** The source's CSV: in the order, the filter and the columns of the view, if there is one. */
 export async function exportCsv(deps: AppDeps, table: TableRow, view: ViewRow | null, me: ActorRef) {
+  table = await refreshVolatile(deps, table);
+  if (table.calcDoneVersion < table.calcVersion) await scheduleRecalc(deps, table.id);
   const cfg: ViewConfig = view?.config ?? {};
   const hidden = new Set((cfg.columns ?? []).filter((c) => c.hidden).map((c) => c.prop));
   const ordered = (cfg.columns ?? []).map((c) => c.prop);

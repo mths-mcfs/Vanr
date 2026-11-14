@@ -12,6 +12,7 @@ import type { SignupQueueLimits } from "../src/signup-queue";
 export interface TestServerOptions {
   /** Shorter limits for the closed sign-up queue. */
   signupQueue?: Partial<SignupQueueLimits>;
+  fileServicesMs?: number;
   /** Replaces a boot step that touches the outside (see `BootSteps`). */
   steps?: Partial<BootSteps>;
   env?: Record<string, string>;
@@ -51,6 +52,7 @@ export async function startTestServer(opts: TestServerOptions = {}): Promise<Run
     steps: opts.steps,
     signupQueue: opts.signupQueue,
     idleTimeoutSeconds: opts.idleTimeoutSeconds,
+    fileServicesMs: opts.fileServicesMs,
   });
 }
 
@@ -126,4 +128,13 @@ export async function signedIn(server: RunningServer, name: string, email: strin
 /** Waits until the server's background work ended (the notification queue and, later, runs and routines). */
 export function settle(server: RunningServer): Promise<void> {
   return server.deps.runtime.settle();
+}
+
+/** Waits for an observable effect of the server's periodic work. */
+export async function waitFor(check: () => Promise<boolean>): Promise<void> {
+  const end = Date.now() + 5000;
+  while (!(await check())) {
+    if (Date.now() >= end) throw new Error("server work did not finish");
+    await Bun.sleep(20);
+  }
 }

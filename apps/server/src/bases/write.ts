@@ -660,7 +660,7 @@ async function updateRowTx(
   // the row leaves with the source's calc_version, so the recalculation won't go over it again: if it was
   // still stale, the values that didn't change have to go to the new type here, as the recalculation would
   const was =
-    current.calcVersion < fresh.calcVersion ? normalizeProps(fresh.defs, current.props) : current.props;
+    current.calcVersion < fresh.calcVersion ? normalizeRowProps(fresh.defs, current.props) : current.props;
   const props = input.props ? await validWrite(tx, fresh, was, input.props) : was;
   const moved = input.afterId || input.beforeId;
   const position = moved
@@ -936,11 +936,12 @@ export async function bulkRows(
 
 const OPTION_TYPES = new Set(["select", "multi_select", "status"]);
 
-/** What changes a computed or stored value (a property's name and color don't). */
+/** What changes a computed or stored value, or the row's searchable text. */
 function calcSignature(defs: readonly PropDef[]): string {
   return JSON.stringify(
     defs.map((d) => [
       d.id,
+      d.name,
       d.type,
       d.options?.map((o) => [o.id, o.name]) ?? null,
       d.groups ?? null,
@@ -961,20 +962,19 @@ export async function saveSchema(
   table: TableRow,
   input: { defs: PropDef[]; parentVersion: number },
 ): Promise<TableRow> {
-  const next = await prepareSchema(deps.db, table, input.defs);
   const at = deps.now();
   const saved = await lockedTx(
     deps,
     (q) => reachOfSources(q, table.databaseId, [table.id]),
-    (tx, held) => writeSchemaTx(tx, deps, table, next, input.parentVersion, at, held.recheck),
+    (tx, held) => writeSchemaTx(tx, deps, table, input.defs, input.parentVersion, at, held.recheck),
   );
-  return afterSchema(deps, saved, next.recalc);
+  return afterSchema(deps, saved);
 }
 
 type PreparedSchema = { defs: PropDef[]; recalc: boolean };
 
 /** Validates the schema and puts it in the stored shape (formula by id, options from the values, result type). */
-async function prepareSchema(db: Db, table: TableRow, input: PropDef[]): Promise<PreparedSchema> {
+async function prepareSchema(db: Db | Tx, table: TableRow, input: PropDef[]): Promise<PreparedSchema> {
   const problems = checkDefs(input);
   if (problems.length) throw bad("base.invalid_schema", "Invalid schema", { problems });
   const title = input.find((d) => d.id === table.titlePropId);
@@ -1029,12 +1029,11 @@ async function writeSchemaTx(
   tx: Tx,
   deps: AppDeps,
   table: TableRow,
-  next: PreparedSchema,
+  input: PropDef[],
   parentVersion: number,
   at: Date,
   recheck: () => Promise<void>,
-): Promise<{ table: TableRow; touched: Set<string> }> {
-  const { defs, recalc } = next;
+): Promise<{ table: TableRow; touched: Set<string>; recalc: boolean }> {
   const current = await lockTable(tx, table.id);
   await recheck();
   if (current.schemaVersion !== parentVersion) {
@@ -1042,6 +1041,7 @@ async function writeSchemaTx(
       table: toTable(current),
     });
   }
+  const { defs, recalc } = await prepareSchema(tx, current, input);
   const [row] = await tx
     .update(dbTables)
     .set({
@@ -1060,18 +1060,17 @@ async function writeSchemaTx(
     await tx.update(dbViews).set({ config: pruned, updatedAt: at }).where(eq(dbViews.id, v.id));
     touched.add(v.databaseId);
   }
-  return { table: row as TableRow, touched };
+  return { table: row as TableRow, touched, recalc };
 }
 
 /** After the commit: the recalculation, the events and the source as it ended up. */
 async function afterSchema(
   deps: AppDeps,
-  saved: { table: TableRow; touched: Set<string> },
-  recalc: boolean,
+  saved: { table: TableRow; touched: Set<string>; recalc: boolean },
 ): Promise<TableRow> {
-  if (recalc) await recalcPolicy(deps, saved.table);
+  if (saved.recalc) await recalcPolicy(deps, saved.table);
   // whoever sums or reads this source by a relation recalculates whole: the target may have changed type or gone
-  if (recalc) for (const id of await refreshDependents(deps, saved.table)) saved.touched.add(id);
+  if (saved.recalc) for (const id of await refreshDependents(deps, saved.table)) saved.touched.add(id);
   for (const id of saved.touched) publishBase(deps, saved.table.workspaceId, id);
   const [after] = await deps.db.select().from(dbTables).where(eq(dbTables.id, saved.table.id));
   return after ?? saved.table;
@@ -1087,16 +1086,14 @@ export async function importRows(
   table: TableRow,
   input: { defs: PropDef[] | null; rows: (table: TableRow) => Props[]; actor: ActorRef },
 ): Promise<{ table: TableRow; created: number }> {
-  const { db } = deps;
-  const next = input.defs ? await prepareSchema(db, table, input.defs) : null;
-  const w = { actor: input.actor, names: await namesOf(db, table.workspaceId), at: deps.now() };
+  const w = { actor: input.actor, names: await namesOf(deps.db, table.workspaceId), at: deps.now() };
   const done = await lockedTx(
     deps,
     // without new columns the import writes rows only: no database to lock
-    async (q) => (next ? reachOfSources(q, table.databaseId, [table.id]) : []),
+    async (q) => (input.defs ? reachOfSources(q, table.databaseId, [table.id]) : []),
     async (tx, held) => {
-      const saved = next
-        ? await writeSchemaTx(tx, deps, table, next, table.schemaVersion, w.at, held.recheck)
+      const saved = input.defs
+        ? await writeSchemaTx(tx, deps, table, input.defs, table.schemaVersion, w.at, held.recheck)
         : null;
       const fresh = saved?.table ?? (await lockTable(tx, table.id));
       if (fresh.schemaVersion !== (saved ? table.schemaVersion + 1 : table.schemaVersion))
@@ -1107,7 +1104,7 @@ export async function importRows(
       return { saved, fresh, inserted: await insertRowsTx(tx, fresh, rows, w) };
     },
   );
-  const after = done.saved && next ? await afterSchema(deps, done.saved, next.recalc) : done.fresh;
+  const after = done.saved ? await afterSchema(deps, done.saved) : done.fresh;
   if (done.inserted.length) {
     publishRows(deps, table.workspaceId, after, { rowIds: [], by: input.actor });
     await indexRows(deps, done.inserted);
@@ -1117,7 +1114,7 @@ export async function importRows(
 }
 
 /** A property that becomes select/multi/status without options gets one option per distinct value (up to 200). */
-async function withOptionsFromValues(db: Db, table: TableRow, defs: PropDef[]): Promise<PropDef[]> {
+async function withOptionsFromValues(db: Db | Tx, table: TableRow, defs: PropDef[]): Promise<PropDef[]> {
   const out: PropDef[] = [];
   for (const d of defs) {
     const old = table.defs.find((x) => x.id === d.id);
@@ -1139,7 +1136,9 @@ async function withOptionsFromValues(db: Db, table: TableRow, defs: PropDef[]): 
       for (const name of text.map((t) => t.trim()).filter(Boolean))
         if (names.size < 200) names.add(name.slice(0, 100));
     }
-    const options = [...names].map((name) => ({ id: newOptionId(), name }));
+    const options = [...names].map(
+      (name) => old.options?.find((o) => o.name === name) ?? { id: newOptionId(), name },
+    );
     out.push({
       ...d,
       options,
@@ -1156,23 +1155,30 @@ function optionNames(def: PropDef, v: unknown): string[] {
   return ids.map((id) => def.options?.find((o) => o.id === id)?.name ?? id);
 }
 
+/** Keep option IDs while adapting a single choice between scalar and list representations. */
+function normalizeRowProps(defs: readonly PropDef[], props: Props): Props {
+  const shaped = { ...props };
+  for (const def of defs) {
+    const value = props[def.id];
+    if (def.type === "multi_select" && typeof value === "string" && def.options?.some((o) => o.id === value))
+      shaped[def.id] = [value];
+    else if (
+      (def.type === "select" || def.type === "status") &&
+      Array.isArray(value) &&
+      value.length === 1 &&
+      typeof value[0] === "string"
+    )
+      shaped[def.id] = value[0];
+  }
+  return normalizeProps(defs, shaped);
+}
+
 // ---------- recalculation ----------
 
 const running = new WeakMap<AppDeps, Map<string, Promise<void>>>();
-/** A recalculation asked for while one of the same source runs: another round after it. */
-const followUps = new WeakMap<AppDeps, Map<string, Promise<void>>>();
 /** The propagations of the relations in progress (a request's, or a retry waiting for a held row). */
 const settling = new WeakMap<AppDeps, Set<Promise<void>>>();
 const halted = new WeakSet<AppDeps>();
-
-function mapOf<K, V>(store: WeakMap<AppDeps, Map<K, V>>, deps: AppDeps): Map<K, V> {
-  let map = store.get(deps);
-  if (!map) {
-    map = new Map();
-    store.set(deps, map);
-  }
-  return map;
-}
 
 /** One batch: up to 500 stale rows, locked without waiting for whoever is already on them. */
 async function recalcBatch(
@@ -1214,7 +1220,7 @@ async function recalcBatch(
       return { done: false, changed: [], busy: again?.v === table.calcVersion };
     }
     const now = deps.now().getTime();
-    const normalized = stale.map((r) => ({ ...r, props: normalizeProps(table.defs, r.props) }));
+    const normalized = stale.map((r) => ({ ...r, props: normalizeRowProps(table.defs, r.props) }));
     const linked = await loadLinked(tx, table, normalized);
     const values = normalized.map((r, i) => {
       const old = stale[i] as RowRow;
@@ -1296,24 +1302,26 @@ export async function runRecalc(deps: AppDeps, tableId: string): Promise<void> {
  * `settle` waits for it, and `stopRecalcs` halts it between two batches. With one already running, another
  * round is queued after it: the round in progress may have gone past the rows someone just marked.
  */
-function scheduleRecalc(deps: AppDeps, tableId: string): Promise<void> {
-  const map = mapOf(running, deps);
-  const existing = map.get(tableId);
-  if (existing) {
-    const follows = mapOf(followUps, deps);
-    const queued = follows.get(tableId);
-    if (queued) return queued;
-    const next = existing.then(() => {
-      follows.delete(tableId);
-      return halted.has(deps) ? undefined : scheduleRecalc(deps, tableId);
-    });
-    follows.set(tableId, next);
-    deps.runtime.track(next, "base.recalc");
-    return next;
+export function scheduleRecalc(deps: AppDeps, tableId: string): Promise<void> {
+  let map = running.get(deps);
+  if (!map) {
+    map = new Map();
+    running.set(deps, map);
   }
-  const job = runRecalc(deps, tableId)
+  const existing = map.get(tableId);
+  const job = (async () => {
+    if (existing) {
+      await existing;
+      if (halted.has(deps)) return;
+      const [table] = await deps.db.select().from(dbTables).where(eq(dbTables.id, tableId));
+      if (!table || table.calcDoneVersion >= table.calcVersion) return;
+    }
+    if (!halted.has(deps)) await runRecalc(deps, tableId);
+  })()
     .catch((err) => log.error("base.recalc_failed", { tableId, err }))
-    .finally(() => map.delete(tableId));
+    .finally(() => {
+      if (map.get(tableId) === job) map.delete(tableId);
+    });
   map.set(tableId, job);
   deps.runtime.track(job, "base.recalc");
   return job;
@@ -1360,11 +1368,7 @@ export async function resumeRecalcs(deps: AppDeps) {
 export async function stopRecalcs(deps: AppDeps) {
   halted.add(deps);
   for (;;) {
-    const jobs = [
-      ...(running.get(deps)?.values() ?? []),
-      ...(followUps.get(deps)?.values() ?? []),
-      ...(settling.get(deps) ?? []),
-    ];
+    const jobs = [...(running.get(deps)?.values() ?? []), ...(settling.get(deps) ?? [])];
     if (!jobs.length) return;
     await Promise.allSettled(jobs);
   }
@@ -1372,6 +1376,9 @@ export async function stopRecalcs(deps: AppDeps) {
 
 /** How long a notice left by a held row waits before the next try. */
 export const LINK_RETRY_MS = 200;
+/** Failed propagations in a row before the retries stop (the notice stays for later). */
+export const MAX_LINK_FAILURES = 5;
+const failures = new WeakMap<AppDeps, number>();
 
 /**
  * After the commit: marks the rows that depend on what changed and recalculates their sources. `wait` (the
@@ -1396,8 +1403,17 @@ export function settleLinks(deps: AppDeps, wait: boolean): Promise<void> {
         const [t] = await deps.db.select().from(dbTables).where(eq(dbTables.id, id));
         if (t) await recalcPolicy(deps, t);
       }
+      failures.delete(deps);
     } catch (err) {
-      log.error("base.links_failed", { err });
+      // a failure that repeats (the database gone, a bug) stops trying after a few: the notice stays in the
+      // database for the next write or the next start
+      const n = (failures.get(deps) ?? 0) + 1;
+      failures.set(deps, n);
+      log.error("base.links_failed", { err, attempt: n });
+      if (n >= MAX_LINK_FAILURES) {
+        failures.delete(deps);
+        pending = false;
+      }
     }
     if (pending) retryLinks(deps);
   })().finally(() => set.delete(work));

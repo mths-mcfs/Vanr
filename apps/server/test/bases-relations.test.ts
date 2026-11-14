@@ -3,7 +3,7 @@
 // the calendar's window, and the grid's bulk write (all or nothing, the caps before any write). The locks
 // only Postgres proves are in bases-postgres.test.ts.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { BasePropDef, BaseSummaryFn } from "@vanr/contract";
+import type { BasePropDef } from "@vanr/contract";
 import { rollupValue } from "@vanr/engine/bases/rollup";
 import { summaryFns } from "@vanr/engine/bases/summary";
 import { type Filter, rowMatches } from "@vanr/engine/bases/view";
@@ -18,6 +18,7 @@ import {
   bulkRows,
   MAX_BULK_CELLS,
   MAX_BULK_ROWS,
+  MAX_LINK_FAILURES,
   resumeRecalcs,
   settleLinks,
   stopRecalcs,
@@ -1061,6 +1062,35 @@ describe("bases: the propagation and the server's stop", () => {
   );
 });
 
-// summary function names come from the contract: the engine's list and the contract's type agree
-const _fns: readonly BaseSummaryFn[] = summaryFns({ id: "x", name: "x", type: "number" });
-void _fns;
+describe("bases: a propagation that keeps failing", () => {
+  test(
+    "it tries MAX_LINK_FAILURES times, then stops and leaves the notice for later",
+    async () => {
+      const srv = await startTestServer();
+      const original = linkLocks.claimSource;
+      try {
+        const ana = withApi(await signedIn(srv, "Ana", email("ana")));
+        const { workspaceId: ws } = await seedWorkspace(srv, ana, "Broken");
+        const { tasks, projects, task } = await projectsAndTasks(ana.api, ws);
+        const t1 = await task("Wash", { hours: 1 });
+        await ana.api.createRow(ws, projects.id, projects.tableId, {
+          props: { [projects.titleId]: "Home", rel: [t1.id] },
+        });
+        let tries = 0;
+        linkLocks.claimSource = async () => {
+          tries++;
+          throw new Error("broken");
+        };
+        // the write itself is committed and answers: the propagation's failure doesn't reach the writer
+        await ana.api.updateRow(ws, tasks.id, t1.id, { props: { hours: 5 } });
+        await settle(srv);
+        expect(tries).toBe(MAX_LINK_FAILURES);
+        expect((await srv.deps.db.select().from(schema.dbCalcDirty)).length).toBe(1);
+      } finally {
+        linkLocks.claimSource = original;
+        await srv.stop();
+      }
+    },
+    SERVER_TEST_MS,
+  );
+});
