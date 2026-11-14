@@ -81,6 +81,10 @@ const ServerFrame = s.union(
   s.object({ type: s.literal("pong") }),
   s.object({ type: s.literal("subscribed", "unsubscribed"), channelId: s.string }),
   s.object({ type: s.literal("error"), code: s.string, channelId: s.optional(s.string) }),
+  s.object(
+    { type: s.literal("live_view.status", "live_view.frame", "live_view.ended", "live_view.unavailable") },
+    s.unknown,
+  ),
   s.object({
     type: s.literal("event"),
     channelId: s.optional(s.string),
@@ -127,6 +131,7 @@ export class RealtimeClient {
   private cancelStable: (() => void) | null = null;
   private lastFrameAt = 0;
   private readonly channels = new Set<string>();
+  private readonly pendingUnsubscribes = new Map<string, number>();
   private readonly liveViews = new Set<string>();
   private readonly listeners = new Map<string, Set<Listener>>();
   private readonly anyListeners = new Set<Listener>();
@@ -174,6 +179,9 @@ export class RealtimeClient {
 
   unsubscribe(channelId: string): void {
     this.channels.delete(channelId);
+    if (this.socket?.readyState === SOCKET_OPEN) {
+      this.pendingUnsubscribes.set(channelId, (this.pendingUnsubscribes.get(channelId) ?? 0) + 1);
+    }
     this.send({ type: "unsubscribe", channelId });
   }
 
@@ -245,6 +253,7 @@ export class RealtimeClient {
 
   private connect(status: "connecting" | "reconnecting") {
     this.clearTimers();
+    this.pendingUnsubscribes.clear();
     this.setStatus(status);
     const socket = this.createSocket(this.url);
     this.socket = socket;
@@ -336,9 +345,16 @@ export class RealtimeClient {
         }
         return;
       }
-      case "unsubscribed":
+      case "unsubscribed": {
+        const pending = this.pendingUnsubscribes.get(frame.channelId) ?? 0;
+        if (pending > 0) {
+          if (pending === 1) this.pendingUnsubscribes.delete(frame.channelId);
+          else this.pendingUnsubscribes.set(frame.channelId, pending - 1);
+          return;
+        }
         if (this.channels.delete(frame.channelId)) this.options.onUnsubscribed?.(frame.channelId);
         return;
+      }
       case "error":
         if (frame.code === "forbidden" && frame.channelId && this.channels.delete(frame.channelId)) {
           this.options.onUnsubscribed?.(frame.channelId);
@@ -349,6 +365,11 @@ export class RealtimeClient {
         return;
       case "event":
         return this.deliver(frame, raw);
+      case "live_view.status":
+      case "live_view.frame":
+      case "live_view.ended":
+      case "live_view.unavailable":
+        return this.deliver({ event: frame }, raw);
     }
   }
 

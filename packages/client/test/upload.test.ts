@@ -81,13 +81,14 @@ describe("uploadInParts", () => {
     expect(parts).toEqual([0, 4, 8]);
   });
 
-  test("a 409 with another offset only moves the pointer", async () => {
+  test("a 409 with another offset reconciles with the server", async () => {
     const file = new Blob(["0123456789"]);
     const { api, parts } = fakeApi(file, () => null);
     // Resuming from a stale session: the server already has 4 bytes.
     await api.replaceFileUpload({ query: { offset: 0 }, body: file.slice(0, 4) });
     parts.length = 0;
-    await uploadInParts(api, "w", file, { fileName: "a.txt" }, { resume: session(0, file.size) });
+    const options = { resume: session(0, file.size), clock: instantClock };
+    await uploadInParts(api, "w", file, { fileName: "a.txt" }, options);
     expect(parts).toEqual([4, 8]);
   });
 
@@ -103,6 +104,46 @@ describe("uploadInParts", () => {
       tooLarge,
     );
     expect(tries).toBe(1);
+  });
+
+  test.each([false, true])("offset conflicts exhaust retries (cyclic: %s)", async (cyclic) => {
+    const file = new Blob(["0123456789"]);
+    let tries = 0;
+    const waits: number[] = [];
+    const { api } = fakeApi(file, () => {
+      tries++;
+      return new ApiError({
+        status: 409,
+        code: tries > 6 ? "upload.closed" : "upload.offset_mismatch",
+        message: "",
+        params: { offset: cyclic ? (tries % 2) * 4 : 0 },
+      });
+    });
+    let gets = 0;
+    api.getFileUpload = async () => session(cyclic ? (++gets % 2) * 4 : 0, file.size);
+    const retryWaitMs = (n: number) => {
+      waits.push(n);
+      return 0;
+    };
+    const options = { clock: instantClock, retries: 2, retryWaitMs };
+    const uploading = uploadInParts(api, "w", file, { fileName: "a.txt" }, options);
+    await expect(uploading).rejects.toMatchObject({ code: "upload.offset_mismatch" });
+    expect(tries).toBe(cyclic ? 4 : 3);
+    expect(waits).toEqual(cyclic ? [1, 1, 2] : [1, 2]);
+  });
+
+  test("confirmed progress renews the retry budget after each lost part response", async () => {
+    const file = new Blob(["0123456789"]);
+    const { api, parts } = fakeApi(file, () => null);
+    const replace = api.replaceFileUpload;
+    api.replaceFileUpload = async (args) => {
+      await replace(args);
+      throw new ApiError({ status: 0, code: "network", message: "response lost" });
+    };
+    await expect(
+      uploadInParts(api, "w", file, { fileName: "a.txt" }, { clock: instantClock, retries: 1 }),
+    ).resolves.toBe(detail);
+    expect(parts).toEqual([0, 4, 8]);
   });
 
   test("gives up after the retry limit, and the limit is what stops it", async () => {

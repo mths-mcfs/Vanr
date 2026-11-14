@@ -250,7 +250,9 @@ export function createFakeServer(options: FakeServerOptions = {}): FakeServer {
     const m = membership(req.params.workspaceId);
     const msg = state.messages.find((x) => x.id === req.params.messageId);
     const c = msg && state.channels.find((x) => x.id === msg.channelId && x.workspaceId === m.workspaceId);
-    if (!msg || !c) throw new Fail(404, "not_found", "Message not found");
+    if (!msg || !c || (c.visibility === "private" && !c.memberIds.includes(m.userId))) {
+      throw new Fail(404, "not_found", "Message not found");
+    }
     return { m, msg };
   };
   const reactionsOf = (msg: T.Message) => ({ reactions: msg.reactions });

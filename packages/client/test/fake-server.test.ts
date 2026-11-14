@@ -93,9 +93,24 @@ describe("fake server", () => {
   test("a person who isn't a member can't read a private channel", async () => {
     const { api, workspaceId, server } = setup();
     const secret = await api.createChannel({ workspaceId, body: { name: "board", visibility: "private" } });
+    const msg = await api.createChannelMessage({
+      workspaceId,
+      channelId: secret.id,
+      body: { body: "private", clientId: "secret" },
+    });
     server.signIn("user_sam");
     expect((await api.listChannels({ workspaceId })).map((c) => c.id)).not.toContain(secret.id);
     const err = await api.listChannelMessages({ workspaceId, channelId: secret.id }).catch((e) => e);
     expect(err).toMatchObject({ status: 404, code: "not_found" });
+    const args = { workspaceId, messageId: msg.id };
+    const results = await Promise.allSettled([
+      api.listMessageReactions(args),
+      api.createMessageReaction({ ...args, body: { reaction: "x" } }),
+      api.clearMessageReactions({ ...args, query: { reaction: "x" } }),
+    ]);
+    for (const result of results)
+      expect(result).toMatchObject({ status: "rejected", reason: { code: "not_found" } });
+    server.signIn("user_ada");
+    expect(await api.listMessageReactions(args)).toEqual([]);
   });
 });

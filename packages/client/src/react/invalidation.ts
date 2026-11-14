@@ -3,6 +3,7 @@
 // is in neither place.
 import type { QueryClient } from "@tanstack/react-query";
 import type { MethodName } from "../api/index.ts";
+import type { VanrClient } from "../client.ts";
 import type { BrowserEventName, EventPayload } from "../realtime/events.ts";
 import type { AnyRealtimeEvent, EventScope } from "../realtime/socket.ts";
 import { type KeyPrefix, prefixKey } from "./keys.ts";
@@ -229,6 +230,7 @@ export const INVALIDATION: { [E in BrowserEventName]: InvalidationRule<E> } = {
     keys: (p, ctx) => [
       ws(ctx)("listFiles"),
       ws(ctx)("getFile", { fileId: p.fileId }),
+      ws(ctx)("getFileText", { fileId: p.fileId }),
       ws(ctx)("listFileVersions", { fileId: p.fileId }),
     ],
   },
@@ -244,8 +246,10 @@ export const INVALIDATION: { [E in BrowserEventName]: InvalidationRule<E> } = {
   "base.deleted": { keys: (p, ctx) => [ws(ctx)("listBases"), ws(ctx)("getBase", { baseId: p.baseId })] },
   "base.rows": {
     keys: (p, ctx) => [
-      ws(ctx)("createBaseTableQuery", { baseId: p.baseId, tableId: p.tableId }),
-      ws(ctx)("getBaseRow", { baseId: p.baseId }),
+      ws(ctx)("createBaseTableQuery", { tableId: p.tableId }),
+      ws(ctx)("getBaseRow"),
+      ws(ctx)("getBase"),
+      ws(ctx)("listBases"),
     ],
   },
   "base.recalc": {
@@ -267,8 +271,13 @@ export function keysForEvent(event: AnyRealtimeEvent, workspaceId: string): KeyP
   });
 }
 
-export async function invalidateForEvent(qc: QueryClient, event: AnyRealtimeEvent, workspaceId: string) {
+export async function invalidateForEvent(
+  qc: QueryClient,
+  event: AnyRealtimeEvent,
+  workspaceId: string,
+  client: VanrClient,
+) {
   await Promise.all(
-    keysForEvent(event, workspaceId).map((p) => qc.invalidateQueries({ queryKey: prefixKey(p) })),
+    keysForEvent(event, workspaceId).map((p) => qc.invalidateQueries({ queryKey: prefixKey(client, p) })),
   );
 }

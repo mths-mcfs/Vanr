@@ -52,6 +52,42 @@ if (process.env.VANR_CLIENT_DOM_TEST !== "1") {
     for (let i = 0; i < 5; i++) await act(() => new Promise((r) => setTimeout(r, 0)));
   };
 
+  test("switching clients on one QueryClient never renders the previous identity's data", async () => {
+    const t = setup();
+    const workspaceId = t.server.sample.workspaceId;
+    const [channel] = t.server.state.channels;
+    if (!channel) throw new Error("missing sample channel");
+    channel.visibility = "private";
+    channel.memberIds = ["user_ada"];
+    const args = { workspaceId, channelId: channel.id };
+    const seen: (string | undefined)[] = [];
+    function Messages() {
+      const q = useApiQuery("listChannelMessages", args, { staleTime: Infinity });
+      seen.push(q.data?.[0]?.body);
+      return <p>{[q.status, q.data?.[0]?.body].join("|")}</p>;
+    }
+    const render = (client: typeof t.client) =>
+      act(() =>
+        t.root.render(
+          <VanrProvider client={client} queryClient={t.queryClient}>
+            <Messages />
+          </VanrProvider>,
+        ),
+      );
+    await render(t.client);
+    await settle();
+    expect(t.host.textContent).toBe("success|Morning! Pier test at 2pm.");
+    seen.length = 0;
+    t.server.signIn("user_sam");
+    const sam = createClient({ fetch: t.server.fetch });
+    await render(sam);
+    await settle();
+    expect(t.host.textContent).toBe("error|");
+    expect(seen).not.toContain("Morning! Pier test at 2pm.");
+    await act(() => t.root.unmount());
+    t.queryClient.clear();
+  });
+
   test("a query renders, an event refetches it, and unmounting stops the socket", async () => {
     const t = setup();
     const workspaceId = t.server.sample.workspaceId;
@@ -123,12 +159,16 @@ if (process.env.VANR_CLIENT_DOM_TEST !== "1") {
     await settle();
     expect(t.host.textContent).toBe("general,firmware,field-tests");
 
+    await t.client.api.createChannel({ workspaceId, body: { name: "handshake", visibility: "public" } });
+    await act(() => t.sockets.last.open());
+    await settle();
+    expect(t.host.textContent).toBe("general,firmware,field-tests,handshake");
+
     await act(() => create?.("tides"));
     await settle();
-    expect(t.host.textContent).toBe("general,firmware,field-tests,tides");
+    expect(t.host.textContent).toBe("general,firmware,field-tests,handshake,tides");
 
     // A channel made while the socket was down shows up after the reconnect, with no event for it.
-    t.sockets.last.open();
     t.sockets.last.drop();
     const firmware = t.server.state.channels[1];
     if (firmware) t.server.state.channels.push({ ...firmware, id: "ch_late", name: "late" });

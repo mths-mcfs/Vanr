@@ -1,12 +1,12 @@
 // Puts a client (and, optionally, a realtime connection) in reach of the hooks, and wires realtime events
 // to cache invalidation: each event refetches what the invalidation table says it made stale, and a
-// reconnect refetches everything the client cached (events sent while it was down were lost).
+// ready connection refetches what this client cached (events sent before it was ready were lost).
 import { type QueryClient, QueryClientProvider, useQueryClient } from "@tanstack/react-query";
 import { createContext, type ReactNode, useContext, useEffect, useMemo } from "react";
 import type { VanrClient } from "../client.ts";
 import type { RealtimeClient } from "../realtime/socket.ts";
 import { invalidateForEvent } from "./invalidation.ts";
-import { KEY_ROOT } from "./keys.ts";
+import { clientKey } from "./keys.ts";
 
 interface VanrContextValue {
   client: VanrClient;
@@ -37,13 +37,14 @@ export function VanrProvider({ client, realtime = null, queryClient, children }:
 
 function RealtimeBridge({ realtime }: { realtime: RealtimeClient | null }) {
   const qc = useQueryClient();
+  const { client } = useVanrContext();
   useEffect(() => {
     if (!realtime) return;
     const offEvent = realtime.onAny((event) => {
-      void invalidateForEvent(qc, event, realtime.workspaceId);
+      void invalidateForEvent(qc, event, realtime.workspaceId, client);
     });
-    const offReconnect = realtime.onReconnect(() => {
-      void qc.invalidateQueries({ queryKey: [KEY_ROOT] });
+    const offReady = realtime.onStatus((status) => {
+      if (status === "open") void qc.invalidateQueries({ queryKey: clientKey(client) });
     });
     // Started a microtask later: StrictMode mounts, unmounts and mounts again in one go, and connecting
     // right away would open a socket only to close it.
@@ -54,10 +55,10 @@ function RealtimeBridge({ realtime }: { realtime: RealtimeClient | null }) {
     return () => {
       live = false;
       offEvent();
-      offReconnect();
+      offReady();
       realtime.stop();
     };
-  }, [qc, realtime]);
+  }, [qc, realtime, client]);
   return null;
 }
 

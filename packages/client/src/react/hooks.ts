@@ -44,7 +44,7 @@ export function useApiQuery<K extends MethodName>(
   return useQuery({
     retry: shouldRetry,
     ...options,
-    queryKey: queryKey(method, args),
+    queryKey: queryKey(client, method, args),
     queryFn: ({ signal }) => client.call(method, args, { signal }),
   });
 }
@@ -69,7 +69,7 @@ export function useApiMutation<K extends MethodName>(method: K, options: ApiMuta
       const [result, args] = params;
       if (invalidates) {
         await Promise.all(
-          invalidates(args, result).map((p) => qc.invalidateQueries({ queryKey: prefixKey(p) })),
+          invalidates(args, result).map((p) => qc.invalidateQueries({ queryKey: prefixKey(client, p) })),
         );
       }
       await onSuccess?.(...params);

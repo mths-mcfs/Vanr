@@ -85,7 +85,7 @@ class Builder<P extends string, B, Q, R> implements Endpoint<P, B, Q, R> {
   bytes(): Builder<P, Blob, Q, R> {
     return new Builder<P, Blob, Q, R>(this.verb, this.path, this.reply, "bytes", this.nullOn);
   }
-  /** Takes optional query-string parameters. */
+  /** Takes query-string parameters, required when any field is required. */
   query<NQ extends { [K in keyof NQ]: QueryValue }>(): Builder<P, B, NQ, R> {
     return new Builder<P, B, NQ, R>(this.verb, this.path, this.reply, this.send, this.nullOn);
   }
@@ -123,7 +123,7 @@ export function endpoint<P extends string, R>(
 }
 
 type BodyArg<B> = [B] extends [never] ? Empty : { body: B };
-type QueryArg<Q> = [Q] extends [never] ? Empty : { query?: Q };
+type QueryArg<Q> = [Q] extends [never] ? Empty : Empty extends Q ? { query?: Q } : { query: Q };
 
 export type CallArgs<E> =
   E extends Endpoint<infer P, infer B, infer Q, infer _R>
