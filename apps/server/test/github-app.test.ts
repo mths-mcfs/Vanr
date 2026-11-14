@@ -293,4 +293,13 @@ describe("GitHub App installation", () => {
     ).toContain("victim/private");
     expect(repoRefusal(allowed, "fork_repository", { owner: "acme", repo: "site" })).not.toBeNull();
   });
+
+  test("restricted issue reads only permit methods confined to the named repository", () => {
+    const args = { owner: "acme", repo: "site", issue_number: 1 };
+    for (const method of ["get", "get_sub_issues", "get_parent"])
+      expect(repoRefusal(["acme/site"], "issue_read", { ...args, method })).not.toBeNull();
+    for (const method of ["get_comments", "get_labels"])
+      expect(repoRefusal(["acme/site"], "issue_read", { ...args, method })).toBeNull();
+    expect(repoRefusal([], "issue_read", { ...args, method: "get_parent" })).toBeNull();
+  });
 });

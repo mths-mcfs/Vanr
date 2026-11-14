@@ -45,6 +45,9 @@ const SEARCH_TOOLS = new Set(["search_code", "search_issues", "search_pull_reque
 const repoArgs = z.object({ owner: z.string().min(1), repo: z.string().min(1) });
 
 function repoTargets(tool: string, args: Record<string, unknown>): string[] {
+  // Issue details also enrich the response with parent and closing-PR references from other repositories.
+  if (tool === "issue_read" && args.method !== "get_comments" && args.method !== "get_labels")
+    return ["(issue relations may cross repositories)"];
   if (REPO_TOOLS.has(tool)) {
     const parsed = repoArgs.safeParse(args);
     if (!parsed.success) return [];

@@ -570,6 +570,24 @@ test(
 );
 
 test(
+  "automatic token refresh during consent preserves a valid step-up",
+  async () => {
+    const back = await begin();
+    await finish(back);
+    const row = await connection(back.serverId);
+    advance(40_000);
+    await requestScope(server.deps, row, "create_item", "items:write");
+    const next = await stepUp(row.id);
+    const before = refreshes().length;
+    await (await mcpFor(server.deps, row)).listTools();
+    expect(refreshes().length).toBe(before + 1);
+    expect(await finish(next)).toContain("connected=");
+    expect((await connection(row.id)).scopeRequest).toBeNull();
+  },
+  SERVER_TEST_MS,
+);
+
+test(
   "step-up and catalog OAuth use header-only resource discovery",
   async () => {
     const remote = startFakeMcp({ issuerPath: "/tenant" });

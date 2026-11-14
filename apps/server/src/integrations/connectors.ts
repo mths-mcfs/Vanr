@@ -58,7 +58,12 @@ const oauthTokens = z.object({
 
 const connSecret = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("api_key"), apiKey: z.string() }),
-  z.object({ kind: z.literal("oauth"), tokens: oauthTokens }),
+  z.object({
+    kind: z.literal("oauth"),
+    tokens: oauthTokens,
+    /** Consent identity survives token refresh; absent on credentials written before it was tracked. */
+    authorizationId: z.string().min(1).optional(),
+  }),
   z.object({ kind: z.literal("none") }),
 ]);
 type ConnSecret = z.infer<typeof connSecret>;
@@ -300,7 +305,7 @@ async function liveSecret(deps: AppDeps, row: ConnectionRow): Promise<ConnSecret
     if (current.kind !== "oauth" || !needsRefresh(current.tokens, deps.now())) return current;
     const tokens = await freshTokens(deps.fetchExternal, current.tokens, deps.now()).catch(() => null);
     if (!tokens) throw new McpAuthRequired(null);
-    const next: ConnSecret = { kind: "oauth", tokens };
+    const next: ConnSecret = { ...current, tokens };
     await tx
       .update(connections)
       .set({ secret: sealJson(deps, next), updatedAt: deps.now() })
@@ -656,13 +661,22 @@ export async function finishOAuth(
       },
       deps.now(),
     );
-    const secret: ConnSecret = { kind: "oauth", tokens };
+    const secret: ConnSecret = { kind: "oauth", tokens, authorizationId: randomId(16) };
     received.push(...secretsOf(secret));
-    // The exchange took a while: the connection is read again under its row lock and only written if it is
-    // still as the start left it. Revoked or deleted meanwhile, the token received is dropped.
+    // Recheck consent under the lock. A token refresh preserves it; revocation or a newer consent does not.
     const active = await deps.db.transaction(async (tx) => {
       const [locked] = await tx.select().from(connections).where(eq(connections.id, row.id)).for("update");
-      if (!locked || locked.revokedAt || locked.secret !== s.credential) return null;
+      if (!locked || locked.revokedAt) return null;
+      if (locked.secret !== s.credential) {
+        const started = s.credential ? openSecret(deps, s.credential) : null;
+        const current = locked.secret ? openSecret(deps, locked.secret) : null;
+        if (
+          started?.kind !== "oauth" ||
+          current?.kind !== "oauth" ||
+          started.authorizationId !== current.authorizationId
+        )
+          return null;
+      }
       const granted =
         locked.scopeRequest !== null && !widens(locked.scopeRequest.scope, tokens.scope ?? null);
       const [written] = await tx
