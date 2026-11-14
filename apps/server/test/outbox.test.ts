@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { createSealer } from "@vanr/engine/seal";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { channelInWorkspace } from "../src/channels";
 import type { AppDeps, WorkspaceMember } from "../src/context";
 import type { ToolContext } from "../src/forward-types";
@@ -211,6 +211,64 @@ describe("a queued send and its receipt", () => {
 });
 
 describe("a post with an undo window", () => {
+  test(
+    "a published post stays sent if its receipt can't be retargeted; the next pass repairs it without reposting",
+    async () => {
+      const t = await team();
+      const row = await queuePost(t, "already published");
+      await server.deps.db.execute(sql`CREATE FUNCTION fail_retarget() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.target->>'type' = 'message' THEN RAISE EXCEPTION 'retarget failed'; END IF; RETURN NEW; END $$`);
+      await server.deps.db.execute(sql`CREATE TRIGGER fail_retarget BEFORE UPDATE ON reversible_actions
+        FOR EACH ROW EXECUTE FUNCTION fail_retarget()`);
+      try {
+        later();
+        expect(await deliverDue(server.deps)).toBe(1);
+        expect(await rowOf(row.id)).toMatchObject({ status: "sent", sentAt: clock });
+        expect((await actionOf(row.id))?.params.failed).toBeUndefined();
+      } finally {
+        await server.deps.db.execute(sql`DROP TRIGGER fail_retarget ON reversible_actions`);
+        await server.deps.db.execute(sql`DROP FUNCTION fail_retarget()`);
+      }
+      expect(await deliverDue(server.deps)).toBe(0);
+      const posted = await server.deps.db.select().from(messages).where(eq(messages.channelId, t.sales));
+      expect(posted).toHaveLength(1);
+      const [message] = posted;
+      if (!message) throw new Error("not posted");
+      expect((await actionOf(row.id))?.target).toEqual({
+        type: "message",
+        id: message.id,
+        title: "#sales",
+      });
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a postMessage failure after insertion keeps the published message and its retractable receipt",
+    async () => {
+      const t = await team();
+      const row = await queuePost(t, "notification failed");
+      const hub = new Proxy(server.deps.hub, {
+        get(target, prop) {
+          if (prop === "toUser")
+            return () => {
+              throw new Error("notification failed");
+            };
+          return Reflect.get(target, prop, target);
+        },
+      });
+      later();
+      expect(await deliverDue({ ...server.deps, hub })).toBe(1);
+      expect(await deliverDue(server.deps)).toBe(0);
+      const posted = await server.deps.db.select().from(messages).where(eq(messages.channelId, t.sales));
+      expect(posted).toHaveLength(1);
+      expect(await rowOf(row.id)).toMatchObject({ status: "sent", sentAt: clock });
+      expect((await actionOf(row.id))?.params.failed).toBeUndefined();
+      expect((await actionOf(row.id))?.target).toMatchObject({ type: "message", id: posted[0]?.id });
+    },
+    SERVER_TEST_MS,
+  );
+
   test(
     "it goes out once when the deadline passes, by the agent, and the receipt then points at the message",
     async () => {
@@ -513,6 +571,46 @@ describe("an email with an undo window", () => {
       expect((await rowOf(row.id))?.status).toBe("failed");
       expect(await t.reserved()).toBe(0);
       expect(String((await actionOf(row.id))?.params.failed)).toContain("no longer available");
+    },
+    SERVER_TEST_MS,
+  );
+
+  test.each(["read", "send disabled"] as const)(
+    "revoking send permission during the window (%s) blocks SMTP and refunds the reservation",
+    async (change) => {
+      const t = await mailbox();
+      mail.sent.length = 0;
+      const row = await t.queueMail();
+      if (change === "read")
+        await setAgentMailbox(server.deps, t.workspaceId, t.agentId, t.account, { level: "read" });
+      else
+        await server.deps.db
+          .update(schema.mailConnections)
+          .set({ disabledActions: ["send"] })
+          .where(eq(schema.mailConnections.id, t.account.id));
+      later();
+      expect(await deliverDue(server.deps)).toBe(0);
+      expect(mail.sent).toEqual([]);
+      expect((await rowOf(row.id))?.status).toBe("failed");
+      expect(await t.reserved()).toBe(0);
+      expect((await actionOf(row.id))?.params.failed).toEqual(expect.any(String));
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "archiving the agent during the window blocks SMTP, fails the receipt and refunds the reservation",
+    async () => {
+      const t = await mailbox();
+      mail.sent.length = 0;
+      const row = await t.queueMail();
+      await server.deps.db.update(agents).set({ archivedAt: clock }).where(eq(agents.id, t.agentId));
+      later();
+      expect(await deliverDue(server.deps)).toBe(0);
+      expect(mail.sent).toEqual([]);
+      expect((await rowOf(row.id))?.status).toBe("failed");
+      expect(await t.reserved()).toBe(0);
+      expect((await actionOf(row.id))?.params.failed).toEqual(expect.any(String));
     },
     SERVER_TEST_MS,
   );

@@ -6,8 +6,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Memory, MemoryReview, Message, Reminder } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
-import { MEMORY_ITEM_MAX_BYTES, MEMORY_STORE_MAX_ITEMS } from "@vanr/engine/memory";
-import { and, eq } from "drizzle-orm";
+import { contentSha256, MEMORY_ITEM_MAX_BYTES, MEMORY_STORE_MAX_ITEMS } from "@vanr/engine/memory";
+import { and, eq, sql } from "drizzle-orm";
 import { createMemory } from "../src/agent-memory";
 import { channelInWorkspace } from "../src/channels";
 import { queueMemoryReview } from "../src/memory-reviews";
@@ -222,6 +222,42 @@ describe("who may call", () => {
 
 describe("size limits, rejected before anything is written", () => {
   test(
+    "editing a file preserves indentation and trailing newlines; short notes still trim whitespace",
+    async () => {
+      const t = await team();
+      const file = await ok<Memory>(
+        call(t.ana, t.workspaceId, "POST", "/memories", {
+          scope: "person",
+          path: "code.md",
+          text: "before",
+        }),
+        201,
+      );
+      const text = "    after\n    code\n\n";
+      const patched = await ok<Memory>(
+        call(t.ana, t.workspaceId, "PATCH", `/memories/${file.id}`, {
+          text,
+          expectedSha256: file.sha256,
+        }),
+      );
+      expect(patched).toMatchObject({ text, sha256: contentSha256(text) });
+      const stored = await ok<{ memories: Memory[] }>(call(t.ana, t.workspaceId, "GET", "/memories/mine"));
+      expect(stored.memories.find((m) => m.id === file.id)?.text).toBe(text);
+      const note = await noteOf(t, t.lia);
+      expect(
+        (
+          await ok<Memory>(
+            call(t.ana, t.workspaceId, "PATCH", `/memories/${note.id}`, {
+              text: "  note\n",
+            }),
+          )
+        ).text,
+      ).toBe("note");
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "a store file, a short note, a reason: one past the limit is a 400 and nothing changes",
     async () => {
       const t = await team();
@@ -354,6 +390,52 @@ describe("feedback on an answer", () => {
     });
     return message;
   }
+
+  test.each(["insert", "thread update"] as const)(
+    "feedback keeps its lesson exactly when the message was persisted despite a failing %s",
+    async (failure) => {
+      const t = await team();
+      const reply = await answer(t, t.general);
+      const condition =
+        failure === "insert" ? sql`NEW.thread_id IS NOT NULL` : sql`NEW.reply_count > OLD.reply_count`;
+      await server.deps.db.execute(sql`CREATE FUNCTION fail_feedback() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF ${condition} THEN RAISE EXCEPTION 'feedback write failed'; END IF; RETURN NEW; END $$`);
+      await server.deps.db.execute(sql`CREATE TRIGGER fail_feedback BEFORE ${sql.raw(failure === "insert" ? "INSERT" : "UPDATE")}
+        ON messages FOR EACH ROW EXECUTE FUNCTION fail_feedback()`);
+      try {
+        const res = await call(t.caio, t.workspaceId, "POST", `/messages/${reply.id}/feedback`, {
+          body: "It's 7 days.",
+        });
+        const posts = await server.deps.db
+          .select()
+          .from(schema.messages)
+          .where(eq(schema.messages.threadId, reply.id));
+        const lessons = await server.deps.db
+          .select()
+          .from(schema.memories)
+          .where(eq(schema.memories.agentId, t.lia));
+        expect(res.status).toBe(failure === "insert" ? 500 : 201);
+        expect(posts).toHaveLength(failure === "insert" ? 0 : 1);
+        expect(lessons).toHaveLength(posts.length);
+        if (failure === "thread update") {
+          expect(res.json).toMatchObject({
+            id: posts[0]?.id,
+            body: "It's 7 days.",
+            memories: [{ id: lessons[0]?.id }],
+          });
+          expect(lessons[0]).toMatchObject({
+            kind: "lesson",
+            source: "feedback",
+            originMessageId: posts[0]?.id,
+          });
+        }
+      } finally {
+        await server.deps.db.execute(sql`DROP TRIGGER fail_feedback ON messages`);
+        await server.deps.db.execute(sql`DROP FUNCTION fail_feedback()`);
+      }
+    },
+    SERVER_TEST_MS,
+  );
 
   test(
     "it goes into the answer's thread and becomes a lesson of the agent, with its origin",

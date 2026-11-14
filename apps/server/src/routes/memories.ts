@@ -242,9 +242,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       z
         .object({
           // The same cap as feedback (4000) on short notes; a file goes up to 100 kB.
-          text: z
-            .string()
-            .trim()
+          text: (row.path ? z.string() : z.string().trim())
             .min(1)
             .max(row.path ? MEMORY_ITEM_MAX_BYTES : MEMORY_NOTE_MAX)
             .optional(),
@@ -400,6 +398,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       },
       { author: person(me), reason: "feedback" },
     );
+    const clientId = `feedback:${target.id}:${newId("fb")}`;
     let messageId: string;
     try {
       const { message } = await postMessage(deps, {
@@ -407,14 +406,30 @@ export function registerMemories(app: Hono<AppEnv>) {
         channel: await writableChannel(db, viewer),
         author: { type: "person", id: me.userId },
         body: input.body,
-        clientId: `feedback:${target.id}:${newId("fb")}`,
+        clientId,
         threadId: target.threadId ?? target.id,
         meta: { feedback: { messageId: target.id, agentId: target.authorId } },
       });
       messageId = message.id;
     } catch (err) {
-      await db.delete(memories).where(eq(memories.id, lesson.id));
-      throw err;
+      // postMessage may reject after inserting and publishing. Only compensate an absent message.
+      const [posted] = await db
+        .select({ id: schema.messages.id })
+        .from(schema.messages)
+        .where(
+          and(
+            eq(schema.messages.workspaceId, me.workspaceId),
+            eq(schema.messages.channelId, channel.id),
+            eq(schema.messages.authorKind, "person"),
+            eq(schema.messages.authorId, me.userId),
+            eq(schema.messages.clientId, clientId),
+          ),
+        );
+      if (!posted) {
+        await db.delete(memories).where(eq(memories.id, lesson.id));
+        throw err;
+      }
+      messageId = posted.id;
     }
     const [mem] = await db
       .update(memories)
