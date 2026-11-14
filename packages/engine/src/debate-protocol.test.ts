@@ -86,6 +86,18 @@ describe("claim", () => {
     }
   });
 
+  test("quotes in the argument do not hide the final JSON", () => {
+    const body = 'A tela mede 27".';
+    const claim = { answer: "SQLite", confidence: 0.8, reason: "", evidence: [] };
+    for (const fenced of [false, true]) {
+      const json = JSON.stringify(claim);
+      const text = `${body}\n${fenced ? `\`\`\`json\n${json}\n\`\`\`` : json}`;
+      const { argument, position } = parsePosition(text, ["Postgres", "SQLite"]);
+      expect(argument).toBe(body);
+      expect(position).toEqual({ ...claim, key: "option:1" });
+    }
+  });
+
   test("normalizes numbers, accents and punctuation", () => {
     expect(normalizeAnswer("42.0")).toBe("42");
     expect(normalizeAnswer(" 1,000 ")).toBe("1000");
@@ -107,6 +119,13 @@ describe("claim", () => {
     // No answer, no vote: the key stays empty, with or without options.
     expect(answerKey("  ", opts)).toBe("");
     expect(answerKey("", [])).toBe("");
+  });
+
+  test("a mentioned option is not a prefix or unsigned part of another number or name", () => {
+    expect(answerKey("Escolho 1.5", ["1", "1.5", "2"])).toBe("option:1");
+    expect(answerKey("Escolho -1", ["1", "2"])).toBe("other:escolho -1");
+    expect(answerKey("Escolho 1,5", ["1", "2"])).toBe("other:escolho 1,5");
+    expect(answerKey("Escolho Node.js", ["Node", "Node.js"])).toBe("option:1");
   });
 });
 
