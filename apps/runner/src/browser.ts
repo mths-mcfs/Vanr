@@ -8,6 +8,8 @@ export interface BrowserDriver {
     agent: AgentRef,
     args: unknown,
     send: (frame: RunnerFrame) => boolean,
+    /** The request's: aborted (canceled, the connection dropped), the op stops what it still can. */
+    signal?: AbortSignal,
   ): Promise<unknown>;
   close(): Promise<void>;
 }

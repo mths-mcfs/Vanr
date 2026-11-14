@@ -8,6 +8,7 @@ import { extractPending, STORAGE_BACKOFF, STORAGE_GAVE_UP } from "../src/drive-e
 import { saveStorage } from "../src/integrations/storage";
 import type { RunningServer } from "../src/server";
 import { type FakeS3, startFakeS3 } from "./fake-s3";
+import { makePng } from "./files";
 import { body, signedIn, startTestServer } from "./harness";
 import { type Person, seedWorkspace } from "./seed";
 
@@ -117,7 +118,7 @@ describe("the extraction queue during an outage", () => {
       }
       const v = await versionOf(big.id);
       expect(v).toMatchObject({ extractStatus: "working", extractAttempts: 0 });
-      expect(v.extractError).toMatch(/^storage unavailable \(wait \d\)$/);
+      expect(v.extractError).toMatch(/^storage unavailable since \S+; wait \d$/);
       // Not claimed again right away.
       expect(
         (await extractPending(server.deps, { batch: 50 }).then(() => versionOf(big.id))).extractAttempts,
@@ -156,7 +157,8 @@ describe("the extraction queue during an outage", () => {
       expect(waits.slice(0, 8)).toEqual([1, 2, 4, 8, 16, 32, 60, 60]);
       expect(Math.max(...waits)).toBe(60);
       const total = waits.reduce((a, b) => a + b, 0);
-      expect(total).toBeGreaterThanOrEqual(24 * 60 - 60);
+      // Marked only once 24 h have gone by (the waits are the time elapsed), not before.
+      expect(total).toBeGreaterThanOrEqual(24 * 60);
       expect(total).toBeLessThanOrEqual(24 * 60 + 60);
       expect(await versionOf(big.id)).toMatchObject({
         extractStatus: "failed",
@@ -189,4 +191,134 @@ describe("the extraction queue during an outage", () => {
     await extractPending(server.deps, { batch: 50 });
     expect(await versionOf(broken.id)).toMatchObject({ extractStatus: "failed", extractAttempts: 1 });
   });
+});
+
+/** The version's row as it is now. */
+async function rowOf(fileId: string) {
+  const [v] = await server.deps.db
+    .select()
+    .from(schema.fileVersions)
+    .where(eq(schema.fileVersions.fileId, fileId));
+  if (!v) throw new Error("no version");
+  return v;
+}
+
+describe("the 24 h are time gone by, by the injected clock", () => {
+  const sinceOf = (reason: string | null) => Date.parse(/since (\S+);/.exec(reason ?? "")?.[1] ?? "");
+  /** Moves the clock to `at` and makes the version due again (its wait is not what is under test here). */
+  const at = async (fileId: string, when: number) => {
+    skew = when - Date.now();
+    await server.deps.db
+      .update(schema.fileVersions)
+      .set({ extractClaimedAt: new Date(when - 11 * 60_000) })
+      .where(eq(schema.fileVersions.fileId, fileId));
+  };
+
+  test("23 h 59 min after the first failure it still waits; at 24 h 01 min it is marked", async () => {
+    const { workspaceId, ana } = await team();
+    const big = await uploaded(ana, workspaceId, "b".repeat(2 * 1024 * 1024 + 1), "border.txt");
+    failing(objectGet, getFails["500"] as () => Response);
+    try {
+      await extractPending(server.deps, { batch: 50 });
+      const first = await rowOf(big.id);
+      const since = sinceOf(first.extractError);
+      expect(Number.isFinite(since)).toBe(true);
+      await at(big.id, since + 23 * 3_600_000 + 59 * 60_000);
+      await extractPending(server.deps, { batch: 50 });
+      const before = await rowOf(big.id);
+      expect(before).toMatchObject({ extractStatus: "working", extractAttempts: 0 });
+      expect(sinceOf(before.extractError)).toBe(since);
+      await at(big.id, since + 24 * 3_600_000 + 60_000);
+      await extractPending(server.deps, { batch: 50 });
+      expect(await rowOf(big.id)).toMatchObject({
+        extractStatus: "failed",
+        extractError: STORAGE_GAVE_UP,
+      });
+    } finally {
+      s3.override = null;
+      skew = 0;
+    }
+  });
+
+  test("a clock that goes back neither marks it nor resets the outage's start", async () => {
+    const { workspaceId, ana } = await team();
+    const big = await uploaded(ana, workspaceId, "c".repeat(2 * 1024 * 1024 + 1), "clock.txt");
+    failing(objectGet, getFails["500"] as () => Response);
+    try {
+      await extractPending(server.deps, { batch: 50 });
+      const since = sinceOf((await rowOf(big.id)).extractError);
+      for (const when of [since - 3 * 3_600_000, since - 30 * 3_600_000, since + 23 * 3_600_000]) {
+        await at(big.id, when);
+        await extractPending(server.deps, { batch: 50 });
+        const v = await rowOf(big.id);
+        expect([when - since, v.extractStatus]).toEqual([when - since, "working"]);
+        expect(sinceOf(v.extractError)).toBe(since);
+      }
+    } finally {
+      s3.override = null;
+      skew = 0;
+    }
+  });
+});
+
+describe("two passes on one version after its claim went stale", () => {
+  /** Holds each thumbnail write of this file right after its bytes are stored, until the test releases it. */
+  function holdThumbnails(fileId: string) {
+    const blobs = server.deps.blobs;
+    const put = blobs.put.bind(blobs);
+    const held: { key: string; release: () => void }[] = [];
+    const waiters: (() => void)[] = [];
+    blobs.put = async (key, data, type) => {
+      await put(key, data, type);
+      if (!key.includes(fileId) || !/\.thumb-[a-z0-9]+\.webp$/.test(key)) return;
+      await new Promise<void>((release) => {
+        held.push({ key, release });
+        waiters.shift()?.();
+      });
+    };
+    const next = (count: number) =>
+      held.length >= count ? Promise.resolve() : new Promise<void>((r) => waiters.push(r));
+    return { held, next, restore: () => (blobs.put = put) };
+  }
+  const thumbsInBucket = (fileId: string) =>
+    [...s3.objects.keys()].filter((k) => k.includes(fileId) && k.includes(".thumb-"));
+
+  for (const order of ["the second finishes first", "the first finishes first"] as const)
+    test(`only the current claim records its result and removes blobs: ${order}`, async () => {
+      const { workspaceId, ana } = await team();
+      const img = await uploaded(ana, workspaceId, await makePng(300, 200), "photo.png");
+      const hold = holdThumbnails(img.id);
+      try {
+        const first = extractPending(server.deps, { batch: 50 });
+        await hold.next(1);
+        // The first claim goes stale; a second pass takes the version.
+        skew += 11 * 60_000;
+        const second = extractPending(server.deps, { batch: 50 });
+        await hold.next(2);
+        const [a, b] = hold.held;
+        if (!a || !b) throw new Error("both passes should be holding");
+        expect(a.key).not.toBe(b.key);
+        if (order === "the second finishes first") {
+          b.release();
+          await second;
+          a.release();
+          await first;
+        } else {
+          a.release();
+          await first;
+          // The first pass lost its claim: nothing recorded, only its own thumbnail removed.
+          expect(await rowOf(img.id)).toMatchObject({ extractStatus: "working", thumbKey: null });
+          b.release();
+          await second;
+        }
+        expect(await rowOf(img.id)).toMatchObject({ extractStatus: "ready", thumbKey: b.key });
+        expect(thumbsInBucket(img.id)).toEqual([expect.stringContaining(b.key)]);
+        const thumb = await ana.browser.fetch(`${W(workspaceId)}/files/${img.id}/blob?variant=thumb`);
+        expect(thumb.status).toBe(200);
+        expect(thumb.headers.get("content-type")).toBe("image/webp");
+      } finally {
+        hold.restore();
+        skew = 0;
+      }
+    });
 });

@@ -10,6 +10,7 @@ import {
   framePaths,
   INVALID,
   maskDeep,
+  NO_NEUTRAL,
   PROTOCOL_KEYS,
   serialize,
 } from "./outbound";
@@ -295,7 +296,7 @@ test("every frame type, invalid, becomes its minimal valid form or is dropped, a
     [
       "live_view.frame",
       { type: "live_view.frame", agentId: "agt_1", data: "Zm9v", width: 0.5, height: 1 },
-      "minimal",
+      "dropped",
     ],
     [
       "live_view.stream_ended",
@@ -803,7 +804,7 @@ function nodesOf(
     .map((k) => (typeof k === "number" ? "[]" : k))
     .join(".")
     .replace(/\.\[\]/g, "[]");
-  const id = `${type}:${at}` in EXEMPT_IDS;
+  const id = `${type}:${at}` in EXEMPT_IDS || NO_NEUTRAL.has(`${type}:${at}`);
   const neutral = hasNeutral(schema) && !id;
   const unit = own ?? (neutral ? path : type === "hello" && path.length ? [path[0] as Key] : null);
   if (path.length) out.push({ path, kind: d.type, unit });

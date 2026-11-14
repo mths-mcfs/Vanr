@@ -194,3 +194,35 @@ test("classifies the CLI errors", () => {
   expect(classifyHarnessError("boom", true).code).toBe("not_logged_in");
   expect(classifyHarnessError("Something else").code).toBe("harness_failed");
 });
+
+test("a turn aborted while its sandbox opens does not start the CLI", async () => {
+  const log = join(dir, `log-${++n}.jsonl`);
+  const bin = fakeCliBin(dir, `claude-${n}`, { kind: "claude", log });
+  const bins = { claude: bin, codex: "/bin/false" };
+  const controller = new AbortController();
+  // The sandbox the turn opens: the request is aborted while it opens (the connection dropped).
+  const sandbox = {
+    status: () => ({ state: "on" as const, engine: "bubblewrap" as const, reason: null }),
+    setMode: () => {},
+    wrap: async (input: { command: string }) => {
+      controller.abort();
+      return { command: input.command, blocked: () => [], release: () => {} };
+    },
+    close: async () => {},
+  };
+  const harnesses = new Harnesses({
+    home: join(dir, "home"),
+    access,
+    bins,
+    cli: new CliWatch({ bins, installed: ["claude_code"] }),
+    bridge,
+    mcpCommand: testMcpCommand(),
+    sandbox,
+    policy: defaultPolicyContext(join(dir, "home")),
+  });
+  const err = await harnesses
+    .turn(agent, args("claude_code", "hi"), { ...io(), signal: controller.signal })
+    .catch((e) => e);
+  expect(err instanceof RunnerError && err.code).toBe("canceled");
+  expect(existsSync(log)).toBe(false);
+});
