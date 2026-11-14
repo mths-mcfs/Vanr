@@ -47,7 +47,7 @@
     "apps/server/test/sql-guard-conformance.test.ts": 2949,
     "apps/server/test/sql-guard.test.ts": 2280,
     "apps/server/test/static.test.ts": 15,
-    "apps/server/test/storage-routing.test.ts": 11821,
+    "apps/server/test/storage-routing.test.ts": 9270,
     "apps/server/test/usage-ledger.test.ts": 2729,
     "apps/server/test/wiki-md.test.ts": 661,
     "apps/server/test/wiki-search.test.ts": 90,
@@ -102,6 +102,10 @@
     "packages/engine/src/wiki/props-vault.test.ts": 3,
     "packages/engine/src/work-state.test.ts": 1,
     "scripts/ci/gate.test.ts": 21,
-    "scripts/typecheck.test.ts": 10
+    "scripts/typecheck.test.ts": 10,
+    "apps/server/test/storage-race.test.ts": 6496,
+    "apps/server/test/storage-outage.test.ts": 9633,
+    "apps/server/test/extract-outage.test.ts": 9231,
+    "apps/server/test/storage-postgres.test.ts": 626
   }
 }
