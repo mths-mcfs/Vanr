@@ -265,12 +265,18 @@ export function occurrences(rule: RecurrenceRule, opts: ExpandOptions): Date[] {
   // With `count` it has to count from the beginning; without it, start one day before `from`.
   const fromDay = dayNumber(localParts(opts.from, tz)) - 1;
   const first = rule.count ? anchorDay : Math.max(anchorDay, fromDay);
+  // Times that fall in the daylight saving gap land on the same instant (the transition): one instant of the
+  // rule is one occurrence, for `count`, `until` and the next run. Instants only grow (times are sorted).
+  let last = Number.NEGATIVE_INFINITY;
   for (let day = first; day < first + MAX_DAYS; day++) {
     if (!dayMatches(rule, day, anchorDay)) continue;
     const date = fromDayNumber(day);
     let go = true;
     for (const t of times) {
-      go = push(zonedTime(date, t.hh, t.mm, tz));
+      const at = zonedTime(date, t.hh, t.mm, tz);
+      if (at.getTime() <= last) continue;
+      last = at.getTime();
+      go = push(at);
       if (!go) break;
     }
     if (!go) break;

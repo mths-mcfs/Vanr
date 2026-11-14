@@ -27,6 +27,7 @@
     "packages/engine/src/blobs-metadata.test.ts": 10,
     "packages/engine/src/notify-quiet-end.test.ts": 13,
     "packages/engine/src/recurrence-dst.test.ts": 14,
-    "packages/engine/src/recurrence-calendar.test.ts": 12
+    "packages/engine/src/recurrence-calendar.test.ts": 12,
+    "packages/engine/src/recurrence-collide.test.ts": 10
   }
 }
