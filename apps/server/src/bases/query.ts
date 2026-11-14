@@ -311,7 +311,7 @@ function groupKey(def: PropDef): SQL {
     case "number":
       return sql`(case when jsonb_typeof(${cell}) = 'number' then ${cell} #>> '{}' end)`;
     default:
-      return textOf(cell);
+      return sql`nullif(${textOf(cell)}, '')`;
   }
 }
 
