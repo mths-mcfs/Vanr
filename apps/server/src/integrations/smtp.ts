@@ -70,15 +70,16 @@ class Conn {
 
 function open(opts: SmtpOptions, socket?: Socket): Promise<Socket | TLSSocket> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new SmtpError("Mail server did not answer in time", "unreachable")),
-      opts.timeoutMs ?? 15_000,
-    );
     const s = socket
       ? tlsConnect({ socket, servername: opts.host })
       : opts.security === "tls"
         ? tlsConnect({ host: opts.address ?? opts.host, port: opts.port, servername: opts.host })
         : netConnect({ host: opts.address ?? opts.host, port: opts.port });
+    s.setTimeout(opts.timeoutMs ?? 15_000, () => s.destroy());
+    const timer = setTimeout(() => {
+      s.destroy();
+      reject(new SmtpError("Mail server did not answer in time", "unreachable"));
+    }, opts.timeoutMs ?? 15_000);
     s.once(socket || opts.security === "tls" ? "secureConnect" : "connect", () => {
       clearTimeout(timer);
       resolve(s);
@@ -106,6 +107,7 @@ export async function smtpSend(
     if (opts.security === "starttls") {
       if (!/STARTTLS/i.test(ehlo.text)) throw new SmtpError("Server does not offer STARTTLS", "protocol");
       await conn.send("STARTTLS", [220], "STARTTLS");
+      conn.socket.setTimeout(0);
       conn = new Conn(await open(opts, conn.socket as Socket));
       ehlo = await conn.send(`EHLO ${PRODUCT.slug}.local`, [250], "EHLO");
     }

@@ -126,6 +126,7 @@ export class ImapClient {
         })
         .catch((err) => {
           clearTimeout(timer);
+          socket.destroy();
           reject(err);
         });
     });
@@ -133,7 +134,13 @@ export class ImapClient {
 
   private async waitData(): Promise<void> {
     if (this.closed) throw new ImapError("Connection closed", "protocol");
-    await new Promise<void>((resolve) => this.waiters.push(resolve));
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => this.socket?.destroy(), this.opts.timeoutMs ?? 15_000);
+      this.waiters.push(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
   }
 
   private async readLine(): Promise<string> {
@@ -252,9 +259,12 @@ export class ImapClient {
   async move(uid: number, to: string): Promise<void> {
     const moved = await this.command(`UID MOVE ${uid} ${quote(to)}`);
     if (moved.status === "OK") return;
+    const capabilities = await this.ok("CAPABILITY", "CAPABILITY");
+    if (!capabilities.untagged.some(({ line }) => /^\* CAPABILITY .*\bUIDPLUS\b/i.test(line)))
+      throw new ImapError("Moving safely requires MOVE or UIDPLUS", "protocol");
     await this.ok(`UID COPY ${uid} ${quote(to)}`, "COPY");
     await this.addFlags(uid, "\\Deleted");
-    await this.ok("EXPUNGE", "EXPUNGE");
+    await this.ok(`UID EXPUNGE ${uid}`, "EXPUNGE");
   }
 
   async append(folder: string, raw: string, flags = "\\Seen"): Promise<void> {
@@ -276,11 +286,13 @@ export class ImapClient {
 
   async close(): Promise<void> {
     if (!this.socket || this.closed) return;
+    const timer = setTimeout(() => this.socket?.destroy(), 1000);
     try {
-      await Promise.race([this.command("LOGOUT"), Bun.sleep(1000)]);
+      await this.command("LOGOUT");
     } catch {
       // already closed
     }
+    clearTimeout(timer);
     this.socket.destroy();
     this.closed = true;
   }

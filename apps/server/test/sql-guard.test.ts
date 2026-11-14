@@ -14,6 +14,7 @@ beforeAll(async () => {
   await pg.exec(`
     create table customers (id int primary key, name text, ssn text);
     create index customers_ssn_idx on customers (ssn);
+    create sequence counter;
     create table orders (id int, customer_id int, total numeric);
     create schema sales;
     create table sales.targets (month int, amount numeric);
@@ -113,4 +114,20 @@ test("a function that runs SQL from text or reads the system does not pass; a pl
   ]) {
     expect({ sql, failure: await check(sql) }).toEqual({ sql, failure: null });
   }
+});
+
+test("rejects writes after recursive CTE SEARCH and CYCLE suffixes", () => {
+  const cte = "with recursive t(n) as (values(1) union all select n+1 from t where n<1)";
+  for (const tail of [
+    "search depth first by n set ord delete from orders",
+    "cycle n set cyclic using path update orders set total=20",
+  ])
+    expect(guardStatement(`${cte} ${tail}`)).toEqual({ failure: { reason: "write" } });
+});
+
+test("apostrophes in quoted aliases do not hide functions or masked columns", async () => {
+  const from = `from customers "a'" join orders b on b.customer_id="a'".id`;
+  expect((await check(`select "a'".id + nextval('counter') + "a'".id ${from}`))?.reason).toBe("function");
+  expect((await check(`select "a'".ssn || "a'".ssn ${from}`))?.reason).toBe("column");
+  expect(await check(`select "a'".name || 'ssn nextval(' ${from}`)).toBeNull();
 });

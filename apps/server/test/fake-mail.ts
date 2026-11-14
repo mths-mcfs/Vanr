@@ -102,7 +102,9 @@ function matches(msg: FakeMessage, criteria: string[]): boolean {
   return true;
 }
 
-export async function startFakeMail(): Promise<FakeMailServer> {
+export async function startFakeMail(
+  options: { move?: boolean; uidPlus?: boolean } = {},
+): Promise<FakeMailServer> {
   const user = "lia@workshop.test";
   const password = "app-password";
   const folders: FakeMailServer["folders"] = new Map([
@@ -135,6 +137,10 @@ export async function startFakeMail(): Promise<FakeMailServer> {
       if (cmd === "UID") {
         cmd = `UID ${(args[0] ?? "").toUpperCase()}`;
         args = args.slice(1);
+      }
+      if (cmd === "CAPABILITY") {
+        send(`* CAPABILITY IMAP4rev1${options.uidPlus ? " UIDPLUS" : ""}`);
+        return send(`${tag} OK capabilities`);
       }
       if (cmd === "LOGOUT") {
         send("* BYE");
@@ -195,7 +201,21 @@ export async function startFakeMail(): Promise<FakeMailServer> {
         if (msg) msg.flags = [...new Set([...msg.flags, ...flags])];
         return send(`${tag} OK stored`);
       }
+      if (cmd === "UID COPY") {
+        const msg = box.messages.find((m) => m.uid === Number(args[0]));
+        const to = folders.get(unquote(args[1] ?? ""));
+        if (!msg || !to) return send(`${tag} NO cannot copy`);
+        to.messages.push({ ...msg, uid: to.nextUid++ });
+        return send(`${tag} OK copied`);
+      }
+      if (cmd === "UID EXPUNGE" && options.uidPlus) {
+        box.messages = box.messages.filter(
+          (m) => m.uid !== Number(args[0]) || !m.flags.includes("\\Deleted"),
+        );
+        return send(`${tag} OK expunged`);
+      }
       if (cmd === "UID MOVE") {
+        if (options.move === false) return send(`${tag} BAD MOVE unavailable`);
         const at = box.messages.findIndex((m) => m.uid === Number(args[0]));
         const to = folders.get(unquote(args[1] ?? ""));
         if (at < 0 || !to) return send(`${tag} NO cannot move`);

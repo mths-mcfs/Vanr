@@ -210,6 +210,9 @@ export function guardStatement(sql: string): { statement: string } | { failure: 
     const before = code[k - 1];
     const opensCommand =
       !before || (before.kind === "punct" && (text(before) === "(" || text(before) === ")"));
+    // Conservatively reject CTE suffixes whose end is not a closing parenthesis.
+    if ((word === "search" || word === "cycle") && before?.kind === "punct" && text(before) === ")")
+      return { failure: { reason: "write" } };
     if (word === "into" || (WRITE_KEYWORDS.has(word) && opensCommand))
       return { failure: { reason: "write" } };
     if (word === "for" && isWord(code[k + 1], LOCK_KEYWORDS)) return { failure: { reason: "write" } };
@@ -287,7 +290,12 @@ function expressions(node: PlanNode): string[] {
     else if (Array.isArray(value)) for (const v of value) if (typeof v === "string") out.push(v);
   }
   // Literals read nothing: 'ssn' inside a string is not the ssn column.
-  return out.map((t) => t.replace(/'(?:[^']|'')*'/g, "''"));
+  return out.map((t) =>
+    (lex(t, true) ?? [])
+      .filter((token) => token.kind === "literal")
+      .reverse()
+      .reduce((text, token) => `${text.slice(0, token.start)}''${text.slice(token.end)}`, t),
+  );
 }
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

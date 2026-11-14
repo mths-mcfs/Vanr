@@ -36,3 +36,15 @@ describe("wiki chunks for search", () => {
     expect(wikiChunks(row("p\n\n".repeat(300_000))).length).toBeLessThanOrEqual(400);
   });
 });
+
+test("authors use the search index principal format", () => {
+  for (const type of ["person", "agent"] as const)
+    expect(wikiChunks({ ...row("Apples"), updatedBy: { type, id: "u1" } })[0]?.authorId).toBe(
+      `${type === "person" ? "user" : "agent"}:u1`,
+    );
+});
+
+test("carries a section heading from the first line", () => {
+  const chunks = wikiChunks(row(`# Topic\n\n${"a ".repeat(500)}\n\n${"b ".repeat(500)}`));
+  expect(chunks[1]?.text).toMatch(/^Topic\n+b b/);
+});
