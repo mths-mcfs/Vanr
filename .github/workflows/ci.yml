@@ -128,6 +128,49 @@ jobs:
       - run: bun test apps/server/test/messages-postgres.test.ts
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # Each queued send goes out once and is canceled or sent, never both, with passes on several connections at
+      # once. Each guard is one conditional UPDATE (no lock to take out).
+      - run: bun test apps/server/test/outbox-postgres.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # The forced claim test with the claim's condition left out by the test's own double: it must fail on the
+      # outcome the condition is for (LOCK_OUTCOME_MISMATCH), only in tests named "forced", one per label; any other
+      # failure (a timeout, a closed connection, an error between tests) proves nothing and fails this step.
+      - name: The forced outbox claim test fails without the condition
+        run: |
+          set +e
+          bun test apps/server/test/outbox-postgres.test.ts --test-name-pattern forced > forced-outbox.log 2>&1
+          status=$?
+          cat forced-outbox.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the forced outbox claim test passed without the condition"
+            exit 1
+          fi
+          for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -aqF "$broken" forced-outbox.log; then
+              echo "::error::the forced outbox claim test broke ($broken) instead of failing on its outcome"
+              exit 1
+            fi
+          done
+          if grep -a '^(fail)' forced-outbox.log | grep -avqF 'forced'; then
+            echo "::error::a test that isn't a forced one failed"
+            exit 1
+          fi
+          labels="outbox"
+          failed=$(grep -a '^(fail)' forced-outbox.log | sort -u | wc -l)
+          if [ "$failed" -ne "$(echo $labels | wc -w)" ]; then
+            echo "::error::$failed forced tests failed, expected one per label ($labels)"
+            exit 1
+          fi
+          for label in $labels; do
+            if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" forced-outbox.log; then
+              echo "::error::the forced $label test did not fail on its outcome without the condition"
+              exit 1
+            fi
+          done
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_DROP_LOCKS: "1"
       # One runner per pairing code, one open browser intervention per agent and one answer per secret request.
       - run: bun test apps/server/test/runners-postgres.test.ts
         env:
