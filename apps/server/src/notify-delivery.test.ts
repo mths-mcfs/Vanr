@@ -7,7 +7,7 @@ import { DEFAULT_SETTINGS } from "@vanr/engine/notify-rules";
 import { eq } from "drizzle-orm";
 import { SERVER_TEST_MS, startTestServer } from "../test/harness";
 import { resendMailer } from "./mailer";
-import { drainDeliveries } from "./notify-delivery";
+import { drainDeliveries, scheduleDeliveries } from "./notify-delivery";
 import type { RunningServer } from "./server";
 
 const S = schema;
@@ -143,5 +143,129 @@ describe("email delivery of a notification", () => {
     expect(await drainDeliveries(server.deps)).toBe(0);
     expect(await row()).toMatchObject({ status: "failed", attempts: 3, note: "email_http_429" });
     expect(requests).toBe(3);
+  });
+});
+
+/**
+ * A double of Resend's idempotency contract: an accepted key is kept with its body; the same key and body
+ * answer the first response without sending again, the same key with another body answers 409
+ * `invalid_idempotent_request`. The first accepted request loses its response on the way back.
+ */
+function resendWithKeys() {
+  const kept = new Map<string, string>();
+  const sentBodies: string[] = [];
+  const keys: string[] = [];
+  let lose = true;
+  const fetchFn: typeof fetch = Object.assign(
+    async (_url: string | URL | Request, init?: RequestInit) => {
+      const key = new Headers(init?.headers).get("idempotency-key") ?? "";
+      keys.push(key);
+      const body = String(init?.body);
+      const old = kept.get(key);
+      if (old !== undefined)
+        return old === body
+          ? Response.json({ id: "first" })
+          : Response.json({ name: "invalid_idempotent_request" }, { status: 409 });
+      kept.set(key, body);
+      sentBodies.push(body);
+      if (lose) {
+        lose = false;
+        throw new DOMException("accepted, but the response was lost", "TimeoutError");
+      }
+      return Response.json({ id: String(sentBodies.length) });
+    },
+    { preconnect: () => {} },
+  );
+  return {
+    fetchFn,
+    sentBodies,
+    keys,
+    loseNone: () => {
+      lose = false;
+    },
+  };
+}
+
+describe("email delivery against the provider's idempotency keys", () => {
+  test("the notice changed after an accepted attempt whose answer was lost: sent once, and rescheduling sends nothing more", async () => {
+    const provider = resendWithKeys();
+    const mailer = server.deps.mailer;
+    server.deps.mailer = resendMailer("k", "n@example.com", { fetch: provider.fetchFn });
+    try {
+      expect(await drainDeliveries(server.deps)).toBe(0);
+      expect(await row()).toMatchObject({ status: "pending", note: "email_timeout" });
+      // The author and the text of the notice change before the retry: the email would be another body.
+      const [d] = await server.deps.db
+        .select()
+        .from(S.notificationDeliveries)
+        .where(eq(S.notificationDeliveries.id, delivery));
+      await server.deps.db
+        .update(S.notifications)
+        .set({ source: { label: "Bia" }, latest: { text: "updated" } })
+        .where(eq(S.notifications.id, d?.notificationId ?? ""));
+      clock = later(2);
+      await drainDeliveries(server.deps);
+      expect(await row()).toMatchObject({ status: "sent", attempts: 2, note: "email_already_accepted" });
+      const [notice] = await server.deps.db
+        .select()
+        .from(S.notifications)
+        .where(eq(S.notifications.id, d?.notificationId ?? ""));
+      if (!notice) throw new Error("no notification");
+      await scheduleDeliveries(server.deps, notice);
+      await server.deps.runtime.settle();
+      clock = later(5);
+      await drainDeliveries(server.deps);
+      expect(provider.sentBodies.length).toBe(1);
+    } finally {
+      server.deps.mailer = mailer;
+    }
+  });
+
+  const hours = (h: number, m = 0) => (h * 60 + m) * 60_000;
+
+  for (const [age, resent] of [
+    [hours(22, 59), true],
+    [hours(23, 1), false],
+  ] as const) {
+    test(`a retry ${resent ? "22 h 59 min" : "23 h 01 min"} after the delivery was created ${resent ? "goes out with the same key" : "ends email_outcome_unknown without calling the provider"}`, async () => {
+      const provider = resendWithKeys();
+      const mailer = server.deps.mailer;
+      server.deps.mailer = resendMailer("k", "n@example.com", { fetch: provider.fetchFn });
+      const created = clock;
+      try {
+        expect(await drainDeliveries(server.deps)).toBe(0);
+        expect(await row()).toMatchObject({ status: "pending", attempts: 1, note: "email_timeout" });
+        clock = new Date(created.getTime() + age);
+        await drainDeliveries(server.deps);
+        if (resent) {
+          expect(await row()).toMatchObject({ status: "sent", attempts: 2 });
+          expect(provider.keys).toEqual([
+            `notification-delivery/${delivery}`,
+            `notification-delivery/${delivery}`,
+          ]);
+        } else {
+          expect(await row()).toMatchObject({ status: "failed", attempts: 2, note: "email_outcome_unknown" });
+          expect(provider.keys).toEqual([`notification-delivery/${delivery}`]);
+        }
+        expect(provider.sentBodies.length).toBe(1);
+      } finally {
+        server.deps.mailer = mailer;
+      }
+    });
+  }
+
+  test("a first attempt 30 h after the delivery was created (postponed) goes out", async () => {
+    const provider = resendWithKeys();
+    provider.loseNone();
+    const mailer = server.deps.mailer;
+    server.deps.mailer = resendMailer("k", "n@example.com", { fetch: provider.fetchFn });
+    try {
+      clock = new Date(clock.getTime() + hours(30));
+      expect(await drainDeliveries(server.deps)).toBe(1);
+      expect(await row()).toMatchObject({ status: "sent", attempts: 1 });
+      expect(provider.keys).toEqual([`notification-delivery/${delivery}`]);
+    } finally {
+      server.deps.mailer = mailer;
+    }
   });
 });

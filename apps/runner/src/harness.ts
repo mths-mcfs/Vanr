@@ -442,6 +442,11 @@ export class Harnesses {
     const { io } = input;
     if (io.signal.aborted) throw new RunnerError("canceled", "Canceled");
     const wrapped = await sandboxed(this.opts, { ...input.box, command: shellLine(input.cmd, input.argv) });
+    // Aborted while the sandbox opened: the CLI does not start.
+    if (io.signal.aborted) {
+      wrapped?.release();
+      throw new RunnerError("canceled", "Canceled");
+    }
     return new Promise<HarnessTurnResult>((resolve, reject) => {
       const child = spawn(wrapped ? "/bin/sh" : input.cmd, wrapped ? ["-c", wrapped.command] : input.argv, {
         cwd: input.cwd,
