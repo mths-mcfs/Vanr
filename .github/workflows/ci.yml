@@ -171,8 +171,8 @@ jobs:
               exit 1
             fi
           done
-          labels="issue-number issue-move issue-place consolidation-apply"
-          for label in $labels; do
+          set -- issue-number issue-move issue-place consolidation-apply
+          for label in "$@"; do
             if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" forced-issues.log; then
               echo "::error::the forced $label test did not fail on its outcome without the lock"
               exit 1
@@ -186,8 +186,8 @@ jobs:
             exit 1
           fi
           count=$(printf '%s\n' "$failed" | grep -c .)
-          if [ "$count" -ne "$(echo $labels | wc -w)" ]; then
-            echo "::error::$count distinct forced tests failed without the locks, expected $(echo $labels | wc -w)"
+          if [ "$count" -ne "$#" ]; then
+            echo "::error::$count distinct forced tests failed without the locks, expected $#"
             exit 1
           fi
         env:
