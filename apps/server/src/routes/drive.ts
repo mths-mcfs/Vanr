@@ -365,7 +365,7 @@ export function registerDrive(app: Hono<AppEnv>) {
       "Content-Disposition": `${q.format === "download" ? "attachment" : "inline"}; filename*=UTF-8''${name}`,
       "X-Content-Type-Options": "nosniff",
       "Accept-Ranges": "bytes",
-      "Cache-Control": q.version ? "private, max-age=31536000, immutable" : "private, no-cache",
+      "Cache-Control": "private, no-cache",
     };
     // HTML, SVG and whatever the bytes don't confirm don't run a script on the app's origin.
     if (!isSafeInline(type)) headers["Content-Security-Policy"] = "sandbox; default-src 'none'";

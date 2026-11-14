@@ -10,6 +10,8 @@ import { createAuth, type SignupDecision } from "./auth";
 import { resumeRecalcs, stopRecalcs } from "./bases/write";
 import type { Config } from "./config";
 import type { AppDeps, RuntimePort } from "./context";
+import { purgeTrash } from "./drive";
+import { extractPending } from "./drive-extract";
 import { HttpError } from "./http";
 import { holdInstanceLock } from "./instance-lock";
 import { guardedFetch } from "./integrations/net";
@@ -20,9 +22,10 @@ import { testModelCheck } from "./models";
 import { loadVapid, webPushSender } from "./push";
 import { Hub } from "./realtime/hub";
 import { isTransfer, TRANSFER_IDLE_SECONDS } from "./routes/drive";
+import { expireUploads } from "./routes/drive-upload";
 import { RunnerHub } from "./runners/hub";
 import { BackgroundWork } from "./runtime/background";
-import { createSearchIndex } from "./search-index";
+import { backfillSearch, createSearchIndex, searchTick } from "./search-index";
 import { FirstUserPlace, SIGNUP_QUEUE_LIMITS, type SignupQueueLimits, signupDecision } from "./signup-queue";
 import { postgresLedger } from "./usage-ledger";
 
@@ -46,6 +49,8 @@ interface StartOptions {
   idleTimeoutSeconds?: number;
   /** Tests: replaces a step of the boot that touches the outside, to break it or hold it. */
   steps?: Partial<BootSteps>;
+  /** Tests: shorten the interval between file service cycles. */
+  fileServicesMs?: number;
 }
 
 /** The boot's steps that touch the outside: the instance lock, the database and the VAPID keys. */
@@ -214,6 +219,27 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   // The vector leg only with an embedder and pgvector in the database; without them the search is lexical
   // and by name. It acquires nothing, so there is nothing to undo.
   if (effective.search.embedder.kind !== "off") await deps.search.ensureVector();
+  await backfillSearch(deps);
+  let stopped = false;
+  let work = Promise.resolve();
+  let timer = setTimeout(cycle, opts.fileServicesMs ?? 60_000);
+  function cycle() {
+    work = (async () => {
+      for (const run of [expireUploads, purgeTrash, extractPending, backfillSearch, searchTick]) {
+        try {
+          await run(deps);
+        } catch (err) {
+          log.error("server.file_service_failed", { service: run.name, err });
+        }
+      }
+      if (!stopped) timer = setTimeout(cycle, opts.fileServicesMs ?? 60_000);
+    })();
+  }
+  undo.push(async () => {
+    stopped = true;
+    clearTimeout(timer);
+    await work;
+  });
   // The formula recalculations: halted before the database closes, then the ones a crash or a deploy left
   // halfway resume in the background.
   undo.push(() => stopRecalcs(deps));
