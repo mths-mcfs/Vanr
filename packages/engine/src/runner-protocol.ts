@@ -108,7 +108,7 @@ const ERROR_CODES = [
   "exec_disabled",
   "outside_work_dir",
   "no_slot",
-  "browser_unavailable",
+  "browser_not_running",
   "too_large",
   "timeout",
   "offline",
@@ -119,7 +119,7 @@ const ERROR_CODES = [
   "plan_limit",
   "harness_failed",
   /** No sandbox on this environment (bubblewrap or socat missing, or the system has none): nothing runs. */
-  "sandbox_unavailable",
+  "sandbox_not_ready",
   /** A person took over the browser: the agent's action does not happen until they hand it back. */
   "person_driving",
   /** The element or page changed since the server checked the action: nothing was done. */
