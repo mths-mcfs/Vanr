@@ -71,6 +71,8 @@ export async function runnerMessage(deps: AppDeps, ws: RunnerSocket, raw: string
     if (frame.type !== "hello") return ws.close(4003, "hello first");
     return hello(deps, ws, frame);
   }
+  // A connection the server cut, or one another connection of the same runner replaced, changes nothing.
+  if (!deps.runners.isCurrent(ws)) return;
   const runnerId = ws.data.runnerId;
   const workspaceId = ws.data.workspaceId as string;
   switch (frame.type) {
@@ -79,16 +81,16 @@ export async function runnerMessage(deps: AppDeps, ws: RunnerSocket, raw: string
     case "pong":
       return;
     case "result":
-      deps.runners.onResult(frame);
+      deps.runners.onResult(ws, frame);
       return;
     case "output":
-      deps.runners.onOutput(frame);
+      deps.runners.onOutput(ws, frame);
       return;
     case "harness.event":
-      deps.runners.onHarnessEvent(runnerId, frame);
+      deps.runners.onHarnessEvent(ws, frame);
       return;
     case "harness.tool":
-      deps.runners.onHarnessTool(runnerId, frame);
+      deps.runners.onHarnessTool(ws, frame);
       return;
     case "cli.changed": {
       const [row] = await deps.db
@@ -103,6 +105,7 @@ export async function runnerMessage(deps: AppDeps, ws: RunnerSocket, raw: string
       await applyJobEvent(deps, runnerId, frame);
       return;
     case "job.done":
+      // finishJob changes only a job of this runner; the ack goes to the sender alone (it forgets the job).
       await finishJob(deps, runnerId, frame.job);
       deps.runners.send(runnerId, { type: "job.ack", jobId: frame.job.jobId });
       return;

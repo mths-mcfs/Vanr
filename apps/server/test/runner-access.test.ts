@@ -8,9 +8,10 @@ import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { and, eq, inArray } from "drizzle-orm";
 import { createWorkspace, joinWorkspace } from "../src/members";
+import { revalidateBrowsers } from "../src/realtime/browser-socket";
 import { publishIntervention, publishSecret } from "../src/runners/requests";
 import type { RunningServer } from "../src/server";
-import { type Browser, body, SERVER_TEST_MS, signedIn, startTestServer, TestSocket } from "./harness";
+import { Browser, body, SERVER_TEST_MS, signedIn, startTestServer, TestSocket } from "./harness";
 import { connectProtocolRunner, mintSession, type ProtocolRunner } from "./protocol-runner";
 
 let server: RunningServer;
@@ -388,6 +389,283 @@ describe("credentials and connections", () => {
   );
 });
 
+describe("a frame naming another runner's id", () => {
+  test(
+    "a result, output, harness frame, job event, job end or live view frame from another runner changes nothing",
+    async () => {
+      const t = await team();
+      const cris = await signedIn(server, "Cris", email("cris"));
+      const other = await createWorkspace(server.deps.db, {
+        name: "Elsewhere",
+        context: "",
+        user: cris.user,
+      });
+      // A answers `exec` and `harness.turn` only when the test sends the result; B is in the same workspace, C
+      // in another.
+      const a = await online(await pairOverHttp(t, t.ana), {
+        browser: true,
+        answer: (req) =>
+          req.op === "exec" || req.op === "harness.turn" ? new Promise(() => {}) : { ok: true, data: {} },
+      });
+      const b = await online(await pairOverHttp(t, t.beto));
+      const c = await online(await pairOverHttp({ ws: `/api/v1/workspaces/${other.workspaceId}` }, cris));
+      for (const intruder of [b, c]) {
+        // A request to A: output and result from the intruder don't count; A's answer does.
+        const chunks: string[] = [];
+        const call = server.deps.runners.call(
+          a.runnerId,
+          "exec",
+          { command: "ls" },
+          {
+            onOutput: (_s, chunk) => chunks.push(chunk),
+            timeoutMs: 10_000,
+          },
+        );
+        const req = await a.request("exec");
+        intruder.send({ type: "output", id: req.id, stream: "stdout", chunk: "forged" });
+        intruder.send({ type: "result", id: req.id, ok: true, data: { forged: true } });
+        intruder.send({
+          type: "result",
+          id: req.id,
+          ok: false,
+          error: { code: "internal", message: "forged" },
+        });
+        a.send({ type: "output", id: req.id, stream: "stdout", chunk: "real" });
+        a.send({ type: "result", id: req.id, ok: true, data: { mine: true } });
+        expect(await call).toEqual({ mine: true });
+        expect(chunks).toEqual(["real"]);
+
+        // A harness turn on A: the intruder's tool call gets "this turn is over", its event is dropped.
+        const events: unknown[] = [];
+        const tools: string[] = [];
+        const turn = server.deps.runners.call(
+          a.runnerId,
+          "harness.turn",
+          { runId: "run_12345678", executor: "claude_code", system: "", prompt: "hi", tools: [] },
+          {
+            onHarnessEvent: (e) => events.push(e),
+            onHarnessTool: async (name) => {
+              tools.push(name);
+              return { content: "ok", isError: false };
+            },
+            timeoutMs: 10_000,
+          },
+        );
+        const turnReq = await a.request("harness.turn");
+        intruder.send({ type: "harness.event", id: turnReq.id, event: { kind: "text", text: "forged" } });
+        intruder.send({ type: "harness.tool", id: turnReq.id, callId: "x", name: "read", input: {} });
+        expect(await intruder.next((f) => f.type === "harness.tool_result")).toMatchObject({
+          content: "This turn is over",
+          isError: true,
+        });
+        a.send({ type: "harness.event", id: turnReq.id, event: { kind: "text", text: "real" } });
+        a.send({ type: "result", id: turnReq.id, ok: true, data: { text: "done" } });
+        await turn;
+        expect(events).toEqual([{ kind: "text", text: "real" }]);
+        expect(tools).toEqual([]);
+      }
+
+      // A job of A: the intruders' events and end don't touch it.
+      const jobId = newId("job");
+      await server.deps.db.insert(schema.runnerJobs).values({
+        id: jobId,
+        workspaceId: t.workspaceId,
+        runnerId: a.runnerId,
+        agentId: t.lia.id,
+        title: "Build",
+        executor: "shell",
+        prompt: "make",
+        status: "running",
+      });
+      const snapshot = {
+        jobId,
+        status: "done",
+        exitCode: 0,
+        result: "forged",
+        session: null,
+        files: [],
+        denied: [],
+        blocked: [],
+        startedAt: null,
+        endedAt: null,
+      };
+      for (const intruder of [b, c]) {
+        intruder.send({ type: "job.event", jobId, kind: "line", line: "forged" });
+        intruder.send({ type: "job.done", job: snapshot });
+        await intruder.next((f) => f.type === "job.ack");
+      }
+      const [job] = await server.deps.db
+        .select()
+        .from(schema.runnerJobs)
+        .where(eq(schema.runnerJobs.id, jobId));
+      expect(job).toMatchObject({ status: "running", tailLine: null, result: null, outputTail: [] });
+
+      // A's live view of Lia: frames and the end from the intruders don't reach the watcher.
+      await lend(t.lia.id, a.runnerId);
+      const ana = await TestSocket.open(t.ana.browser, t.workspaceId);
+      ana.send({ type: "live_view.subscribe", agentId: t.lia.id });
+      await a.request("live_view.start");
+      for (const intruder of [b, c]) {
+        intruder.send({ type: "live_view.frame", agentId: t.lia.id, data: "EVIL", width: 1, height: 1 });
+        intruder.send({ type: "live_view.stream_ended", agentId: t.lia.id, reason: "closed" });
+      }
+      a.send({ type: "live_view.frame", agentId: t.lia.id, data: "REAL", width: 2, height: 2 });
+      expect(await ana.next((f) => f.type === "live_view.frame")).toMatchObject({ seq: 1, data: "REAL" });
+      expect(ana.frames.some((f) => f.type === "live_view.ended")).toBe(false);
+      ana.close();
+      for (const r of [a, b, c]) expect(r.invalid).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("who may call each runner route", () => {
+  test(
+    "a member who neither paired the runner nor edits the agent is turned away on every managing route",
+    async () => {
+      const t = await team();
+      const paired = await pairOverHttp(t, t.ana);
+      const runner = await online(paired, { browser: true });
+      await lend(t.lia.id, paired.runnerId);
+      const lia = `${t.ws}/agents/${t.lia.id}`;
+      const net = newId("nr");
+      await server.deps.db
+        .insert(schema.networkRequests)
+        .values({ id: net, workspaceId: t.workspaceId, agentId: t.lia.id, domain: "example.com" });
+      const entry = newId("bs");
+      await server.deps.db.insert(schema.browserLogEntries).values({
+        id: entry,
+        workspaceId: t.workspaceId,
+        agentId: t.lia.id,
+        runnerId: paired.runnerId,
+        tool: "browser_navigate",
+        action: {},
+        outcome: "ok",
+        at: server.deps.now(),
+      });
+      await server.deps.db.insert(schema.runnerSecrets).values({
+        agentId: t.lia.id,
+        runnerId: paired.runnerId,
+        name: "API_TOKEN",
+        workspaceId: t.workspaceId,
+        target: "env",
+      });
+      const intervention = newId("bi");
+      await server.deps.db.insert(schema.browserInterventions).values({
+        id: intervention,
+        workspaceId: t.workspaceId,
+        agentId: t.lia.id,
+        runnerId: paired.runnerId,
+        kind: "login",
+        targetUserId: t.ana.user.id,
+        expiresAt: new Date(server.deps.now().getTime() + 60_000),
+      });
+      const runnerPath = `${t.ws}/runners/${paired.runnerId}`;
+      // Each route with who may call it in the origin: the runner's manager (who paired it or configures the
+      // workspace), who manages agents, who configures, the agent's editor (owner or agent manager), who may
+      // talk to the agent.
+      const forbiddenCalls: [string, string, unknown?][] = [
+        ["DELETE", runnerPath],
+        ["POST", `${runnerPath}/access/reduce`, { disableTool: "commands" }],
+        ["POST", `${runnerPath}/move-agents`, { toRunnerId: paired.runnerId }],
+        ["POST", `${lia}/environment/start`],
+        ["POST", `${lia}/environment/stop`],
+        ["DELETE", `${lia}/environment`],
+        ["POST", `${t.ws}/network-requests/${net}/allow`],
+        ["POST", `${t.ws}/network-requests/${net}/deny`],
+        ["DELETE", `${t.ws}/network-requests/${net}`],
+        ["PUT", `${t.ws}/sandbox-settings`, { minutesPerDay: 10 }],
+        ["DELETE", `${lia}/secrets/API_TOKEN?runnerId=${paired.runnerId}`],
+        ["PUT", `${lia}/browser`, { permittedDomains: ["example.com"] }],
+        ["PUT", `${lia}/browser/policy`, { level: "balanced", sites: [] }],
+        ["GET", `${lia}/browser/log`],
+        ["GET", `${lia}/browser/log/${entry}/shot`],
+        ["POST", `${lia}/browser/stop`],
+        ["POST", `${lia}/browser/interventions/start`, {}],
+      ];
+      for (const [method, path, payload] of forbiddenCalls) {
+        const res = await api(t.beto.browser, method, path, payload);
+        expect({ method, path, status: res.status }).toEqual({ method, path, status: 403 });
+      }
+      // On an agent everyone talks to, Beto still can't cancel an intervention meant for Ana and not his.
+      const open = await agent(t, t.ana.user.id, "opal");
+      const meant = newId("bi");
+      await server.deps.db.insert(schema.browserInterventions).values({
+        id: meant,
+        workspaceId: t.workspaceId,
+        agentId: open.id,
+        runnerId: paired.runnerId,
+        kind: "login",
+        targetUserId: t.ana.user.id,
+        expiresAt: new Date(server.deps.now().getTime() + 60_000),
+      });
+      expect(
+        (await api(t.beto.browser, "POST", `${t.ws}/browser-interventions/${meant}/cancel`)).status,
+      ).toBe(403);
+      expect(
+        (await api(t.beto.browser, "POST", `${t.ws}/browser-interventions/${meant}/fail`, {})).status,
+      ).toBe(403);
+      expect(
+        (await api(t.beto.browser, "POST", `${t.ws}/browser-interventions/${meant}/complete`)).status,
+      ).toBe(403);
+      // Someone outside the workspace gets 404 on every workspace route, reads included.
+      const outsider = await signedIn(server, "Olga", email("olga"));
+      const workspaceRoutes: [string, string, unknown?][] = [
+        ["GET", `${t.ws}/runners`],
+        ["GET", `${t.ws}/runners/outages`],
+        ["PATCH", runnerPath, { name: "x" }],
+        ["POST", `${runnerPath}/revoke`],
+        ["POST", `${t.ws}/runner-pairings/ABCDEF/confirm`, {}],
+        ["GET", `${lia}/environment`],
+        ["PUT", `${lia}/environment/target`, { runnerId: null }],
+        ["GET", `${lia}/environment/domains`],
+        ["GET", `${t.ws}/sandbox-settings`],
+        ["POST", `${t.ws}/secret-requests/sr_x/deliver`, { box: { v: 1, epk: "e", iv: "i", ct: "c" } }],
+        ["POST", `${t.ws}/secret-requests/sr_x/decline`],
+        ["GET", `${lia}/secrets`],
+        ["GET", `${lia}/browser`],
+        ["GET", `${lia}/browser/interventions`],
+        ["GET", `${t.ws}/browser-interventions/${meant}`],
+        ["POST", `${t.ws}/browser-interventions/${meant}/control`],
+        ["POST", `${t.ws}/browser-interventions/${meant}/cancel`],
+        ["POST", `${lia}/browser/interventions/start`, {}],
+        ...forbiddenCalls,
+      ];
+      for (const [method, path, payload] of workspaceRoutes) {
+        const res = await api(outsider.browser, method, path, payload);
+        expect({ method, path, status: res.status }).toEqual({ method, path, status: 404 });
+      }
+      // The intervention is Ana's and Lia talks only to Ana: for Beto it doesn't exist.
+      expect(
+        (await api(t.beto.browser, "POST", `${t.ws}/browser-interventions/${intervention}/cancel`)).status,
+      ).toBe(404);
+      expect(
+        (await api(t.beto.browser, "POST", `${t.ws}/browser-interventions/${intervention}/control`)).status,
+      ).toBe(404);
+      // Nothing changed for the forbidden calls.
+      expect((await api(t.ana.browser, "GET", `${t.ws}/runners`)).body.runners).toHaveLength(1);
+      expect((await api(t.ana.browser, "GET", `${lia}/secrets`)).body.secrets).toHaveLength(1);
+      expect((await api(t.ana.browser, "GET", `${t.ws}/sandbox-settings`)).body.minutesPerDay).toBe(120);
+      expect(
+        (
+          await server.deps.db.select().from(schema.networkRequests).where(eq(schema.networkRequests.id, net))
+        )[0]?.status,
+      ).toBe("pending");
+      // And the ones who may: Ana (owner) cancels, reads the log, sets the sandbox.
+      expect((await api(t.ana.browser, "GET", `${lia}/browser/log`)).body.steps).toHaveLength(1);
+      expect(
+        (await api(t.ana.browser, "PUT", `${t.ws}/sandbox-settings`, { minutesPerDay: 10 })).status,
+      ).toBe(200);
+      expect(
+        (await api(t.ana.browser, "POST", `${t.ws}/browser-interventions/${intervention}/cancel`)).body
+          .status,
+      ).toBe("canceled");
+      expect(runner.invalid).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
 describe("requests to a person", () => {
   test(
     "a secret request notifies the person it is for, only they deliver it, and two deliveries at once count once",
@@ -527,7 +805,7 @@ describe("requests to a person", () => {
       );
 
       // Nobody holds the browser now: two people taking over several times at once open one intervention.
-      const takeOver = `${t.ws}/agents/${shared.id}/browser/interventions/takeover`;
+      const takeOver = `${t.ws}/agents/${shared.id}/browser/interventions/start`;
       const tries = await Promise.all(
         Array.from({ length: 8 }, (_, i) =>
           api(i % 2 ? t.beto.browser : t.ana.browser, "POST", takeOver, {}),
@@ -552,6 +830,161 @@ describe("requests to a person", () => {
         );
       expect(openRows).toHaveLength(1);
       expect(runner.invalid).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("a secret delivered against a decline", () => {
+  /** A runner whose `secret.store` answers wait for the test (or answer at once, with `auto`). */
+  async function holdingRunner(t: Team, auto?: { ok: false; code: string }) {
+    const held: {
+      ct: string;
+      answer: (
+        a: { ok: true; data: unknown } | { ok: false; error: { code: string; message: string } },
+      ) => void;
+    }[] = [];
+    const paired = await pairOverHttp(t, t.ana);
+    const runner = await online(paired, {
+      answer: (req) => {
+        if (req.op !== "secret.store") return { ok: true, data: {} };
+        const ct = String((req.args.box as { ct?: unknown } | undefined)?.ct);
+        if (auto) {
+          held.push({ ct, answer: () => {} });
+          return { ok: false, error: { code: auto.code, message: "no" } };
+        }
+        return new Promise((resolve) => held.push({ ct, answer: resolve }));
+      },
+    });
+    return { paired, runner, held };
+  }
+  async function request(t: Team, agentId: string, runnerId: string, targetUserId: string | null = null) {
+    const id = newId("sr");
+    await server.deps.db.insert(schema.secretPrompts).values({
+      id,
+      workspaceId: t.workspaceId,
+      agentId,
+      runnerId,
+      name: "API_TOKEN",
+      target: "env",
+      targetUserId,
+      publicKey: "pk",
+      expiresAt: new Date(server.deps.now().getTime() + 30 * 60_000),
+    });
+    return id;
+  }
+  const state = async (id: string, agentId: string) => ({
+    status: (
+      await server.deps.db.select().from(schema.secretPrompts).where(eq(schema.secretPrompts.id, id))
+    )[0]?.status,
+    rows: (
+      await server.deps.db
+        .select()
+        .from(schema.runnerSecrets)
+        .where(eq(schema.runnerSecrets.agentId, agentId))
+    ).length,
+  });
+  const box = (ct: string) => ({ box: { v: 1, epk: "e", iv: "i", ct } });
+
+  test(
+    "many attempts to deliver and decline at once: one answer wins, only a delivered secret reaches the runner",
+    async () => {
+      const t = await team();
+      const shared = await agent(t, t.ana.user.id, "sid");
+      const { paired, held } = await holdingRunner(t);
+      for (let round = 0; round < 3; round++) {
+        held.length = 0;
+        await server.deps.db.delete(schema.runnerSecrets).where(eq(schema.runnerSecrets.agentId, shared.id));
+        const id = await request(t, shared.id, paired.runnerId);
+        const path = `${t.ws}/secret-requests/${id}`;
+        const answers = Promise.all(
+          Array.from({ length: 8 }, (_, i) =>
+            i % 2
+              ? api(t.ana.browser, "POST", `${path}/decline`)
+              : api(t.ana.browser, "POST", `${path}/deliver`, box(`v${i}`)),
+          ),
+        );
+        // A store that reaches the runner is answered as stored; every other answer is already known.
+        const settle = (async () => {
+          for (;;) {
+            for (const h of held) h.answer({ ok: true, data: { stored: true } });
+            const s = await state(id, shared.id);
+            if (s.status !== "pending" && (s.status !== "delivered" || held.length > 0)) return;
+            await new Promise((r) => setTimeout(r, 5));
+          }
+        })();
+        const results = await answers;
+        await settle;
+        for (const h of held) h.answer({ ok: true, data: { stored: true } });
+        expect(results.filter((r) => r.status === 200)).toHaveLength(1);
+        expect(
+          results.filter((r) => r.status === 409).every((r) => r.body.error.code === "secret.closed"),
+        ).toBe(true);
+        const s = await state(id, shared.id);
+        expect(held.length).toBe(s.status === "delivered" ? 1 : 0);
+        expect(s.rows).toBe(held.length);
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a decline that wins sends nothing; delivering again while the first is on its way never reaches the runner",
+    async () => {
+      const t = await team();
+      const shared = await agent(t, t.ana.user.id, "sol");
+      const { paired, held } = await holdingRunner(t);
+      const first = await request(t, shared.id, paired.runnerId);
+      expect((await api(t.ana.browser, "POST", `${t.ws}/secret-requests/${first}/decline`)).status).toBe(200);
+      const late = await api(t.ana.browser, "POST", `${t.ws}/secret-requests/${first}/deliver`, box("late"));
+      expect(late.body.error.code).toBe("secret.closed");
+      expect(held).toEqual([]);
+      expect(await state(first, shared.id)).toEqual({ status: "declined", rows: 0 });
+
+      const second = await request(t, shared.id, paired.runnerId);
+      const path = `${t.ws}/secret-requests/${second}/deliver`;
+      const d1 = api(t.ana.browser, "POST", path, box("first"));
+      for (let i = 0; i < 400 && held.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
+      const d2 = await api(t.ana.browser, "POST", path, box("second"));
+      const decline = await api(t.ana.browser, "POST", `${t.ws}/secret-requests/${second}/decline`);
+      held[0]?.answer({ ok: true, data: { stored: true } });
+      expect((await d1).status).toBe(200);
+      expect([d2.status, decline.status]).toEqual([409, 409]);
+      expect(held.map((h) => h.ct)).toEqual(["first"]);
+      expect(await state(second, shared.id)).toEqual({ status: "delivered", rows: 1 });
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "when the runner answers with an error, the request opens again and no row is left; when no answer comes, the row stays",
+    async () => {
+      const t = await team();
+      const shared = await agent(t, t.ana.user.id, "rae");
+      const refusing = await holdingRunner(t, { ok: false, code: "bad_request" });
+      await lend(shared.id, refusing.paired.runnerId);
+      const id = await request(t, shared.id, refusing.paired.runnerId);
+      const failed = await api(t.ana.browser, "POST", `${t.ws}/secret-requests/${id}/deliver`, box("x"));
+      expect(failed.body.error.code).toBe("runner.bad_request");
+      expect(await state(id, shared.id)).toEqual({ status: "pending", rows: 0 });
+      expect((await api(t.ana.browser, "POST", `${t.ws}/secret-requests/${id}/decline`)).status).toBe(200);
+
+      // The connection drops with the store on its way: the value may be on the disk, so its row stays.
+      const other = await agent(t, t.ana.user.id, "ody");
+      const dropping = await holdingRunner(t);
+      const id2 = await request(t, other.id, dropping.paired.runnerId);
+      const pending = api(t.ana.browser, "POST", `${t.ws}/secret-requests/${id2}/deliver`, box("y"));
+      for (let i = 0; i < 400 && dropping.held.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
+      await dropping.runner.close();
+      expect((await pending).body.error.code).toBe("runner.offline");
+      expect(await state(id2, other.id)).toEqual({ status: "pending", rows: 1 });
+      // Offline from the start: nothing is decided, nothing is written.
+      const id3 = await request(t, other.id, dropping.paired.runnerId);
+      expect(
+        (await api(t.ana.browser, "POST", `${t.ws}/secret-requests/${id3}/deliver`, box("z"))).body.error
+          .code,
+      ).toBe("runner.offline");
+      expect((await state(id3, other.id)).status).toBe("pending");
     },
     SERVER_TEST_MS,
   );
@@ -611,7 +1044,7 @@ describe("live view", () => {
       const took = await api(
         t.ana.browser,
         "POST",
-        `${t.ws}/agents/${t.lia.id}/browser/interventions/takeover`,
+        `${t.ws}/agents/${t.lia.id}/browser/interventions/start`,
         {},
       );
       expect(took.body).toMatchObject({
@@ -691,6 +1124,260 @@ describe("the browser's real-time socket", () => {
       expect(await ana.next((f) => f.type === "error")).toMatchObject({ code: "invalid_frame" });
       ana.close();
       beto.close();
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("a connection doesn't outlive the right that opened it", () => {
+  /** Ana's socket subscribed to #general, and a way to see whether an event still reaches it. */
+  async function watching(t: Team, who: { browser: Browser } = t.ana) {
+    const socket = await TestSocket.open(who.browser, t.workspaceId);
+    expect(await socket.subscribe(t.general)).toMatchObject({ type: "subscribed" });
+    return socket;
+  }
+  const reaches = async (socket: TestSocket, channelId: string) => {
+    server.deps.hub.toChannel(channelId, { type: "message.posted", text: "probe" });
+    return socket
+      .next((f) => f.type === "event", 300)
+      .then(
+        () => true,
+        () => false,
+      );
+  };
+
+  test(
+    "signing out closes the session's sockets at once; another session of the same person stays",
+    async () => {
+      const t = await team();
+      const other = new Browser(server.url);
+      expect((await other.signIn(t.ana.user.email)).status).toBe(200);
+      const kept = await watching(t, { browser: other });
+      const socket = await watching(t);
+      const sessionOf = (userId: string) =>
+        server.deps.hub
+          .sockets()
+          .filter((ws) => ws.data.userId === userId)
+          .map((ws) => ws.data.sessionId);
+      const before = new Set(sessionOf(t.ana.user.id));
+      expect(before.size).toBe(2);
+      expect((await t.ana.browser.json("/api/auth/sign-out", "POST", {})).status).toBe(200);
+      // Cut by the sign-out itself (the session hook), not by a later sweep: it is gone when the answer arrives.
+      expect(new Set(sessionOf(t.ana.user.id)).size).toBe(1);
+      expect(await socket.closed).toBe(4401);
+      expect(server.deps.hub.sockets().some((ws) => ws.data.userId === t.ana.user.id)).toBe(true);
+      expect(await reaches(kept, t.general)).toBe(true);
+      kept.close();
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "revoking every session of the person closes all their sockets in the same request",
+    async () => {
+      const t = await team();
+      const socket = await watching(t, t.beto);
+      expect((await t.beto.browser.json("/api/auth/revoke-sessions", "POST", {})).status).toBe(200);
+      expect(server.deps.hub.sockets().some((ws) => ws.data.userId === t.beto.user.id)).toBe(false);
+      expect(await socket.closed).toBe(4401);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "an expired or deleted session, or a removed member: the next frame with an effect is not taken and the sweep cuts the rest",
+    async () => {
+      const t = await team();
+      // Expired by the server's clock: a subscribe is not taken, the socket closes.
+      const early = await watching(t);
+      ahead += 8 * 24 * 3600_000;
+      try {
+        early.send({ type: "subscribe", channelId: t.general });
+        expect(await early.closed).toBe(4401);
+        expect(early.frames.some((f) => f.type === "subscribed")).toBe(false);
+      } finally {
+        ahead -= 8 * 24 * 3600_000;
+      }
+      // A session deleted where no hook runs (straight in the database): the sweep cuts it.
+      const beto = await watching(t, t.beto);
+      await server.deps.db.delete(schema.sessions).where(eq(schema.sessions.userId, t.beto.user.id));
+      await revalidateBrowsers(server.deps);
+      expect(await beto.closed).toBe(4401);
+      // Removed from the workspace: the path that removes the member cuts the sockets at once (hub.dropUser);
+      // without it the sweep does.
+      const ana2 = await signedIn(server, "Ana2", email("ana2"));
+      await joinWorkspace(server.deps.db, {
+        workspaceId: t.workspaceId,
+        userId: ana2.user.id,
+        name: "Ana2",
+        role: "admin",
+      });
+      const removed = await watching(t, ana2);
+      await server.deps.db
+        .delete(schema.members)
+        .where(and(eq(schema.members.workspaceId, t.workspaceId), eq(schema.members.userId, ana2.user.id)));
+      server.deps.hub.dropUser(t.workspaceId, ana2.user.id);
+      expect(await removed.closed).toBe(4003);
+      const swept = await signedIn(server, "Ana3", email("ana3"));
+      await joinWorkspace(server.deps.db, {
+        workspaceId: t.workspaceId,
+        userId: swept.user.id,
+        name: "Ana3",
+        role: "member",
+      });
+      const left = await watching(t, swept);
+      await server.deps.db
+        .delete(schema.members)
+        .where(and(eq(schema.members.workspaceId, t.workspaceId), eq(schema.members.userId, swept.user.id)));
+      left.send({ type: "typing", channelId: t.general });
+      expect(await left.closed).toBe(4401);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "leaving a private channel or an agent's audience stops its events, its live view and its control",
+    async () => {
+      const t = await team();
+      const board = newId("ch");
+      await server.deps.db.insert(schema.channels).values({
+        id: board,
+        workspaceId: t.workspaceId,
+        name: "board",
+        topic: "",
+        visibility: "private",
+        createdBy: t.ana.user.id,
+      });
+      await server.deps.db.insert(schema.channelMemberships).values([
+        { channelId: board, memberType: "person", memberId: t.ana.user.id },
+        { channelId: board, memberType: "person", memberId: t.beto.user.id },
+      ]);
+      const beto = await TestSocket.open(t.beto.browser, t.workspaceId);
+      expect(await beto.subscribe(board)).toMatchObject({ type: "subscribed" });
+      await server.deps.db
+        .delete(schema.channelMemberships)
+        .where(eq(schema.channelMemberships.memberId, t.beto.user.id));
+      await revalidateBrowsers(server.deps);
+      expect(await beto.next((f) => f.type === "unsubscribed")).toMatchObject({ channelId: board });
+      expect(await reaches(beto, board)).toBe(false);
+
+      // Beto watches and controls an agent everyone talks to; then it becomes Ana's only.
+      const ivy = await agent(t, t.ana.user.id, "ivy2");
+      const paired = await pairOverHttp(t, t.ana);
+      const runner = await online(paired, { browser: true });
+      await lend(ivy.id, paired.runnerId);
+      beto.send({ type: "live_view.subscribe", agentId: ivy.id });
+      await runner.request("live_view.start");
+      expect(
+        (await api(t.beto.browser, "POST", `${t.ws}/agents/${ivy.id}/browser/interventions/start`, {}))
+          .status,
+      ).toBe(200);
+      await server.deps.db
+        .update(schema.agents)
+        .set({ visibilityMode: "owner" })
+        .where(eq(schema.agents.id, ivy.id));
+      beto.send({ type: "live_view.input", agentId: ivy.id, events: [{ type: "click" }] });
+      expect(await beto.next((f) => f.type === "live_view.unavailable")).toMatchObject({
+        reason: "forbidden",
+      });
+      expect(await beto.next((f) => f.type === "error")).toMatchObject({ code: "not_watching" });
+      runner.send({ type: "live_view.frame", agentId: ivy.id, data: "AFTER", width: 1, height: 1 });
+      await runner.request("live_view.stop");
+      expect(beto.frames.some((f) => f.type === "live_view.frame" && f.data === "AFTER")).toBe(false);
+      expect(runner.frames.some((f) => f.type === "request" && f.op === "live_view.input")).toBe(false);
+      beto.close();
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a runner moved, reduced, removed or replaced mid-request: what was pending stops and its late frames count for nothing",
+    async () => {
+      const t = await team();
+      const hold = (req: { op: string }) =>
+        req.op === "exec"
+          ? new Promise<never>(() => {})
+          : ({
+              ok: true,
+              data:
+                req.op === "access.reduce"
+                  ? {
+                      access: {
+                        folders: [],
+                        tools: { browser: true, claude: false, codex: false, commands: false },
+                      },
+                    }
+                  : {},
+            } as const);
+      const pa = await pairOverHttp(t, t.ana);
+      const pb = await pairOverHttp(t, t.ana);
+      const a = await online(pa, { browser: true, answer: hold });
+      const b = await online(pb, { browser: true, answer: hold });
+      const ivy = await agent(t, t.ana.user.id, "ivy3");
+      await lend(ivy.id, pa.runnerId);
+      const ana = await TestSocket.open(t.ana.browser, t.workspaceId);
+      ana.send({ type: "live_view.subscribe", agentId: ivy.id });
+      await a.request("live_view.start");
+      const exec = (runnerId: string) =>
+        server.deps.runners
+          .call(runnerId, "exec", { command: "ls" }, { agent: ivy, timeoutMs: 20_000 })
+          .catch((e: { code?: string }) => e.code);
+
+      // Moved to B: the call on A is canceled (A is told), the live view from A ends, A's late answer is nothing.
+      const moving = exec(pa.runnerId);
+      const req = await a.request("exec");
+      const moved = await api(t.ana.browser, "POST", `${t.ws}/runners/${pa.runnerId}/move-agents`, {
+        toRunnerId: pb.runnerId,
+      });
+      expect(moved.body.moved).toEqual([ivy.id]);
+      expect(await moving).toBe("canceled");
+      expect(await a.next((f) => f.type === "cancel" && f.id === req.id)).toBeTruthy();
+      expect(await ana.next((f) => f.type === "live_view.ended")).toMatchObject({ agentId: ivy.id });
+      a.send({ type: "live_view.frame", agentId: ivy.id, data: "LATE", width: 1, height: 1 });
+      a.send({ type: "result", id: req.id, ok: true, data: { late: true } });
+
+      // Access reduced on B: what was running there stops.
+      const running = exec(pb.runnerId);
+      await b.request("exec");
+      expect(
+        (
+          await api(t.ana.browser, "POST", `${t.ws}/runners/${pb.runnerId}/access/reduce`, {
+            disableTool: "commands",
+          })
+        ).status,
+      ).toBe(200);
+      expect(await running).toBe("canceled");
+
+      // Removed: the pending call fails at once and the runner's late frames don't count.
+      const removing = exec(pb.runnerId);
+      const last = await b.request("exec");
+      expect((await api(t.ana.browser, "DELETE", `${t.ws}/runners/${pb.runnerId}`)).status).toBe(204);
+      expect(await removing).toBe("offline");
+      b.send({ type: "result", id: last.id, ok: true, data: {} });
+      b.send({ type: "runner.state", paused: true });
+      expect(await b.closed).toMatchObject({ code: 1000 });
+      const [rowB] = await server.deps.db
+        .select()
+        .from(schema.runners)
+        .where(eq(schema.runners.id, pb.runnerId));
+      expect(rowB?.paused).toBe(false);
+
+      // A rotates its credential and connects again: the old socket is replaced and what it still sends is nothing;
+      // the old credential, used again, revokes the runner and drops the new connection.
+      const oldCredential = pa.credential;
+      const again = await online(pa);
+      expect(await a.next((f) => f.type === "rejected")).toMatchObject({ reason: "replaced" });
+      a.send({ type: "runner.state", paused: true });
+      const [rowA] = await server.deps.db
+        .select()
+        .from(schema.runners)
+        .where(eq(schema.runners.id, pa.runnerId));
+      expect(rowA?.paused).toBe(false);
+      expect((await mintSession(server.url, oldCredential)).status).toBe(403);
+      expect(await again.next((f) => f.type === "rejected")).toMatchObject({ reason: "revoked" });
+      expect(ana.frames.some((f) => f.type === "live_view.frame")).toBe(false);
+      for (const r of [a, b, again]) expect(r.invalid).toEqual([]);
+      ana.close();
     },
     SERVER_TEST_MS,
   );

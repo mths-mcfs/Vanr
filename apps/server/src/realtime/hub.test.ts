@@ -16,6 +16,7 @@ beforeAll(() => {
         kind: "browser",
         workspaceId: url.searchParams.get("w") ?? "",
         userId: url.searchParams.get("u") ?? "",
+        sessionId: "s",
         channels: new Set(),
         lastTypingAt: new Map(),
       };

@@ -10,6 +10,7 @@ import { z } from "zod";
 import { agentInWorkspace, requireAgentEditor } from "../agents";
 import { type AppDeps, type AppEnv, requireUser } from "../context";
 import { conflict, forbidden, HttpError, notFound, param, readJson } from "../http";
+import { endLiveView, endLiveViewsOf } from "../runners/browser-live";
 import { mintSession, revokeRunner } from "../runners/credentials";
 import { RunnerCallError } from "../runners/hub";
 import { installScript, runnerBundle } from "../runners/install";
@@ -50,6 +51,12 @@ export function runnerError(err: unknown): never {
 }
 
 const MAX_TIMEOUT_S = 3600;
+
+/** The agent no longer uses this runner: what it had pending there stops and its live view from there ends. */
+function agentLeftRunner(deps: AppDeps, runnerId: string, agentId: string) {
+  deps.runners.cancelPending(runnerId, agentId);
+  endLiveView(deps, agentId);
+}
 
 async function sandboxOf(deps: AppDeps, workspaceId: string): Promise<SandboxSettings> {
   const [row] = await deps.db
@@ -243,6 +250,7 @@ export function registerRunners(app: Hono<AppEnv>) {
       reason: "revoked",
       message: "Removed from the workspace",
     });
+    endLiveViewsOf(deps, row.id);
     deps.hub.toWorkspace(me.workspaceId, { type: "runner.deleted", runnerId: row.id });
     for (const a of moved) await emitEnvironment(deps, me.workspaceId, a.id);
     return c.body(null, 204);
@@ -286,6 +294,9 @@ export function registerRunners(app: Hono<AppEnv>) {
       .set({ access: res.access, updatedAt: deps.now() })
       .where(eq(runners.id, row.id));
     deps.hub.toWorkspace(me.workspaceId, { type: "runner.access", runnerId: row.id, access: res.access });
+    // What was running started under the wider access: it stops, and so does a live view without the browser.
+    deps.runners.cancelPending(row.id);
+    if (!res.access.tools.browser) endLiveViewsOf(deps, row.id);
     return c.json({ access: res.access });
   });
 
@@ -330,7 +341,10 @@ export function registerRunners(app: Hono<AppEnv>) {
       toRunnerId: to.id,
       agentIds: moved,
     });
-    for (const id of moved) await emitEnvironment(deps, me.workspaceId, id);
+    for (const id of moved) {
+      if (to.id !== from.id) agentLeftRunner(deps, from.id, id);
+      await emitEnvironment(deps, me.workspaceId, id);
+    }
     await pushAgents(deps, to.id);
     const result: MoveAgentsResult = { moved, skipped, restarted: 0, queued };
     return c.json(result);
@@ -413,7 +427,10 @@ export function registerRunners(app: Hono<AppEnv>) {
       .set({ environmentId: null, updatedAt: deps.now() })
       .where(eq(agents.id, agent.id));
     await setStatus(deps, me.workspaceId, agent.id, "none");
-    if (previous) await pushAgents(deps, previous);
+    if (previous) {
+      agentLeftRunner(deps, previous, agent.id);
+      await pushAgents(deps, previous);
+    }
     return c.body(null, 204);
   });
 
@@ -440,6 +457,7 @@ export function registerRunners(app: Hono<AppEnv>) {
           target: agentEnvironments.agentId,
           set: { status: "running", updatedAt: deps.now() },
         });
+    if (previous && previous !== runnerId) agentLeftRunner(deps, previous, agent.id);
     const target = await targetOf(deps, runnerId);
     // The same shape as every `environment.updated`: the agent's page updates the card without fetching.
     await emitEnvironment(deps, me.workspaceId, agent.id);

@@ -12,6 +12,7 @@ import { and, eq, gt, isNull, lt, or, sql } from "drizzle-orm";
 import type { AppDeps } from "../context";
 import { HttpError } from "../http";
 import { log } from "../logger";
+import { endLiveViewsOf } from "./browser-live";
 import type { RunnerRow } from "./runners";
 
 const { runners, runnerSessions } = schema;
@@ -46,6 +47,7 @@ export async function revokeRunner(
         ? "This runner's credential was used from somewhere else; pair it again"
         : "This runner's access was revoked; pair it again",
   });
+  endLiveViewsOf(deps, row.id);
   deps.hub.toWorkspace(row.workspaceId, { type: "runner.revoked", runnerId: row.id, reason });
   log.warn("runner.revoked", { runnerId: row.id, reason });
 }

@@ -82,7 +82,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("runner decisions at once on Post
         const takingOver = await Promise.all(
           Array.from({ length: N }, (_, i) =>
             (i % 2 ? beto : ana).browser.json(
-              `${ws}/agents/${agentId}/browser/interventions/takeover`,
+              `${ws}/agents/${agentId}/browser/interventions/start`,
               "POST",
               {},
             ),
@@ -128,6 +128,49 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("runner decisions at once on Post
             .from(schema.runnerSecrets)
             .where(eq(schema.runnerSecrets.agentId, agentId)),
         ).toHaveLength(1);
+        const stores = () =>
+          runner.frames.filter((f) => f.type === "request" && f.op === "secret.store").length;
+        expect(stores()).toBe(1);
+
+        // Attempts to deliver and to decline at once: one answer wins, and only a delivered secret reaches the runner.
+        for (let round = 0; round < 3; round++) {
+          const id = newId("sr");
+          await server.deps.db.insert(schema.secretPrompts).values({
+            id,
+            workspaceId,
+            agentId,
+            runnerId: runner.runnerId,
+            name: `KEY_${round}`,
+            target: "env",
+            targetUserId: beto.user.id,
+            publicKey: "pk",
+            expiresAt: new Date(Date.now() + 30 * 60_000),
+          });
+          const before = stores();
+          const answers = await Promise.all(
+            Array.from({ length: N }, (_, i) =>
+              i % 2
+                ? beto.browser.json(`${ws}/secret-requests/${id}/decline`, "POST", {})
+                : beto.browser.json(`${ws}/secret-requests/${id}/deliver`, "POST", {
+                    box: { v: 1, epk: "e", iv: "i", ct: `c${i}` },
+                  }),
+            ),
+          );
+          expect(answers.filter((r) => r.status === 200)).toHaveLength(1);
+          const [row] = await server.deps.db
+            .select()
+            .from(schema.secretPrompts)
+            .where(eq(schema.secretPrompts.id, id));
+          const named = await server.deps.db
+            .select()
+            .from(schema.runnerSecrets)
+            .where(
+              and(eq(schema.runnerSecrets.agentId, agentId), eq(schema.runnerSecrets.name, `KEY_${round}`)),
+            );
+          const delivered = row?.status === "delivered" ? 1 : 0;
+          expect(stores() - before).toBe(delivered);
+          expect(named).toHaveLength(delivered);
+        }
       } finally {
         for (const close of closers) await close();
         await server.stop();

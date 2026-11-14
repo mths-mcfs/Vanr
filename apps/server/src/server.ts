@@ -16,7 +16,14 @@ import { log } from "./logger";
 import { createMailer, type Mailer } from "./mailer";
 import { testModelCheck } from "./models";
 import { loadVapid, webPushSender } from "./push";
-import { browserClose, browserMessage, browserOpen, checkBrowserUpgrade } from "./realtime/browser-socket";
+import {
+  browserClose,
+  browserMessage,
+  browserOpen,
+  checkBrowserUpgrade,
+  REVALIDATE_MS,
+  revalidateBrowsers,
+} from "./realtime/browser-socket";
 import { type BrowserSocket, type BrowserSocketData, Hub } from "./realtime/hub";
 import { hasPendingInvite, INVITE_COOKIE } from "./routes/invitations";
 import { dropAllLiveViews } from "./runners/browser-live";
@@ -218,7 +225,15 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   stuckWatch.unref();
   undo.push(() => clearInterval(stuckWatch));
   origins = [publicUrl, ...(opts.extraOrigins ?? [])];
-  const auth = createAuth({ db, config: effective, mailer, trustedOrigins: origins, signupAllowed });
+  const auth = createAuth({
+    db,
+    config: effective,
+    mailer,
+    trustedOrigins: origins,
+    signupAllowed,
+    // A signed-out or revoked session closes the sockets it opened at once.
+    onSessionEnded: (sessionId) => hub.dropSession(sessionId),
+  });
   // Background work (the notification queue today); stopping waits for what is running. Slice S6
   // (runtime/runtime) creates the AgentRuntime here instead, which takes this work over.
   const background = new BackgroundWork();
@@ -254,6 +269,12 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   const app = createApp(deps, { firstUser, signupQueue: signupLimits });
   handler = (req) => app.fetch(req);
   depsRef = deps;
+  // A session that expires, or a membership or channel lost outside this server's routes, is caught here.
+  const sweep = setInterval(() => {
+    void revalidateBrowsers(deps).catch((err) => log.warn("ws.revalidate_failed", { err }));
+  }, REVALIDATE_MS);
+  sweep.unref?.();
+  undo.push(() => clearInterval(sweep));
   log.info("server.started", { url: publicUrl, db: opened.kind });
 
   // Every stop, at once or later, gets the same shutdown: it ends (or fails) once for all of them.

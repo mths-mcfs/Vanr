@@ -122,7 +122,7 @@ jobs:
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_DROP_LOCKS: "1"
-      # One runner per pairing code, one open browser intervention per agent and one delivery per secret request.
+      # One runner per pairing code, one open browser intervention per agent and one answer per secret request.
       - run: bun test apps/server/test/runners-postgres.test.ts
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test

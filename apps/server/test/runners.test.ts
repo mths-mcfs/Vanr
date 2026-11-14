@@ -136,8 +136,29 @@ async function connect(home: string) {
   });
   clients.push(client);
   client.start();
-  await client.ready();
+  await settled(client, home);
   return client;
+}
+
+/**
+ * Connected and ready: the client holds an accepted connection and the server has the runner's real state (its
+ * work folder, which the runner's first hello leaves out while it doesn't know its secrets yet, see ebfce6a). It
+ * holds whether or not the runner reconnects for the real hello; nothing waits on the clock.
+ */
+async function settled(client: RunnerClient, home: string) {
+  await client.ready();
+  const workDir = readConfig(home)?.workDir ?? null;
+  await until(
+    async () => {
+      if (!client.connected || !server.deps.runners.isOnline(client.runnerId)) return false;
+      const [row] = await server.deps.db
+        .select({ workDir: schema.runners.workDir })
+        .from(schema.runners)
+        .where(eq(schema.runners.id, client.runnerId));
+      return row?.workDir === workDir;
+    },
+    (ok) => ok,
+  );
 }
 
 const call = <T>(

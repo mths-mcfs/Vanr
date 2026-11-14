@@ -78,6 +78,9 @@ async function interventionIn(
   return { row, agent };
 }
 
+/** A runner call whose answer never came: the runner may have done it. */
+const UNSURE: ReadonlySet<string> = new Set(["offline", "timeout", "canceled"]);
+const runnerOffline = () => conflict("runner.offline", "The runner is offline");
 const closed = () => conflict("browser.intervention_closed", "This request is already finished");
 const inControl = () => conflict("browser.in_control", "Someone else has control");
 /** A closed secret request: an expired one has its own code so the page doesn't say "someone answered". */
@@ -115,13 +118,61 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
       const [expired] = await deps.db
         .update(secretPrompts)
         .set({ status: "expired" })
-        .where(eq(secretPrompts.id, row.id))
+        .where(and(eq(secretPrompts.id, row.id), eq(secretPrompts.status, "pending")))
         .returning();
       if (expired) await publishSecret(deps, expired, "secret_request.updated");
       throw secretClosed("expired");
     }
-    await deps.runners
-      .call(
+    if (!deps.runners.isOnline(row.runnerId)) throw runnerOffline();
+    // The database decides first: one statement takes the request out of `pending` (a decline, or another
+    // attempt to deliver, that lost gets `secret.closed`), and the secret's row is written with it, so a secret on the
+    // runner's disk always has its row. Only the winner sends the box to the runner.
+    const at = deps.now();
+    const key = and(
+      eq(runnerSecrets.agentId, agent.id),
+      eq(runnerSecrets.runnerId, row.runnerId),
+      eq(runnerSecrets.name, row.name),
+    );
+    const won = await deps.db.transaction(async (tx) => {
+      const [taken] = await tx
+        .update(secretPrompts)
+        .set({ status: "delivered", fulfilledAt: at, decidedBy: me.userId })
+        .where(and(eq(secretPrompts.id, row.id), eq(secretPrompts.status, "pending")))
+        .returning();
+      if (!taken) return null;
+      const [previous] = await tx.select().from(runnerSecrets).where(key);
+      const values = {
+        target: row.target,
+        filePath: row.filePath,
+        browser: row.browser,
+        deliveredBy: me.userId,
+        updatedAt: at,
+      };
+      await tx
+        .insert(runnerSecrets)
+        .values({
+          agentId: agent.id,
+          runnerId: row.runnerId,
+          name: row.name,
+          workspaceId: me.workspaceId,
+          ...values,
+        })
+        .onConflictDoUpdate({
+          target: [runnerSecrets.agentId, runnerSecrets.runnerId, runnerSecrets.name],
+          set: values,
+        });
+      return { next: taken, previous: previous ?? null };
+    });
+    if (!won) {
+      const [now] = await deps.db
+        .select({ status: secretPrompts.status })
+        .from(secretPrompts)
+        .where(eq(secretPrompts.id, row.id));
+      throw secretClosed(now?.status ?? "pending");
+    }
+    const { next, previous } = won;
+    try {
+      await deps.runners.call(
         row.runnerId,
         "secret.store",
         {
@@ -133,38 +184,24 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
           box,
         },
         { agent: { id: agent.id, handle: agent.handle }, timeoutMs: 20_000 },
-      )
-      .catch(runnerError);
-    const at = deps.now();
-    const [next] = await deps.db
-      .update(secretPrompts)
-      .set({ status: "delivered", fulfilledAt: at, decidedBy: me.userId })
-      .where(and(eq(secretPrompts.id, row.id), eq(secretPrompts.status, "pending")))
-      .returning();
-    if (!next) throw conflict("secret.closed", "This request is no longer open");
-    await deps.db
-      .insert(runnerSecrets)
-      .values({
-        agentId: agent.id,
-        runnerId: row.runnerId,
-        name: row.name,
-        workspaceId: me.workspaceId,
-        target: row.target,
-        filePath: row.filePath,
-        browser: row.browser,
-        deliveredBy: me.userId,
-        updatedAt: at,
-      })
-      .onConflictDoUpdate({
-        target: [runnerSecrets.agentId, runnerSecrets.runnerId, runnerSecrets.name],
-        set: {
-          target: row.target,
-          filePath: row.filePath,
-          browser: row.browser,
-          deliveredBy: me.userId,
-          updatedAt: at,
-        },
+      );
+    } catch (err) {
+      // The runner didn't store it: the request can be answered again. When the runner answered with an error
+      // nothing was stored and the secret's row goes back to what it was; when the answer never came (no
+      // answer in time, the connection dropped on the way) the value may be on the disk, so the row stays and
+      // the secret can still be listed and deleted.
+      const notStored = err instanceof RunnerCallError && !UNSURE.has(err.code);
+      await deps.db.transaction(async (tx) => {
+        await tx
+          .update(secretPrompts)
+          .set({ status: "pending", fulfilledAt: null, decidedBy: null })
+          .where(and(eq(secretPrompts.id, row.id), eq(secretPrompts.status, "delivered")));
+        if (!notStored) return;
+        if (previous) await tx.update(runnerSecrets).set(previous).where(key);
+        else await tx.delete(runnerSecrets).where(key);
       });
+      runnerError(err);
+    }
     await publishSecret(deps, next, "secret_request.updated");
     return c.json(toSecretRequest(next));
   });
@@ -384,7 +421,7 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
   const canSeeLog = async (deps: AppDeps, me: WorkspaceMember, agent: AgentRow) =>
     isEditor(me, agent) || canTalkTo(await withPlanOwner(deps.db, agent), me.userId);
 
-  app.get(`${WORKSPACE}/agents/:agentId/browser/steps`, async (c) => {
+  app.get(`${WORKSPACE}/agents/:agentId/browser/log`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
     const agent = await agentInWorkspace(deps.db, me.workspaceId, param(c, "agentId"));
@@ -401,7 +438,7 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
     return c.json({ steps: rows.map(toBrowserLogEntry) });
   });
 
-  app.get(`${WORKSPACE}/agents/:agentId/browser/steps/:stepId/shot`, async (c) => {
+  app.get(`${WORKSPACE}/agents/:agentId/browser/log/:entryId/shot`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
     const agent = await agentInWorkspace(deps.db, me.workspaceId, param(c, "agentId"));
@@ -409,7 +446,7 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
     const [row] = await deps.db
       .select({ shotKey: browserLogEntries.shotKey })
       .from(browserLogEntries)
-      .where(and(eq(browserLogEntries.id, param(c, "stepId")), eq(browserLogEntries.agentId, agent.id)));
+      .where(and(eq(browserLogEntries.id, param(c, "entryId")), eq(browserLogEntries.agentId, agent.id)));
     const blob = row?.shotKey ? await deps.blobs.get(row.shotKey) : null;
     if (!blob) throw notFound("No screenshot for this step");
     return c.body(blob.bytes as Uint8Array<ArrayBuffer>, 200, {
@@ -512,7 +549,7 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
     return c.json(toIntervention(next));
   });
 
-  app.post(`${WORKSPACE}/agents/:agentId/browser/interventions/takeover`, async (c) => {
+  app.post(`${WORKSPACE}/agents/:agentId/browser/interventions/start`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
     const agent = await agentInWorkspace(deps.db, me.workspaceId, param(c, "agentId"));

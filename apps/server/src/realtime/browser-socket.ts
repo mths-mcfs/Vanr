@@ -1,7 +1,7 @@
 // The browser's WebSocket: /api/v1/realtime?workspaceId=. It authenticates by the session cookie, checks that
 // the person is a member of the workspace and only lets them subscribe to a channel they can read.
 import { schema } from "@vanr/engine/db";
-import { and, eq } from "drizzle-orm";
+import { and, eq, gt } from "drizzle-orm";
 import { z } from "zod";
 import { canReadChannel } from "../channels";
 import type { AppDeps } from "../context";
@@ -12,6 +12,7 @@ import {
   liveViewInput,
   liveViewSubscribe,
   liveViewUnsubscribe,
+  recheckLiveViews,
 } from "../runners/browser-live";
 import type { BrowserSocket, BrowserSocketData } from "./hub";
 
@@ -63,8 +64,61 @@ export async function checkBrowserUpgrade(
   if (!m) return fail(404, "not_found", "Workspace not found");
   return {
     ok: true,
-    data: { kind: "browser", workspaceId, userId, channels: new Set(), lastTypingAt: new Map() },
+    data: {
+      kind: "browser",
+      workspaceId,
+      userId,
+      sessionId: session.session.id,
+      channels: new Set(),
+      lastTypingAt: new Map(),
+    },
   };
+}
+
+/**
+ * How often every open socket is checked again: its session (expired or ended where no hook told us), its
+ * membership, the private channels it follows and the agents it watches. A frame that has an effect is checked
+ * before it is taken, so this bounds only what the socket still receives.
+ */
+export const REVALIDATE_MS = 15_000;
+
+/**
+ * The right that opened the socket still holds: its session exists and hasn't expired (by the server's clock)
+ * and the person is still a member of the workspace. Otherwise the socket is cut at once.
+ */
+async function stillAllowed(deps: AppDeps, ws: BrowserSocket): Promise<boolean> {
+  const { sessions, members } = schema;
+  const [row] = await deps.db
+    .select({ id: sessions.id })
+    .from(sessions)
+    .innerJoin(
+      members,
+      and(eq(members.userId, sessions.userId), eq(members.workspaceId, ws.data.workspaceId)),
+    )
+    .where(
+      and(
+        eq(sessions.id, ws.data.sessionId),
+        eq(sessions.userId, ws.data.userId),
+        gt(sessions.expiresAt, deps.now()),
+      ),
+    );
+  if (row) return true;
+  deps.hub.cut(ws, 4401, "access ended");
+  return false;
+}
+
+/** The sweep (every REVALIDATE_MS): every socket's right, the private channels it follows, the agents it watches. */
+export async function revalidateBrowsers(deps: AppDeps): Promise<void> {
+  for (const ws of deps.hub.sockets()) {
+    if (!(await stillAllowed(deps, ws))) continue;
+    const { workspaceId, userId } = ws.data;
+    for (const channelId of [...ws.data.channels]) {
+      if (await canReadChannel(deps.db, { workspaceId, userId, channelId })) continue;
+      deps.hub.unsubscribe(ws, channelId);
+      reply(ws, { type: "unsubscribed", channelId });
+    }
+  }
+  await recheckLiveViews(deps);
 }
 
 export function browserOpen(deps: AppDeps, ws: BrowserSocket) {
@@ -107,6 +161,10 @@ export async function browserMessage(deps: AppDeps, ws: BrowserSocket, raw: stri
 
 async function handle(deps: AppDeps, ws: BrowserSocket, frame: ClientFrame) {
   const { workspaceId, userId } = ws.data;
+  // A frame with an effect is taken only while the right that opened the socket still holds.
+  const effect =
+    frame.type !== "ping" && frame.type !== "unsubscribe" && frame.type !== "live_view.unsubscribe";
+  if (effect && !(await stillAllowed(deps, ws))) return;
   switch (frame.type) {
     case "ping":
       return reply(ws, { type: "pong" });
@@ -140,6 +198,8 @@ async function handle(deps: AppDeps, ws: BrowserSocket, frame: ClientFrame) {
     case "live_view.unsubscribe":
       return liveViewUnsubscribe(deps, ws, frame.agentId);
     case "live_view.input":
+      // Still allowed to see that agent (its audience may have changed since the watch began).
+      await recheckLiveViews(deps, ws);
       return liveViewInput(deps, ws, frame.agentId, frame.events);
     default: {
       const _exhaustive: never = frame;

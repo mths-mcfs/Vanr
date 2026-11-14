@@ -111,8 +111,8 @@ const STEP_TEXT_MAX = 500;
 const clipValue = (v: unknown): unknown =>
   typeof v === "string" && v.length > STEP_TEXT_MAX ? `${v.slice(0, STEP_TEXT_MAX)}…` : v;
 
-const stepShotKey = (workspaceId: string, agentId: string, stepId: string) =>
-  `browser-log/${workspaceId}/${agentId}/${stepId}.jpg`;
+const entryShotKey = (workspaceId: string, agentId: string, entryId: string) =>
+  `browser-log/${workspaceId}/${agentId}/${entryId}.jpg`;
 
 interface StepInput {
   workspaceId: string;
@@ -137,7 +137,7 @@ export async function recordStep(deps: AppDeps, input: StepInput): Promise<void>
   try {
     let shotKey: string | null = null;
     if (input.shot) {
-      shotKey = stepShotKey(input.workspaceId, input.agentId, id);
+      shotKey = entryShotKey(input.workspaceId, input.agentId, id);
       await deps.blobs.put(shotKey, new Uint8Array(Buffer.from(input.shot, "base64")), "image/jpeg");
     }
     await deps.db.insert(browserLogEntries).values({

@@ -40,6 +40,10 @@ type HarnessToolHandler = (name: string, input: unknown) => Promise<{ content: s
 
 interface Pending {
   runnerId: string;
+  /** The connection the request went out on: only frames from it count for the request. */
+  socket: RunnerSocket;
+  /** The agent the request is for (null: the runner itself). */
+  agentId: string | null;
   resolve: (data: unknown) => void;
   reject: (err: RunnerCallError) => void;
   onOutput?: (stream: "stdout" | "stderr", chunk: string) => void;
@@ -62,6 +66,8 @@ export class RunnerHub {
   private readonly pending = new Map<string, Pending>();
   private readonly busy = new Map<string, number>();
   private readonly waiting = new Map<string, (() => void)[]>();
+  /** Connections the server cut (revoked, removed, re-paired): nothing they send counts any more. */
+  private readonly cut = new WeakSet<RunnerSocket>();
 
   isOnline(runnerId: string): boolean {
     return this.sockets.has(runnerId);
@@ -104,7 +110,15 @@ export class RunnerHub {
     const ws = this.sockets.get(runnerId);
     if (!ws) return;
     if (frame) this.send(runnerId, frame);
+    // Cut at once: the pending requests fail now and the socket's frames stop counting, before its close ends.
+    this.cut.add(ws);
+    this.failAll(runnerId, "offline", "The runner was disconnected");
     ws.close(code, "closed");
+  }
+
+  /** The socket is the runner's current connection and the server didn't cut it. */
+  isCurrent(ws: RunnerSocket): boolean {
+    return !this.cut.has(ws) && !!ws.data.runnerId && this.sockets.get(ws.data.runnerId) === ws;
   }
 
   private async slot(runnerId: string, signal?: AbortSignal): Promise<() => void> {
@@ -158,8 +172,16 @@ export class RunnerHub {
           this.send(runnerId, { type: "cancel", id });
           reject(new RunnerCallError("timeout", "The runner did not answer in time"));
         }, opts.timeoutMs ?? 60_000);
+        const socket = this.sockets.get(runnerId);
+        if (!socket) {
+          clearTimeout(timer);
+          reject(new RunnerCallError("offline", "The runner is offline"));
+          return;
+        }
         this.pending.set(id, {
           runnerId,
+          socket,
+          agentId: opts.agent?.id ?? null,
           resolve: (d) => resolve(d as T),
           reject,
           onOutput: opts.onOutput,
@@ -189,36 +211,53 @@ export class RunnerHub {
     }
   }
 
+  /** The answer to a request: it counts only from the runner the request went to (another one's is dropped). */
   onResult(
+    from: RunnerSocket,
     frame:
       | { id: string; ok: true; data: unknown }
       | { id: string; ok: false; error: { code: RunnerErrorCode; message: string } },
   ) {
-    const p = this.pending.get(frame.id);
-    if (!p) return;
+    const p = this.pendingOf(from, frame.id);
+    if (!p) {
+      if (this.pending.has(frame.id))
+        log.warn("runner.foreign_result", { runnerId: from.data.runnerId, id: frame.id });
+      return;
+    }
     this.pending.delete(frame.id);
     clearTimeout(p.timer);
     if (frame.ok) p.resolve(frame.data);
     else p.reject(new RunnerCallError(frame.error.code, frame.error.message));
   }
 
-  onOutput(frame: { id: string; stream: "stdout" | "stderr"; chunk: string }) {
-    this.pending.get(frame.id)?.onOutput?.(frame.stream, frame.chunk);
+  /** A piece of a request's output: only from the runner the request went to. */
+  onOutput(from: RunnerSocket, frame: { id: string; stream: "stdout" | "stderr"; chunk: string }) {
+    const p = this.pendingOf(from, frame.id);
+    if (!p) {
+      if (this.pending.has(frame.id))
+        log.warn("runner.foreign_output", { runnerId: from.data.runnerId, id: frame.id });
+      return;
+    }
+    p.onOutput?.(frame.stream, frame.chunk);
   }
 
   /** Only valid for the request this same runner is serving. */
-  private pendingOf(runnerId: string, id: string): Pending | null {
+  private pendingOf(from: RunnerSocket, id: string): Pending | null {
     const p = this.pending.get(id);
-    return p && p.runnerId === runnerId ? p : null;
+    return p && p.socket === from ? p : null;
   }
 
-  onHarnessEvent(runnerId: string, frame: { id: string; event: HarnessEvent }) {
-    this.pendingOf(runnerId, frame.id)?.onHarnessEvent?.(frame.event);
+  onHarnessEvent(from: RunnerSocket, frame: { id: string; event: HarnessEvent }) {
+    const p = this.pendingOf(from, frame.id);
+    if (!p && this.pending.has(frame.id))
+      log.warn("runner.foreign_harness_event", { runnerId: from.data.runnerId, id: frame.id });
+    p?.onHarnessEvent?.(frame.event);
   }
 
   /** The harness called a tool: runs it and returns the result to the runner. */
-  onHarnessTool(runnerId: string, frame: { id: string; callId: string; name: string; input: unknown }) {
-    const handler = this.pendingOf(runnerId, frame.id)?.onHarnessTool;
+  onHarnessTool(from: RunnerSocket, frame: { id: string; callId: string; name: string; input: unknown }) {
+    const handler = this.pendingOf(from, frame.id)?.onHarnessTool;
+    const runnerId = from.data.runnerId ?? "";
     const reply = (out: { content: string; isError: boolean }) =>
       this.send(runnerId, {
         type: "harness.tool_result",
@@ -234,6 +273,21 @@ export class RunnerHub {
     handler(frame.name, frame.input).then(reply, (err) =>
       reply({ content: err instanceof Error ? err.message : String(err), isError: true }),
     );
+  }
+
+  /**
+   * The right a request ran under ended (the agent moved to another runner or lost it, the runner's access was
+   * reduced): its pending requests fail with `canceled` and the runner is told to stop them. With no `agentId`,
+   * every pending request of the runner.
+   */
+  cancelPending(runnerId: string, agentId?: string) {
+    for (const [id, p] of this.pending) {
+      if (p.runnerId !== runnerId || (agentId !== undefined && p.agentId !== agentId)) continue;
+      this.pending.delete(id);
+      clearTimeout(p.timer);
+      this.send(runnerId, { type: "cancel", id });
+      p.reject(new RunnerCallError("canceled", "Canceled: the access it ran under changed"));
+    }
   }
 
   private failAll(runnerId: string, code: RunnerErrorCode, message: string) {

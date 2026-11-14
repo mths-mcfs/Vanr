@@ -201,3 +201,44 @@ export function dropAllLiveViews() {
   for (const s of streams.values()) if (s.stopTimer) clearTimeout(s.stopTimer);
   streams.clear();
 }
+
+/** Tells the watchers the agent's live view ended and drops the stream (the runner is told to stop when online). */
+export function endLiveView(deps: AppDeps, agentId: string) {
+  const s = streams.get(agentId);
+  if (!s) return;
+  if (s.stopTimer) clearTimeout(s.stopTimer);
+  streams.delete(agentId);
+  for (const w of s.watchers) send(w, { type: "live_view.ended", agentId, reason: "closed" });
+  if (deps.runners.isOnline(s.runnerId))
+    void deps.runners
+      .call(s.runnerId, "live_view.stop", {}, { agent: { id: agentId, handle: "" }, timeoutMs: 10_000 })
+      .catch(() => {});
+}
+
+/** Every live view streamed by this runner ends (it was revoked, removed or lost its browser). */
+export function endLiveViewsOf(deps: AppDeps, runnerId: string) {
+  for (const [agentId, s] of [...streams]) if (s.runnerId === runnerId) endLiveView(deps, agentId);
+}
+
+/**
+ * Checks each stream against the database now: a stream whose agent is gone or moved to another runner ends, and
+ * a watcher who may no longer see the agent (left its audience, another workspace) stops watching. `only`
+ * limits the watchers checked to one socket (before it sends a frame).
+ */
+export async function recheckLiveViews(deps: AppDeps, only?: BrowserSocket) {
+  for (const [agentId, s] of [...streams]) {
+    if (only && !s.watchers.has(only)) continue;
+    const [agent] = await deps.db.select().from(agents).where(eq(agents.id, agentId));
+    if (!agent || agent.environmentId !== s.runnerId) {
+      endLiveView(deps, agentId);
+      continue;
+    }
+    const talker = await withPlanOwner(deps.db, agent);
+    for (const w of [...s.watchers]) {
+      if (only && w !== only) continue;
+      if (w.data.workspaceId === agent.workspaceId && canTalkTo(talker, w.data.userId)) continue;
+      liveViewUnsubscribe(deps, w, agentId);
+      send(w, { type: "live_view.unavailable", agentId, reason: "forbidden" });
+    }
+  }
+}

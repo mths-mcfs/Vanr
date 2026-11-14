@@ -41,6 +41,13 @@ beforeAll(() => {
 });
 afterAll(() => server.stop(true));
 
+/** The server's end of a runner's connection (where its frames come from). */
+function socketOf(id: string): RunnerSocket {
+  const ws = sockets.get(id);
+  if (!ws) throw new Error(`no socket for ${id}`);
+  return ws;
+}
+
 interface Frame {
   type: string;
   id: string;
@@ -95,12 +102,12 @@ describe("runner hub", () => {
       args: { command: "ls" },
     });
     const id = request?.id ?? "";
-    hub.onOutput({ id, stream: "stdout", chunk: "file.txt\n" });
-    hub.onResult({ id, ok: true, data: { exitCode: 0 } });
+    hub.onOutput(socketOf("r1"), { id, stream: "stdout", chunk: "file.txt\n" });
+    hub.onResult(socketOf("r1"), { id, ok: true, data: { exitCode: 0 } });
     expect(await call).toEqual({ exitCode: 0 });
     expect(chunks).toEqual(["stdout:file.txt\n"]);
     // A late result for a request already settled changes nothing.
-    hub.onResult({ id, ok: false, error: { code: "internal", message: "late" } });
+    hub.onResult(socketOf("r1"), { id, ok: false, error: { code: "internal", message: "late" } });
     r.ws.close();
   });
 
@@ -108,7 +115,11 @@ describe("runner hub", () => {
     const r = await runner("r2");
     const call = failure(hub.call("r2", "read", { path: "/etc/shadow" }));
     const [request] = await r.until(1);
-    hub.onResult({ id: request?.id ?? "", ok: false, error: { code: "outside_work_dir", message: "no" } });
+    hub.onResult(socketOf("r2"), {
+      id: request?.id ?? "",
+      ok: false,
+      error: { code: "outside_work_dir", message: "no" },
+    });
     expect(await call).toEqual({ code: "outside_work_dir", message: "no" });
     r.ws.close();
   });
@@ -157,10 +168,10 @@ describe("runner hub", () => {
     const first = await r.until(MAX_INFLIGHT);
     await Bun.sleep(30);
     expect(r.frames).toHaveLength(MAX_INFLIGHT);
-    hub.onResult({ id: first[0]?.id ?? "", ok: true, data: "done 0" });
+    hub.onResult(socketOf("r6"), { id: first[0]?.id ?? "", ok: true, data: "done 0" });
     const all = await r.until(MAX_INFLIGHT + 1);
     expect(all[MAX_INFLIGHT]).toMatchObject({ type: "request", args: { path: String(MAX_INFLIGHT) } });
-    for (const f of all.slice(1)) hub.onResult({ id: f.id, ok: true, data: `done ${f.id}` });
+    for (const f of all.slice(1)) hub.onResult(socketOf("r6"), { id: f.id, ok: true, data: `done ${f.id}` });
     expect(await calls[0]).toBe("done 0");
     await Promise.all(calls);
     r.ws.close();
@@ -174,7 +185,7 @@ describe("runner hub", () => {
     const waiting = hub.call("r7", "list", { path: "waiting" }, { signal: abort.signal });
     abort.abort();
     expect(await failure(waiting)).toEqual({ code: "canceled", message: "Canceled" });
-    for (const f of r.frames) hub.onResult({ id: f.id, ok: true, data: null });
+    for (const f of r.frames) hub.onResult(socketOf("r7"), { id: f.id, ok: true, data: null });
     await Promise.all(busy);
     await Bun.sleep(30);
     expect(r.frames.filter((f) => (f.args as { path?: string }).path === "waiting")).toEqual([]);
@@ -199,8 +210,8 @@ describe("runner hub", () => {
     const [request] = await r.until(1);
     const id = request?.id ?? "";
     // Another runner naming this request gets the "turn is over" answer, not the handler.
-    hub.onHarnessTool("r9", { id, callId: "x", name: "read", input: {} });
-    hub.onHarnessEvent("r9", { id, event: { kind: "text", text: "spoofed" } });
+    hub.onHarnessTool(socketOf("r9"), { id, callId: "x", name: "read", input: {} });
+    hub.onHarnessEvent(socketOf("r9"), { id, event: { kind: "text", text: "spoofed" } });
     const [spoofed] = await other.until(1);
     expect(spoofed).toEqual({
       type: "harness.tool_result",
@@ -209,7 +220,7 @@ describe("runner hub", () => {
       content: "This turn is over",
       isError: true,
     });
-    hub.onHarnessTool("r8", { id, callId: "c1", name: "search", input: { q: "a" } });
+    hub.onHarnessTool(socketOf("r8"), { id, callId: "c1", name: "search", input: { q: "a" } });
     const frames = await r.until(2);
     expect(frames[1]).toEqual({
       type: "harness.tool_result",
@@ -218,9 +229,9 @@ describe("runner hub", () => {
       content: 'search:{"q":"a"}',
       isError: false,
     });
-    hub.onHarnessEvent("r8", { id, event: { kind: "text", text: "thinking" } });
+    hub.onHarnessEvent(socketOf("r8"), { id, event: { kind: "text", text: "thinking" } });
     expect(events).toEqual([{ kind: "text", text: "thinking" }]);
-    hub.onResult({ id, ok: true, data: null });
+    hub.onResult(socketOf("r8"), { id, ok: true, data: null });
     await call;
     r.ws.close();
     other.ws.close();
@@ -235,12 +246,16 @@ describe("runner hub", () => {
     for (let i = 0; i < 20; i++) {
       const call = hub.call("r10", "list", { path: String(i) }, opts);
       const frames = await r.until(i + 1);
-      hub.onResult({ id: frames[i]?.id ?? "", ok: true, data: i });
+      hub.onResult(socketOf("r10"), { id: frames[i]?.id ?? "", ok: true, data: i });
       await call;
     }
     const failed = failure(hub.call("r10", "list", { path: "e" }, opts));
     const errorFrames = await r.until(21);
-    hub.onResult({ id: errorFrames[20]?.id ?? "", ok: false, error: { code: "internal", message: "x" } });
+    hub.onResult(socketOf("r10"), {
+      id: errorFrames[20]?.id ?? "",
+      ok: false,
+      error: { code: "internal", message: "x" },
+    });
     await failed;
     expect(listeners()).toBe(0);
     // Past its deadline.
@@ -255,12 +270,12 @@ describe("runner hub", () => {
     )
       await Bun.sleep(2);
     for (const f of r.frames.filter((f) => (f.args as { path?: string } | undefined)?.path === "busy"))
-      hub.onResult({ id: f.id, ok: true, data: null });
+      hub.onResult(socketOf("r10"), { id: f.id, ok: true, data: null });
     await Promise.all(busy);
     while (!r.frames.some((f) => (f.args as { path?: string } | undefined)?.path === "queued"))
       await Bun.sleep(2);
     const q = r.frames.find((f) => (f.args as { path?: string } | undefined)?.path === "queued");
-    hub.onResult({ id: q?.id ?? "", ok: true, data: null });
+    hub.onResult(socketOf("r10"), { id: q?.id ?? "", ok: true, data: null });
     await queued;
     expect(listeners()).toBe(0);
     // The runner drops.
