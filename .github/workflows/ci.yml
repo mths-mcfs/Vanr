@@ -109,7 +109,7 @@ jobs:
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
-      - run: bun test apps/runner/src/sandbox.test.ts --reporter=junit --reporter-outfile=sandbox-junit.xml
+      - run: bun test apps/runner/src/sandbox.test.ts apps/runner/src/cli-state.test.ts apps/runner/src/net-mode.test.ts --reporter=junit --reporter-outfile=sandbox-junit.xml
         env:
           # Makes the test fail if any real srt test would be skipped.
           VANR_SANDBOX_REQUIRED: "1"
