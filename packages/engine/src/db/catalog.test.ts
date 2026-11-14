@@ -62,6 +62,21 @@ describe("the initial migration", () => {
     });
   }
 
+  test("tells apart collations of the same name in different schemas", async () => {
+    const pg = new PGlite();
+    try {
+      await pg.exec(`create schema a; create schema b;
+        create collation a.same from "C"; create collation b.same from "C";
+        create table t (v text collate a.same)`);
+      const query = async (text: string) => (await pg.query<Record<string, unknown>>(text)).rows;
+      const before = await readCatalog(query);
+      await pg.exec("alter table t alter column v type text collate b.same");
+      expect(await readCatalog(query)).not.toEqual(before);
+    } finally {
+      await pg.close();
+    }
+  });
+
   // Runs only where a disposable Postgres is available (the CI job starts one); never point it at a
   // database you care about: it applies the migrations there.
   const url = process.env.VANR_TEST_POSTGRES_URL;

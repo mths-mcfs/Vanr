@@ -11,7 +11,7 @@ export interface CatalogColumn {
   type: string;
   notNull: boolean;
   default: string | null;
-  /** Collation when it differs from the type's default; null otherwise. */
+  /** Collation when it differs from the type's default, schema-qualified outside pg_catalog; else null. */
   collation: string | null;
 }
 
@@ -58,10 +58,13 @@ const QUERIES = {
     where n.nspname = 'public' and c.relkind = 'r'`,
   columns: `select c.relname as table, a.attname as name, format_type(a.atttypid, a.atttypmod) as type,
       a.attnotnull as not_null, pg_get_expr(d.adbin, d.adrelid) as default,
-      case when a.attcollation <> ty.typcollation then co.collname end as collation
+      case when a.attcollation <> ty.typcollation then
+        case when cn.nspname = 'pg_catalog' then co.collname else cn.nspname || '.' || co.collname end
+      end as collation
     from pg_attribute a
     join pg_type ty on ty.oid = a.atttypid
     left join pg_collation co on co.oid = a.attcollation
+    left join pg_namespace cn on cn.oid = co.collnamespace
     join pg_class c on c.oid = a.attrelid
     join pg_namespace n on n.oid = c.relnamespace
     left join pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum

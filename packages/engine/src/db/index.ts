@@ -1,5 +1,3 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
@@ -8,6 +6,7 @@ import { migrate as migratePglite } from "drizzle-orm/pglite/migrator";
 import { drizzle as drizzlePostgres } from "drizzle-orm/postgres-js";
 import { migrate as migratePostgres } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
+import { lockDataDir } from "./lock";
 import * as schema from "./schema";
 
 export { schema };
@@ -23,59 +22,6 @@ export interface OpenDb {
   db: Db;
   kind: DbTarget["kind"];
   close(): Promise<void>;
-}
-
-/** Directories opened by this process. Two PGlite instances on one directory corrupt it silently. */
-const openDirs = new Set<string>();
-
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    // EPERM: the process exists but belongs to someone else.
-    return e instanceof Error && "code" in e && e.code === "EPERM";
-  }
-}
-
-/**
- * Takes the directory for this process: a registry inside the process, and a lock file created
- * exclusively with the pid across processes. The lock sits next to the directory, `<dir>.lock`:
- * PGlite will not initialize a new database in a directory that already holds a file. A lock whose process is gone is taken over.
- * Returns the release function.
- */
-function lockDir(dataDir: string): () => void {
-  const dir = resolve(dataDir);
-  if (openDirs.has(dir)) throw new Error(`database directory ${dir} is already open in this process`);
-  mkdirSync(dirname(dir), { recursive: true });
-  const lock = `${dir}.lock`;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      writeFileSync(lock, String(process.pid), { flag: "wx" });
-      openDirs.add(dir);
-      return () => {
-        openDirs.delete(dir);
-        try {
-          if (readFileSync(lock, "utf8") === String(process.pid)) rmSync(lock, { force: true });
-        } catch {
-          // Already gone.
-        }
-      };
-    } catch (e) {
-      if (!(e instanceof Error && "code" in e && e.code === "EEXIST")) throw e;
-      let holder = Number.NaN;
-      try {
-        holder = Number.parseInt(readFileSync(lock, "utf8").trim(), 10);
-      } catch {
-        // Removed between the two calls: try again.
-      }
-      if (Number.isInteger(holder) && holder > 0 && holder !== process.pid && processAlive(holder)) {
-        throw new Error(`database directory ${dir} is already open by process ${holder}`);
-      }
-      rmSync(lock, { force: true });
-    }
-  }
-  throw new Error(`could not lock database directory ${dir}`);
 }
 
 /** Runs `fn` once; later calls get the same promise. */
@@ -107,7 +53,7 @@ export async function openDb(target: DbTarget): Promise<OpenDb> {
     }
   }
   const extensions = { pg_trgm };
-  const release = target.dataDir ? lockDir(target.dataDir) : () => {};
+  const release = target.dataDir ? lockDataDir(target.dataDir) : () => {};
   let client: PGlite | null = null;
   try {
     client = target.dataDir ? new PGlite(target.dataDir, { extensions }) : new PGlite({ extensions });
