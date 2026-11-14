@@ -4,7 +4,7 @@ import { HocuspocusProvider, HocuspocusProviderWebsocket } from "@hocuspocus/pro
 import * as Y from "yjs";
 import type { RunningServer } from "../src/server";
 import { COLLAB_PATH } from "../src/wiki-collab";
-import { wikiMarkdown } from "../src/wiki-md";
+import { wikiMarkdown, YFRAGMENT } from "../src/wiki-md";
 import type { Browser } from "./harness";
 
 /** Waits for a condition the server or the socket makes true (each check is a fresh read); the bound is generous for a loaded CI host. */
@@ -122,4 +122,70 @@ export function connect(
       socket.destroy();
     },
   };
+}
+
+// ---- A bare socket speaking the wire format, to send what the provider never would.
+
+const enc = new TextEncoder();
+export function varUintBytes(n: number): number[] {
+  const out: number[] = [];
+  for (;;) {
+    out.push((n & 0x7f) | (n > 0x7f ? 0x80 : 0));
+    n = Math.floor(n / 128);
+    if (!n) return out;
+  }
+}
+export const varString = (s: string) => {
+  const b = enc.encode(s);
+  return [...varUintBytes(b.length), ...b];
+};
+export const varBytes = (b: Uint8Array) => [...varUintBytes(b.length), ...b];
+export const authMessage = (doc: string) => new Uint8Array([...varString(doc), 2, 0, ...varString("cookie")]);
+export const updateMessage = (doc: string, update: Uint8Array) =>
+  new Uint8Array([...varString(doc), 0, 2, ...varBytes(update)]);
+
+export interface Raw {
+  ws: WebSocket;
+  received: Uint8Array[];
+  closed: Promise<number>;
+  /** Waits for the server's answer to an authentication: true when authenticated. */
+  authenticated(doc: string): Promise<boolean>;
+  /** Waits for a SyncStatus on `doc` (the answer to an update). */
+  synced(doc: string): Promise<boolean>;
+}
+
+export function rawSocket(srv: RunningServer, browser: Browser, workspaceId: string): Promise<Raw> {
+  const cookie = [...browser.cookies].map(([k, v]) => `${k}=${v}`).join("; ");
+  const ws = new WebSocket(`${srv.url.replace(/^http/, "ws")}${COLLAB_PATH}?workspaceId=${workspaceId}`, {
+    headers: { cookie, origin: srv.url },
+  } as never);
+  ws.binaryType = "arraybuffer";
+  const received: Uint8Array[] = [];
+  const closed = new Promise<number>((r) => ws.addEventListener("close", (e) => r(e.code)));
+  ws.addEventListener("message", (e) => received.push(new Uint8Array(e.data as ArrayBuffer)));
+  const answer = (doc: string, type: number) =>
+    until(() => received.some((m) => startsWith(m, [...varString(doc), type]))).then(
+      () => received.find((m) => startsWith(m, [...varString(doc), type])) as Uint8Array,
+    );
+  const prefix = (doc: string) => varString(doc).length;
+  return new Promise((resolve) =>
+    ws.addEventListener("open", () =>
+      resolve({
+        ws,
+        received,
+        closed,
+        authenticated: async (doc) => (await answer(doc, 2))[prefix(doc) + 1] === 2,
+        synced: async (doc) => (await answer(doc, 8))[prefix(doc) + 1] === 1,
+      }),
+    ),
+  );
+}
+export const startsWith = (m: Uint8Array, head: number[]) => head.every((b, i) => m[i] === b);
+
+export function paragraphUpdate(text: string): Uint8Array {
+  const doc = new Y.Doc();
+  const para = new Y.XmlElement("paragraph");
+  para.insert(0, [new Y.XmlText(text)]);
+  doc.getXmlFragment(YFRAGMENT).push([para]);
+  return Y.encodeStateAsUpdate(doc);
 }
