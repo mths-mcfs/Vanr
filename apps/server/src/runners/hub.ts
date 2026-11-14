@@ -112,20 +112,21 @@ export class RunnerHub {
     if (used >= MAX_INFLIGHT) {
       await new Promise<void>((resolve, reject) => {
         const list = this.waiting.get(runnerId) ?? [];
-        const go = () => resolve();
+        // A reused signal keeps no listener once the slot comes: `go` takes it off.
+        const onAbort = () => {
+          this.waiting.set(
+            runnerId,
+            (this.waiting.get(runnerId) ?? []).filter((g) => g !== go),
+          );
+          reject(new RunnerCallError("canceled", "Canceled"));
+        };
+        const go = () => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        };
         list.push(go);
         this.waiting.set(runnerId, list);
-        signal?.addEventListener(
-          "abort",
-          () => {
-            this.waiting.set(
-              runnerId,
-              (this.waiting.get(runnerId) ?? []).filter((g) => g !== go),
-            );
-            reject(new RunnerCallError("canceled", "Canceled"));
-          },
-          { once: true },
-        );
+        signal?.addEventListener("abort", onAbort, { once: true });
       });
     }
     this.busy.set(runnerId, (this.busy.get(runnerId) ?? 0) + 1);
@@ -147,6 +148,9 @@ export class RunnerHub {
     if (!this.isOnline(runnerId)) throw new RunnerCallError("offline", "The runner is offline");
     const release = await this.slot(runnerId, opts.signal);
     const id = newId("rq");
+    const onAbort = () => {
+      if (this.pending.has(id)) this.send(runnerId, { type: "cancel", id });
+    };
     try {
       return await new Promise<T>((resolve, reject) => {
         const timer = setTimeout(() => {
@@ -163,14 +167,7 @@ export class RunnerHub {
           onHarnessTool: opts.onHarnessTool,
           timer,
         });
-        opts.signal?.addEventListener(
-          "abort",
-          () => {
-            if (!this.pending.has(id)) return;
-            this.send(runnerId, { type: "cancel", id });
-          },
-          { once: true },
-        );
+        opts.signal?.addEventListener("abort", onAbort, { once: true });
         const sent = this.send(runnerId, {
           type: "request",
           id,
@@ -186,6 +183,8 @@ export class RunnerHub {
         }
       });
     } finally {
+      // However the call ended (result, error, deadline, runner gone, server stopping).
+      opts.signal?.removeEventListener("abort", onAbort);
       release();
     }
   }
@@ -246,7 +245,9 @@ export class RunnerHub {
     }
   }
 
+  /** The server is stopping: every pending call fails and every runner connection closes. */
   closeAll() {
+    for (const id of this.sockets.keys()) this.failAll(id, "offline", "The server is stopping");
     for (const ws of this.sockets.values()) ws.close(1001, "server stopping");
     this.sockets.clear();
   }

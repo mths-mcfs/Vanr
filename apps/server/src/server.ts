@@ -30,6 +30,15 @@ interface StartOptions {
   sql?: SqlConnector;
   /** The single-instance lock's connection dropped with the server up (index.ts ends the process). */
   onInstanceLockLost?: () => void;
+  /** Tests: replaces a step of the boot that touches the outside, to break it or hold it. */
+  steps?: Partial<BootSteps>;
+}
+
+/** The boot's steps that touch the outside: the instance lock, the database and the VAPID keys. */
+export interface BootSteps {
+  holdInstanceLock: typeof holdInstanceLock;
+  openDb: typeof openDb;
+  loadVapid: typeof loadVapid;
 }
 
 export interface RunningServer {
@@ -79,17 +88,18 @@ export async function startServer(opts: StartOptions): Promise<RunningServer> {
 
 async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   const { config } = opts;
+  const steps: BootSteps = { holdInstanceLock, openDb, loadVapid, ...opts.steps };
   // Single instance on Postgres: the lock comes before the migration and before runtime.start(), which
   // marks every active run in the database as failed. On PGlite the database belongs to the process.
   const lock =
     config.db.kind === "postgres"
-      ? await holdInstanceLock(
+      ? await steps.holdInstanceLock(
           config.db.url,
           opts.onInstanceLockLost ?? (() => log.error("server.instance_lock_lost")),
         )
       : null;
   if (lock) undo.push(() => lock.release());
-  const opened = await openDb(config.db);
+  const opened = await steps.openDb(config.db);
   undo.push(() => opened.close());
   const mailer = createMailer(config.mail, opts.memoryMail);
   const hub = new Hub();
@@ -149,7 +159,7 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     runners: runnersHub,
     // Push goes only to known push service hosts (push.ts), without redirects: it doesn't go through
     // guardedFetch, which would resolve DNS to check for a private network.
-    push: webPushSender(await loadVapid(effective), opts.fetchExternal ?? fetch),
+    push: webPushSender(await steps.loadVapid(effective), opts.fetchExternal ?? fetch),
     // Slice S6 (runtime/runtime) adds `runtime` and `testModelFor`, S3 (wiki-collab) adds `wikiLive` and
     // S5 (assignments/motor, assignments/verify) adds `assignmentEngine` and `assignmentVerifier`.
   };
@@ -160,13 +170,18 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   handler = (req) => app.fetch(req);
   log.info("server.started", { url: publicUrl, db: opened.kind });
 
+  // Every stop, at once or later, gets the same shutdown: it ends (or fails) once for all of them.
+  let stopping: Promise<void> | null = null;
   return {
     url: publicUrl,
     port,
     deps,
     mailer,
     routes: app.routes.map((r) => ({ method: r.method, path: r.path })),
-    stop: () => undoAll(undo),
+    stop: () => {
+      stopping ??= undoAll(undo);
+      return stopping;
+    },
   };
 }
 

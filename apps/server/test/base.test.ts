@@ -2,6 +2,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { schema } from "@vanr/engine/db";
+import { count } from "drizzle-orm";
 import type { RunningServer } from "../src/server";
 import { Browser, body as read, startTestServer } from "./harness";
 
@@ -127,7 +129,57 @@ describe("closed sign-up", () => {
       await closed.stop();
     }
   }, 30_000);
+
+  test("simultaneous sign-ups on a new installation: exactly one gets in", async () => {
+    const closed = await startTestServer({ env: { SIGNUP_OPEN: "false" } });
+    try {
+      const n = 5;
+      holdUserCounts(closed, n);
+      const results = await Promise.all(
+        Array.from({ length: n }, (_, i) =>
+          new Browser(closed.url).signUp(`Person ${i}`, `p${i}@example.com`),
+        ),
+      );
+      expect(results.map((r) => r.status).sort()).toEqual([200, 403, 403, 403, 403]);
+      const [users] = await closed.deps.db.select({ n: count() }).from(schema.users);
+      expect(users?.n).toBe(1);
+    } finally {
+      await closed.stop();
+    }
+  }, 30_000);
 });
+
+/**
+ * Holds every read of the users count until `n` reads arrived (or 300 ms passed): the widest legal
+ * schedule for concurrent sign-ups, where each one reads the count before any of them creates a user.
+ */
+function holdUserCounts(server: RunningServer, n: number) {
+  const db = server.deps.db;
+  const select = db.select.bind(db);
+  let arrived = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  setTimeout(() => release(), 300);
+  db.select = ((fields: Parameters<typeof select>[0]) => {
+    const query = select(fields);
+    if (!fields || !("n" in fields)) return query;
+    const from = query.from.bind(query);
+    query.from = ((table: typeof schema.users) => {
+      const built = from(table);
+      if (table !== schema.users) return built;
+      // The server only awaits this query: a promise of the same rows, read now and handed back late.
+      return (async () => {
+        const rows = await built;
+        if (++arrived === n) release();
+        await gate;
+        return rows;
+      })();
+    }) as unknown as typeof query.from;
+    return query;
+  }) as typeof db.select;
+}
 
 describe("SPA fallback", () => {
   test("index.html on any path outside the API; /assets cached for 4 h", async () => {

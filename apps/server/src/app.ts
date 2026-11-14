@@ -10,6 +10,11 @@ import { registerWorkspaceScope } from "./workspace-scope";
 
 /** Paths that accept multipart (a file upload to the Drive). Every other write is JSON only. */
 const MULTIPART = [/\/files\/files$/, /\/files\/[^/]+\/files$/, /\/wiki\/import\/vault$/];
+/**
+ * Auth paths whose request may create a user: email sign-up, social sign-in with an ID token and the OAuth
+ * callbacks (the first social login creates the user).
+ */
+const CREATES_USER = /^\/api\/auth\/(sign-up\/|sign-in\/social$|callback\/|oauth2\/callback\/)/;
 /** A part of a chunked upload: raw bytes. A form from another site doesn't send that type without a preflight. */
 const RAW_PART = /\/files\/uploads\/[^/]+$/;
 
@@ -30,8 +35,16 @@ export function createApp(deps: AppDeps) {
     await next();
   });
 
-  // Better Auth answers at /api/auth/* in its own format.
-  app.on(["GET", "POST"], "/api/auth/*", (c) => deps.auth.handler(c.req.raw));
+  // Better Auth answers at /api/auth/* in its own format. With closed sign-up, deciding whether a new
+  // user may enter (the first user of the installation) and creating it are one step: the requests that
+  // may create a user go one at a time. The server is a single instance per database (the boot's lock),
+  // so a queue in the process is enough. With open sign-up nothing waits.
+  const oneAtATime = queueOfOne();
+  app.on(["GET", "POST"], "/api/auth/*", (c) =>
+    !deps.config.signupOpen && CREATES_USER.test(c.req.path)
+      ? oneAtATime(() => deps.auth.handler(c.req.raw))
+      : deps.auth.handler(c.req.raw),
+  );
 
   app.get("/api/v1/health", async (c) => {
     let database = "ok";
@@ -95,4 +108,14 @@ export function createApp(deps: AppDeps) {
   app.get("*", (c) => serveStatic(c.req.path));
 
   return app;
+}
+
+/** Runs the tasks one after the other, in arrival order; a task that fails doesn't stop the next. */
+function queueOfOne() {
+  let tail: Promise<unknown> = Promise.resolve();
+  return <T>(task: () => Promise<T>): Promise<T> => {
+    const run = tail.then(task, task);
+    tail = run.catch(() => undefined);
+    return run;
+  };
 }

@@ -1,11 +1,16 @@
 // A boot that fails at a step undoes what came up before it, and the error thrown is the step's own. Each
-// test breaks one real step (the database, the listener, the VAPID keys read after the listener) and checks
-// that nothing stays open and that the next attempt in the same process starts. The single-instance lock
-// and the database connections on a real Postgres are in production.test.ts.
+// test breaks one step through `steps` (the instance lock, the database, the VAPID keys read after the
+// listener) or for real (the port), and checks the undo on the resource itself: the lock released, the
+// database closed, the port free, the runner connections closed. The lock on a real Postgres is in
+// production.test.ts.
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { type OpenDb, openDb } from "@vanr/engine/db";
+import { sql } from "drizzle-orm";
+import type { RunnerSocketData } from "../src/runners/hub";
+import type { BootSteps } from "../src/server";
 import { body as read, startTestServer } from "./harness";
 
 const dirs: string[] = [];
@@ -35,8 +40,66 @@ function expectPortFree(port: number) {
   again.stop(true);
 }
 
+/** A database the boot can no longer use: queries on a closed PGlite reject. */
+async function expectClosed(opened: OpenDb | null) {
+  if (!opened) throw new Error("the database was never opened");
+  const query = async () => opened.db.execute(sql`select 1`);
+  await expect(query()).rejects.toThrow("Failed query");
+}
+
+/**
+ * The boot's outside steps, recorded: a double of the lock's connection (the lock is taken only with a
+ * Postgres URL, so the config gets one) and the real database opened on PGlite in memory.
+ */
+function recorded() {
+  const seen = { lockHeld: false, lockReleased: false, opened: null as OpenDb | null };
+  const steps: Partial<BootSteps> = {
+    holdInstanceLock: async () => {
+      seen.lockHeld = true;
+      return {
+        release: async () => {
+          seen.lockReleased = true;
+        },
+      };
+    },
+    openDb: async () => {
+      seen.opened = await openDb({ kind: "pglite", dataDir: null });
+      return seen.opened;
+    },
+  };
+  return { seen, steps, env: { DATABASE_URL: "postgres://lock-double.invalid/vanr" } };
+}
+
 describe("boot that fails halfway", () => {
-  test("the database doesn't open: its error is the one thrown and the port is never taken", async () => {
+  test("the lock can't be taken: its error is thrown and nothing after it starts", async () => {
+    const { seen, steps, env } = recorded();
+    const original = new Error("lock held elsewhere");
+    const port = freePort();
+    await expect(
+      startTestServer({
+        env: { ...env, PORT: String(port) },
+        steps: { ...steps, holdInstanceLock: () => Promise.reject(original) },
+      }),
+    ).rejects.toBe(original);
+    expect(seen.opened).toBeNull();
+    expectPortFree(port);
+  });
+
+  test("the database doesn't open: the lock is released and the database's error is thrown", async () => {
+    const { seen, steps, env } = recorded();
+    const original = new Error("migration failed");
+    const port = freePort();
+    await expect(
+      startTestServer({
+        env: { ...env, PORT: String(port) },
+        steps: { ...steps, openDb: () => Promise.reject(original) },
+      }),
+    ).rejects.toBe(original);
+    expect([seen.lockHeld, seen.lockReleased]).toEqual([true, true]);
+    expectPortFree(port);
+  });
+
+  test("a database that can't be created on disk: its own error (ENOTDIR) is the one thrown", async () => {
     const dir = await tempDir();
     await writeFile(join(dir, "file"), "not a directory");
     const port = freePort();
@@ -46,11 +109,16 @@ describe("boot that fails halfway", () => {
     expectPortFree(port);
   }, 30_000);
 
-  test("port in use: the listener's error is the one thrown, and the next attempt in the same process starts", async () => {
+  test("port in use: the lock is released, the database closed, the listener's error thrown, and the next attempt starts", async () => {
+    const { seen, steps, env } = recorded();
     const busy = Bun.serve({ port: 0, fetch: () => new Response("busy") });
     const port = String(busy.port);
     try {
-      await expect(startTestServer({ env: { PORT: port } })).rejects.toMatchObject({ code: "EADDRINUSE" });
+      await expect(startTestServer({ env: { ...env, PORT: port }, steps })).rejects.toMatchObject({
+        code: "EADDRINUSE",
+      });
+      expect(seen.lockReleased).toBe(true);
+      await expectClosed(seen.opened);
       expect(await (await fetch(`http://localhost:${port}/`)).text()).toBe("busy");
       busy.stop(true);
       const retry = await startTestServer({ env: { PORT: port } });
@@ -64,15 +132,29 @@ describe("boot that fails halfway", () => {
     }
   }, 30_000);
 
-  test("a step after the listener fails (unreadable VAPID keys): the listener is closed and the error is the step's", async () => {
+  test("a step after the listener fails (the VAPID keys): lock released, database closed, port free, the step's error", async () => {
+    const { seen, steps, env } = recorded();
+    const original = new SyntaxError("vapid.json is not JSON");
+    const port = freePort();
+    await expect(
+      startTestServer({
+        env: { ...env, PORT: String(port) },
+        steps: { ...steps, loadVapid: () => Promise.reject(original) },
+      }),
+    ).rejects.toBe(original);
+    expect(seen.lockReleased).toBe(true);
+    await expectClosed(seen.opened);
+    await expect(fetch(`http://localhost:${port}/api/v1/health`)).rejects.toThrow();
+    expectPortFree(port);
+  }, 30_000);
+
+  test("unreadable VAPID keys on disk: the parse error is thrown, and with the file gone the same data directory starts", async () => {
     const dir = await tempDir();
     await writeFile(join(dir, "vapid.json"), "{ not json");
     const port = freePort();
     const env = { DATA_DIR: dir, PORT: String(port) };
     await expect(startTestServer({ env })).rejects.toBeInstanceOf(SyntaxError);
-    await expect(fetch(`http://localhost:${port}/api/v1/health`)).rejects.toThrow();
     expectPortFree(port);
-    // With the keys fixed, the same data directory (its database included) starts in the same process.
     await rm(join(dir, "vapid.json"));
     const retry = await startTestServer({ env });
     try {
@@ -81,16 +163,130 @@ describe("boot that fails halfway", () => {
       await retry.stop();
     }
   }, 30_000);
+
+  test("an undo that fails doesn't replace the original error, and the undos after it still run", async () => {
+    const { seen, steps, env } = recorded();
+    const busy = Bun.serve({ port: 0, fetch: () => new Response("busy") });
+    try {
+      await expect(
+        startTestServer({
+          env: { ...env, PORT: String(busy.port) },
+          steps: {
+            ...steps,
+            holdInstanceLock: async () => ({ release: () => Promise.reject(new Error("unlock failed")) }),
+          },
+        }),
+      ).rejects.toMatchObject({ code: "EADDRINUSE" });
+      await expectClosed(seen.opened);
+    } finally {
+      busy.stop(true);
+    }
+  }, 30_000);
+});
+
+describe("while it boots", () => {
+  test("a request that arrives before the app is mounted gets 503, and 200 once the boot ends", async () => {
+    const port = freePort();
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    let reached!: () => void;
+    const atVapid = new Promise<void>((r) => {
+      reached = r;
+    });
+    const booting = startTestServer({
+      env: { PORT: String(port) },
+      steps: {
+        loadVapid: async (config) => {
+          reached();
+          await held;
+          const { loadVapid } = await import("../src/push");
+          return loadVapid(config);
+        },
+      },
+    });
+    await atVapid;
+    const early = await fetch(`http://localhost:${port}/api/v1/health`);
+    expect([early.status, await early.text()]).toEqual([503, "starting"]);
+    release();
+    const server = await booting;
+    try {
+      expect((await fetch(`${server.url}/api/v1/health`)).status).toBe(200);
+    } finally {
+      await server.stop();
+    }
+  }, 30_000);
 });
 
 describe("stop", () => {
-  test("closes the listener and a second stop does nothing", async () => {
+  test("closes the listener, the database and the runner connections; a second stop does nothing", async () => {
+    const { seen, steps, env } = recorded();
     const port = freePort();
-    const server = await startTestServer({ env: { PORT: String(port) } });
-    expect((await fetch(`${server.url}/api/v1/health`)).status).toBe(200);
-    await server.stop();
-    await expect(fetch(`http://localhost:${port}/api/v1/health`)).rejects.toThrow();
-    await server.stop();
-    expectPortFree(port);
+    const server = await startTestServer({ env: { ...env, PORT: String(port) }, steps });
+    // A runner connected to the server's hub, through a socket server of its own.
+    const sockets = Bun.serve<RunnerSocketData>({
+      port: 0,
+      fetch: (req, srv) =>
+        srv.upgrade(req, {
+          data: {
+            kind: "runner",
+            runnerId: "r1",
+            workspaceId: "w1",
+            lastFrameAt: 0,
+            helloTimer: null,
+            pingTimer: null,
+          },
+        })
+          ? undefined
+          : new Response("upgrade", { status: 426 }),
+      websocket: {
+        open: (ws) => {
+          server.deps.runners.register("r1", ws);
+        },
+        message() {},
+      },
+    });
+    try {
+      const runner = new WebSocket(`ws://localhost:${sockets.port}/`);
+      const closed = new Promise<number>((r) => runner.addEventListener("close", (ev) => r(ev.code)));
+      while (!server.deps.runners.isOnline("r1")) await Bun.sleep(2);
+      expect((await fetch(`${server.url}/api/v1/health`)).status).toBe(200);
+      await server.stop();
+      expect(await closed).toBe(1001);
+      expect(server.deps.runners.online()).toEqual([]);
+      expect(seen.lockReleased).toBe(true);
+      await expectClosed(seen.opened);
+      await expect(fetch(`http://localhost:${port}/api/v1/health`)).rejects.toThrow();
+      await server.stop();
+      expectPortFree(port);
+    } finally {
+      sockets.stop(true);
+    }
+  }, 30_000);
+
+  test("two stops at once share the shutdown: after either one, the database is closed", async () => {
+    const { seen, steps, env } = recorded();
+    const server = await startTestServer({ env, steps });
+    const first = server.stop();
+    const second = server.stop();
+    expect(second).toBe(first);
+    await second;
+    await expectClosed(seen.opened);
+    expect(server.stop()).toBe(first);
+  }, 30_000);
+
+  test("a shutdown that fails gives every stop the same error", async () => {
+    const { steps, env } = recorded();
+    const failure = new Error("unlock failed");
+    const server = await startTestServer({
+      env,
+      steps: { ...steps, holdInstanceLock: async () => ({ release: () => Promise.reject(failure) }) },
+    });
+    const first = server.stop();
+    const second = server.stop();
+    await expect(first).rejects.toBe(failure);
+    await expect(second).rejects.toBe(failure);
+    await expect(server.stop()).rejects.toBe(failure);
   }, 30_000);
 });

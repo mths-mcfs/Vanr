@@ -1,7 +1,7 @@
 import type { Me } from "@vanr/contract";
 import type { SqlConnector } from "@vanr/engine/sqlconn";
 import { loadConfig } from "../src/config";
-import { type RunningServer, startServer } from "../src/server";
+import { type BootSteps, type RunningServer, startServer } from "../src/server";
 
 // Later slices add here what they unlock: the real Postgres option (`postgres`, S2), the live wiki timings
 // (S3), the assignment engine and the model provider options (S5, S6), the typed API client (`apiFor`,
@@ -9,6 +9,8 @@ import { type RunningServer, startServer } from "../src/server";
 // and `holdNextIndexWrite` (search-index, S2).
 
 export interface TestServerOptions {
+  /** Replaces a boot step that touches the outside (see `BootSteps`). */
+  steps?: Partial<BootSteps>;
   env?: Record<string, string>;
   now?: () => Date;
   fetchExternal?: typeof fetch;
@@ -32,6 +34,7 @@ export async function startTestServer(opts: TestServerOptions = {}): Promise<Run
     now: opts.now,
     fetchExternal: opts.fetchExternal ?? noNetwork,
     sql: opts.sql,
+    steps: opts.steps,
   });
 }
 

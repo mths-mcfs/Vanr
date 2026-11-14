@@ -1,6 +1,7 @@
 // The runner hub on real runner sockets: a Bun server registers each connection under its runner id, and
 // the test plays the runner, reading the `request` frames and answering through the hub.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { getEventListeners } from "node:events";
 import { MAX_INFLIGHT } from "@vanr/engine/runner-protocol";
 import { RunnerCallError, RunnerHub, type RunnerSocket, type RunnerSocketData } from "./hub";
 
@@ -223,6 +224,59 @@ describe("runner hub", () => {
     await call;
     r.ws.close();
     other.ws.close();
+  });
+
+  test("a signal reused across calls keeps no abort listener once each call ends, by any path", async () => {
+    const abort = new AbortController();
+    const listeners = () => getEventListeners(abort.signal, "abort").length;
+    const r = await runner("r10");
+    const opts = { signal: abort.signal };
+    // Answered with a result and with an error.
+    for (let i = 0; i < 20; i++) {
+      const call = hub.call("r10", "list", { path: String(i) }, opts);
+      const frames = await r.until(i + 1);
+      hub.onResult({ id: frames[i]?.id ?? "", ok: true, data: i });
+      await call;
+    }
+    const failed = failure(hub.call("r10", "list", { path: "e" }, opts));
+    const errorFrames = await r.until(21);
+    hub.onResult({ id: errorFrames[20]?.id ?? "", ok: false, error: { code: "internal", message: "x" } });
+    await failed;
+    expect(listeners()).toBe(0);
+    // Past its deadline.
+    await failure(hub.call("r10", "list", { path: "t" }, { ...opts, timeoutMs: 20 }));
+    expect(listeners()).toBe(0);
+    // Waiting for a slot, then served.
+    const busy = Array.from({ length: MAX_INFLIGHT }, () => hub.call("r10", "list", { path: "busy" }, opts));
+    const queued = hub.call("r10", "list", { path: "queued" }, opts);
+    while (
+      r.frames.filter((f) => f.type === "request" && (f.args as { path?: string }).path === "busy").length <
+      MAX_INFLIGHT
+    )
+      await Bun.sleep(2);
+    for (const f of r.frames.filter((f) => (f.args as { path?: string } | undefined)?.path === "busy"))
+      hub.onResult({ id: f.id, ok: true, data: null });
+    await Promise.all(busy);
+    while (!r.frames.some((f) => (f.args as { path?: string } | undefined)?.path === "queued"))
+      await Bun.sleep(2);
+    const q = r.frames.find((f) => (f.args as { path?: string } | undefined)?.path === "queued");
+    hub.onResult({ id: q?.id ?? "", ok: true, data: null });
+    await queued;
+    expect(listeners()).toBe(0);
+    // The runner drops.
+    const dropped = failure(hub.call("r10", "list", { path: "drop" }, opts));
+    while (!r.frames.some((f) => (f.args as { path?: string } | undefined)?.path === "drop"))
+      await Bun.sleep(2);
+    r.ws.close();
+    await dropped;
+    expect(listeners()).toBe(0);
+    // The server stops (closeAll) with a call in flight.
+    const s = await runner("r11");
+    const stopping = failure(hub.call("r11", "list", { path: "." }, opts));
+    await s.until(1);
+    hub.closeAll();
+    expect(await stopping).toEqual({ code: "offline", message: "The server is stopping" });
+    expect(listeners()).toBe(0);
   });
 
   test("closeAll closes every runner connection", async () => {
