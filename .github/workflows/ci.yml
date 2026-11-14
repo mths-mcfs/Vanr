@@ -166,17 +166,30 @@ jobs:
             exit 1
           fi
           for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
-            if grep -qF "$broken" forced-issues.log; then
+            if grep -aqF "$broken" forced-issues.log; then
               echo "::error::the forced issue lock tests broke ($broken) instead of failing on their outcome"
               exit 1
             fi
           done
-          for label in issue-number issue-move consolidation-apply; do
-            if ! grep -qF "LOCK_OUTCOME_MISMATCH($label)" forced-issues.log; then
+          labels="issue-number issue-move issue-place consolidation-apply"
+          for label in $labels; do
+            if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" forced-issues.log; then
               echo "::error::the forced $label test did not fail on its outcome without the lock"
               exit 1
             fi
           done
+          # Every failure is a forced test, and as many distinct tests failed as there are labels (bun prints
+          # each failure twice on the GitHub runner, so names are counted, not lines).
+          failed=$(grep -a '^(fail) ' forced-issues.log | sed -E 's/^\(fail\) //; s/ \[[0-9.]+m?s\]$//' | sort -u)
+          if printf '%s\n' "$failed" | grep -qv forced; then
+            echo "::error::a test outside the forced ones failed without the locks: $failed"
+            exit 1
+          fi
+          count=$(printf '%s\n' "$failed" | grep -c .)
+          if [ "$count" -ne "$(echo $labels | wc -w)" ]; then
+            echo "::error::$count distinct forced tests failed without the locks, expected $(echo $labels | wc -w)"
+            exit 1
+          fi
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_DROP_LOCKS: "1"

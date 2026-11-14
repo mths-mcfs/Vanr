@@ -194,6 +194,55 @@ describe("runner hub", () => {
     r.ws.close();
   });
 
+  test("an aborted call never goes out; aborting a pending one cancels it at once, with no deadline or listener left", async () => {
+    const r = await runner("r11");
+    const before = new AbortController();
+    before.abort();
+    expect(await failure(hub.call("r11", "list", { path: "never" }, { signal: before.signal }))).toEqual({
+      code: "canceled",
+      message: "Canceled",
+    });
+    // The deadline the hub sets for the request (the only timer of an hour), seen through the timer functions.
+    const hour = 3_600_000;
+    const created = new Set<unknown>();
+    const cleared = new Set<unknown>();
+    const { setTimeout: realSet, clearTimeout: realClear } = globalThis;
+    const abort = new AbortController();
+    let request: Frame | undefined;
+    let ended: unknown;
+    Object.assign(globalThis, {
+      setTimeout: ((fn: () => void, ms?: number) => {
+        const t = realSet(fn, ms);
+        if (ms === hour) created.add(t);
+        return t;
+      }) as typeof setTimeout,
+      clearTimeout: ((t: Parameters<typeof clearTimeout>[0]) => {
+        cleared.add(t);
+        realClear(t);
+      }) as typeof clearTimeout,
+    });
+    try {
+      const call = failure(
+        hub.call("r11", "list", { path: "pending" }, { signal: abort.signal, timeoutMs: hour }),
+      );
+      [request] = await r.until(1);
+      abort.abort();
+      ended = await call;
+    } finally {
+      Object.assign(globalThis, { setTimeout: realSet, clearTimeout: realClear });
+    }
+    expect(request).toMatchObject({ type: "request", args: { path: "pending" } });
+    expect(ended).toEqual({ code: "canceled", message: "Canceled" });
+    expect((await r.until(2))[1]).toEqual({ type: "cancel", id: request?.id ?? "" });
+    expect(created.size).toBe(1);
+    expect([...created].every((t) => cleared.has(t))).toBe(true);
+    expect(getEventListeners(abort.signal, "abort").length).toBe(0);
+    // A late answer finds no request: nothing is resolved twice and nothing else goes to the runner.
+    hub.onResult(socketOf("r11"), { id: request?.id ?? "", ok: true, data: "late" });
+    expect(r.frames.length).toBe(2);
+    r.ws.close();
+  });
+
   test("a harness tool call is answered to the runner serving the turn, and only to it", async () => {
     const r = await runner("r8");
     const other = await runner("r9");
