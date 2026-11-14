@@ -5,6 +5,29 @@ import { join } from "node:path";
 import { diskBlobs } from "./blobs";
 
 describe("diskBlobs", () => {
+  test("concurrent writes finish with the bytes and type of one complete input", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "blobs-"));
+    try {
+      const store = diskBlobs(dir);
+      for (let attempt = 0; attempt < 100; attempt++) {
+        let completed = 0;
+        await Promise.all(
+          [65, 66].map(async (value) => {
+            await store.put("same-key", new Uint8Array(100_000).fill(value), `application/${value}`);
+            completed++;
+          }),
+        );
+        expect(completed).toBe(2);
+        const got = await store.get("same-key");
+        expect(got?.bytes.length).toBe(100_000);
+        expect(["application/65", "application/66"]).toContain(got?.contentType ?? "");
+        expect([...new Set(got?.bytes)]).toEqual([Number(got?.contentType.split("/")[1])]);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("stores, reads and deletes inside the folder", async () => {
     const dir = await mkdtemp(join(tmpdir(), "blobs-"));
     try {

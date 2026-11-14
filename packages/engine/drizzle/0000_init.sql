@@ -1982,7 +1982,7 @@ CREATE UNIQUE INDEX "push_subscriptions_uq" ON "push_subscriptions" USING btree 
 CREATE INDEX "routine_executions_routine_idx" ON "routine_executions" USING btree ("routine_id","at");--> statement-breakpoint
 CREATE UNIQUE INDEX "routine_executions_slot_uq" ON "routine_executions" USING btree ("routine_id","scheduled_for") WHERE scheduled_for is not null;--> statement-breakpoint
 CREATE UNIQUE INDEX "routine_executions_dedupe_uq" ON "routine_executions" USING btree ("routine_id","dedupe_key") WHERE dedupe_key is not null;--> statement-breakpoint
-CREATE UNIQUE INDEX "routine_executions_queued_uq" ON "routine_executions" USING btree ("routine_id") WHERE status = 'queued' and trigger <> 'retry';--> statement-breakpoint
+CREATE UNIQUE INDEX "routine_executions_queued_uq" ON "routine_executions" USING btree ("routine_id") WHERE status = 'queued' and trigger is distinct from 'retry';--> statement-breakpoint
 CREATE INDEX "routine_executions_queue_idx" ON "routine_executions" USING btree ("not_before") WHERE status = 'queued';--> statement-breakpoint
 CREATE INDEX "routines_workspace_idx" ON "routines" USING btree ("workspace_id");--> statement-breakpoint
 CREATE INDEX "routines_due_idx" ON "routines" USING btree ("next_fire_at") WHERE active;--> statement-breakpoint

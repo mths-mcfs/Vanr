@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RunnerAccess } from "@vanr/contract";
@@ -225,4 +225,44 @@ test("a turn aborted while its sandbox opens does not start the CLI", async () =
     .catch((e) => e);
   expect(err instanceof RunnerError && err.code).toBe("canceled");
   expect(existsSync(log)).toBe(false);
+});
+
+test("duplicate turns own separate MCP files and canceled preparation preserves old files", async () => {
+  const { harnesses } = setup("claude");
+  const opts = Reflect.get(harnesses, "opts");
+  let tokens = 0;
+  opts.bridge = { path: "/unused", open: async () => ({ token: `token-${++tokens}`, close() {} }) };
+  const gates = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+  const reached = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+  let call = 0;
+  Reflect.set(harnesses, "spawnTurn", async (input: { argv: string[] }) => {
+    const index = call++;
+    reached[index]?.resolve();
+    await gates[index]?.promise;
+    return { text: readFileSync(input.argv[input.argv.indexOf("--mcp-config") + 1] ?? "", "utf8") };
+  });
+  const turn = args("claude_code", "hi");
+  const previous = join(opts.home, "harness", "turns", turn.runId, "keep");
+  mkdirSync(join(opts.home, "harness", "turns", turn.runId), { recursive: true });
+  writeFileSync(previous, "owned earlier");
+  const first = harnesses.turn(agent, turn, io());
+  await reached[0]?.promise;
+  const second = harnesses.turn(agent, turn, io());
+  await reached[1]?.promise;
+  gates[0]?.resolve();
+  const firstResult = await first;
+  gates[1]?.resolve();
+  const secondResult = await second;
+  expect(firstResult.text).toContain("token-1");
+  expect(secondResult.text).toContain("token-2");
+  const controller = new AbortController();
+  opts.bridge.open = async () => {
+    controller.abort();
+    return { token: "cancel", close() {} };
+  };
+  Reflect.deleteProperty(harnesses, "spawnTurn");
+  await expect(harnesses.turn(agent, turn, { ...io(), signal: controller.signal })).rejects.toMatchObject({
+    code: "canceled",
+  });
+  expect(readFileSync(previous, "utf8")).toBe("owned earlier");
 });

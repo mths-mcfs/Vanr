@@ -2,10 +2,12 @@
 // secrets) and returns the protocol result; an error becomes a RunnerError with the code.
 import { spawn } from "node:child_process";
 import {
-  appendFileSync,
+  closeSync,
+  constants,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   statSync,
@@ -334,13 +336,23 @@ export function writeOp(
     args.encoding === "base64" ? Buffer.from(args.content, "base64") : Buffer.from(args.content, "utf8");
   if (data.byteLength > READ_MAX) throw new RunnerError("too_large", "File is larger than 5 MB");
   mkdirSync(dirname(path), { recursive: true });
-  // Aborted: nothing is written. The write goes into the file itself (its mode, its owner, a link stay).
+  // Aborted: nothing is written. The resolved file keeps its mode and owner.
   if (ctx.signal.aborted) throw new RunnerError("canceled", "Canceled");
   // Node writes the whole buffer or throws (a size limit, a full disk, a quota): a short write is an error,
   // never a success, and the error says the file may be cut.
   try {
-    if (args.append) appendFileSync(path, data);
-    else writeFileSync(path, data);
+    const fd = openSync(
+      path,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_NOFOLLOW |
+        (args.append ? constants.O_APPEND : constants.O_TRUNC),
+    );
+    try {
+      writeFileSync(fd, data);
+    } finally {
+      closeSync(fd);
+    }
   } catch (err) {
     const code = err instanceof Error && "code" in err ? String(err.code) : "error";
     if (code === "EACCES" || code === "EPERM") throw err;

@@ -131,7 +131,7 @@ const UNWIND_WAIT_MS = 15_000;
  * goes after the abort (the guard on each command, while the op is unwinding), the load in progress is
  * stopped (`Page.stopLoading` still goes) and no result comes back. The next op waits for an aborted one to
  * finish unwinding before it begins. What the browser already got (a click already dispatched, a page
- * already loaded) is not undone. `timeoutMs`: the op answers `undefined` after it, as `within` does.
+ * already loaded) is not undone. `timeoutMs` aborts pending effects and rejects with `timeout`.
  */
 async function underSignal<T>(
   s: Session,
@@ -139,7 +139,7 @@ async function underSignal<T>(
   page: string | undefined,
   work: () => Promise<T>,
   timeoutMs?: number,
-): Promise<T | undefined> {
+): Promise<T> {
   if (signal?.aborted) throw canceled();
   if (s.unwinding.size) {
     // Waiting for an aborted op to unwind, this op answers its own abort at once.
@@ -156,9 +156,10 @@ async function underSignal<T>(
     if (!settled)
       throw new RunnerError("timeout", "The browser is still stopping a canceled action; try again");
   }
-  const bounded = (p: Promise<T>) => (timeoutMs === undefined ? p : within(p, timeoutMs));
-  if (!signal) return bounded(work());
+  const deadline = new AbortController();
+  signal = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal;
   if (signal.aborted) throw canceled();
+  let timedOut = false;
   s.signal = signal;
   const inner = work();
   // The op's own work, however long it takes after its answer: the signal stays on until it settles.
@@ -175,16 +176,24 @@ async function underSignal<T>(
       s.unwinding.add(unwind);
       void unwind.then(() => s.unwinding.delete(unwind));
       void s.cdp.send("Page.stopLoading", {}, page).catch(() => {});
-      reject(canceled());
+      reject(timedOut ? new RunnerError("timeout", "The page did not answer in time") : canceled());
     };
     signal.addEventListener("abort", stop, { once: true });
   });
   aborted.catch(() => {});
+  const timer =
+    timeoutMs === undefined
+      ? undefined
+      : setTimeout(() => {
+          timedOut = true;
+          deadline.abort();
+        }, timeoutMs);
   try {
-    const out = await Promise.race([bounded(inner), aborted]);
+    const out = await Promise.race([inner, aborted]);
     if (signal.aborted) throw canceled();
     return out;
   } finally {
+    clearTimeout(timer);
     signal.removeEventListener("abort", stop);
   }
 }
@@ -297,6 +306,7 @@ export class CdpBrowser implements BrowserDriver {
   private readonly sessions = new Map<string, Session>();
   /** Chrome starting: whoever asks for the session meanwhile waits for the same one, instead of opening another on the same profile. */
   private readonly starting = new Map<string, Promise<Session>>();
+  private closing = false;
 
   constructor(private readonly opts: CdpBrowserOptions) {}
 
@@ -313,7 +323,7 @@ export class CdpBrowser implements BrowserDriver {
         // The agent does not close a browser a person took over; the person (without `driver`) closes it.
         const by = (args as OpArgs<"browser.close">).driver;
         if (by === "agent" && this.sessions.get(agent.id)?.policy.driver === "person") throw personDriving();
-        await this.closeSession(agent.id, "closed");
+        await this.closeSession(agent.id, "closed", signal);
         return { closed: true };
       }
       case "live_view.stop": {
@@ -355,7 +365,6 @@ export class CdpBrowser implements BrowserDriver {
             () => this.inspect(s, a),
             this.opts.opTimeoutMs ?? OP_TIMEOUT_MS,
           );
-          if (!r) throw new RunnerError("timeout", "The page did not answer in time");
           return r;
         });
         s.lock = run.catch(() => {});
@@ -372,26 +381,26 @@ export class CdpBrowser implements BrowserDriver {
           // The person took over after the server checked: the action does not happen (the server waits for them to hand it back).
           if (s.policy.driver === "person") throw personDriving();
           s.policy = policy;
-          s.op = policy;
-          // What the page tried after the previous answer goes along with this one, marked: it is not from this action.
-          s.blocked = s.blocked.map((b) => ({ ...b, before: true }));
-          try {
-            const work = () =>
-              op === "browser.open"
+
+          const work = async () => {
+            s.op = policy;
+            s.blocked = s.blocked.map((b) => ({ ...b, before: true }));
+            try {
+              return await (op === "browser.open"
                 ? this.open(s, (a as OpArgs<"browser.open">).url)
-                : this.act(s, a as OpArgs<"browser.act">);
-            const r = await underSignal(
-              s,
-              signal,
-              this.page(s).sessionId,
-              work,
-              this.opts.opTimeoutMs ?? OP_TIMEOUT_MS,
-            );
-            if (!r) throw new RunnerError("timeout", "The page did not answer in time");
-            return await this.forAgent(s, await this.withEvidence(s, r));
-          } finally {
-            s.op = null;
-          }
+                : this.act(s, a as OpArgs<"browser.act">));
+            } finally {
+              s.op = null;
+            }
+          };
+          const r = await underSignal(
+            s,
+            signal,
+            this.page(s).sessionId,
+            work,
+            this.opts.opTimeoutMs ?? OP_TIMEOUT_MS,
+          );
+          return await this.forAgent(s, await this.withEvidence(s, r));
         });
         s.lock = run.catch(() => {});
         return run;
@@ -402,7 +411,9 @@ export class CdpBrowser implements BrowserDriver {
   }
 
   async close(): Promise<void> {
-    for (const id of [...this.sessions.keys()]) await this.closeSession(id, "closed");
+    this.closing = true;
+    for (const id of new Set([...this.sessions.keys(), ...this.starting.keys()]))
+      await this.closeSession(id, "closed");
   }
 
   /**
@@ -466,6 +477,7 @@ export class CdpBrowser implements BrowserDriver {
     send: (frame: RunnerFrame) => boolean,
     policy: BrowserPolicy,
   ): Promise<Session> {
+    if (this.closing) throw canceled();
     const live = this.sessions.get(agent.id);
     if (live && !live.cdp.closed) {
       live.send = send;
@@ -477,6 +489,7 @@ export class CdpBrowser implements BrowserDriver {
       this.starting.set(agent.id, start);
     }
     const s = await start;
+    if (this.closing) throw canceled();
     s.send = send;
     return s;
   }
@@ -829,9 +842,10 @@ export class CdpBrowser implements BrowserDriver {
     if (wasStreaming) await this.startStream(s, wasStreaming.fps, true);
   }
 
-  private async closeSession(agentId: string, reason: "closed" | "error") {
+  private async closeSession(agentId: string, reason: "closed" | "error", signal?: AbortSignal) {
     // Closing while Chrome starts: waits for it to start so it really closes.
     await this.starting.get(agentId)?.catch(() => {});
+    if (signal?.aborted) throw canceled();
     const s = this.sessions.get(agentId);
     if (!s) return;
     this.sessions.delete(agentId);
@@ -999,28 +1013,36 @@ export class CdpBrowser implements BrowserDriver {
     return pos;
   }
 
-  /**
-   * `onTarget`: after moving the mouse there, the point still lands on the element (the page did not put another
-   * on top on hover). A styled checkbox stays out: its point lands on the label.
-   */
-  private async click(s: Session, selector: string, onTarget = false) {
+  private async click(s: Session, selector: string, action: OpArgs<"browser.act">) {
+    const kind = action.action === "check" ? "check" : "click";
+    const expect = action.expect ?? (await this.describe(s, kind, selector)).fingerprint;
     const { x, y } = await this.center(s, selector);
     const sid = this.page(s).sessionId;
     await s.cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y }, sid);
-    if (onTarget) {
-      const sel = JSON.stringify(selectorOf(selector));
-      const hit = await this.eval<string | null>(
-        s,
-        `(() => { const el = document.querySelector(${sel}); const hit = document.elementFromPoint(${x}, ${y});
-          if (!el || !hit || el === hit || el.contains(hit) || hit.contains(el)) return null;
-          return hit.tagName.toLowerCase(); })()`,
-      );
-      if (hit)
-        throw new RunnerError(
-          "page_changed",
-          `Something else (${hit}) is over ${selector} now; nothing was clicked. Close it or call browser_read again.`,
-        );
-    }
+    const objectId = await this.hit(s, { x, y });
+    const hit = objectId
+      ? await s.cdp.send<{ result: { value?: boolean } }>(
+          "Runtime.callFunctionOn",
+          {
+            objectId,
+            functionDeclaration: `function(selector, check) {
+          const el = document.querySelector(selector);
+          if (!el || (check && (!(el instanceof HTMLInputElement) || !/^(checkbox|radio)$/i.test(el.type)))) return false;
+          let target = this;
+          if (!check) while (target && target !== el && !el.contains(target)) target = target.getRootNode().host;
+          return this === el || el.contains(this) || (check
+            ? this.closest('label')?.control === el && !this.closest('button,a,input,select,textarea,[role=button]')
+            : target === el || this.contains(el));
+        }`,
+            arguments: [{ value: selectorOf(selector) }, { value: action.action === "check" }],
+            returnByValue: true,
+          },
+          sid,
+        )
+      : null;
+    if (!hit?.result.value)
+      throw new RunnerError("page_changed", "The control is covered or missing; nothing was clicked");
+    await this.expectSame(s, { ...action, expect }, kind);
     await s.cdp.send(
       "Input.dispatchMouseEvent",
       { type: "mousePressed", x, y, button: "left", clickCount: 1 },
@@ -1035,10 +1057,43 @@ export class CdpBrowser implements BrowserDriver {
 
   /** Keys and text go to the focus: if the page moved the focus into an iframe, they do not go. */
   private async focusInPage(s: Session) {
-    const inFrame = await this.eval<boolean>(
-      s,
-      `(() => { const a = document.activeElement; return !!a && ${FRAME_TAGS}.test(a.tagName); })()`,
+    const sid = this.page(s).sessionId;
+    let focused = await s.cdp.send<{ result: { objectId?: string } }>(
+      "Runtime.evaluate",
+      {
+        expression: "document.activeElement",
+        contextId: await this.world(s),
+      },
+      sid,
     );
+    let inFrame = false;
+    while (focused.result.objectId) {
+      const { node } = await s.cdp.send<{
+        node: { nodeName: string; shadowRoots?: { backendNodeId: number }[] };
+      }>("DOM.describeNode", { objectId: focused.result.objectId, depth: 1, pierce: true }, sid);
+      if (/^(IFRAME|FRAME|FENCEDFRAME)$/.test(node.nodeName)) {
+        inFrame = true;
+        break;
+      }
+      const root = node.shadowRoots?.[0];
+      if (!root) break;
+      const { object } = await s.cdp.send<{ object: { objectId: string } }>(
+        "DOM.resolveNode",
+        {
+          backendNodeId: root.backendNodeId,
+          executionContextId: await this.world(s),
+        },
+        sid,
+      );
+      focused = await s.cdp.send(
+        "Runtime.callFunctionOn",
+        {
+          objectId: object.objectId,
+          functionDeclaration: "function() { return this.activeElement; }",
+        },
+        sid,
+      );
+    }
     if (inFrame)
       throw new RunnerError(
         "not_allowed",
@@ -1071,11 +1126,24 @@ export class CdpBrowser implements BrowserDriver {
       return;
     }
     const base = { key: key === "Space" ? " " : key, code: k.code, windowsVirtualKeyCode: k.vk };
+    const before = await s.cdp.send<{ frameTree: { frame: { loaderId: string } } }>(
+      "Page.getFrameTree",
+      {},
+      sid,
+    );
     await s.cdp.send(
       "Input.dispatchKeyEvent",
       { type: k.text ? "keyDown" : "rawKeyDown", ...base, ...(k.text ? { text: k.text } : {}) },
       sid,
     );
+    const focusFailure = await this.focusInPage(s).then(
+      () => null,
+      (error: unknown) => ({ error }),
+    );
+    const after = await s.cdp.send<typeof before>("Page.getFrameTree", {}, sid);
+    // A keyDown can replace the document and destroy its focus context. Its keyUp must not act on the new page.
+    if (after.frameTree.frame.loaderId !== before.frameTree.frame.loaderId) return;
+    if (focusFailure) throw focusFailure.error;
     await s.cdp.send("Input.dispatchKeyEvent", { type: "keyUp", ...base }, sid);
   }
 
@@ -1141,11 +1209,29 @@ export class CdpBrowser implements BrowserDriver {
    * What really gets the click: the node at the element's center (where `click` presses), taken by
    * Chrome, which sees inside a shadow root (`querySelector` stops at the component host) and skips what
    * has `pointer-events: none`, like the click. The click point is the window's; Chrome's, the
-   * page's, so it adds the scroll. Without the node, it describes the selector's own element.
+   * page's, so it adds the scroll. Without the node, no click is approved.
    */
   private async describeHit(s: Session, selector: string): Promise<ElementFacts | null> {
     const pos = await this.center(s, selector).catch(() => null);
     if (!pos) return null;
+    const objectId = await this.hit(s, pos);
+    if (!objectId) return null;
+    const page = this.page(s);
+    const r = await s.cdp.send<{ result: { value?: unknown }; exceptionDetails?: unknown }>(
+      "Runtime.callFunctionOn",
+      {
+        functionDeclaration: DESCRIBE_FN,
+        objectId,
+        arguments: [{ value: null }, { value: false }],
+        returnByValue: true,
+      },
+      page.sessionId,
+    );
+    if (r.exceptionDetails) throw new RunnerError("bad_request", "The page did not accept the action");
+    return (r.result.value ?? null) as ElementFacts | null;
+  }
+
+  private async hit(s: Session, pos: { x: number; y: number }): Promise<string | undefined> {
     const page = this.page(s);
     const scroll = await this.eval<{ x: number; y: number }>(s, "({ x: scrollX, y: scrollY })");
     const hit = await s.cdp
@@ -1155,25 +1241,13 @@ export class CdpBrowser implements BrowserDriver {
         page.sessionId,
       )
       .catch(() => null);
-    if (!hit) return this.call<ElementFacts | null>(s, DESCRIBE_FN, [selectorOf(selector), false]);
+    if (!hit) return undefined;
     const node = await s.cdp.send<{ object: { objectId?: string } }>(
       "DOM.resolveNode",
       { backendNodeId: hit.backendNodeId, executionContextId: await this.world(s, page) },
       page.sessionId,
     );
-    if (!node.object.objectId) return null;
-    const r = await s.cdp.send<{ result: { value?: unknown }; exceptionDetails?: unknown }>(
-      "Runtime.callFunctionOn",
-      {
-        functionDeclaration: DESCRIBE_FN,
-        objectId: node.object.objectId,
-        arguments: [{ value: null }, { value: false }],
-        returnByValue: true,
-      },
-      page.sessionId,
-    );
-    if (r.exceptionDetails) throw new RunnerError("bad_request", "The page did not accept the action");
-    return (r.result.value ?? null) as ElementFacts | null;
+    return node.object.objectId;
   }
 
   /**
@@ -1258,7 +1332,7 @@ export class CdpBrowser implements BrowserDriver {
       case "click":
         need(a.selector, "an element");
         await this.expectSame(s, a, "click");
-        await this.click(s, need(a.selector, "an element"), true);
+        await this.click(s, need(a.selector, "an element"), a);
         await sleep(300);
         await this.settle(s, 5000);
         return (await this.here(s)).info;
@@ -1301,7 +1375,7 @@ export class CdpBrowser implements BrowserDriver {
             "bad_request",
             `${selector} is not a checkbox or radio button; use browser_click for other elements`,
           );
-        if (checked !== (a.text !== "false")) await this.click(s, selector);
+        if (checked !== (a.text !== "false")) await this.click(s, selector, a);
         return this.info(s);
       }
       case "press":

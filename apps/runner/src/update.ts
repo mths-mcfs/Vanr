@@ -98,7 +98,7 @@ async function installUpdate(m: UpdateManifest, opts: UpdateOptions): Promise<st
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   if (bytes.byteLength !== m.size || sha256 !== m.sha256)
     throw new UpdateError("bad_bundle", "The downloaded bundle does not match the signed manifest");
-  const next = `${opts.bundlePath}.new`;
+  const next = `${opts.bundlePath}.new.mjs`;
   writeFileSync(next, bytes, { mode: 0o644 });
   chmodSync(next, 0o644);
   // The new bundle has to start and report the signed version before it takes the place of the current one.

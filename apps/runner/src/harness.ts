@@ -5,7 +5,7 @@
 // run on the server with the usual permissions and approvals. Before starting the CLI, the runner checks
 // that the login is a subscription; on Claude Code it checks again at `init` (`apiKeySource`).
 import { spawn } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { AgentRef, HarnessEvent, HarnessTurnResult, opArgs } from "@vanr/engine/runner-protocol";
 import { z } from "zod";
@@ -357,13 +357,14 @@ export class Harnesses {
         "This environment is already thinking for other agents; try again soon",
       );
     this.running++;
-    const dir = join(this.opts.home, "harness", "turns", args.runId);
-    const cwd = join(this.opts.home, "harness", "work", `${agent.handle}-${agent.id.slice(-8)}`);
+    let dir: string | undefined;
     const timeoutSeconds = Math.min(args.timeoutSeconds ?? DEFAULT_TIMEOUT_S, 86_400);
     let bridge: { token: string; close: () => void } | null = null;
     try {
-      ensureDir(dir);
-      ensureDir(cwd);
+      const turns = join(this.opts.home, "harness", "turns");
+      ensureDir(turns);
+      dir = mkdtempSync(join(turns, `${args.runId}-`));
+      const cwd = this.opts.access.agentRoot(agent, join(this.opts.home, "harness", "work"));
       bridge = await this.opts.bridge.open(args.tools, io.callTool);
       const link = { [MCP_TOKEN_ENV]: bridge.token, [MCP_SOCKET_ENV]: this.opts.bridge.path };
       // In the sandbox: the CLI login, the turn folder and the work folder, the MCP; network only the CLI's.
@@ -424,7 +425,7 @@ export class Harnesses {
     } finally {
       bridge?.close();
       this.running--;
-      rmSync(dir, { recursive: true, force: true });
+      if (dir) rmSync(dir, { recursive: true, force: true });
     }
   }
 

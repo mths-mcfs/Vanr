@@ -840,6 +840,9 @@ export class Jobs {
       denyWrite: cli?.denyWrite ?? [],
       domains: [...domainsFor(network), ...(args.executor === "shell" ? [] : CLI_DOMAINS[args.executor])],
       network,
+    }).catch((err) => {
+      dropSnapshot();
+      throw err;
     });
     const secrets = await this.opts.secrets.materialize(agent, root, signal).catch((err) => {
       wrapped?.release();
@@ -910,9 +913,6 @@ export class Jobs {
       stdio: [stdin === null ? "ignore" : "pipe", "pipe", "pipe"],
       detached: process.platform !== "win32",
     });
-    if (stdin !== null && child.stdin) {
-      child.stdin.end(stdin);
-    }
     let lastSent = 0;
     let tailLine = "";
     let sentLine = "";
@@ -1035,6 +1035,8 @@ export class Jobs {
         );
       }
     }, PROGRESS_EVERY_MS);
+    child.stdin?.on("error", fail);
+    if (stdin !== null) child.stdin?.end(stdin);
     child.on("error", (e) => guarded(`error: ${e.message}`));
     child.on("close", (code) => {
       clearTimeout(timer);

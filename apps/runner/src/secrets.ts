@@ -73,8 +73,8 @@ const b64 = (b: ArrayBuffer | Uint8Array) =>
 const unb64 = (s: string) => new Uint8Array(Buffer.from(s, "base64"));
 /** An open request lasts 24 h; after that the private key goes away. */
 const PENDING_TTL_MS = 24 * 3600_000;
-/** Shorter values are not masked in command output: a short number shows up by chance. */
-export const MIN_MASK = 4;
+/** Every nonempty secret is masked. */
+export const MIN_MASK = 1;
 
 export interface SecretValue {
   name: string;
@@ -83,7 +83,7 @@ export interface SecretValue {
   value: string;
 }
 
-/** Each value of 4 characters or more becomes `[secret:NAME]`, longest first. */
+/** Each nonempty value becomes `[secret:NAME]`, longest first. */
 const masksOf = (values: readonly SecretValue[]): [string, string][] =>
   values
     .filter((v) => v.value.length >= MIN_MASK)
@@ -398,7 +398,6 @@ export class SecretStore {
     } catch {
       throw new RunnerError("bad_request", "The sealed value does not match this request");
     }
-    const file = this.read(agent);
     const entry: StoredEntry = {
       name: input.name,
       target: input.target,
@@ -406,6 +405,7 @@ export class SecretStore {
       ...(await this.seal(value, this.aad(agent, input.name, input.browser))),
       updatedAt: new Date().toISOString(),
     };
+    const file = this.read(agent);
     file.entries = [...file.entries.filter((e) => e.name !== input.name), entry];
     // Aborted while the value was opened and sealed: the store does not change.
     if (signal?.aborted) throw new RunnerError("canceled", "Canceled");
@@ -550,7 +550,7 @@ export class SecretStore {
         }
         if (!id) {
           this.hooks?.beforeLook?.(w.path);
-          id = sameFile(w.path, w.value);
+          if (sameFile(w.path, w.value)) continue;
         }
         if (!id) throw reject(w, "and something the runner did not put there is in its place");
         this.materialized.set(w.path, {
@@ -605,7 +605,7 @@ export class SecretStore {
   }
 
   /**
-   * Removes the file at `path` only if it is still the one this process created or adopted (a plain file
+   * Removes the file at `path` only if it is still the one this process created (a plain file
    * with the same identity). Checked to be something else: the agent's now, left and logged. The check or
    * the removal failing (no access): kept for a new try, logged once. Left open by Node, which has no
    * `unlinkat` on a descriptor: an agent swapping the file between this check and the removal loses its own
@@ -777,10 +777,8 @@ const utf16be = (s: string) => Buffer.from(s, "utf16le").swap16();
 function byteForms(masks: readonly [string, string][]): [string, string][] {
   const out: [string, string][] = [];
   for (const [value, label] of masks) {
-    for (const f of secretTextForms(value))
+    for (const f of secretTextForms(value)) {
       out.push([latin1(Buffer.from(f, "utf8")), latin1(Buffer.from(label, "utf8"))]);
-    const plain = [value, ...(value.includes("\n") ? [value.replace(/\r?\n/g, "\r\n")] : [])];
-    for (const f of plain) {
       out.push([latin1(Buffer.from(f, "utf16le")), latin1(Buffer.from(label, "utf16le"))]);
       out.push([latin1(utf16be(f)), latin1(utf16be(label))]);
       if ([...f].every((c) => c.charCodeAt(0) <= 0xff))
@@ -822,8 +820,6 @@ export function maskBytesPrefix(
   }
 }
 
-const escapeRe = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
 /**
  * Forms in which a typed value comes back: as is, with the spaces collapsed (page text) and
  * encoded as in a URL (GET form, the page's JavaScript in the query, the path or the fragment).
@@ -853,21 +849,13 @@ export interface BrowserMasker {
   url(url: string): string;
 }
 
-/**
- * Masks of what the model reads from the browser. A value of 4 characters or more goes away in any form
- * (`secretForms`), and so does its start right before a cut (the "…" of the read or of the page), so
- * the read does not hand over half a key. A short value (a CVV) goes away only as a URL parameter or
- * segment: in the text, a short number shows up by chance, and replacing each one with the secret's name
- * would be a clue and would spoil the text. The URL is also checked decoded (an encoding no form foresaw).
- */
+/** Masks browser text and URLs, including encoded and truncated forms of secrets. */
 export function browserMasker(values: readonly SecretValue[]): BrowserMasker {
   const long: [string, string][] = [];
-  const short: [RegExp, string][] = [];
   for (const v of values) {
     const label = `[secret:${v.name}]`;
     for (const form of secretForms(v.value)) {
-      if (form.length >= MIN_MASK) long.push([form, label]);
-      else short.push([new RegExp(`(?<=[=/#])${escapeRe(form)}(?=$|[&#/;?])`, "g"), label]);
+      long.push([form, label]);
     }
   }
   long.sort((a, b) => b[0].length - a[0].length);
@@ -893,8 +881,7 @@ export function browserMasker(values: readonly SecretValue[]): BrowserMasker {
   };
   const text = (t: string) => (long.length ? cutTails(maskSecrets(t, long)) : t);
   const url = (u: string): string => {
-    let out = text(u);
-    for (const [re, label] of short) out = out.replace(re, label);
+    const out = text(u);
     let decoded = out;
     try {
       decoded = decodeURIComponent(out);

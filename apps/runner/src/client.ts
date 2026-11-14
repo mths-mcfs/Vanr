@@ -399,7 +399,7 @@ export class RunnerClient {
     if (res.status === 401) return { reject: "invalid_token", message };
     if (res.status === 403 || code === "runner.revoked") return { reject: "revoked", message };
     if (!res.ok || !body.session || !body.credential) throw new Error(message);
-    this.saveConfig({ ...this.config, token: body.credential });
+    this.saveConfig({ token: body.credential });
     return { session: body.session };
   }
 
@@ -461,7 +461,7 @@ export class RunnerClient {
         this.log("ignored a frame the runner does not understand");
         return;
       }
-      void this.onFrame(frame);
+      void this.onFrame(frame).catch((err) => this.log(`frame failed: ${String(err)}`));
     };
     ws.onclose = () => {
       if (this.ws !== ws) return;
@@ -494,7 +494,7 @@ export class RunnerClient {
         await this.secrets.unlock(frame.storeKey, frame.runnerId);
         this.hadWelcome = true;
         await this.refreshMasks();
-        if (frame.name !== this.config.name) this.saveConfig({ ...this.config, name: frame.name });
+        if (frame.name !== this.config.name) this.saveConfig({ name: frame.name });
         this.log(`connected as ${frame.name}`);
         this.jobs.redeliver();
         // A hello sent without the CLI states (before any mask): they go now.
@@ -540,7 +540,9 @@ export class RunnerClient {
 
   private async onRequest(frame: Extract<ServerFrame, { type: "request" }>) {
     const { id, op } = frame;
-    if (!(op in opArgs)) return this.fail(id, { code: "bad_request", message: `Unknown op ${op}` });
+    if (!Object.hasOwn(opArgs, op))
+      return this.fail(id, { code: "bad_request", message: `Unknown op ${op}` });
+    if (this.updating) return this.fail(id, { code: "internal", message: "Updating; retry shortly" });
     if (this.inflight.has(id))
       return this.fail(id, { code: "bad_request", message: "Request id already in use" });
     if (this.inflight.size >= MAX_INFLIGHT) return this.fail(id, { code: "internal", message: "busy" });
@@ -832,9 +834,10 @@ export class RunnerClient {
     writePrivate(join(this.opts.home, "agents.json"), JSON.stringify(agents));
   }
 
-  private saveConfig(next: RunnerConfig) {
-    this.config = next;
-    writeConfig(this.opts.home, next);
+  private saveConfig(patch: Partial<RunnerConfig>) {
+    this.reloadConfig();
+    this.config = { ...(readConfig(this.opts.home) ?? this.config), ...patch };
+    writeConfig(this.opts.home, this.config);
     this.mtime = configMtime(this.opts.home);
   }
 
@@ -844,6 +847,7 @@ export class RunnerClient {
       | { removeFolder: { path: string; agentId?: string } }
       | { disableTool: keyof RunnerAccess["tools"] },
   ): RunnerAccess {
+    this.reloadConfig();
     const access = structuredClone(this.config.access);
     if ("disableTool" in input) access.tools[input.disableTool] = false;
     else {
@@ -856,7 +860,7 @@ export class RunnerClient {
         return f.agents.length === 0 || agents.length === 0 ? [] : [{ ...f, agents }];
       });
     }
-    this.saveConfig({ ...this.config, access });
+    this.saveConfig({ access });
     this.send({ type: "access.changed", access });
     return access;
   }
