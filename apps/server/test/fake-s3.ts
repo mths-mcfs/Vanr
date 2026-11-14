@@ -7,6 +7,11 @@ export interface FakeS3 {
   /** Makes the step fail with 403 (tests the connection test report). */
   failOn: Set<"PUT" | "GET" | "LIST" | "DELETE">;
   unsigned: number;
+  /**
+   * Answers a request instead of the bucket when it returns a response (any status, a body that breaks in
+   * the middle); null lets the bucket answer. `list` is true for ListObjectsV2.
+   */
+  override: ((req: { method: string; key: string; list: boolean }) => Response | null) | null;
   stop(): void;
 }
 
@@ -15,7 +20,7 @@ const xml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
 export function startFakeS3(bucket = "workshop"): FakeS3 {
   const objects: FakeS3["objects"] = new Map();
   const failOn: FakeS3["failOn"] = new Set();
-  const state = { unsigned: 0 };
+  const state: { unsigned: number; override: FakeS3["override"] } = { unsigned: 0, override: null };
   const server = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -25,6 +30,8 @@ export function startFakeS3(bucket = "workshop"): FakeS3 {
       if (b !== bucket) return new Response("NoSuchBucket", { status: 404 });
       const key = decodeURIComponent(rest.join("/"));
       const denied = () => new Response("<Error><Code>AccessDenied</Code></Error>", { status: 403 });
+      const forced = state.override?.({ method: req.method, key, list: !key && req.method === "GET" });
+      if (forced) return forced;
       if (!key && req.method === "GET") {
         if (failOn.has("LIST")) return denied();
         const prefix = url.searchParams.get("prefix") ?? "";
@@ -72,6 +79,12 @@ export function startFakeS3(bucket = "workshop"): FakeS3 {
     failOn,
     get unsigned() {
       return state.unsigned;
+    },
+    get override() {
+      return state.override;
+    },
+    set override(fn) {
+      state.override = fn;
     },
     stop: () => server.stop(true),
   };
