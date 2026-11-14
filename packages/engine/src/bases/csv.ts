@@ -107,16 +107,38 @@ export function parseCsv(input: string, limits: CsvLimits = CSV_LIMITS): string[
   return rows.map(unprotectRow);
 }
 
-const RISKY = /^[=+\-@\t\r]/;
 const NUMBER = /^-?\d+([.,]\d+)?([eE][+-]?\d+)?$/;
+
+/**
+ * A spreadsheet would read the cell as a formula: it starts with tab or CR, or its first character that
+ * is not whitespace (any JS `\s`, so also U+00A0 and U+FEFF) is = + - or @. Importers and cleanup steps
+ * often trim the leading whitespace before the spreadsheet reads it. A number is not a formula.
+ */
+function risky(text: string): boolean {
+  const lead = text.replace(/^\s+/, "");
+  return (/^[\t\r]/.test(text) || /^[=+\-@]/.test(lead)) && !NUMBER.test(lead);
+}
+
+/**
+ * The cell needs an added `'`: it is risky, or it is apostrophes in front of a risky text (so the `'`
+ * the user typed is not taken for ours on the way back and dropped).
+ */
+function needsMark(text: string): boolean {
+  return risky(text.replace(/^'+/, ""));
+}
 
 /** A cell a spreadsheet would read as a formula gets a `'` in front. */
 export function protectCell(text: string): string {
-  return RISKY.test(text) && !NUMBER.test(text) ? `'${text}` : text;
+  return needsMark(text) ? `'${text}` : text;
+}
+
+/** The inverse of protectCell: removes exactly the `'` it added, nothing else. */
+function unprotectCell(cell: string): string {
+  return cell.startsWith("'") && needsMark(cell.slice(1)) ? cell.slice(1) : cell;
 }
 
 function unprotectRow(row: string[]): string[] {
-  return row.map((c) => (/^'[=+\-@\t\r]/.test(c) ? c.slice(1) : c));
+  return row.map(unprotectCell);
 }
 
 // Quote on `;` and tab too: the reader picks the separator from the first line, so a header with more
