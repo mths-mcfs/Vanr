@@ -295,7 +295,7 @@ test("every frame type, invalid, becomes its minimal valid form or is dropped, a
     [
       "live_view.frame",
       { type: "live_view.frame", agentId: "agt_1", data: "Zm9v", width: 0.5, height: 1 },
-      "dropped",
+      "minimal",
     ],
     [
       "live_view.stream_ended",
@@ -754,5 +754,138 @@ test("what is validated is what goes on the wire: undefined, NaN, BigInt, Date, 
     expect(json).not.toBeNull();
     expect(runnerFrame.safeParse(JSON.parse(json as string)).success).toBe(true);
     expect(leaks(json as string)).toBe(false);
+  }
+});
+
+interface NodeAt {
+  path: Key[];
+  kind: string;
+  /** What a failure here may cost: the smallest removable part around it, the node itself (a required field
+   * that takes its neutral value), or `null` (the whole frame: a closed value, a boolean, an id). */
+  unit: Key[] | null;
+}
+
+/** A type with a neutral value: a list, a text, a number, a record, an object whose required fields have one. */
+function hasNeutral(schema: z.ZodType): boolean {
+  let d = defOf(schema);
+  while (WRAPPERS.has(d.type) && d.innerType) d = defOf(d.innerType);
+  if (["array", "record", "string", "number"].includes(d.type)) return true;
+  if (d.type !== "object") return false;
+  return Object.values(d.shape ?? {}).every((f) => {
+    const w = defOf(f).type;
+    return w === "optional" || w === "default" || w === "nullable" || hasNeutral(f);
+  });
+}
+
+/** Every node of a valid frame, containers too, with what its failure may cost. */
+function nodesOf(
+  schema: z.ZodType,
+  value: unknown,
+  path: Key[],
+  removable: Key[] | null,
+  type: string,
+  out: NodeAt[],
+) {
+  let d = defOf(schema);
+  const wrappers: string[] = [];
+  while (WRAPPERS.has(d.type) && d.innerType) {
+    wrappers.push(d.type);
+    d = defOf(d.innerType);
+  }
+  const inJob = type === "hello" && path[0] === "jobs" && path.length > 1;
+  const own =
+    inJob || removable
+      ? removable
+      : wrappers.some((w) => ["optional", "nullable", "default"].includes(w))
+        ? path
+        : null;
+  const at = path
+    .map((k) => (typeof k === "number" ? "[]" : k))
+    .join(".")
+    .replace(/\.\[\]/g, "[]");
+  const id = `${type}:${at}` in EXEMPT_IDS;
+  const neutral = hasNeutral(schema) && !id;
+  const unit = own ?? (neutral ? path : type === "hello" && path.length ? [path[0] as Key] : null);
+  if (path.length) out.push({ path, kind: d.type, unit });
+  if (d.type === "object" && value !== null && typeof value === "object" && !Array.isArray(value))
+    for (const [k, v] of Object.entries(value)) {
+      const child = d.shape?.[k];
+      if (child) nodesOf(child, v, [...path, k], own, type, out);
+    }
+  else if (d.type === "array" && Array.isArray(value) && d.element)
+    for (const [i, v] of value.entries())
+      nodesOf(d.element, v, [...path, i], inJob ? own : (own ?? [...path, i]), type, out);
+}
+
+const OUTCOME = [["job", "status"], ["job", "exitCode"], ["ok"], ["type"]];
+
+test("property: one invalid field that is not the outcome keeps the outcome and every other valid field (no case skipped)", () => {
+  const seen: Record<string, number> = {};
+  let checked = 0;
+  for (const schema of frameSchemas()) {
+    const type = typeOf(schema);
+    const base = generate(schema, "", () => undefined, []);
+    const nodes: NodeAt[] = [];
+    nodesOf(schema, base, [], null, type, nodes);
+    const leaves = nodes.filter((n) => !["object", "array"].includes(n.kind));
+    for (const node of nodes) {
+      if (OUTCOME.some((o) => o.join(".") === node.path.join("."))) continue;
+      for (const bad of [null, 42, "x", {}, [], true]) {
+        const frame = structuredClone(base) as Record<Key, unknown>;
+        (at(frame, node.path.slice(0, -1)) as Record<Key, unknown>)[node.path.at(-1) as Key] = bad;
+        if (runnerFrame.safeParse(frame).success) continue;
+        const kind =
+          node.unit === null ? "whole" : node.unit.length === node.path.length ? "neutral" : "removed";
+        const shape = `${node.kind}:${kind}`;
+        seen[shape] = (seen[shape] ?? 0) + 1;
+        const out = assemble(frame as unknown as RunnerFrame, []);
+        if (node.unit === null) {
+          // A closed value, a boolean or an id: the frame goes in its minimal form or not at all (the exception).
+          if (out) expect(runnerFrame.safeParse(out).success).toBe(true);
+          continue;
+        }
+        const label = [type, node.path.join("."), JSON.stringify(bad)];
+        // The one frame that does not go: a cli.changed left with no CLI would erase what the server knows.
+        if (type === "cli.changed" && node.path.length === 1 && out === null) continue;
+        expect([...label, out === null]).toEqual([...label, false]);
+        for (const o of OUTCOME)
+          expect([...label, o.join("."), at(out, o)]).toEqual([...label, o.join("."), at(base, o)]);
+        for (const leaf of leaves) {
+          if (under(node.unit, leaf.path)) continue;
+          expect([...label, leaf.path.join("."), at(out, leaf.path)]).toEqual([
+            ...label,
+            leaf.path.join("."),
+            at(base, leaf.path),
+          ]);
+          checked++;
+        }
+      }
+    }
+  }
+  console.log(
+    `[repair-one] cases by node kind and what they cost ${JSON.stringify(seen)}; ${checked} valid fields checked`,
+  );
+  for (const k of ["array:neutral", "object:neutral", "string:neutral", "string:removed", "number:neutral"])
+    expect([k, (seen[k] ?? 0) > 0]).toEqual([k, true]);
+});
+
+test("a required list, text or record that fails takes its neutral value; the job keeps done and its exit code", () => {
+  const job = {
+    jobId: "job_00000001",
+    status: "done",
+    exitCode: 0,
+    result: "ok",
+    files: [],
+    session: null,
+    startedAt: null,
+    endedAt: null,
+    denied: [],
+    blocked: [],
+  };
+  for (const files of [null, 42, {}]) {
+    const out = assemble({ type: "job.done", job: { ...job, files } } as unknown as RunnerFrame, []);
+    expect(
+      out?.type === "job.done" && [out.job.status, out.job.exitCode, out.job.result, out.job.files],
+    ).toEqual(["done", 0, "ok", []]);
   }
 });
