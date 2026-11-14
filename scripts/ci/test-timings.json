@@ -62,6 +62,7 @@
     "apps/server/test/search-postgres.test.ts": 3273,
     "apps/server/test/search-routes.test.ts": 17398,
     "apps/server/test/signup-queue.test.ts": 26048,
+    "apps/server/test/sockets.test.ts": 3255,
     "apps/server/test/sql-guard-attacks.test.ts": 1129,
     "apps/server/test/sql-guard-conformance.test.ts": 1585,
     "apps/server/test/sql-guard.test.ts": 1264,
