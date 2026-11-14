@@ -40,6 +40,7 @@
     "packages/engine/src/wiki/props-vault.test.ts": 80,
     "packages/engine/src/formula/robustness.test.ts": 150,
     "packages/engine/src/bases/checkbox.test.ts": 40,
-    "packages/engine/src/bases/view-robustness.test.ts": 40
+    "packages/engine/src/bases/view-robustness.test.ts": 40,
+    "packages/engine/src/recurrence-collide.test.ts": 10
   }
 }
