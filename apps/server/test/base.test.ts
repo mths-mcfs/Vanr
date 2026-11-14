@@ -5,15 +5,15 @@ import { join } from "node:path";
 import { schema } from "@vanr/engine/db";
 import { count } from "drizzle-orm";
 import type { RunningServer } from "../src/server";
-import { Browser, body as read, startTestServer } from "./harness";
+import { Browser, body as read, SERVER_TEST_MS, startTestServer } from "./harness";
 
 let server: RunningServer;
 beforeAll(async () => {
   server = await startTestServer();
-});
+}, SERVER_TEST_MS);
 afterAll(async () => {
   await server.stop();
-});
+}, SERVER_TEST_MS);
 
 describe("base server", () => {
   test("/api/v1/health declares the edition and the database", async () => {
@@ -114,46 +114,58 @@ describe("base server", () => {
 });
 
 describe("closed sign-up", () => {
-  test("the first user gets in (new installation); the second gets 403", async () => {
-    const closed = await startTestServer({ env: { SIGNUP_OPEN: "false" } });
-    try {
-      const cfg = await read(await fetch(`${closed.url}/api/v1/auth/config`));
-      expect(cfg).toMatchObject({ signupOpen: false, firstRun: true });
-      const first = new Browser(closed.url);
-      expect((await first.signUp("Owner", "owner@example.com")).status).toBe(200);
-      const second = new Browser(closed.url);
-      const res = await second.signUp("Other", "other@example.com");
-      expect(res.status).toBe(403);
-      expect(await read(res)).toMatchObject({ code: "SIGNUP_CLOSED" });
-    } finally {
-      await closed.stop();
-    }
-  }, 30_000);
+  test(
+    "the first user gets in (new installation); the second gets 403",
+    async () => {
+      const closed = await startTestServer({ env: { SIGNUP_OPEN: "false" } });
+      try {
+        const cfg = await read(await fetch(`${closed.url}/api/v1/auth/config`));
+        expect(cfg).toMatchObject({ signupOpen: false, firstRun: true });
+        const first = new Browser(closed.url);
+        expect((await first.signUp("Owner", "owner@example.com")).status).toBe(200);
+        const second = new Browser(closed.url);
+        const res = await second.signUp("Other", "other@example.com");
+        expect(res.status).toBe(403);
+        expect(await read(res)).toMatchObject({ code: "SIGNUP_CLOSED" });
+      } finally {
+        await closed.stop();
+      }
+    },
+    SERVER_TEST_MS,
+  );
 
-  test("simultaneous sign-ups on a new installation: exactly one gets in", async () => {
-    const closed = await startTestServer({ env: { SIGNUP_OPEN: "false" } });
-    try {
-      const n = 5;
-      holdUserCounts(closed, n);
-      const results = await Promise.all(
-        Array.from({ length: n }, (_, i) =>
-          new Browser(closed.url).signUp(`Person ${i}`, `p${i}@example.com`),
-        ),
-      );
-      expect(results.map((r) => r.status).sort()).toEqual([200, 403, 403, 403, 403]);
-      const [users] = await closed.deps.db.select({ n: count() }).from(schema.users);
-      expect(users?.n).toBe(1);
-    } finally {
-      await closed.stop();
-    }
-  }, 30_000);
+  test(
+    "simultaneous sign-ups on a new installation: exactly one gets in",
+    async () => {
+      const closed = await startTestServer({ env: { SIGNUP_OPEN: "false" } });
+      try {
+        const n = 5;
+        const barrier = holdUserCounts(closed, n);
+        const results = await Promise.all(
+          Array.from({ length: n }, (_, i) =>
+            new Browser(closed.url).signUp(`Person ${i}`, `p${i}@example.com`),
+          ),
+        );
+        expect(barrier.timedOut).toBe(false);
+        expect(results.map((r) => r.status).sort()).toEqual([200, 403, 403, 403, 403]);
+        const [users] = await closed.deps.db.select({ n: count() }).from(schema.users);
+        expect(users?.n).toBe(1);
+      } finally {
+        await closed.stop();
+      }
+    },
+    SERVER_TEST_MS,
+  );
 });
 
 /**
- * Holds every read of the users count until `n` reads arrived (or 300 ms passed): the widest legal
- * schedule for concurrent sign-ups, where each one reads the count before any of them creates a user.
+ * Holds each of the first `n` reads of the users count until all `n` arrived, so every sign-up reads the
+ * count before any of them goes on: the widest legal schedule for concurrent sign-ups. The reads after those
+ * pass through. If the `n` reads don't all arrive in time, the barrier records it and the test fails
+ * (`barrier.timedOut`): a schedule the test didn't force proves nothing.
  */
 function holdUserCounts(server: RunningServer, n: number) {
+  const barrier = { timedOut: false };
   const db = server.deps.db;
   const select = db.select.bind(db);
   let arrived = 0;
@@ -161,45 +173,57 @@ function holdUserCounts(server: RunningServer, n: number) {
   const gate = new Promise<void>((r) => {
     release = r;
   });
-  setTimeout(() => release(), 300);
+  const deadline = setTimeout(() => {
+    barrier.timedOut = true;
+    release();
+  }, 5_000);
   db.select = ((fields: Parameters<typeof select>[0]) => {
     const query = select(fields);
     if (!fields || !("n" in fields)) return query;
     const from = query.from.bind(query);
     query.from = ((table: typeof schema.users) => {
       const built = from(table);
-      if (table !== schema.users) return built;
+      if (table !== schema.users || arrived >= n) return built;
+      arrived++;
       // The server only awaits this query: a promise of the same rows, read now and handed back late.
       return (async () => {
         const rows = await built;
-        if (++arrived === n) release();
+        if (arrived === n) {
+          clearTimeout(deadline);
+          release();
+        }
         await gate;
         return rows;
       })();
     }) as unknown as typeof query.from;
     return query;
   }) as typeof db.select;
+  return barrier;
 }
 
 describe("SPA fallback", () => {
-  test("index.html on any path outside the API; /assets cached for 4 h", async () => {
-    const dist = await mkdtemp(join(tmpdir(), "dist-"));
-    await mkdir(join(dist, "assets"));
-    await writeFile(join(dist, "index.html"), "<!doctype html><title>spa</title>");
-    await writeFile(join(dist, "assets", "app-123.js"), "console.log(1)");
-    const s = await startTestServer({ env: { WEB_DIST: dist } });
-    try {
-      for (const path of ["/", "/login", "/workspace/abc/c/def"]) {
-        const res = await fetch(`${s.url}${path}`);
-        expect(res.status).toBe(200);
-        expect(await res.text()).toContain("<title>spa</title>");
+  test(
+    "index.html on any path outside the API; /assets cached for 4 h",
+    async () => {
+      const dist = await mkdtemp(join(tmpdir(), "dist-"));
+      await mkdir(join(dist, "assets"));
+      await writeFile(join(dist, "index.html"), "<!doctype html><title>spa</title>");
+      await writeFile(join(dist, "assets", "app-123.js"), "console.log(1)");
+      const s = await startTestServer({ env: { WEB_DIST: dist } });
+      try {
+        for (const path of ["/", "/login", "/workspace/abc/c/def"]) {
+          const res = await fetch(`${s.url}${path}`);
+          expect(res.status).toBe(200);
+          expect(await res.text()).toContain("<title>spa</title>");
+        }
+        const asset = await fetch(`${s.url}/assets/app-123.js`);
+        expect(asset.headers.get("cache-control")).toBe("public, max-age=14400");
+        const traversal = await fetch(`${s.url}/assets/..%2f..%2fetc%2fpasswd`);
+        expect(await traversal.text()).toContain("<title>spa</title>");
+      } finally {
+        await s.stop();
       }
-      const asset = await fetch(`${s.url}/assets/app-123.js`);
-      expect(asset.headers.get("cache-control")).toBe("public, max-age=14400");
-      const traversal = await fetch(`${s.url}/assets/..%2f..%2fetc%2fpasswd`);
-      expect(await traversal.text()).toContain("<title>spa</title>");
-    } finally {
-      await s.stop();
-    }
-  }, 30_000);
+    },
+    SERVER_TEST_MS,
+  );
 });

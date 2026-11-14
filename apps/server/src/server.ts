@@ -19,6 +19,7 @@ import { loadVapid, webPushSender } from "./push";
 import { Hub } from "./realtime/hub";
 import { RunnerHub } from "./runners/hub";
 import { BackgroundWork } from "./runtime/background";
+import type { SignupQueueLimits } from "./signup-queue";
 import { postgresLedger } from "./usage-ledger";
 
 interface StartOptions {
@@ -35,6 +36,8 @@ interface StartOptions {
   forceFakeModels?: boolean;
   /** The single-instance lock's connection dropped with the server up (index.ts ends the process). */
   onInstanceLockLost?: () => void;
+  /** Tests: shorter limits for the closed sign-up queue (signup-queue.ts). */
+  signupQueue?: Partial<SignupQueueLimits>;
   /** Tests: replaces a step of the boot that touches the outside, to break it or hold it. */
   steps?: Partial<BootSteps>;
 }
@@ -176,7 +179,7 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   // Here, in this order: the undo of stopRecalcs (S2, bases/write) and of the assignment engine's stop
   // (S5); the provider lookup (S6); search.ensureVector (S2, search-index); runtime.start (S6), the
   // engine's start (S5) and resumeRecalcs (S2), all before the app takes requests.
-  const app = createApp(deps);
+  const app = createApp(deps, { signupQueue: opts.signupQueue });
   handler = (req) => app.fetch(req);
   log.info("server.started", { url: publicUrl, db: opened.kind });
 
