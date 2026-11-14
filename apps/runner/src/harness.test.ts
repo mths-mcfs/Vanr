@@ -10,6 +10,7 @@ import { classifyHarnessError, Harnesses, type HarnessTurnArgs } from "./harness
 import { McpBridge } from "./mcp";
 import { defaultPolicyContext, sandboxOff } from "./sandbox";
 import { type FakeCliConfig, fakeCliBin, fakeCliLog, testMcpCommand } from "./testing/fake-cli";
+import { signedInPolicy } from "./testing/sandbox";
 
 // The harness in the environment with fake `claude` and `codex` (never the real ones): the CLI starts the runner's
 // MCP server, calls the agent's tool, which comes back here, and the answer arrives bit by bit. An
@@ -218,7 +219,7 @@ test("a turn aborted while its sandbox opens does not start the CLI", async () =
     bridge,
     mcpCommand: testMcpCommand(),
     sandbox,
-    policy: defaultPolicyContext(join(dir, "home")),
+    policy: signedInPolicy(join(dir, "home"), join(dir, "person")),
   });
   const err = await harnesses
     .turn(agent, args("claude_code", "hi"), { ...io(), signal: controller.signal })
