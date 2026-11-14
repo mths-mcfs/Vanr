@@ -1,7 +1,7 @@
 // What each agent may touch in this environment. A relative path stays in the agent's folder inside the
 // work folder; an absolute path only counts inside a folder allowed for it. A symlink is resolved before
 // deciding, and system folders can never be allowed.
-import { type Dirent, existsSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
+import { type Dirent, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { RunnerAccess } from "@vanr/contract";
@@ -203,6 +203,8 @@ export function real(path: string): string {
   let cur = resolve(path);
   const rest: string[] = [];
   while (!existsSync(cur)) {
+    if (lstatSync(cur, { throwIfNoEntry: false })?.isSymbolicLink())
+      throw new RunnerError("not_allowed", "A broken symlink cannot be resolved");
     const parent = dirname(cur);
     if (parent === cur) break;
     rest.unshift(cur.slice(parent.length + (parent.endsWith(sep) ? 0 : 1)));
@@ -223,12 +225,19 @@ export class Access {
    * starts from (the ops on files, the secret files, the sandbox's folders, the jobs). A work folder that is a
    * link is the person's choice, and its target is the work folder; a link that leads nowhere fails here.
    */
-  agentRoot(agent: AgentRef | null): string {
-    const ws = resolve(this.get().workDir);
+  agentRoot(agent: AgentRef | null, workDir = this.get().workDir): string {
+    if (agent && [agent.handle, agent.id].some((v) => !/^[a-zA-Z0-9_-]+$/.test(v)))
+      throw new RunnerError("bad_request", "Invalid agent identity");
+    const ws = resolve(workDir);
     const root = agent ? join(ws, `${agent.handle}-${agent.id.slice(-8)}`) : ws;
+    if (!inside(real(root), real(ws)))
+      throw new RunnerError("outside_work_dir", "Agent folder leaves the work folder");
     try {
       mkdirSync(root, { recursive: true, mode: 0o700 });
-      return realpathSync(root);
+      const resolved = realpathSync(root);
+      if (!inside(resolved, realpathSync(ws)))
+        throw new RunnerError("outside_work_dir", "Agent folder leaves the work folder");
+      return resolved;
     } catch (err) {
       const code = err instanceof Error && "code" in err ? String(err.code) : "error";
       throw new RunnerError("not_found", `The work folder is not there (${code})`);

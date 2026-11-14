@@ -19,8 +19,9 @@ import { sealSecret } from "@vanr/contract";
 import { Access, RunnerError } from "./access";
 import { Jobs } from "./jobs";
 import { execOp, writeOp } from "./ops";
+import { serialize } from "./outbound";
 import { defaultPolicyContext, sandboxOff } from "./sandbox";
-import { type FileId, SecretStore, sameId } from "./secrets";
+import { type FileId, maskBytes, SecretStore, StreamMasker, sameId } from "./secrets";
 import { seeded } from "./testing/random";
 
 // What an operation leaves behind: a write keeps the file it writes into (mode, link), the secrets a command
@@ -118,7 +119,7 @@ async function storeOf(home: string, values: Map<string, { name: string; target:
 }
 const bob = { id: "agt_0000000087654321", handle: "bob" };
 
-test("table: nothing at the path is created 0600 and removed at release; the same value there is adopted and removed", async () => {
+test("table: nothing at the path is created 0600 and removed at release; a pre-existing equal file is retained", async () => {
   const values = new Map([[agent.id, [{ name: "KEY", target: "file:t-new.pem", value: "secret key" }]]]);
   const store = await storeOf(mkdtempSync(join(dir, "home-")), values);
   const m = await store.materialize(agent, root);
@@ -128,11 +129,12 @@ test("table: nothing at the path is created 0600 and removed at release; the sam
   ]).toEqual(["secret key", 0o600]);
   m.release();
   expect(existsSync(join(root, "t-new.pem"))).toBe(false);
-  // A leftover of a stop (a new process, the same value): adopted, then removed at release.
+  // Equal content does not establish ownership for removal.
   writeFileSync(join(root, "t-new.pem"), "secret key", { mode: 0o600 });
   const again = await (await storeOf(mkdtempSync(join(dir, "home-")), values)).materialize(agent, root);
   again.release();
-  expect(existsSync(join(root, "t-new.pem"))).toBe(false);
+  expect(readFileSync(join(root, "t-new.pem"), "utf8")).toBe("secret key");
+  rmSync(join(root, "t-new.pem"));
 });
 
 test("table: other content, a link (inside, outside, broken) or a folder at the path is left as it is and nothing runs", async () => {
@@ -851,3 +853,58 @@ test("the identity is device, inode and birth: each one alone tells two files ap
     sameId(a, { ...a, birth: 9n }),
   ]).toEqual([true, false, false, false]);
 });
+
+test("concurrent sealed deliveries retain both secrets", async () => {
+  const { store, add } = await storeWith(mkdtempSync(join(dir, "home-")));
+  const seal = Reflect.get(store, "seal").bind(store);
+  const gate = Promise.withResolvers<void>();
+  let sealed = 0;
+  Reflect.set(store, "seal", async (value: string, aad: string) => {
+    const entry = await seal(value, aad);
+    if (!aad.startsWith("pending|")) {
+      if (++sealed === 2) gate.resolve();
+      await gate.promise;
+    }
+    return entry;
+  });
+  await Promise.all([add("FIRST", "env", "a"), add("SECOND", "env", "abc")]);
+  expect(
+    store
+      .list(agent)
+      .map((s) => s.name)
+      .sort(),
+  ).toEqual(["FIRST", "SECOND"]);
+  expect(await store.masks(agent)).toContainEqual(["abc", "[secret:SECOND]"]);
+  expect(await store.masks(agent)).toContainEqual(["a", "[secret:FIRST]"]);
+});
+
+test("a link appearing after write authorization is never followed", () => {
+  const target = join(dir, "late-link-target");
+  const signal = new AbortController().signal;
+  Object.defineProperty(signal, "aborted", {
+    get() {
+      symlinkSync(target, join(root, "late-link"));
+      return false;
+    },
+  });
+  expect(() => write("late-link", signal)).toThrow();
+  expect(existsSync(target)).toBe(false);
+});
+
+test.each(["q", "zz", "abc"])(
+  "stored short secret %s is masked in results, streams and bytes",
+  async (value) => {
+    const { store, add } = await storeWith(mkdtempSync(join(dir, "home-")));
+    await add("PIN", "env", value);
+    const masks = await store.masks(agent);
+    const text = `PIN=${value}`;
+    const stream = new StreamMasker(masks);
+    expect(stream.push(text) + stream.end()).toBe("PIN=[secret:PIN]");
+    expect(maskBytes(Buffer.from(text), masks).toString()).toBe("PIN=[secret:PIN]");
+    expect(
+      JSON.parse(
+        serialize({ type: "result", id: "short", ok: true, data: { content: text } }, masks) ?? "null",
+      ).data.content,
+    ).toBe("PIN=[secret:PIN]");
+  },
+);

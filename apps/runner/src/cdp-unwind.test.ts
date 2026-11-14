@@ -3,7 +3,7 @@ import { CdpBrowser } from "./cdp";
 
 // The browser's ops after an aborted one: they wait for it to finish unwinding (its own steps after the abort
 // do not go), and a wait that is itself aborted ends at once with `canceled`, not at the deadline.
-function browserWithOneSession() {
+function browserWithOneSession(timeout = 60_000) {
   const b = Object.create(CdpBrowser.prototype) as Record<string, unknown>;
   const agent = { id: "agt_0000000012345678", handle: "lia" };
   const session = {
@@ -11,11 +11,11 @@ function browserWithOneSession() {
     policy: { driver: "agent" },
     pages: [{ sessionId: "s" }],
     active: 0,
-    signal: null,
+    signal: null as AbortSignal | null,
     unwinding: new Set(),
     cdp: { send: async () => ({}) },
   };
-  Object.assign(b, { sessions: new Map([[agent.id, session]]), opts: { opTimeoutMs: 60_000 } });
+  Object.assign(b, { sessions: new Map([[agent.id, session]]), opts: { opTimeoutMs: timeout } });
   const calls: string[] = [];
   let hang: () => void = () => {};
   let entered: () => void = () => {};
@@ -33,14 +33,14 @@ function browserWithOneSession() {
     }
     return { url: "u", allowed: true, element: null, fingerprint: "f" };
   });
-  const handle = (signal: AbortSignal) =>
+  const handle = (signal?: AbortSignal) =>
     (Reflect.get(b, "handle") as (...a: unknown[]) => Promise<unknown>)
       .call(b, "browser.inspect", agent, {}, () => true, signal)
       .then(
         () => "done",
         (e: { code?: string }) => e.code,
       );
-  return { handle, calls, inFirst, release: () => hang() };
+  return { b, agent, session, handle, calls, inFirst, release: () => hang() };
 }
 
 test("a wait for an aborted op ends at once with canceled when the waiting op is aborted too", async () => {
@@ -76,4 +76,51 @@ test("the next op does not begin while an aborted one is still unwinding", async
   release();
   expect(await two).toBe("done");
   expect(calls).toEqual(["inspect", "inspect"]);
+});
+
+test("timeout cancels pending work without a request signal and keeps unwinding", async () => {
+  const { handle, session, calls, release } = browserWithOneSession(10);
+  expect(await handle()).toBe("timeout");
+  expect(session.signal?.aborted).toBe(true);
+  expect(session.unwinding.size).toBe(1);
+  const next = handle();
+  await Promise.resolve();
+  expect(calls).toEqual(["inspect"]);
+  release();
+  expect(await next).toBe("done");
+  expect(session.unwinding.size).toBe(0);
+});
+
+test.each([false, true])("close while starting respects request cancellation: %s", async (abort) => {
+  const { b, agent, session } = browserWithOneSession();
+  const sessions = Reflect.get(b, "sessions");
+  if (!(sessions instanceof Map)) throw new Error("missing sessions");
+  sessions.clear();
+  const starting = Promise.withResolvers<unknown>();
+  Reflect.set(b, "starting", new Map([[agent.id, starting.promise]]));
+  const closed: string[] = [];
+  Object.assign(session, {
+    guard: { close() {} },
+    cdp: { send: async (m: string) => closed.push(m), close() {} },
+    stream: null,
+    proc: {
+      kill() {},
+      once(_e: string, cb: () => void) {
+        cb();
+      },
+    },
+  });
+  const controller = new AbortController();
+  const close = Reflect.get(b, abort ? "handle" : "close");
+  if (typeof close !== "function") throw new Error("missing close");
+  const pending = abort
+    ? close.call(b, "browser.close", agent, {}, () => true, controller.signal)
+    : close.call(b);
+  if (abort) controller.abort();
+  sessions.set(agent.id, session);
+  starting.resolve(session);
+  if (abort) await expect(pending).rejects.toMatchObject({ code: "canceled" });
+  else await pending;
+  expect(closed.includes("Browser.close")).toBe(!abort);
+  expect(sessions.has(agent.id)).toBe(abort);
 });
