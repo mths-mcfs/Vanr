@@ -52,6 +52,17 @@
     "packages/engine/src/embeddings.test.ts": 20,
     "packages/engine/src/models/anthropic.test.ts": 60,
     "packages/engine/src/models/catalog.test.ts": 10,
-    "packages/engine/src/models/anthropic-stream.test.ts": 150
+    "packages/engine/src/models/anthropic-stream.test.ts": 150,
+    "apps/runner/src/access.test.ts": 5,
+    "apps/runner/src/browser-guard.test.ts": 40000,
+    "apps/runner/src/cdp.test.ts": 4400,
+    "apps/runner/src/cli.test.ts": 5,
+    "apps/runner/src/frame-gate.test.ts": 5,
+    "apps/runner/src/harness.test.ts": 800,
+    "apps/runner/src/jobs.test.ts": 150,
+    "apps/runner/src/net-guard.test.ts": 60,
+    "apps/runner/src/protocol.test.ts": 1100,
+    "apps/runner/src/sandbox.test.ts": 3600,
+    "apps/runner/src/update.test.ts": 30
   }
 }
