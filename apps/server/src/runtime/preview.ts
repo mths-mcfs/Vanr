@@ -2,6 +2,7 @@
 // resolved links and diff. "Resolved" here is the real destination of each link, as the browser would open it:
 // the href of `[text](url)` and of `<a href>` shows next to the text the reader sees. Redirects are not
 // followed (no network in the gate).
+import { diffArrays } from "diff";
 
 const MD_LINK = /\[([^\]\n]{0,300})\]\((\S{1,2000}?)(?:\s+"[^"]*")?\)/g;
 const HTML_LINK = /<a\s[^>]*?href\s*=\s*["']([^"']{1,2000})["'][^>]*>([\s\S]{0,300}?)<\/a>/gi;
@@ -51,37 +52,30 @@ export function linksIn(text: string): string[] {
   return out;
 }
 
+/** Above this many line pairs, the diff is skipped: the whole text goes out and the new one comes in. */
+const DIFF_MAX_PAIRS = 4_000_000;
+
+const MARK = { added: "+ ", removed: "- ", same: "  " } as const;
+
 /**
- * Line diff (LCS) in a short unified format: `+` new line, `-` removed line, `  ` unchanged.
- * Very large texts fall back to "everything out, everything in" instead of spending quadratic memory.
+ * Line diff in a short unified format: `+` new line, `-` removed line, `  ` unchanged. The lines are compared
+ * whole (the `diff` package's array diff, a minimal edit script). Very large texts fall back to
+ * "everything out, everything in" instead of spending the time.
  */
 export function lineDiff(before: string, after: string): string {
-  const a = before.split("\n");
-  const b = after.split("\n");
-  if (a.length * b.length > 4_000_000)
-    return [...a.map((l) => `- ${l}`), ...b.map((l) => `+ ${l}`)].join("\n");
-  const n = a.length;
-  const m = b.length;
-  const lcs: Uint32Array[] = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
-  for (let i = n - 1; i >= 0; i--) {
-    const row = lcs[i] as Uint32Array;
-    const next = lcs[i + 1] as Uint32Array;
-    for (let j = m - 1; j >= 0; j--)
-      row[j] =
-        a[i] === b[j] ? (next[j + 1] as number) + 1 : Math.max(next[j] as number, row[j + 1] as number);
-  }
-  const out: string[] = [];
-  let i = 0;
-  let j = 0;
-  while (i < n && j < m) {
-    if (a[i] === b[j]) {
-      out.push(`  ${a[i]}`);
-      i++;
-      j++;
-    } else if ((lcs[i + 1]?.[j] ?? 0) >= (lcs[i]?.[j + 1] ?? 0)) out.push(`- ${a[i++]}`);
-    else out.push(`+ ${b[j++]}`);
-  }
-  while (i < n) out.push(`- ${a[i++]}`);
-  while (j < m) out.push(`+ ${b[j++]}`);
-  return out.join("\n");
+  const oldLines = before.split("\n");
+  const newLines = after.split("\n");
+  const changes =
+    oldLines.length * newLines.length > DIFF_MAX_PAIRS
+      ? [
+          { removed: true, added: false, value: oldLines },
+          { removed: false, added: true, value: newLines },
+        ]
+      : diffArrays(oldLines, newLines);
+  return changes
+    .flatMap((change) => {
+      const mark = change.added ? MARK.added : change.removed ? MARK.removed : MARK.same;
+      return change.value.map((line) => mark + line);
+    })
+    .join("\n");
 }

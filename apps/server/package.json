@@ -12,6 +12,7 @@
     "@vanr/product": "workspace:*",
     "@vanr/runner": "workspace:*",
     "better-auth": "1.7.12",
+    "diff": "9.0.0",
     "drizzle-orm": "0.45.4",
     "fflate": "0.8.3",
     "happy-dom": "21.0.4",

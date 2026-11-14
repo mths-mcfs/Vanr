@@ -6,6 +6,7 @@ import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError } from "better-auth/api";
 import type { Config } from "./config";
 import type { Mailer } from "./forward-types";
+import { authSubject, localeFromHeader } from "./notify-text";
 
 export interface AuthDeps {
   db: Db;
@@ -42,11 +43,11 @@ export function createAuth(deps: AuthDeps) {
       enabled: true,
       minPasswordLength: 8,
       requireEmailVerification: false,
-      sendResetPassword: async ({ user, url }) => {
+      sendResetPassword: async ({ user, url }, request) => {
         await deps.mailer.send({
           to: user.email,
           kind: "reset",
-          subject: `${PRODUCT.name}: reset your password`,
+          subject: authSubject(localeFromHeader(request?.headers.get("accept-language")), "reset"),
           text: url,
           link: url,
         });
@@ -54,11 +55,11 @@ export function createAuth(deps: AuthDeps) {
     },
     emailVerification: {
       sendOnSignUp: true,
-      sendVerificationEmail: async ({ user, url }) => {
+      sendVerificationEmail: async ({ user, url }, request) => {
         await deps.mailer.send({
           to: user.email,
           kind: "verify",
-          subject: `${PRODUCT.name}: confirm your email`,
+          subject: authSubject(localeFromHeader(request?.headers.get("accept-language")), "verify"),
           text: url,
           link: url,
         });
