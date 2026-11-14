@@ -2,7 +2,7 @@
 // from; that slice replaces the import with the real module and deletes the type here.
 
 import type { AgentAction, AgentActionKind, EffectClass, GateReason } from "@vanr/contract";
-import type { Db, schema } from "@vanr/engine/db";
+import type { Db } from "@vanr/engine/db";
 import type { Preview } from "@vanr/engine/effects";
 import type { ModelProvider } from "@vanr/engine/models/types";
 import type { BudgetScope } from "@vanr/engine/usage";
@@ -24,18 +24,6 @@ export type ProviderUnavailable = { error: "no_credential" | "unsupported_provid
 export type ProviderLookup = (
   agent: Pick<AgentRow, "workspaceId" | "credentialId">,
 ) => Promise<ModelProvider | ProviderUnavailable>;
-
-/** From `control`. */
-export type QuestionRow = typeof schema.questions.$inferSelect;
-
-/** From `control`: an agent action a person can undo and redo. */
-export type ActionRow = typeof schema.reversibleActions.$inferSelect;
-
-/** From `control`: what undoing and redoing one kind of action does. */
-export type Undoer = {
-  undo(deps: AppDeps, row: ActionRow, actorUserId: string): Promise<void>;
-  redo(deps: AppDeps, row: ActionRow, actorUserId: string): Promise<void>;
-};
 
 /** From `runtime/tools`: the "always allow" predicate a person can remember for a call. */
 export interface StandingRuleKey {
