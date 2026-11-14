@@ -46,7 +46,7 @@ let secrets: SecretStore;
 beforeAll(() => {
   writeConfig(home, {
     server: "http://127.0.0.1:1",
-    runnerId: "mc_1",
+    runnerId: "rnr_1",
     name: "test",
     token: TOKEN,
     workspaceId: "workspace_1",

@@ -290,6 +290,68 @@ const HELLO_NEUTRAL: Record<string, unknown> = {
   features: [],
 };
 
+// The values of `process.platform` and `process.arch`: a closed set Node defines.
+const OS_NAMES = new Set([
+  "aix",
+  "android",
+  "cygwin",
+  "darwin",
+  "freebsd",
+  "haiku",
+  "linux",
+  "netbsd",
+  "openbsd",
+  "sunos",
+  "win32",
+]);
+const ARCH_NAMES = new Set([
+  "arm",
+  "arm64",
+  "ia32",
+  "loong64",
+  "mips",
+  "mipsel",
+  "ppc",
+  "ppc64",
+  "riscv64",
+  "s390",
+  "s390x",
+  "x64",
+]);
+const VERSION_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+
+/**
+ * The hello of a runner that does not know its secrets yet (it just started, or every read failed): nothing in
+ * it is text from outside. Closed values, numbers and booleans stay; the version, the system and the features
+ * stay only when they are what the runner itself makes (a version number, a Node platform, a known feature);
+ * the session is the server's. The host name, the work folder, the folders, the CLI states, the sandbox's
+ * reason and the jobs go neutral, and the real hello follows once the secrets are read (a new connection: the
+ * server reads only the first hello of each one).
+ */
+export function neutralHello(
+  frame: Extract<RunnerFrame, { type: "hello" }>,
+  features: readonly string[],
+): RunnerFrame {
+  return {
+    type: "hello",
+    ...(frame.session !== undefined ? { session: frame.session } : {}),
+    version: VERSION_RE.test(frame.version) ? frame.version : "unknown",
+    protocol: frame.protocol,
+    os: OS_NAMES.has(frame.os) ? frame.os : "unknown",
+    arch: ARCH_NAMES.has(frame.arch) ? frame.arch : "unknown",
+    hostname: "unknown",
+    workDir: null,
+    paused: frame.paused,
+    access: { folders: [], tools: frame.access.tools },
+    browser: frame.browser,
+    executors: frame.executors,
+    cli: {},
+    jobs: [],
+    sandbox: { ...frame.sandbox, reason: null },
+    features: frame.features.filter((f) => features.includes(f)),
+  };
+}
+
 function minimal(type: string, frame: unknown, why: string): unknown {
   const id = idOf(field(frame, "id"));
   const at = new Date().toISOString();
@@ -355,54 +417,77 @@ function optionOf(frame: unknown): z.ZodType | undefined {
   );
 }
 
+type Fix =
+  | { holder: unknown[]; key: number; how: "remove" }
+  | { holder: Record<string, unknown>; key: string; how: "delete" | "null" }
+  | { holder: Record<string, unknown>; key: string; how: "set"; value: unknown };
+
 /**
- * Takes out the part of `frame` at an issue's path, in place: the deepest item of a list, optional field or
- * nullable field on the way (a hello's failing field becomes its neutral value). `false`: nothing to take out.
+ * Where the part of `frame` at an issue's path can be taken out: the deepest item of a list, optional field
+ * (or field with a default) or nullable field on the way. A job that fails leaves a hello whole, and a hello's
+ * field with no such place becomes its neutral value. `null`: nothing to take out (the frame is replaced).
  */
-function takeOut(frame: Record<string, unknown>, path: PropertyKey[]): boolean {
-  // A job that fails leaves the hello whole: the server would finish the task with what is left of it.
+function fixAt(frame: Record<string, unknown>, path: PropertyKey[]): Fix | null {
   if (
     frame.type === "hello" &&
     path[0] === "jobs" &&
     typeof path[1] === "number" &&
     Array.isArray(frame.jobs)
-  ) {
-    frame.jobs.splice(path[1], 1);
-    return true;
-  }
+  )
+    return { holder: frame.jobs, key: path[1], how: "remove" };
   let schema = optionOf(frame);
   let holder: unknown = frame;
-  let best: { holder: unknown; key: PropertyKey; how: "remove" | "delete" | "null" } | null = null;
+  let best: Fix | null = null;
   for (const key of path) {
     if (!schema || holder === null || typeof holder !== "object") break;
     let d = defOf(schema);
     while (WRAPPERS.has(d.type) && d.innerType) d = defOf(d.innerType);
     const child = d.type === "object" ? d.shape?.[String(key)] : d.type === "array" ? d.element : undefined;
     if (Array.isArray(holder) && typeof key === "number") best = { holder, key, how: "remove" };
-    for (
-      let c = child ? defOf(child) : undefined;
-      c && WRAPPERS.has(c.type);
-      c = c.innerType && defOf(c.innerType)
-    ) {
-      if (c.type === "optional") best = { holder, key, how: "delete" };
-      else if (c.type === "nullable") best = { holder, key, how: "null" };
-    }
+    else if (isRecord(holder) && typeof key === "string")
+      for (
+        let c = child ? defOf(child) : undefined;
+        c && WRAPPERS.has(c.type);
+        c = c.innerType && defOf(c.innerType)
+      ) {
+        if (c.type === "optional" || c.type === "default") best = { holder, key, how: "delete" };
+        else if (c.type === "nullable") best = { holder, key, how: "null" };
+      }
     holder = (holder as Record<PropertyKey, unknown>)[key as string];
     schema = child;
   }
-  if (!best) {
-    const top = path[0];
-    if (frame.type === "hello" && typeof top === "string" && top in HELLO_NEUTRAL) {
-      frame[top] = structuredClone(HELLO_NEUTRAL[top]);
-      return true;
+  if (best) return best;
+  const top = path[0];
+  if (frame.type === "hello" && typeof top === "string" && top in HELLO_NEUTRAL)
+    return { holder: frame, key: top, how: "set", value: structuredClone(HELLO_NEUTRAL[top]) };
+  return null;
+}
+
+/**
+ * Takes out, in one pass, the place of every issue (the items of a list are filtered at once, from the last),
+ * and goes again until the frame is valid or nothing is left to take out. No count limits it: each pass takes
+ * something out of a finite frame.
+ */
+function repair(frame: Record<string, unknown>): RunnerFrame | null {
+  for (;;) {
+    const parsed = runnerFrame.safeParse(frame);
+    if (parsed.success) return parsed.data;
+    const fixes: Fix[] = [];
+    for (const issue of parsed.error.issues) {
+      const fix = fixAt(frame, issue.path);
+      if (!fix) return null;
+      fixes.push(fix);
     }
-    return false;
+    const removals = new Map<unknown[], Set<number>>();
+    for (const fix of fixes) {
+      if (fix.how === "remove")
+        removals.set(fix.holder, (removals.get(fix.holder) ?? new Set()).add(fix.key));
+      else if (fix.how === "delete") delete fix.holder[fix.key];
+      else if (fix.how === "null") fix.holder[fix.key] = null;
+      else if (fix.how === "set") fix.holder[fix.key] = fix.value;
+    }
+    for (const [list, at] of removals) for (const i of [...at].sort((a, b) => b - a)) list.splice(i, 1);
   }
-  const at = best.holder as Record<PropertyKey, unknown> & unknown[];
-  if (best.how === "remove" && Array.isArray(at)) at.splice(best.key as number, 1);
-  else if (best.how === "delete") delete at[best.key as string];
-  else at[best.key as string] = null;
-  return true;
 }
 
 function validated(shaped: unknown): RunnerFrame | null {
@@ -410,35 +495,42 @@ function validated(shaped: unknown): RunnerFrame | null {
   return parsed.success ? parsed.data : null;
 }
 
-const REPAIRS_MAX = 50;
+/**
+ * The value as `JSON.stringify` would put it on the wire, read back: what is validated is what goes. An
+ * `undefined` field goes away, `NaN` and `Infinity` become null, a Date its text, a Map `{}`, a BigInt its
+ * digits (JSON throws on it). `null` when it cannot be serialized at all (a cycle).
+ */
+function toWire(value: unknown): unknown {
+  try {
+    const json = JSON.stringify(value, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
+    return json === undefined ? null : JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
 
 /**
- * The frame as it goes to the server: masked (all but the exemptions), cut to the schema, valid. A frame that
- * still fails the schema is repaired or replaced as INVALID says for its type (or `null`: it is not sent).
+ * The frame as it goes to the server: as the wire will carry it, masked (all but the exemptions), cut to the
+ * schema, valid. A frame that still fails the schema is repaired or replaced as INVALID says for its type (or
+ * `null`: it is not sent).
  */
 export function assemble(frame: RunnerFrame, masks: Masks): RunnerFrame | null {
-  const shaped = shapeFrame(frame, masks);
-  let parsed = runnerFrame.safeParse(shaped);
+  const wire = toWire(frame);
+  const shaped = wire === null ? null : shapeFrame(wire, masks);
+  const parsed = runnerFrame.safeParse(shaped);
   if (parsed.success) return parsed.data;
   // The error text names where the frame failed and how, not the value; it is masked like any other text.
   const issue = parsed.error.issues[0];
   const why = `The runner could not send this ${frame.type} (${issue ? `${issue.path.join(".")}: ${issue.code}` : "invalid"})`;
   if (isRecord(shaped)) {
-    for (let i = 0; i < REPAIRS_MAX && !parsed.success; i++) {
-      const first = parsed.error.issues[0];
-      if (!first || !takeOut(shaped, first.path)) break;
-      parsed = runnerFrame.safeParse(shaped);
-    }
-    // A cli.changed or an access.changed with nothing left would erase what the server knows: it goes as is.
-    if (
-      parsed.success &&
-      !(shaped.type === "cli.changed" && Object.keys(field(shaped, "cli") ?? {}).length === 0)
-    )
-      return parsed.data;
-    if (shaped.type === "cli.changed") return null;
+    const repaired = repair(shaped);
+    // A cli.changed with nothing left would erase what the server knows: it does not go.
+    if (shaped.type === "cli.changed")
+      return repaired?.type === "cli.changed" && Object.keys(repaired.cli).length ? repaired : null;
+    if (repaired) return repaired;
   }
   const fallback = minimal(frame.type, frame, why);
-  return fallback ? validated(shapeFrame(fallback, masks)) : null;
+  return fallback ? validated(shapeFrame(toWire(fallback), masks)) : null;
 }
 
 /** A job snapshot as it goes to the server (in `job.done`, `hello` and `job.status`), masked and valid. */

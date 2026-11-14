@@ -107,17 +107,33 @@ function frameSchemas(): z.ZodType[] {
 }
 
 /** The client's real `send`, on a socket that keeps what it was given. */
-function client() {
+type Knowing = "unknown" | "empty" | "known";
+
+/**
+ * The client's real `send`, on a socket that keeps what it was given, in one of the three states of what the
+ * runner knows of its secrets: not yet (`unknown`), none (`empty`), the secret (`known`, as the runner learns
+ * it: from the agents' stores, not from the caller).
+ */
+function client(knowing: Knowing = "known") {
   const sent: string[] = [];
   const c = Object.create(RunnerClient.prototype) as Record<string, unknown>;
+  const maskState =
+    knowing === "known"
+      ? { kind: "known", byAgent: new Map([["agt_1", MASKS]]), all: MASKS }
+      : { kind: knowing };
   Object.assign(c, {
     ws: { readyState: WebSocket.OPEN, send: (s: string) => sent.push(s) },
-    knownMasks: new Map(),
+    maskState,
+    heldFrames: [],
     log: () => {},
     opts: { log: () => {} },
   });
   const send = Reflect.get(c, "send") as (frame: RunnerFrame, masks: [string, string][]) => boolean;
-  return { send: (frame: RunnerFrame) => send.call(c, frame, MASKS), sent };
+  return {
+    send: (frame: RunnerFrame) => send.call(c, frame, []),
+    sent,
+    held: () => (c.heldFrames as unknown[]).length,
+  };
 }
 
 const leaks = (json: string) => FORMS.some((f) => json.includes(JSON.stringify(f).slice(1, -1)));
@@ -126,46 +142,68 @@ const typeOf = (schema: z.ZodType) => {
   return String((t.values ?? [])[0]);
 };
 
-test("schema-driven: a secret planted in any string position of any frame does not go out, but in an id", () => {
-  const counts: Record<string, number> = {};
-  const leaked = new Set<string>();
-  let frames = 0;
-  for (const schema of frameSchemas()) {
-    const type = typeOf(schema);
-    const positions: Position[] = [];
-    generate(schema, "", () => undefined, positions);
-    const plain = generate(schema, "", () => undefined, []);
-    expect([type, runnerFrame.safeParse(plain).success]).toEqual([type, true]);
-    counts[type] = (counts[type] ?? 0) + positions.length;
-    const tries: ((path: string) => string | undefined)[] = [];
-    for (const form of FORMS) {
-      for (const p of positions) tries.push((path) => (path === p.path ? form : undefined));
-      tries.push(() => form);
-    }
-    for (const plant of tries) {
-      const { send, sent } = client();
-      const frame = generate(schema, "", plant, []) as RunnerFrame;
-      send(frame);
-      frames++;
-      for (const json of sent) {
-        expect(runnerFrame.safeParse(JSON.parse(json)).success).toBe(true);
-        if (!leaks(json)) continue;
-        // Which position kept it: plant it alone in each and see.
-        for (const p of positions) {
-          const one = client();
-          one.send(generate(schema, "", (path) => (path === p.path ? SECRET : undefined), []) as RunnerFrame);
-          if (one.sent.some(leaks)) leaked.add(`${type}:${p.path}`);
+test("schema-driven, in the three states: what the runner does not know as safe never goes out but in an id", () => {
+  for (const knowing of ["unknown", "empty", "known"] as const) {
+    const counts: Record<string, number> = {};
+    const leaked = new Set<string>();
+    let frames = 0;
+    let wire = 0;
+    let held = 0;
+    for (const schema of frameSchemas()) {
+      const type = typeOf(schema);
+      const positions: Position[] = [];
+      generate(schema, "", () => undefined, positions);
+      const plain = generate(schema, "", () => undefined, []);
+      expect([type, runnerFrame.safeParse(plain).success]).toEqual([type, true]);
+      counts[type] = (counts[type] ?? 0) + positions.length;
+      const tries: { plant: (path: string) => string | undefined; free: boolean }[] = [];
+      for (const form of FORMS) {
+        for (const p of positions)
+          tries.push({
+            plant: (path) => (path === p.path ? form : undefined),
+            // Text in a free position: the frame stays valid, so it must go (or be held), never dropped.
+            free: !p.closed && !(`${type}:${p.path}` in EXEMPT_IDS),
+          });
+        tries.push({ plant: () => form, free: false });
+      }
+      for (const { plant, free } of tries) {
+        const { send, sent, held: holding } = client(knowing);
+        const frame = generate(schema, "", plant, []) as RunnerFrame;
+        send(frame);
+        frames++;
+        held += holding();
+        wire += sent.length;
+        // Nothing is lost: what does not go is held for the read (only when the runner does not know).
+        if (free) expect([knowing, type, sent.length + holding()]).toEqual([knowing, type, 1]);
+        for (const json of sent) {
+          // What is validated is what goes on the wire.
+          expect(runnerFrame.safeParse(JSON.parse(json)).success).toBe(true);
+          if (!leaks(json)) continue;
+          // Which position kept it: plant it alone in each and see.
+          for (const p of positions) {
+            const one = client(knowing);
+            one.send(
+              generate(schema, "", (path) => (path === p.path ? SECRET : undefined), []) as RunnerFrame,
+            );
+            if (one.sent.some(leaks)) leaked.add(`${type}:${p.path}`);
+          }
         }
       }
     }
+    console.log(
+      `[schema:${knowing}] ${frames} frames, ${wire} on the wire, ${held} held; positions by type ${JSON.stringify(counts)}; kept: ${[...leaked].sort().join(", ")}`,
+    );
+    expect(Object.keys(counts).length).toBe(14);
+    const ids = [...Object.keys(EXEMPT_IDS), ...[...PROTOCOL_KEYS].map((k) => `${k}{key}`)];
+    if (knowing === "known") {
+      // What kept the secret is exactly the list of ids (and the keys of an op's result), nothing else.
+      expect([...leaked].sort()).toEqual(ids.sort());
+    } else if (knowing === "unknown") {
+      // Not knowing: only the hello (neutral) and the pong go, and the planted text only in an id.
+      for (const k of leaked) expect([k, ids.includes(k)]).toEqual([k, true]);
+      expect(held).toBeGreaterThan(0);
+    } else expect(held).toBe(0);
   }
-  console.log(
-    `[schema] ${frames} frames sent; string positions planted by type ${JSON.stringify(counts)}; kept: ${[...leaked].sort().join(", ")}`,
-  );
-  // What kept the secret is exactly the list of ids (and the keys of an op's result), nothing else.
-  const allowed = [...Object.keys(EXEMPT_IDS), ...[...PROTOCOL_KEYS].map((k) => `${k}{key}`)];
-  expect([...leaked].sort()).toEqual(allowed.sort());
-  expect(Object.keys(counts).length).toBe(14);
 });
 
 test("each id kept as it is names a plain string field of the schema; every other string is masked", () => {
@@ -568,4 +606,153 @@ test("property: a secret that appears at any point of a flow masks everything th
     cases++;
   }
   console.log(`[rotate] ${cases} flows; the secret appeared at piece ${JSON.stringify(r.spread("change"))}`);
+});
+
+type Key = string | number;
+interface LeafAt {
+  path: Key[];
+  kind: string;
+  /** The smallest part the repair may take out when this leaf fails; `null`: the whole frame. */
+  unit: Key[] | null;
+}
+
+/** Every leaf of a valid frame, with the smallest part its failure may cost (the rule the repair keeps). */
+function leavesOf(
+  schema: z.ZodType,
+  value: unknown,
+  path: Key[],
+  unit: Key[] | null,
+  type: string,
+  out: LeafAt[],
+) {
+  let d = defOf(schema);
+  while (WRAPPERS.has(d.type) && d.innerType) d = defOf(d.innerType);
+  const removable = (s: z.ZodType) => {
+    for (let c: Def | undefined = defOf(s); c && WRAPPERS.has(c.type); c = c.innerType && defOf(c.innerType))
+      if (["optional", "nullable", "default"].includes(c.type)) return true;
+    return false;
+  };
+  if (d.type === "object" && value !== null && typeof value === "object" && !Array.isArray(value)) {
+    for (const [k, v] of Object.entries(value)) {
+      const child = d.shape?.[k];
+      if (!child) continue;
+      // A hello's job goes whole or not at all (the server finishes the task with what it gets).
+      const inJob = type === "hello" && path[0] === "jobs";
+      const own = inJob
+        ? unit
+        : removable(child)
+          ? [...path, k]
+          : type === "hello" && path.length === 0
+            ? [k]
+            : unit;
+      leavesOf(child, v, [...path, k], own, type, out);
+    }
+  } else if (d.type === "array" && Array.isArray(value) && d.element) {
+    const element = d.element;
+    const inJob = type === "hello" && path[0] === "jobs" && path.length > 1;
+    for (const [i, v] of value.entries())
+      leavesOf(element, v, [...path, i], inJob ? unit : [...path, i], type, out);
+  } else if (d.type !== "unknown") out.push({ path, kind: d.type, unit });
+}
+
+const at = (v: unknown, path: Key[]) =>
+  path.reduce<unknown>((o, k) => (o as Record<Key, unknown> | null)?.[k], v);
+const under = (prefix: Key[], path: Key[]) => prefix.every((k, i) => path[i] === k);
+
+test("property: a repair takes out only what failed; every field valid on its own survives, a job's status too", () => {
+  const r = seeded(31337);
+  let frames = 0;
+  let checked = 0;
+  for (const schema of frameSchemas()) {
+    const type = typeOf(schema);
+    const base = generate(schema, "", () => undefined, []);
+    const leaves: LeafAt[] = [];
+    leavesOf(schema, base, [], null, type, leaves);
+    const corruptible = leaves.filter((l) => l.path[0] !== "type" && l.path[0] !== "ok");
+    if (!corruptible.length) continue;
+    for (let round = 0; round < 150; round++) {
+      const frame = structuredClone(base) as Record<Key, unknown>;
+      const bad = new Set<LeafAt>();
+      for (let i = 0, n = 1 + r.int(3, "bad"); i < n; i++) bad.add(r.pick(corruptible, "leaf"));
+      for (const leaf of bad) {
+        const holder = at(frame, leaf.path.slice(0, -1)) as Record<Key, unknown>;
+        holder[leaf.path.at(-1) as Key] = leaf.kind === "number" ? "x" : leaf.kind === "string" ? 42 : "zzz";
+      }
+      const out = assemble(frame as unknown as RunnerFrame, []);
+      frames++;
+      const whole = [...bad].some((b) => b.unit === null);
+      if (out === null) {
+        expect([type, whole || type === "cli.changed"]).toEqual([type, true]);
+        continue;
+      }
+      expect(runnerFrame.safeParse(out).success).toBe(true);
+      if (whole) continue;
+      for (const leaf of leaves) {
+        if (bad.has(leaf) || [...bad].some((b) => b.unit && under(b.unit, leaf.path))) continue;
+        expect([type, leaf.path.join("."), at(out, leaf.path)]).toEqual([
+          type,
+          leaf.path.join("."),
+          at(base, leaf.path),
+        ]);
+        checked++;
+      }
+    }
+  }
+  // The case of the review: a list with thousands of bad items next to valid fields.
+  const job = {
+    jobId: "job_00000001",
+    status: "done",
+    exitCode: 0,
+    result: "ok",
+    files: ["keep.txt", ...Array(5000).fill(42), "also.txt"],
+    session: null,
+    startedAt: null,
+    endedAt: null,
+    denied: [],
+    blocked: [],
+  };
+  const out = assemble({ type: "job.done", job } as unknown as RunnerFrame, []);
+  expect(
+    out?.type === "job.done" && [out.job.status, out.job.result, out.job.exitCode, out.job.files],
+  ).toEqual(["done", "ok", 0, ["keep.txt"]]);
+  console.log(`[repair] ${frames} frames with 1-3 bad fields; ${checked} valid fields checked, all kept`);
+});
+
+test("what is validated is what goes on the wire: undefined, NaN, BigInt, Date, Map, functions, toJSON, cycles", () => {
+  const cycle: Record<string, unknown> = {};
+  cycle.self = cycle;
+  const cases: unknown[] = [
+    { type: "result", id: "req_1", ok: true, data: undefined },
+    { type: "harness.tool", id: "req_1", callId: "c1", name: "t", input: undefined },
+    { type: "pong", at: Number.NaN },
+    { type: "pong", at: Number.POSITIVE_INFINITY },
+    { type: "pong", at: -0 },
+    {
+      type: "result",
+      id: "req_1",
+      ok: true,
+      data: { n: 10n, d: new Date(0), m: new Map([["k", "v"]]), f: () => 1, s: Symbol("x") },
+    },
+    { type: "result", id: "req_1", ok: true, data: { toJSON: () => `${SECRET}` } },
+    { type: "result", id: "req_1", ok: true, data: cycle },
+    {
+      type: "job.done",
+      job: {
+        jobId: "job_1",
+        status: "done",
+        exitCode: Number.NaN,
+        result: "ok",
+        files: [],
+        session: null,
+        startedAt: null,
+        endedAt: null,
+      },
+    },
+  ];
+  for (const frame of cases) {
+    const json = serialize(frame as RunnerFrame, MASKS);
+    expect(json).not.toBeNull();
+    expect(runnerFrame.safeParse(JSON.parse(json as string)).success).toBe(true);
+    expect(leaks(json as string)).toBe(false);
+  }
 });

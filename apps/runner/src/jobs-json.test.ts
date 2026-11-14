@@ -1,6 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Access } from "./access";
@@ -155,6 +155,8 @@ test("a secret the runner learns while a job runs masks the job's lines and its 
   let known: [string, string][] = [];
   let jobs: Jobs | undefined;
   const say = (text: string) => ({ type: "assistant", message: { content: [{ type: "text", text }] } });
+  // The double of the CLI says when it started and writes its output only when the test lets it: no timer.
+  const gate = join(mkdtempSync(join(dir, "gate-")), "gate");
   const pending = run(
     [],
     [say("the token is NEW-SECRET-77"), { type: "result", result: "done NEW-SECRET-77", session_id: "s1" }],
@@ -162,15 +164,21 @@ test("a secret the runner learns while a job runs masks the job's lines and its 
       jobs = j;
     },
     undefined,
-    "sleep 0.4\n",
+    `touch '${gate}.ready'\nwhile [ ! -f '${gate}.go' ]; do sleep 0.01; done\n`,
     () => known,
   );
+  await until(() => existsSync(`${gate}.ready`));
   // The person gives the secret while the job runs (the welcome of a reconnection, a secret.store).
-  await Bun.sleep(150);
   known = [["NEW-SECRET-77", "[secret:N]"]];
+  writeFileSync(`${gate}.go`, "");
   const events = await pending;
   expect(JSON.stringify(events)).not.toContain("NEW-SECRET-77");
   expect(jobs?.output("job_00000001", 200).lines).toEqual(["the token is [secret:N]"]);
   const done = events.find((e) => e.type === "job.done");
   expect(done?.type === "job.done" && done.job.result).toBe("done [secret:N]");
 });
+
+/** Waits for a condition the code under test makes true (a file its double writes), not for a time. */
+async function until(condition: () => boolean) {
+  while (!condition()) await Bun.sleep(5);
+}

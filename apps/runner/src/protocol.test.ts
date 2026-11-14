@@ -59,9 +59,12 @@ test("every frame the runner sends passes the engine schema, and the runner acce
   const results = new Map<string, (frame: RunnerFrame) => void>();
   const waiters: { match: (f: RunnerFrame) => boolean; done: (f: RunnerFrame) => void }[] = [];
   let socket: { send: (data: string) => void } | null = null;
-  let hello: () => void = () => {};
-  const helloSeen = new Promise<void>((r) => {
-    hello = r;
+  // Like the server, a welcome answers every hello. The first hello of a process is neutral (no secret is known
+  // yet); once the secrets are read the runner opens a new connection with the real one.
+  const hellos: RunnerFrame[] = [];
+  let realHello: () => void = () => {};
+  const realHelloSeen = new Promise<void>((r) => {
+    realHello = r;
   });
   const push = (frame: ServerFrame) => {
     // The server side of the contract: what goes out is a valid `serverFrame`.
@@ -94,7 +97,18 @@ test("every frame the runner sends passes the engine schema, and the runner acce
         }
         const frame = parsed.data;
         sent.push(frame);
-        if (frame.type === "hello") hello();
+        if (frame.type === "hello") {
+          hellos.push(frame);
+          push({
+            type: "welcome",
+            runnerId: config.runnerId,
+            name: "laptop",
+            heartbeatMs: 25_000,
+            storeKey: Buffer.alloc(32, 7).toString("base64"),
+            agents: [{ ...agent, name: "Lia" }],
+          });
+          if (frame.hostname !== "unknown") realHello();
+        }
         if (frame.type === "result") results.get(frame.id)?.(frame);
         for (const w of waiters.splice(0)) {
           if (w.match(frame)) w.done(frame);
@@ -136,6 +150,7 @@ test("every frame the runner sends passes the engine schema, and the runner acce
       secrets: { values: async () => [] } as unknown as SecretStore,
     }),
     log: (l) => logs.push(l),
+    backoffBaseMs: 10,
   });
   let seq = 0;
   const ask = (op: string, args: Record<string, unknown>, stream = false) => {
@@ -152,16 +167,12 @@ test("every frame the runner sends passes the engine schema, and the runner acce
 
   try {
     client.start();
-    await helloSeen;
-    push({
-      type: "welcome",
-      runnerId: config.runnerId,
-      name: "laptop",
-      heartbeatMs: 25_000,
-      storeKey: Buffer.alloc(32, 7).toString("base64"),
-      agents: [{ ...agent, name: "Lia" }],
-    });
+    await realHelloSeen;
     await client.ready();
+    expect(hellos.map((h) => h.type === "hello" && [h.hostname === "unknown", h.workDir])).toEqual([
+      [true, null],
+      [false, config.workDir],
+    ]);
     push({ type: "agents", agents: [{ ...agent, name: "Lia" }] });
     push({ type: "ping", at: 1 });
     await next((f) => f.type === "pong");

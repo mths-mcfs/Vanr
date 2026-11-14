@@ -22,7 +22,10 @@ function fakeClient(fields: Record<string, unknown>) {
   Object.assign(c, {
     ws: { readyState: WebSocket.OPEN, send: (s: string) => sent.push(JSON.parse(s)) },
     inflight: new Map(),
-    knownMasks: new Map(),
+    maskState: { kind: "empty" },
+    heldFrames: [],
+    reading: null,
+    readFailures: 0,
     secrets: { masks: async () => MASKS },
     opts: { log: () => {} },
     ...fields,
@@ -159,7 +162,6 @@ test("a hello with more pending jobs than it can carry is valid; the rest goes a
         opts: { version: "1.0.0", log: () => {} },
         cli: { states: () => ({}) },
         jobs,
-        masksLoaded: true,
         executors: [],
         sandbox: sandboxOff(),
         heartbeatMs: 25_000,
@@ -302,4 +304,164 @@ test("a job that ended before a secret existed is masked with it when it is deli
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+/** Waits for a condition the code under test makes true, not for a time. */
+async function until(condition: () => boolean) {
+  while (!condition()) await Bun.sleep(2);
+}
+
+test("a read of the secrets that fails is not knowing: nothing from outside goes until a read works, then it goes in order", async () => {
+  let fails = 2;
+  const secrets = {
+    masks: async () => {
+      if (fails-- > 0) throw new Error("cannot decrypt the store");
+      return MASKS;
+    },
+    lock: () => {},
+  };
+  const cli = { states: () => ({ claude_code: { version: SECRET, login: "subscription", plan: null } }) };
+  const job = {
+    jobId: "job_00000001",
+    status: "done",
+    exitCode: 0,
+    result: `end ${SECRET}`,
+    files: [],
+    session: null,
+    startedAt: null,
+    endedAt: null,
+    denied: [],
+    blocked: [],
+  };
+  const { c, sent, call } = fakeClient({
+    maskState: { kind: "unknown" },
+    secrets,
+    cli,
+    agents: [agent],
+    hadWelcome: true,
+    cliCheckedAt: 0,
+    cliSent: "",
+    opts: { log: () => {}, backoffBaseMs: 1 },
+  });
+  await call("refreshMasks");
+  expect(Reflect.get(c, "maskState")).toEqual({ kind: "unknown" });
+  // While it does not know, a finished job and the CLI state are held.
+  call("send", { type: "job.done", job });
+  call("recheckCli");
+  expect(sent).toEqual([]);
+  // The read is tried again on its own, with a growing wait, and the held frames go once it works.
+  await until(() => (Reflect.get(c, "maskState") as { kind: string }).kind === "known");
+  expect(sent.map((f) => f.type)).toEqual(["job.done", "cli.changed"]);
+  expect(JSON.stringify(sent)).not.toContain(SECRET);
+  expect(sent[0]).toMatchObject({ job: { result: "end [secret:S]" } });
+});
+
+test("a read that fails after one that worked keeps the last good list: a flow already going stays masked", async () => {
+  let fail = false;
+  const secrets = {
+    masks: async () => {
+      if (fail) throw new Error("cannot decrypt the store");
+      return MASKS;
+    },
+    lock: () => {},
+  };
+  const { c, call } = fakeClient({
+    maskState: { kind: "unknown" },
+    secrets,
+    agents: [agent],
+    opts: { log: () => {}, backoffBaseMs: 60_000 },
+  });
+  await call("refreshMasks");
+  const flows = new Flows(() => (Reflect.get(c, "allMasks") as () => [string, string][]).call(c));
+  const before = flows.push("text", "out ABCD-");
+  fail = true;
+  await call("refreshMasks");
+  expect((Reflect.get(c, "maskState") as { kind: string }).kind).toBe("known");
+  const after = flows.push("text", "SECRET done") + flows.end("text");
+  expect(before + after).toBe("out [secret:S] done");
+  clearTimeout(Reflect.get(c, "readRetry") as ReturnType<typeof setTimeout>);
+});
+
+test("the first hello, before the secrets are read, carries no text from outside; the real one goes on a new connection", async () => {
+  const real = globalThis.WebSocket;
+  const sent: string[] = [];
+  const closes: number[] = [];
+  class FakeSocket {
+    static OPEN = 1;
+    readyState = 1;
+    onopen: (() => void) | null = null;
+    onclose: (() => void) | null = null;
+    send(s: string) {
+      sent.push(s);
+    }
+    close(code: number) {
+      closes.push(code);
+      this.readyState = 3;
+    }
+  }
+  globalThis.WebSocket = FakeSocket as unknown as typeof WebSocket;
+  try {
+    const { c, call } = fakeClient({
+      maskState: { kind: "unknown" },
+      config: {
+        server: "https://example.invalid",
+        workDir: `/w/${SECRET}`,
+        paused: false,
+        access: {
+          folders: [{ path: `/w/${SECRET}`, agents: ["agt_1"] }],
+          tools: { claude: true, codex: false, commands: true, browser: false },
+        },
+      },
+      opts: { version: "1.2.3", log: () => {} },
+      cli: { states: () => ({ claude_code: { version: SECRET, login: "subscription", plan: SECRET } }) },
+      jobs: { pending: () => [], redeliver: () => {} },
+      executors: ["claude_code"],
+      sandbox: { status: () => ({ state: "unavailable", engine: null, reason: `no bwrap in /w/${SECRET}` }) },
+      heartbeatMs: 25_000,
+      agents: [agent],
+      toolCalls: new Map(),
+      retryLater: () => {},
+    });
+    call("openSocket", "fixture-session-1234");
+    (Reflect.get(c, "ws") as FakeSocket).onopen?.();
+    clearTimeout(Reflect.get(c, "watchdog") as ReturnType<typeof setTimeout>);
+    expect(sent.length).toBe(1);
+    expect(sent[0]).not.toContain(SECRET);
+    expect(JSON.parse(sent[0] as string)).toMatchObject({
+      type: "hello",
+      version: "1.2.3",
+      hostname: "unknown",
+      workDir: null,
+      access: { folders: [], tools: { claude: true } },
+      cli: {},
+      jobs: [],
+    });
+    // The read works: the runner closes this connection to send the real hello on the next one.
+    Reflect.set(c, "hadWelcome", true);
+    await call("refreshMasks");
+    expect(closes).toEqual([4006]);
+    expect(sent.join("")).not.toContain(SECRET);
+  } finally {
+    globalThis.WebSocket = real;
+  }
+});
+
+test("a request that arrives before the secrets are read waits for the read, and is rejected if it fails", async () => {
+  const { sent, call } = fakeClient({
+    maskState: { kind: "unknown" },
+    secrets: { masks: async () => Promise.reject(new Error("cannot decrypt the store")), lock: () => {} },
+    agents: [agent],
+    opts: { log: () => {}, backoffBaseMs: 60_000 },
+  });
+  const reading = call("refreshMasks");
+  await call("onRequest", {
+    type: "request",
+    id: "req_1",
+    op: "exec",
+    agent,
+    stream: false,
+    args: { command: "x" },
+  });
+  await reading;
+  expect(sent).toMatchObject([{ type: "result", id: "req_1", ok: false, error: { code: "internal" } }]);
 });

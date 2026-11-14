@@ -47,25 +47,30 @@ type OpResults = {
 
 type IsAny<T> = 0 extends 1 & T ? true : false;
 type Leaf = string | number | boolean | bigint | null | undefined;
-/** `true` when some key of a value of type T, at any depth, comes from data rather than from the type. */
-type FreeKeys<T, Depth extends unknown[] = []> = Depth["length"] extends 8
-  ? false
-  : IsAny<T> extends true
+/**
+ * `true` when some key of a value of type T, at any depth (inside lists, unions and optional fields too), comes
+ * from data rather than from the type. No depth limit: a type that recurses forever makes the typecheck fail,
+ * which is failing closed.
+ */
+type FreeKeys<T> =
+  IsAny<T> extends true
     ? true
     : unknown extends T
       ? true
       : T extends Leaf
         ? false
         : T extends readonly (infer E)[]
-          ? FreeKeys<E, [...Depth, 0]>
+          ? FreeKeys<E>
           : T extends object
             ? string extends keyof T
               ? true
               : number extends keyof T
                 ? true
-                : true extends { [K in keyof T]-?: FreeKeys<T[K], [...Depth, 0]> }[keyof T]
+                : symbol extends keyof T
                   ? true
-                  : false
+                  : true extends { [K in keyof T]-?: FreeKeys<T[K]> }[keyof T]
+                    ? true
+                    : false
             : false;
 
 /** Ops whose result may have free keys because a mask rule for those keys exists (none today). */
@@ -84,10 +89,20 @@ const seesRecord: FreeKeys<{ a: { b: Record<string, string> } }> = true;
 const seesUnknown: FreeKeys<{ a: unknown[] }> = true;
 const seesIndex: FreeKeys<{ a: { [k: string]: number } }> = true;
 const seesNone: FreeKeys<{ a: { b: string; c: number[] } | null }> = false;
+type Nest<T, N extends unknown[] = []> = N["length"] extends 20 ? T : { a?: Nest<T, [...N, 0]> | null };
+const seesDeep: FreeKeys<Nest<{ list: { b: Record<string, string> }[] }>> = true;
+const seesDeepNone: FreeKeys<Nest<{ list: { b: string }[] }>> = false;
 
 test("no op result has keys that come from data, and every op's result is checked", () => {
   expect(noFreeKeys).toBe(true);
   expect(Object.keys(listed).sort()).toEqual(Object.keys(opArgs).sort());
-  expect([seesRecord, seesUnknown, seesIndex, seesNone]).toEqual([true, true, true, false]);
+  expect([seesRecord, seesUnknown, seesIndex, seesNone, seesDeep, seesDeepNone]).toEqual([
+    true,
+    true,
+    true,
+    false,
+    true,
+    false,
+  ]);
   expect([...PROTOCOL_KEYS]).toEqual(["result:data"]);
 });

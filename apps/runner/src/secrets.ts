@@ -90,6 +90,11 @@ export class SecretStore {
     this.purgePending();
   }
 
+  /** No store key: the secrets cannot be read (before the welcome, between connections). */
+  get locked(): boolean {
+    return this.key === null;
+  }
+
   lock(): void {
     this.key = null;
   }

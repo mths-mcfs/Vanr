@@ -60,7 +60,7 @@
     "apps/runner/src/harness.test.ts": 817,
     "apps/runner/src/jobs.test.ts": 147,
     "apps/runner/src/net-guard.test.ts": 29,
-    "apps/runner/src/protocol.test.ts": 1009,
+    "apps/runner/src/protocol.test.ts": 1800,
     "apps/runner/src/sandbox.test.ts": 9,
     "apps/runner/src/update.test.ts": 24,
     "apps/runner/src/secrets.test.ts": 300,
@@ -73,7 +73,7 @@
     "apps/runner/src/jobs-diff.test.ts": 18000,
     "apps/runner/src/jobs-names.test.ts": 200,
     "apps/runner/src/jobs-json.test.ts": 1100,
-    "apps/runner/src/outbound.test.ts": 6400,
+    "apps/runner/src/outbound.test.ts": 7300,
     "apps/runner/src/client-send.test.ts": 300,
     "apps/runner/src/results.test.ts": 100
   }
