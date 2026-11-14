@@ -9,6 +9,7 @@ import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { and, eq } from "drizzle-orm";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "../test/harness";
+import { wrapQuery } from "../test/lock-double";
 import { memberOf, type Person, seedChannel, seedWorkspace } from "../test/seed";
 import type { AgentRow } from "./agents";
 import type { AppDeps } from "./context";
@@ -17,6 +18,7 @@ import {
   canSeeRoutine,
   drainQueues,
   dueRoutines,
+  fireRoutine,
   fireRoutineEvent,
   MISSED_COUNT_CAP,
   nextRunFor,
@@ -142,6 +144,36 @@ const debatesOf = (routineId: string) =>
     .where(and(eq(debates.workspaceId, workspaceId)))
     .then((rows) => rows.filter((d) => (d.origin as { routineId?: string } | null)?.routineId === routineId));
 
+/** Intercepts the real write, including inside transactions, after it reached the database. */
+function interceptWrites(
+  db: AppDeps["db"],
+  after: (table: unknown, values: Record<string, unknown>) => Promise<void>,
+  before?: (table: unknown, values: Record<string, unknown>) => void,
+): AppDeps["db"] {
+  return new Proxy(db, {
+    get(target, prop) {
+      const value = Reflect.get(target, prop, target);
+      if (prop === "transaction")
+        return (fn: (tx: AppDeps["db"]) => Promise<unknown>) =>
+          target.transaction((tx) => fn(interceptWrites(tx, after, before)));
+      if (prop === "update" || prop === "insert")
+        return (table: unknown) =>
+          new Proxy(value.call(target, table), {
+            get(query, key) {
+              const method = Reflect.get(query, key, query);
+              if (key === "set" || key === "values")
+                return (values: Record<string, unknown>) => {
+                  before?.(table, values);
+                  return wrapQuery(method.call(query, values), () => after(table, values));
+                };
+              return typeof method === "function" ? method.bind(query) : method;
+            },
+          });
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
 describe("the next time", () => {
   const schedule = (rule: Record<string, unknown>): RoutineTrigger => ({
     kind: "schedule",
@@ -235,10 +267,12 @@ describe("executing", () => {
         [{ kind: "file" }, "complete"],
       ] as const) {
         const routine = await newRoutine({ target });
-        const reg = await registerFire(server.deps, routine.id, {
-          trigger: "manual",
-          key: `manual:${target.kind}`,
+        const fire = { trigger: "manual" as const, key: `manual:${target.kind}` };
+        await expect(fireRoutine(server.deps, routine.id, fire)).rejects.toMatchObject({
+          code: "not_available",
         });
+        expect(await executionsOf(routine.id)).toEqual([]);
+        const reg = await registerFire(server.deps, routine.id, fire);
         if (reg.duplicate) throw new Error("duplicate");
         expect(runtimeFor(target)).toBe(method);
         await expect(startRoutineRun(server.deps, reg.run)).rejects.toMatchObject({
@@ -349,7 +383,19 @@ describe("executing", () => {
   test(
     "a paused routine skips what was queued; what a person asked for runs even paused",
     async () => {
-      const routine = await newRoutine({ active: false });
+      const routine = await newRoutine();
+      const pending = await registerFire(server.deps, routine.id, {
+        trigger: "webhook",
+        key: "before-pause",
+      });
+      if (pending.duplicate) throw new Error("duplicate");
+      await server.deps.db.update(routines).set({ active: false }).where(eq(routines.id, routine.id));
+      expect(await startRoutineRun(server.deps, pending.run)).toMatchObject({
+        status: "skipped",
+        reason: "paused",
+        dedupeKey: null,
+      });
+      expect(await debatesOf(routine.id)).toEqual([]);
       const queued = await registerFire(server.deps, routine.id, { trigger: "webhook", key: "webhook:p1" });
       if (queued.duplicate) throw new Error("duplicate");
       await server.deps.db
@@ -359,7 +405,7 @@ describe("executing", () => {
       const watch = observed(new Date(Date.now() + MIN));
       await drainQueues(watch.deps);
       await watch.failures();
-      const [skipped] = await executionsOf(routine.id);
+      const skipped = (await executionsOf(routine.id)).find((r) => r.id === queued.run.id);
       expect(skipped).toMatchObject({ status: "skipped", reason: "paused", dedupeKey: null });
       const manual = await registerFire(server.deps, routine.id, { trigger: "manual", key: "manual:p2" });
       if (manual.duplicate) throw new Error("duplicate");
@@ -385,6 +431,58 @@ describe("executing", () => {
 });
 
 describe("a fall in the middle", () => {
+  test(
+    "a retry reuses the debate created before the result write, without another event or notice",
+    async () => {
+      const at = new Date();
+      const routine = await newRoutine();
+      const watch = observed(at);
+      const reg = await registerFire(watch.deps, routine.id, { trigger: "webhook", key: "debate-crash" });
+      if (reg.duplicate) throw new Error("duplicate");
+      const events: unknown[] = [];
+      const off = server.deps.hub.onPublish((_target, event) => {
+        if (event.type === "debate.updated" || event.type === "debate.requested") events.push(event);
+      });
+      let hit = 0;
+      const db = interceptWrites(
+        server.deps.db,
+        async () => {},
+        (table, values) => {
+          if (table === routineExecutions && values.status === "ok") {
+            hit++;
+            throw new Error("FALL");
+          }
+        },
+      );
+      try {
+        await expect(startRoutineRun({ ...watch.deps, db }, reg.run)).rejects.toThrow("FALL");
+        await watch.failures();
+        expect(hit).toBe(1);
+        const [opened] = await debatesOf(routine.id);
+        expect(opened).toBeDefined();
+        const count = events.length;
+        for (const minutes of [36, 38]) {
+          const sweep = observed(new Date(at.getTime() + minutes * MIN));
+          await drainQueues(sweep.deps);
+          await sweep.failures();
+        }
+        expect((await executionsOf(routine.id)).map((r) => r.status)).toEqual(["failed", "ok"]);
+        expect((await executionsOf(routine.id))[1]?.summaryVars?.debateId).toBe(opened?.id);
+        expect(await debatesOf(routine.id)).toHaveLength(1);
+        expect(events).toHaveLength(count);
+        const notices = await server.deps.db
+          .select()
+          .from(notifications)
+          .where(eq(notifications.groupKey, `routine:${routine.id}`));
+        expect(notices.map((n) => n.count)).toEqual([1]);
+      } finally {
+        off();
+        await drop(routine);
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
   test(
     "a fire recorded and never begun is taken by the sweep after PENDING_STALE_MS, not before",
     async () => {
@@ -440,6 +538,26 @@ describe("a fall in the middle", () => {
         expect((await executionsOf(routine.id)).find((r) => r.id === current.id)?.status).toBe("running");
         const at = new Date(deadlineAt.getTime() + STALE_GRACE_MS + 1000);
         const watch = observed(at);
+        let hit = 0;
+        const db = interceptWrites(server.deps.db, async (table, values) => {
+          const cut =
+            attempt === 1
+              ? values.status === "failed"
+              : attempt === 2
+                ? values.trigger === "retry"
+                : attempt === 3
+                  ? table === routines && values.runningSince === null
+                  : table === routines && values.pausedReason === "failures";
+          if (cut) {
+            hit++;
+            throw new Error("FALL");
+          }
+        });
+        await expect(drainQueues({ ...watch.deps, db })).rejects.toThrow("FALL");
+        expect(hit).toBe(1);
+        expect((await executionsOf(routine.id)).find((r) => r.id === current.id)?.status).toBe("running");
+        expect((await executionsOf(routine.id)).find((r) => r.attempt === attempt + 1)).toBeUndefined();
+        expect((await routineRow(routine.id)).runningSince).toEqual(startedAt);
         await drainQueues(watch.deps);
         expect(await watch.failures()).toEqual([]);
         const rows = await executionsOf(routine.id);
@@ -686,17 +804,18 @@ describe("a fall while a time comes due", () => {
         nextFireAt: at,
       });
       const crash = observed(at);
-      const dying = {
-        ...crash.deps,
-        runtime: {
-          ...crash.deps.runtime,
-          track(work: Promise<unknown>, what: string) {
-            if (what === "routine.scheduled") throw new Error("FALL");
-            crash.deps.runtime.track(work, what);
-          },
-        },
-      };
-      await expect(dueRoutines(dying)).rejects.toThrow("FALL");
+      let hit = 0;
+      const db = interceptWrites(server.deps.db, async (table, values) => {
+        if (table === routines && values.runningSince instanceof Date) {
+          hit++;
+          throw new Error("FALL");
+        }
+      });
+      await dueRoutines({ ...crash.deps, db });
+      expect((await crash.failures()).some((e) => e instanceof Error && e.message === "FALL")).toBe(true);
+      expect(hit).toBe(1);
+      expect((await executionsOf(last.id))[0]?.status).toBe("pending");
+      expect((await routineRow(last.id)).runningSince).toBeNull();
       expect(await routineRow(last.id)).toMatchObject({
         active: false,
         pausedReason: SERIES_ENDED,

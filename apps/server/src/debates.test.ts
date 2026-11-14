@@ -10,6 +10,7 @@ import { newId } from "@vanr/engine/ids";
 import { emptyUsage } from "@vanr/engine/models/types";
 import { and, eq } from "drizzle-orm";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "../test/harness";
+import { wrapQuery } from "../test/lock-double";
 import { memberOf, type Person, seedChannel, seedWorkspace } from "../test/seed";
 import type { AgentRow } from "./agents";
 import type { AppDeps } from "./context";
@@ -254,6 +255,32 @@ describe("a debate between people runs without the runtime", () => {
       });
       const fromRoutine = await fresh(String(fire?.summaryVars?.debateId));
       expect(fromRoutine.origin).toMatchObject({ kind: "routine", routineId: routine.id });
+      // Restricted conclusions must reach neither this reader's routine nor an outsider's public destination.
+      const outsiderId = newId("rtn");
+      await server.deps.db.insert(routines).values({ ...routine, id: outsiderId, createdBy: bob.user.id });
+      const channelId = await seedChannel(server, workspaceId, {
+        name: "secret",
+        visibility: "private",
+        members: [ana],
+      });
+      const secret = "CONFIDENTIAL acquisition";
+      const restricted = await peopleDebate(server.deps, secret, { channelId, speakers: [person(ana)] });
+      await server.deps.runtime.settle();
+      expect(await canSeeDebate(server.deps.db, await fresh(restricted.id), bob.user.id)).toBe(false);
+      await speak(server.deps, restricted.id, ana, secret);
+      await server.deps.runtime.settle();
+      expect((await fresh(restricted.id)).status).toBe("done");
+      const fires = await server.deps.db.select().from(routineExecutions);
+      expect(fires.filter((r) => r.dedupeKey === `event:debate.concluded:${restricted.id}`)).toEqual([]);
+      const visible = await server.deps.db
+        .select()
+        .from(debates)
+        .where(visibleDebates({ workspaceId, userId: bob.user.id }));
+      expect(JSON.stringify(visible)).not.toContain(secret);
+      expect(JSON.stringify(events.filter((e) => e.target === `workspace:${workspaceId}`))).not.toContain(
+        secret,
+      );
+      await server.deps.db.delete(routines).where(eq(routines.id, outsiderId));
     },
     SERVER_TEST_MS,
   );
@@ -622,6 +649,45 @@ describe("the round's state under its lock", () => {
 });
 
 describe("the deadline", () => {
+  test(
+    "a stop during synthesis supplies the persisted reason to both the debate and its post",
+    async () => {
+      const opened = await peopleDebate(server.deps, "stop during synthesis");
+      await server.deps.runtime.settle();
+      await speak(server.deps, opened.id, ana, "yes");
+      await server.deps.runtime.settle();
+      await server.deps.db
+        .update(debates)
+        .set({ phase: "concluding", endReason: "deadline" })
+        .where(eq(debates.id, opened.id));
+      let hit = 0;
+      const db = new Proxy(server.deps.db, {
+        get(target, prop) {
+          if (prop !== "update") return Reflect.get(target, prop, target);
+          return (table: Parameters<typeof target.update>[0]) =>
+            wrapQuery(target.update(table), async () => {
+              if (table === debatePosts) {
+                hit++;
+                await stopDebate(server.deps, await fresh(opened.id), "concluded");
+              }
+            });
+        },
+      });
+      scheduleAdvance({ ...server.deps, db }, opened.id);
+      await server.deps.runtime.settle();
+      expect(hit).toBe(1);
+      expect(await fresh(opened.id)).toMatchObject({
+        status: "done",
+        endReason: "concluded",
+        synthesis: { endReason: "concluded" },
+      });
+      expect((await postsOf(opened.id)).find((p) => p.kind === "synthesis")?.meta).toMatchObject({
+        synthesis: { endReason: "concluded" },
+      });
+    },
+    SERVER_TEST_MS,
+  );
+
   const later = (deps: AppDeps, ms: number): AppDeps => ({ ...deps, now: () => new Date(Date.now() + ms) });
 
   test(
@@ -676,6 +742,22 @@ describe("the deadline", () => {
         endReason: "deadline",
       });
       expect((await postsOf(opened.id)).every((p) => p.hiddenUntilRoundEnd)).toBe(true);
+      // A full batch of these must not starve an overdue human debate (also with a legacy null phase).
+      const waiting = Array.from({ length: 50 }, () => ({
+        ...opened,
+        id: newId("deb"),
+        phase: "concluding" as const,
+      }));
+      await server.deps.db.insert(debates).values(waiting);
+      const human = await peopleDebate(server.deps, "after full batch", {
+        deadline: opened.deadline?.toISOString(),
+      });
+      await server.deps.runtime.settle();
+      await server.deps.db.update(debates).set({ phase: null }).where(eq(debates.id, human.id));
+      await debateDeadlines(later(server.deps, 60_000));
+      await server.deps.runtime.settle();
+      expect(await fresh(human.id)).toMatchObject({ status: "done", endReason: "deadline" });
+      for (const row of waiting) await server.deps.db.delete(debates).where(eq(debates.id, row.id));
     },
     SERVER_TEST_MS,
   );

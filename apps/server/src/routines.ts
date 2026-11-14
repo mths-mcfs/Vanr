@@ -474,6 +474,9 @@ async function insertFire(
 
 /** Records and runs (waits for the end). For whoever needs the result: email, tests. */
 export async function fireRoutine(deps: AppDeps, routineId: string, fire: Fire) {
+  const [routine] = await deps.db.select().from(routines).where(eq(routines.id, routineId));
+  const method = routine && runtimeFor(targetOf(routine));
+  if (method) requireRuntime(deps.runtime, method);
   const reg = await registerFire(deps, routineId, fire);
   if (reg.duplicate) return reg;
   return { run: await startRoutineRun(deps, reg.run), duplicate: false as const };
@@ -556,11 +559,7 @@ async function claim(
  * policy the execution waits (at most one, retries aside); otherwise it becomes `skipped` for the overlap. The
  * runtime method the target reaches is checked first, before anything is written.
  */
-export async function startRoutineRun(
-  deps: AppDeps,
-  registered: ExecutionRow,
-  opts: { orphan?: boolean } = {},
-): Promise<ExecutionRow> {
+export async function startRoutineRun(deps: AppDeps, registered: ExecutionRow): Promise<ExecutionRow> {
   const { db } = deps;
   const [routine] = await db.select().from(routines).where(eq(routines.id, registered.routineId));
   if (!routine) return registered;
@@ -573,12 +572,12 @@ export async function startRoutineRun(
     run = owned;
   }
   const policy = policyOf(routine);
-  // Queued, or an orphan the sweep took, from before a person's pause: it doesn't run any more, and the key goes
+  // A fire from before a person's pause doesn't run any more, and the key goes
   // (the sender delivers again once it is turned on). A routine whose series ended isn't paused: the fire recorded
   // before the end (in the same transaction that turned it off) runs, even as an orphan after a fall. "Run now" and
   // "once" (and their retries) were asked for already, so they run with the routine paused.
   const paused = !routine.active && routine.pausedReason !== SERIES_ENDED;
-  if (paused && (run.status === "queued" || opts.orphan) && !(await askedExplicitly(deps, run)))
+  if (paused && !(await askedExplicitly(deps, run)))
     return (
       (await finishRun(
         deps,
@@ -593,8 +592,20 @@ export async function startRoutineRun(
         [run.status],
       )) ?? run
     );
-  const lock = await claim(deps, routine, policy);
-  if (!lock) {
+  const claimed = await db.transaction(async (tx) => {
+    const scoped = { ...deps, db: tx };
+    const lock = await claim(scoped, routine, policy);
+    if (!lock) return null;
+    const running = await updateRun(
+      scoped,
+      run.id,
+      { status: "running", startedAt: lock.at, deadlineAt: lock.until },
+      ["pending", "queued"],
+    );
+    if (!running) await release(scoped, routine.id, lock.at);
+    return { running };
+  });
+  if (!claimed) {
     if (run.status === "queued") return run;
     if (policy.overlap === "queue" && run.trigger !== "retry") {
       try {
@@ -622,16 +633,8 @@ export async function startRoutineRun(
       )) ?? run
     );
   }
-  const claimedAt = lock.at;
-  const [running] = await db
-    .update(routineExecutions)
-    .set({ status: "running", startedAt: claimedAt, deadlineAt: lock.until })
-    .where(and(eq(routineExecutions.id, run.id), inArray(routineExecutions.status, ["pending", "queued"])))
-    .returning();
-  if (!running) {
-    await release(deps, routine.id, claimedAt);
-    return run;
-  }
+  const { running } = claimed;
+  if (!running) return run;
   let outcome: Outcome;
   try {
     outcome = await execute(deps, routine, running, policy);
@@ -639,9 +642,7 @@ export async function startRoutineRun(
     log.error("routine.failed", { routineId: routine.id, err });
     outcome = fail("routines.run.error", err instanceof Error ? err.message : String(err), "error");
   }
-  const done = (await finishRun(deps, running, outcome)) ?? running;
-  await release(deps, routine.id, claimedAt);
-  await afterRun(deps, routine, policy, done);
+  const done = (await completeRun(deps, routine, policy, running, outcome)) ?? running;
   // The next one of the queue (overlap or a retry that came due) runs now, in the background.
   deps.runtime.track(drainRoutine(deps, routine.id), "routine.queue");
   return done;
@@ -697,8 +698,32 @@ async function finishRun(
   return row ?? null;
 }
 
+/** The result, release and retry/pause commit together; notifications run only after the commit. */
+async function completeRun(
+  deps: AppDeps,
+  routine: RoutineRow,
+  policy: RoutinePolicy,
+  run: ExecutionRow,
+  outcome: Outcome,
+) {
+  const result = await deps.db.transaction(async (tx) => {
+    const scoped = { ...deps, db: tx };
+    const done = await finishRun(scoped, run, outcome);
+    if (!done) return null;
+    if (run.startedAt) await release(scoped, routine.id, run.startedAt);
+    return { done, notice: await afterRun(scoped, routine, policy, done) };
+  });
+  if (result?.notice) await notify(deps, result.notice);
+  return result?.done ?? null;
+}
+
 /** After the end: the retry, the notice and the pause after N failures in a row. */
-async function afterRun(deps: AppDeps, routine: RoutineRow, policy: RoutinePolicy, run: ExecutionRow) {
+async function afterRun(
+  deps: AppDeps,
+  routine: RoutineRow,
+  policy: RoutinePolicy,
+  run: ExecutionRow,
+): Promise<Parameters<typeof notify>[1] | null> {
   const { db } = deps;
   const target = targetOf(routine);
   if (run.status === "failed" && RETRYABLE.has(run.reason ?? "") && run.attempt <= policy.retries) {
@@ -720,11 +745,11 @@ async function afterRun(deps: AppDeps, routine: RoutineRow, policy: RoutinePolic
       })
       .onConflictDoNothing();
     await updateRun(deps, run.id, { retried: true });
-    return;
+    return null;
   }
   if (run.status === "failed") {
     const paused = await pauseAfterFailures(deps, routine, policy);
-    await notify(deps, {
+    return {
       workspaceId: routine.workspaceId,
       userId: routine.createdBy,
       kind: "routine_alert",
@@ -738,11 +763,10 @@ async function afterRun(deps: AppDeps, routine: RoutineRow, policy: RoutinePolic
           : (run.summary ?? "")
         ).slice(0, 160),
       },
-    });
-    return;
+    };
   }
   if (run.status === "ok" && (target.kind === "file" || target.kind === "debate"))
-    await notify(deps, {
+    return {
       workspaceId: routine.workspaceId,
       userId: routine.createdBy,
       kind: "routine_report",
@@ -750,7 +774,8 @@ async function afterRun(deps: AppDeps, routine: RoutineRow, policy: RoutinePolic
       actor: { type: "agent", id: routine.agentId },
       source: { routineId: routine.id, label: routine.name },
       latest: { title: routine.name, ...(run.summary ? { text: run.summary.slice(0, 160) } : {}) },
-    });
+    };
+  return null;
 }
 
 /**
@@ -818,8 +843,7 @@ export async function drainQueues(deps: AppDeps): Promise<number> {
     )
     .orderBy(asc(routineExecutions.at))
     .limit(50);
-  for (const run of orphans)
-    deps.runtime.track(startRoutineRun(deps, run, { orphan: true }), "routine.orphan");
+  for (const run of orphans) deps.runtime.track(startRoutineRun(deps, run), "routine.orphan");
   const due = await deps.db
     .selectDistinct({ routineId: routineExecutions.routineId })
     .from(routineExecutions)
@@ -858,14 +882,13 @@ async function recoverInterrupted(deps: AppDeps) {
   for (const { run, routine } of rows) {
     const policy = policyOf(routine);
     if (!run.startedAt) continue;
-    const done = await finishRun(
+    await completeRun(
       deps,
+      routine,
+      policy,
       run,
       fail("routines.run.interrupted", "The server stopped in the middle of this run", "interrupted"),
     );
-    if (!done) continue;
-    await release(deps, routine.id, run.startedAt);
-    await afterRun(deps, routine, policy, done);
   }
 }
 
@@ -954,6 +977,7 @@ async function execute(
 
   if (target.kind === "debate") {
     const debate = await openDebate(deps, {
+      id: `deb_${root}`,
       workspaceId: row.workspaceId,
       title: row.name,
       goal: prompt,

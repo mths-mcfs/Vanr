@@ -1058,11 +1058,15 @@ async function synthesize(deps: AppDeps, row: DebateRow) {
   } else {
     structured = { summary: "" };
   }
-  const synthesis = buildSynthesis(row, posts, structured, fallback);
   // It closes only if nobody canceled or reopened it while the lead wrote.
   const done = await changeDebate(deps, row.id, (fresh) =>
     fresh.status === "open" && fresh.phase === "concluding" && fresh.round === row.round
-      ? { status: "done", phase: null, pendingSpeakers: [], synthesis: { ...synthesis } }
+      ? {
+          status: "done",
+          phase: null,
+          pendingSpeakers: [],
+          synthesis: { ...buildSynthesis(fresh, posts, structured, fallback) },
+        }
       : null,
   );
   if (!done) return;
@@ -1072,7 +1076,7 @@ async function synthesize(deps: AppDeps, row: DebateRow) {
     round: row.round,
     body: structured.summary,
     runId,
-    meta: { synthesis: { ...synthesis } },
+    meta: { synthesis: done.synthesis },
   });
   await closeNotifications(deps, row.workspaceId, turnKey(row.id));
   for (const userId of stakeholders(row)) {
@@ -1092,7 +1096,7 @@ async function synthesize(deps: AppDeps, row: DebateRow) {
     });
   }
   // A debate a routine opened doesn't fire a routine again (keeps one from feeding the other forever).
-  if (originOf(row)?.kind !== "routine") {
+  if (originOf(done)?.kind !== "routine" && (await audience(db, done)) === "workspace") {
     await fireRoutineEvent(deps, {
       workspaceId: row.workspaceId,
       event: "debate.concluded",
@@ -1146,15 +1150,22 @@ export async function debateDeadlines(deps: AppDeps) {
   const due = await deps.db
     .select()
     .from(debates)
-    .where(and(eq(debates.status, "open"), lte(debates.deadline, deps.now())))
+    .where(
+      and(
+        eq(debates.status, "open"),
+        lte(debates.deadline, deps.now()),
+        sql`${debates.phase} is distinct from 'concluding'`,
+      ),
+    )
     .limit(50);
   for (const row of due) {
-    if (row.phase === "concluding") continue;
     await stopDebate(deps, row, "deadline");
   }
 }
 
 interface NewDebate {
+  /** Stable identity for a routine fire and its retries, stored atomically with the debate. */
+  id?: string;
   workspaceId: string;
   title: string;
   goal: string;
@@ -1207,7 +1218,7 @@ export async function openDebate(deps: AppDeps, input: NewDebate): Promise<Debat
   const [row] = await deps.db
     .insert(debates)
     .values({
-      id: newId("deb"),
+      id: input.id ?? newId("deb"),
       workspaceId: input.workspaceId,
       title: input.title,
       goal: input.goal,
@@ -1235,8 +1246,12 @@ export async function openDebate(deps: AppDeps, input: NewDebate): Promise<Debat
       createdAt: at,
       updatedAt: at,
     })
+    .onConflictDoNothing({ target: debates.id })
     .returning();
-  if (!row) throw new Error("debate insert failed");
+  if (!row) {
+    if (input.id) return debateById(deps.db, input.workspaceId, input.id);
+    throw new Error("debate insert failed");
+  }
   await reindex(deps, { kind: "debate", id: row.id });
   await publishDebate(deps, row);
   if (
