@@ -1,0 +1,211 @@
+import type { Copy } from "./types.ts";
+
+export const ptBR: Copy = {
+  galleryTitle: "Kit de interface",
+  pages: { components: "Componentes", states: "Estados" },
+  theme: { label: "Tema", light: "Bétula", dark: "Alcatrão", system: "Sistema" },
+  language: "Idioma",
+  intro:
+    "Todas as peças com que as telas do Vanr são montadas, nos dois temas. Nada aqui conversa com um servidor.",
+  sections: {
+    type: {
+      title: "Tipografia",
+      note: "Sans de interface para o trabalho, mono para ids e logs, a serifada só em títulos.",
+    },
+    buttons: {
+      title: "Botões",
+      note: "Uma ação principal por tela. Perigo é para o que não tem volta.",
+    },
+    fields: { title: "Campos", note: "Rótulo, dica e erro ficam ligados ao controle." },
+    choices: {
+      title: "Escolhas",
+      note: "Caixa de seleção, interruptor e opção única, cada um com o rótulo ao lado.",
+    },
+    overlays: {
+      title: "Camadas",
+      note: "Diálogos, menus, dicas e listas de seleção abrem por cima da página.",
+    },
+    tabs: { title: "Abas", note: "As setas do teclado passam de uma aba para a outra." },
+    feedback: { title: "Avisos", note: "Os avisos fixos ficam na página; as notificações vêm e vão." },
+    identity: {
+      title: "Pessoas e agentes",
+      note: "Pessoas são redondas. Agentes levam um sigilo desenhado a partir do id.",
+    },
+    status: {
+      title: "Situação do trabalho",
+      note: "Cada situação tem um símbolo próprio, então a cor nunca é a única pista.",
+    },
+    surfaces: {
+      title: "Superfícies",
+      note: "Cartões, painéis e linhas de lista, separados por linhas, não por sombras.",
+    },
+    loading: {
+      title: "Carregando",
+      note: "Um indicador giratório para ações, esqueletos para o conteúdo que está chegando.",
+    },
+    empty: {
+      title: "Estado vazio",
+      note: "Uma tela vazia diz o que entra ali e como adicionar.",
+    },
+  },
+  typeSamples: {
+    title: "Planejamento trimestral",
+    body: "O Scout redigiu as notas de versão a partir dos pull requests mesclados e está esperando a sua revisão.",
+    mono: "09:14:02  run_01JD8Q2W4X  saída 0 em 2,4 s",
+  },
+  actions: {
+    send: "Enviar",
+    save: "Salvar alterações",
+    cancel: "Cancelar",
+    archive: "Arquivar",
+    delete: "Excluir rotina",
+    retry: "Tentar de novo",
+    approve: "Aprovar",
+    newTask: "Nova tarefa",
+    more: "Mais ações",
+    search: "Buscar",
+    saving: "Salvando",
+  },
+  fields: {
+    name: "Nome do agente",
+    namePlaceholder: "ex.: Batedor de versões",
+    nameHint: "Aparece no chat ao lado do sigilo do agente.",
+    instructions: "Instruções",
+    instructionsPlaceholder: "O que este agente deve fazer?",
+    instructionsError: "Adicione pelo menos uma instrução antes de salvar.",
+    model: "Modelo",
+    modelPlaceholder: "Escolha um modelo",
+    agentId: "Id do agente",
+    required: "obrigatório",
+    long: "Para onde deve ir o resumo semanal das tarefas concluídas pela equipe",
+    longError:
+      "Este canal não existe mais ou você perdeu o acesso a ele. Escolha outro canal da lista ou peça acesso ao responsável.",
+  },
+  choices: {
+    notify: "Me avise quando terminar",
+    notifyHint: "Envia uma mensagem na conversa.",
+    autoApprove: "Aprovar edições de arquivo automaticamente",
+    autoApproveHint: "Comandos de terminal continuam pedindo antes.",
+    schedule: "Agenda de execução",
+    hourly: "A cada hora",
+    daily: "Todo dia às 9h",
+    manual: "Só quando iniciada manualmente",
+    archived: "Rotinas arquivadas",
+  },
+  dialog: {
+    open: "Renomear agente",
+    title: "Renomear agente",
+    description: "O novo nome aparece em todo lugar onde o agente aparece.",
+    close: "Fechar",
+    confirmOpen: "Excluir rotina",
+    confirmTitle: "Excluir a rotina “Resumo semanal”?",
+    confirmDescription: "O histórico de execuções vai junto. Não dá para desfazer.",
+    confirm: "Excluir rotina",
+  },
+  menu: {
+    open: "Ações da conversa",
+    label: "Conversa",
+    rename: "Renomear",
+    duplicate: "Duplicar",
+    pin: "Fixar na barra lateral",
+    delete: "Excluir conversa",
+    contextArea: "Clique com o botão direito nesta mensagem para ver o menu",
+    showAll: "Abrir todas as camadas de uma vez",
+  },
+  tooltip: { trigger: "Copiar id da execução", text: "Copia run_01JD8Q2W4X" },
+  tabs: {
+    chat: "Chat",
+    tasks: "Tarefas",
+    routines: "Rotinas",
+    wiki: "Wiki",
+    body: {
+      chat: "Conversas com pessoas e agentes.",
+      tasks: "Trabalho atribuído a você ou a um agente.",
+      routines: "Trabalhos que rodam numa agenda.",
+      wiki: "Páginas que o espaço de trabalho inteiro pode editar.",
+    },
+  },
+  toast: {
+    region: "Notificações",
+    close: "Dispensar",
+    push: "Mostrar",
+    queue: "Enfileirar quatro",
+    undo: "Desfazer",
+    undoAlt: "Desfazer o arquivamento da conversa",
+    items: {
+      info: { title: "O Scout pegou a tarefa", description: "Costuma levar alguns minutos." },
+      success: {
+        title: "Alterações salvas",
+        description: "Todo mundo no espaço de trabalho já vê o novo nome.",
+      },
+      warning: {
+        title: "O Ledger está esperando aprovação",
+        description: "Ele quer rodar um comando no terminal.",
+      },
+      danger: {
+        title: "A execução falhou",
+        description: "O conector respondeu 401. Reconecte e tente de novo.",
+      },
+    },
+  },
+  callouts: {
+    info: {
+      title: "Os agentes podem ler esta página",
+      body: "Tudo o que for escrito aqui fica disponível para todos os agentes do espaço de trabalho.",
+    },
+    success: {
+      title: "Conector pronto",
+      body: "O GitHub está conectado. As issues novas aparecem em Tarefas.",
+    },
+    warning: {
+      title: "Precisa de aprovação",
+      body: "O Ledger quer apagar 14 arquivos em /relatorios. Confira a lista antes.",
+    },
+    danger: {
+      title: "Rotina interrompida",
+      body: "Três execuções seguidas falharam. Corrija as credenciais e retome a rotina.",
+    },
+  },
+  status: {
+    running: "Rodando",
+    "awaiting-approval": "Precisa de aprovação",
+    "awaiting-reply": "Esperando resposta",
+    failed: "Falhou",
+    done: "Concluído",
+    paused: "Pausado",
+  },
+  chips: {
+    design: "Design",
+    urgent: "Urgente",
+    mine: "Atribuídas a mim",
+    remove: (label) => `Remover ${label}`,
+    long: "Integração e migração de clientes corporativos",
+  },
+  surfaces: {
+    card: "Resumo semanal",
+    cardBody: "Roda toda segunda às 9h e publica em #equipe.",
+    panel: "Log da execução",
+    rows: ["Redigir notas de versão", "Fazer a triagem das issues novas", "Conciliar as faturas do mês"],
+  },
+  empty: {
+    title: "Nenhuma rotina ainda",
+    description: "Rotinas rodam um agente numa agenda, como um resumo diário das tarefas em aberto.",
+    action: "Nova rotina",
+  },
+  loading: { label: "Carregando conversas" },
+  states: {
+    columns: {
+      default: "Padrão",
+      hover: "Sob o cursor",
+      focus: "Foco",
+      active: "Pressionado",
+      disabled: "Desabilitado",
+      loading: "Carregando",
+      error: "Erro",
+    },
+    none: "n/a",
+    longTitle: "Texto longo",
+    longBody:
+      "Responsabilidades, configurações e acompanhamento das notificações automáticas de reconciliação intercompanhias",
+  },
+};

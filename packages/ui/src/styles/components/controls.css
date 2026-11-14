@@ -1,0 +1,447 @@
+@layer vanr.components {
+  /* Button */
+
+  .vr-button {
+    --_height: var(--vr-control-md);
+    --_pad: var(--vr-space-3);
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    min-height: var(--_height);
+    padding: 0 var(--_pad);
+    border: var(--vr-border) solid transparent;
+    border-radius: var(--vr-radius-2);
+    font-size: var(--vr-text-md);
+    line-height: var(--vr-text-md-lh);
+    font-weight: var(--vr-weight-medium);
+    white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+    transition:
+      background-color var(--vr-duration-fast) var(--vr-ease),
+      border-color var(--vr-duration-fast) var(--vr-ease),
+      color var(--vr-duration-fast) var(--vr-ease),
+      translate var(--vr-duration-fast) var(--vr-ease);
+  }
+
+  .vr-button--sm {
+    --_height: var(--vr-control-sm);
+    --_pad: var(--vr-space-2);
+    font-size: var(--vr-text-sm);
+    line-height: var(--vr-text-sm-lh);
+  }
+
+  .vr-button--lg {
+    --_height: var(--vr-control-lg);
+    --_pad: var(--vr-space-4);
+  }
+
+  .vr-button--icon {
+    width: var(--_height);
+    padding: 0;
+  }
+
+  .vr-button__content {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--vr-space-2);
+    min-width: 0;
+  }
+
+  .vr-button--sm .vr-button__content {
+    gap: var(--vr-space-1);
+  }
+
+  .vr-button__label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .vr-button__icon {
+    display: inline-flex;
+  }
+
+  .vr-button:active:not(:disabled, [data-loading]) {
+    translate: 0 1px;
+  }
+
+  .vr-button--primary {
+    background-color: var(--vr-accent);
+    border-color: var(--vr-accent);
+    color: var(--vr-on-accent);
+  }
+
+  .vr-button--primary:hover:not(:disabled, [data-loading]) {
+    background-color: var(--vr-accent-hover);
+    border-color: var(--vr-accent-hover);
+  }
+
+  .vr-button--secondary {
+    background-color: var(--vr-bg-raised);
+    border-color: var(--vr-line-control);
+    color: var(--vr-fg);
+  }
+
+  .vr-button--secondary:hover:not(:disabled, [data-loading]) {
+    background-color: var(--vr-bg-hover);
+  }
+
+  .vr-button--secondary:active:not(:disabled, [data-loading]) {
+    background-color: var(--vr-bg-active);
+  }
+
+  .vr-button--ghost {
+    background-color: transparent;
+    color: var(--vr-fg-muted);
+  }
+
+  .vr-button--ghost:hover:not(:disabled, [data-loading]) {
+    background-color: var(--vr-bg-hover);
+    color: var(--vr-fg);
+  }
+
+  .vr-button--ghost:active:not(:disabled, [data-loading]) {
+    background-color: var(--vr-bg-active);
+  }
+
+  .vr-button--danger {
+    background-color: var(--vr-danger);
+    border-color: var(--vr-danger);
+    color: var(--vr-on-danger);
+  }
+
+  .vr-button--danger:hover:not(:disabled, [data-loading]) {
+    background-color: var(--vr-danger-hover);
+    border-color: var(--vr-danger-hover);
+  }
+
+  /* Disabled keeps readable text and loses its fill; the dashed edge says "not now". */
+  .vr-button:disabled {
+    background-color: var(--vr-bg-sunken);
+    border-color: var(--vr-line-control);
+    border-style: dashed;
+    color: var(--vr-fg-disabled);
+    cursor: not-allowed;
+  }
+
+  .vr-button--ghost:disabled {
+    background-color: transparent;
+    border-color: transparent;
+  }
+
+  .vr-button[data-loading] {
+    cursor: progress;
+  }
+
+  /* Transparent, not hidden: the label stays the button's accessible name while it is busy. */
+  .vr-button[data-loading] .vr-button__content {
+    opacity: 0;
+  }
+
+  .vr-button__spinner {
+    position: absolute;
+    inset: 0;
+    margin: auto;
+  }
+
+  /* Text controls: Input, Textarea, Select trigger */
+
+  .vr-control {
+    --_height: var(--vr-control-md);
+    display: flex;
+    width: 100%;
+    min-width: 0;
+    min-height: var(--_height);
+    padding: 0 var(--vr-space-3);
+    border: var(--vr-border) solid var(--vr-line-control);
+    border-radius: var(--vr-radius-2);
+    background-color: var(--vr-bg-raised);
+    color: var(--vr-fg);
+    font-size: var(--vr-text-md);
+    line-height: var(--vr-text-md-lh);
+    transition: border-color var(--vr-duration-fast) var(--vr-ease);
+  }
+
+  .vr-control--sm {
+    --_height: var(--vr-control-sm);
+    padding: 0 var(--vr-space-2);
+    font-size: var(--vr-text-sm);
+  }
+
+  .vr-control--lg {
+    --_height: var(--vr-control-lg);
+  }
+
+  .vr-control--mono {
+    font-family: var(--vr-font-mono);
+    font-size: var(--vr-text-sm);
+  }
+
+  .vr-control::placeholder {
+    color: var(--vr-fg-subtle);
+    opacity: 1;
+  }
+
+  .vr-control:hover:not(:disabled, [data-disabled]) {
+    border-color: var(--vr-fg-muted);
+  }
+
+  .vr-control:focus-visible {
+    outline: var(--vr-ring) solid var(--vr-focus);
+    outline-offset: 1px;
+    border-color: var(--vr-focus);
+  }
+
+  .vr-control[aria-invalid="true"] {
+    border-color: var(--vr-danger-fg);
+  }
+
+  .vr-control:disabled,
+  .vr-control[data-disabled] {
+    background-color: var(--vr-bg-sunken);
+    border-style: dashed;
+    color: var(--vr-fg-disabled);
+    cursor: not-allowed;
+  }
+
+  .vr-textarea {
+    padding: var(--vr-space-2) var(--vr-space-3);
+    resize: vertical;
+  }
+
+  .vr-select {
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--vr-space-2);
+    text-align: start;
+    cursor: pointer;
+  }
+
+  .vr-select > span:first-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .vr-select[data-placeholder] > span:first-child {
+    color: var(--vr-fg-subtle);
+  }
+
+  .vr-select__chevron {
+    display: inline-flex;
+    color: var(--vr-fg-muted);
+    transition: rotate var(--vr-duration-fast) var(--vr-ease);
+  }
+
+  .vr-select[data-state="open"] .vr-select__chevron {
+    rotate: 180deg;
+  }
+
+  /* Field */
+
+  .vr-field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-1);
+    min-width: 0;
+  }
+
+  .vr-field__label {
+    display: flex;
+    align-items: baseline;
+    gap: var(--vr-space-2);
+    font-weight: var(--vr-weight-medium);
+    color: var(--vr-fg);
+  }
+
+  .vr-field__required {
+    font-size: var(--vr-text-sm);
+    font-weight: var(--vr-weight-regular);
+    color: var(--vr-fg-muted);
+  }
+
+  .vr-field__hint {
+    font-size: var(--vr-text-sm);
+    line-height: var(--vr-text-sm-lh);
+    color: var(--vr-fg-muted);
+  }
+
+  .vr-field__error {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--vr-space-1);
+    font-size: var(--vr-text-sm);
+    line-height: var(--vr-text-sm-lh);
+    color: var(--vr-danger-fg);
+  }
+
+  .vr-field__error-icon {
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  .vr-field[data-disabled] .vr-field__label {
+    color: var(--vr-fg-disabled);
+  }
+
+  /* Checkbox, Radio, Switch */
+
+  .vr-choice {
+    display: inline-flex;
+    align-items: flex-start;
+    gap: var(--vr-space-2);
+    min-width: 0;
+  }
+
+  .vr-choice__text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .vr-choice__label {
+    color: var(--vr-fg);
+    cursor: pointer;
+  }
+
+  .vr-choice__hint {
+    font-size: var(--vr-text-sm);
+    line-height: var(--vr-text-sm-lh);
+    color: var(--vr-fg-muted);
+  }
+
+  .vr-choice[data-disabled] .vr-choice__label {
+    color: var(--vr-fg-disabled);
+    cursor: not-allowed;
+  }
+
+  .vr-checkbox,
+  .vr-radio {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 1rem;
+    height: 1rem;
+    margin-top: 0.125rem;
+    padding: 0;
+    border: var(--vr-border) solid var(--vr-line-control);
+    background-color: var(--vr-bg-raised);
+    cursor: pointer;
+    transition:
+      background-color var(--vr-duration-fast) var(--vr-ease),
+      border-color var(--vr-duration-fast) var(--vr-ease);
+  }
+
+  .vr-checkbox {
+    border-radius: var(--vr-radius-1);
+    color: var(--vr-on-accent);
+  }
+
+  .vr-checkbox:hover:not(:disabled),
+  .vr-radio:hover:not(:disabled) {
+    border-color: var(--vr-fg-muted);
+  }
+
+  .vr-checkbox[data-state="checked"],
+  .vr-checkbox[data-state="indeterminate"] {
+    background-color: var(--vr-accent);
+    border-color: var(--vr-accent);
+  }
+
+  .vr-checkbox__indicator {
+    display: inline-flex;
+  }
+
+  /* Round is the one place the shape is the meaning: a radio picks one of many. */
+  .vr-radio {
+    border-radius: 50%;
+  }
+
+  .vr-radio[data-state="checked"] {
+    border-color: var(--vr-accent);
+  }
+
+  .vr-radio__dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background-color: currentColor;
+    color: var(--vr-accent);
+  }
+
+  .vr-radio-group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-2);
+  }
+
+  .vr-switch {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    width: 1.75rem;
+    height: 1rem;
+    margin-top: 0.125rem;
+    padding: 0 1px;
+    border: var(--vr-border) solid var(--vr-line-control);
+    border-radius: var(--vr-radius-2);
+    background-color: var(--vr-bg-raised);
+    cursor: pointer;
+    transition:
+      background-color var(--vr-duration-fast) var(--vr-ease),
+      border-color var(--vr-duration-fast) var(--vr-ease);
+  }
+
+  .vr-switch:hover:not(:disabled) {
+    border-color: var(--vr-fg-muted);
+  }
+
+  .vr-switch__thumb {
+    display: block;
+    width: 0.625rem;
+    height: 0.625rem;
+    border-radius: var(--vr-radius-1);
+    background-color: currentColor;
+    color: var(--vr-fg-muted);
+    translate: 1px 0;
+    transition: translate var(--vr-duration-base) var(--vr-ease);
+  }
+
+  .vr-switch[data-state="checked"] {
+    background-color: var(--vr-accent);
+    border-color: var(--vr-accent);
+  }
+
+  .vr-switch[data-state="checked"] .vr-switch__thumb {
+    color: var(--vr-on-accent);
+    translate: 0.8125rem 0;
+  }
+
+  .vr-checkbox[aria-invalid="true"],
+  .vr-radio-group[aria-invalid="true"] .vr-radio,
+  .vr-switch[aria-invalid="true"] {
+    border-color: var(--vr-danger-fg);
+  }
+
+  .vr-checkbox:disabled,
+  .vr-radio:disabled,
+  .vr-switch:disabled {
+    border-style: dashed;
+    background-color: var(--vr-bg-sunken);
+    cursor: not-allowed;
+  }
+
+  .vr-checkbox:disabled[data-state="checked"] {
+    color: var(--vr-fg-disabled);
+    border-color: var(--vr-line-control);
+  }
+
+  .vr-switch:disabled .vr-switch__thumb,
+  .vr-radio:disabled .vr-radio__dot {
+    color: var(--vr-fg-disabled);
+  }
+}
