@@ -548,3 +548,87 @@ test.skipIf(!chrome)(
   },
   30_000,
 );
+
+test.skipIf(!chrome)(
+  "an action canceled between two of its steps sends no command that acts on the page after the cancel",
+  async () => {
+    const a = agent();
+    sites.page("site.test", "/field", () => html('<input id="field">'));
+    await open(a, sites.http("site.test", "/field"));
+    const s = (
+      Reflect.get(browser, "sessions") as Map<
+        string,
+        { cdp: { send: (...x: unknown[]) => Promise<unknown> }; unwinding: Set<Promise<void>> }
+      >
+    ).get(a.id);
+    if (!s) throw new Error("no session");
+    const c = new AbortController();
+    const original = s.cdp.send.bind(s.cdp);
+    const after: string[] = [];
+    // The commands the action tries after the cancel, sent or rejected: a signal that its next step came.
+    const tried: Promise<unknown>[] = [];
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let reached: () => void = () => {};
+    const atStep = new Promise<void>((r) => {
+      reached = r;
+    });
+    let paused = false;
+    // The first step of `fill` (focus and clear the field) is held until the request is canceled.
+    s.cdp.send = async (...x: unknown[]) => {
+      const [method, params] = x as [string, { expression?: string }];
+      const late = c.signal.aborted;
+      const going = original(...x);
+      if (late && method !== "Page.stopLoading") tried.push(going.catch(() => {}));
+      const out = await going;
+      if (late) after.push(method);
+      if (
+        !paused &&
+        method === "Runtime.evaluate" &&
+        params?.expression?.includes("getOwnPropertyDescriptor")
+      ) {
+        paused = true;
+        reached();
+        await gate;
+      }
+      return out;
+    };
+    try {
+      const acting = browser
+        .handle(
+          "browser.act",
+          a,
+          { action: "fill", selector: "#field", text: "AFTER CANCEL", policy: policy() },
+          send,
+          c.signal,
+        )
+        .then(
+          () => "result",
+          (e: { code?: string }) => e.code,
+        );
+      await atStep;
+      c.abort();
+      expect(await acting).toBe("canceled");
+      release();
+      // The canceled action's next step comes (rejected or not), and settles.
+      while (!tried.length) await Bun.sleep(5);
+      await Promise.all(tried);
+      await Promise.allSettled([...s.unwinding]);
+      const acts = [
+        "Page.navigate",
+        "Input.dispatchMouseEvent",
+        "Input.dispatchKeyEvent",
+        "Input.insertText",
+        "DOM.setFileInputFiles",
+        "Runtime.evaluate",
+        "Runtime.callFunctionOn",
+      ];
+      expect(after.filter((m) => acts.includes(m))).toEqual([]);
+    } finally {
+      s.cdp.send = original;
+    }
+  },
+  30_000,
+);
