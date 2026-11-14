@@ -1,9 +1,15 @@
 {
   "version": 1,
   "files": {
-    "scripts/typecheck.test.ts": 50,
-    "scripts/ci/gate.test.ts": 24,
+    "packages/ui/test/contrast.test.ts": 286,
+    "packages/ui/test/hydration.test.tsx": 257,
+    "packages/ui/test/smoke.test.tsx": 208,
     "packages/contract/src/secret-box.test.ts": 90,
-    "packages/contract/src/permissions.test.ts": 5
+    "scripts/ci/gate.test.ts": 24,
+    "packages/ui/test/field.test.tsx": 10,
+    "scripts/typecheck.test.ts": 9,
+    "packages/ui/test/identity.test.ts": 8,
+    "packages/contract/src/permissions.test.ts": 5,
+    "packages/ui/test/styles.test.ts": 4
   }
 }
