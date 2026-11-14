@@ -44,7 +44,7 @@ import { Harnesses } from "./harness";
 import { Jobs, which } from "./jobs";
 import { McpBridge, type ToolOutcome } from "./mcp";
 import { execOp, listOp, type OpContext, readOp, writeOp } from "./ops";
-import { assemble, Flows, HELLO_JOBS_MAX, type Masks } from "./outbound";
+import { Flows, HELLO_JOBS_BYTES, HELLO_JOBS_MAX, type Masks, serialize } from "./outbound";
 import { type CommandSandbox, defaultPolicyContext, openSandbox, type PolicyContext } from "./sandbox";
 import { SecretStore } from "./secrets";
 import { runningBundle, UpdateError, update } from "./update";
@@ -113,8 +113,13 @@ export class RunnerClient {
   private cliSent = "";
   private cliCheckedAt = 0;
   agents: { id: string; handle: string; name: string }[] = [];
-  /** The masks of each agent's secrets, known since the welcome: a frame of no agent is masked with all. */
+  /**
+   * The masks of each agent's secrets the runner has seen since it started: they hold for every frame while the
+   * process lives, across reconnections (the store is locked between them), and they only grow.
+   */
   private readonly knownMasks = new Map<string, Masks>();
+  /** The masks were read at least once (a welcome): until then a hello carries no text from outside. */
+  private masksLoaded = false;
   private welcomeWaiters: (() => void)[] = [];
   private readonly executors: ("claude_code" | "codex")[];
   private readonly browser: BrowserDriver | null;
@@ -184,6 +189,7 @@ export class RunnerClient {
       maxConcurrent: () => this.config.maxConcurrentJobs,
       maxSeconds: () => this.config.jobMaxSeconds,
       send: (event) => this.send(event),
+      knownMasks: (agentId) => this.masksOf(agentId),
       bins,
       get sandbox() {
         return client.sandbox;
@@ -262,12 +268,13 @@ export class RunnerClient {
    */
   private send(frame: RunnerFrame, masks: Masks = []): boolean {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
-    const out = assemble(frame, [...masks, ...this.allMasks()]);
-    if (!out) {
+    const json = serialize(frame, [...masks, ...this.allMasks()]);
+    if (json === null) {
       this.log(`did not send an invalid ${frame.type} frame`);
+      if (frame.type === "cli.changed") this.cliSent = "";
       return false;
     }
-    this.ws.send(JSON.stringify(out));
+    this.ws.send(json);
     return true;
   }
 
@@ -347,9 +354,12 @@ export class RunnerClient {
     this.hadWelcome = false;
     this.armWatchdog();
     ws.onopen = () => {
-      const cli = this.cli.states(true);
-      this.cliSent = JSON.stringify(cli);
-      this.cliCheckedAt = Date.now();
+      // A runner that has not read its masks yet (it just started) sends no text from outside in the hello:
+      // the CLI states and the pending jobs go after the welcome, masked (cli.changed, redeliver).
+      const known = this.masksKnown();
+      const cli = known ? this.cli.states(true) : {};
+      this.cliSent = known ? JSON.stringify(cli) : "";
+      this.cliCheckedAt = known ? Date.now() : 0;
       this.send({
         type: "hello",
         session,
@@ -365,7 +375,7 @@ export class RunnerClient {
         executors: this.executors,
         cli,
         // The rest of the pending jobs goes as job.done after the welcome (redeliver), in the journal's order.
-        jobs: this.helloJobs(),
+        jobs: known ? this.helloJobs() : [],
         sandbox: this.sandbox.status(),
         features: this.browser ? [BROWSER_GUARD_FEATURE] : [],
       });
@@ -385,7 +395,6 @@ export class RunnerClient {
       if (this.ws !== ws) return;
       this.ws = null;
       this.secrets.lock();
-      this.knownMasks.clear();
       for (const c of this.inflight.values()) c.abort();
       this.failToolCalls();
       if (this.watchdog) clearTimeout(this.watchdog);
@@ -416,6 +425,8 @@ export class RunnerClient {
         if (frame.name !== this.config.name) this.saveConfig({ ...this.config, name: frame.name });
         this.log(`connected as ${frame.name}`);
         this.jobs.redeliver();
+        // A hello sent without the CLI states (before any mask): they go now.
+        if (this.cliSent === "") this.recheckCli();
         for (const w of this.welcomeWaiters.splice(0)) w();
         if (frame.update && this.config.autoUpdate && newer(frame.update.version, this.version)) {
           this.pendingUpdate = frame.update.version;
@@ -470,7 +481,7 @@ export class RunnerClient {
     // The agent's secrets, for every frame this request sends.
     const masks = frame.agent ? await this.secrets.masks(frame.agent).catch(() => []) : [];
     // The pieces of one text (a command's output, a harness turn's text) go through one flow each.
-    const flows = new Flows([...masks, ...this.allMasks()]);
+    const flows = new Flows(() => [...masks, ...this.allMasks()]);
     const piece = (key: string, text: string) => flows.push(key, text);
     const flush = () => {
       for (const key of flows.keys()) {
@@ -605,20 +616,45 @@ export class RunnerClient {
     }
   }
 
-  /** The running jobs first (only the hello reports them), then the ended ones, up to the hello's limit. */
+  /**
+   * The running jobs first (only the hello reports them), then the ended ones, in the journal's order, while
+   * they fit the hello's count and byte budget. The server finishes a task from the hello's snapshot, so a job
+   * goes whole or not at all; the rest goes as job.done after the welcome.
+   */
   private helloJobs() {
     const pending = this.jobs.pending();
-    const running = pending.filter((j) => j.status === "running");
-    return [...running, ...pending.filter((j) => j.status !== "running")].slice(0, HELLO_JOBS_MAX);
+    const ordered = [
+      ...pending.filter((j) => j.status === "running"),
+      ...pending.filter((j) => j.status !== "running"),
+    ];
+    const out: typeof pending = [];
+    let size = 0;
+    for (const job of ordered) {
+      size += Buffer.byteLength(JSON.stringify(job));
+      if (out.length >= HELLO_JOBS_MAX || size > HELLO_JOBS_BYTES) break;
+      out.push(job);
+    }
+    return out;
   }
 
-  /** The masks of every known agent's secrets, refreshed at the welcome and when a secret changes. */
+  private masksKnown(): boolean {
+    return this.masksLoaded || this.knownMasks.size > 0;
+  }
+
+  /** Reads the masks of every known agent's secrets (at the welcome, when a secret changes) and adds them. */
   private async refreshMasks() {
-    this.knownMasks.clear();
     for (const agent of this.agents) {
       const masks = await this.secrets.masks(agent).catch((): Masks => []);
-      if (masks.length) this.knownMasks.set(agent.id, masks);
+      const before = this.knownMasks.get(agent.id) ?? [];
+      const added = masks.filter(([v]) => !before.some(([b]) => b === v));
+      if (added.length) this.knownMasks.set(agent.id, [...before, ...added]);
     }
+    this.masksLoaded = true;
+  }
+
+  /** The masks of one agent the runner knows (for the jobs, which read them at each line). */
+  masksOf(agentId: string): Masks {
+    return this.knownMasks.get(agentId) ?? [];
   }
 
   private allMasks(): Masks {

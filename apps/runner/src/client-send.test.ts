@@ -1,11 +1,13 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type RunnerFrame, runnerFrame } from "@vanr/engine/runner-protocol";
 import { RunnerClient } from "./client";
 import { Jobs } from "./jobs";
+import { Flows } from "./outbound";
 import { sandboxOff } from "./sandbox";
+import { seeded } from "./testing/random";
 
 // What the client sends, on its real way out: the pieces of one text go through one flow (a secret split
 // between two frames goes out in neither, and the tail goes before the last frame); a frame of no agent is
@@ -157,6 +159,7 @@ test("a hello with more pending jobs than it can carry is valid; the rest goes a
         opts: { version: "1.0.0", log: () => {} },
         cli: { states: () => ({}) },
         jobs,
+        masksLoaded: true,
         executors: [],
         sandbox: sandboxOff(),
         heartbeatMs: 25_000,
@@ -175,6 +178,127 @@ test("a hello with more pending jobs than it can carry is valid; the rest goes a
     } finally {
       globalThis.WebSocket = real;
     }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("property: across reconnections at any point, every frame (the first hello of each connection too) is masked", async () => {
+  const r = seeded(9090);
+  const real = globalThis.WebSocket;
+  const sent: string[] = [];
+  class FakeSocket {
+    static OPEN = 1;
+    readyState = 1;
+    onopen: (() => void) | null = null;
+    onclose: (() => void) | null = null;
+    send(s: string) {
+      sent.push(s);
+    }
+    close() {}
+  }
+  globalThis.WebSocket = FakeSocket as unknown as typeof WebSocket;
+  let version = 0;
+  try {
+    const { c, call } = fakeClient({
+      config: {
+        server: "https://example.invalid",
+        workDir: "/w",
+        paused: false,
+        access: { folders: [], tools: { claude: true, codex: false, commands: true, browser: false } },
+      },
+      opts: { version: "1.0.0", log: () => {} },
+      cli: {
+        states: () => ({
+          claude_code: { version: `${SECRET} ${version}`, login: "subscription", plan: SECRET },
+        }),
+      },
+      jobs: { pending: () => [] },
+      executors: ["claude_code"],
+      sandbox: sandboxOff(),
+      heartbeatMs: 25_000,
+      agents: [agent],
+      toolCalls: new Map(),
+      retryLater: () => {},
+      cliSent: "",
+      secrets: { masks: async () => MASKS, lock: () => {} },
+    });
+    await call("refreshMasks");
+    const connect = () => {
+      call("openSocket", `fixture-session-${String(r.int(1e6)).padStart(8, "0")}`);
+      (Reflect.get(c, "ws") as FakeSocket).onopen?.();
+      clearTimeout(Reflect.get(c, "watchdog") as ReturnType<typeof setTimeout>);
+      Reflect.set(c, "hadWelcome", true);
+    };
+    connect();
+    const flows = new Flows(() => (Reflect.get(c, "allMasks") as () => [string, string][]).call(c));
+    let reconnects = 0;
+    for (let step = 0; step < 600; step++) {
+      const action = r.int(5, "action");
+      if (action === 0) {
+        (Reflect.get(c, "ws") as FakeSocket).onclose?.();
+        connect();
+        reconnects++;
+      } else if (action === 1) {
+        version++;
+        Reflect.set(c, "cliCheckedAt", 0);
+        call("recheckCli");
+      } else if (action === 2) {
+        const piece = flows.push("text", r.pick(["ABCD-", "SECRET", "x ", SECRET], "piece"));
+        if (piece)
+          call("send", { type: "harness.event", id: "req_1", event: { kind: "text", text: piece } }, []);
+      } else if (action === 3)
+        call("send", { type: "output", id: "req_1", stream: "stdout", chunk: `a ${SECRET} b` }, []);
+      else call("send", { type: "job.event", jobId: "job_1", kind: "line", line: SECRET, at: "t" }, []);
+    }
+    const harness = sent.flatMap((s) => {
+      const f = JSON.parse(s);
+      return f.type === "harness.event" ? [f.event.text] : [];
+    });
+    expect(harness.join("").includes(SECRET)).toBe(false);
+    for (const s of sent) expect(s.includes(SECRET)).toBe(false);
+    const hellos = sent.filter((s) => JSON.parse(s).type === "hello");
+    expect(hellos.length).toBe(reconnects + 1);
+    console.log(
+      `[reconnect] ${sent.length} frames, ${reconnects} reconnections, actions ${JSON.stringify(r.spread("action"))}`,
+    );
+  } finally {
+    globalThis.WebSocket = real;
+  }
+});
+
+test("a job that ended before a secret existed is masked with it when it is delivered again", async () => {
+  const home = mkdtempSync(join(tmpdir(), "runner-redeliver-"));
+  try {
+    mkdirSync(join(home, "jobs"));
+    const job = {
+      jobId: "job_00000001",
+      status: "done",
+      exitCode: 0,
+      result: `the key is ${SECRET}`,
+      files: [],
+      session: null,
+      startedAt: null,
+      endedAt: null,
+      denied: [],
+      blocked: [],
+      agent,
+      executor: "shell",
+      delivered: false,
+    };
+    writeFileSync(join(home, "jobs", "journal.json"), JSON.stringify([job]));
+    let client: { call: (name: string, ...a: unknown[]) => unknown } | undefined;
+    const jobs = new Jobs({
+      home,
+      send: (e: RunnerFrame) => client?.call("send", e),
+    } as unknown as ConstructorParameters<typeof Jobs>[0]);
+    const made = fakeClient({ jobs, agents: [agent] });
+    client = made;
+    // The journal on disk keeps what it had (the secret did not exist when the job ended).
+    expect(readFileSync(join(home, "jobs", "journal.json"), "utf8")).toContain(SECRET);
+    await made.call("refreshMasks");
+    jobs.redeliver();
+    expect(made.sent).toMatchObject([{ type: "job.done", job: { result: "the key is [secret:S]" } }]);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

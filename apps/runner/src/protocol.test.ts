@@ -227,6 +227,8 @@ test("every frame the runner sends passes the engine schema, and the runner acce
   expect([...types].sort()).toEqual(
     [
       "access.changed",
+      // The first hello of a process goes before any mask is read: the CLI states follow the welcome.
+      "cli.changed",
       "harness.event",
       "harness.tool",
       "hello",

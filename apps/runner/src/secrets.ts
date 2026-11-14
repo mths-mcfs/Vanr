@@ -368,21 +368,45 @@ export function maskSecrets(text: string, masks: [string, string][]): string {
  */
 export class StreamMasker {
   private held = "";
-  private readonly masks: [string, string][];
+  private source: [string, string][] | null = null;
+  private prepared: [string, string][] = [];
 
-  constructor(masks: [string, string][]) {
-    this.masks = prepare(masks);
+  /**
+   * `masks`: the list, or a function that gives the current one. With a function the list is read again at
+   * each piece: a secret that appears in the middle of a flow masks what comes after, and what is still held
+   * is scanned with the new list before it goes. What already went out before the secret existed stays out.
+   */
+  constructor(private readonly masks: [string, string][] | (() => [string, string][])) {}
+
+  private current(): [string, string][] {
+    const list = typeof this.masks === "function" ? this.masks() : this.masks;
+    const same =
+      list === this.source ||
+      (this.source !== null &&
+        list.length === this.source.length &&
+        list.every((m, i) => m === this.source?.[i]));
+    if (!same) {
+      this.source = list;
+      this.prepared = prepare(list);
+    }
+    return this.prepared;
   }
 
   push(chunk: string): string {
-    if (!this.masks.length) return chunk;
-    const { out, rest } = scan(this.held + chunk, this.masks, false);
+    const masks = this.current();
+    if (!masks.length) {
+      const out = this.held + chunk;
+      this.held = "";
+      return out;
+    }
+    const { out, rest } = scan(this.held + chunk, masks, false);
     this.held = rest;
     return out;
   }
 
   end(): string {
-    const rest = this.masks.length ? scan(this.held, this.masks, true).out : this.held;
+    const masks = this.current();
+    const rest = masks.length ? scan(this.held, masks, true).out : this.held;
     this.held = "";
     return rest;
   }

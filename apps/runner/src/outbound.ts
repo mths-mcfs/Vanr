@@ -245,52 +245,55 @@ const idOf = (v: unknown): string | null =>
 const field = (frame: unknown, key: string): unknown => (isRecord(frame) ? frame[key] : undefined);
 
 /**
- * What goes in place of an invalid frame, by type: built only from the frame's ids (when they are valid) and
- * the error, never from the data that failed. `null`: the frame is dropped, and the runner goes on (the log
- * says it). Each choice keeps the runner going and errs on the side of less: no false access, no false state.
+ * What goes in place of an invalid frame, by type. First the frame is repaired: only the part that failed goes
+ * (an item of a list, an optional field, a nullable one set to null), the rest stays as it is, since the server
+ * stores what it gets (a hello overwrites the environment's row, a job.done finishes the task). What cannot be
+ * repaired becomes the form below, built only from the frame's ids and the error; `null`: the frame is dropped
+ * and the runner goes on (the log says it). A frame over the socket's size limit is invalid too (see fit).
  */
 export const INVALID: Record<RunnerFrame["type"], string> = {
   hello:
-    "a hello that says the runner can do nothing (paused, no tools, no jobs); the jobs go after the welcome",
+    "each failing field neutral (unknown, none, paused); a failing job leaves the hello and goes after the welcome",
   pong: "a pong with at = 0",
-  result: "an internal error with the request id; dropped without a valid id",
+  result:
+    "an internal error with the request id; dropped without a valid id (the server's request times out)",
   output: "a stderr piece that says a piece could not be sent",
   "job.event": "a line that says the event could not be sent",
-  "job.done": "the job failed, with the error as its result",
+  "job.done":
+    "the failing field dropped (usage, diff, an item); the job failed with the error only without a valid status",
   "runner.state": "dropped; the state goes again in the next hello",
-  "cli.changed": "no CLI (cli: {}): the server sends no turn until the next check",
+  "cli.changed": "the failing CLI left out; dropped if nothing is left",
   "harness.event": "a text that says the event could not be sent",
   "harness.tool": "the tool call with an empty input",
-  "access.changed": "no access (no folder, no tool)",
+  "access.changed": "the failing folder left out; no access if the tools fail",
   "sandbox.changed": "the sandbox unavailable, with the error as the reason",
   "live_view.frame": "dropped; the next frame replaces it",
   "live_view.stream_ended": "the stream ended with reason error; dropped without a valid agent id",
+};
+
+const NO_TOOLS = { claude: false, codex: false, commands: false, browser: false };
+/** The neutral value of each field of a hello, for the one that fails. */
+const HELLO_NEUTRAL: Record<string, unknown> = {
+  version: "unknown",
+  protocol: 0,
+  os: "unknown",
+  arch: "unknown",
+  hostname: "unknown",
+  workDir: null,
+  paused: true,
+  access: { folders: [], tools: NO_TOOLS },
+  browser: false,
+  executors: [],
+  cli: {},
+  jobs: [],
+  sandbox: { state: "unavailable", engine: null, reason: null },
+  features: [],
 };
 
 function minimal(type: string, frame: unknown, why: string): unknown {
   const id = idOf(field(frame, "id"));
   const at = new Date().toISOString();
   switch (type) {
-    case "hello": {
-      const session = field(frame, "session");
-      return {
-        type,
-        ...(typeof session === "string" && session.length >= 16 && session.length <= 200 ? { session } : {}),
-        version: "unknown",
-        protocol: Number.isInteger(field(frame, "protocol")) ? field(frame, "protocol") : 0,
-        os: "unknown",
-        arch: "unknown",
-        hostname: "unknown",
-        workDir: null,
-        paused: true,
-        access: { folders: [], tools: { claude: false, codex: false, commands: false, browser: false } },
-        browser: false,
-        executors: [],
-        cli: {},
-        jobs: [],
-        features: [],
-      };
-    }
     case "pong":
       return { type, at: 0 };
     case "result":
@@ -321,8 +324,6 @@ function minimal(type: string, frame: unknown, why: string): unknown {
         }
       );
     }
-    case "cli.changed":
-      return { type, cli: {} };
     case "harness.event":
       return id && { type, id, event: { kind: "text", text: why } };
     case "harness.tool": {
@@ -333,10 +334,7 @@ function minimal(type: string, frame: unknown, why: string): unknown {
       );
     }
     case "access.changed":
-      return {
-        type,
-        access: { folders: [], tools: { claude: false, codex: false, commands: false, browser: false } },
-      };
+      return { type, access: { folders: [], tools: NO_TOOLS } };
     case "sandbox.changed":
       return { type, sandbox: { state: "unavailable", engine: null, reason: why } };
     case "live_view.stream_ended": {
@@ -348,22 +346,97 @@ function minimal(type: string, frame: unknown, why: string): unknown {
   }
 }
 
+/** The frame's own schema (the option of the union its `type`, and `ok`, choose). */
+function optionOf(frame: unknown): z.ZodType | undefined {
+  return frameOptions().find(
+    (o) =>
+      valuesAt(o, "type").includes(field(frame, "type")) &&
+      (valuesAt(o, "ok").length === 0 || valuesAt(o, "ok").includes(field(frame, "ok"))),
+  );
+}
+
+/**
+ * Takes out the part of `frame` at an issue's path, in place: the deepest item of a list, optional field or
+ * nullable field on the way (a hello's failing field becomes its neutral value). `false`: nothing to take out.
+ */
+function takeOut(frame: Record<string, unknown>, path: PropertyKey[]): boolean {
+  // A job that fails leaves the hello whole: the server would finish the task with what is left of it.
+  if (
+    frame.type === "hello" &&
+    path[0] === "jobs" &&
+    typeof path[1] === "number" &&
+    Array.isArray(frame.jobs)
+  ) {
+    frame.jobs.splice(path[1], 1);
+    return true;
+  }
+  let schema = optionOf(frame);
+  let holder: unknown = frame;
+  let best: { holder: unknown; key: PropertyKey; how: "remove" | "delete" | "null" } | null = null;
+  for (const key of path) {
+    if (!schema || holder === null || typeof holder !== "object") break;
+    let d = defOf(schema);
+    while (WRAPPERS.has(d.type) && d.innerType) d = defOf(d.innerType);
+    const child = d.type === "object" ? d.shape?.[String(key)] : d.type === "array" ? d.element : undefined;
+    if (Array.isArray(holder) && typeof key === "number") best = { holder, key, how: "remove" };
+    for (
+      let c = child ? defOf(child) : undefined;
+      c && WRAPPERS.has(c.type);
+      c = c.innerType && defOf(c.innerType)
+    ) {
+      if (c.type === "optional") best = { holder, key, how: "delete" };
+      else if (c.type === "nullable") best = { holder, key, how: "null" };
+    }
+    holder = (holder as Record<PropertyKey, unknown>)[key as string];
+    schema = child;
+  }
+  if (!best) {
+    const top = path[0];
+    if (frame.type === "hello" && typeof top === "string" && top in HELLO_NEUTRAL) {
+      frame[top] = structuredClone(HELLO_NEUTRAL[top]);
+      return true;
+    }
+    return false;
+  }
+  const at = best.holder as Record<PropertyKey, unknown> & unknown[];
+  if (best.how === "remove" && Array.isArray(at)) at.splice(best.key as number, 1);
+  else if (best.how === "delete") delete at[best.key as string];
+  else at[best.key as string] = null;
+  return true;
+}
+
 function validated(shaped: unknown): RunnerFrame | null {
   const parsed = runnerFrame.safeParse(shaped);
   return parsed.success ? parsed.data : null;
 }
 
+const REPAIRS_MAX = 50;
+
 /**
  * The frame as it goes to the server: masked (all but the exemptions), cut to the schema, valid. A frame that
- * still fails the schema becomes what INVALID says for its type (or `null`: it is not sent).
+ * still fails the schema is repaired or replaced as INVALID says for its type (or `null`: it is not sent).
  */
 export function assemble(frame: RunnerFrame, masks: Masks): RunnerFrame | null {
   const shaped = shapeFrame(frame, masks);
-  const parsed = runnerFrame.safeParse(shaped);
+  let parsed = runnerFrame.safeParse(shaped);
   if (parsed.success) return parsed.data;
   // The error text names where the frame failed and how, not the value; it is masked like any other text.
   const issue = parsed.error.issues[0];
   const why = `The runner could not send this ${frame.type} (${issue ? `${issue.path.join(".")}: ${issue.code}` : "invalid"})`;
+  if (isRecord(shaped)) {
+    for (let i = 0; i < REPAIRS_MAX && !parsed.success; i++) {
+      const first = parsed.error.issues[0];
+      if (!first || !takeOut(shaped, first.path)) break;
+      parsed = runnerFrame.safeParse(shaped);
+    }
+    // A cli.changed or an access.changed with nothing left would erase what the server knows: it goes as is.
+    if (
+      parsed.success &&
+      !(shaped.type === "cli.changed" && Object.keys(field(shaped, "cli") ?? {}).length === 0)
+    )
+      return parsed.data;
+    if (shaped.type === "cli.changed") return null;
+  }
   const fallback = minimal(frame.type, frame, why);
   return fallback ? validated(shapeFrame(fallback, masks)) : null;
 }
@@ -375,17 +448,93 @@ export function assembleSnapshot(job: JobSnapshot, masks: Masks): JobSnapshot {
   return frame.job;
 }
 
+// ---- the size of a frame ----
+
+/**
+ * The most a frame takes on the socket, in bytes. The server closes the runner's socket over 4 MiB
+ * (its `MAX_FRAME` for this socket counts characters: a byte count is never smaller).
+ */
+export const FRAME_BYTES_MAX = 4 * 1024 * 1024;
+/** What the jobs of a hello may take, with room for the rest; the jobs that do not fit go after the welcome. */
+export const HELLO_JOBS_BYTES = 1024 * 1024;
+const CUT_MARK = "\n[cut by the runner: the frame was over the size limit]";
+const bytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v));
+
+/** The longest string of a value, where it is, without recursion. */
+function longest(
+  value: unknown,
+): { holder: Record<PropertyKey, unknown>; key: PropertyKey; size: number } | null {
+  let best: { holder: Record<PropertyKey, unknown>; key: PropertyKey; size: number } | null = null;
+  const stack: unknown[] = [value];
+  while (stack.length) {
+    const v = stack.pop();
+    if (v === null || typeof v !== "object") continue;
+    for (const [k, item] of Object.entries(v)) {
+      if (typeof item === "string") {
+        const size = item.length;
+        if (!best || size > best.size)
+          best = { holder: v as Record<PropertyKey, unknown>, key: Array.isArray(v) ? Number(k) : k, size };
+      } else if (item !== null && typeof item === "object") stack.push(item);
+    }
+  }
+  return best;
+}
+
+/**
+ * A valid frame over the size limit, made to fit, or `null`: a hello leaves its last jobs out (they go after
+ * the welcome), a result becomes `too_large`, a browser frame is dropped (the next one replaces it), and any
+ * other frame has its longest strings cut, marked, until it fits (a job.done with a huge diff goes with the
+ * diff cut, not lost).
+ */
+function fit(frame: RunnerFrame, masks: Masks): RunnerFrame | null {
+  if (frame.type === "live_view.frame") return null;
+  if (frame.type === "result")
+    return assemble(
+      {
+        type: "result",
+        id: frame.id,
+        ok: false,
+        error: { code: "too_large", message: "The result was over the frame size limit" },
+      },
+      masks,
+    );
+  const out = structuredClone(frame);
+  if (out.type === "hello") while (out.jobs.length && bytes(out) > FRAME_BYTES_MAX) out.jobs.pop();
+  for (let i = 0; i < 64 && bytes(out) > FRAME_BYTES_MAX; i++) {
+    const at = longest(out);
+    if (!at || at.size <= CUT_MARK.length) break;
+    const text = at.holder[at.key as string] as string;
+    at.holder[at.key as string] = text.slice(0, Math.floor(text.length / 2)) + CUT_MARK;
+  }
+  const parsed = runnerFrame.safeParse(out);
+  return parsed.success && bytes(parsed.data) <= FRAME_BYTES_MAX ? parsed.data : null;
+}
+
+/**
+ * The one way a frame becomes what goes on the socket: assembled (masked, cut, valid), serialized, and made
+ * to fit the socket's size limit. `null`: nothing goes.
+ */
+export function serialize(frame: RunnerFrame, masks: Masks): string | null {
+  const out = assemble(frame, masks);
+  if (!out) return null;
+  const json = JSON.stringify(out);
+  if (Buffer.byteLength(json) <= FRAME_BYTES_MAX) return json;
+  const fitted = fit(out, masks);
+  return fitted ? JSON.stringify(fitted) : null;
+}
+
 // ---- flows ----
 
 /**
  * Frames that carry pieces of one text (the text deltas of a harness turn, the output of a command, the lines
  * of a job) go through one stream masker per flow, so a secret split between two frames does not go out in
- * either; `end` gives the tail it held, which goes before the flow's last frame.
+ * either; `end` gives the tail it held, which goes before the flow's last frame. The masks are read again at
+ * each piece (`masks()`): a secret that appears in the middle of a flow masks what comes after it.
  */
 export class Flows {
   private readonly open = new Map<string, StreamMasker>();
 
-  constructor(private readonly masks: Masks) {}
+  constructor(private readonly masks: () => Masks) {}
 
   push(key: string, text: string): string {
     let m = this.open.get(key);

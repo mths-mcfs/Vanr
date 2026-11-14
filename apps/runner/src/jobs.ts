@@ -299,7 +299,7 @@ export class JobOutput {
   private textBuffer = "";
 
   constructor(
-    masks: [string, string][],
+    masks: [string, string][] | (() => [string, string][]),
     private readonly onLine: (line: string, event?: Record<string, unknown>) => void,
     private readonly kind: "json" | "text" = "json",
   ) {
@@ -660,7 +660,7 @@ export class Jobs {
   /** Jobs canceled while they were still preparing. */
   private readonly canceledStarts = new Set<string>();
   /** The secrets of each running job, for what is sent while it runs. */
-  private readonly liveMasks = new Map<string, Masks>();
+  private readonly liveMasks = new Map<string, () => Masks>();
 
   constructor(
     private readonly opts: {
@@ -671,6 +671,8 @@ export class Jobs {
       maxConcurrent: () => number;
       maxSeconds: () => number;
       send: (event: JobEvent) => boolean;
+      /** The masks of an agent the runner knows now (they grow while a job runs: a secret given mid-job). */
+      knownMasks?: (agentId: string) => Masks;
       bins: { claude: string; codex: string };
       sandbox: CommandSandbox;
       policy: PolicyContext;
@@ -722,7 +724,7 @@ export class Jobs {
    * journal as it was sent, masked when it ended.
    */
   private view(t: JournalEntry): JobSnapshot {
-    return assembleSnapshot(this.snapshot(t), this.liveMasks.get(t.jobId) ?? []);
+    return assembleSnapshot(this.snapshot(t), this.liveMasks.get(t.jobId)?.() ?? []);
   }
 
   /** Sends a job frame, assembled (masked, cut, valid) with the job's secrets. */
@@ -842,6 +844,17 @@ export class Jobs {
       dropSnapshot();
       throw err;
     });
+    // The job's secrets and the ones the runner learns while it runs, read again at each line and each frame.
+    let merged: Masks = secrets.masks;
+    let mergedFrom: Masks | null = null;
+    const masksNow = (): Masks => {
+      const known = this.opts.knownMasks?.(agent.id) ?? [];
+      if (known !== mergedFrom) {
+        mergedFrom = known;
+        merged = [...secrets.masks, ...known];
+      }
+      return merged;
+    };
     const startedAt = new Date().toISOString();
     const canceledEarly = this.canceledStarts.has(args.jobId);
     const entry: JournalEntry = {
@@ -936,11 +949,11 @@ export class Jobs {
       if (!parsed.text) return;
       // One line of the job's text: masked whole, then through the flow of the job's lines, so a secret of
       // two lines split between two events goes out in neither.
-      const one = maskSecrets(parsed.text, secrets.masks).replace(/\r?\n/g, " ");
+      const one = maskSecrets(parsed.text, masksNow()).replace(/\r?\n/g, " ");
       flowed += lines.push(`${one}\n`);
       takeLines(false);
     };
-    const lines = new StreamMasker(secrets.masks);
+    const lines = new StreamMasker(masksNow);
     let flowed = "";
     // The lines the flow let go: written to the log, and the newest sent (one every LINE_EVERY_MS).
     const takeLines = (last: boolean) => {
@@ -956,7 +969,7 @@ export class Jobs {
         sentLine = tailLine;
         this.emit(
           { type: "job.event", jobId: args.jobId, kind: "line", line: tailLine, at: at() },
-          secrets.masks,
+          masksNow(),
         );
       }
     };
@@ -967,7 +980,7 @@ export class Jobs {
         fail(err);
       }
     };
-    const output = new JobOutput(secrets.masks, guarded, args.executor === "shell" ? "text" : "json");
+    const output = new JobOutput(masksNow, guarded, args.executor === "shell" ? "text" : "json");
     const take = (chunk: string) => {
       try {
         output.push(chunk);
@@ -991,7 +1004,7 @@ export class Jobs {
     };
     // The job now holds its slot as a running one.
     this.starting.delete(args.jobId);
-    this.liveMasks.set(args.jobId, secrets.masks);
+    this.liveMasks.set(args.jobId, masksNow);
     this.running.set(args.jobId, {
       kill: () => {
         canceled = true;
@@ -1008,7 +1021,7 @@ export class Jobs {
         lastSent = Date.now();
         this.emit(
           { type: "job.event", jobId: args.jobId, kind: "progress", line: tailLine, at: at() },
-          secrets.masks,
+          masksNow(),
         );
       }
     }, PROGRESS_EVERY_MS);
@@ -1045,14 +1058,14 @@ export class Jobs {
         if (usage) entry.usage = { model, ...usage };
         // Files and diff against the start of the job (the server stores them as proof for the assignment).
         if (base) {
-          const changes = gitChanges(cwd, snapStore, base, secretPaths, secrets.masks);
+          const changes = gitChanges(cwd, snapStore, base, secretPaths, masksNow());
           entry.files = changes.files;
           entry.diff = changes.diff;
         }
         if (tailLine !== sentLine)
           this.emit(
             { type: "job.event", jobId: args.jobId, kind: "line", line: tailLine, at: at() },
-            secrets.masks,
+            masksNow(),
           );
       } catch (err) {
         // Whatever failed after the process ended: the job still ends, failed, and its slot is back.
@@ -1063,13 +1076,13 @@ export class Jobs {
         dropSnapshot();
         // The journal keeps the job as it was sent: masked, cut and valid.
         // A field the assembly left out (a usage that failed the schema) goes from the journal too.
-        const sent = assembleSnapshot(this.snapshot(entry), secrets.masks);
+        const sent = assembleSnapshot(this.snapshot(entry), masksNow());
         Object.assign(entry, { ...sent, usage: sent.usage ?? null, diff: sent.diff ?? null });
         // The runner keeps a shorter result than the protocol allows.
         if (entry.result) entry.result = entry.result.slice(0, RESULT_MAX);
         this.liveMasks.delete(args.jobId);
         this.save();
-        this.emit({ type: "job.done", job: this.snapshot(entry) }, secrets.masks);
+        this.emit({ type: "job.done", job: this.snapshot(entry) }, masksNow());
       }
     });
     return { jobId: args.jobId, startedAt, cwd };

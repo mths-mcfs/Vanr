@@ -23,6 +23,7 @@ function run(
   seen?: (jobs: Jobs) => void,
   raw?: string,
   before = "",
+  known?: () => [string, string][],
 ) {
   const home = mkdtempSync(join(dir, "home-"));
   const tools = { claude: true, codex: false, commands: true, browser: false };
@@ -52,6 +53,7 @@ function run(
     cli: { requireSubscription: () => ({}) } as unknown as CliWatch,
     maxConcurrent: () => 1,
     maxSeconds: () => 30,
+    knownMasks: () => known?.() ?? [],
     send: (e) => {
       events.push(e);
       if (e.type === "job.done") finished();
@@ -147,4 +149,28 @@ test("the lines of a job are one flow: a secret of two lines split between two e
   // The last line goes before the job.done.
   const last = events.findLastIndex((e) => e.type === "job.event");
   expect(last).toBeLessThan(events.findIndex((e) => e.type === "job.done"));
+});
+
+test("a secret the runner learns while a job runs masks the job's lines and its end from then on", async () => {
+  let known: [string, string][] = [];
+  let jobs: Jobs | undefined;
+  const say = (text: string) => ({ type: "assistant", message: { content: [{ type: "text", text }] } });
+  const pending = run(
+    [],
+    [say("the token is NEW-SECRET-77"), { type: "result", result: "done NEW-SECRET-77", session_id: "s1" }],
+    (j) => {
+      jobs = j;
+    },
+    undefined,
+    "sleep 0.4\n",
+    () => known,
+  );
+  // The person gives the secret while the job runs (the welcome of a reconnection, a secret.store).
+  await Bun.sleep(150);
+  known = [["NEW-SECRET-77", "[secret:N]"]];
+  const events = await pending;
+  expect(JSON.stringify(events)).not.toContain("NEW-SECRET-77");
+  expect(jobs?.output("job_00000001", 200).lines).toEqual(["the token is [secret:N]"]);
+  const done = events.find((e) => e.type === "job.done");
+  expect(done?.type === "job.done" && done.job.result).toBe("done [secret:N]");
 });

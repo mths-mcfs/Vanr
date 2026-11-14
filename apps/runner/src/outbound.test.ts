@@ -2,8 +2,18 @@ import { expect, test } from "bun:test";
 import { type RunnerFrame, runnerFrame } from "@vanr/engine/runner-protocol";
 import type { z } from "zod";
 import { RunnerClient } from "./client";
-import { assemble, EXEMPT_IDS, framePaths, INVALID, maskDeep, PROTOCOL_KEYS } from "./outbound";
-import { secretTextForms } from "./secrets";
+import {
+  assemble,
+  EXEMPT_IDS,
+  Flows,
+  FRAME_BYTES_MAX,
+  framePaths,
+  INVALID,
+  maskDeep,
+  PROTOCOL_KEYS,
+  serialize,
+} from "./outbound";
+import { maskSecrets, secretTextForms } from "./secrets";
 import { seeded } from "./testing/random";
 
 // The judge of the mask does not use any list: a generator walks the protocol's zod schema of each frame the
@@ -224,7 +234,7 @@ test("every frame type, invalid, becomes its minimal valid form or is dropped, a
     [
       "cli.changed",
       { type: "cli.changed", cli: { codex: { version: "1", login: "maybe", plan: null } } },
-      "minimal",
+      "dropped",
     ],
     ["harness.event", { type: "harness.event", id: "req_1", event: { kind: "other", text: "t" } }, "minimal"],
     ["harness.tool", { type: "harness.tool", id: "req_1", callId: "c1", name: 5, input: 1 }, "minimal"],
@@ -266,22 +276,33 @@ test("every frame type, invalid, becomes its minimal valid form or is dropped, a
     }
   }
   expect([...seen].sort()).toEqual(Object.keys(INVALID).sort());
-  // Access and the sandbox fail closed.
-  const access = assemble(cases[11]?.[1] as RunnerFrame, []);
-  expect(access?.type === "access.changed" && access.access.tools).toEqual({
-    claude: false,
-    codex: false,
-    commands: false,
-    browser: false,
+  // Only the failing part goes: the bad folder leaves the access, the tools stay what they are.
+  const access = assemble(cases.find(([t]) => t === "access.changed")?.[1] as RunnerFrame, []);
+  expect(access?.type === "access.changed" && access.access).toEqual({
+    folders: [],
+    tools: { claude: true, codex: true, commands: true, browser: true },
   });
-});
-
-test("the error text of a minimal frame is masked like any text (a secret equal to a field name)", () => {
-  const out = assemble(
+  // A CLI that fails leaves the cli.changed; the one that is fine still goes.
+  const cli = assemble(
+    {
+      type: "cli.changed",
+      cli: {
+        claude_code: { version: "2", login: "subscription", plan: "max" },
+        codex: { version: "1", login: "maybe" as "none", plan: null },
+      },
+    },
+    [],
+  );
+  expect(cli).toEqual({
+    type: "cli.changed",
+    cli: { claude_code: { version: "2", login: "subscription", plan: "max" } },
+  });
+  // A job.done keeps its status: a usage that fails goes as null.
+  const repaired = assemble(
     {
       type: "job.done",
       job: {
-        jobId: "job_00000001",
+        jobId: "job_1",
         status: "done",
         exitCode: 0,
         result: "ok",
@@ -301,10 +322,44 @@ test("the error text of a minimal frame is masked like any text (a secret equal 
         },
       },
     },
-    [["inputTokens", "[secret:S]"]],
+    [],
   );
-  expect(out?.type === "job.done" && out.job.status).toBe("failed");
-  expect(JSON.stringify(out)).not.toContain("inputTokens");
+  expect(
+    repaired?.type === "job.done" && [repaired.job.status, repaired.job.result, repaired.job.usage],
+  ).toEqual(["done", "ok", null]);
+  // A hello keeps what is right: only the failing field is neutral, a failing job leaves it.
+  const hello = assemble(cases.find(([t]) => t === "hello")?.[1] as RunnerFrame, []);
+  expect(hello?.type === "hello" && [hello.protocol, hello.paused, hello.access.tools.claude]).toEqual([
+    0,
+    false,
+    true,
+  ]);
+});
+
+test("the error text of a minimal frame is masked like any text (a secret equal to a field name)", () => {
+  const out = assemble(
+    {
+      type: "job.done",
+      job: {
+        jobId: "job_00000001",
+        status: "finished",
+        exitCode: 0,
+        result: "ok",
+        files: [],
+        session: null,
+        startedAt: null,
+        endedAt: null,
+        denied: [],
+        blocked: [],
+      },
+    } as unknown as RunnerFrame,
+    [["status", "[secret:S]"]],
+  );
+  // `status` is not repairable: the job goes failed, and the error names the field masked.
+  expect(out?.type === "job.done" && [out.job.status, out.job.result]).toEqual([
+    "failed",
+    "The runner could not send this job.done (job.[secret:S]: invalid_value)",
+  ]);
 });
 
 test("property: an assembled frame is always valid and holds no secret in any of its text forms", () => {
@@ -400,4 +455,117 @@ test("a value nested a hundred thousand times is masked without recursion, cut a
   const out = JSON.stringify(maskDeep(deep, [["abcd-SECRET-0001", "[secret:S]"]]));
   expect(out).toContain("[too deep]");
   expect(out).not.toContain("abcd-SECRET-0001");
+});
+
+test("property: a frame of any size goes within the socket's limit, valid, or (a browser frame, a bad id) not at all", () => {
+  const r = seeded(4242);
+  // Characters that grow when escaped (a control character takes 6 bytes in JSON) and characters of 4 bytes.
+  const fill = ["x", "\u0001", "😀", "é", '"'];
+  const sizes = [10, 300_000, 1_200_000, 5_000_000];
+  let frames = 0;
+  const cut: Record<string, number> = {};
+  for (const schema of frameSchemas()) {
+    const type = typeOf(schema);
+    const positions: Position[] = [];
+    generate(schema, "", () => undefined, positions);
+    for (const p of positions.filter((q) => !q.closed)) {
+      const size = r.pick(sizes, "size");
+      const big = r.pick(fill, "fill").repeat(Math.ceil(size / 2));
+      const frame = generate(schema, "", (path) => (path === p.path ? big : undefined), []) as RunnerFrame;
+      const json = serialize(frame, MASKS);
+      frames++;
+      if (json === null) {
+        // Only a browser frame, or a frame whose id is what failed (nothing to answer to), is dropped.
+        expect([type, p.path, type === "live_view.frame" || `${type}:${p.path}` in EXEMPT_IDS]).toEqual([
+          type,
+          p.path,
+          true,
+        ]);
+        continue;
+      }
+      expect([type, p.path, Buffer.byteLength(json) <= FRAME_BYTES_MAX]).toEqual([type, p.path, true]);
+      expect(runnerFrame.safeParse(JSON.parse(json)).success).toBe(true);
+      if (json.includes("over the size limit")) cut[type] = (cut[type] ?? 0) + 1;
+    }
+  }
+  // The heavy cases, named: a piece of output of control characters, a tool input of 6 MB, a huge result.
+  const chunk = serialize(
+    { type: "output", id: "req_1", stream: "stdout", chunk: "\u0001".repeat(1_100_000) },
+    [],
+  );
+  expect(Buffer.byteLength(chunk ?? "") <= FRAME_BYTES_MAX && chunk?.includes("over the size limit")).toBe(
+    true,
+  );
+  const input = serialize(
+    { type: "harness.tool", id: "req_1", callId: "c1", name: "n", input: { text: "x".repeat(6_000_000) } },
+    [],
+  );
+  expect(Buffer.byteLength(input ?? "") <= FRAME_BYTES_MAX && input?.includes("over the size limit")).toBe(
+    true,
+  );
+  const result = JSON.parse(
+    serialize({ type: "result", id: "req_1", ok: true, data: { content: "x".repeat(6_000_000) } }, []) ??
+      "null",
+  );
+  expect(result).toMatchObject({ type: "result", id: "req_1", ok: false, error: { code: "too_large" } });
+  // A hello with more than its share of heavy jobs leaves the last ones out, whole.
+  const job = (i: number) => ({
+    jobId: `job_${String(i).padStart(8, "0")}`,
+    status: "done" as const,
+    exitCode: 0,
+    result: "ok",
+    files: [],
+    session: null,
+    startedAt: null,
+    endedAt: null,
+    denied: [],
+    blocked: [],
+    diff: "\u0001".repeat(199_000),
+  });
+  const hello = generate(
+    frameSchemas().find((s) => typeOf(s) === "hello") as z.ZodType,
+    "",
+    () => undefined,
+    [],
+  ) as RunnerFrame;
+  const json = serialize({ ...hello, jobs: Array.from({ length: 30 }, (_, i) => job(i)) } as RunnerFrame, []);
+  const sent = JSON.parse(json ?? "null");
+  expect(Buffer.byteLength(json ?? "") <= FRAME_BYTES_MAX).toBe(true);
+  expect(sent.jobs.map((j: { jobId: string }) => j.jobId)).toEqual(
+    Array.from({ length: sent.jobs.length }, (_, i) => job(i).jobId),
+  );
+  expect(sent.jobs.every((j: { diff: string }) => j.diff.length === 199_000)).toBe(true);
+  console.log(
+    `[size] ${frames} frames, sizes ${JSON.stringify(r.spread("size"))}; cut and marked by type ${JSON.stringify(cut)}; hello kept ${sent.jobs.length} of 30 heavy jobs`,
+  );
+}, 120_000);
+
+test("property: a secret that appears at any point of a flow masks everything the flow had not let go yet", () => {
+  const r = seeded(777);
+  const secret = "ABCD-SECRET";
+  const words = ["ABCD-", "SECRET", "AB", "CD-SEC", "RET", "x", " ", "\n", secret];
+  let cases = 0;
+  for (let round = 0; round < 3000; round++) {
+    let list: [string, string][] = [];
+    const flows = new Flows(() => list);
+    const pieces = Array.from({ length: 1 + r.int(12) }, () => r.pick(words, "word"));
+    const at = r.int(pieces.length + 1, "change");
+    let before = "";
+    let after = "";
+    let input = "";
+    pieces.forEach((piece, i) => {
+      if (i === at) list = [[secret, "[secret:S]"]];
+      const out = flows.push("text", piece);
+      input += piece;
+      if (i < at) before += out;
+      else after += out;
+    });
+    if (at >= pieces.length) list = [[secret, "[secret:S]"]];
+    after += flows.end("text");
+    // What went out before the secret existed is the input as it was (the limit); all the rest is masked.
+    expect(input.startsWith(before)).toBe(true);
+    expect(after).toBe(maskSecrets(input.slice(before.length), list));
+    cases++;
+  }
+  console.log(`[rotate] ${cases} flows; the secret appeared at piece ${JSON.stringify(r.spread("change"))}`);
 });
