@@ -35,7 +35,7 @@
     "apps/server/src/signup-place.test.ts": 210,
     "apps/server/test/base.test.ts": 8770,
     "apps/server/test/bases-postgres.test.ts": 600,
-    "apps/server/test/bases.test.ts": 36262,
+    "apps/server/test/bases.test.ts": 141819,
     "apps/server/test/boot.test.ts": 17403,
     "apps/server/test/config.test.ts": 5,
     "apps/server/test/drive-extract.test.ts": 3377,
