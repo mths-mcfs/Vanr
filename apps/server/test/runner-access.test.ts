@@ -10,6 +10,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { log } from "../src/logger";
 import { createWorkspace, joinWorkspace } from "../src/members";
 import { revalidateBrowsers } from "../src/realtime/browser-socket";
+import { MAX_TRANSITIONS } from "../src/runners/hub";
 import { publishIntervention, publishSecret } from "../src/runners/requests";
 import type { RunningServer } from "../src/server";
 import { Browser, body, SERVER_TEST_MS, signedIn, startTestServer, TestSocket } from "./harness";
@@ -1643,233 +1644,391 @@ describe("frames, limits and the hello's waits", () => {
     },
     SERVER_TEST_MS,
   );
+});
+
+/**
+ * Holds one database step the server makes through its deps (select, update, insert, delete), the first one
+ * `match` picks once armed, until `release`; `hit` resolves when it is held. The step itself has already run.
+ */
+function stepHolder(srv: RunningServer) {
+  const db = srv.deps.db;
+  let rule: {
+    match: (prop: string, arg: unknown) => boolean;
+    skip: number;
+    hit: () => void;
+    released: Promise<void>;
+  } | null = null;
+  srv.deps.db = new Proxy(db, {
+    get(target, prop) {
+      const value = Reflect.get(target, prop, target);
+      if (!["select", "update", "insert", "delete"].includes(String(prop)))
+        return typeof value === "function" ? value.bind(target) : value;
+      return (...args: unknown[]) =>
+        wrapQuery(value.apply(target, args), async () => {
+          const r = rule;
+          if (!r?.match(String(prop), args[0])) return;
+          if (r.skip-- > 0) return;
+          rule = null;
+          r.hit();
+          await r.released;
+        });
+    },
+  });
+  return {
+    arm(match: (prop: string, arg: unknown) => boolean, skip = 0) {
+      let hit!: () => void;
+      const reached = new Promise<void>((r) => {
+        hit = r;
+      });
+      let release!: () => void;
+      const released = new Promise<void>((r) => {
+        release = r;
+      });
+      rule = { match, skip, hit, released };
+      return { reached, release };
+    },
+    disarm() {
+      rule = null;
+    },
+    done() {
+      rule = null;
+      srv.deps.db = db;
+    },
+  };
+}
+
+/** Any database step. */
+const anyStep = () => true;
+/** The hello's first step in its turn: the check for a revocation that came after the session. */
+const helloTurn = (prop: string, arg: unknown) =>
+  prop === "select" && typeof arg === "object" && arg !== null && "revokedAt" in arg && "removedAt" in arg;
+/** The close's write of the disconnection. */
+const closeWrite = (prop: string, arg: unknown) => prop === "update" && arg === schema.runners;
+
+/** A hello by hand on a fresh socket; `welcomed` resolves on the welcome, `closed` with the close code. */
+async function rawHello(srv: RunningServer, session: string) {
+  const ws = new WebSocket(`${srv.url.replace(/^http/, "ws")}/api/v1/runners/connect`);
+  const closed = new Promise<number>((r) => ws.addEventListener("close", (ev) => r(ev.code)));
+  const welcomed = new Promise<"welcome">((resolve) =>
+    ws.addEventListener("message", (ev) => {
+      if (JSON.parse(String(ev.data)).type === "welcome") resolve("welcome");
+    }),
+  );
+  await new Promise((r) => ws.addEventListener("open", r, { once: true }));
+  ws.send(
+    JSON.stringify({
+      type: "hello",
+      session,
+      version: "0.2.0",
+      protocol: 2,
+      os: "linux",
+      arch: "x64",
+      hostname: "h",
+      workDir: null,
+      paused: false,
+      access: { folders: [], tools: { browser: false, claude: false, codex: false, commands: true } },
+      browser: false,
+      executors: [],
+      cli: {},
+      jobs: [],
+      features: [],
+    }),
+  );
+  return { ws, closed, welcomed };
+}
+
+describe("a runner's connection transitions", () => {
+  /** The presence events of one runner, in order. */
+  function presenceOf(runnerId: string) {
+    const seen: boolean[] = [];
+    const original = server.deps.hub.toWorkspace.bind(server.deps.hub);
+    server.deps.hub.toWorkspace = (id, event) => {
+      if (event.type === "runner.presence_changed" && event.runnerId === runnerId)
+        seen.push(event.online === true);
+      return original(id, event);
+    };
+    return { seen, restore: () => (server.deps.hub.toWorkspace = original) };
+  }
+  const rowOf = async (runnerId: string) =>
+    (await server.deps.db.select().from(schema.runners).where(eq(schema.runners.id, runnerId)))[0];
+  /** Resolves once the server's close handler for the next closed runner socket has run its first, synchronous part. */
+  const nextCloseHandled = () => {
+    const failSocket = server.deps.runners.failSocket;
+    return new Promise<void>((resolve) => {
+      server.deps.runners.failSocket = (ws) => {
+        server.deps.runners.failSocket = failSocket;
+        failSocket.call(server.deps.runners, ws);
+        resolve();
+      };
+    });
+  };
+  const nextSession = async (paired: { credential: string }) => {
+    const minted = await mintSession(server.url, paired.credential);
+    paired.credential = minted.body.credential;
+    return minted.body.session;
+  };
 
   test(
-    "a runner that closes at any wait of its hello is left neither online nor with a timer",
+    "the close of a runner's only connection writes the disconnection and says so once",
     async () => {
       const t = await team();
       const paired = await pairOverHttp(t, t.ana);
-      const db = server.deps.db;
-      const info = log.info;
+      const runner = await online(paired);
+      const presence = presenceOf(runner.runnerId);
       try {
-        for (let k = 0; ; k++) {
-          const minted = await mintSession(server.url, paired.credential);
-          paired.credential = minted.body.credential;
-          // The k-th database step of the hello holds until the socket is closed and its close handler ran.
-          let steps = 0;
-          let held = false;
-          let release!: () => void;
-          const released = new Promise<void>((r) => {
-            release = r;
-          });
-          let hold!: () => void;
-          const holding = new Promise<void>((r) => {
-            hold = r;
-          });
-          let armed = false;
-          server.deps.db = new Proxy(db, {
-            get(target, prop) {
-              const value = Reflect.get(target, prop, target);
-              if (!["select", "update", "insert", "delete"].includes(String(prop)))
-                return typeof value === "function" ? value.bind(target) : value;
-              return (...args: unknown[]) =>
-                wrapQuery(value.apply(target, args), async () => {
-                  if (!armed || steps++ !== k) return;
-                  held = true;
-                  hold();
-                  await released;
-                });
-            },
-          });
-          let ended!: (how: string) => void;
-          const end = new Promise<string>((r) => {
-            ended = r;
-          });
-          log.info = (msg: string, fields?: Record<string, unknown>) => {
-            if (msg === "runner.connected" || msg === "runner.hello_abandoned") ended(msg);
-            info(msg, fields);
-          };
-          const unregister = server.deps.runners.unregister.bind(server.deps.runners);
-          let closedHandler!: () => void;
-          const handlerRan = new Promise<void>((r) => {
-            closedHandler = r;
-          });
-          let registered: { data: { pingTimer: unknown } } | null = null;
-          const register = server.deps.runners.register.bind(server.deps.runners);
-          server.deps.runners.register = (id, ws) => {
-            registered = ws;
-            return register(id, ws);
-          };
-          server.deps.runners.unregister = (ws) => {
-            const out = unregister(ws);
-            closedHandler();
-            return out;
-          };
-          const ws = new WebSocket(`${server.url.replace(/^http/, "ws")}/api/v1/runners/connect`);
-          const closed = new Promise((r) => ws.addEventListener("close", r));
-          await new Promise((r) => ws.addEventListener("open", r, { once: true }));
-          armed = true;
-          ws.send(
-            JSON.stringify({
-              type: "hello",
-              session: minted.body.session,
-              version: "0.2.0",
-              protocol: 2,
-              os: "linux",
-              arch: "x64",
-              hostname: "h",
-              workDir: null,
-              paused: false,
-              access: { folders: [], tools: { browser: false, claude: false, codex: false, commands: true } },
-              browser: false,
-              executors: [],
-              cli: {},
-              jobs: [],
-              features: [],
-            }),
-          );
-          const first = await Promise.race([holding.then(() => "held"), end]);
-          server.deps.runners.register = register;
-          if (first !== "held") {
-            // No step k: every wait of the hello was covered.
-            expect(k).toBeGreaterThan(3);
-            ws.close();
-            await closed;
-            server.deps.db = db;
-            server.deps.runners.unregister = unregister;
-            break;
-          }
-          ws.close();
-          await closed;
-          await handlerRan;
-          release();
-          expect(await end).toBe("runner.hello_abandoned");
-          expect(held).toBe(true);
-          expect(server.deps.runners.isOnline(paired.runnerId)).toBe(false);
-          expect((registered as { data: { pingTimer: unknown } } | null)?.data.pingTimer ?? null).toBeNull();
-          server.deps.db = db;
-          server.deps.runners.unregister = unregister;
-        }
+        const handled = nextCloseHandled();
+        await runner.close();
+        await handled;
+        await server.deps.runners.settled();
+        expect(presence.seen).toEqual([false]);
+        expect((await rowOf(runner.runnerId))?.disconnectedAt).not.toBeNull();
+        expect(server.deps.runners.isOnline(runner.runnerId)).toBe(false);
       } finally {
-        server.deps.db = db;
-        log.info = info;
+        presence.restore();
       }
     },
     SERVER_TEST_MS,
   );
-});
 
-describe("a replaced connection's close", () => {
   test(
-    "the old socket's close finishing at any wait of the new hello, or after its welcome, leaves the runner online",
+    "a close at any wait of its own hello leaves the runner offline, with no timer and no welcome",
     async () => {
       const t = await team();
       const paired = await pairOverHttp(t, t.ana);
-      const db = server.deps.db;
-      const toWorkspace = server.deps.hub.toWorkspace.bind(server.deps.hub);
+      const hold = stepHolder(server);
+      const presence = presenceOf(paired.runnerId);
       try {
-        // k: the new hello's database step at which the old close is let go; -1: after the new welcome.
+        for (let k = 0; ; k++) {
+          const session = await nextSession(paired);
+          const step = hold.arm(anyStep, k);
+          const hello = await rawHello(server, session);
+          const first = await Promise.race([step.reached.then(() => "held" as const), hello.welcomed]);
+          hold.disarm();
+          if (first === "welcome") {
+            // No step k: every wait of the hello was covered.
+            expect(k).toBeGreaterThan(3);
+            const handled = nextCloseHandled();
+            hello.ws.close();
+            await hello.closed;
+            await handled;
+            await server.deps.runners.settled();
+            break;
+          }
+          let welcomed = false;
+          void hello.welcomed.then(() => (welcomed = true));
+          const handled = nextCloseHandled();
+          hello.ws.close();
+          await hello.closed;
+          await handled;
+          step.release();
+          await server.deps.runners.settled();
+          const said = presence.seen.length;
+          expect({ k, online: server.deps.runners.isOnline(paired.runnerId), welcomed }).toEqual({
+            k,
+            online: false,
+            welcomed: false,
+          });
+          // Online was said only if the disconnection was written and said after it.
+          if (presence.seen.includes(true)) {
+            expect({ k, last: presence.seen.at(-1) }).toEqual({ k, last: false });
+            expect((await rowOf(paired.runnerId))?.disconnectedAt ?? null).not.toBeNull();
+          }
+          presence.seen.splice(0, said);
+        }
+      } finally {
+        presence.restore();
+        hold.done();
+      }
+    },
+    2 * SERVER_TEST_MS,
+  );
+
+  test(
+    "the old connection's close finishing before, during or after a new hello leaves the runner online",
+    async () => {
+      const t = await team();
+      const paired = await pairOverHttp(t, t.ana);
+      const hold = stepHolder(server);
+      try {
+        // The old close holds at its write while the new hello is sent; the hello waits its turn.
+        {
+          const old = await online(paired);
+          const presence = presenceOf(old.runnerId);
+          const step = hold.arm(closeWrite);
+          await old.close();
+          await step.reached;
+          // The new hello asks for its turn; given time, it would get welcomed if nothing kept it behind the close.
+          const transition = server.deps.runners.transition;
+          const asked = new Promise<void>((resolve) => {
+            server.deps.runners.transition = (id, run) => {
+              server.deps.runners.transition = transition;
+              resolve();
+              return transition.call(server.deps.runners, id, run);
+            };
+          });
+          const fresh = connectProtocolRunner(server.url, await nextSession(paired));
+          await asked;
+          await Promise.race([fresh, new Promise((r) => setTimeout(r, 500))]);
+          step.release();
+          const runner = await fresh;
+          open.push(runner);
+          await server.deps.runners.settled();
+          expect(server.deps.runners.isOnline(runner.runnerId)).toBe(true);
+          expect((await rowOf(runner.runnerId))?.disconnectedAt ?? null).toBeNull();
+          expect(presence.seen).toEqual([false, true]);
+          presence.restore();
+          await runner.close();
+          await server.deps.runners.settled();
+        }
+        // The new hello holds at its k-th wait while the old (current) connection closes, then goes on.
         for (let k = 0; ; k++) {
           const old = await online(paired);
-          const presence: boolean[] = [];
-          server.deps.hub.toWorkspace = (id, event) => {
-            if (event.type === "runner.presence_changed" && event.runnerId === old.runnerId)
-              presence.push(event.online === true);
-            return toWorkspace(id, event);
-          };
-          // The old close's write of the disconnection waits until it is let go.
-          let closeHeld!: () => void;
-          const closeHolding = new Promise<void>((r) => {
-            closeHeld = r;
-          });
-          let letClose!: () => void;
-          const closeLetGo = new Promise<void>((r) => {
-            letClose = r;
-          });
-          let closeDone!: () => void;
-          const closeFinished = new Promise<void>((r) => {
-            closeDone = r;
-          });
-          // The new hello's k-th step holds until the old close finished.
-          let helloSteps = 0;
-          let helloArmed = false;
-          let helloReached = false;
-          server.deps.db = new Proxy(db, {
-            get(target, prop) {
-              const value = Reflect.get(target, prop, target);
-              if (!["select", "update", "insert", "delete"].includes(String(prop)))
-                return typeof value === "function" ? value.bind(target) : value;
-              return (...args: unknown[]) => {
-                const query = value.apply(target, args);
-                if (prop === "update" && args[0] === schema.runners) {
-                  const set = query.set.bind(query);
-                  query.set = (values: Record<string, unknown>) => {
-                    const built = set(values);
-                    if (!("disconnectedAt" in values) || values.disconnectedAt === null) return built;
-                    const where = built.where.bind(built);
-                    // The close writes with `.returning()`: that is where it waits to be let go.
-                    built.where = (...w: unknown[]) => {
-                      const q = where(...w);
-                      return Object.assign(Object.create(q), {
-                        returning: (...r: unknown[]) =>
-                          (async () => {
-                            closeHeld();
-                            await closeLetGo;
-                            try {
-                              return await q.returning(...r);
-                            } finally {
-                              closeDone();
-                            }
-                          })(),
-                      });
-                    };
-                    return built;
-                  };
-                  return query;
-                }
-                return wrapQuery(query, async () => {
-                  if (!helloArmed || helloSteps++ !== k) return;
-                  helloReached = true;
-                  letClose();
-                  await closeFinished;
-                });
-              };
-            },
-          });
+          const presence = presenceOf(old.runnerId);
+          const session = await nextSession(paired);
+          const step = hold.arm(anyStep, k);
+          const hello = await rawHello(server, session);
+          const first = await Promise.race([step.reached.then(() => "held" as const), hello.welcomed]);
+          hold.disarm();
           await old.close();
-          await closeHolding;
-          const minted = await mintSession(server.url, paired.credential);
-          paired.credential = minted.body.credential;
-          helloArmed = true;
-          const fresh = await connectProtocolRunner(server.url, minted.body.session);
-          open.push(fresh);
-          helloArmed = false;
-          const afterWelcome = !helloReached;
-          if (afterWelcome) {
-            letClose();
-            await closeFinished;
-          }
-          server.deps.db = db;
-          const [row] = await db.select().from(schema.runners).where(eq(schema.runners.id, fresh.runnerId));
-          expect({
+          if (first === "held") step.release();
+          await hello.welcomed;
+          await server.deps.runners.settled();
+          expect({ k, online: server.deps.runners.isOnline(paired.runnerId) }).toEqual({ k, online: true });
+          expect({ k, gone: (await rowOf(paired.runnerId))?.disconnectedAt ?? null }).toEqual({
             k,
-            online: server.deps.runners.isOnline(fresh.runnerId),
-            gone: row?.disconnectedAt ?? null,
-          }).toEqual({
-            k,
-            online: true,
             gone: null,
           });
-          expect({ k, last: presence.at(-1) }).toEqual({ k, last: true });
-          await fresh.close();
-          if (afterWelcome) {
+          expect({ k, last: presence.seen.at(-1) }).toEqual({ k, last: true });
+          presence.restore();
+          hello.ws.close();
+          await hello.closed;
+          await server.deps.runners.settled();
+          if (first === "welcome") {
             expect(k).toBeGreaterThan(3);
             break;
           }
         }
       } finally {
-        server.deps.db = db;
-        server.deps.hub.toWorkspace = toWorkspace;
+        hold.done();
+      }
+    },
+    2 * SERVER_TEST_MS,
+  );
+
+  test(
+    "three connections in a row: one stays, online, and a runner reconnecting in a loop doesn't pile up",
+    async () => {
+      const t = await team();
+      const paired = await pairOverHttp(t, t.ana);
+      const first = await online(paired);
+      const presence = presenceOf(first.runnerId);
+      const hold = stepHolder(server);
+      try {
+        const [b, c] = await Promise.all([
+          connectProtocolRunner(server.url, await nextSession(paired)),
+          connectProtocolRunner(server.url, await nextSession(paired)),
+        ]);
+        open.push(b, c);
+        await server.deps.runners.settled();
+        expect(server.deps.runners.isOnline(first.runnerId)).toBe(true);
+        expect((await rowOf(first.runnerId))?.disconnectedAt ?? null).toBeNull();
+        expect(presence.seen.at(-1)).toBe(true);
+        expect(presence.seen.includes(false)).toBe(false);
+
+        // With a hello held in its turn, more connections at once than the queue holds are turned away.
+        const sessions: string[] = [];
+        for (let i = 0; i < MAX_TRANSITIONS + 4; i++) sessions.push(await nextSession(paired));
+        const step = hold.arm(helloTurn);
+        const firstHello = await rawHello(server, sessions[0] ?? "");
+        await step.reached;
+        const rest = await Promise.all(sessions.slice(1).map((s) => rawHello(server, s)));
+        // The ones past the queue's room close with 1013 at once, without waiting for the held turn.
+        const codes = await Promise.all(
+          rest.map((h) =>
+            Promise.race([h.closed, new Promise<number>((r) => setTimeout(() => r(-1), 2000))]),
+          ),
+        );
+        expect(codes.filter((code) => code === 1013).length).toBeGreaterThan(0);
+        step.release();
+        await server.deps.runners.settled();
+        expect(server.deps.runners.pendingTransitions()).toBe(0);
+        for (const h of [firstHello, ...rest]) h.ws.close();
+        await Promise.all([firstHello, ...rest].map((h) => h.closed));
+        await server.deps.runners.settled();
+        expect(server.deps.runners.pendingTransitions()).toBe(0);
+      } finally {
+        hold.done();
+        presence.restore();
+      }
+    },
+    2 * SERVER_TEST_MS,
+  );
+
+  test(
+    "stopping the server waits for a runner's transition in its turn",
+    async () => {
+      const local = await startTestServer();
+      let stopped = false;
+      try {
+        const ana = await signedIn(local, "Ana", email("ana"));
+        const { workspaceId } = await createWorkspace(local.deps.db, {
+          name: "Stop",
+          context: "",
+          user: ana.user,
+        });
+        const post = async (path: string, payload: unknown) =>
+          body(
+            await fetch(`${local.url}${path}`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(payload),
+            }),
+          );
+        const start = await post("/api/v1/runner-pairings", {
+          os: "linux",
+          arch: "x64",
+          hostname: "h",
+          version: "0.2.0",
+        });
+        await ana.browser.json(
+          `/api/v1/workspaces/${workspaceId}/runner-pairings/${start.userCode}/confirm`,
+          "POST",
+          {},
+        );
+        const token = await post("/api/v1/runner-pairings/token", { deviceCode: start.deviceCode });
+        const minted = await mintSession(local.url, token.token);
+        const hold = stepHolder(local);
+        const step = hold.arm(helloTurn);
+        const hello = await rawHello(local, minted.body.session);
+        await step.reached;
+        // The stop reaches the wait for the runners' transitions while the hello still holds its turn.
+        const settled = local.deps.runners.settled.bind(local.deps.runners);
+        let waiting!: () => void;
+        const reachedSettle = new Promise<void>((r) => {
+          waiting = r;
+        });
+        local.deps.runners.settled = () => {
+          waiting();
+          return settled();
+        };
+        const order: string[] = [];
+        const stopping = local.stop().then(() => {
+          order.push("stopped");
+          stopped = true;
+        });
+        const first = await Promise.race([
+          reachedSettle.then(() => "waits" as const),
+          stopping.then(() => "stopped" as const),
+        ]);
+        expect(first).toBe("waits");
+        order.push("released");
+        step.release();
+        await stopping;
+        expect(order).toEqual(["released", "stopped"]);
+        await hello.closed;
+        hold.done();
+      } finally {
+        if (!stopped) await local.stop();
       }
     },
     2 * SERVER_TEST_MS,

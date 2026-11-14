@@ -143,6 +143,9 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     new Response("starting", { status: 503 });
 
   const runnersHub = new RunnerHub();
+  // After the listener's stop in the undo (its close handlers queue the runners' last transitions) and before
+  // the database closes: those transitions run to the end.
+  undo.push(() => runnersHub.settled());
   // The wiki editor (Milkdown without a browser) comes up before accepting connections.
   await wikiMarkdown();
   // The sockets answer only once the deps exist; until then an upgrade gets the 503 of `handler`.

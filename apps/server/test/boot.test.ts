@@ -271,7 +271,6 @@ describe("stop", () => {
               helloTimer: null,
               pingTimer: null,
               closed: false,
-              onlineAt: null,
             },
           })
             ? undefined

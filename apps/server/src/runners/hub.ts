@@ -24,12 +24,10 @@ export interface RunnerSocketData {
   pingTimer: ReturnType<typeof setInterval> | null;
   /** The close handler ran: an `hello` still awaiting must not register it nor arm a timer. */
   closed: boolean;
-  /**
-   * The `lastOnlineAt` this connection's hello wrote: the row still carries it only while this is the runner's
-   * current connection, so the close writes the disconnection (and says the runner left) only then.
-   */
-  onlineAt: Date | null;
 }
+
+/** Connection transitions a runner may have waiting at once; a runner reconnecting in a loop past it is turned away (close 1013). */
+export const MAX_TRANSITIONS = 8;
 
 export type RunnerSocket = ServerWebSocket<RunnerSocketData>;
 
@@ -75,6 +73,49 @@ export class RunnerHub {
   private readonly waiting = new Map<string, (() => void)[]>();
   /** Connections the server cut (revoked, removed, re-paired): nothing they send counts any more. */
   private readonly cut = new WeakSet<RunnerSocket>();
+  /** Each runner's connection transitions, one at a time: the tail of the chain and how many wait on it. */
+  private readonly transitions = new Map<string, { tail: Promise<void>; size: number }>();
+
+  /**
+   * Runs `step` after the runner's earlier connection transitions (a hello that registers, a close that
+   * unregisters, each with its writes and presence events), so a close never runs in the middle of a hello.
+   * Per runner: the others don't wait. False when the runner already has MAX_TRANSITIONS waiting (the step
+   * doesn't run); the entry goes away once nothing is waiting.
+   */
+  transition(runnerId: string, step: () => Promise<void>): Promise<boolean> {
+    const queue = this.transitions.get(runnerId) ?? { tail: Promise.resolve(), size: 0 };
+    if (queue.size >= MAX_TRANSITIONS) return Promise.resolve(false);
+    queue.size += 1;
+    const run = queue.tail
+      .then(step)
+      .catch((err: unknown) => log.error("runner.transition_failed", { err, runnerId }));
+    queue.tail = run.finally(() => {
+      queue.size -= 1;
+      if (queue.size === 0 && this.transitions.get(runnerId) === queue) this.transitions.delete(runnerId);
+    });
+    this.transitions.set(runnerId, queue);
+    return queue.tail.then(() => true);
+  }
+
+  /** The runners with a transition waiting (tests). */
+  pendingTransitions(): number {
+    return this.transitions.size;
+  }
+
+  /** Resolves when every runner's transitions ran (the server's stop waits for it). */
+  async settled(): Promise<void> {
+    while (this.transitions.size) await Promise.all([...this.transitions.values()].map((q) => q.tail));
+  }
+
+  /** The socket closed: what it had pending fails now, before its turn to unregister comes. */
+  failSocket(ws: RunnerSocket) {
+    for (const [id, p] of this.pending) {
+      if (p.socket !== ws) continue;
+      this.pending.delete(id);
+      clearTimeout(p.timer);
+      p.reject(new RunnerCallError("offline", "The runner went offline"));
+    }
+  }
 
   isOnline(runnerId: string): boolean {
     return this.sockets.has(runnerId);
