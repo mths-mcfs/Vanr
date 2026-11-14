@@ -4,10 +4,11 @@
     "apps/runner/src/access.test.ts": 6,
     "apps/runner/src/browser-actions.test.ts": 30816,
     "apps/runner/src/browser-network.test.ts": 13770,
+    "apps/runner/src/cdp-unwind.test.ts": 200,
     "apps/runner/src/cdp.test.ts": 4255,
     "apps/runner/src/cli.test.ts": 2,
     "apps/runner/src/client-send.test.ts": 500,
-    "apps/runner/src/effects.test.ts": 500,
+    "apps/runner/src/effects.test.ts": 1000,
     "apps/runner/src/frame-gate.test.ts": 1,
     "apps/runner/src/harness.test.ts": 840,
     "apps/runner/src/jobs-diff.test.ts": 6700,
@@ -114,6 +115,7 @@
     "packages/engine/src/work-state.test.ts": 2,
     "scripts/ci/gate.test.ts": 14,
     "scripts/typecheck.test.ts": 4,
-    "apps/server/test/storage-bucket.test.ts": 19513
+    "apps/server/test/storage-bucket.test.ts": 9919,
+    "apps/server/test/drive-slow-client.test.ts": 12940
   }
 }

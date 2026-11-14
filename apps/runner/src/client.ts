@@ -169,7 +169,7 @@ export class RunnerClient {
       this.exit = r;
     });
     this.access = new Access(() => this.config);
-    this.secrets = new SecretStore(opts.home);
+    this.secrets = new SecretStore(opts.home, (line) => this.log(line));
     this.policy = defaultPolicyContext(opts.home);
     // Until the sandbox opens, nothing runs: the off one rejects `wrap` and the `unavailable` state does too.
     this.sandbox = {

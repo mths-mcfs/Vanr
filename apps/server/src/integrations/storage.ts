@@ -13,6 +13,7 @@ import { type Db, schema } from "@vanr/engine/db";
 import { randomId } from "@vanr/engine/ids";
 import { createSealer, keyPreview, type Sealer } from "@vanr/engine/seal";
 import { eq, sql } from "drizzle-orm";
+import { z } from "zod";
 import type { AppDeps } from "../context";
 import { HttpError, notFound } from "../http";
 import { log } from "../logger";
@@ -96,8 +97,17 @@ export async function testStorage(
   input: S3Input,
 ): Promise<StorageTestResult> {
   const { cfg, keys } = await resolveInput(deps, workspaceId, input);
-  return testS3(settingsOf(cfg, keys), randomId(10));
+  return probe(deps, cfg, keys);
 }
+
+const envOf = (deps: AppDeps): BucketEnv => ({
+  track: (work, what) => deps.runtime.track(work, what),
+  now: deps.now,
+});
+
+/** The connection test, through the same bucket wrapper as every call (the probe's write has the short deadline). */
+const probe = (deps: AppDeps, cfg: S3ConfigRow, keys: S3Keys) =>
+  testS3(settingsOf(cfg, keys), randomId(10), remoteStore(cfg, keys, envOf(deps), "call"));
 
 /** Saves: S3 only after it passes the test. Going back to "builtin" keeps the S3 (the files stay there). */
 export async function saveStorage(
@@ -120,7 +130,7 @@ export async function saveStorage(
   // Before the bucket test (no network for a change that can't be accepted anyway); the check that counts
   // is the one in the transaction below.
   await deps.db.transaction((tx) => assertDestinationFree(tx, deps.localBlobs, workspaceId, cfg));
-  const test = await testS3(settingsOf(cfg, keys), randomId(10));
+  const test = await probe(deps, cfg, keys);
   if (!test.ok)
     throw new HttpError(400, "storage.bucket_check_failed", "The bucket did not pass the test", {
       steps: test.steps,
@@ -202,9 +212,15 @@ async function filesOnlyInBucket(tx: Db, local: BlobStore, workspaceId: string):
 
 /** The bucket failed (down, rejected the call, timed out): not the same as a file that doesn't exist. */
 export class StorageUnavailable extends HttpError {
-  constructor(message = "The file storage is unavailable right now; try again in a moment") {
+  /** What the bucket answered (logged and shown by the connection test; never sent to a download). */
+  readonly reason: unknown;
+  constructor(
+    message = "The file storage is unavailable right now; try again in a moment",
+    reason?: unknown,
+  ) {
     super(503, "storage.unavailable", message);
     this.name = "StorageUnavailable";
+    this.reason = reason;
   }
 }
 
@@ -230,15 +246,17 @@ function classify(what: string, key: string, err: unknown): HttpError {
   const code = typeof err === "object" && err !== null && "code" in err ? err.code : undefined;
   if (code === "NoSuchKey") return notFound("This version has no file");
   log.warn("storage.bucket_failed", { err, what, key });
-  return new StorageUnavailable();
+  return new StorageUnavailable(undefined, err);
 }
 
 /**
  * How long a bucket call may take before it counts as unavailable. `call` covers the short ones (HEAD, a
  * whole read of a small object, delete, list); `write` a whole upload; `piece` the wait for each next piece
- * of a streamed body. Tests shorten them.
+ * of a streamed body. `late` is how long a write that missed its deadline is still waited for, so its
+ * object can be deleted when it lands (beyond that it is logged as abandoned: the stop doesn't wait forever
+ * for a bucket that never answers). Tests shorten them.
  */
-export const bucketDeadlines = { callMs: 30_000, writeMs: 15 * 60_000, pieceMs: 60_000 };
+export const bucketDeadlines = { callMs: 30_000, writeMs: 15 * 60_000, pieceMs: 60_000, lateMs: 60_000 };
 
 class BucketDeadline extends Error {
   constructor(what: string, ms: number) {
@@ -246,13 +264,50 @@ class BucketDeadline extends Error {
   }
 }
 
-/** Rejects past `ms` (the client's own request can't be cancelled, so it is left to end by itself). */
-function within<T>(what: string, ms: number, work: Promise<T>): Promise<T> {
+/**
+ * Where the server's bucket calls run: `track` keeps late work as background work (the server's stop waits
+ * for it, so nothing runs after the database closes) and `now` is the injected clock.
+ */
+export interface BucketEnv {
+  track: (work: Promise<unknown>, what: string) => void;
+  now: () => Date;
+}
+
+/**
+ * Rejects past `ms`. The client's own request can't be cancelled, so it goes on: whoever gave up waiting still
+ * owns it, and `undo` (when given) runs once it ends successfully, as background work.
+ */
+function within<T>(
+  what: string,
+  ms: number,
+  work: Promise<T>,
+  late?: { env: BucketEnv; undo: () => Promise<unknown> },
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const late = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new BucketDeadline(what, ms)), ms);
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new BucketDeadline(what, ms));
+      if (late) {
+        const giveUp = bucketDeadlines.lateMs;
+        let abandon: ReturnType<typeof setTimeout> | undefined;
+        const abandoned = new Promise<void>((resolve) => {
+          abandon = setTimeout(() => {
+            log.warn("storage.late_write_abandoned", { what, waitedMs: giveUp });
+            resolve();
+          }, giveUp);
+        });
+        const undone = work.then(
+          () => late.undo(),
+          () => undefined,
+        );
+        late.env.track(
+          Promise.race([undone, abandoned]).finally(() => clearTimeout(abandon)),
+          `storage.undo_late_${what}`,
+        );
+      }
+    }, ms);
   });
-  return Promise.race([work, late]).finally(() => clearTimeout(timer));
+  return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
 }
 
 async function bucket<T>(
@@ -260,9 +315,10 @@ async function bucket<T>(
   key: string,
   call: () => Promise<T>,
   ms = bucketDeadlines.callMs,
+  late?: { env: BucketEnv; undo: () => Promise<unknown> },
 ): Promise<T> {
   try {
-    return await within(what, ms, call());
+    return await within(what, ms, call(), late);
   } catch (err) {
     throw classify(what, key, err);
   }
@@ -305,23 +361,77 @@ interface RemoteStore extends BlobStore {
   destination: S3ConfigRow;
 }
 
-function remoteStore(cfg: S3ConfigRow, keys: S3Keys): RemoteStore {
-  const settings = settingsOf(cfg, keys);
-  const inner = s3Blobs(settings);
-  /**
-   * The object is missing (its HEAD answered 404): a 404 without a body can't tell a missing object from a
-   * missing bucket, so the bucket is asked directly (a listing of at most one key, the cheapest bucket-level
-   * call the client has). A bucket that is gone or rejects the call makes the read unavailable, not "no file".
-   */
-  const missing = async (key: string) => {
-    await bucket("check the bucket", key, () =>
+/** How long a bucket check's answer is kept, per destination, by the injected clock. */
+export const BUCKET_CHECK_MS = 30_000;
+const bucketChecks = new Map<string, { present: boolean; at: number }>();
+/** The part of an S3 error the check reads (the client's error carries the bucket's code). */
+const s3ErrorCode = z.object({ code: z.string() });
+
+/**
+ * Does the bucket exist for these keys? Asked with a listing of at most one key, the cheapest bucket-level
+ * call the client has, and classified by the answer: a listing accepted, or AccessDenied (the bucket
+ * answered and recognized the keys, they just can't list), is a bucket that is there; NoSuchBucket, keys it
+ * doesn't recognize (InvalidAccessKeyId, SignatureDoesNotMatch...), 5xx, the network or the deadline are a
+ * bucket that can't be reached.
+ */
+async function bucketIsThere(settings: S3Settings, key: string): Promise<boolean> {
+  try {
+    await within(
+      "check the bucket",
+      bucketDeadlines.callMs,
       client(settings).list({ maxKeys: 1, prefix: settings.prefix }),
     );
+    return true;
+  } catch (err) {
+    const answer = s3ErrorCode.safeParse(err);
+    if (answer.success && answer.data.code === "AccessDenied") return true;
+    log.warn("storage.bucket_check_failed", { err, key });
+    return false;
+  }
+}
+
+function remoteStore(
+  cfg: S3ConfigRow,
+  keys: S3Keys,
+  env: BucketEnv,
+  /** Which deadline a write gets, read at each call (tests change the deadlines at run time). */
+  writeDeadline: "write" | "call" = "write",
+): RemoteStore {
+  const settings = settingsOf(cfg, keys);
+  const inner = s3Blobs(settings);
+  const destination = `${cfg.endpoint}|${cfg.bucket}|${settings.prefix}`;
+  /**
+   * The object is missing (its HEAD answered 404): a 404 without a body can't tell a missing object from a
+   * missing bucket, so the bucket is checked; its answer is kept for BUCKET_CHECK_MS (a thousand missing
+   * files don't make a thousand listings, and a bucket that comes back is seen within that time).
+   */
+  const missing = async (key: string) => {
+    const now = env.now().getTime();
+    const kept = bucketChecks.get(destination);
+    const fresh = kept && now >= kept.at && now - kept.at < BUCKET_CHECK_MS;
+    const present = fresh ? kept.present : await bucketIsThere(settings, key);
+    if (!fresh) bucketChecks.set(destination, { present, at: now });
+    if (!present) throw new StorageUnavailable();
     return null;
   };
+  // A write that ends after its deadline was given up: its object is deleted once it lands.
+  const undoWrite = (key: string) => ({
+    env,
+    undo: () =>
+      within("delete", bucketDeadlines.callMs, inner.delete(key)).catch((err: unknown) =>
+        log.warn("storage.undo_late_write_failed", { err, key }),
+      ),
+  });
   return {
     destination: cfg,
-    put: (key, data, type) => bucket("write", key, () => inner.put(key, data, type), bucketDeadlines.writeMs),
+    put: (key, data, type) =>
+      bucket(
+        "write",
+        key,
+        () => inner.put(key, data, type),
+        writeDeadline === "write" ? bucketDeadlines.writeMs : bucketDeadlines.callMs,
+        undoWrite(key),
+      ),
     async get(key) {
       return (await bucket("read", key, () => inner.get(key))) ?? missing(key);
     },
@@ -373,14 +483,14 @@ interface Route {
 }
 const storageCache = new Map<string, Route>();
 
-async function routeOf(db: Db, authSecret: string, workspaceId: string): Promise<Route> {
+async function routeOf(db: Db, authSecret: string, env: BucketEnv, workspaceId: string): Promise<Route> {
   const hit = storageCache.get(workspaceId);
   if (hit && Date.now() - hit.at < CACHE_MS) return hit;
   const row = await storageRow(db, workspaceId);
   let s3: RemoteStore | null = null;
   if (row?.s3 && row.secret) {
     const keys = JSON.parse(storageSealer(authSecret).open(row.secret)) as S3Keys;
-    s3 = remoteStore(row.s3, keys);
+    s3 = remoteStore(row.s3, keys, env);
   }
   const route = { primary: row?.kind === "s3" ? s3 : null, s3, at: Date.now() };
   storageCache.set(workspaceId, route);
@@ -391,12 +501,15 @@ async function routeOf(db: Db, authSecret: string, workspaceId: string): Promise
  * A BlobStore that follows each workspace's storage. A read tries the current place and then the other one
  * (a file from before the switch or from a migration in progress); a delete deletes in both.
  */
-export function routedBlobs(base: BlobStore, ctx: () => { db: Db; authSecret: string }): BlobStore {
+export function routedBlobs(
+  base: BlobStore,
+  ctx: () => { db: Db; authSecret: string } & BucketEnv,
+): BlobStore {
   const route = async (key: string) => {
     const workspaceId = WORKSPACE_KEY.exec(key)?.[1];
     if (!workspaceId) return null;
-    const { db, authSecret } = ctx();
-    return routeOf(db, authSecret, workspaceId);
+    const { db, authSecret, track, now } = ctx();
+    return routeOf(db, authSecret, { track, now }, workspaceId);
   };
   /**
    * Reads where the file should be and then in the other place. A bucket that fails doesn't stop the read
@@ -458,6 +571,7 @@ export async function startMigration(
   const target = remoteStore(
     row.s3,
     JSON.parse(storageSealer(deps.config.authSecret).open(row.secret)) as S3Keys,
+    envOf(deps),
   );
   const state: StorageMigrationRow = { status: "running", copied: 0, total: keys.length, error: null };
   const save = (m: StorageMigrationRow) =>
