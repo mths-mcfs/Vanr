@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -19,7 +20,7 @@ import { Access, RunnerError } from "./access";
 import { Jobs } from "./jobs";
 import { execOp, writeOp } from "./ops";
 import { defaultPolicyContext, sandboxOff } from "./sandbox";
-import { SecretStore } from "./secrets";
+import { type FileId, SecretStore, sameId } from "./secrets";
 import { seeded } from "./testing/random";
 
 // What an operation leaves behind: a write keeps the file it writes into (mode, link), the secrets a command
@@ -393,7 +394,7 @@ test("release: a file that cannot be removed now does not keep the others, is lo
   expect([
     existsSync(join(root, "t-ro", "conf")),
     existsSync(join(root, "t-after")),
-    logs.some((l) => l.includes("trying again")),
+    logs.some((l) => l.includes("tries again")),
   ]).toEqual([true, false, true]);
   chmodSync(join(root, "t-ro"), 0o700);
   // The next release (of any op) tries it again.
@@ -674,4 +675,179 @@ test("exec and job.start with a secret path taken by the person run nothing", as
     [false, 0, "the person's own"],
   );
   rmSync(join(root, "taken.json"));
+});
+
+// ---- round 11: short writes, failed checks, the root by its real path, masked logs ----
+
+/** Runs `code` (importing the store) in a child under `ulimit -f 1` (1 KiB files), with a deadline. */
+function underFileLimit(code: string): string {
+  const work = mkdtempSync(join(dir, "limit-"));
+  const script = join(work, "run.ts");
+  writeFileSync(
+    script,
+    `import { SecretStore } from ${JSON.stringify(join(import.meta.dir, "secrets.ts"))};
+import { writeOp } from ${JSON.stringify(join(import.meta.dir, "ops.ts"))};
+import { Access } from ${JSON.stringify(join(import.meta.dir, "access.ts"))};
+import { existsSync, statSync } from "node:fs";
+const work = ${JSON.stringify(work)};
+${code}`,
+  );
+  const child = Bun.spawnSync(["bash", "-c", `ulimit -f 1; exec "${process.execPath}" "${script}"`], {
+    timeout: 10_000,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  return child.stdout.toString().trim();
+}
+
+test("a secret file that cannot be written whole fails before anything runs and leaves no partial file", () => {
+  const out = underFileLimit(`const s = new SecretStore(work + "/home");
+await s.unlock(Buffer.alloc(32, 3).toString("base64"), "rnr_1");
+Reflect.set(s, "values", async () => [{ name: "BIG", target: "file:big.pem", value: "x".repeat(4096), browser: null }]);
+const out = await s.materialize({ id: "agt_0000000012345678", handle: "lia" }, work).then(() => "went", (e) => e.code + "|" + e.message);
+console.log(JSON.stringify({ out, left: existsSync(work + "/big.pem") }));`);
+  const parsed = JSON.parse(out);
+  expect(parsed.left).toBe(false);
+  expect(parsed.out).toContain("internal|");
+  expect(parsed.out).toContain("big.pem");
+});
+
+test("a write of the file ops that is cut by a limit is an error, never a success", () => {
+  const out =
+    underFileLimit(`const access = new Access(() => ({ access: { folders: [], tools: { claude: false, codex: false, commands: true, browser: false } }, workDir: work + "/ws", paused: false }));
+const ctx = { access, agent: null, signal: new AbortController().signal, secrets: { secretFiles: () => [] } };
+let out = "went";
+try { writeOp(ctx, { path: "big.txt", content: "y".repeat(4096), encoding: "utf8", append: false }); } catch (e) { out = e.code + "|" + e.message; }
+console.log(out);`);
+  expect(out).toContain("internal|");
+  expect(out).toContain("could not be written whole");
+});
+
+test("release: a check that fails (no access) keeps the file for a new try, logged once; the next release removes it", async () => {
+  const values = new Map([[agent.id, [{ name: "A", target: "file:t-noaccess/conf", value: "secret one" }]]]);
+  const logs: string[] = [];
+  const store = new SecretStore(mkdtempSync(join(dir, "home-")), (l) => logs.push(l));
+  await store.unlock(Buffer.alloc(32, 3).toString("base64"), "rnr_1");
+  Reflect.set(store, "values", async (a: { id: string }) =>
+    (values.get(a.id) ?? []).map((v) => ({ ...v, browser: null })),
+  );
+  const m = await store.materialize(agent, root);
+  chmodSync(join(root, "t-noaccess"), 0);
+  m.release();
+  (await store.materialize(bob, root)).release();
+  chmodSync(join(root, "t-noaccess"), 0o700);
+  expect([
+    existsSync(join(root, "t-noaccess", "conf")),
+    logs.filter((l) => l.includes("t-noaccess")).length,
+  ]).toEqual([true, 1]);
+  (await store.materialize(bob, root)).release();
+  expect(existsSync(join(root, "t-noaccess", "conf"))).toBe(false);
+  rmSync(join(root, "t-noaccess"), { recursive: true });
+});
+
+test("release: past the cap of files waiting for a new try, a new one stays and is logged once", async () => {
+  const values = new Map([[agent.id, [{ name: "A", target: "file:t-cap/conf", value: "secret one" }]]]);
+  const logs: string[] = [];
+  const store = new SecretStore(mkdtempSync(join(dir, "home-")), (l) => logs.push(l));
+  await store.unlock(Buffer.alloc(32, 3).toString("base64"), "rnr_1");
+  Reflect.set(store, "values", async (a: { id: string }) =>
+    (values.get(a.id) ?? []).map((v) => ({ ...v, browser: null })),
+  );
+  // 1000 files already waiting, under a folder the runner cannot look into now: they stay in the list.
+  mkdirSync(join(root, "t-cap-locked"));
+  const waiting = Reflect.get(store, "toRemove") as Map<string, unknown>;
+  for (let i = 0; i < 1000; i++)
+    waiting.set(join(root, "t-cap-locked", `f-${i}`), {
+      id: { dev: 0n, ino: 0n, birth: 0n },
+      name: "X",
+      rel: "x",
+      masks: [],
+    });
+  chmodSync(join(root, "t-cap-locked"), 0);
+  const m = await store.materialize(agent, root);
+  chmodSync(join(root, "t-cap"), 0);
+  try {
+    m.release();
+  } finally {
+    chmodSync(join(root, "t-cap"), 0o700);
+    chmodSync(join(root, "t-cap-locked"), 0o700);
+  }
+  expect([waiting.size, logs.filter((l) => l.includes("already wait: it stays")).length]).toEqual([1000, 1]);
+  expect(existsSync(join(root, "t-cap", "conf"))).toBe(true);
+  rmSync(join(root, "t-cap"), { recursive: true });
+  rmSync(join(root, "t-cap-locked"), { recursive: true });
+});
+
+test("the root by its real path: a work folder that is a link works (the file goes in its target); a broken or missing one fails", async () => {
+  const target = mkdtempSync(join(dir, "real-root-"));
+  const linked = join(dir, `linked-root-${Date.now()}`);
+  symlinkSync(target, linked);
+  const values = new Map([[agent.id, [{ name: "CONF", target: "file:conf", value: "secret conf" }]]]);
+  const store = await storeOf(mkdtempSync(join(dir, "home-")), values);
+  const m = await store.materialize(agent, linked);
+  expect(readFileSync(join(target, "conf"), "utf8")).toBe("secret conf");
+  m.release();
+  expect(existsSync(join(target, "conf"))).toBe(false);
+  const broken = join(dir, `broken-root-${Date.now()}`);
+  symlinkSync(join(dir, "nowhere"), broken);
+  expect((await codeOf(store.materialize(agent, broken))).startsWith("not_found")).toBe(true);
+  expect((await codeOf(store.materialize(agent, join(dir, "missing-root")))).startsWith("not_found")).toBe(
+    true,
+  );
+  // The ops' root is the same real path.
+  const access2 = new Access(() => ({ access: { folders: [], tools }, workDir: linked, paused: false }));
+  expect(access2.agentRoot(null)).toBe(realpathSync(target));
+});
+
+test("the log of a release names the secret and the path in the work folder, masked, never the absolute path", async () => {
+  const values = new Map([
+    [agent.id, [{ name: "TOKEN", target: "file:SECRET-IN-PATH/conf", value: "SECRET-IN-PATH" }]],
+  ]);
+  const logs: string[] = [];
+  const store = new SecretStore(mkdtempSync(join(dir, "home-")), (l) => logs.push(l));
+  await store.unlock(Buffer.alloc(32, 3).toString("base64"), "rnr_1");
+  Reflect.set(store, "values", async (a: { id: string }) =>
+    (values.get(a.id) ?? []).map((v) => ({ ...v, browser: null })),
+  );
+  const m = await store.materialize(agent, root);
+  rmSync(join(root, "SECRET-IN-PATH", "conf"));
+  mkdirSync(join(root, "SECRET-IN-PATH", "conf"));
+  m.release();
+  expect(logs.length).toBe(1);
+  expect([logs[0]?.includes("SECRET-IN-PATH"), logs[0]?.includes(root), logs[0]?.includes("TOKEN")]).toEqual([
+    false,
+    false,
+    true,
+  ]);
+  rmSync(join(root, "SECRET-IN-PATH"), { recursive: true });
+});
+
+test("what is at the path is read without following a link, and a file longer than the value is other content", async () => {
+  // A link to a file that holds exactly the value: still a link, not adopted.
+  writeFileSync(join(root, "t-same.txt"), "secret conf");
+  symlinkSync(join(root, "t-same.txt"), join(root, "t-linkv"));
+  // A file that starts with the value and goes on: not the value.
+  writeFileSync(join(root, "t-longer"), "secret confAND MORE");
+  for (const rel of ["t-linkv", "t-longer"]) {
+    const values = new Map([[agent.id, [{ name: "CONF", target: `file:${rel}`, value: "secret conf" }]]]);
+    const why = await codeOf(
+      (await storeOf(mkdtempSync(join(dir, "home-")), values)).materialize(agent, root),
+    );
+    expect([rel, why.startsWith("not_allowed")]).toEqual([rel, true]);
+  }
+  expect([kind(join(root, "t-linkv")), readFileSync(join(root, "t-longer"), "utf8")]).toEqual([
+    "link",
+    "secret confAND MORE",
+  ]);
+  for (const f of ["t-same.txt", "t-linkv", "t-longer"]) rmSync(join(root, f));
+});
+
+test("the identity is device, inode and birth: each one alone tells two files apart", () => {
+  const a: FileId = { dev: 1n, ino: 2n, birth: 3n };
+  expect([
+    sameId(a, { ...a }),
+    sameId(a, { ...a, dev: 9n }),
+    sameId(a, { ...a, ino: 9n }),
+    sameId(a, { ...a, birth: 9n }),
+  ]).toEqual([true, false, false, false]);
 });
