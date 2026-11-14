@@ -56,7 +56,7 @@ async function storedState(workspaceId: string, slug: string) {
   const doc = new Y.Doc();
   Y.applyUpdate(doc, bytes);
   const md = await wikiMarkdown();
-  return { bytes, doc, text: md.serialize(md.fromYDoc(doc)), pageId: page.id };
+  return { ...d, bytes, doc, text: md.serialize(md.fromYDoc(doc)) };
 }
 
 async function writeState(pageId: string, doc: Y.Doc) {
@@ -100,6 +100,111 @@ async function withLimit<K extends keyof typeof LIVE_LIMITS>(key: K, value: numb
 }
 
 describe("the live document's limits", () => {
+  test("an update with 5001 links is rejected before acknowledgement and preserves the other editor's draft", async () => {
+    const { workspaceId, ana, beto } = await team();
+    const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Live links", body: BODY });
+    const name = docName(workspaceId, page.slug);
+    const a = connect(server, ana.browser, workspaceId, name);
+    const b = connect(server, beto.browser, workspaceId, name);
+    try {
+      await Promise.all([a.synced, b.synced]);
+      const prior = BODY.replace("One.", "One, in the draft.");
+      await a.edit(() => prior);
+      await until(() => !a.provider.hasUnsyncedChanges && !b.provider.hasUnsyncedChanges);
+      await until(async () => (await storedState(workspaceId, page.slug))?.text === prior);
+      const acks = a.syncStatus.length;
+      await a.edit(() => Array.from({ length: 5001 }, (_, i) => `[[Target ${i}]]`).join(" "));
+      await until(() => a.syncStatus.length > acks || a.closeCodes.length > 0);
+      expect(a.syncStatus.slice(acks)).toEqual([false]);
+      await until(() => a.closeCodes.length > 0);
+      expect(a.closeCodes[0]).toBe(4413);
+      await server.deps.wikiLive.settled();
+      expect(await b.md()).toBe(prior);
+      expect((await storedState(workspaceId, page.slug))?.text).toBe(prior);
+
+      await b.edit((md) => md.replace("Two.", "Two, after rejection."));
+      const after = prior.replace("Two.", "Two, after rejection.");
+      await until(() => !b.provider.hasUnsyncedChanges);
+      await until(async () => (await storedState(workspaceId, page.slug))?.text === after);
+      expect((await ana.api.wiki.publishWikiPageDraft(workspaceId, page.slug)).body).toBe(after);
+      expect(b.closeCodes).toEqual([]);
+    } finally {
+      a.close();
+      b.close();
+      await unloaded(server);
+    }
+  });
+
+  for (const legacy of ["foreign content", "oversized history"] as const) {
+    for (const action of ["publish", "discard"] as const) {
+      test(`HTTP ${action} normalizes a saved draft with ${legacy} without a WebSocket session`, async () => {
+        const { workspaceId, ana } = await team();
+        const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Offline draft", body: BODY });
+        await server.deps.wikiLive.settled();
+        expect(server.deps.wikiLive.loaded()).toBe(0);
+        const row = await pageBySlug(server.deps.db, { workspaceId, system: true }, page.slug);
+        const md = await wikiMarkdown();
+        let draftBody = "Draft.\n";
+        const doc = md.toYDoc(draftBody);
+        try {
+          if (legacy === "foreign content") doc.getText("junk").insert(0, "legacy data");
+          else {
+            // Each client adds one letter, leaving a history much larger than the draft's text.
+            for (let i = 0; i < 300; i++) {
+              const other = new Y.Doc();
+              try {
+                Y.applyUpdate(other, Y.encodeStateAsUpdate(doc));
+                const para = other.getXmlFragment(YFRAGMENT).get(0);
+                if (!(para instanceof Y.XmlElement)) throw new Error("no paragraph");
+                const text = para.get(0);
+                if (!(text instanceof Y.XmlText)) throw new Error("no text");
+                text.insert(text.length, "a");
+                Y.applyUpdate(doc, Y.encodeStateAsUpdate(other, Y.encodeStateVector(doc)));
+              } finally {
+                other.destroy();
+              }
+            }
+            draftBody = `Draft.${"a".repeat(300)}\n`;
+          }
+          const state = Y.encodeStateAsUpdate(doc);
+          const fresh = md.toYDoc(draftBody);
+          const cap =
+            legacy === "oversized history"
+              ? Math.ceil((Y.encodeStateAsUpdate(fresh).byteLength + state.byteLength) / 2)
+              : LIVE_LIMITS.stateBytes;
+          fresh.destroy();
+          await server.deps.db.insert(schema.wikiPageDocs).values({
+            pageId: row.id,
+            state: Buffer.from(state).toString("base64"),
+            parentVersion: 1,
+            dirty: true,
+            editors: [{ type: "person", id: ana.user.id }],
+            editedAt: new Date(),
+          });
+          await withLimit("stateBytes", cap, async () => {
+            const response =
+              action === "publish"
+                ? await ana.api.wiki.publishWikiPageDraft(workspaceId, page.slug)
+                : await ana.api.wiki.deleteWikiPageDraft(workspaceId, page.slug);
+            const version = action === "publish" ? 2 : 1;
+            const body = action === "publish" ? draftBody : BODY;
+            const expected = { version, body, draft: { dirty: false, parentVersion: version } };
+            expect(response).toMatchObject(expected);
+            expect(await ana.api.wiki.getWikiPage(workspaceId, page.slug)).toMatchObject(expected);
+            const stored = await storedState(workspaceId, page.slug);
+            expect(stored).toMatchObject({ text: body, dirty: false, parentVersion: version });
+            expect(stored?.bytes.byteLength ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(cap);
+            expect(stored?.doc.getText("junk").length).toBe(0);
+            stored?.doc.destroy();
+            expect(server.deps.wikiLive.loaded()).toBe(0);
+          });
+        } finally {
+          doc.destroy();
+        }
+      });
+    }
+  }
+
   test("an update with content outside the editor's fragment is rejected and closes its socket (4413); none of it is saved", async () => {
     const { workspaceId, ana } = await team();
     const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Junk type", body: BODY });

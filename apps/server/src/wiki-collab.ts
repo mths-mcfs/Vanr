@@ -36,6 +36,7 @@ import {
   writeTx,
 } from "./wiki";
 import { readablePagesSql } from "./wiki-access";
+import { checkLinks } from "./wiki-links";
 import { type WikiMarkdown, wikiMarkdown, YFRAGMENT } from "./wiki-md";
 
 const { knowledgePages, pageRevisions, wikiPageDocs, members, agents, sessions: authSessions } = schema;
@@ -1040,7 +1041,7 @@ export function createWikiCollab(
       }
       // Rejected: the client's document now differs from the server's and every later update of it depends
       // on this one, so the connection closes after the rejection instead of acknowledging what can't apply.
-      // Over a limit: the page's length, the encoded state, or content outside the editor's fragment.
+      // Over a limit: the page's length or links, the encoded state, or content outside the editor's fragment.
       if (size === "too_large" || size > MAX_BODY) {
         p.sendNow(syncStatus(head.rawKey, false));
         return p.close(CLOSE.tooLarge);
@@ -1094,7 +1095,7 @@ export function createWikiCollab(
 
   /**
    * The page's length once `update` is applied to a copy of the document; null for an invalid update,
-   * "too_large" past the state's cap or with content in a shared type other than the editor's fragment
+   * "too_large" past the link or state cap, or with content in a shared type other than the editor's fragment
    * (which the page's text doesn't count, so it would grow the saved state unseen).
    */
   async function sizeAfter(
@@ -1120,10 +1121,11 @@ export function createWikiCollab(
       if (foreignContent(probe) || Y.encodeStateAsUpdate(probe).byteLength > LIVE_LIMITS.stateBytes)
         return "too_large";
       const text = await textOf(s, probe);
+      checkLinks(text);
       // A NUL can't be published (Postgres text can't hold it): an update that brings one is invalid.
       return text.includes("\0") ? null : text.length;
-    } catch {
-      return null;
+    } catch (err) {
+      return err instanceof HttpError && err.code === "wiki.too_many_links" ? "too_large" : null;
     } finally {
       probe.destroy();
     }
@@ -1155,7 +1157,6 @@ export function createWikiCollab(
     const [page] = await deps.db.select().from(knowledgePages).where(eq(knowledgePages.id, row.id));
     if (!page) return null;
     const doc = new Y.Doc();
-    Y.applyUpdate(doc, unb64(saved.state));
     const offline: Session = {
       pageId: row.id,
       workspaceId: row.workspaceId,
@@ -1169,6 +1170,7 @@ export function createWikiCollab(
       closed: false,
     };
     try {
+      Y.applyUpdate(doc, await loadableState(offline, unb64(saved.state)));
       const result = await fn(offline, doc, null);
       if (save) await persist(offline, doc);
       return result;
