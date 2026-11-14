@@ -130,6 +130,7 @@ type Outcome =
   | { status: "sent"; note?: string }
   | { status: "skipped"; note: string }
   | { status: "retry"; note: string }
+  | { status: "failed"; note: string }
   | { status: "later"; at: Date; note: string };
 
 export async function drainDeliveries(deps: AppDeps): Promise<number> {
@@ -181,16 +182,18 @@ async function finish(deps: AppDeps, d: Delivery, o: Outcome) {
       ? { status: "sent", sentAt: now, lockedAt: null, note: o.note ?? null }
       : o.status === "skipped"
         ? { status: "skipped", lockedAt: null, note: o.note }
-        : o.status === "later"
-          ? { status: "pending", dueAt: o.at, lockedAt: null, attempts: d.attempts - 1, note: o.note }
-          : d.attempts >= MAX_ATTEMPTS
-            ? { status: "failed", lockedAt: null, note: o.note }
-            : {
-                status: "pending",
-                lockedAt: null,
-                note: o.note,
-                dueAt: new Date(now.getTime() + 60_000 * 2 ** d.attempts),
-              };
+        : o.status === "failed"
+          ? { status: "failed", lockedAt: null, note: o.note }
+          : o.status === "later"
+            ? { status: "pending", dueAt: o.at, lockedAt: null, attempts: d.attempts - 1, note: o.note }
+            : d.attempts >= MAX_ATTEMPTS
+              ? { status: "failed", lockedAt: null, note: o.note }
+              : {
+                  status: "pending",
+                  lockedAt: null,
+                  note: o.note,
+                  dueAt: new Date(now.getTime() + 60_000 * 2 ** d.attempts),
+                };
   await deps.db.update(notificationDeliveries).set(set).where(ownedBy(d));
 }
 
@@ -330,12 +333,17 @@ async function sendEmail(
     settingsLink,
     n,
   });
-  await deps.mailer.send({
+  const sent = await deps.mailer.send({
     to: user.email,
     subject: mail.subject,
     text: mail.text,
     kind: "notification",
     link,
   });
-  return { status: "sent" };
+  if (sent.ok) return { status: "sent" };
+  // A rejection worth retrying goes back to the queue with the same growing wait as a push; a final one is
+  // recorded as failed with its reason.
+  return sent.retry
+    ? { status: "retry", note: `email_${sent.reason}` }
+    : { status: "failed", note: `email_${sent.reason}` };
 }

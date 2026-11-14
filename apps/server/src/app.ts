@@ -8,6 +8,7 @@ import { registerDrive } from "./routes/drive";
 import { registerDriveUploads } from "./routes/drive-upload";
 import { registerSearch } from "./routes/search";
 import { registerWaitlist } from "./routes/waitlist";
+import { type FirstUserPlace, SIGNUP_QUEUE_LIMITS, type SignupQueueLimits, signupGate } from "./signup-queue";
 import { createStatic } from "./static";
 import { registerWorkspaceScope } from "./workspace-scope";
 
@@ -21,7 +22,10 @@ const CREATES_USER = /^\/api\/auth\/(sign-up\/|sign-in\/social$|callback\/|oauth
 /** A part of a chunked upload: raw bytes. A form from another site doesn't send that type without a preflight. */
 const RAW_PART = /\/files\/uploads\/[^/]+$/;
 
-export function createApp(deps: AppDeps) {
+export function createApp(
+  deps: AppDeps,
+  opts: { firstUser: FirstUserPlace; signupQueue?: Partial<SignupQueueLimits> },
+) {
   const app = new Hono<AppEnv>();
   const serveStatic = createStatic(deps.config.webDist);
 
@@ -38,15 +42,12 @@ export function createApp(deps: AppDeps) {
     await next();
   });
 
-  // Better Auth answers at /api/auth/* in its own format. With closed sign-up, deciding whether a new
-  // user may enter (the first user of the installation) and creating it are one step: the requests that
-  // may create a user go one at a time. The server is a single instance per database (the boot's lock),
-  // so a queue in the process is enough. With open sign-up nothing waits.
-  const oneAtATime = queueOfOne();
+  // Better Auth answers at /api/auth/* in its own format. With closed sign-up, the requests that may
+  // create a user pass the sign-up gate (signup-queue.ts): on a new installation, deciding that a person is
+  // the first user and creating them is one step. With open sign-up, and for a sign-in, nothing waits.
+  const gate = signupGate(deps, { ...SIGNUP_QUEUE_LIMITS, ...opts.signupQueue }, opts.firstUser);
   app.on(["GET", "POST"], "/api/auth/*", (c) =>
-    !deps.config.signupOpen && CREATES_USER.test(c.req.path)
-      ? oneAtATime(() => deps.auth.handler(c.req.raw))
-      : deps.auth.handler(c.req.raw),
+    !deps.config.signupOpen && CREATES_USER.test(c.req.path) ? gate(c.req.raw) : deps.auth.handler(c.req.raw),
   );
 
   app.get("/api/v1/health", async (c) => {
@@ -114,14 +115,4 @@ export function createApp(deps: AppDeps) {
   app.get("*", (c) => serveStatic(c.req.path));
 
   return app;
-}
-
-/** Runs the tasks one after the other, in arrival order; a task that fails doesn't stop the next. */
-function queueOfOne() {
-  let tail: Promise<unknown> = Promise.resolve();
-  return <T>(task: () => Promise<T>): Promise<T> => {
-    const run = tail.then(task, task);
-    tail = run.catch(() => undefined);
-    return run;
-  };
 }
