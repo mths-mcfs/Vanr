@@ -388,9 +388,24 @@ export function gitChanges(
   return { files: files.slice(0, 200), diff: diff?.trim() ? clipMiddle(diff, DIFF_MAX) : null };
 }
 
+interface JobStartArgs {
+  jobId: string;
+  executor: "claude_code" | "codex" | "shell";
+  title: string;
+  prompt: string;
+  cwd?: string;
+  model?: string;
+  session?: string;
+  timeoutSeconds?: number;
+  allow?: string[];
+  network?: NetworkPolicyFrame;
+}
+
 export class Jobs {
   private journal: JournalEntry[] = [];
   private readonly running = new Map<string, { kill: () => void }>();
+  /** Jobs between the checks of `start` and their process: they hold their id and a slot. */
+  private readonly starting = new Set<string>();
 
   constructor(
     private readonly opts: {
@@ -488,28 +503,31 @@ export class Jobs {
 
   async start(
     agent: AgentRef,
-    args: {
-      jobId: string;
-      executor: "claude_code" | "codex" | "shell";
-      title: string;
-      prompt: string;
-      cwd?: string;
-      model?: string;
-      session?: string;
-      timeoutSeconds?: number;
-      allow?: string[];
-      network?: NetworkPolicyFrame;
-    },
+    args: JobStartArgs,
   ): Promise<{ jobId: string; startedAt: string; cwd: string }> {
     if (!/^[A-Za-z0-9_-]{8,64}$/.test(args.jobId)) throw new RunnerError("bad_request", "Bad job id");
-    if (this.journal.some((t) => t.jobId === args.jobId))
+    if (this.journal.some((t) => t.jobId === args.jobId) || this.starting.has(args.jobId))
       throw new RunnerError("bad_request", "Job id already used");
     this.opts.access.requireTool(
       args.executor === "shell" ? "commands" : args.executor === "codex" ? "codex" : "claude",
     );
-    if (this.running.size >= this.opts.maxConcurrent())
+    if (this.running.size + this.starting.size >= this.opts.maxConcurrent())
       throw new RunnerError("no_slot", "This environment is already running its maximum of jobs");
     if (args.executor !== "shell") this.opts.cli.requireSubscription(args.executor);
+    // The id and the slot are taken here, before the first await: a second start with the same id, or one
+    // past the cap, arriving while this one prepares, is rejected above instead of running the job twice.
+    this.starting.add(args.jobId);
+    try {
+      return await this.launch(agent, args);
+    } finally {
+      this.starting.delete(args.jobId);
+    }
+  }
+
+  private async launch(
+    agent: AgentRef,
+    args: JobStartArgs,
+  ): Promise<{ jobId: string; startedAt: string; cwd: string }> {
     const root = this.opts.access.agentRoot(agent);
     const cwd = args.cwd ? this.opts.access.resolve(agent, args.cwd) : root;
     const { cmd, args: argv, stdin } = executorCommand(args.executor, { ...args, cwd }, this.opts.bins);
@@ -650,6 +668,8 @@ export class Jobs {
       kill("SIGTERM");
       setTimeout(() => kill("SIGKILL"), 10_000).unref();
     };
+    // The job now holds its slot as a running one.
+    this.starting.delete(args.jobId);
     this.running.set(args.jobId, {
       kill: () => {
         canceled = true;

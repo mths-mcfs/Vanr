@@ -298,6 +298,51 @@ export function maskSecrets(text: string, masks: [string, string][]): string {
   return out;
 }
 
+/**
+ * Mask for output that arrives in pieces (the stream of a command, the capture that cuts it). A piece can end
+ * in the middle of a secret, so the end of each piece (the longest secret minus one) is held until the next one,
+ * and an occurrence that crosses that point is held whole. A secret with line breaks is also masked in its
+ * `\r\n` form (what a terminal sends back). `end` releases what is held, masked.
+ */
+export class StreamMasker {
+  private held = "";
+  private readonly masks: [string, string][];
+  private readonly keep: number;
+
+  constructor(masks: [string, string][]) {
+    const crlf = masks
+      .filter(([v]) => v.includes("\n"))
+      .map(([v, label]): [string, string] => [v.replace(/\r?\n/g, "\r\n"), label]);
+    this.masks = [...masks, ...crlf].filter(([v]) => v.length > 0).sort((a, b) => b[0].length - a[0].length);
+    this.keep = Math.max(0, ...this.masks.map(([v]) => v.length - 1));
+  }
+
+  push(chunk: string): string {
+    const text = this.held + chunk;
+    let cut = Math.max(0, text.length - this.keep);
+    // A whole occurrence that crosses the cut moves the cut back to its start.
+    for (let moved = true; moved && cut > 0; ) {
+      moved = false;
+      for (const [v] of this.masks) {
+        const from = Math.max(0, cut - v.length + 1);
+        const at = text.indexOf(v, from);
+        if (at >= 0 && at < cut && at + v.length > cut) {
+          cut = at;
+          moved = true;
+        }
+      }
+    }
+    this.held = text.slice(cut);
+    return maskSecrets(text.slice(0, cut), this.masks);
+  }
+
+  end(): string {
+    const rest = maskSecrets(this.held, this.masks);
+    this.held = "";
+    return rest;
+  }
+}
+
 const escapeRe = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**

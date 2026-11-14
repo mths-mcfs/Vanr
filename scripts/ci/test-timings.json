@@ -63,6 +63,9 @@
     "apps/runner/src/net-guard.test.ts": 29,
     "apps/runner/src/protocol.test.ts": 1009,
     "apps/runner/src/sandbox.test.ts": 9,
-    "apps/runner/src/update.test.ts": 24
+    "apps/runner/src/update.test.ts": 24,
+    "apps/runner/src/secrets.test.ts": 300,
+    "apps/runner/src/ops.test.ts": 400,
+    "apps/runner/src/jobs-start.test.ts": 100
   }
 }
