@@ -121,11 +121,9 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("issues and consolidations at onc
         .from(schema.issueTimeline)
         .where(and(eq(schema.issueTimeline.issueId, row.id), eq(schema.issueTimeline.event, "status")))
         .orderBy(asc(schema.issueTimeline.seq));
-      const got = moves.map((m) => m.textVars);
-      const want = [
-        { from: "todo", to: "in_progress" },
-        { from: "in_progress", to: "done" },
-      ];
+      // Postgres keeps jsonb keys in its own order: the moves are compared as text.
+      const got = moves.map((m) => `${m.textVars?.from}->${m.textVars?.to}`);
+      const want = ["todo->in_progress", "in_progress->done"];
       outcome("issue-move", got, want);
       expect(got).toEqual(want);
     });
