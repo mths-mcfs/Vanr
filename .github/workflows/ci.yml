@@ -1,0 +1,139 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  # One group per PR, so a new push cancels the older run. Pushes to main get a
+  # group per run, so they are never cancelled.
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - run: bunx biome ci .
+
+  typecheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - run: bun run typecheck
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # The shard count is the length of this list.
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - run: bun test --shard="$SHARD/$SHARDS" --timings=scripts/ci/test-timings.json
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ strategy.job-total }}
+
+  workflows:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ACTIONLINT_VERSION: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+      ZIZMOR_VERSION: 1.31.1
+      ZIZMOR_SHA256: d185f726bdaf92df78273217dfdd24ebcd6b0ef48cf3ce776ff5762b6e138c99
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install actionlint and zizmor
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz -C bin actionlint
+          curl -fsSL -o zizmor.tar.gz \
+            "https://github.com/zizmorcore/zizmor/releases/download/v${ZIZMOR_VERSION}/zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${ZIZMOR_SHA256}  zizmor.tar.gz" | sha256sum -c -
+          tar -xzf zizmor.tar.gz -C bin zizmor
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: actionlint
+      - run: zizmor --format=github .github
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz -C bin gitleaks
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      # On a PR, scan the commits the PR adds; on main, scan the whole history.
+      # --diff-merges=first-parent makes git log show what each merge commit
+      # changes, which it hides by default, so a secret added in a merge is found.
+      - run: |
+          if [ "$EVENT" = pull_request ]; then
+            # An unknown SHA makes git log fail and gitleaks scan nothing yet exit 0.
+            for sha in "$BASE_SHA" "$HEAD_SHA"; do
+              if ! git rev-parse --verify --quiet "${sha}^{commit}" > /dev/null; then
+                echo "::error::commit not found: '${sha}'"
+                exit 1
+              fi
+            done
+            gitleaks git --no-banner --redact --log-opts="--diff-merges=first-parent $BASE_SHA..$HEAD_SHA" .
+          else
+            gitleaks git --no-banner --redact --log-opts="--diff-merges=first-parent --full-history --all --diff-filter=tuxdb" .
+          fi
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
+  ci-ok:
+    if: always()
+    needs: [lint, typecheck, test, workflows, secrets]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - run: bun scripts/ci/gate.ts lint typecheck test workflows secrets
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}

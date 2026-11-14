@@ -1,0 +1,25 @@
+name: Setup
+description: Verify and install Bun from packageManager, then install workspace dependencies with the Bun cache.
+runs:
+  using: composite
+  steps:
+    - name: Install verified Bun
+      shell: bash
+      env:
+        # SHA-256 of bun-linux-x64.zip for the version in packageManager.
+        BUN_SHA256: 3e730528d89775f03f87f05c06787c4df4099d0a37f3f252e7b829cb23816e18
+      run: |
+        version="$(python3 -c 'import json; print(json.load(open("package.json"))["packageManager"].removeprefix("bun@"))')"
+        archive="$RUNNER_TEMP/bun.zip"
+        curl -fsSL -o "$archive" "https://github.com/oven-sh/bun/releases/download/bun-v${version}/bun-linux-x64.zip"
+        echo "${BUN_SHA256}  $archive" | sha256sum -c -
+        unzip -q "$archive" -d "$RUNNER_TEMP/bun"
+        ln -s bun "$RUNNER_TEMP/bun/bun-linux-x64/bunx"
+        echo '${{ runner.temp }}/bun/bun-linux-x64' >> "$GITHUB_PATH"
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.bun/install/cache
+        key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+        restore-keys: bun-${{ runner.os }}-
+    - shell: bash
+      run: bun install --frozen-lockfile
