@@ -218,32 +218,41 @@ async function runConsolidation(
       .update(memoryConsolidations)
       .set(set)
       .where(and(eq(memoryConsolidations.id, row.id), eq(memoryConsolidations.status, "running")));
-  const items = read.map((r) => ({
-    id: r.id,
-    path: r.path,
-    kind: r.kind,
-    untrustedSource: r.untrustedSource,
-    updatedAt: r.updatedAt.toISOString(),
-    text: r.text,
-  }));
-  const res = await deps.runtime.complete({
-    agent,
-    initiatedBy: userId,
-    system: SYSTEM,
-    prompt: JSON.stringify(items),
-    what: "Consolidate memory",
-    maxTokens: CONSOLIDATION_MAX_TOKENS,
-    timeoutMs: CONSOLIDATION_TIMEOUT_MS,
-    model: CONSOLIDATION_MODEL,
-    source: "memory",
-  });
-  if (!res.ok) return finish({ status: "failed", error: res.code, decidedAt: deps.now() });
-  const parsed = reply.safeParse(jsonFrom(res.text));
-  let raw: ProposedItem[];
-  if (parsed.success) raw = parsed.data.items;
-  else if ((await deps.testModelFor(agent.workspaceId))(agent)) raw = testConsolidation(read);
-  else return finish({ status: "failed", error: "unreadable", runId: res.runId, decidedAt: deps.now() });
-  return finish({ status: "ready", items: normalizeItems(raw, read), runId: res.runId });
+  try {
+    const items = read.map((r) => ({
+      id: r.id,
+      path: r.path,
+      kind: r.kind,
+      untrustedSource: r.untrustedSource,
+      updatedAt: r.updatedAt.toISOString(),
+      text: r.text,
+    }));
+    const res = await deps.runtime.complete({
+      agent,
+      initiatedBy: userId,
+      system: SYSTEM,
+      prompt: JSON.stringify(items),
+      what: "Consolidate memory",
+      maxTokens: CONSOLIDATION_MAX_TOKENS,
+      timeoutMs: CONSOLIDATION_TIMEOUT_MS,
+      model: CONSOLIDATION_MODEL,
+      source: "memory",
+    });
+    if (!res.ok) return await finish({ status: "failed", error: res.code, decidedAt: deps.now() });
+    const parsed = reply.safeParse(jsonFrom(res.text));
+    let raw: ProposedItem[];
+    if (parsed.success) raw = parsed.data.items;
+    else if ((await deps.testModelFor(agent.workspaceId))(agent)) raw = testConsolidation(read);
+    else
+      return await finish({ status: "failed", error: "unreadable", runId: res.runId, decidedAt: deps.now() });
+    return await finish({ status: "ready", items: normalizeItems(raw, read), runId: res.runId });
+  } catch (err) {
+    return finish({
+      status: "failed",
+      error: err instanceof Error ? err.message : String(err),
+      decidedAt: deps.now(),
+    });
+  }
 }
 
 async function consolidationOf(db: Db, agent: AgentRow, id: string) {
@@ -256,8 +265,8 @@ async function consolidationOf(db: Db, agent: AgentRow, id: string) {
 }
 
 /**
- * Applies the set: locks the consolidation and then each item it read (always in id order, so it never waits in a
- * circle with another writer of the same items), checks the hash of all of them (if one changed, nothing changes
+ * Applies the set: locks the consolidation, the store (before items, as replacement reviews do), and each item
+ * it read in id order; checks the hash of all of them (if one changed, nothing changes
  * and it becomes `failed: changed`) and writes through the versioned writer. Two applies at the same time: the
  * second waits for the consolidation's lock and finds it already applied. The item locks are FOR NO KEY UPDATE:
  * the versions inserted at the same time (a foreign key to the item) don't wait for them.
@@ -274,6 +283,7 @@ export async function applyConsolidation(deps: AppDeps, me: WorkspaceMember, age
       .where(and(eq(memoryConsolidations.id, id), eq(memoryConsolidations.agentId, agent.id)))
       .for("no key update");
     if (row?.status !== "ready") return { row, stale: false, closed: true };
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`memory:agent:${agent.id}`}))`);
     const ids = Object.keys(row.bases);
     const current = ids.length
       ? await tx
@@ -295,12 +305,14 @@ export async function applyConsolidation(deps: AppDeps, me: WorkspaceMember, age
       const [firstId] = item.sources;
       const first = firstId === undefined ? undefined : byId.get(firstId);
       if (!first) continue;
+      const untrustedSource =
+        item.untrustedSource || item.sources.some((mid) => byId.get(mid)?.untrustedSource);
       if (item.action === "rewrite") {
         await changeMemory(
           tx,
           at,
           first.id,
-          { text: item.text, untrustedSource: item.untrustedSource },
+          { text: item.text, untrustedSource },
           { author, op: "update", reason, store },
         );
         continue;
@@ -320,7 +332,7 @@ export async function applyConsolidation(deps: AppDeps, me: WorkspaceMember, age
             kind: first.kind,
             about: first.about,
             pinned: item.sources.some((s) => byId.get(s)?.pinned),
-            untrustedSource: item.untrustedSource,
+            untrustedSource,
             source: "consolidation",
             origin: { by: author, name: null, channel: null, at: at.toISOString() },
           },

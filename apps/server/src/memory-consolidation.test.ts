@@ -9,7 +9,7 @@ import { contentSha256, MEMORY_ITEM_MAX_BYTES } from "@vanr/engine/memory";
 import { and, asc, eq } from "drizzle-orm";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "../test/harness";
 import { seedWorkspace } from "../test/seed";
-import { createMemory, type MemoryRow } from "./agent-memory";
+import { createMemory, type MemoryRow, memoryPrompt } from "./agent-memory";
 import type { AgentRow } from "./agents";
 import type { WorkspaceMember } from "./context";
 import { isUniqueViolation } from "./db-errors";
@@ -22,6 +22,7 @@ import {
   startConsolidation,
   toConsolidation,
 } from "./memory-consolidation";
+import { approveReview, queueMemoryReview } from "./memory-reviews";
 import type { RunningServer } from "./server";
 
 const { memories, memoryConsolidations, memoryVersions } = schema;
@@ -146,6 +147,29 @@ describe("starting", () => {
     ).toEqual([]);
   });
 
+  test("a rejected completion fails the job and allows another consolidation to start", async () => {
+    const agent = await newAgent("rejected");
+    await remember(agent, "Office opens at 9");
+    await remember(agent, "office opens at 9");
+    const deps = {
+      ...server.deps,
+      runtime: {
+        ...server.deps.runtime,
+        complete: async () => {
+          throw new Error("provider connection lost");
+        },
+      },
+    };
+    const row = await startConsolidation(deps, me, agent);
+    await deps.runtime.settle();
+    const [failed] = await consolidationsOf(deps.db, agent);
+    expect(failed).toMatchObject({ id: row.id, status: "failed", error: "provider connection lost" });
+    expect(failed?.decidedAt).toBeInstanceOf(Date);
+    const next = await startConsolidation(deps, me, agent);
+    await deps.runtime.settle();
+    expect(next.id).not.toBe(row.id);
+  });
+
   test("an agent has one open consolidation at most: a second open one is rejected by the database", async () => {
     const agent = await newAgent("one");
     const a = await remember(agent, "A");
@@ -231,6 +255,51 @@ describe("cleaning the model's proposal", () => {
 });
 
 describe("applying", () => {
+  test.each(["rewrite", "merge"] as const)(
+    "%s preserves a source marked untrusted by an identical-text review after the read",
+    async (action) => {
+      const agent = await newAgent(`trust_${action}`);
+      const a = await remember(agent, "Office opens at 9");
+      const b = await remember(agent, "office opens at 9");
+      const text = "The office opens at 9.";
+      const row = await readyConsolidation(
+        agent,
+        [a, b],
+        normalizeItems([{ action, sources: action === "merge" ? [a.id, b.id] : [a.id], text }], [a, b]),
+      );
+      const source = action === "merge" ? b : a;
+      const review = await queueMemoryReview(server.deps, {
+        workspaceId,
+        agentId: agent.id,
+        scope: "agent",
+        op: "update",
+        memoryId: source.id,
+        text: source.text,
+        baseSha256: contentSha256(source.text),
+        reasons: [{ flag: "A", source: "mail_read inbox/1" }],
+        origin: { by: author(), name: null, channel: null, at: server.deps.now().toISOString() },
+        tool: "memory",
+      });
+      expect((await approveReview(server.deps, me, review.id)).status).toBe("approved");
+      expect(await memoryOf(source.id)).toMatchObject({ text: source.text, untrustedSource: true });
+      expect((await applyConsolidation(server.deps, me, agent, row.id)).status).toBe("applied");
+      const [result] = await server.deps.db
+        .select()
+        .from(memories)
+        .where(and(eq(memories.agentId, agent.id), eq(memories.text, text), eq(memories.archived, false)));
+      if (!result) throw new Error("no consolidated memory");
+      expect(result.untrustedSource).toBe(true);
+      const prompt = await memoryPrompt(server.deps.db, server.deps.now(), {
+        workspaceId,
+        agentId: agent.id,
+        personId: null,
+      });
+      expect(prompt.split("\n").find((line) => line.includes(`[${result.id}]`))).toContain(
+        "from an untrusted source",
+      );
+    },
+  );
+
   test("rewrites, merges and drops through the versioned writer, and marks what it read as vetted", async () => {
     const agent = await newAgent("apply");
     const a = await remember(agent, "Office opens at 9", { path: "/office.md", pinned: true });

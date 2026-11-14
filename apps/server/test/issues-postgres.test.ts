@@ -9,20 +9,21 @@
 // these tests to fail on their outcome (LOCK_OUTCOME_MISMATCH), which proves they catch a missing lock.
 // These run only in the CI postgres job.
 import { describe, expect, test } from "bun:test";
-import { schema } from "@vanr/engine/db";
+import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { contentSha256 } from "@vanr/engine/memory";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import postgres from "postgres";
 import { createMemory } from "../src/agent-memory";
 import type { AppDeps } from "../src/context";
 import { isUniqueViolation } from "../src/db-errors";
 import { HttpError } from "../src/http";
 import { columnsOf, createIssue, updateIssue } from "../src/issues";
-import { applyConsolidation } from "../src/memory-consolidation";
+import { applyConsolidation, normalizeItems } from "../src/memory-consolidation";
+import { approveReview, queueMemoryReview } from "../src/memory-reviews";
 import type { RunningServer } from "../src/server";
 import { signedIn, startTestServer } from "./harness";
-import { forcedPair, instrumented, outcome } from "./lock-double";
+import { forcedPair, gate, instrumented, outcome, sqlText, WAIT_MS } from "./lock-double";
 import { NO_POSTGRES, TEST_POSTGRES_URL, testDatabaseUrl } from "./postgres";
 import { seedWorkspace } from "./seed";
 
@@ -58,6 +59,138 @@ const withDb = (deps: AppDeps, hooks: Parameters<typeof instrumented>[1]): AppDe
 });
 
 describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("issues and consolidations at once on Postgres"), () => {
+  test("a merge and a create review replacing its source finish without deadlock", async () => {
+    await withServer("mcn_replace", async (server, admin, { workspaceId, userId }) => {
+      const { db } = server.deps;
+      const [agent] = await db
+        .insert(schema.agents)
+        .values({
+          id: newId("agt"),
+          workspaceId,
+          name: "Lia",
+          handle: "lia",
+          model: "claude-haiku-5-5",
+          ownerUserId: userId,
+          appearance: { color: "blue", eyes: "dot", adornment: "none" },
+        })
+        .returning();
+      if (!agent) throw new Error("no agent");
+      const author = { type: "person" as const, id: userId };
+      const origin = { by: author, name: null, channel: null, at: server.deps.now().toISOString() };
+      const remember = (text: string) =>
+        createMemory(
+          db,
+          server.deps.now(),
+          { workspaceId, agentId: agent.id, scope: "agent", text, origin },
+          {
+            author,
+          },
+        );
+      const a = await remember("Opens at 9");
+      const b = await remember("opens at 9");
+      const [row] = await db
+        .insert(schema.memoryConsolidations)
+        .values({
+          id: newId("mcn"),
+          workspaceId,
+          agentId: agent.id,
+          status: "ready",
+          items: normalizeItems([{ action: "merge", sources: [a.id, b.id], text: "Opens at 9." }], [a, b]),
+          bases: { [a.id]: contentSha256(a.text), [b.id]: contentSha256(b.text) },
+          covered: 2,
+          total: 2,
+        })
+        .returning();
+      if (!row) throw new Error("no consolidation");
+      const review = await queueMemoryReview(server.deps, {
+        workspaceId,
+        agentId: agent.id,
+        scope: "agent",
+        op: "create",
+        text: "Now opens at 10",
+        replaces: a.id,
+        origin,
+        tool: "memory",
+        reasons: [{ flag: "A", source: "mail_read inbox/1" }],
+      });
+      const me = { workspaceId, userId, role: "owner" as const, handle: "ana" };
+      const held = gate();
+      const release = gate();
+      let paused = false;
+      // Pause before the first store lock, including one requested inside createMemory's savepoint.
+      // With the old order the merge already holds its sources, so the approval waits on a source while
+      // holding the store lock. Releasing the merge then produces the deadlock.
+      const pauseAtStore = (source: Db): Db =>
+        new Proxy(source, {
+          get(target, prop) {
+            if (prop === "transaction")
+              return (fn: (tx: Db) => Promise<unknown>) => target.transaction((tx) => fn(pauseAtStore(tx)));
+            if (prop === "execute")
+              return async (query: Parameters<Db["execute"]>[0]) => {
+                if (!paused && sqlText(query).includes("pg_advisory_xact_lock")) {
+                  paused = true;
+                  await target.execute(sql`set local deadlock_timeout = '50ms'`);
+                  held.open();
+                  await release.opened;
+                }
+                return target.execute(query);
+              };
+            const value = Reflect.get(target, prop, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      const pending: Promise<unknown>[] = [];
+      try {
+        const applying = applyConsolidation({ ...server.deps, db: pauseAtStore(db) }, me, agent, row.id).then(
+          (r) => r.status,
+          (err: unknown) => {
+            if (err instanceof HttpError) return err.code;
+            throw err;
+          },
+        );
+        pending.push(applying);
+        expect(
+          await Promise.race([
+            held.opened.then(() => true),
+            applying.then(
+              () => false,
+              () => false,
+            ),
+          ]),
+        ).toBe(true);
+        const pids = new Set<number>();
+        let finished = false;
+        const approving = approveReview(withDb(server.deps, { pids }), me, review.id).finally(() => {
+          finished = true;
+        });
+        pending.push(approving);
+        approving.catch(() => undefined);
+        const deadline = Date.now() + WAIT_MS;
+        while (!finished) {
+          const [pid] = pids;
+          const [activity] =
+            await admin`select wait_event_type from pg_stat_activity where pid = ${pid ?? 0}`;
+          if (activity?.wait_event_type === "Lock") break;
+          if (Date.now() > deadline)
+            throw new Error("Replacement approval neither finished nor waited on a lock");
+          await Bun.sleep(25);
+        }
+        release.open();
+        const [applied, approved] = await Promise.all([applying, approving]);
+        expect(approved.status).toBe("approved");
+        expect(applied).toBe("memory_consolidation.changed");
+        const [after] = await db
+          .select()
+          .from(schema.memoryConsolidations)
+          .where(eq(schema.memoryConsolidations.id, row.id));
+        expect(after).toMatchObject({ status: "failed", error: "changed" });
+      } finally {
+        release.open();
+        await Promise.allSettled(pending);
+      }
+    });
+  }, 60_000);
+
   test("N issues created at once get the numbers 1 to N", async () => {
     await withServer("iss_n", async (server, _admin, { workspaceId, userId }) => {
       const rows = await Promise.all(
