@@ -124,3 +124,42 @@ test.each([false, true])("close while starting respects request cancellation: %s
   expect(closed.includes("Browser.close")).toBe(!abort);
   expect(sessions.has(agent.id)).toBe(abort);
 });
+
+test.each([
+  { name: "ordinary key", navigation: false, focus: "page", keys: ["keyDown", "keyUp"] },
+  { name: "navigation destroys context", navigation: true, focus: "missing", keys: ["keyDown"] },
+  { name: "navigation replaces page", navigation: true, focus: "page", keys: ["keyDown"] },
+  { name: "context error without navigation", navigation: false, focus: "missing", keys: ["keyDown"] },
+  { name: "focus moves into a frame", navigation: false, focus: "frame", keys: ["keyDown"] },
+])("keyboard sequence: $name", async ({ navigation, focus, keys }) => {
+  const { b, session } = browserWithOneSession();
+  const sent: string[] = [];
+  Object.assign(session.cdp, {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      switch (method) {
+        case "Page.getFrameTree":
+          return { frameTree: { frame: { loaderId: navigation && sent.length ? "new" : "old" } } };
+        case "Page.createIsolatedWorld":
+          return { executionContextId: 1 };
+        case "Runtime.evaluate":
+          if (sent.length && focus === "missing") throw new Error("Cannot find context with specified id");
+          return { result: { objectId: "focused" } };
+        case "DOM.describeNode":
+          return { node: { nodeName: sent.length && focus === "frame" ? "IFRAME" : "INPUT" } };
+        case "Input.dispatchKeyEvent":
+          sent.push(String(params.type));
+          return {};
+        default:
+          throw new Error(`Unexpected CDP command: ${method}`);
+      }
+    },
+  });
+  const press = Reflect.get(b, "press");
+  if (typeof press !== "function") throw new Error("missing press");
+  const result = press.call(b, session, "Enter");
+  if (!navigation && focus === "missing")
+    await expect(result).rejects.toThrow("Cannot find context with specified id");
+  else if (focus === "frame") await expect(result).rejects.toMatchObject({ code: "not_allowed" });
+  else await expect(result).resolves.toBeUndefined();
+  expect(sent).toEqual([...keys]);
+});

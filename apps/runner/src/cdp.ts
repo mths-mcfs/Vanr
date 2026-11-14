@@ -1126,12 +1126,24 @@ export class CdpBrowser implements BrowserDriver {
       return;
     }
     const base = { key: key === "Space" ? " " : key, code: k.code, windowsVirtualKeyCode: k.vk };
+    const before = await s.cdp.send<{ frameTree: { frame: { loaderId: string } } }>(
+      "Page.getFrameTree",
+      {},
+      sid,
+    );
     await s.cdp.send(
       "Input.dispatchKeyEvent",
       { type: k.text ? "keyDown" : "rawKeyDown", ...base, ...(k.text ? { text: k.text } : {}) },
       sid,
     );
-    await this.focusInPage(s);
+    const focusFailure = await this.focusInPage(s).then(
+      () => null,
+      (error: unknown) => ({ error }),
+    );
+    const after = await s.cdp.send<typeof before>("Page.getFrameTree", {}, sid);
+    // A keyDown can replace the document and destroy its focus context. Its keyUp must not act on the new page.
+    if (after.frameTree.frame.loaderId !== before.frameTree.frame.loaderId) return;
+    if (focusFailure) throw focusFailure.error;
     await s.cdp.send("Input.dispatchKeyEvent", { type: "keyUp", ...base }, sid);
   }
 
