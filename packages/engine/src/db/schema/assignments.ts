@@ -1,3 +1,4 @@
+import type { AssignmentLimitKind } from "@vanr/contract";
 import {
   bigint,
   bigserial,
@@ -91,7 +92,7 @@ export const assignments = pgTable(
       .notNull()
       .default({ dollars: 5, minutes: 480, steps: 30 }),
     /** Cap that paused the assignment (null: not paused by a cap). */
-    ceiling: text("ceiling", { enum: ["dollars", "minutes", "steps"] }),
+    ceiling: text("ceiling").$type<AssignmentLimitKind>(),
     /** Assignment deadline (optional): once passed, the owner is notified. */
     dueAt: ts("due_at"),
     /** The engine waits until this time (the agent asked to come back later, decision deadline). */

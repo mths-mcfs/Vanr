@@ -46,7 +46,7 @@ function bytesAt(b: Uint8Array, at: number, sig: readonly number[]): boolean {
 function looksLikeText(b: Uint8Array): boolean {
   if (b.includes(0)) return false;
   try {
-    new TextDecoder("utf-8", { fatal: true }).decode(b.length >= SNIFF_BYTES ? b.subarray(0, -4) : b);
+    new TextDecoder("utf-8", { fatal: true }).decode(b, { stream: b.length === SNIFF_BYTES });
     return true;
   } catch {
     return false;

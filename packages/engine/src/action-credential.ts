@@ -9,6 +9,7 @@
 //
 // Used by integrations (connectors, email), the harness (gate audit) and anything else that acts outside
 // with a stored credential. No database or Bun dependency: the web app imports the types.
+import type { ChannelAccessLevel, ChannelAccessRule } from "@vanr/contract";
 
 /** Whose credential the action uses. */
 type CredentialOwner = "agent" | "workspace" | "requester";
@@ -31,17 +32,12 @@ interface ActionCredential {
   credential: CredentialRef | null;
 }
 
-const CHANNEL_LEVELS = ["off", "read", "approval"] as const;
 /** A channel's restriction: `off` removes, `read` leaves read only, `approval` asks a person on every write. */
-type ChannelLevel = (typeof CHANNEL_LEVELS)[number];
+type ChannelLevel = ChannelAccessLevel;
 type WorkspaceLevel = "read" | "write";
 
 /** Channel rule: one connection, or `*` for all of the agent's. */
-export interface ChannelRule {
-  channelId: string;
-  connectionId: string;
-  level: ChannelLevel;
-}
+export type ChannelRule = ChannelAccessRule;
 
 export const ALL_CONNECTIONS = "*";
 
