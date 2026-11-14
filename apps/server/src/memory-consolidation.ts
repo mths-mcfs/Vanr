@@ -265,7 +265,7 @@ async function consolidationOf(db: Db, agent: AgentRow, id: string) {
 }
 
 /**
- * Applies the set: locks the consolidation, the store (before items, as replacement reviews do), and each item
+ * Applies the set: locks the consolidation, the store (before items, as replacement reviews do), and each active item
  * it read in id order; checks the hash of all of them (if one changed, nothing changes
  * and it becomes `failed: changed`) and writes through the versioned writer. Two applies at the same time: the
  * second waits for the consolidation's lock and finds it already applied. The item locks are FOR NO KEY UPDATE:
@@ -285,18 +285,19 @@ export async function applyConsolidation(deps: AppDeps, me: WorkspaceMember, age
     if (row?.status !== "ready") return { row, stale: false, closed: true };
     await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`memory:agent:${agent.id}`}))`);
     const ids = Object.keys(row.bases);
+    // Archived sources already invalidate the proposal; locking them can deadlock with a restore.
     const current = ids.length
       ? await tx
           .select()
           .from(memories)
-          .where(and(storeWhere(store), inArray(memories.id, ids)))
+          .where(and(storeWhere(store), eq(memories.archived, false), inArray(memories.id, ids)))
           .orderBy(asc(memories.id))
           .for("no key update")
       : [];
     const byId = new Map(current.map((m) => [m.id, m]));
     const stale = ids.some((mid) => {
       const m = byId.get(mid);
-      return !m || m.archived || contentSha256(m.text) !== row.bases[mid];
+      return !m || contentSha256(m.text) !== row.bases[mid];
     });
     if (stale) return { row, stale: true, closed: false };
     for (const item of row.items) {

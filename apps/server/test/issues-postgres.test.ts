@@ -14,7 +14,7 @@ import { newId } from "@vanr/engine/ids";
 import { contentSha256 } from "@vanr/engine/memory";
 import { and, asc, eq, sql } from "drizzle-orm";
 import postgres from "postgres";
-import { createMemory } from "../src/agent-memory";
+import { changeMemory, createMemory, memoryVersionsOf, restoreMemory } from "../src/agent-memory";
 import type { AppDeps } from "../src/context";
 import { isUniqueViolation } from "../src/db-errors";
 import { HttpError } from "../src/http";
@@ -178,6 +178,121 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("issues and consolidations at onc
         release.open();
         const [applied, approved] = await Promise.all([applying, approving]);
         expect(approved.status).toBe("approved");
+        expect(applied).toBe("memory_consolidation.changed");
+        const [after] = await db
+          .select()
+          .from(schema.memoryConsolidations)
+          .where(eq(schema.memoryConsolidations.id, row.id));
+        expect(after).toMatchObject({ status: "failed", error: "changed" });
+      } finally {
+        release.open();
+        await Promise.allSettled(pending);
+      }
+    });
+  }, 60_000);
+
+  test("a merge and restoration of an archived source finish without deadlock", async () => {
+    await withServer("mcn_restore", async (server, admin, { workspaceId, userId }) => {
+      const { db } = server.deps;
+      const [agent] = await db
+        .insert(schema.agents)
+        .values({
+          id: newId("agt"),
+          workspaceId,
+          name: "Lia",
+          handle: "lia",
+          model: "claude-haiku-5-5",
+          ownerUserId: userId,
+          appearance: { color: "blue", eyes: "dot", adornment: "none" },
+        })
+        .returning();
+      if (!agent) throw new Error("no agent");
+      const author = { type: "person" as const, id: userId };
+      const origin = { by: author, name: null, channel: null, at: server.deps.now().toISOString() };
+      const remember = (text: string) =>
+        createMemory(
+          db,
+          server.deps.now(),
+          { workspaceId, agentId: agent.id, scope: "agent", text, origin },
+          { author },
+        );
+      const a = await remember("Opens at 9");
+      const b = await remember("opens at 9");
+      const [row] = await db
+        .insert(schema.memoryConsolidations)
+        .values({
+          id: newId("mcn"),
+          workspaceId,
+          agentId: agent.id,
+          status: "ready",
+          items: normalizeItems([{ action: "merge", sources: [a.id, b.id], text: "Opens at 9." }], [a, b]),
+          bases: { [a.id]: contentSha256(a.text), [b.id]: contentSha256(b.text) },
+          covered: 2,
+          total: 2,
+        })
+        .returning();
+      if (!row) throw new Error("no consolidation");
+      const [initial] = await memoryVersionsOf(db, a.id);
+      if (!initial) throw new Error("no memory version");
+      await changeMemory(db, server.deps.now(), a.id, { archived: true }, { author, op: "archive" });
+      const me = { workspaceId, userId, role: "owner" as const, handle: "ana" };
+      const held = gate();
+      const release = gate();
+      const pending: Promise<unknown>[] = [];
+      try {
+        // Restore holds the archived source before requesting the store. Applying must skip that source,
+        // which already invalidates the proposal, rather than wait for it while holding the store.
+        const restoring = restoreMemory(
+          instrumented(db, {
+            pids: new Set(),
+            after: {
+              kind: "select",
+              run: async () => {
+                held.open();
+                await release.opened;
+              },
+            },
+          }),
+          server.deps.now(),
+          a.id,
+          initial.id,
+          author,
+          "restore",
+        );
+        pending.push(restoring);
+        expect(
+          await Promise.race([
+            held.opened.then(() => true),
+            restoring.then(
+              () => false,
+              () => false,
+            ),
+          ]),
+        ).toBe(true);
+        const pids = new Set<number>();
+        let finished = false;
+        const applying = applyConsolidation(withDb(server.deps, { pids }), me, agent, row.id)
+          .catch((err: unknown) => {
+            if (err instanceof HttpError) return err.code;
+            throw err;
+          })
+          .finally(() => {
+            finished = true;
+          });
+        pending.push(applying);
+        applying.catch(() => undefined);
+        const deadline = Date.now() + WAIT_MS;
+        while (!finished) {
+          const [pid] = pids;
+          const [activity] =
+            await admin`select wait_event_type from pg_stat_activity where pid = ${pid ?? 0}`;
+          if (activity?.wait_event_type === "Lock") break;
+          if (Date.now() > deadline) throw new Error("Consolidation neither finished nor waited on a lock");
+          await Bun.sleep(25);
+        }
+        release.open();
+        const [restored, applied] = await Promise.all([restoring, applying]);
+        expect(restored).toMatchObject({ id: a.id, archived: false, text: a.text });
         expect(applied).toBe("memory_consolidation.changed");
         const [after] = await db
           .select()
