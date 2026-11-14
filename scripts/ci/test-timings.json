@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "files": {
+    "scripts/ci/gate.test.ts": 25
+  }
+}
