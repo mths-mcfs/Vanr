@@ -503,6 +503,10 @@ function dateParts(def: PropDef): { start: SQL; end: SQL; time: SQL } {
   return { start: instantOf(start), end: instantOf(end), time: sql`(strpos(${start}, 'T') > 0)` };
 }
 
+const itemPresent = (c: SQL) => sql`${c} not in ('null'::jsonb, '""'::jsonb, '[]'::jsonb)`;
+const dateKey = (c: SQL) =>
+  sql`jsonb_build_array(extract(epoch from ${instantOf(sql`${c} ->> 'start'`)}), extract(epoch from ${instantOf(sql`${c} ->> 'end'`)}))`;
+
 /** The SQL of one summary over the rows of the `where` (a column of the select). Sums stay `numeric`. */
 function summarySql(def: PropDef, fn: SummaryFn): SQL {
   const c = jcell(def);
@@ -516,9 +520,11 @@ function summarySql(def: PropDef, fn: SummaryFn): SQL {
       return all;
     case "count_values":
       if (isTime(def)) return all;
-      return sql`coalesce(sum(case when jsonb_typeof(${c}) = 'array' then jsonb_array_length(${c}) when ${empty} then 0 else 1 end), 0)::float8`;
+      return sql`coalesce(sum(case when jsonb_typeof(${c}) = 'array' then (select count(*) from jsonb_array_elements(${c}) e where ${itemPresent(sql`e`)}) when ${empty} then 0 else 1 end), 0)::float8`;
     case "count_unique":
       if (isTime(def)) return sql`count(distinct ${timeCol(def)})::float8`;
+      if (filterKind(def) === "date")
+        return sql`count(distinct ${dateKey(c)}) filter (where not ${empty})::float8`;
       // a person or an agent by its identity, not by the object's text
       if (isActor(def))
         return sql`count(distinct (${c} ->> 'type') || ':' || (${c} ->> 'id')) filter (where not ${empty})::float8`;
@@ -644,7 +650,7 @@ async function uniqueItems(db: Db, def: PropDef, where: SQL): Promise<number> {
     .parse(
       firstRow(
         await db.execute(
-          sql`select count(distinct e)::float8 as n from ${R}, jsonb_array_elements(case when jsonb_typeof(${c}) = 'array' then ${c} else '[]'::jsonb end) as e where ${where}`,
+          sql`select count(distinct case when jsonb_typeof(e) = 'object' and e ? 'start' then ${dateKey(sql`e`)} else e end)::float8 as n from ${R}, jsonb_array_elements(case when jsonb_typeof(${c}) = 'array' then ${c} else '[]'::jsonb end) as e where ${where} and ${itemPresent(sql`e`)}`,
         ),
       ),
     );

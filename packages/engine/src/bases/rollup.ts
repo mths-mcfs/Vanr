@@ -1,7 +1,14 @@
 // Rollup: a function over the value of a property in the rows a relation links. The server gathers the values
 // (one per linked row, as a formula sees them) and calls `rollupValue`; the result type comes from
 // `rollupType` when the schema is saved, for the filter, the order and the grid.
-import { type FormulaPlan, planFormulas, propValue, type RowData } from "../formula/index";
+import {
+  FORMULA_LIMITS,
+  type FormulaPlan,
+  planFormulas,
+  propFType,
+  propValue,
+  type RowData,
+} from "../formula/index";
 import {
   type ComputedJson,
   type FType,
@@ -9,6 +16,7 @@ import {
   fromJson,
   isDate,
   isPerson,
+  jsonSize,
   T,
   toJson,
 } from "../formula/values";
@@ -68,58 +76,22 @@ function unique(values: FValue[]): FValue[] {
   });
 }
 
-/** A finite number in units of 2^-1074 (the smallest step of a double): every double is a whole count of them. */
-function units(x: number): bigint {
-  const view = new DataView(new ArrayBuffer(8));
-  view.setFloat64(0, x);
-  const bits = view.getBigUint64(0);
-  const negative = bits >> 63n === 1n;
-  const exponent = Number((bits >> 52n) & 0x7ffn);
-  const fraction = bits & 0xfffffffffffffn;
-  const n = exponent === 0 ? fraction : (fraction | (1n << 52n)) << BigInt(exponent - 1);
-  return negative ? -n : n;
-}
-
-/** A whole count of 2^-1074 back to the nearest double (ties to even); past the largest double, ±Infinity. */
-function fromUnits(total: bigint): number {
-  const negative = total < 0n;
-  let a = negative ? -total : total;
-  const bits = a.toString(2).length;
-  let scale = 0;
-  if (bits > 53) {
-    scale = bits - 53;
-    const rest = a & ((1n << BigInt(scale)) - 1n);
-    const half = 1n << BigInt(scale - 1);
-    a >>= BigInt(scale);
-    if (rest > half || (rest === half && (a & 1n) === 1n)) a += 1n;
-  }
-  // a fits in 53 bits: the product is exact unless it overflows (then it is Infinity, as it should)
-  const v = Number(a) * 2 ** (scale - 1074);
-  return negative ? -v : v;
-}
-
-/**
- * The sum as the database's `numeric` makes it: exact, rounded once at the end. A plain left-to-right sum gives
- * 0 for 1e308 + 5 − 1e308 and depends on the rows' order; an exact sum past the largest number is ±Infinity
- * (shown as `not_finite`). Bun's `Math.sumPrecise` isn't used: it gets -50 + -119 wrong.
- */
-export function exactSum(nums: readonly number[]): number {
+/** Sum the serialized decimal coefficients, as jsonb/numeric does, before rounding or dividing. */
+export function exactSum(nums: readonly number[], divisor = 1): number {
   let total = 0n;
-  for (const x of nums) total += units(x);
-  return fromUnits(total);
-}
-
-/** The average without overflowing on the way: 1e308 and 1e308 average 1e308, not Infinity. */
-function average(nums: readonly number[]): number {
-  const sum = exactSum(nums);
-  return Number.isFinite(sum) ? sum / nums.length : exactSum(nums.map((x) => x / nums.length));
+  for (const x of nums) {
+    const [mantissa = "0", exponent = "0"] = String(x).split("e");
+    const places = mantissa.includes(".") ? mantissa.length - mantissa.indexOf(".") - 1 : 0;
+    total += BigInt(mantissa.replace(".", "")) * 10n ** BigInt(324 + Number(exponent) - places);
+  }
+  // 10^-324 covers every serialized double; extra division digits keep rounding at the final conversion.
+  return Number(`${(total * 10n ** 20n) / BigInt(divisor)}e-344`);
 }
 
 function median(sorted: number[]): number {
   const mid = Math.floor(sorted.length / 2);
   const at = (i: number) => sorted[i] ?? 0;
-  // half of each, so two 1e308 don't overflow
-  return sorted.length % 2 ? at(mid) : at(mid - 1) / 2 + at(mid) / 2;
+  return sorted.length % 2 ? at(mid) : exactSum([at(mid - 1), at(mid)], 2);
 }
 
 /**
@@ -156,7 +128,7 @@ export function rollupValue(fn: RollupFn, values: readonly FValue[]): FValue {
     case "sum":
       return exactSum(nums);
     case "average":
-      return nums.length ? average(nums) : null;
+      return nums.length ? exactSum(nums, nums.length) : null;
     case "median":
       return nums.length ? median([...nums].sort((a, b) => a - b)) : null;
     case "min":
@@ -164,7 +136,7 @@ export function rollupValue(fn: RollupFn, values: readonly FValue[]): FValue {
     case "max":
       return nums.length ? Math.max(...nums) : null;
     case "range":
-      return nums.length ? Math.max(...nums) - Math.min(...nums) : null;
+      return nums.length ? exactSum([Math.max(...nums), -Math.min(...nums)]) : null;
     case "earliest": {
       const d = dates.reduce<(typeof dates)[number] | null>(
         (a, b) => (!a || b.start < a.start ? b : a),
@@ -260,7 +232,8 @@ export function linkedValues(
   props: Record<string, unknown>,
   linked: { tables: ReadonlyMap<string, LinkedTable>; rows: ReadonlyMap<string, LinkedRow> },
   names?: (a: PropActor) => string,
-): { extra: Record<string, FValue>; computed: Record<string, unknown> } {
+): { extra: Record<string, FValue>; computed: Record<string, unknown>; output: number } {
+  let output = 0;
   const extra: Record<string, FValue> = {};
   const computed: Record<string, unknown> = {};
   const rowsOf = (rel: PropDef): LinkedRow[] => {
@@ -281,7 +254,13 @@ export function linkedValues(
     const rel = defs.find((d) => d.id === def.rollup?.relationPropId);
     const table = rel?.relation ? linked.tables.get(rel.relation.tableId) : undefined;
     const target = table?.defs.find((d) => d.id === def.rollup?.targetPropId);
-    if (!rel || !table || !target || !rollupReadable(table.defs, target.id, table.plan)) {
+    if (
+      !rel ||
+      !table ||
+      !target ||
+      !rollupReadable(table.defs, target.id, table.plan) ||
+      !rollupType(def.rollup.fn, propFType(target, table.plan?.types))
+    ) {
       extra[def.id] = null;
       computed[def.id] = { err: "bad_rollup" };
       continue;
@@ -289,11 +268,17 @@ export function linkedValues(
     const values = rowsOf(rel).map((r) =>
       target.type === "formula" ? fromJson(r.computed[target.id], names) : propValue(target, r, names),
     );
-    const json = rollupJson(def.rollup.fn, values);
-    // a number that doesn't fit is an error in the cell and empty for the formulas that read it
     const v = rollupValue(def.rollup.fn, values);
-    extra[def.id] = typeof v === "number" && !Number.isFinite(v) ? null : v;
-    if (json !== null) computed[def.id] = json;
+    output += v === null ? 0 : jsonSize(v, FORMULA_LIMITS.maxRowOutput - output);
+    const err =
+      output > FORMULA_LIMITS.maxRowOutput
+        ? "too_large"
+        : typeof v === "number" && !Number.isFinite(v)
+          ? "not_finite"
+          : null;
+    extra[def.id] = err ? null : v;
+    const json = err ? { err } : toJson(v);
+    if (json !== undefined) computed[def.id] = json;
   }
-  return { extra, computed };
+  return { extra, computed, output };
 }

@@ -20,7 +20,7 @@ import { type Db, schema } from "@vanr/engine/db";
 import { planFormulas, propFType, resultTypeOf } from "@vanr/engine/formula";
 import { newId } from "@vanr/engine/ids";
 import type { PropDef, PropError, Props } from "@vanr/engine/props";
-import { and, asc, count, eq, gte, inArray, type SQL, sql } from "drizzle-orm";
+import { and, asc, count, eq, inArray, notInArray, type SQL, sql } from "drizzle-orm";
 import { type RowRow, relationTableIds, type TableRow, type Tx } from "./core";
 
 const { dbTables, dbRows, dbCalcDirty } = schema;
@@ -172,14 +172,13 @@ export async function dependentsOf(
   return out;
 }
 
-/** In the change's transaction: notes that these rows changed, if some source depends on this one. */
+/** In the change's transaction: notes every changed row, including dependencies added before commit. */
 export async function noteChanged(
   tx: Tx,
   table: Pick<TableRow, "id" | "workspaceId">,
   rowIds: readonly string[],
 ) {
   if (!rowIds.length) return;
-  if (!(await dependentsOf(tx, table.workspaceId, table.id)).length) return;
   for (const part of chunks(rowIds, CHUNK)) {
     await tx
       .insert(dbCalcDirty)
@@ -244,29 +243,34 @@ async function markDependents(
       .from(dbTables)
       .where(eq(dbTables.id, y.id));
     if (!now) continue;
+    if (!rowIds.length) {
+      // Deleted source: revalidate every row, including empty relations. Missing targets keep their saved
+      // result type (withRollupTypes does the same) and linkedValues publishes bad_rollup.
+      await tx
+        .update(dbTables)
+        .set({ calcVersion: now.calcVersion + 1 })
+        .where(eq(dbTables.id, y.id));
+      marked.add(y.id);
+      continue;
+    }
     let touched = false;
     for (const rel of rels) {
       for (const part of chunks(rowIds, MARK_CHUNK)) {
-        const fresh = and(
-          eq(dbRows.tableId, y.id),
-          gte(dbRows.calcVersion, now.calcVersion),
-          linksAny(rel.id, part),
-        );
-        const got = await linkLocks.lockRows(tx, fresh);
-        if (got.length) {
+        const matching = and(eq(dbRows.tableId, y.id), linksAny(rel.id, part));
+        const got = await linkLocks.lockRows(tx, matching);
+        const ids = got.map((g) => g.id);
+        if (ids.length) {
           await tx
             .update(dbRows)
             .set({ calcVersion: now.calcVersion - 1 })
-            .where(
-              inArray(
-                dbRows.id,
-                got.map((g) => g.id),
-              ),
-            );
+            .where(inArray(dbRows.id, ids));
           touched = true;
         }
-        // what is left with the version up to date was held by another write
-        const [left] = await tx.select({ n: count() }).from(dbRows).where(fresh);
+        // A held stale row may already have read the old origin; its notice must survive that recalculation.
+        const [left] = await tx
+          .select({ n: count() })
+          .from(dbRows)
+          .where(and(matching, notInArray(dbRows.id, ids)));
         if (Number(left?.n ?? 0) > 0) complete = false;
       }
     }
@@ -286,12 +290,10 @@ async function markDependents(
  * the next sources with notices (oldest first) that this call hasn't seen, so a source whose dependents are
  * held is passed over and the others are handled in the same call; no free source waits for a held one. The
  * notices of one source are merged into one (each row once), so a source held for a long time keeps one
- * notice, as big as its changed rows, however many writes it gets. Returns the sources marked (the caller
- * schedules their recalculation) and whether a notice was left because something was held (the caller tries
- * again).
+ * notice, as big as its changed rows, however many writes it gets. Adds only committed sources to `marked`,
+ * even if a later source fails. Returns whether work remains for a retry.
  */
-export async function propagate(db: Db): Promise<{ marked: Set<string>; pending: boolean }> {
-  const marked = new Set<string>();
+export async function propagate(db: Db, marked: Set<string>): Promise<boolean> {
   const seen = new Set<string>();
   let pending = false;
   for (let round = 0; round < MAX_ROUNDS; round++) {
@@ -309,9 +311,10 @@ export async function propagate(db: Db): Promise<{ marked: Set<string>; pending:
       .groupBy(dbCalcDirty.tableId, dbCalcDirty.workspaceId)
       .orderBy(sql`min(${dbCalcDirty.createdAt})`, dbCalcDirty.tableId)
       .limit(SOURCES_PER_ROUND);
-    if (!sources.length) return { marked, pending };
+    if (!sources.length) return pending;
     for (const source of sources) {
       seen.add(source.tableId);
+      const committed = new Set<string>();
       const left = await db.transaction(async (tx) => {
         const notices = await tx
           .select()
@@ -320,8 +323,10 @@ export async function propagate(db: Db): Promise<{ marked: Set<string>; pending:
           .orderBy(asc(dbCalcDirty.createdAt), asc(dbCalcDirty.id))
           .for("update", { skipLocked: true });
         if (!notices.length) return false;
-        const rowIds = [...new Set(notices.flatMap((n) => n.rowIds))];
-        const complete = await markDependents(tx, source.workspaceId, source.tableId, rowIds, marked);
+        const rowIds = notices.some((n) => !n.rowIds.length)
+          ? []
+          : [...new Set(notices.flatMap((n) => n.rowIds))];
+        const complete = await markDependents(tx, source.workspaceId, source.tableId, rowIds, committed);
         await tx.delete(dbCalcDirty).where(
           inArray(
             dbCalcDirty.id,
@@ -330,7 +335,7 @@ export async function propagate(db: Db): Promise<{ marked: Set<string>; pending:
         );
         // what is left goes back as one notice, as old as the oldest one (its turn doesn't move back)
         if (!complete)
-          for (const part of chunks(rowIds, CHUNK))
+          for (const part of rowIds.length ? chunks(rowIds, CHUNK) : [[]])
             await tx.insert(dbCalcDirty).values({
               id: newId("dcd"),
               workspaceId: source.workspaceId,
@@ -340,10 +345,11 @@ export async function propagate(db: Db): Promise<{ marked: Set<string>; pending:
             });
         return !complete;
       });
+      for (const id of committed) marked.add(id);
       if (left) pending = true;
     }
   }
-  return { marked, pending: true };
+  return true;
 }
 
 type SchemaProblem = { code: "bad_rollup" | "missing_relation"; propId: string };

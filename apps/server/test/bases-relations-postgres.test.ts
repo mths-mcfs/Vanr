@@ -16,6 +16,7 @@ import { schema } from "@vanr/engine/db";
 import { eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { linkLocks } from "../src/bases/links";
+import { runRecalc } from "../src/bases/write";
 import type { RunningServer } from "../src/server";
 import { type BasesApi, basesApi } from "./bases-api";
 import { SERVER_TEST_MS, settle, signedIn, startTestServer } from "./harness";
@@ -133,6 +134,110 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("bases relations on Postgres"), (
       expect(dirty?.rowIds).toEqual([t1.id]);
       await settle(pg);
       expect((await api.getRow(ws, projects.id, p.id)).computed).toMatchObject({ sum: 5 });
+      expect(await notices()).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a source edit during a stale row recalculation keeps its notice until that row unlocks",
+    async () => {
+      const { ws, api } = await owner("Recalc race");
+      const { tasks, projects } = await projectsAndTasks(api, ws);
+      const t = await api.createRow(ws, tasks.id, tasks.tableId, { props: { hours: 2 } });
+      const p = await api.createRow(ws, projects.id, projects.tableId, { props: { rel: [t.id] } });
+      const db = pg.deps.db;
+      await db.execute(sql`update db_rows set calc_version = calc_version - 1 where id = ${p.id}`);
+      await db.execute(
+        sql`update db_tables set calc_done_version = calc_version - 1 where id = ${projects.tableId}`,
+      );
+      await db.execute(
+        sql.raw(
+          `create function hold_recalc() returns trigger language plpgsql as $$begin if new.id = '${p.id}' then perform pg_advisory_xact_lock(53929); end if; return new; end$$`,
+        ),
+      );
+      await db.execute(
+        sql`create trigger hold_recalc before update on db_rows for each row execute function hold_recalc()`,
+      );
+      const gate = Promise.withResolvers<void>();
+      const ready = Promise.withResolvers<number>();
+      const holder = db.transaction(async (tx) => {
+        await tx.execute(sql`select pg_advisory_xact_lock(53929)`);
+        ready.resolve(pidIn(rowsOf(await tx.execute(sql`select pg_backend_pid() as pid`))));
+        await gate.promise;
+      });
+      const pid = await ready.promise;
+      const signal = { stop: false };
+      const recalc = runRecalc(pg.deps, projects.tableId);
+      try {
+        expect(await blockedBy(pid, signal)).toBe(true);
+        await api.updateRow(ws, tasks.id, t.id, { props: { hours: 9 } });
+        expect((await notices()).some((n) => n.tableId === tasks.tableId)).toBe(true);
+      } finally {
+        signal.stop = true;
+        gate.resolve();
+        await holder;
+        await recalc;
+        await db.execute(sql`drop trigger hold_recalc on db_rows`);
+        await db.execute(sql`drop function hold_recalc()`);
+      }
+      await settle(pg);
+      expect((await api.getRow(ws, projects.id, p.id)).computed.sum).toBe(9);
+      expect(await notices()).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "the first rollup created before a source write commits sees that write after propagation",
+    async () => {
+      const { ws, api } = await owner("New dependent");
+      const tasks = await base(api, ws, "Tasks", [{ id: "hours", name: "Hours", type: "number" }]);
+      const projects = await base(api, ws, "Projects", [
+        { id: "rel", name: "R", type: "relation", relation: { tableId: tasks.tableId } },
+      ]);
+      const t = await api.createRow(ws, tasks.id, tasks.tableId, { props: { hours: 2 } });
+      const p = await api.createRow(ws, projects.id, projects.tableId, { props: { rel: [t.id] } });
+      await settle(pg);
+      const originalTx = pg.deps.db.transaction.bind(pg.deps.db);
+      const gate = Promise.withResolvers<void>();
+      const ready = Promise.withResolvers<void>();
+      let armed = true;
+      pg.deps.db.transaction = (fn, config) =>
+        originalTx(async (tx) => {
+          const result = await fn(tx);
+          if (armed && result && typeof result === "object" && "before" in result) {
+            armed = false;
+            ready.resolve();
+            await gate.promise;
+          }
+          return result;
+        }, config);
+      const write = api.updateRow(ws, tasks.id, t.id, { props: { hours: 7 } });
+      try {
+        await ready.promise;
+        const table = (await api.get(ws, projects.id)).tables[0];
+        if (!table) throw new Error("no table");
+        await api.saveSchema(ws, projects.id, projects.tableId, {
+          parentVersion: table.schemaVersion,
+          defs: [
+            ...table.defs,
+            {
+              id: "sum",
+              name: "Sum",
+              type: "rollup",
+              rollup: { relationPropId: "rel", targetPropId: "hours", fn: "sum" },
+            },
+          ],
+        });
+        expect((await api.getRow(ws, projects.id, p.id)).computed.sum).toBe(2);
+      } finally {
+        gate.resolve();
+        await write;
+        pg.deps.db.transaction = originalTx;
+      }
+      await settle(pg);
+      expect((await api.getRow(ws, projects.id, p.id)).computed.sum).toBe(7);
       expect(await notices()).toEqual([]);
     },
     SERVER_TEST_MS,

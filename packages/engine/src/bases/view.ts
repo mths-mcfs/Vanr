@@ -68,7 +68,7 @@ export function filterKind(def: PropDef): FilterKind {
       return "file";
     case "formula":
     case "rollup":
-      switch ((def.formula ?? def.rollup)?.resultType) {
+      switch ((def.type === "formula" ? def.formula : def.rollup)?.resultType) {
         case "number":
           return "number";
         case "boolean":

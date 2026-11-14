@@ -147,7 +147,7 @@ describe("rollup", () => {
       { now: 0 },
     );
     expect(out.computed.f).toBe(16);
-    const rollup = defs[1] as PropDef;
+    const rollup = { ...defs[1], formula: { expression: '"old"', resultType: "text" as const } } as PropDef;
     expect(filterKind(rollup)).toBe("number");
     expect(filterKind(defs[0] as PropDef)).toBe("multi");
     const row = {

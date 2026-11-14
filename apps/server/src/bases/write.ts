@@ -14,6 +14,7 @@
 import type { ActorRef, BaseViewType } from "@vanr/contract";
 import { keyBetween, keysBetween } from "@vanr/engine/bases/position";
 import { linkedValues, rollupReadable } from "@vanr/engine/bases/rollup";
+import { summaryFns } from "@vanr/engine/bases/summary";
 import {
   checkFilter,
   effectiveFilter,
@@ -524,6 +525,7 @@ function computeRow(
       extra: links.extra,
     },
     { now: ctx.now, names: ctx.names },
+    links.output,
   ).computed;
   return { ...links.computed, ...formulas };
 }
@@ -710,7 +712,8 @@ export async function updateRow(
   publishRows(deps, table.workspaceId, table, { rowIds: [rowId], by: input.actor });
   await indexRows(deps, [result.row]);
   await settleLinks(deps, true);
-  return result;
+  const [row] = await db.select().from(dbRows).where(eq(dbRows.id, rowId));
+  return { ...result, row: row ?? result.row };
 }
 
 /** Deletes rows inside the caller's transaction and takes them out of the search in the same commit. */
@@ -854,7 +857,19 @@ export async function rewriteRows(
   publishRows(deps, table.workspaceId, table, { rowIds: touched.map((r) => r.id), deleted: gone, by: actor });
   await indexRows(deps, touched);
   await settleLinks(deps, true);
-  return touched;
+  const current = touched.length
+    ? await deps.db
+        .select()
+        .from(dbRows)
+        .where(
+          inArray(
+            dbRows.id,
+            touched.map((r) => r.id),
+          ),
+        )
+    : [];
+  const byId = new Map(current.map((r) => [r.id, r]));
+  return touched.map((r) => byId.get(r.id) ?? r);
 }
 
 // ---------- the grid's bulk write ----------
@@ -1394,15 +1409,18 @@ export function settleLinks(deps: AppDeps, wait: boolean): Promise<void> {
   const work: Promise<void> = (async () => {
     let pending = true;
     try {
-      const done = await propagate(deps.db);
-      pending = done.pending;
-      for (const id of done.marked) {
-        if (!wait) {
-          void scheduleRecalc(deps, id);
-          continue;
+      const marked = new Set<string>();
+      try {
+        pending = await propagate(deps.db, marked);
+      } finally {
+        for (const id of marked) {
+          if (!wait) {
+            void scheduleRecalc(deps, id);
+            continue;
+          }
+          const [t] = await deps.db.select().from(dbTables).where(eq(dbTables.id, id));
+          if (t) await recalcPolicy(deps, t);
         }
-        const [t] = await deps.db.select().from(dbTables).where(eq(dbTables.id, id));
-        if (t) await recalcPolicy(deps, t);
       }
       failures.delete(deps);
     } catch (err) {
@@ -1526,7 +1544,12 @@ function pruneConfig(cfg: ViewConfig, defs: readonly PropDef[]): ViewConfig {
   }
   if (cfg.formProps) out.formProps = cfg.formProps.filter(known);
   if (cfg.summaries)
-    out.summaries = Object.fromEntries(Object.entries(cfg.summaries).filter(([k]) => known(k)));
+    out.summaries = Object.fromEntries(
+      Object.entries(cfg.summaries).filter(([k, fn]) => {
+        const def = byId.get(k);
+        return def && summaryFns(def).some((f) => f === fn);
+      }),
+    );
   return out;
 }
 
@@ -1729,8 +1752,18 @@ export async function deleteDatabase(deps: AppDeps, database: DatabaseRow) {
       // the rows went by cascade above; their chunks after them (rows before chunks, as reindex locks them)
       await unindexMany(tx, "db_row", rowIds);
       const sources = tables.map((t) => t.id);
+      // No source FK: this full invalidation survives the cascade, even for empty relations.
+      if (sources.length)
+        await tx.insert(schema.dbCalcDirty).values(
+          sources.map((tableId) => ({
+            id: newId("dcd"),
+            workspaceId: database.workspaceId,
+            tableId,
+            rowIds: [],
+          })),
+        );
       const reached = [...held.found].filter((id) => id !== database.id);
-      if (!reached.length) return { gone: [], healed: [], sources };
+      if (!reached.length) return { gone: [], healed: [] };
       const bare = sql`not exists (select 1 from ${dbViews} where ${dbViews.databaseId} = ${dbDatabases.id})`;
       const gone = await tx
         .delete(dbDatabases)
@@ -1758,16 +1791,12 @@ export async function deleteDatabase(deps: AppDeps, database: DatabaseRow) {
             updatedAt: at,
           })),
         );
-      return { gone, healed: healed.map(([id]) => id), sources };
+      return { gone, healed: healed.map(([id]) => id) };
     },
   );
   if (!result) return;
   for (const id of result.healed) publishBase(deps, database.workspaceId, id);
   for (const id of [database.id, ...result.gone.map((g) => g.id)])
     deps.hub.toWorkspace(database.workspaceId, { type: "base.deleted", baseId: id });
-  // the sources of other databases that pointed to these: the relation empty, the rollup with an error
-  const touched = new Set<string>();
-  for (const id of result.sources)
-    for (const t of await refreshDependents(deps, { id, workspaceId: database.workspaceId })) touched.add(t);
-  for (const id of touched) publishBase(deps, database.workspaceId, id);
+  await settleLinks(deps, true);
 }

@@ -13,7 +13,7 @@ import { type Filter, rowMatches } from "@vanr/engine/bases/view";
 import { openDb, schema } from "@vanr/engine/db";
 import { propValue } from "@vanr/engine/formula";
 import { fromJson } from "@vanr/engine/formula/values";
-import { eq, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import { MAX_ROWS } from "../src/bases/core";
 import { linkLocks } from "../src/bases/links";
 import { MAX_CHART_GROUPS, MAX_SUMMARIES, summarizeRows } from "../src/bases/query";
@@ -155,6 +155,24 @@ describe("bases: relation and rollup", () => {
       expect((await ana.api.list(ws)).bases.find((b) => b.id === projects.id)?.tableId).toBe(
         projects.tableId,
       );
+      const large = await task("x".repeat(60000), {});
+      await ana.api.updateRow(ws, tasks.id, t2.id, { props: { [tasks.titleId]: "x".repeat(60000) } });
+      const defs = projects.table.defs.map((d) =>
+        d.id === "sum" && d.rollup
+          ? { ...d, rollup: { ...d.rollup, targetPropId: tasks.titleId, fn: "show_original" as const } }
+          : d,
+      );
+      const saved = await ana.api.saveSchema(ws, projects.id, projects.tableId, {
+        parentVersion: projects.table.schemaVersion,
+        defs,
+      });
+      expect((await ana.api.getRow(ws, projects.id, p.id)).computed.names).toEqual({ err: "too_large" });
+      await ana.api.saveSchema(ws, projects.id, projects.tableId, {
+        parentVersion: saved.schemaVersion,
+        defs: defs.filter((d) => d.type !== "formula"),
+      });
+      const oversized = await ana.api.updateRow(ws, projects.id, p.id, { props: { rel: [t2.id, large.id] } });
+      expect(oversized.computed.sum).toEqual({ err: "too_large" });
     },
     SERVER_TEST_MS,
   );
@@ -288,6 +306,27 @@ describe("bases: relation and rollup", () => {
       expect((await ana.api.getRow(ws, tasks.id, t1.id)).computed).toMatchObject({ count: 1, via: 2 });
       expect(await notices()).toEqual([]);
       expect(withBack.schemaVersion).toBeGreaterThan(tv.schemaVersion);
+      await ana.api.saveSchema(ws, tasks.id, tasks.tableId, {
+        parentVersion: withBack.schemaVersion,
+        defs: withBack.defs.map((d) =>
+          d.id === "proj"
+            ? { ...d, relation: { tableId: tasks.tableId } }
+            : d.id === "count" && d.rollup
+              ? { ...d, rollup: { ...d.rollup, targetPropId: "hours", fn: "sum" as const } }
+              : d,
+        ),
+      });
+      expect(
+        (await ana.api.updateRow(ws, tasks.id, t1.id, { props: { hours: 5, proj: [t1.id] } })).computed.count,
+      ).toBe(5);
+      const t2 = await task("Dry", { hours: 2, proj: [t1.id] });
+      const bulk = await ana.api.bulkRows(ws, tasks.id, tasks.tableId, {
+        ops: [t2, t1].map((r) => ({ rowId: r.id, props: { hours: 9 } })),
+      });
+      expect(bulk.rows.map((r) => [r.id, r.computed.count])).toEqual([
+        [t2.id, 9],
+        [t1.id, 9],
+      ]);
     },
     SERVER_TEST_MS,
   );
@@ -354,10 +393,16 @@ describe("bases: relation and rollup", () => {
       const p = await ana.api.createRow(ws, projects.id, projects.tableId, {
         props: { [projects.titleId]: "Home", rel: [t1.id] },
       });
+      const empty = await ana.api.createRow(ws, projects.id, projects.tableId, {});
       const tv = (await ana.api.get(ws, tasks.id)).tables[0];
       if (!tv) throw new Error("no table");
-      await ana.api.saveSchema(ws, tasks.id, tasks.tableId, {
+      const changed = await ana.api.saveSchema(ws, tasks.id, tasks.tableId, {
         parentVersion: tv.schemaVersion,
+        defs: tv.defs.map((d) => (d.id === "hours" ? { ...d, type: "text" as const } : d)),
+      });
+      expect((await ana.api.getRow(ws, projects.id, p.id)).computed.sum).toEqual({ err: "bad_rollup" });
+      await ana.api.saveSchema(ws, tasks.id, tasks.tableId, {
+        parentVersion: changed.schemaVersion,
         defs: tv.defs.filter((d) => d.id !== "hours"),
       });
       await settle(server);
@@ -373,7 +418,15 @@ describe("bases: relation and rollup", () => {
       });
       expect(renamed.schemaVersion).toBe(pv.schemaVersion + 1);
       // deleting the linked base: the rollups error out, the titles go, the formula over the relation empties
-      await ana.api.remove(ws, tasks.id);
+      const off = server.deps.hub.onPublish((_, event) => {
+        if (event.type === "base.deleted" && event.baseId === tasks.id) throw new Error("crash after delete");
+      });
+      try {
+        await apiError(ana.api.remove(ws, tasks.id));
+      } finally {
+        off();
+      }
+      await resumeRecalcs(server.deps);
       await settle(server);
       const gone = await ana.api.getRow(ws, projects.id, p.id);
       expect(gone.computed).toMatchObject({
@@ -382,6 +435,7 @@ describe("bases: relation and rollup", () => {
         names: "",
       });
       expect(gone.linked).toEqual({});
+      expect((await ana.api.getRow(ws, projects.id, empty.id)).computed.pct).toEqual({ err: "bad_rollup" });
       expect((await ana.api.get(ws, projects.id)).relationTargets).toEqual([]);
       // a new relation to a source that no longer exists is rejected
       const pv2 = (await ana.api.get(ws, projects.id)).tables[0];
@@ -409,19 +463,51 @@ describe("bases: relation and rollup", () => {
       const p = await ana.api.createRow(ws, projects.id, projects.tableId, {
         props: { [projects.titleId]: "Home", rel: [t1.id] },
       });
+      const other = await projectsAndTasks(ana.api, ws);
+      const t2 = await other.task("Dry", { hours: 2 });
+      const p2 = await ana.api.createRow(ws, other.projects.id, other.projects.tableId, {
+        props: { rel: [t2.id] },
+      });
       // the task's write committed with its notice, and the process went down before marking the project
       await server.deps.db.transaction(async (tx) => {
         await tx
           .update(schema.dbRows)
           .set({ props: sql`jsonb_set(${schema.dbRows.props}, '{hours}', '10'::jsonb)` })
-          .where(eq(schema.dbRows.id, t1.id));
-        await tx
-          .insert(schema.dbCalcDirty)
-          .values({ id: "dcd_crash", workspaceId: ws, tableId: tasks.tableId, rowIds: [t1.id] });
+          .where(inArray(schema.dbRows.id, [t1.id, t2.id]));
+        await tx.insert(schema.dbCalcDirty).values([
+          {
+            id: "dcd_crash",
+            workspaceId: ws,
+            tableId: tasks.tableId,
+            rowIds: [t1.id],
+            createdAt: new Date(0),
+          },
+          { id: "dcd_retry", workspaceId: ws, tableId: other.tasks.tableId, rowIds: [t2.id] },
+        ]);
       });
       expect((await ana.api.getRow(ws, projects.id, p.id)).computed).toMatchObject({ sum: 2 });
-      await resumeRecalcs(server.deps);
-      await settle(server);
+      const original = server.deps.db.transaction.bind(server.deps.db);
+      let attempts = 0;
+      server.deps.db.transaction = (fn, config) =>
+        original(async (tx) => {
+          const result = await fn(tx);
+          if (++attempts === 2) throw new Error("rollback after marking");
+          return result;
+        }, config);
+      const recalculated: unknown[] = [];
+      const off = server.deps.hub.onPublish((_, e) => {
+        if (e.type === "base.recalc") recalculated.push(e.tableId);
+      });
+      try {
+        await settleLinks(server.deps, true);
+        expect(recalculated).toContain(projects.tableId);
+        expect(recalculated).not.toContain(other.projects.tableId);
+        await settle(server);
+      } finally {
+        server.deps.db.transaction = original;
+        off();
+      }
+      expect((await ana.api.getRow(ws, other.projects.id, p2.id)).computed.sum).toBe(10);
       expect((await ana.api.getRow(ws, projects.id, p.id)).computed).toMatchObject({ sum: 10 });
       // running it again changes nothing
       await resumeRecalcs(server.deps);
@@ -490,6 +576,7 @@ describe("bases: the footer's summary and the chart", () => {
         },
         { id: "c", name: "C", type: "checkbox" },
         { id: "f", name: "F", type: "formula", formula: { expression: 'prop("N") * 2' } },
+        { id: "list", name: "List", type: "formula", formula: { expression: '["", "a", "", []]' } },
       ]);
       const r = rng(7);
       const pick = <T>(xs: readonly T[]): T => xs[Math.floor(r() * xs.length)] as T;
@@ -664,6 +751,15 @@ describe("bases: the footer's summary and the chart", () => {
       expect(e2.code).toBe("base.bad_chart");
       const e3 = await apiError(ana.api.summaries(ws, b.id, b.tableId, { summaries: { nope: "count" } }));
       expect(e3.code).toBe("base.bad_summary");
+      await ana.api.saveSchema(ws, b.id, b.tableId, {
+        parentVersion: b.table.schemaVersion,
+        defs: b.table.defs.map((d) => (d.id === "v" ? { ...d, type: "text" as const } : d)),
+      });
+      expect((await ana.api.get(ws, b.id)).views.find((v) => v.id === view.id)?.config.summaries).toEqual({});
+      expect((await ana.api.summaries(ws, b.id, b.tableId, { viewId: view.id })).values).toEqual({});
+      expect(
+        (await apiError(ana.api.updateView(ws, b.id, view.id, { config: { summaries: { s: "sum" } } }))).code,
+      ).toBe("base.bad_view");
     },
     SERVER_TEST_MS,
   );
@@ -1238,6 +1334,24 @@ describe("bases: the review's round (each defect reproduced becomes a test)", ()
       expect(
         (await ana.api.aggregate(ws, tasks.id, tasks.tableId, { y: "hours", agg: "avg" })).groups,
       ).toEqual([{ key: null, value: 7.5e307 }]); // (3e308 + 5) / 4, without overflowing on the way
+      for (const nums of [
+        [1e18, -999999999999999900],
+        [0.1, 0.2, -0.3],
+        [1e18, 999999999999999900],
+        [1e308, 1e308],
+      ]) {
+        await ana.api.bulkRows(ws, tasks.id, tasks.tableId, {
+          ops: [a, b, c, d].map((row, i) => ({ rowId: row.id, props: { hours: nums[i] ?? null } })),
+        });
+        await expectOracle(
+          ana.api,
+          ws,
+          tasks.id,
+          tasks.tableId,
+          (def, row) => row.props[def.id] ?? null,
+          (def) => def.id === "hours",
+        );
+      }
     },
     SERVER_TEST_MS,
   );
@@ -1268,6 +1382,16 @@ describe("bases: the review's round (each defect reproduced becomes a test)", ()
         within: { prop: "d", op: "overlaps", value: ["2026-11-01", "2026-11-30"] },
       });
       expect(window.rows.map((r) => r.props[b.titleId])).toEqual(["r2"]);
+      for (const start of ["2026-10-31T22:30:00Z", "2026-10-31", "2026-10-31T00:00:00Z"])
+        await ana.api.createRow(ws, b.id, b.tableId, { props: { d: { start } } });
+      await expectOracle(
+        ana.api,
+        ws,
+        b.id,
+        b.tableId,
+        (def, row) => fromJson(row.props[def.id]),
+        (def) => def.id === "d",
+      );
     },
     SERVER_TEST_MS,
   );

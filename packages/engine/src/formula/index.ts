@@ -638,12 +638,12 @@ export function evaluateRow(
   defs: readonly PropDef[],
   row: RowData,
   ctx: EvalContext,
+  output = 0,
 ): RowResult {
   const values = new Map<string, FValue | FormulaRuntimeError>();
   const computed: Record<string, ComputedJson> = {};
   const budget = { steps: 0 };
   let steps = 0;
-  let output = 0;
   for (const [id, errs] of plan.errors) computed[id] = { err: errs[0]?.code ?? "invalid" };
   for (const f of plan.order) {
     const ev = new RowEvaluator(defs, row, ctx, values, budget);
