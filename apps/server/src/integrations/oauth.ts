@@ -235,7 +235,7 @@ export function pkcePair(): { verifier: string; challenge: string } {
   return { verifier, challenge };
 }
 
-export function authorizeUrl(input: {
+export function consentUrl(input: {
   endpoint: string;
   clientId: string;
   redirectUri: string;

@@ -24,8 +24,8 @@ import { McpAuthRequired, McpClient, McpError, type McpTool } from "./mcp";
 import { checkServerUrl } from "./net";
 import {
   type AuthServer,
-  authorizeUrl,
   checkIssuer,
+  consentUrl,
   discoverAuthServer,
   exchangeCode,
   freshTokens,
@@ -440,7 +440,7 @@ async function beginOAuth(
     { kind: "connector", targetId: row.id, nextPath, ttlMs: STATE_TTL_MS },
     secret,
   );
-  return authorizeUrl({
+  return consentUrl({
     endpoint: server.authorization_endpoint,
     clientId: client.clientId,
     redirectUri,

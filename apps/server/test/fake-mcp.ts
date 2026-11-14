@@ -23,7 +23,7 @@ export interface FakeMcp {
   registrations: Record<string, unknown>[];
   /** Plays the browser: follows the authorize and returns the code, the state and the `iss` of the redirect. */
   authorize(
-    authorizeUrl: string,
+    consentUrl: string,
   ): Promise<{ code: string; state: string; redirectUri: string; iss: string | null }>;
   stop(): void;
 }
@@ -277,8 +277,8 @@ export function startFakeMcp(opts: FakeMcpOptions = {}): FakeMcp {
     tokenRequests,
     authorizeRequests,
     registrations,
-    async authorize(authorizeUrl) {
-      const res = await fetch(authorizeUrl, { redirect: "manual" });
+    async authorize(consentUrl) {
+      const res = await fetch(consentUrl, { redirect: "manual" });
       const location = new URL(res.headers.get("location") ?? "");
       return {
         code: location.searchParams.get("code") ?? "",

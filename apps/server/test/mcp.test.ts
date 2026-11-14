@@ -1,7 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { McpAuthRequired, McpClient, parseSse } from "../src/integrations/mcp";
 import {
-  authorizeUrl,
+  consentUrl,
   discoverAuthServer,
   exchangeCode,
   pkcePair,
@@ -48,7 +48,7 @@ test("OAuth with discovery, dynamic registration and PKCE gives a token the serv
   const redirectUri = "http://localhost:9/api/v1/connectors/oauth/callback";
   const client = await registerClient(fetch, server.registration_endpoint ?? "", redirectUri, "test");
   const { verifier, challenge } = pkcePair();
-  const url = authorizeUrl({
+  const url = consentUrl({
     endpoint: server.authorization_endpoint,
     clientId: client.clientId,
     redirectUri,

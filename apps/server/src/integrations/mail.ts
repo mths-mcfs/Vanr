@@ -359,7 +359,7 @@ const composioStart = z.object({ id: z.string(), redirect_url: z.string().url() 
 
 /**
  * Composio: creates the connected account and returns the authorization link. The callback marks the account
- * active. Without a Composio key on this machine, this path wasn't exercised against the real service.
+ * active. Without a Composio key in this environment, this path wasn't exercised against the real service.
  */
 export async function connectComposio(
   deps: AppDeps,
