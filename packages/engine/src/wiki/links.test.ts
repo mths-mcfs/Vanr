@@ -93,6 +93,15 @@ describe("resolveTarget", () => {
     }
     expect(slugify("Réunion Agenda!")).toBe("reunion-agenda");
   });
+
+  test("tie: a page the whole workspace reads wins over a restricted one, even with a shorter folder", () => {
+    const pages = [
+      { ...page("plan-restricted", "Plan", ""), restricted: true },
+      page("plan", "Plan", "deep/folder"),
+    ];
+    expect(resolveTarget("Plan", pages)?.slug).toBe("plan");
+    expect(resolveTarget("Plan", [pages[0] as (typeof pages)[0]])?.slug).toBe("plan-restricted");
+  });
 });
 
 describe("blocks, headings and tags", () => {

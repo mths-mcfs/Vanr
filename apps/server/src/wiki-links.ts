@@ -14,12 +14,15 @@ import {
 } from "@vanr/engine/wiki/links";
 import { and, asc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { WikiRow } from "./wiki";
+import { readablePagesSql, type WikiViewer } from "./wiki-access";
 
 const { knowledgePages, pageLinks } = schema;
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type Conn = Db | Tx;
 
-export type LinkTarget = Pick<WikiRow, "id" | "slug" | "title" | "folder" | "aliases">;
+export type LinkTarget = Pick<WikiRow, "id" | "slug" | "title" | "folder" | "aliases"> & {
+  restricted: boolean;
+};
 
 /** Ways of writing a page's target, in lowercase (without `.md`). */
 export function namesOf(p: Pick<WikiRow, "slug" | "title" | "folder" | "aliases">): string[] {
@@ -43,6 +46,7 @@ async function candidates(db: Conn, workspaceId: string, targets: string[]): Pro
       title: knowledgePages.title,
       folder: knowledgePages.folder,
       aliases: knowledgePages.aliases,
+      restricted: sql<boolean>`${knowledgePages.access} is not null`,
     })
     .from(knowledgePages)
     .where(
@@ -146,8 +150,12 @@ function snippetAt(body: string, at: number, len: number): string {
 
 const escapeLike = (s: string) => s.replace(/[%_\\]/g, "\\$&");
 
-/** Side panel: who points to the page, who cites it without a link, where it points and the outline. */
-export async function panelOf(db: Db, row: WikiRow): Promise<WikiPanel> {
+/**
+ * Side panel, for the reader: who points to the page, who cites it without a link, where it points and the
+ * outline. An inbound link or a mention from a page the reader doesn't read stays out, and a link to a page
+ * they don't read shows as a page that doesn't exist.
+ */
+export async function panelOf(db: Db, row: WikiRow, viewer: WikiViewer): Promise<WikiPanel> {
   // Backlinks: links of pages outside the trash that point to this one.
   const back = await db
     .select({
@@ -160,7 +168,12 @@ export async function panelOf(db: Db, row: WikiRow): Promise<WikiPanel> {
     .from(pageLinks)
     .innerJoin(knowledgePages, eq(knowledgePages.id, pageLinks.sourceId))
     .where(
-      and(eq(pageLinks.targetId, row.id), ne(pageLinks.sourceId, row.id), isNull(knowledgePages.deletedAt)),
+      and(
+        eq(pageLinks.targetId, row.id),
+        ne(pageLinks.sourceId, row.id),
+        isNull(knowledgePages.deletedAt),
+        readablePagesSql(viewer),
+      ),
     )
     .orderBy(asc(knowledgePages.title), asc(pageLinks.ordinal));
   const bySource = new Map<string, WikiPanel["inboundLinks"][number]>();
@@ -198,6 +211,7 @@ export async function panelOf(db: Db, row: WikiRow): Promise<WikiPanel> {
           eq(knowledgePages.workspaceId, row.workspaceId),
           isNull(knowledgePages.deletedAt),
           ne(knowledgePages.id, row.id),
+          readablePagesSql(viewer),
           sql`(${sql.join(
             names.map((n) => sql`${knowledgePages.body} ilike ${`%${escapeLike(n)}%`}`),
             sql` or `,
@@ -233,12 +247,14 @@ export async function panelOf(db: Db, row: WikiRow): Promise<WikiPanel> {
         body: knowledgePages.body,
         deletedAt: knowledgePages.deletedAt,
       },
+      readable: sql<boolean>`${readablePagesSql(viewer)}`,
     })
     .from(pageLinks)
     .leftJoin(knowledgePages, eq(knowledgePages.id, pageLinks.targetId))
     .where(eq(pageLinks.sourceId, row.id))
     .orderBy(asc(pageLinks.ordinal));
-  const outgoing: WikiPanel["outgoing"] = outs.map(({ link, target }) => {
+  const outgoing: WikiPanel["outgoing"] = outs.map(({ link, target: hit, readable }) => {
+    const target = hit && readable ? hit : null;
     const self = link.targetId === row.id;
     const body = self ? row.body : target?.body;
     let anchorOk = true;

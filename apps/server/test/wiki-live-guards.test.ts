@@ -53,7 +53,7 @@ const BODY = "# Plan\n\nOne.\n\nTwo.\n";
 const docName = (workspaceId: string, slug: string) => `wiki/${workspaceId}/${slug}`;
 
 async function storedDraft(srv: RunningServer, workspaceId: string, slug: string) {
-  const page = await pageBySlug(srv.deps.db, workspaceId, slug);
+  const page = await pageBySlug(srv.deps.db, { workspaceId, system: true }, slug);
   const [d] = await srv.deps.db
     .select()
     .from(schema.wikiPageDocs)
@@ -449,7 +449,7 @@ describe("the live draft's limits", () => {
   test("a saved draft past MAX_BODY (stored before the limit) is not published", async () => {
     const { workspaceId, ana } = await team();
     const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Legacy", body: BODY });
-    const row = await pageBySlug(server.deps.db, workspaceId, page.slug);
+    const row = await pageBySlug(server.deps.db, { workspaceId, system: true }, page.slug);
     const md = await wikiMarkdown();
     const big = md.toYDoc(`${BODY}\n${"z".repeat(MAX_BODY + 10)}\n`);
     await server.deps.db.insert(schema.wikiPageDocs).values({
@@ -739,7 +739,9 @@ describe("stopping the server", () => {
           expect(draft?.text).toContain("One, typed before the stop.");
           expect(draft?.text).toContain("Two (draft).");
           expect(draft?.dirty).toBe(true);
-          expect((await pageBySlug(second.deps.db, workspaceId, page.slug)).version).toBe(2);
+          expect((await pageBySlug(second.deps.db, { workspaceId, system: true }, page.slug)).version).toBe(
+            2,
+          );
         } finally {
           await second.stop();
         }
@@ -784,7 +786,7 @@ describe("stopping the server", () => {
         a.close();
         const second = await startTestServer({ env: { DATA_DIR: dir } });
         try {
-          const row = await pageBySlug(second.deps.db, workspaceId, page.slug);
+          const row = await pageBySlug(second.deps.db, { workspaceId, system: true }, page.slug);
           expect(row.version).toBe(2);
           expect(row.body).toContain("One, published while stopping.");
           expect((await storedDraft(second, workspaceId, page.slug))?.dirty).toBe(false);
@@ -806,7 +808,7 @@ describe("the draft's writer must still be allowed when the save commits", () =>
   test("a version saved by an agent reaches the session and the session publishes nothing in its name", async () => {
     const { workspaceId, ana } = await team();
     const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Agent save", body: BODY });
-    const row = await pageBySlug(server.deps.db, workspaceId, page.slug);
+    const row = await pageBySlug(server.deps.db, { workspaceId, system: true }, page.slug);
     const saved = await savePage(server.deps, {
       row,
       author: { type: "agent", id: "agt_x" },
@@ -817,7 +819,7 @@ describe("the draft's writer must still be allowed when the save commits", () =>
     expect(saved.version).toBe(2);
     await ana.api.wiki.lockWikiPage(workspaceId, page.slug, true);
     // An agent never passes a lock, whatever its caller allows.
-    const locked = await pageBySlug(server.deps.db, workspaceId, page.slug);
+    const locked = await pageBySlug(server.deps.db, { workspaceId, system: true }, page.slug);
     const err = await savePage(server.deps, {
       row: locked,
       author: { type: "agent", id: "agt_x" },

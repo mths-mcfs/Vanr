@@ -147,6 +147,26 @@ jobs:
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_WIKI_FOR_UPDATE: "1"
+      # The wiki's annotations and checks on a real Postgres: two decisions on the same change of a proposal
+      # (the second waits for the first's row lock and is rejected), a decision while the page is saved,
+      # comments at once at the ceiling and two checks of one workspace. The next run swaps the row locks for
+      # unlocked reads and must fail by the result, so the first run can't pass without the locks.
+      - run: bun test apps/server/test/wiki-annotations-postgres.test.ts --test-name-pattern "on Postgres"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      - name: The proposal decision race test fails without the row locks
+        run: |
+          if out=$(bun test apps/server/test/wiki-annotations-postgres.test.ts --test-name-pattern "two decisions on the same change" 2>&1); then
+            echo "$out"
+            echo "::error::the proposal decision race test passed without the row locks"
+            exit 1
+          fi
+          echo "$out"
+          # It must fail for the race (the stale decision wrote over the other's version), not for anything else.
+          grep -q '"decide": "500 internal,200"' <<< "$out"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_WIKI_ANNOTATIONS_UNLOCKED: "1"
 
   sandbox:
     # The runner's real sandbox (bubblewrap + socat): the attack tests of the isolation of the agent's

@@ -23,6 +23,7 @@ import {
   savePropSchema,
   TITLE_BREAKS_LINK,
 } from "./wiki";
+import type { WikiViewer } from "./wiki-access";
 
 const { wikiAttachments, fileVersions, files } = schema;
 
@@ -192,7 +193,14 @@ export async function importVault(
     propsCreated: [],
     failed: [...(input.failed ?? [])],
   };
-  const existing = await allPages(deps.db, input.workspaceId);
+  // A note with the title and folder of a page the importer reads is skipped. A restricted page they don't
+  // read doesn't count: skipping the note would confirm that page exists.
+  const existing = await allPages(
+    deps.db,
+    input.author.type === "person"
+      ? { workspaceId: input.workspaceId, userId: input.author.id }
+      : { workspaceId: input.workspaceId, agentId: input.author.id },
+  );
   const key = (f: string, t: string) => `${f}\u0000${t.toLowerCase()}`;
   const taken = new Set(existing.map((p) => key(p.folder, p.title)));
   const schemaNow = await propSchemaOf(deps.db, input.workspaceId);
@@ -307,9 +315,13 @@ const fileSafe = (s: string) =>
     .join("")
     .trim() || "page";
 
-/** The whole vault as a zip: one note per page (front matter with tags, alternate titles and properties). */
-export async function exportVault(deps: AppDeps, workspaceId: string): Promise<Uint8Array> {
-  const pages = await allPages(deps.db, workspaceId);
+/**
+ * The vault as a zip: one note per page the exporter reads (front matter with tags, alternate titles and
+ * properties).
+ */
+export async function exportVault(deps: AppDeps, viewer: WikiViewer): Promise<Uint8Array> {
+  const { workspaceId } = viewer;
+  const pages = await allPages(deps.db, viewer);
   const { defs } = await propSchemaOf(deps.db, workspaceId);
   const out: Record<string, Uint8Array> = {};
   const enc = new TextEncoder();

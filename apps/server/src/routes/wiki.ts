@@ -2,7 +2,15 @@
 // trash, history with diff and restore, properties, links panel, live draft, graph, the pages agents read
 // most and the Obsidian vault (zip). Saving a quote from a message, debate or assignment (`append`) comes
 // with the slice of the chat, debates and assignments routes.
-import type { ActorRef, WikiDiff, WikiPage, WikiTopRead, WikiTrashedPage } from "@vanr/contract";
+import type {
+  ActorRef,
+  WikiDecision,
+  WikiDiff,
+  WikiGraph,
+  WikiPage,
+  WikiTopRead,
+  WikiTrashedPage,
+} from "@vanr/contract";
 import { can } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { PROP_TYPES, propText } from "@vanr/engine/props";
@@ -14,7 +22,9 @@ import { z } from "zod";
 import type { AppEnv, Ctx, WorkspaceMember } from "../context";
 import { type Form, readFormFile } from "../drive";
 import { forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
+import { unindex } from "../search-index";
 import {
+  accessManagerOnly,
   adminOnly,
   allPages,
   createPage,
@@ -27,6 +37,7 @@ import {
   propSchemaOf,
   purgePage,
   requireDeleter,
+  restrictedSlug,
   savePage,
   savePropSchema,
   toPage,
@@ -34,9 +45,21 @@ import {
   trashPage,
   unlockedFor,
   untrashPage,
+  viewerOf,
   type WikiRow,
   writeProps,
 } from "../wiki";
+import { canReadPage, parseAccess, readablePagesSql } from "../wiki-access";
+import {
+  annotationsOf,
+  createComment,
+  decideProposal,
+  deleteComment,
+  MAX_QUOTE,
+  resolveComment,
+} from "../wiki-annotations";
+import { CHANGES_PAGE, logChange, readChanges, readIndex } from "../wiki-changes";
+import { CHECK_NOW_GAP_MS, checkWorkspace, readChecks } from "../wiki-checks";
 import { linkingPages, panelOf, planRenames } from "../wiki-links";
 import { attachmentsOf, exportVault, importVault, unzipVault } from "../wiki-vault";
 import { requireMember, WORKSPACE } from "../workspace-scope";
@@ -75,10 +98,33 @@ const propDef = z
   })
   .strict();
 
-/** The page of the path (`:pageId` is the page's slug, which stays across renames). */
+/**
+ * The page of the path (`:pageId` is the page's slug, which stays across renames), among the pages the
+ * person reads: a restricted page they don't read is 404, like one that doesn't exist.
+ */
 async function page(c: Ctx, me: WorkspaceMember) {
-  return pageBySlug(c.get("deps").db, me.workspaceId, param(c, "pageId"));
+  return pageBySlug(c.get("deps").db, viewerOf(me), param(c, "pageId"));
 }
+
+const accessInput = z.union([
+  z.null(),
+  z.object({ kind: z.literal("channel"), channelId: z.string().min(1).max(64) }).strict(),
+  z
+    .object({
+      kind: z.literal("private"),
+      userIds: z.array(z.string().min(1).max(64)).max(200),
+      agentIds: z.array(z.string().min(1).max(64)).max(100),
+    })
+    .strict(),
+]);
+
+const anchorInput = z
+  .object({
+    quote: z.string().min(1).max(MAX_QUOTE),
+    prefix: z.string().max(64),
+    suffix: z.string().max(64),
+  })
+  .strict();
 
 async function versionRow(c: Ctx, row: WikiRow, version: number) {
   if (!Number.isInteger(version) || version < 1) throw notFound("Version not found");
@@ -94,7 +140,7 @@ async function versionRow(c: Ctx, row: WikiRow, version: number) {
 export function registerWiki(app: Hono<AppEnv>) {
   app.get(`${WORKSPACE}/wiki/pages`, async (c) => {
     const me = requireMember(c);
-    const pages = await allPages(c.get("deps").db, me.workspaceId);
+    const pages = await allPages(c.get("deps").db, viewerOf(me));
     return c.json({ pages: pages.map(toSummary) });
   });
 
@@ -111,6 +157,7 @@ export function registerWiki(app: Hono<AppEnv>) {
         and(
           eq(knowledgePages.workspaceId, me.workspaceId),
           isNull(knowledgePages.deletedAt),
+          readablePagesSql(viewerOf(me)),
           or(
             ilike(knowledgePages.title, like),
             ilike(knowledgePages.body, like),
@@ -203,14 +250,20 @@ export function registerWiki(app: Hono<AppEnv>) {
           props: z.record(z.string(), z.unknown()).optional(),
           altTitles: altTitles.optional(),
           tags: tags.optional(),
+          agentEdits: z.enum(["direct", "propose"]).optional(),
         })
         .strict(),
     );
+    // How an agent changes the page is not a version: whoever may edit the page picks it.
+    let current = row;
+    if (input.agentEdits && input.agentEdits !== row.agentEdits)
+      current = await patchPage(deps, row, { agentEdits: input.agentEdits }, unlockedFor(me$(me)));
+    if (!input.props && !input.altTitles && !input.tags) return c.json(await toPage(deps.db, current, me));
     const props = input.props
       ? writeProps((await propSchemaOf(deps.db, me.workspaceId)).defs, row.props, input.props)
       : undefined;
     const saved = await savePage(deps, {
-      row,
+      row: current,
       author: me$(me),
       canBypassLock: isAdmin(me),
       parentVersion: input.parentVersion,
@@ -284,7 +337,21 @@ export function registerWiki(app: Hono<AppEnv>) {
         note: "meta",
       });
     }
-    const out: WikiPage = { ...(await toPage(deps.db, final, me)), relinked: { rewritten, skipped } };
+    // The relinking holds in every page that links here; the answer names only the ones the person reads.
+    const readable = new Set(
+      (
+        await Promise.all(
+          linkers.map(async (p) => ((await canReadPage(deps.db, viewerOf(me), p)) ? p.slug : null)),
+        )
+      ).filter((x): x is string => x !== null),
+    );
+    const out: WikiPage = {
+      ...(await toPage(deps.db, final, me)),
+      relinked: {
+        rewritten: rewritten.filter((p) => readable.has(p.slug)),
+        skipped: skipped.filter((p) => readable.has(p.slug)),
+      },
+    };
     return c.json(out);
   });
 
@@ -300,6 +367,14 @@ export function registerWiki(app: Hono<AppEnv>) {
       { folder: normalizeFolder(input.folder), updatedBy: me$(me) },
       unlockedFor(me$(me)),
     );
+    if (moved.folder !== row.folder)
+      await logChange(deps.db, {
+        page: moved,
+        action: "move",
+        author: me$(me),
+        at: deps.now(),
+        detail: moved.folder,
+      });
     // A moved page's live connections are checked again at once, like a lock.
     await deps.wikiLive.recheckPage(moved);
     return c.json(await toPage(deps.db, moved, me));
@@ -340,7 +415,13 @@ export function registerWiki(app: Hono<AppEnv>) {
     const rows = await deps.db
       .select()
       .from(knowledgePages)
-      .where(and(eq(knowledgePages.workspaceId, me.workspaceId), isNotNull(knowledgePages.deletedAt)))
+      .where(
+        and(
+          eq(knowledgePages.workspaceId, me.workspaceId),
+          isNotNull(knowledgePages.deletedAt),
+          readablePagesSql(viewerOf(me)),
+        ),
+      )
       .orderBy(desc(knowledgePages.deletedAt))
       .limit(500);
     const out: WikiTrashedPage[] = [];
@@ -366,14 +447,14 @@ export function registerWiki(app: Hono<AppEnv>) {
   app.post(`${WORKSPACE}/wiki/trash/:trashId/restore`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
-    const row = await pageBySlug(deps.db, me.workspaceId, param(c, "trashId"), { trashed: true });
+    const row = await pageBySlug(deps.db, viewerOf(me), param(c, "trashId"), { trashed: true });
     return c.json(await toPage(deps.db, await untrashPage(deps, row, me), me));
   });
 
   app.delete(`${WORKSPACE}/wiki/trash/:trashId`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
-    const row = await pageBySlug(deps.db, me.workspaceId, param(c, "trashId"), { trashed: true });
+    const row = await pageBySlug(deps.db, viewerOf(me), param(c, "trashId"), { trashed: true });
     await purgePage(deps, row, me);
     return c.body(null, 204);
   });
@@ -458,7 +539,7 @@ export function registerWiki(app: Hono<AppEnv>) {
 
   app.get(`${WORKSPACE}/wiki/pages/:pageId/panel`, async (c) => {
     const me = requireMember(c);
-    return c.json(await panelOf(c.get("deps").db, await page(c, me)));
+    return c.json(await panelOf(c.get("deps").db, await page(c, me), viewerOf(me)));
   });
 
   // Live draft: publish now (the button) or throw it away.
@@ -501,12 +582,22 @@ export function registerWiki(app: Hono<AppEnv>) {
     return c.json(await savePropSchema(deps, me.workspaceId, input.defs, input.parentVersion));
   });
 
+  // The graph: the whole wiki, or the local one around a page (`pageId`) up to `depth` steps. Only pages
+  // the person reads and the links between them.
   app.get(`${WORKSPACE}/wiki/graph`, async (c) => {
     const me = requireMember(c);
     const { db } = c.get("deps");
-    const pages = await allPages(db, me.workspaceId);
+    const q = readQuery(
+      c,
+      z.object({
+        pageId: z.string().min(1).max(200).optional(),
+        depth: z.coerce.number().int().min(1).max(3).default(1),
+      }),
+    );
+    const pages = await allPages(db, viewerOf(me));
+    const readable = new Set(pages.map((p) => p.slug));
     const target = alias(knowledgePages, "target");
-    const edges = await db
+    const all = await db
       .selectDistinct({ from: knowledgePages.slug, to: target.slug })
       .from(pageLinks)
       .innerJoin(knowledgePages, eq(knowledgePages.id, pageLinks.sourceId))
@@ -519,7 +610,34 @@ export function registerWiki(app: Hono<AppEnv>) {
           isNull(target.deletedAt),
         ),
       );
-    return c.json({ nodes: pages.map((p) => ({ slug: p.slug, title: p.title, folder: p.folder })), edges });
+    let edges = all.filter((e) => readable.has(e.from) && readable.has(e.to));
+    let nodes = pages;
+    if (q.pageId) {
+      if (!readable.has(q.pageId)) throw notFound("Page not found");
+      const near = new Set([q.pageId]);
+      let frontier = [q.pageId];
+      for (let d = 0; d < q.depth && frontier.length; d++) {
+        const next: string[] = [];
+        for (const e of edges)
+          for (const [a, b] of [
+            [e.from, e.to],
+            [e.to, e.from],
+          ] as const)
+            if (frontier.includes(a) && !near.has(b)) {
+              near.add(b);
+              next.push(b);
+            }
+        frontier = next;
+      }
+      nodes = pages.filter((p) => near.has(p.slug));
+      edges = edges.filter((e) => near.has(e.from) && near.has(e.to));
+    }
+    const out: WikiGraph = {
+      nodes: nodes.map((p) => ({ slug: p.slug, title: p.title, folder: p.folder })),
+      edges,
+      center: q.pageId ?? null,
+    };
+    return c.json(out);
   });
 
   // The pages agents read most in the last 7 days.
@@ -540,6 +658,7 @@ export function registerWiki(app: Hono<AppEnv>) {
         and(
           eq(knowledgePages.workspaceId, me.workspaceId),
           isNull(knowledgePages.deletedAt),
+          readablePagesSql(viewerOf(me)),
           eq(wikiPageViews.readerType, "agent"),
           gte(wikiPageViews.lastAt, since),
         ),
@@ -609,7 +728,7 @@ export function registerWiki(app: Hono<AppEnv>) {
 
   app.get(`${WORKSPACE}/wiki/export`, async (c) => {
     const me = requireMember(c);
-    const zip = await exportVault(c.get("deps"), me.workspaceId);
+    const zip = await exportVault(c.get("deps"), viewerOf(me));
     return new Response(zip, {
       headers: {
         "Content-Type": "application/zip",
@@ -623,5 +742,139 @@ export function registerWiki(app: Hono<AppEnv>) {
   app.get(`${WORKSPACE}/wiki/attachments`, async (c) => {
     const me = requireMember(c);
     return c.json({ attachments: await attachmentsOf(c.get("deps"), me.workspaceId) });
+  });
+
+  // Who reads the page: the workspace, whoever reads a channel, or a list of people and agents. Only who
+  // created the page or an admin changes it (checked with the role read in the write's transaction).
+  app.put(`${WORKSPACE}/wiki/pages/:pageId/access`, async (c) => {
+    const me = requireMember(c);
+    const deps = c.get("deps");
+    const row = await page(c, me);
+    const { access } = await readJson(c, z.object({ access: accessInput }).strict());
+    const next = await parseAccess(deps.db, me, access);
+    // Restricting draws a new end for the slug: with the title's slug, someone else's new page with the same
+    // title would become `-2` and confirm the restricted one exists.
+    const slug = !row.access && next ? restrictedSlug(row.title) : undefined;
+    const updated = await patchPage(
+      deps,
+      row,
+      slug ? { access: next, slug } : { access: next },
+      async (tx, p) => {
+        await accessManagerOnly(me.userId)(tx, p);
+        // The page leaves the search in the same commit; the reindex after it brings it back with the new
+        // audience. If that reindex fails, the page is missing from the search, never shown to the old one.
+        await unindex(tx, deps, { kind: "wiki", id: p.id });
+      },
+    );
+    // Whoever is editing live and lost the read is closed now (at the old address too, if it changed).
+    await deps.wikiLive.recheckPage(row);
+    if (updated.slug !== row.slug) await deps.wikiLive.recheckPage(updated);
+    return c.json(await toPage(deps.db, updated, me));
+  });
+
+  // The page's comments and proposals.
+  app.get(`${WORKSPACE}/wiki/pages/:pageId/annotations`, async (c) => {
+    const me = requireMember(c);
+    return c.json(await annotationsOf(c.get("deps").db, await page(c, me)));
+  });
+
+  app.post(`${WORKSPACE}/wiki/pages/:pageId/comments`, async (c) => {
+    const me = requireMember(c);
+    const deps = c.get("deps");
+    const row = await page(c, me);
+    const input = await readJson(
+      c,
+      z
+        .object({
+          body: z.string().trim().min(1).max(10_000),
+          anchor: anchorInput.optional(),
+          parentId: z.string().min(1).max(64).optional(),
+          agentId: z.string().min(1).max(64).optional(),
+        })
+        .strict(),
+    );
+    return c.json(await createComment(deps, me, row, input), 201);
+  });
+
+  // Resolving a thread is a state of it: PUT resolves, DELETE opens it again.
+  app.put(`${WORKSPACE}/wiki/annotations/:annotationId/resolution`, async (c) => {
+    const me = requireMember(c);
+    return c.json(await resolveComment(c.get("deps"), me, param(c, "annotationId"), true));
+  });
+
+  app.delete(`${WORKSPACE}/wiki/annotations/:annotationId/resolution`, async (c) => {
+    const me = requireMember(c);
+    return c.json(await resolveComment(c.get("deps"), me, param(c, "annotationId"), false));
+  });
+
+  app.delete(`${WORKSPACE}/wiki/annotations/:annotationId`, async (c) => {
+    const me = requireMember(c);
+    await deleteComment(c.get("deps"), me, param(c, "annotationId"));
+    return c.body(null, 204);
+  });
+
+  app.post(`${WORKSPACE}/wiki/annotations/:annotationId/decide`, async (c) => {
+    const me = requireMember(c);
+    const deps = c.get("deps");
+    const input = await readJson(
+      c,
+      z
+        .object({
+          decisions: z
+            .array(z.object({ hunkId: z.string().min(1).max(16), accept: z.boolean() }).strict())
+            .min(1)
+            .max(50),
+        })
+        .strict(),
+    );
+    const { proposal, page: saved } = await decideProposal(
+      deps,
+      me,
+      param(c, "annotationId"),
+      input.decisions,
+    );
+    const out: WikiDecision = { proposal, page: await toPage(deps.db, saved, me) };
+    return c.json(out);
+  });
+
+  // index.md and log.md, built for whoever reads.
+  app.get(`${WORKSPACE}/wiki/index`, async (c) => {
+    const me = requireMember(c);
+    return c.json(await readIndex(c.get("deps").db, viewerOf(me)));
+  });
+
+  app.get(`${WORKSPACE}/wiki/changes`, async (c) => {
+    const me = requireMember(c);
+    const q = readQuery(
+      c,
+      z.object({
+        before: z.iso.datetime().optional(),
+        limit: z.coerce.number().int().min(1).max(200).default(CHANGES_PAGE),
+      }),
+    );
+    const changes = await readChanges(c.get("deps").db, viewerOf(me), {
+      before: q.before ? new Date(q.before) : undefined,
+      limit: q.limit,
+    });
+    return c.json({ changes });
+  });
+
+  // The wiki check: the last result, and "run now" (once a minute per workspace).
+  app.get(`${WORKSPACE}/wiki/checks`, async (c) => {
+    const me = requireMember(c);
+    return c.json(await readChecks(c.get("deps").db, viewerOf(me)));
+  });
+
+  app.post(`${WORKSPACE}/wiki/checks`, async (c) => {
+    const me = requireMember(c);
+    const deps = c.get("deps");
+    // The model is looked up before the claim: until the runtime slice this answers `not_available`
+    // with nothing written.
+    const ran = await checkWorkspace(deps, me.workspaceId, {
+      gapMs: CHECK_NOW_GAP_MS,
+      model: () => deps.runtime.providerForWorkspace(me.workspaceId),
+    });
+    if (!ran) throw new HttpError(429, "wiki.checks.too_soon", "The wiki was checked less than a minute ago");
+    return c.json(await readChecks(deps.db, viewerOf(me)));
   });
 }

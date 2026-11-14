@@ -46,7 +46,7 @@ async function team(srv = server) {
 }
 
 async function storedDraft(srv: RunningServer, workspaceId: string, slug: string) {
-  const page = await pageBySlug(srv.deps.db, workspaceId, slug);
+  const page = await pageBySlug(srv.deps.db, { workspaceId, system: true }, slug);
   const [d] = await srv.deps.db
     .select()
     .from(schema.wikiPageDocs)

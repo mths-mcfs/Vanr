@@ -1,0 +1,474 @@
+{
+  "extensions": [],
+  "tables": ["page_annotations", "wiki_change_log", "wiki_checks"],
+  "columns": [
+    {
+      "table": "knowledge_pages",
+      "name": "access",
+      "type": "jsonb",
+      "notNull": false,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "knowledge_pages",
+      "name": "agent_edits",
+      "type": "text",
+      "notNull": true,
+      "default": "'direct'::text",
+      "collation": null
+    },
+    {
+      "table": "page_annotations",
+      "name": "agent_id",
+      "type": "text",
+      "notNull": false,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "page_annotations",
+      "name": "anchor",
+      "type": "jsonb",
+      "notNull": false,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "page_annotations",
+      "name": "author",
+      "type": "jsonb",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "page_annotations",
+      "name": "body",
+      "type": "text",
+      "notNull": true,
+      "default": "''::text",
+      "collation": null
+    },
+    {
+      "table": "page_annotations",
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "notNull": true,
+      "default": "now()",
+      "collation": null
+    },
+    {
+      "table": "page_annotations",
+      "name": "handled_at",
+      "type": "timestamp with time zone",
+      "notNull": false,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "page_annotations",
+      "name": "handled_by",
+      "type": "jsonb",
+      "notNull": false,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "page_annotations",
+      "name": "hunks",
+      "type": "jsonb",
+      "notNull": true,
+      "default": "'[]'::jsonb",
+      "collation": null
+    },
+    {
+      "table": "page_annotations",
+      "name": "id",
+      "type": "text",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "page_annotations",
+      "name": "kind",
+      "type": "text",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "page_annotations",
+      "name": "message_id",
+      "type": "text",
+      "notNull": false,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "page_annotations",
+      "name": "page_id",
+      "type": "text",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "page_annotations",
+      "name": "parent_id",
+      "type": "text",
+      "notNull": false,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "page_annotations",
+      "name": "parent_version",
+      "type": "integer",
+      "notNull": false,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "page_annotations",
+      "name": "status",
+      "type": "text",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "page_annotations",
+      "name": "updated_at",
+      "type": "timestamp with time zone",
+      "notNull": true,
+      "default": "now()",
+      "collation": null
+    },
+    {
+      "table": "page_annotations",
+      "name": "workspace_id",
+      "type": "text",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "wiki_change_log",
+      "name": "action",
+      "type": "text",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "wiki_change_log",
+      "name": "at",
+      "type": "timestamp with time zone",
+      "notNull": true,
+      "default": "now()",
+      "collation": null
+    },
+    {
+      "table": "wiki_change_log",
+      "name": "author",
+      "type": "jsonb",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "wiki_change_log",
+      "name": "detail",
+      "type": "text",
+      "notNull": false,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "wiki_change_log",
+      "name": "id",
+      "type": "text",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "wiki_change_log",
+      "name": "page_id",
+      "type": "text",
+      "notNull": false,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "wiki_change_log",
+      "name": "title",
+      "type": "text",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "wiki_change_log",
+      "name": "workspace_id",
+      "type": "text",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "wiki_checks",
+      "name": "checked",
+      "type": "jsonb",
+      "notNull": true,
+      "default": "'{}'::jsonb",
+      "collation": null
+    },
+    {
+      "table": "wiki_checks",
+      "name": "findings",
+      "type": "jsonb",
+      "notNull": true,
+      "default": "'[]'::jsonb",
+      "collation": null
+    },
+    {
+      "table": "wiki_checks",
+      "name": "ran_at",
+      "type": "timestamp with time zone",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "wiki_checks",
+      "name": "test_model",
+      "type": "boolean",
+      "notNull": true,
+      "default": "false",
+      "collation": null
+    },
+    {
+      "table": "wiki_checks",
+      "name": "workspace_id",
+      "type": "text",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    }
+  ],
+  "constraints": [
+    {
+      "table": "knowledge_pages",
+      "name": "knowledge_pages_agent_edits_not_null",
+      "type": "n",
+      "definition": "NOT NULL agent_edits"
+    },
+    {
+      "table": "page_annotations",
+      "name": "page_annotations_author_not_null",
+      "type": "n",
+      "definition": "NOT NULL author"
+    },
+    {
+      "table": "page_annotations",
+      "name": "page_annotations_body_not_null",
+      "type": "n",
+      "definition": "NOT NULL body"
+    },
+    {
+      "table": "page_annotations",
+      "name": "page_annotations_created_at_not_null",
+      "type": "n",
+      "definition": "NOT NULL created_at"
+    },
+    {
+      "table": "page_annotations",
+      "name": "page_annotations_hunks_not_null",
+      "type": "n",
+      "definition": "NOT NULL hunks"
+    },
+    {
+      "table": "page_annotations",
+      "name": "page_annotations_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL id"
+    },
+    {
+      "table": "page_annotations",
+      "name": "page_annotations_kind_not_null",
+      "type": "n",
+      "definition": "NOT NULL kind"
+    },
+    {
+      "table": "page_annotations",
+      "name": "page_annotations_page_id_knowledge_pages_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (page_id) REFERENCES knowledge_pages(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "page_annotations",
+      "name": "page_annotations_page_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL page_id"
+    },
+    {
+      "table": "page_annotations",
+      "name": "page_annotations_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "table": "page_annotations",
+      "name": "page_annotations_status_not_null",
+      "type": "n",
+      "definition": "NOT NULL status"
+    },
+    {
+      "table": "page_annotations",
+      "name": "page_annotations_updated_at_not_null",
+      "type": "n",
+      "definition": "NOT NULL updated_at"
+    },
+    {
+      "table": "page_annotations",
+      "name": "page_annotations_workspace_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL workspace_id"
+    },
+    {
+      "table": "page_annotations",
+      "name": "page_annotations_workspace_id_workspaces_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "wiki_change_log",
+      "name": "wiki_change_log_action_not_null",
+      "type": "n",
+      "definition": "NOT NULL action"
+    },
+    {
+      "table": "wiki_change_log",
+      "name": "wiki_change_log_at_not_null",
+      "type": "n",
+      "definition": "NOT NULL at"
+    },
+    {
+      "table": "wiki_change_log",
+      "name": "wiki_change_log_author_not_null",
+      "type": "n",
+      "definition": "NOT NULL author"
+    },
+    {
+      "table": "wiki_change_log",
+      "name": "wiki_change_log_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL id"
+    },
+    {
+      "table": "wiki_change_log",
+      "name": "wiki_change_log_page_id_knowledge_pages_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (page_id) REFERENCES knowledge_pages(id) ON DELETE SET NULL"
+    },
+    {
+      "table": "wiki_change_log",
+      "name": "wiki_change_log_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "table": "wiki_change_log",
+      "name": "wiki_change_log_title_not_null",
+      "type": "n",
+      "definition": "NOT NULL title"
+    },
+    {
+      "table": "wiki_change_log",
+      "name": "wiki_change_log_workspace_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL workspace_id"
+    },
+    {
+      "table": "wiki_change_log",
+      "name": "wiki_change_log_workspace_id_workspaces_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "wiki_checks",
+      "name": "wiki_checks_checked_not_null",
+      "type": "n",
+      "definition": "NOT NULL checked"
+    },
+    {
+      "table": "wiki_checks",
+      "name": "wiki_checks_findings_not_null",
+      "type": "n",
+      "definition": "NOT NULL findings"
+    },
+    {
+      "table": "wiki_checks",
+      "name": "wiki_checks_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (workspace_id)"
+    },
+    {
+      "table": "wiki_checks",
+      "name": "wiki_checks_ran_at_not_null",
+      "type": "n",
+      "definition": "NOT NULL ran_at"
+    },
+    {
+      "table": "wiki_checks",
+      "name": "wiki_checks_test_model_not_null",
+      "type": "n",
+      "definition": "NOT NULL test_model"
+    },
+    {
+      "table": "wiki_checks",
+      "name": "wiki_checks_workspace_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL workspace_id"
+    },
+    {
+      "table": "wiki_checks",
+      "name": "wiki_checks_workspace_id_workspaces_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
+    }
+  ],
+  "indexes": [
+    {
+      "table": "page_annotations",
+      "name": "page_annotations_page_idx",
+      "definition": "CREATE INDEX page_annotations_page_idx ON public.page_annotations USING btree (page_id, created_at)"
+    },
+    {
+      "table": "page_annotations",
+      "name": "page_annotations_pkey",
+      "definition": "CREATE UNIQUE INDEX page_annotations_pkey ON public.page_annotations USING btree (id)"
+    },
+    {
+      "table": "wiki_change_log",
+      "name": "wiki_change_log_pkey",
+      "definition": "CREATE UNIQUE INDEX wiki_change_log_pkey ON public.wiki_change_log USING btree (id)"
+    },
+    {
+      "table": "wiki_change_log",
+      "name": "wiki_change_log_workspace_at_idx",
+      "definition": "CREATE INDEX wiki_change_log_workspace_at_idx ON public.wiki_change_log USING btree (workspace_id, at)"
+    },
+    {
+      "table": "wiki_checks",
+      "name": "wiki_checks_pkey",
+      "definition": "CREATE UNIQUE INDEX wiki_checks_pkey ON public.wiki_checks USING btree (workspace_id)"
+    }
+  ],
+  "sequences": [],
+  "triggers": [],
+  "functions": []
+}
