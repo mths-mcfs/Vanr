@@ -184,6 +184,7 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   const blobs = routedBlobs(localBlobs, () => ({
     db,
     authSecret: effective.authSecret,
+    allowPrivateNetworks: effective.integrations.allowPrivateNetworks,
     track: (work, what) => deps.runtime.track(work, what),
     now,
   }));
