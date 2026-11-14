@@ -5,7 +5,7 @@
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { and, count, eq, gte, sql } from "drizzle-orm";
-import type { AppDeps } from "../forward-types";
+import type { AppDeps } from "../context";
 
 const { integrationUsage } = schema;
 type Kind = (typeof integrationUsage.$inferInsert)["kind"];

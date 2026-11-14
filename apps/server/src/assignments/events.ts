@@ -4,7 +4,7 @@
 import type { AssignmentEvent, AssignmentEventKind } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { and, asc, desc, eq, gt, lt, sql } from "drizzle-orm";
-import type { AppDeps } from "../forward-types";
+import type { AppDeps } from "../context";
 
 const { assignmentEvents, assignmentSeen } = schema;
 type AssignmentActor = schema.AssignmentActor;

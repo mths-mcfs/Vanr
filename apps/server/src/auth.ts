@@ -5,7 +5,7 @@ import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError } from "better-auth/api";
 import type { Config } from "./config";
-import type { Mailer } from "./forward-types";
+import type { Mailer } from "./mailer";
 import { authSubject, localeFromHeader } from "./notify-text";
 
 export interface AuthDeps {

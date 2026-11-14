@@ -83,6 +83,11 @@ jobs:
       - run: bun test packages/engine/src/search-pg.test.ts --test-name-pattern "real Postgres"
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # The server as a single instance (the advisory lock, the undo of a boot that fails after it) and
+      # the usage ledger on Postgres, each test in a database of its own.
+      - run: bun test apps/server/test/production.test.ts apps/server/test/usage-ledger.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
 
   workflows:
     runs-on: ubuntu-latest

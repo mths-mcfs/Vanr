@@ -6,7 +6,8 @@ import { anthropicProvider } from "@vanr/engine/models/anthropic";
 import { fakeProvider } from "@vanr/engine/models/fake";
 import type { ModelProvider } from "@vanr/engine/models/types";
 import { and, eq, isNull } from "drizzle-orm";
-import type { AgentRow, AppDeps, ProviderLookup } from "./forward-types";
+import type { AppDeps } from "./context";
+import type { AgentRow, ProviderLookup } from "./forward-types";
 
 const { credentials, workspaces } = schema;
 

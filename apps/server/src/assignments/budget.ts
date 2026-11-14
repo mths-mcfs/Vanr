@@ -5,7 +5,7 @@ import type { AssignmentUsage } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import type { BudgetScope } from "@vanr/engine/usage";
 import { and, count, eq, inArray, sql } from "drizzle-orm";
-import type { AppDeps } from "../forward-types";
+import type { AppDeps } from "../context";
 
 const { assignments, assignmentWork, runnerJobs } = schema;
 type AssignmentLimits = schema.AssignmentLimits;

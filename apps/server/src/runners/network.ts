@@ -8,7 +8,7 @@ import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { DOMAIN_RE, type NetworkPolicyFrame } from "@vanr/engine/runner-protocol";
 import { and, desc, eq, inArray } from "drizzle-orm";
-import type { AppDeps } from "../forward-types";
+import type { AppDeps } from "../context";
 
 const { sandboxPolicies, networkRequests, messages } = schema;
 

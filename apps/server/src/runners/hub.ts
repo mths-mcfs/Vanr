@@ -1,0 +1,253 @@
+// The runners' connections and the RPC over them. `call` sends a `request` and waits for the `result`; a
+// caller that asked for a stream gets the `output` frames on the way. A runner serves at most MAX_INFLIGHT
+// requests at a time; the rest wait for a slot here. If the runner drops, everything pending fails with `offline`.
+
+import { newId } from "@vanr/engine/ids";
+import {
+  type AgentRef,
+  type HarnessEvent,
+  MAX_INFLIGHT,
+  type OpArgs,
+  type RunnerErrorCode,
+  type RunnerOp,
+  type ServerFrame,
+} from "@vanr/engine/runner-protocol";
+import type { ServerWebSocket } from "bun";
+import { log } from "../logger";
+
+export interface RunnerSocketData {
+  kind: "runner";
+  runnerId: string | null;
+  workspaceId: string | null;
+  lastFrameAt: number;
+  helloTimer: ReturnType<typeof setTimeout> | null;
+  pingTimer: ReturnType<typeof setInterval> | null;
+}
+
+export type RunnerSocket = ServerWebSocket<RunnerSocketData>;
+
+export class RunnerCallError extends Error {
+  constructor(
+    readonly code: RunnerErrorCode,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+/** Agent tool called by the harness on the runner during a `harness.turn`. */
+type HarnessToolHandler = (name: string, input: unknown) => Promise<{ content: string; isError: boolean }>;
+
+interface Pending {
+  runnerId: string;
+  resolve: (data: unknown) => void;
+  reject: (err: RunnerCallError) => void;
+  onOutput?: (stream: "stdout" | "stderr", chunk: string) => void;
+  onHarnessEvent?: (event: HarnessEvent) => void;
+  onHarnessTool?: HarnessToolHandler;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+interface CallOptions {
+  agent?: AgentRef | null;
+  timeoutMs?: number;
+  onOutput?: (stream: "stdout" | "stderr", chunk: string) => void;
+  onHarnessEvent?: (event: HarnessEvent) => void;
+  onHarnessTool?: HarnessToolHandler;
+  signal?: AbortSignal;
+}
+
+export class RunnerHub {
+  private readonly sockets = new Map<string, RunnerSocket>();
+  private readonly pending = new Map<string, Pending>();
+  private readonly busy = new Map<string, number>();
+  private readonly waiting = new Map<string, (() => void)[]>();
+
+  isOnline(runnerId: string): boolean {
+    return this.sockets.has(runnerId);
+  }
+
+  online(): string[] {
+    return [...this.sockets.keys()];
+  }
+
+  /** Registers the runner's connection and returns the previous one (which must be rejected with `replaced`). */
+  register(runnerId: string, ws: RunnerSocket): RunnerSocket | null {
+    const previous = this.sockets.get(runnerId) ?? null;
+    this.sockets.set(runnerId, ws);
+    if (previous) this.failAll(runnerId, "offline", "The runner reconnected");
+    return previous && previous !== ws ? previous : null;
+  }
+
+  /** Removes the connection (if it is still the current one). Returns true when the runner went offline. */
+  unregister(ws: RunnerSocket): boolean {
+    const id = ws.data.runnerId;
+    if (!id || this.sockets.get(id) !== ws) return false;
+    this.sockets.delete(id);
+    this.failAll(id, "offline", "The runner went offline");
+    return true;
+  }
+
+  send(runnerId: string, frame: ServerFrame): boolean {
+    const ws = this.sockets.get(runnerId);
+    if (!ws) return false;
+    try {
+      ws.send(JSON.stringify(frame));
+      return true;
+    } catch (err) {
+      log.warn("runner.send_failed", { err, runnerId });
+      return false;
+    }
+  }
+
+  close(runnerId: string, frame: ServerFrame | null, code = 1000) {
+    const ws = this.sockets.get(runnerId);
+    if (!ws) return;
+    if (frame) this.send(runnerId, frame);
+    ws.close(code, "closed");
+  }
+
+  private async slot(runnerId: string, signal?: AbortSignal): Promise<() => void> {
+    const used = this.busy.get(runnerId) ?? 0;
+    if (used >= MAX_INFLIGHT) {
+      await new Promise<void>((resolve, reject) => {
+        const list = this.waiting.get(runnerId) ?? [];
+        const go = () => resolve();
+        list.push(go);
+        this.waiting.set(runnerId, list);
+        signal?.addEventListener(
+          "abort",
+          () => {
+            this.waiting.set(
+              runnerId,
+              (this.waiting.get(runnerId) ?? []).filter((g) => g !== go),
+            );
+            reject(new RunnerCallError("canceled", "Canceled"));
+          },
+          { once: true },
+        );
+      });
+    }
+    this.busy.set(runnerId, (this.busy.get(runnerId) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.busy.set(runnerId, Math.max(0, (this.busy.get(runnerId) ?? 1) - 1));
+      this.waiting.get(runnerId)?.shift()?.();
+    };
+  }
+
+  async call<O extends RunnerOp, T = unknown>(
+    runnerId: string,
+    op: O,
+    args: OpArgs<O>,
+    opts: CallOptions = {},
+  ): Promise<T> {
+    if (!this.isOnline(runnerId)) throw new RunnerCallError("offline", "The runner is offline");
+    const release = await this.slot(runnerId, opts.signal);
+    const id = newId("rq");
+    try {
+      return await new Promise<T>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          this.pending.delete(id);
+          this.send(runnerId, { type: "cancel", id });
+          reject(new RunnerCallError("timeout", "The runner did not answer in time"));
+        }, opts.timeoutMs ?? 60_000);
+        this.pending.set(id, {
+          runnerId,
+          resolve: (d) => resolve(d as T),
+          reject,
+          onOutput: opts.onOutput,
+          onHarnessEvent: opts.onHarnessEvent,
+          onHarnessTool: opts.onHarnessTool,
+          timer,
+        });
+        opts.signal?.addEventListener(
+          "abort",
+          () => {
+            if (!this.pending.has(id)) return;
+            this.send(runnerId, { type: "cancel", id });
+          },
+          { once: true },
+        );
+        const sent = this.send(runnerId, {
+          type: "request",
+          id,
+          op,
+          agent: opts.agent ?? null,
+          stream: !!opts.onOutput,
+          args: args as Record<string, unknown>,
+        });
+        if (!sent) {
+          clearTimeout(timer);
+          this.pending.delete(id);
+          reject(new RunnerCallError("offline", "The runner is offline"));
+        }
+      });
+    } finally {
+      release();
+    }
+  }
+
+  onResult(
+    frame:
+      | { id: string; ok: true; data: unknown }
+      | { id: string; ok: false; error: { code: RunnerErrorCode; message: string } },
+  ) {
+    const p = this.pending.get(frame.id);
+    if (!p) return;
+    this.pending.delete(frame.id);
+    clearTimeout(p.timer);
+    if (frame.ok) p.resolve(frame.data);
+    else p.reject(new RunnerCallError(frame.error.code, frame.error.message));
+  }
+
+  onOutput(frame: { id: string; stream: "stdout" | "stderr"; chunk: string }) {
+    this.pending.get(frame.id)?.onOutput?.(frame.stream, frame.chunk);
+  }
+
+  /** Only valid for the request this same runner is serving. */
+  private pendingOf(runnerId: string, id: string): Pending | null {
+    const p = this.pending.get(id);
+    return p && p.runnerId === runnerId ? p : null;
+  }
+
+  onHarnessEvent(runnerId: string, frame: { id: string; event: HarnessEvent }) {
+    this.pendingOf(runnerId, frame.id)?.onHarnessEvent?.(frame.event);
+  }
+
+  /** The harness called a tool: runs it and returns the result to the runner. */
+  onHarnessTool(runnerId: string, frame: { id: string; callId: string; name: string; input: unknown }) {
+    const handler = this.pendingOf(runnerId, frame.id)?.onHarnessTool;
+    const reply = (out: { content: string; isError: boolean }) =>
+      this.send(runnerId, {
+        type: "harness.tool_result",
+        id: frame.id,
+        callId: frame.callId,
+        content: out.content.slice(0, 400_000),
+        isError: out.isError,
+      });
+    if (!handler) {
+      reply({ content: "This turn is over", isError: true });
+      return;
+    }
+    handler(frame.name, frame.input).then(reply, (err) =>
+      reply({ content: err instanceof Error ? err.message : String(err), isError: true }),
+    );
+  }
+
+  private failAll(runnerId: string, code: RunnerErrorCode, message: string) {
+    for (const [id, p] of this.pending) {
+      if (p.runnerId !== runnerId) continue;
+      this.pending.delete(id);
+      clearTimeout(p.timer);
+      p.reject(new RunnerCallError(code, message));
+    }
+  }
+
+  closeAll() {
+    for (const ws of this.sockets.values()) ws.close(1001, "server stopping");
+    this.sockets.clear();
+  }
+}
