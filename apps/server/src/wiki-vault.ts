@@ -4,7 +4,6 @@
 // bomb), and a path with `..`, absolute or with a drive letter is rejected (zip slip).
 import type { ActorRef, WikiAttachment, WikiVaultImportResult } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
-import type { PropDef } from "@vanr/engine/props";
 import { formatFrontmatter, splitFrontmatter, vaultMeta } from "@vanr/engine/wiki/frontmatter";
 import { bodyTags } from "@vanr/engine/wiki/links";
 import { frontmatterToProps, propsToFrontmatter } from "@vanr/engine/wiki/props-vault";
@@ -14,15 +13,7 @@ import type { AppDeps } from "./context";
 import { createFile, MAX_UPLOAD_BYTES } from "./drive";
 import { HttpError } from "./http";
 import { log } from "./logger";
-import {
-  allPages,
-  createPage,
-  MAX_BODY,
-  normalizeFolder,
-  propSchemaOf,
-  savePropSchema,
-  TITLE_BREAKS_LINK,
-} from "./wiki";
+import { allPages, createPage, MAX_BODY, normalizeFolder, propSchemaOf, TITLE_BREAKS_LINK } from "./wiki";
 
 const { wikiAttachments, fileVersions, files } = schema;
 
@@ -195,8 +186,7 @@ export async function importVault(
   const existing = await allPages(deps.db, input.workspaceId);
   const key = (f: string, t: string) => `${f}\u0000${t.toLowerCase()}`;
   const taken = new Set(existing.map((p) => key(p.folder, p.title)));
-  const schemaNow = await propSchemaOf(deps.db, input.workspaceId);
-  let defs: PropDef[] = schemaNow.defs;
+  let { defs, version } = await propSchemaOf(deps.db, input.workspaceId);
   const decoder = new TextDecoder("utf-8", { fatal: false });
   const notes = input.files.filter((f) => /\.md$/i.test(f.path));
   const others = input.files.filter((f) => !/\.md$/i.test(f.path));
@@ -225,8 +215,6 @@ export async function importVault(
       continue;
     }
     const props = frontmatterToProps(defs, meta.rest);
-    defs = props.defs;
-    for (const name of props.created) if (!result.propsCreated.includes(name)) result.propsCreated.push(name);
     await createPage(deps, {
       workspaceId: input.workspaceId,
       title,
@@ -238,11 +226,14 @@ export async function importVault(
       author: input.author,
       sourceType: "obsidian",
       note: "import",
+      propSchema: { defs: props.defs, version },
     });
+    defs = props.defs;
+    version++;
+    for (const name of props.created) if (!result.propsCreated.includes(name)) result.propsCreated.push(name);
     taken.add(key(folder, title));
     result.created++;
   }
-  if (result.propsCreated.length) await savePropSchema(deps, input.workspaceId, defs, schemaNow.version);
 
   const liveAttachments = new Set(
     (await attachmentsOf(deps, input.workspaceId)).map((a) => a.path.toLowerCase()),
@@ -315,14 +306,17 @@ export async function exportVault(deps: AppDeps, workspaceId: string): Promise<U
   const enc = new TextEncoder();
   const used = new Set<string>();
   for (const p of pages) {
-    const dir = p.folder ? `${p.folder.split("/").map(fileSafe).join("/")}/` : "";
+    const dir = `wiki/${p.folder ? `${p.folder.split("/").map(fileSafe).join("/")}/` : ""}`;
     let path = `${dir}${fileSafe(p.title)}.md`;
     for (let i = 2; used.has(path.toLowerCase()); i++) path = `${dir}${fileSafe(p.title)} (${i}).md`;
     used.add(path.toLowerCase());
     const data = {
       ...(p.aliases.length ? { aliases: p.aliases } : {}),
       ...(p.tags.length ? { tags: p.tags } : {}),
-      ...propsToFrontmatter(defs, p.props),
+      ...Object.fromEntries(
+        Object.entries(propsToFrontmatter(defs, p.props)).filter(([key]) => key.toLowerCase() !== "title"),
+      ),
+      title: p.title,
     };
     // A body that starts with a divider (`---`) would be read as front matter on the way back: it gets an
     // empty block in front so it stays body.
@@ -330,7 +324,7 @@ export async function exportVault(deps: AppDeps, workspaceId: string): Promise<U
     out[path] = enc.encode(`${head}${p.body}`);
   }
   for (const a of await attachmentsOf(deps, workspaceId)) {
-    const path = a.path.split("/").map(fileSafe).join("/");
+    const path = `wiki/${a.path.split("/").map(fileSafe).join("/")}`;
     if (used.has(path.toLowerCase())) continue;
     const [v] = await deps.db
       .select({ blobKey: fileVersions.blobKey })

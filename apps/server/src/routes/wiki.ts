@@ -300,8 +300,6 @@ export function registerWiki(app: Hono<AppEnv>) {
       { folder: normalizeFolder(input.folder), updatedBy: me$(me) },
       unlockedFor(me$(me)),
     );
-    // A moved page's live connections are checked again at once, like a lock.
-    await deps.wikiLive.recheckPage(moved);
     return c.json(await toPage(deps.db, moved, me));
   });
 
@@ -312,8 +310,6 @@ export function registerWiki(app: Hono<AppEnv>) {
     const row = await page(c, me);
     const { locked } = await readJson(c, z.object({ locked: z.boolean() }).strict());
     const updated = await patchPage(deps, row, { locked }, adminOnly(me$(me)));
-    // Whoever is editing live is checked again now: a member drops to read only on a lock.
-    if (locked !== row.locked) deps.wikiLive.recheckPage(updated);
     return c.json(await toPage(deps.db, updated, me));
   });
 
@@ -498,7 +494,7 @@ export function registerWiki(app: Hono<AppEnv>) {
     const names = new Set(input.defs.map((d) => d.name.toLowerCase()));
     if (ids.size !== input.defs.length || names.size !== input.defs.length)
       throw new HttpError(400, "wiki.props.duplicate", "Property ids and names must be unique");
-    return c.json(await savePropSchema(deps, me.workspaceId, input.defs, input.parentVersion));
+    return c.json(await savePropSchema(deps, me.workspaceId, input.defs, input.parentVersion, me$(me)));
   });
 
   app.get(`${WORKSPACE}/wiki/graph`, async (c) => {

@@ -24,13 +24,7 @@ import { BackgroundWork } from "./runtime/background";
 import { createSearchIndex } from "./search-index";
 import { FirstUserPlace, SIGNUP_QUEUE_LIMITS, type SignupQueueLimits, signupDecision } from "./signup-queue";
 import { postgresLedger } from "./usage-ledger";
-import {
-  COLLAB_PATH,
-  type CollabSocketData,
-  checkCollabUpgrade,
-  createWikiCollab,
-  MAX_FRAME,
-} from "./wiki-collab";
+import { COLLAB_PATH, type CollabSocketData, createWikiCollab, MAX_FRAME } from "./wiki-collab";
 import { wikiMarkdown } from "./wiki-md";
 
 interface StartOptions {
@@ -153,7 +147,7 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
       // Slice S2 (realtime/browser-socket, runners/socket) adds here the WebSocket upgrades of
       // /api/v1/realtime and /api/v1/runners/connect, and their handlers.
       if (depsRef && path === COLLAB_PATH) {
-        const check = await checkCollabUpgrade(depsRef, req, origins);
+        const check = await collab.upgrade(req, origins);
         if (!check.ok) return check.response;
         if (srv.upgrade(req, { data: check.data })) return undefined;
         return Response.json(errorBody("upgrade_required", "Use WebSocket"), { status: 426 });
