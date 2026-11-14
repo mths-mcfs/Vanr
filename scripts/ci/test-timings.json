@@ -95,7 +95,7 @@
     "apps/server/src/runtime/background.test.ts": 97,
     "apps/server/test/runtime-port.test.ts": 7994,
     "apps/server/test/drive-extract.test.ts": 3377,
-    "apps/server/test/drive-routes.test.ts": 151788,
+    "apps/server/test/drive-routes.test.ts": 26950,
     "apps/server/test/search-routes.test.ts": 17398,
     "apps/server/test/storage-routing.test.ts": 11821,
     "apps/server/test/search-postgres.test.ts": 3273,
