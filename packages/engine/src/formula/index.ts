@@ -439,7 +439,7 @@ class RowEvaluator implements Evaluator {
   }
 
   /**
-   * The single check on every value a function or operator makes. New text costs by its length: without
+   * The single check on every value a function or operator makes, and on every property read. New text costs by its length: without
    * this, `map(list, repeat("b", 100000))` fit in the steps. A new list costs one step per item, whichever
    * function copied it: without this, `map(xs, reverse(xs))` copied millions of items for a few thousand
    * steps. A number that is not finite is an error, never a value (it would be stored as null).
@@ -476,15 +476,17 @@ class RowEvaluator implements Evaluator {
         return out;
       }
       case "prop": {
+        // A property read is a door through which a list enters: a stored list is copied on every read
+        // (propValue) and another formula's list is handed over. Both pay per item, like a made value.
         const def = resolveProp(this.defs, n.ref);
         if (!def) return this.fail("dependency_error", n.at, { name: n.ref });
         if (def.type === "formula") {
           const v = this.formulaValues.get(def.id);
           if (v instanceof FormulaRuntimeError || v === undefined)
             this.fail("dependency_error", n.at, { name: def.name });
-          return v as FValue;
+          return this.made(v as FValue, n.at);
         }
-        return propValue(def, this.row, this.ctx.names);
+        return this.made(propValue(def, this.row, this.ctx.names), n.at);
       }
       case "var":
         return scope.get(n.name) ?? null;

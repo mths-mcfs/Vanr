@@ -38,7 +38,7 @@
     "packages/engine/src/wiki/links.test.ts": 30,
     "packages/engine/src/wiki/merge.test.ts": 50,
     "packages/engine/src/wiki/props-vault.test.ts": 80,
-    "packages/engine/src/formula/robustness.test.ts": 130,
+    "packages/engine/src/formula/robustness.test.ts": 150,
     "packages/engine/src/bases/checkbox.test.ts": 40,
     "packages/engine/src/bases/view-robustness.test.ts": 40
   }

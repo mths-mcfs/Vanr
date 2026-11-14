@@ -99,3 +99,43 @@ describe("date arithmetic keeps years below 100", () => {
     expect(run('week(parseDate("0050-06-15"))')).toBe(24);
   });
 });
+
+describe("every list that enters the evaluation pays for its items", () => {
+  const loop = (body: string) => `sum(map(split(repeat("x,", 9999), ","), ${body}))`;
+  const ids = Array.from({ length: 100 }, (_, i) => `i${i}`);
+  const defs: PropDef[] = [
+    { id: "files", name: "Files", type: "file" },
+    { id: "tags", name: "Tags", type: "multi_select", options: ids.map((id) => ({ id, name: id })) },
+    { id: "who", name: "Who", type: "person" },
+    { id: "list", name: "List", type: "formula", formula: { expression: 'split(repeat("y,", 99), ",")' } },
+  ];
+  const row: RowData = {
+    ...ROW,
+    props: { files: ids, tags: ids, who: ids.map((id) => ({ type: "person" as const, id })) },
+  };
+  const evalOne = (expression: string) => {
+    const all: PropDef[] = [...defs, { id: "f", name: "F", type: "formula", formula: { expression } }];
+    return evaluateRow(planFormulas(all), all, row, { now: NOW });
+  };
+
+  test.each([
+    ["stored file list", loop('length(prop("Files"))')],
+    ["stored multi-select", loop('length(prop("Tags"))')],
+    ["stored people", loop('length(prop("Who"))')],
+    ["another formula's list", loop('length(prop("List"))')],
+    ["a list literal", loop(`length([${ids.map(() => "1").join(", ")}])`)],
+  ])("%s, read 10 thousand times, exceeds the step limit", (_door, expression) => {
+    expect(evalOne(expression).computed.f).toEqual({ err: "too_many_steps" });
+  });
+
+  test("one read pays for the items once and still runs", () => {
+    expect(evalOne('length(prop("Files")) + length(prop("List"))').computed.f).toBe(200);
+  });
+
+  test("a let variable and `current` hand over the same list, without a copy", () => {
+    const r = evalOne(`let(xs, prop("Files"), ${loop("length(xs)")})`);
+    expect(r.computed.f).toBe(1_000_000);
+    const items = evalOne('map(split(repeat("x,", 99), ","), current)');
+    expect(items.computed.f).toHaveLength(100);
+  });
+});
