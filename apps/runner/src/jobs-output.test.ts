@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
-import { JobOutput, maskValue } from "./jobs";
+import { JobOutput } from "./jobs";
 import { maskSecrets } from "./secrets";
+import { seeded } from "./testing/random";
 
 // A job's output is masked before it is split into lines: a secret of several lines (a PEM key) never goes
 // out one line at a time, wherever the pieces of the output are cut.
@@ -56,55 +57,54 @@ test("property: for any cut of the output into pieces, the lines equal those of 
   expect(cuts).toBeGreaterThan(5000);
 });
 
-test("property (JSON lines): raw lines go to the runner unchanged and every string of the event is masked, for any cut", () => {
+test("property: JSON events and text lines are two flows; a JSON line in the middle does not release the text", () => {
+  // The text flow carries secrets of several lines, whose lines can be valid JSON themselves (`1234`).
   const secrets: [string, string][] = [
-    ['q"uo\\te', "[secret:Q]"],
-    ["two\nlines", "[secret:L]"],
-    ["system", "[secret:S]"],
+    ["abcd\n1234\nwxyz", "[secret:A]"],
+    ["two\nlines", "[secret:B]"],
+    ["tok_abc123", "[secret:C]"],
   ];
-  let seed = 3;
-  const rand = (n: number) => {
-    seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff;
-    return seed % n;
-  };
-  const strings = ['q"uo\\te', "two\nlines", "system", "plain", "x two\nlines y", ""];
+  const r = seeded(424242);
+  const textPieces = ["abcd", "1234", "wxyz", "two", "lines", "tok_abc123", "plain", "[1]", "null", "x y"];
   const event = () =>
-    rand(4) === 0
-      ? "not json two"
-      : JSON.stringify({
-          type: strings[rand(strings.length)],
-          [strings[rand(strings.length)] || "k"]: [
-            strings[rand(strings.length)],
-            { t: strings[rand(strings.length)] },
-          ],
-        });
-  let cuts = 0;
-  for (let round = 0; round < 700; round++) {
-    const lines = Array.from({ length: 1 + rand(5) }, event);
-    const text = `${lines.join("\n")}\n`;
-    const got: [string, unknown][] = [];
-    const out = new JobOutput(secrets, (line, masked) => got.push([line, masked]));
-    let at = 0;
-    while (at < text.length) {
-      const len = 1 + rand(10);
-      out.push(text.slice(at, at + len));
-      at += len;
-      cuts++;
+    JSON.stringify({ type: "result", result: r.pick(["ok", "tok_abc123", "two\nlines"], "value") });
+  let cases = 0;
+  for (let round = 0; round < 600; round++) {
+    // Text lines with events put between them anywhere.
+    const textLines = Array.from({ length: 1 + r.int(6, "textLines") }, () =>
+      r.pick(textPieces, "textPiece"),
+    );
+    const all: string[] = [];
+    for (const line of textLines) {
+      while (r.int(3, "eventsBetween") === 0) all.push(event());
+      all.push(line);
     }
-    out.end();
-    const expected = lines.map((l): [string, unknown] => {
-      try {
-        const v: unknown = JSON.parse(l);
-        return [l, maskValue(v, secrets)];
-      } catch {
-        return [maskSecrets(l, secrets), undefined];
+    if (r.int(2)) all.push(event());
+    const input = `${all.join("\n")}\n`;
+    for (let k = 0; k < 8; k++) {
+      const text: string[] = [];
+      const events: string[] = [];
+      const out = new JobOutput(secrets, (line, ev) => (ev ? events.push(line) : text.push(line)));
+      let at = 0;
+      while (at < input.length) {
+        const len = 1 + r.int(16, "cut");
+        out.push(input.slice(at, at + len));
+        at += len;
       }
-    });
-    expect(got).toEqual(expected);
-    for (const [, masked] of got)
-      if (masked !== undefined)
-        for (const [v] of secrets)
-          expect(JSON.stringify(masked)).not.toContain(JSON.stringify(v).slice(1, -1));
+      out.end();
+      // The text that went out is the mask of the text that came in, whatever events were in between.
+      const expected = maskSecrets(`${textLines.join("\n")}\n`, secrets)
+        .split("\n")
+        .map((l) => l.trimEnd())
+        .filter(Boolean);
+      expect([input, text]).toEqual([input, expected]);
+      // The events go to the runner raw, every one of them, in order.
+      expect(events).toEqual(all.filter((l) => l.startsWith("{")));
+      cases++;
+    }
   }
-  expect(cuts).toBeGreaterThan(5000);
+  console.log(
+    `[flows] ${cases} cases; cuts 1-16: ${JSON.stringify(r.spread("cut"))}; events between text lines: ${JSON.stringify(r.spread("eventsBetween"))}`,
+  );
+  expect(Math.min(...r.spread("cut"))).toBeGreaterThan(1000);
 });
