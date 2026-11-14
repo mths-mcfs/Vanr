@@ -1,6 +1,6 @@
 // The GitHub App installation, called as the connector routes will call it (they come with a later slice).
 // GitHub is a local fake that checks the app's JWT with the app's public key, turns a user's `code` into a user
-// token and lists the installations that user controls; nothing goes out to the network.
+// token and lists the installations accessible to that user; nothing goes out to the network.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createVerify, generateKeyPairSync } from "node:crypto";
 import { schema } from "@vanr/engine/db";
@@ -15,19 +15,40 @@ const STATE_TTL_MS = 30 * 60_000;
 const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const API = "https://api.github.test";
 
-/** Which installations each GitHub user (by their user token) controls. */
-const USERS: Record<string, number[]> = { "user-ana": [101], "user-bob": [101, 202], "user-eve": [303] };
+/** Installations visible to each user, including a read-only collaborator. */
+const USERS: Record<string, number[]> = { "user-ana": [101], "user-bob": [101, 202], "user-eve": [909] };
 const CLIENT = { id: "Iv1.vanr", secret: "app-client-secret" };
 
 /** The fake GitHub API: every request must carry a JWT of the app, the installation token or a user token. */
 function fakeGitHub() {
   const seen: { method: string; path: string; jwt: "valid" | "invalid" | "token" | "user" }[] = [];
   const installs = new Map([
-    ["101", { id: 101, account: { login: "acme" }, repository_selection: "selected", suspended_at: null }],
-    ["202", { id: 202, account: { login: "other" }, repository_selection: "all", suspended_at: null }],
+    [
+      "101",
+      {
+        id: 101,
+        account: { id: 10, login: "acme", type: "Organization" },
+        repository_selection: "selected",
+        suspended_at: null,
+      },
+    ],
+    [
+      "202",
+      {
+        id: 202,
+        account: { id: 22, login: "other", type: "User" },
+        repository_selection: "all",
+        suspended_at: null,
+      },
+    ],
     [
       "909",
-      { id: 909, account: { login: "victim-account" }, repository_selection: "all", suspended_at: null },
+      {
+        id: 909,
+        account: { id: 90, login: "victim-account", type: "Organization" },
+        repository_selection: "all",
+        suspended_at: null,
+      },
     ],
   ]);
   /** A code works once and belongs to one user. */
@@ -74,9 +95,18 @@ function fakeGitHub() {
       if (method === "DELETE") return new Response(null, { status: 204 });
       return Response.json(install);
     }
+    if (url.pathname === "/user" && jwt === "user")
+      return Response.json({
+        id: new Headers(init.headers).get("authorization") === "Bearer user-bob" ? 22 : 11,
+      });
+    if (url.pathname.startsWith("/user/memberships/orgs/") && jwt === "user")
+      return Response.json({ state: "active", role: url.pathname.endsWith("/acme") ? "admin" : "member" });
     if (url.pathname === "/user/installations" && jwt === "user") {
       const ids = USERS[new Headers(init.headers).get("authorization")?.replace(/^Bearer /, "") ?? ""] ?? [];
-      return Response.json({ total_count: ids.length, installations: ids.map((id) => ({ id })) });
+      return Response.json({
+        total_count: ids.length,
+        installations: ids.map((id) => installs.get(String(id))),
+      });
     }
     if (url.pathname === "/installation/repositories" && jwt === "token")
       return Response.json({ total_count: 1, repositories: [{ full_name: "acme/site", private: true }] });
@@ -237,13 +267,39 @@ describe("GitHub App installation", () => {
     const allowed = ["acme/site", "tools/*"];
     expect(repoRefusal([], "search_code", { q: "x" })).toBeNull();
     expect(repoRefusal(allowed, "get_me", {})).toBeNull();
-    expect(repoRefusal(allowed, "get_file", { owner: "Acme", repo: "Site" })).toBeNull();
-    expect(repoRefusal(allowed, "get_file", { repository: "tools/cli" })).toBeNull();
-    expect(repoRefusal(allowed, "search_code", { q: "repo:acme/site TODO" })).toBeNull();
-    expect(repoRefusal(allowed, "search_code", { q: "TODO" })).toContain("Name one");
-    expect(repoRefusal(allowed, "get_file", { owner: "acme", repo: "secret" })).toContain("acme/secret");
-    expect(repoRefusal(allowed, "search_code", { q: "-repo:acme/site TODO" })).toContain("search operator");
-    expect(repoRefusal(allowed, "search_code", { q: "org:acme TODO" })).toContain("acme/*");
-    expect(repoRefusal(allowed, "get_file", { owner: "acme/site", repo: "x" })).toContain("acme/site/x");
+    expect(repoRefusal(allowed, "get_file_contents", { owner: "Acme", repo: "Site" })).toBeNull();
+    expect(repoRefusal(allowed, "get_file_contents", { owner: "tools", repo: "cli" })).toBeNull();
+    expect(repoRefusal(allowed, "search_code", { query: "repo:acme/site TODO" })).toBeNull();
+    expect(repoRefusal(allowed, "search_code", { query: "TODO" })).toContain("Name one");
+    expect(repoRefusal(allowed, "get_file_contents", { owner: "acme", repo: "secret" })).toContain(
+      "acme/secret",
+    );
+    expect(repoRefusal(allowed, "search_code", { query: "-repo:acme/site TODO" })).toContain(
+      "search operator",
+    );
+    expect(repoRefusal(allowed, "search_code", { query: "org:acme TODO" })).toContain("acme/*");
+    expect(repoRefusal(allowed, "get_file_contents", { owner: "acme/site", repo: "x" })).toContain(
+      "acme/site/x",
+    );
+    expect(repoRefusal(allowed, "search_code", { query: "TOPSECRET", repo: "acme/site" })).not.toBeNull();
+    expect(
+      repoRefusal(allowed, "issue_write", {
+        owner: "acme",
+        repo: "site",
+        parent_owner: "victim",
+        parent_repo: "private",
+        parent_issue_number: 1,
+      }),
+    ).toContain("victim/private");
+    expect(repoRefusal(allowed, "fork_repository", { owner: "acme", repo: "site" })).not.toBeNull();
+  });
+
+  test("restricted issue reads only permit methods confined to the named repository", () => {
+    const args = { owner: "acme", repo: "site", issue_number: 1 };
+    for (const method of ["get", "get_sub_issues", "get_parent"])
+      expect(repoRefusal(["acme/site"], "issue_read", { ...args, method })).not.toBeNull();
+    for (const method of ["get_comments", "get_labels"])
+      expect(repoRefusal(["acme/site"], "issue_read", { ...args, method })).toBeNull();
+    expect(repoRefusal([], "issue_read", { ...args, method: "get_parent" })).toBeNull();
   });
 });

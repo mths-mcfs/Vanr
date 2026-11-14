@@ -366,8 +366,8 @@ export async function connectImap(
 const composioStart = z.object({ id: z.string(), redirect_url: z.string().url() });
 
 /**
- * Composio: creates the connected account and returns the authorization link. The callback marks the account
- * active. Without a Composio key in this environment, this path wasn't exercised against the real service.
+ * Composio: creates the connected account and returns the authorization link. The callback verifies
+ * authorization and the authenticated mailbox before marking it active.
  */
 export async function connectComposio(
   deps: AppDeps,
@@ -440,13 +440,61 @@ export async function finishComposio(
     await deps.db.delete(mailConnections).where(account);
     return back("mail_error=denied");
   }
-  const [row] = await deps.db
-    .update(mailConnections)
-    .set({ status: "active", updatedAt: deps.now() })
-    .where(account)
-    .returning({ id: mailConnections.id });
-  if (!row) return back("mail_error=state");
-  return back(`mail_connected=${row.id}`);
+  const [pending] = await deps.db.select().from(mailConnections).where(account);
+  if (pending?.status !== "pending") return back("mail_error=state");
+  const cfg = deps.config.integrations.composio;
+  const secret = openSecret(deps, pending);
+  if (!cfg || secret?.via !== "composio" || !secret.connectedAccountId) return back("mail_error=state");
+  try {
+    const provider = z.enum(["gmail", "outlook"]).parse(pending.provider);
+    const headers = { "content-type": "application/json", "x-api-key": cfg.apiKey };
+    const res = await deps.fetchExternal(
+      `${cfg.apiUrl}/api/v3/connected_accounts/${encodeURIComponent(secret.connectedAccountId)}`,
+      { headers, signal: AbortSignal.timeout(15_000) },
+    );
+    if (!res.ok) throw new Error("Could not verify the connected account");
+    const remote = z
+      .object({
+        id: z.literal(secret.connectedAccountId),
+        user_id: z.literal(pending.id),
+        status: z.literal("ACTIVE"),
+        is_disabled: z.literal(false),
+        toolkit: z.object({ slug: z.literal(pending.provider) }),
+        auth_config: z.object({ id: z.literal(cfg.authConfigs[provider] ?? "") }),
+      })
+      .parse(await res.json());
+    const gmail = provider === "gmail";
+    const profile = await deps.fetchExternal(`${cfg.apiUrl}/api/v3/tools/execute/proxy`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        connected_account_id: remote.id,
+        user_id: pending.id,
+        method: "GET",
+        endpoint: gmail
+          ? "https://gmail.googleapis.com/gmail/v1/users/me/profile"
+          : "https://graph.microsoft.com/v1.0/me?$select=mail",
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!profile.ok) throw new Error("Could not verify the mailbox");
+    const result = z
+      .object({
+        status: z.literal(200),
+        data: z.object({ emailAddress: z.string().optional(), mail: z.string().nullable().optional() }),
+      })
+      .parse(await profile.json());
+    const address = (gmail ? result.data.emailAddress : result.data.mail)?.trim().toLowerCase();
+    if (!address || !isAddress(address)) throw new Error("The mailbox has no valid email address");
+    const [row] = await deps.db
+      .update(mailConnections)
+      .set({ address, status: "active", updatedAt: deps.now() })
+      .where(and(account, eq(mailConnections.status, "pending")))
+      .returning({ id: mailConnections.id });
+    return row ? back(`mail_connected=${row.id}`) : back("mail_error=state");
+  } catch {
+    return back("mail_error=unverified");
+  }
 }
 
 const ACTION = z.enum(MAIL_ACTIONS);
