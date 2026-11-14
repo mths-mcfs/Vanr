@@ -75,7 +75,7 @@ export const agents = {
     harness: T.HarnessKind;
     model?: string;
     fallback?: boolean;
-    acceptPlanTerms?: boolean;
+    agreeToPlanTerms?: boolean;
   }>(),
   getAgentInbox: e("GET", "/api/v1/workspaces/:workspaceId/agents/:agentId/inbox", C.AgentInbox).query<{
     limit?: number;

@@ -121,7 +121,7 @@ export const work = {
   listIssues: e("GET", "/api/v1/workspaces/:workspaceId/issues", s.field("issues", s.array(C.Issue))).query<{
     q?: string;
   }>(),
-  getIssueByNumber: e("GET", "/api/v1/workspaces/:workspaceId/issues/number/:issueNumber", C.Issue),
+  getIssueBySeq: e("GET", "/api/v1/workspaces/:workspaceId/issues/seq/:issueSeq", C.Issue),
   createIssue: e("POST", "/api/v1/workspaces/:workspaceId/issues", C.Issue).body<CreateIssueBody>(),
   updateIssue: e("PATCH", "/api/v1/workspaces/:workspaceId/issues/:issueId", C.Issue).body<
     Partial<Omit<CreateIssueBody, "channelId" | "criteria">> & { boardPosition?: number }
@@ -140,7 +140,7 @@ export const work = {
     "POST",
     "/api/v1/workspaces/:workspaceId/issues/:issueId/comments",
     C.IssueActivity,
-  ).body<{ text: string; attachmentIds?: string[] }>(),
+  ).body<{ text: string; attachedFileIds?: string[] }>(),
   askIssueAgent: e("POST", "/api/v1/workspaces/:workspaceId/issues/:issueId/ask-agent", C.Issue).body<{
     agentId: string;
   }>(),

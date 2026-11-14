@@ -620,9 +620,9 @@
       "path": "/api/v1/workspaces/:workspaceId/issues/:issueId/activity"
     },
     {
-      "name": "getIssueByNumber",
+      "name": "getIssueBySeq",
       "verb": "GET",
-      "path": "/api/v1/workspaces/:workspaceId/issues/number/:issueNumber"
+      "path": "/api/v1/workspaces/:workspaceId/issues/seq/:issueSeq"
     },
     { "name": "getJobOutput", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/jobs/:jobId/output" },
     { "name": "getMe", "verb": "GET", "path": "/api/v1/me" },
@@ -883,7 +883,6 @@
     { "name": "listDatabases", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/databases" },
     { "name": "listDebateMetrics", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/debates/metrics" },
     { "name": "listDebates", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/debates" },
-    { "name": "listFileFiles", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/files/files" },
     {
       "name": "listFileVersions",
       "verb": "GET",
@@ -1486,9 +1485,10 @@
       "path": "/api/v1/workspaces/:workspaceId/wiki/pages/:pageId/meta"
     },
     { "name": "updateWorkspace", "verb": "PATCH", "path": "/api/v1/workspaces/:workspaceId" },
+    { "name": "uploadFile", "verb": "POST", "path": "/api/v1/workspaces/:workspaceId/files/files" },
     {
       "name": "uploadFileVersion",
-      "verb": "GET",
+      "verb": "POST",
       "path": "/api/v1/workspaces/:workspaceId/files/:fileId/files"
     }
   ]

@@ -22,7 +22,7 @@ export interface UploadOptions {
   /** Consecutive failures of the same part before giving up. */
   retries?: number;
   /** Wait before retry number `attempt` (1-based). */
-  backoffMs?: (attempt: number) => number;
+  retryWaitMs?: (attempt: number) => number;
   clock?: Clock;
 }
 
@@ -64,7 +64,7 @@ export async function uploadInParts(
   options: UploadOptions = {},
 ): Promise<T.FileDetail> {
   const retries = options.retries ?? UPLOAD_RETRIES;
-  const backoff = options.backoffMs ?? uploadBackoff;
+  const backoff = options.retryWaitMs ?? uploadBackoff;
   const clock = options.clock ?? systemClock;
   const signal = options.signal;
   const call = signal ? { signal } : undefined;

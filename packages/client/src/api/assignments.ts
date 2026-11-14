@@ -94,7 +94,7 @@ export const assignments = {
     "POST",
     "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/close",
     C.Assignment,
-  ).body<{ outcome: "canceled" | "done"; saveToWiki?: boolean; note?: string }>(),
+  ).body<{ outcome: "canceled" | "done"; copyToWiki?: boolean; note?: string }>(),
   transferAssignment: e(
     "POST",
     "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/transfer",
@@ -232,7 +232,7 @@ export const assignments = {
     "POST",
     "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/submissions/:submissionId/accept",
     C.Assignment,
-  ).body<{ saveToWiki: boolean }>(),
+  ).body<{ copyToWiki: boolean }>(),
   requestAssignmentSubmissionChanges: e(
     "POST",
     "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/submissions/:submissionId/request-changes",

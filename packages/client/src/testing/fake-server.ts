@@ -43,7 +43,7 @@ export interface FakeState {
 
 export interface FakeServerOptions {
   /** Who is signed in; null answers 401 to everything that needs a session. Default: the first seed user. */
-  signedInAs?: string | null;
+  actingUser?: string | null;
   /** Starts empty instead of with the sample workspace. */
   empty?: boolean;
   /** Clock for createdAt fields (tests pass a fixed one). */
@@ -194,7 +194,7 @@ export function createFakeServer(options: FakeServerOptions = {}): FakeServer {
     ? { users: [], workspaces: [], members: [], channels: [], messages: [], reads: new Map() }
     : sampleState();
   let me: string | null =
-    options.signedInAs === undefined ? (state.users[0]?.id ?? null) : options.signedInAs;
+    options.actingUser === undefined ? (state.users[0]?.id ?? null) : options.actingUser;
   const now = options.now ?? (() => new Date());
   let seq = 100;
   const newId = (prefix: string) => `${prefix}${seq++}`;

@@ -9,32 +9,31 @@ import table from "./route-table.json";
 
 type Row = { name: string; verb: string; path: string };
 
-/** Where the table is wrong about a method and the client follows the server instead. */
-const OVERRIDES: Record<string, Row & { reason: string }> = {
-  listFileFiles: {
-    name: "uploadFile",
-    verb: "POST",
-    path: "/api/v1/workspaces/:workspaceId/files/files",
-    reason:
-      "uploads one file as multipart; the server route is POST and the table's GET came from the extractor",
-  },
-  uploadFileVersion: {
-    name: "uploadFileVersion",
-    verb: "POST",
-    path: "/api/v1/workspaces/:workspaceId/files/:fileId/files",
-    reason: "uploads a new version as multipart; the server route is POST",
-  },
+/**
+ * Divergences approved by the orchestrator: route-table.json already carries the corrected row for each of
+ * these, while vocab.json (the table it was copied from) still has the old one until it is fixed.
+ */
+const APPROVED_DIVERGENCES: Record<string, string> = {
+  uploadFile: "was listFileFiles with GET; it uploads one file as multipart and the server route is POST",
+  uploadFileVersion: "was GET; it uploads a new version as multipart and the server route is POST",
+  getIssueBySeq: "was the by-number route; the vocabulary pair renames the issue number to issueSeq",
 };
 
-/** Methods the table doesn't have, for routes the server has. */
+/** Methods the table doesn't have, for routes the server has (approved by the orchestrator). */
 const EXTRAS: Record<string, string> = {
   deleteChannelMemberPerson:
     "removes a person from a channel (the table only has the agent half of this route pair)",
 };
 
-const rows: Row[] = table.methods.map((r) => OVERRIDES[r.name] ?? r);
+const rows: Row[] = table.methods;
 
 describe("route table", () => {
+  test("every approved divergence is a row of the table", () => {
+    const names = new Set(rows.map((r) => r.name));
+    expect(Object.keys(APPROVED_DIVERGENCES).filter((n) => !names.has(n))).toEqual([]);
+    expect(Object.keys(EXTRAS).filter((n) => names.has(n))).toEqual([]);
+  });
+
   test("every method in the table exists with its verb and path", () => {
     const byName = new Map(Object.entries(endpoints));
     const wrong: string[] = [];

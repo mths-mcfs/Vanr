@@ -17,7 +17,7 @@ export interface CreateDebateBody {
   options?: string[];
   /** Share of the workspace budget the debate may spend, in percent. */
   spendCapPercent?: number;
-  originIssueId?: string;
+  sourceIssueId?: string;
   channelId?: string;
 }
 
@@ -50,10 +50,10 @@ export const debates = {
     "/api/v1/workspaces/:workspaceId/debates/:debateId/participants",
     C.DebateDetail,
   ).body<{
-    addAgentIds?: string[];
-    removeAgentIds?: string[];
-    addUserIds?: string[];
-    removeUserIds?: string[];
+    agentsToAdd?: string[];
+    agentsToRemove?: string[];
+    peopleToAdd?: string[];
+    peopleToRemove?: string[];
     addSpeakerUserIds?: string[];
     removeSpeakerUserIds?: string[];
   }>(),
