@@ -12,7 +12,7 @@ export interface Mail {
   link?: string;
   /**
    * The same key on every attempt of the same message: the provider sends it once, even when an attempt
-   * it accepted timed out here. Never a secret nor personal data (the delivery's id is the usual one).
+   * it accepted timed out here. Never a secret nor personal data (an internal row id is the usual one).
    */
   idempotencyKey?: string;
 }

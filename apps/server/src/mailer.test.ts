@@ -78,9 +78,9 @@ describe("resend mailer", () => {
       { preconnect: () => {} },
     );
     const mailer = resendMailer("k", "n@example.com", { fetch: capture });
-    await mailer.send({ ...mail, idempotencyKey: "notification-delivery/d1" });
+    await mailer.send({ ...mail, idempotencyKey: "notification/n1-email" });
     await mailer.send(mail);
-    expect(keys).toEqual(["notification-delivery/d1", null]);
+    expect(keys).toEqual(["notification/n1-email", null]);
   });
 
   test("409: still running with the same key is worth retrying; the key reused with another payload is final", async () => {
