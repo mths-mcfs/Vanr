@@ -78,7 +78,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
-      - run: bun test packages/engine/src/db/catalog.test.ts --test-name-pattern Postgres
+      - run: bun test packages/engine/src/db/catalog.test.ts packages/engine/src/sqlconn.test.ts --test-name-pattern Postgres
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
 
