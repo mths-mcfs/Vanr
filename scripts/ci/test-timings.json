@@ -1,10 +1,11 @@
 {
   "version": 1,
   "files": {
-    "packages/ui/test/smoke.test.tsx": 319,
-    "scripts/ci/gate.test.ts": 33,
+    "packages/ui/test/smoke.test.tsx": 245,
+    "packages/ui/test/contrast.test.ts": 227,
+    "scripts/ci/gate.test.ts": 31,
+    "packages/ui/test/identity.test.ts": 13,
     "scripts/typecheck.test.ts": 11,
-    "packages/ui/test/contrast.test.ts": 10,
-    "packages/ui/test/identity.test.ts": 7
+    "packages/ui/test/styles.test.ts": 5
   }
 }

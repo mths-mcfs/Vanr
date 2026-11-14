@@ -1,8 +1,10 @@
 import { CircleAlert } from "lucide-react";
 import {
   type AriaAttributes,
+  Children,
   type ComponentPropsWithRef,
   createContext,
+  isValidElement,
   type ReactNode,
   useContext,
   useId,
@@ -31,22 +33,39 @@ export type FieldControlProps = {
   disabled?: boolean;
 };
 
+/** Joins id lists, skipping empty values; undefined when nothing is left. */
+export function joinIds(...ids: Array<string | false | null | undefined>): string | undefined {
+  return ids.filter(Boolean).join(" ") || undefined;
+}
+
 /**
- * Merges the Field wiring with the control's own props. The control's explicit props win, and
- * its own aria-describedby is kept alongside the Field's hint and error.
+ * Merges the Field wiring with the control's own props. The control's own id wins (and the Field
+ * points its label at it). The caller's aria-describedby and aria-labelledby are added to the
+ * Field's, never dropped: a caller's aria-labelledby would otherwise silence the Field label.
  */
 export function useFieldControl(own: FieldControlProps, options: { labelledBy?: boolean } = {}) {
   const field = useContext(FieldContext);
   if (field === null) return own;
-  const describedBy = [field.describedBy, own["aria-describedby"]].filter(Boolean).join(" ") || undefined;
+  const callerLabelledBy = own["aria-labelledby"];
   return {
     id: own.id ?? field.controlId,
-    "aria-describedby": describedBy,
+    "aria-describedby": joinIds(field.describedBy, own["aria-describedby"]),
     "aria-invalid": own["aria-invalid"] ?? (field.invalid || undefined),
-    "aria-labelledby": own["aria-labelledby"] ?? (options.labelledBy ? field.labelId : undefined),
+    "aria-labelledby":
+      options.labelledBy || callerLabelledBy !== undefined
+        ? joinIds(field.labelId, callerLabelledBy)
+        : undefined,
     required: own.required ?? (field.required || undefined),
     disabled: own.disabled ?? (field.disabled || undefined),
   };
+}
+
+/** The id a lone child control brings with it, so the Field label can point at it. */
+function childControlId(children: ReactNode): string | undefined {
+  const nodes = Children.toArray(children);
+  const only = nodes.length === 1 ? nodes[0] : undefined;
+  if (isValidElement<{ id?: unknown }>(only) && typeof only.props.id === "string") return only.props.id;
+  return undefined;
 }
 
 export type FieldProps = Omit<ComponentPropsWithRef<"div">, "children"> & {
@@ -58,7 +77,10 @@ export type FieldProps = Omit<ComponentPropsWithRef<"div">, "children"> & {
   disabled?: boolean;
   /** Text after the label for required fields, such as "required" or "obrigatório". */
   requiredLabel?: string;
-  /** Id for the control. Generated when left out. */
+  /**
+   * Id for the control. When left out, the Field uses the id of its only child control, or
+   * generates one. A control wrapped in other elements needs this to keep its label.
+   */
   controlId?: string;
   children: ReactNode;
 };
@@ -76,14 +98,14 @@ export function Field({
   ...props
 }: FieldProps) {
   const generated = useId();
-  const id = controlId ?? `${generated}-control`;
+  const id = childControlId(children) ?? controlId ?? `${generated}-control`;
   const labelId = `${generated}-label`;
   const hintId = hint === undefined ? undefined : `${generated}-hint`;
   const errorId = error === undefined || error === null || error === false ? undefined : `${generated}-error`;
   const value: FieldContextValue = {
     controlId: id,
     labelId,
-    describedBy: [hintId, errorId].filter(Boolean).join(" ") || undefined,
+    describedBy: joinIds(hintId, errorId),
     invalid: errorId !== undefined,
     required,
     disabled,

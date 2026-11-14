@@ -372,6 +372,23 @@ function OverlaysSection({ t }: { t: Copy }) {
             <Field label={t.agentForm.nameLabel} hint={t.agentForm.nameShownInChat}>
               <Input defaultValue="Scout" />
             </Field>
+            {/* A select list and a menu opened from inside the dialog must float above it. */}
+            <Field label={t.agentForm.modelPickerLabel}>
+              <Select placeholder={t.agentForm.modelPrompt}>
+                <SelectItem value="haiku">claude-haiku-5-5</SelectItem>
+                <SelectItem value="opus">claude-opus-5-5</SelectItem>
+              </Select>
+            </Field>
+            <div>
+              <Menu>
+                <MenuTrigger asChild>
+                  <Button icon={<Icon icon={Ellipsis} />}>{t.threadMenu.trigger}</Button>
+                </MenuTrigger>
+                <MenuContent>
+                  <ThreadMenuItems t={t} />
+                </MenuContent>
+              </Menu>
+            </div>
           </DialogContent>
         </Dialog>
         <ConfirmDialog

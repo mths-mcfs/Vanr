@@ -4,9 +4,9 @@ import {
   RadioGroup as RadioPrimitive,
   Switch as SwitchPrimitive,
 } from "radix-ui";
-import { type ComponentPropsWithRef, type ReactNode, useId } from "react";
+import { type ComponentPropsWithRef, type ReactNode, useId, useState } from "react";
 import { cx } from "../internal/cx.ts";
-import { useFieldControl } from "./Field.tsx";
+import { joinIds, useFieldControl } from "./Field.tsx";
 import { Icon } from "./Icon.tsx";
 
 type Labelled = {
@@ -16,14 +16,16 @@ type Labelled = {
   hint?: ReactNode;
 };
 
-function ChoiceLabel({ htmlFor, label, hint, hintId }: Labelled & { htmlFor: string; hintId: string }) {
+type ChoiceIds = { id: string; labelId: string; hintId: string };
+
+function ChoiceLabel({ ids, label, hint }: Labelled & { ids: ChoiceIds }) {
   return (
     <span className="vr-choice__text">
-      <label className="vr-choice__label" htmlFor={htmlFor}>
+      <label className="vr-choice__label" id={ids.labelId} htmlFor={ids.id}>
         {label}
       </label>
       {hint !== undefined && (
-        <span className="vr-choice__hint" id={hintId}>
+        <span className="vr-choice__hint" id={ids.hintId}>
           {hint}
         </span>
       )}
@@ -31,34 +33,75 @@ function ChoiceLabel({ htmlFor, label, hint, hintId }: Labelled & { htmlFor: str
   );
 }
 
-function useChoiceIds(own: { id?: string; "aria-describedby"?: string }, hint: ReactNode) {
+type OwnAria = { id?: string; "aria-describedby"?: string; "aria-labelledby"?: string };
+
+/**
+ * Ids and names for a control with its own inline label. The inline label always names the
+ * control; a caller's aria-labelledby (and, inside a Field, the Field label) is added after it.
+ * The hint joins the caller's and the Field's descriptions.
+ */
+function useChoiceWiring<P extends OwnAria & { required?: boolean; disabled?: boolean }>(
+  own: P,
+  hint: ReactNode,
+  options: { inField: boolean },
+) {
   const generated = useId();
+  const labelId = `${generated}-label`;
   const hintId = `${generated}-hint`;
-  const describedBy = [own["aria-describedby"], hint === undefined ? undefined : hintId]
-    .filter(Boolean)
-    .join(" ");
-  return { id: own.id ?? `${generated}-control`, hintId, describedBy: describedBy || undefined };
+  const describedBy = joinIds(own["aria-describedby"], hint !== undefined && hintId);
+  const field = useFieldControl({ ...own, "aria-describedby": describedBy });
+  const wiring = options.inField ? field : { ...own, "aria-describedby": describedBy };
+  const id = wiring.id ?? `${generated}-control`;
+  const extra = wiring["aria-labelledby"];
+  return {
+    ids: { id, labelId, hintId },
+    aria: {
+      id,
+      "aria-describedby": wiring["aria-describedby"],
+      "aria-labelledby": extra === undefined ? undefined : joinIds(labelId, extra),
+      ...(options.inField && {
+        "aria-invalid": field["aria-invalid"],
+        required: field.required,
+        disabled: field.disabled,
+      }),
+    },
+  };
 }
 
 export type CheckboxProps = Omit<ComponentPropsWithRef<typeof CheckboxPrimitive.Root>, "children"> & Labelled;
 
-export function Checkbox({ label, hint, className, ...props }: CheckboxProps) {
-  const ids = useChoiceIds(props, hint);
-  const wiring = useFieldControl({ ...props, id: ids.id, "aria-describedby": ids.describedBy });
+export function Checkbox({
+  label,
+  hint,
+  className,
+  checked,
+  defaultChecked,
+  onCheckedChange,
+  ...props
+}: CheckboxProps) {
+  const { ids, aria } = useChoiceWiring(props, hint, { inField: true });
+  const disabled = aria.disabled ?? props.disabled;
+  // Mirror the uncontrolled value so the glyph follows the real state in both modes.
+  const [uncontrolled, setUncontrolled] = useState<CheckboxPrimitive.CheckedState>(defaultChecked ?? false);
+  const state = checked ?? uncontrolled;
   return (
-    <span className={cx("vr-choice", className)} data-disabled={wiring.disabled || undefined}>
+    <span className={cx("vr-choice", className)} data-disabled={disabled || undefined}>
       <CheckboxPrimitive.Root
         {...props}
-        {...wiring}
-        id={ids.id}
-        aria-labelledby={undefined}
+        {...aria}
+        {...(checked !== undefined && { checked })}
+        {...(defaultChecked !== undefined && { defaultChecked })}
+        onCheckedChange={(next) => {
+          if (checked === undefined) setUncontrolled(next);
+          onCheckedChange?.(next);
+        }}
         className="vr-checkbox"
       >
         <CheckboxPrimitive.Indicator className="vr-checkbox__indicator">
-          <Icon icon={props.checked === "indeterminate" ? Minus : Check} size="sm" />
+          <Icon icon={state === "indeterminate" ? Minus : Check} size="sm" />
         </CheckboxPrimitive.Indicator>
       </CheckboxPrimitive.Root>
-      <ChoiceLabel htmlFor={ids.id} label={label} hint={hint} hintId={ids.hintId} />
+      <ChoiceLabel ids={ids} label={label} hint={hint} />
     </span>
   );
 }
@@ -66,23 +109,14 @@ export function Checkbox({ label, hint, className, ...props }: CheckboxProps) {
 export type SwitchProps = Omit<ComponentPropsWithRef<typeof SwitchPrimitive.Root>, "children"> & Labelled;
 
 export function Switch({ label, hint, className, ...props }: SwitchProps) {
-  const ids = useChoiceIds(props, hint);
-  const wiring = useFieldControl({ ...props, id: ids.id, "aria-describedby": ids.describedBy });
+  const { ids, aria } = useChoiceWiring(props, hint, { inField: true });
+  const disabled = aria.disabled ?? props.disabled;
   return (
-    <span
-      className={cx("vr-choice", "vr-choice--switch", className)}
-      data-disabled={wiring.disabled || undefined}
-    >
-      <SwitchPrimitive.Root
-        {...props}
-        {...wiring}
-        id={ids.id}
-        aria-labelledby={undefined}
-        className="vr-switch"
-      >
+    <span className={cx("vr-choice", "vr-choice--switch", className)} data-disabled={disabled || undefined}>
+      <SwitchPrimitive.Root {...props} {...aria} className="vr-switch">
         <SwitchPrimitive.Thumb className="vr-switch__thumb" />
       </SwitchPrimitive.Root>
-      <ChoiceLabel htmlFor={ids.id} label={label} hint={hint} hintId={ids.hintId} />
+      <ChoiceLabel ids={ids} label={label} hint={hint} />
     </span>
   );
 }
@@ -97,14 +131,15 @@ export function RadioGroup({ className, ...props }: RadioGroupProps) {
 
 export type RadioProps = Omit<ComponentPropsWithRef<typeof RadioPrimitive.Item>, "children"> & Labelled;
 
+/** One option of a RadioGroup. The group, not the option, takes the Field's id and description. */
 export function Radio({ label, hint, className, ...props }: RadioProps) {
-  const ids = useChoiceIds(props, hint);
+  const { ids, aria } = useChoiceWiring(props, hint, { inField: false });
   return (
     <span className={cx("vr-choice", className)} data-disabled={props.disabled || undefined}>
-      <RadioPrimitive.Item {...props} id={ids.id} aria-describedby={ids.describedBy} className="vr-radio">
+      <RadioPrimitive.Item {...props} {...aria} className="vr-radio">
         <RadioPrimitive.Indicator className="vr-radio__dot" />
       </RadioPrimitive.Item>
-      <ChoiceLabel htmlFor={ids.id} label={label} hint={hint} hintId={ids.hintId} />
+      <ChoiceLabel ids={ids} label={label} hint={hint} />
     </span>
   );
 }

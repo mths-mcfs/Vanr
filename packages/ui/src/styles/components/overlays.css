@@ -48,14 +48,6 @@
     transform-origin: var(--radix-popper-transform-origin);
   }
 
-  .vr-popover[data-state="open"] {
-    animation: vr-rise var(--vr-duration-base) var(--vr-ease);
-  }
-
-  .vr-popover[data-state="closed"] {
-    animation: vr-fade-out var(--vr-duration-fast) var(--vr-ease);
-  }
-
   .vr-select__content {
     min-width: var(--radix-select-trigger-width);
     max-height: var(--radix-select-content-available-height, 24rem);
@@ -133,14 +125,6 @@
     background-color: color-mix(in srgb, var(--vr-bg-inverse) 38%, transparent);
   }
 
-  .vr-dialog__overlay[data-state="open"] {
-    animation: vr-fade var(--vr-duration-slow) var(--vr-ease);
-  }
-
-  .vr-dialog__overlay[data-state="closed"] {
-    animation: vr-fade-out var(--vr-duration-fast) var(--vr-ease);
-  }
-
   .vr-dialog {
     --_width: 32rem;
     position: fixed;
@@ -159,14 +143,6 @@
     background-color: var(--vr-bg-overlay);
     color: var(--vr-fg);
     translate: -50% 0;
-  }
-
-  .vr-dialog[data-state="open"] {
-    animation: vr-dialog-rise var(--vr-duration-slow) var(--vr-ease);
-  }
-
-  .vr-dialog[data-state="closed"] {
-    animation: vr-fade-out var(--vr-duration-fast) var(--vr-ease);
   }
 
   .vr-dialog--sm {
@@ -229,11 +205,6 @@
     line-height: var(--vr-text-sm-lh);
   }
 
-  .vr-tooltip[data-state="delayed-open"],
-  .vr-tooltip[data-state="instant-open"] {
-    animation: vr-fade var(--vr-duration-fast) var(--vr-ease);
-  }
-
   /* Toast */
 
   .vr-toast__viewport {
@@ -264,25 +235,12 @@
     color: var(--vr-fg);
   }
 
-  .vr-toast[data-state="open"] {
-    animation: vr-slide-in var(--vr-duration-slow) var(--vr-ease);
-  }
-
-  .vr-toast[data-state="closed"] {
-    animation: vr-fade-out var(--vr-duration-fast) var(--vr-ease);
-  }
-
   .vr-toast[data-swipe="move"] {
     translate: var(--radix-toast-swipe-move-x) 0;
   }
 
   .vr-toast[data-swipe="cancel"] {
     translate: 0 0;
-    transition: translate var(--vr-duration-base) var(--vr-ease);
-  }
-
-  .vr-toast[data-swipe="end"] {
-    animation: vr-fade-out var(--vr-duration-fast) var(--vr-ease);
   }
 
   .vr-toast__icon {
@@ -357,5 +315,53 @@
   .vr-toast__close:hover {
     background-color: var(--vr-bg-hover);
     color: var(--vr-fg);
+  }
+
+  /* Motion exists only for readers who have not asked for less of it. */
+  @media (prefers-reduced-motion: no-preference) {
+    .vr-popover[data-state="open"] {
+      animation: vr-rise var(--vr-duration-base) var(--vr-ease);
+    }
+
+    .vr-popover[data-state="closed"] {
+      animation: vr-fade-out var(--vr-duration-fast) var(--vr-ease);
+    }
+
+    .vr-dialog__overlay[data-state="open"] {
+      animation: vr-fade var(--vr-duration-slow) var(--vr-ease);
+    }
+
+    .vr-dialog__overlay[data-state="closed"] {
+      animation: vr-fade-out var(--vr-duration-fast) var(--vr-ease);
+    }
+
+    .vr-dialog[data-state="open"] {
+      animation: vr-dialog-rise var(--vr-duration-slow) var(--vr-ease);
+    }
+
+    .vr-dialog[data-state="closed"] {
+      animation: vr-fade-out var(--vr-duration-fast) var(--vr-ease);
+    }
+
+    .vr-tooltip[data-state="delayed-open"],
+    .vr-tooltip[data-state="instant-open"] {
+      animation: vr-fade var(--vr-duration-fast) var(--vr-ease);
+    }
+
+    .vr-toast[data-state="open"] {
+      animation: vr-slide-in var(--vr-duration-slow) var(--vr-ease);
+    }
+
+    .vr-toast[data-state="closed"] {
+      animation: vr-fade-out var(--vr-duration-fast) var(--vr-ease);
+    }
+
+    .vr-toast[data-swipe="cancel"] {
+      transition: translate var(--vr-duration-base) var(--vr-ease);
+    }
+
+    .vr-toast[data-swipe="end"] {
+      animation: vr-fade-out var(--vr-duration-fast) var(--vr-ease);
+    }
   }
 }

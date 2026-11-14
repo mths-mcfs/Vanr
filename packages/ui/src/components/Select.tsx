@@ -59,6 +59,7 @@ export function Select({
       <SelectPrimitive.Trigger
         {...triggerProps}
         id={wiring.id}
+        aria-labelledby={wiring["aria-labelledby"]}
         aria-describedby={wiring["aria-describedby"]}
         aria-invalid={wiring["aria-invalid"]}
         className={cx("vr-control", "vr-select", `vr-control--${size}`, className)}

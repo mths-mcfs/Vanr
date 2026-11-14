@@ -24,13 +24,13 @@
     /* Text */
     --vr-fg: light-dark(#1d1c19, #ede9e0);
     --vr-fg-muted: light-dark(#4d4a43, #bdb7aa);
-    --vr-fg-subtle: light-dark(#5f5b52, #a39d90);
+    --vr-fg-subtle: light-dark(#5f5b52, #aba598);
     --vr-fg-disabled: light-dark(#625e55, #9d978a);
     --vr-fg-inverse: light-dark(#f7f6f2, #1a1814);
 
     /* Lines */
     --vr-line: light-dark(#d3d0c7, #39352f);
-    --vr-line-control: light-dark(#837f73, #858074);
+    --vr-line-control: light-dark(#78746a, #858074);
     --vr-focus: light-dark(#2944c8, #9aacff);
 
     /* Accent: cobalt underglaze on birch */
@@ -41,9 +41,9 @@
     --vr-accent-wash: light-dark(#dde2f6, #252b47);
 
     /* Destructive fill */
-    --vr-danger: light-dark(#b42318, #c4352a);
-    --vr-danger-hover: light-dark(#961c13, #ad2c22);
-    --vr-on-danger: light-dark(#ffffff, #ffffff);
+    --vr-danger: light-dark(#b42318, #ee8579);
+    --vr-danger-hover: light-dark(#961c13, #f5a39a);
+    --vr-on-danger: light-dark(#ffffff, #2b0b07);
 
     /* Tones: text and wash pairs for callouts, toasts and status badges */
     --vr-info-fg: light-dark(#2944c8, #9aacff);
@@ -102,13 +102,14 @@
     --vr-control-md: 2rem;
     --vr-control-lg: 2.5rem;
 
-    /* Layers */
+    /* Layers. Everything that floats from a control (list, menu, tooltip) sits above the modal,
+       because those controls can live inside a dialog. */
     --vr-z-raised: 10;
-    --vr-z-dropdown: 100;
     --vr-z-overlay: 300;
     --vr-z-modal: 400;
-    --vr-z-toast: 500;
-    --vr-z-tooltip: 600;
+    --vr-z-dropdown: 500;
+    --vr-z-toast: 600;
+    --vr-z-tooltip: 700;
 
     /* Motion */
     --vr-duration-fast: 120ms;

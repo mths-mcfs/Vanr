@@ -19,11 +19,6 @@
     white-space: nowrap;
     cursor: pointer;
     user-select: none;
-    transition:
-      background-color var(--vr-duration-fast) var(--vr-ease),
-      border-color var(--vr-duration-fast) var(--vr-ease),
-      color var(--vr-duration-fast) var(--vr-ease),
-      translate var(--vr-duration-fast) var(--vr-ease);
   }
 
   .vr-button--sm {
@@ -118,6 +113,7 @@
   }
 
   /* Disabled keeps readable text and loses its fill; the dashed edge says "not now". */
+
   .vr-button:disabled {
     background-color: var(--vr-bg-sunken);
     border-color: var(--vr-line-control);
@@ -136,6 +132,7 @@
   }
 
   /* Transparent, not hidden: the label stays the button's accessible name while it is busy. */
+
   .vr-button[data-loading] .vr-button__content {
     opacity: 0;
   }
@@ -161,7 +158,6 @@
     color: var(--vr-fg);
     font-size: var(--vr-text-md);
     line-height: var(--vr-text-md-lh);
-    transition: border-color var(--vr-duration-fast) var(--vr-ease);
   }
 
   .vr-control--sm {
@@ -232,7 +228,6 @@
   .vr-select__chevron {
     display: inline-flex;
     color: var(--vr-fg-muted);
-    transition: rotate var(--vr-duration-fast) var(--vr-ease);
   }
 
   .vr-select[data-state="open"] .vr-select__chevron {
@@ -330,14 +325,10 @@
     border: var(--vr-border) solid var(--vr-line-control);
     background-color: var(--vr-bg-raised);
     cursor: pointer;
-    transition:
-      background-color var(--vr-duration-fast) var(--vr-ease),
-      border-color var(--vr-duration-fast) var(--vr-ease);
   }
 
   .vr-checkbox {
     border-radius: var(--vr-radius-1);
-    color: var(--vr-on-accent);
   }
 
   .vr-checkbox:hover:not(:disabled),
@@ -349,6 +340,7 @@
   .vr-checkbox[data-state="indeterminate"] {
     background-color: var(--vr-accent);
     border-color: var(--vr-accent);
+    color: var(--vr-on-accent);
   }
 
   .vr-checkbox__indicator {
@@ -356,6 +348,7 @@
   }
 
   /* Round is the one place the shape is the meaning: a radio picks one of many. */
+
   .vr-radio {
     border-radius: 50%;
   }
@@ -391,9 +384,6 @@
     border-radius: var(--vr-radius-2);
     background-color: var(--vr-bg-raised);
     cursor: pointer;
-    transition:
-      background-color var(--vr-duration-fast) var(--vr-ease),
-      border-color var(--vr-duration-fast) var(--vr-ease);
   }
 
   .vr-switch:hover:not(:disabled) {
@@ -408,7 +398,6 @@
     background-color: currentColor;
     color: var(--vr-fg-muted);
     translate: 1px 0;
-    transition: translate var(--vr-duration-base) var(--vr-ease);
   }
 
   .vr-switch[data-state="checked"] {
@@ -435,7 +424,7 @@
     cursor: not-allowed;
   }
 
-  .vr-checkbox:disabled[data-state="checked"] {
+  .vr-checkbox:disabled:is([data-state="checked"], [data-state="indeterminate"]) {
     color: var(--vr-fg-disabled);
     border-color: var(--vr-line-control);
   }
@@ -443,5 +432,41 @@
   .vr-switch:disabled .vr-switch__thumb,
   .vr-radio:disabled .vr-radio__dot {
     color: var(--vr-fg-disabled);
+  }
+
+  /* Motion exists only for readers who have not asked for less of it. */
+  @media (prefers-reduced-motion: no-preference) {
+    .vr-button {
+      transition:
+        background-color var(--vr-duration-fast) var(--vr-ease),
+        border-color var(--vr-duration-fast) var(--vr-ease),
+        color var(--vr-duration-fast) var(--vr-ease),
+        translate var(--vr-duration-fast) var(--vr-ease);
+    }
+
+    .vr-control {
+      transition: border-color var(--vr-duration-fast) var(--vr-ease);
+    }
+
+    .vr-select__chevron {
+      transition: rotate var(--vr-duration-fast) var(--vr-ease);
+    }
+
+    .vr-checkbox,
+    .vr-radio {
+      transition:
+        background-color var(--vr-duration-fast) var(--vr-ease),
+        border-color var(--vr-duration-fast) var(--vr-ease);
+    }
+
+    .vr-switch {
+      transition:
+        background-color var(--vr-duration-fast) var(--vr-ease),
+        border-color var(--vr-duration-fast) var(--vr-ease);
+    }
+
+    .vr-switch__thumb {
+      transition: translate var(--vr-duration-base) var(--vr-ease);
+    }
   }
 }

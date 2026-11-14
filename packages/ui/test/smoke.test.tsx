@@ -382,3 +382,83 @@ describe("accessible wiring", () => {
     expect(render(<Icon icon={Plus} label="Add" />)).toContain('aria-label="Add"');
   });
 });
+
+describe("labels and descriptions survive caller ids", () => {
+  const forOf = (html: string) => html.match(/<label class="vr-field__label"[^>]* for="([^"]+)"/)?.[1];
+
+  test.each([
+    ["Input", <Input key="i" id="agent-name" />],
+    ["Textarea", <Textarea key="t" id="agent-name" />],
+    [
+      "Select",
+      <Select key="s" id="agent-name">
+        <SelectItem value="a">A</SelectItem>
+      </Select>,
+    ],
+    ["Checkbox", <Checkbox key="c" id="agent-name" label="Notify" />],
+    ["Switch", <Switch key="w" id="agent-name" label="Notify" />],
+  ])("a %s with its own id keeps the Field label", (_name, control) => {
+    const html = render(<Field label="Agent">{control}</Field>);
+    expect(forOf(html)).toBe("agent-name");
+    expect(html).toMatch(/<(input|textarea|button)[^>]* id="agent-name"/);
+  });
+
+  test.each([
+    ["Checkbox", <Checkbox key="c" label="Notify" />],
+    ["Switch", <Switch key="w" label="Notify" />],
+  ])("a %s inside a Field uses the Field id", (_name, control) => {
+    const html = render(<Field label="Agent">{control}</Field>);
+    const id = forOf(html);
+    expect(html).toMatch(new RegExp(`role="(checkbox|switch)"[^>]* id="${id}"`));
+  });
+
+  test("a caller's aria-labelledby is added to the Field label, not swapped for it", () => {
+    const html = render(
+      <Field label="Agent">
+        <Input aria-labelledby="section-title" />
+      </Field>,
+    );
+    const labelId = html.match(/<label class="vr-field__label" id="([^"]+)"/)?.[1];
+    expect(html).toContain(`aria-labelledby="${labelId} section-title"`);
+  });
+
+  test.each([
+    ["Checkbox", <Checkbox key="c" label="Notify" aria-labelledby="extra" />],
+    ["Switch", <Switch key="w" label="Notify" aria-labelledby="extra" />],
+    [
+      "Radio",
+      <RadioGroup key="r">
+        <Radio value="a" label="Hourly" aria-labelledby="extra" />
+      </RadioGroup>,
+    ],
+  ])("a %s keeps its own label alongside the caller's aria-labelledby", (_name, control) => {
+    const html = render(control);
+    const labelId = html.match(/<label class="vr-choice__label" id="([^"]+)"/)?.[1];
+    expect(html).toContain(`aria-labelledby="${labelId} extra"`);
+  });
+
+  test("a Checkbox in a Field sums the caller's, its hint's and the Field's descriptions", () => {
+    const html = render(
+      <Field label="Agent" error="Pick one">
+        <Checkbox label="Notify" hint="In the thread" aria-describedby="extra" />
+      </Field>,
+    );
+    const described = html.match(/role="checkbox"[^>]* aria-describedby="([^"]+)"/)?.[1]?.split(" ") ?? [];
+    expect(described).toHaveLength(3);
+    expect(described).toContain("extra");
+    expect(described.some((id) => id.endsWith("-error"))).toBe(true);
+    expect(described.some((id) => id.endsWith("-hint"))).toBe(true);
+  });
+});
+
+describe("checkbox glyph follows the real state", () => {
+  const glyph = (html: string) => html.match(/lucide-(check|minus)\b/)?.[1];
+  test.each([
+    ["uncontrolled indeterminate", <Checkbox key="a" label="All" defaultChecked="indeterminate" />, "minus"],
+    ["uncontrolled checked", <Checkbox key="b" label="All" defaultChecked />, "check"],
+    ["controlled indeterminate", <Checkbox key="c" label="All" checked="indeterminate" />, "minus"],
+    ["controlled checked", <Checkbox key="d" label="All" checked />, "check"],
+  ])("%s", (_name, element, expected) => {
+    expect(glyph(render(element))).toBe(expected);
+  });
+});

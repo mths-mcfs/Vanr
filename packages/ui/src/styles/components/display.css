@@ -56,14 +56,13 @@
     stroke: currentColor;
     stroke-dasharray: 28 72;
     stroke-linecap: square;
-    animation: vr-trace 900ms linear infinite;
   }
 
+  /* bg-active, not bg-sunken: the placeholder has to show on the page in both themes. */
   .vr-skeleton {
     display: block;
     border-radius: var(--vr-radius-1);
-    background-color: var(--vr-bg-sunken);
-    animation: vr-breathe 1400ms ease-in-out infinite;
+    background-color: var(--vr-bg-active);
   }
 
   .vr-skeleton--line {
@@ -81,14 +80,6 @@
     width: 1.75rem;
     height: 1.75rem;
     border-radius: 50%;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .vr-spinner__head,
-    .vr-skeleton,
-    .vr-status[data-status="running"] .vr-status__icon {
-      animation: none;
-    }
   }
 
   /* Tabs */
@@ -115,7 +106,6 @@
     font-weight: var(--vr-weight-medium);
     white-space: nowrap;
     cursor: pointer;
-    transition: color var(--vr-duration-fast) var(--vr-ease);
   }
 
   .vr-tabs__trigger:hover:not(:disabled) {
@@ -299,10 +289,6 @@
     color: var(--vr-accent-fg);
   }
 
-  .vr-status[data-status="running"] .vr-status__icon {
-    animation: vr-spin 1600ms linear infinite;
-  }
-
   .vr-status[data-status="awaiting-approval"] {
     background-color: var(--vr-warning-wash);
     color: var(--vr-warning-fg);
@@ -361,9 +347,6 @@
 
   .vr-chip--selectable {
     cursor: pointer;
-    transition:
-      background-color var(--vr-duration-fast) var(--vr-ease),
-      border-color var(--vr-duration-fast) var(--vr-ease);
   }
 
   .vr-chip--selectable:hover:not(:disabled) {
@@ -563,5 +546,30 @@
     font-size: var(--_size);
     line-height: 1;
     letter-spacing: -0.01em;
+  }
+
+  /* Motion exists only for readers who have not asked for less of it. */
+  @media (prefers-reduced-motion: no-preference) {
+    .vr-spinner__head {
+      animation: vr-trace 900ms linear infinite;
+    }
+
+    .vr-skeleton {
+      animation: vr-breathe 1400ms ease-in-out infinite;
+    }
+
+    .vr-tabs__trigger {
+      transition: color var(--vr-duration-fast) var(--vr-ease);
+    }
+
+    .vr-status[data-status="running"] .vr-status__icon {
+      animation: vr-spin 1600ms linear infinite;
+    }
+
+    .vr-chip--selectable {
+      transition:
+        background-color var(--vr-duration-fast) var(--vr-ease),
+        border-color var(--vr-duration-fast) var(--vr-ease);
+    }
   }
 }
