@@ -337,7 +337,7 @@ export function blockMessage(reason: BlockedReason | "read_only", target: string
     case "private_network":
       return `${target} is on a private network (local, loopback or cloud metadata address). Your browser cannot reach it unless a person allows that range.`;
     case "read_only":
-      return `${target} is read-only for you: you can read and scroll, but not click or type. Open links with browser_open, or ask a person to allow acting on this site.`;
+      return `${target} is read-only for you: you can read and scroll, but not click or type. Open links with browser_navigate, or ask a person to allow acting on this site.`;
   }
 }
 

@@ -29,7 +29,7 @@ import { ensureDir, writePrivate } from "./config";
 import { maybe } from "./lines";
 import { agentEnv, domainsFor, sandboxed } from "./ops";
 import { CLI_DOMAINS, type CommandSandbox, cliPaths, type PolicyContext, shellLine } from "./sandbox";
-import { maskSecrets, type SecretStore } from "./secrets";
+import { MIN_MASK, maskBytes, maskSecrets, type SecretStore, StreamMasker } from "./secrets";
 
 const LINE_EVERY_MS = 2000;
 const PROGRESS_EVERY_MS = 30_000;
@@ -184,11 +184,7 @@ const executorEvent = z.object({
     .catch({ type: undefined, command: undefined }),
 });
 
-/** Reads a line of the executor's output: text to show, final result and session (to resume). */
-export function parseExecutorLine(
-  executor: "claude_code" | "codex" | "shell",
-  raw: string,
-): {
+interface ExecutorLine {
   text?: string;
   result?: string;
   session?: string;
@@ -196,7 +192,10 @@ export function parseExecutorLine(
   apiKey?: string;
   model?: string;
   usage?: Omit<JobUsage, "model">;
-} {
+}
+
+/** Reads a line of the executor's output: text to show, final result and session (to resume). */
+export function parseExecutorLine(executor: "claude_code" | "codex" | "shell", raw: string): ExecutorLine {
   if (executor === "shell") return { text: raw };
   let value: unknown;
   try {
@@ -204,6 +203,11 @@ export function parseExecutorLine(
   } catch {
     return { text: raw };
   }
+  return parseExecutorEvent(executor, value);
+}
+
+/** An event of the Claude Code or Codex output, already decoded from its JSON line. */
+export function parseExecutorEvent(executor: "claude_code" | "codex", value: unknown): ExecutorLine {
   const parsed = executorEvent.safeParse(value);
   // JSON that is not an object (a number, a list) carries nothing the runner reads.
   if (!parsed.success) return {};
@@ -274,6 +278,100 @@ export function parseExecutorLine(
   if (item.type === "agent_message" && item.text) return { text: item.text, result: item.text };
   if (item.type === "command_execution" && item.command) return { text: `$ ${item.command}` };
   return {};
+}
+
+/** Each string of a decoded event masked, keys included, at any depth. */
+export function maskValue(value: unknown, masks: [string, string][]): unknown {
+  if (typeof value === "string") return maskSecrets(value, masks);
+  if (Array.isArray(value)) return value.map((v) => maskValue(v, masks));
+  if (value !== null && typeof value === "object")
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [maskSecrets(k, masks), maskValue(v, masks)]),
+    );
+  return value;
+}
+
+/**
+ * The output of a job, split into lines. `text` (a shell job): masked as a stream before the split, so a
+ * secret of several lines (a PEM key) is replaced whole even when it arrives in pieces. `json` (Claude Code
+ * and Codex): each line that is a JSON value goes out raw, for what the runner decides from it (an API key
+ * in place of the plan), with the decoded event masked string by string for what goes to the server; a
+ * secret escaped inside a JSON string (`\n`, `\"`) is masked in its decoded form. The other lines take the
+ * text path. `onLine(line, masked)`: a JSON line and its masked event, or a masked text line alone.
+ */
+export class JobOutput {
+  private buffer = "";
+  private readonly masks: [string, string][];
+  private text: StreamMasker;
+  private textBuffer = "";
+
+  constructor(
+    masks: [string, string][],
+    private readonly onLine: (line: string, masked?: unknown) => void,
+    private readonly kind: "json" | "text" = "json",
+  ) {
+    this.masks = masks;
+    this.text = new StreamMasker(masks);
+  }
+
+  push(chunk: string): void {
+    if (this.kind === "text") {
+      this.addText(chunk);
+      return;
+    }
+    this.buffer += chunk;
+    let i = this.buffer.indexOf("\n");
+    while (i >= 0) {
+      const line = this.buffer.slice(0, i);
+      this.buffer = this.buffer.slice(i + 1);
+      this.rawLine(line, true);
+      i = this.buffer.indexOf("\n");
+    }
+  }
+
+  end(): void {
+    if (this.kind === "json") {
+      const rest = this.buffer;
+      this.buffer = "";
+      if (rest.trim()) this.rawLine(rest, false);
+    }
+    this.textBuffer += this.text.end();
+    this.textLines();
+    if (this.textBuffer.trim()) this.onLine(this.textBuffer.trim());
+    this.textBuffer = "";
+  }
+
+  private rawLine(line: string, newline: boolean) {
+    let value: unknown;
+    try {
+      value = JSON.parse(line);
+    } catch {
+      this.addText(newline ? `${line}\n` : line);
+      return;
+    }
+    // The text held so far goes out first, in order.
+    this.textBuffer += this.text.end();
+    this.textLines();
+    if (this.textBuffer.trim()) this.onLine(this.textBuffer.trim());
+    this.textBuffer = "";
+    this.text = new StreamMasker(this.masks);
+    this.onLine(line.trim(), maskValue(value, this.masks));
+  }
+
+  private addText(chunk: string) {
+    this.textBuffer += this.text.push(chunk);
+    this.textLines();
+  }
+
+  private textLines() {
+    let i = this.textBuffer.indexOf("\n");
+    while (i >= 0) {
+      const line = this.textBuffer.slice(0, i).trimEnd();
+      this.textBuffer = this.textBuffer.slice(i + 1);
+      if (line) this.onLine(line);
+      i = this.textBuffer.indexOf("\n");
+    }
+  }
 }
 
 /** Cuts in the middle, keeping the start and the end. */
@@ -369,6 +467,7 @@ export function gitChanges(
   store: string,
   base: string,
   exclude: readonly string[] = [],
+  masks: [string, string][] = [],
 ): { files: string[]; diff: string | null } {
   const now = gitSnapshot(cwd, store, exclude);
   if (!now) return { files: [], diff: null };
@@ -376,21 +475,160 @@ export function gitChanges(
     .split("\n")
     .map((f) => f.trim())
     .filter(Boolean);
+  // With secrets, both sides are masked before the diff: the diff sent is the diff of the masked files.
+  const changed = new Set(files);
+  const content = diffMasks(masks);
+  const from = masks.length ? maskedTree(store, cwd, base, changed, content) : base;
+  const to = masks.length ? maskedTree(store, cwd, now, changed, content) : now;
+  if (!from || !to) return { files: files.slice(0, 200), diff: null };
   const diff = snapGit(store, cwd, [
     "diff",
     "--no-color",
     "--no-ext-diff",
     "--no-textconv",
     "--no-renames",
-    base,
-    now,
+    from,
+    to,
   ]);
-  return { files: files.slice(0, 200), diff: diff?.trim() ? clipMiddle(diff, DIFF_MAX) : null };
+  // Masked before it is cut, so a secret across the cut is replaced whole.
+  return {
+    files: files.slice(0, 200),
+    diff: diff?.trim() ? clipMiddle(maskDiff(diff, masks), DIFF_MAX) : null,
+  };
+}
+
+/** Git on the runner's snapshot repository with bytes in and out (blobs, the batch reader, the index). */
+function storeGit(
+  store: string,
+  cwd: string,
+  args: string[],
+  input?: Uint8Array,
+  env: Record<string, string> = {},
+) {
+  try {
+    return execFileSync("git", ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", ...args], {
+      cwd,
+      input,
+      timeout: GIT_TIMEOUT_MS,
+      maxBuffer: 256 * 1024 * 1024,
+      stdio: ["pipe", "pipe", "ignore"],
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_OPTIONAL_LOCKS: "0",
+        GIT_DIR: store,
+        GIT_WORK_TREE: cwd,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        ...env,
+      },
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The same tree with the given files masked: each blob is masked as a whole (`maskBytes`), so a secret of
+ * several lines is replaced in the content before any diff splits it into `+`/`-` lines. `null` if git fails.
+ */
+function maskedTree(
+  store: string,
+  cwd: string,
+  tree: string,
+  paths: ReadonlySet<string>,
+  masks: [string, string][],
+): string | null {
+  const listing = storeGit(store, cwd, ["ls-tree", "-r", "-z", tree]);
+  if (!listing) return null;
+  const blobs = listing
+    .toString("utf8")
+    .split("\0")
+    .map((entry) => /^(\d+) blob ([0-9a-f]+)\t(.*)$/s.exec(entry))
+    .filter((m): m is RegExpExecArray => !!m && paths.has(m[3] as string));
+  if (!blobs.length) return tree;
+  const batch = storeGit(
+    store,
+    cwd,
+    ["cat-file", "--batch"],
+    Buffer.from(`${blobs.map((m) => m[2]).join("\n")}\n`),
+  );
+  if (!batch) return null;
+  const changed: string[] = [];
+  let at = 0;
+  for (const [, mode, , path] of blobs) {
+    const eol = batch.indexOf(0x0a, at);
+    const size = Number(batch.subarray(at, eol).toString("latin1").split(" ")[2]);
+    const content = batch.subarray(eol + 1, eol + 1 + size);
+    at = eol + 1 + size + 1;
+    const masked = maskBytes(content, masks);
+    if (masked.equals(content)) continue;
+    const sha = storeGit(store, cwd, ["hash-object", "-w", "--stdin"], masked)?.toString("utf8").trim();
+    if (!sha) return null;
+    changed.push(`${mode} ${sha}\t${path}`);
+  }
+  if (!changed.length) return tree;
+  const tmp = mkdtempSync(join(tmpdir(), "runner-mask-index-"));
+  try {
+    const index = { GIT_INDEX_FILE: join(tmp, "index") };
+    if (!storeGit(store, cwd, ["read-tree", tree], undefined, index)) return null;
+    const info = Buffer.from(`${changed.join("\0")}\0`);
+    if (!storeGit(store, cwd, ["update-index", "-z", "--index-info"], info, index)) return null;
+    return storeGit(store, cwd, ["write-tree"], undefined, index)?.toString("utf8").trim() || null;
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The masks of a diff's content: each secret whole, plus each line (of 4 characters or more, like any mask) of
+ * a secret of several lines, under the same label. A key changed in one of its lines is no longer the
+ * secret's value, but its other lines still are and stay hidden.
+ */
+export function diffMasks(masks: [string, string][]): [string, string][] {
+  const lines = masks.flatMap(([value, label]) =>
+    value.includes("\n")
+      ? value
+          .split(/\r?\n/)
+          .filter((line) => line.length >= MIN_MASK)
+          .map((line): [string, string] => [line, label])
+      : [],
+  );
+  return [...masks, ...lines];
+}
+
+/**
+ * The file names in the header lines of a diff, masked (a name can carry a secret's value). The content lines
+ * come from masked trees already.
+ */
+export function maskDiff(diff: string, masks: [string, string][]): string {
+  if (!masks.length) return diff;
+  return diff
+    .split("\n")
+    .map((line) => (/^(diff --git |--- |\+\+\+ |rename |copy )/.test(line) ? maskSecrets(line, masks) : line))
+    .join("\n");
+}
+
+interface JobStartArgs {
+  jobId: string;
+  executor: "claude_code" | "codex" | "shell";
+  title: string;
+  prompt: string;
+  cwd?: string;
+  model?: string;
+  session?: string;
+  timeoutSeconds?: number;
+  allow?: string[];
+  network?: NetworkPolicyFrame;
 }
 
 export class Jobs {
   private journal: JournalEntry[] = [];
   private readonly running = new Map<string, { kill: () => void }>();
+  /** Jobs between the checks of `start` and their process: they hold their id and a slot. */
+  private readonly starting = new Set<string>();
+  /** Jobs canceled while they were still preparing. */
+  private readonly canceledStarts = new Set<string>();
 
   constructor(
     private readonly opts: {
@@ -481,35 +719,46 @@ export class Jobs {
 
   cancel(jobId: string): { canceled: boolean } {
     const r = this.running.get(jobId);
-    if (!r) return { canceled: false };
-    r.kill();
-    return { canceled: true };
+    if (r) {
+      r.kill();
+      return { canceled: true };
+    }
+    // Still preparing: when the preparation ends, nothing runs and the job ends as canceled.
+    if (this.starting.has(jobId)) {
+      this.canceledStarts.add(jobId);
+      return { canceled: true };
+    }
+    return { canceled: false };
   }
 
   async start(
     agent: AgentRef,
-    args: {
-      jobId: string;
-      executor: "claude_code" | "codex" | "shell";
-      title: string;
-      prompt: string;
-      cwd?: string;
-      model?: string;
-      session?: string;
-      timeoutSeconds?: number;
-      allow?: string[];
-      network?: NetworkPolicyFrame;
-    },
+    args: JobStartArgs,
   ): Promise<{ jobId: string; startedAt: string; cwd: string }> {
     if (!/^[A-Za-z0-9_-]{8,64}$/.test(args.jobId)) throw new RunnerError("bad_request", "Bad job id");
-    if (this.journal.some((t) => t.jobId === args.jobId))
+    if (this.journal.some((t) => t.jobId === args.jobId) || this.starting.has(args.jobId))
       throw new RunnerError("bad_request", "Job id already used");
     this.opts.access.requireTool(
       args.executor === "shell" ? "commands" : args.executor === "codex" ? "codex" : "claude",
     );
-    if (this.running.size >= this.opts.maxConcurrent())
+    if (this.running.size + this.starting.size >= this.opts.maxConcurrent())
       throw new RunnerError("no_slot", "This environment is already running its maximum of jobs");
     if (args.executor !== "shell") this.opts.cli.requireSubscription(args.executor);
+    // The id and the slot are taken here, before the first await: a second start with the same id, or one
+    // past the cap, arriving while this one prepares, is rejected above instead of running the job twice.
+    this.starting.add(args.jobId);
+    try {
+      return await this.launch(agent, args);
+    } finally {
+      this.starting.delete(args.jobId);
+      this.canceledStarts.delete(args.jobId);
+    }
+  }
+
+  private async launch(
+    agent: AgentRef,
+    args: JobStartArgs,
+  ): Promise<{ jobId: string; startedAt: string; cwd: string }> {
     const root = this.opts.access.agentRoot(agent);
     const cwd = args.cwd ? this.opts.access.resolve(agent, args.cwd) : root;
     const { cmd, args: argv, stdin } = executorCommand(args.executor, { ...args, cwd }, this.opts.bins);
@@ -548,9 +797,10 @@ export class Jobs {
       throw err;
     });
     const startedAt = new Date().toISOString();
+    const canceledEarly = this.canceledStarts.has(args.jobId);
     const entry: JournalEntry = {
       jobId: args.jobId,
-      status: "running",
+      status: canceledEarly ? "canceled" : "running",
       exitCode: null,
       result: null,
       files: [],
@@ -563,9 +813,22 @@ export class Jobs {
       executor: args.executor,
       delivered: false,
     };
+    const jobDir = join(this.dir, args.jobId);
+    if (canceledEarly) {
+      // Canceled before its process started: nothing runs, the slot goes back, the job ends as canceled.
+      secrets.release();
+      wrapped?.release();
+      dropSnapshot();
+      entry.endedAt = startedAt;
+      this.journal.push(entry);
+      this.save();
+      ensureDir(jobDir);
+      writeFileSync(join(jobDir, "output.log"), "");
+      this.opts.send({ type: "job.done", job: this.snapshot(entry) });
+      return { jobId: args.jobId, startedAt, cwd };
+    }
     this.journal.push(entry);
     this.save();
-    const jobDir = join(this.dir, args.jobId);
     ensureDir(jobDir);
     const logPath = join(jobDir, "output.log");
     const child = spawn(wrapped ? "/bin/sh" : cmd, wrapped ? ["-c", wrapped.command] : argv, {
@@ -587,14 +850,22 @@ export class Jobs {
     let canceled = false;
     let timedOut = false;
     let rejected: string | null = null;
-    let buffer = "";
     let model: string | null = null;
     let usage: Omit<JobUsage, "model"> | null = null;
     const at = () => new Date().toISOString();
-    const onLine = (raw: string) => {
-      const parsed = parseExecutorLine(args.executor, raw);
-      if (parsed.apiKey && !rejected) {
-        rejected = `Claude Code in this environment would use ${parsed.apiKey} instead of your plan; stopped.`;
+    const onLine = (line: string, masked?: unknown) => {
+      // What the runner decides comes from the raw event; what goes to the server, from the masked one.
+      const raw =
+        masked === undefined || args.executor === "shell" ? null : parseExecutorLine(args.executor, line);
+      const parsed =
+        masked === undefined || args.executor === "shell"
+          ? { text: line }
+          : parseExecutorEvent(args.executor, masked);
+      if (raw?.apiKey && !rejected) {
+        rejected = maskSecrets(
+          `Claude Code in this environment would use ${raw.apiKey} instead of your plan; stopped.`,
+          secrets.masks,
+        );
         stop();
       }
       if (parsed.session) entry.session = parsed.session;
@@ -613,11 +884,13 @@ export class Jobs {
               }
             : u;
       }
-      if (parsed.denied) entry.denied = [...new Set([...entry.denied, ...parsed.denied])].slice(0, 50);
-      if (parsed.result !== undefined)
-        entry.result = maskSecrets(parsed.result, secrets.masks).slice(0, RESULT_MAX);
+      if (parsed.denied) {
+        // The command the CLI wanted to run may hold a value it read from a secret file.
+        entry.denied = [...new Set([...entry.denied, ...parsed.denied])].slice(0, 50);
+      }
+      if (parsed.result !== undefined) entry.result = parsed.result.slice(0, RESULT_MAX);
       if (!parsed.text) return;
-      const text = maskSecrets(parsed.text, secrets.masks).slice(0, LINE_MAX);
+      const text = parsed.text.slice(0, LINE_MAX);
       appendFileSync(logPath, `${text.replace(/\n/g, " ")}\n`);
       tailLine = text;
       if (Date.now() - lastSent >= LINE_EVERY_MS && text !== sentLine) {
@@ -626,18 +899,9 @@ export class Jobs {
         this.opts.send({ type: "job.event", jobId: args.jobId, kind: "line", line: text, at: at() });
       }
     };
-    const onData = (s: string) => {
-      buffer += s;
-      let i = buffer.indexOf("\n");
-      while (i >= 0) {
-        const line = buffer.slice(0, i).trimEnd();
-        buffer = buffer.slice(i + 1);
-        if (line) onLine(line);
-        i = buffer.indexOf("\n");
-      }
-    };
-    child.stdout?.setEncoding("utf8").on("data", onData);
-    child.stderr?.setEncoding("utf8").on("data", onData);
+    const output = new JobOutput(secrets.masks, onLine, args.executor === "shell" ? "text" : "json");
+    child.stdout?.setEncoding("utf8").on("data", (s: string) => output.push(s));
+    child.stderr?.setEncoding("utf8").on("data", (s: string) => output.push(s));
     const kill = (signal: NodeJS.Signals) => {
       try {
         if (child.pid && process.platform !== "win32") process.kill(-child.pid, signal);
@@ -650,6 +914,8 @@ export class Jobs {
       kill("SIGTERM");
       setTimeout(() => kill("SIGKILL"), 10_000).unref();
     };
+    // The job now holds its slot as a running one.
+    this.starting.delete(args.jobId);
     this.running.set(args.jobId, {
       kill: () => {
         canceled = true;
@@ -673,9 +939,9 @@ export class Jobs {
         });
       }
     }, PROGRESS_EVERY_MS);
-    child.on("error", (e) => onLine(`error: ${e.message}`));
+    child.on("error", (e) => onLine(maskSecrets(`error: ${e.message}`, secrets.masks)));
     child.on("close", (code) => {
-      if (buffer.trim()) onLine(buffer.trim());
+      output.end();
       clearTimeout(timer);
       clearInterval(progress);
       this.running.delete(args.jobId);
@@ -690,9 +956,10 @@ export class Jobs {
       if (usage) entry.usage = { model, ...usage };
       // Files and diff against the start of the job (the server stores them as proof for the assignment).
       if (base) {
-        const changes = gitChanges(cwd, snapStore, base, secretPaths);
-        entry.files = changes.files;
-        entry.diff = changes.diff ? maskSecrets(changes.diff, secrets.masks) : null;
+        const changes = gitChanges(cwd, snapStore, base, secretPaths, secrets.masks);
+        // A file name can carry a secret's value too.
+        entry.files = changes.files.map((f) => maskSecrets(f, secrets.masks));
+        entry.diff = changes.diff;
       }
       dropSnapshot();
       this.save();

@@ -59,7 +59,7 @@ export interface GateCall {
   preview: Preview;
   /**
    * A workspace or agent rule that requires a person on this call, beyond the table (mailbox in "ask" mode,
-   * `run_code` with approval, connector with "approval" access, an explicit request of the assignment). It
+   * `execute_code` with approval, connector with "approval" access, an explicit request of the assignment). It
    * never relaxes the table: it only adds the request.
    */
   policy?: "ask";

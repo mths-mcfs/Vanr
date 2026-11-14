@@ -22,22 +22,22 @@ async function collect(it: AsyncIterable<ModelEvent>): Promise<ModelEvent[]> {
 
 describe("fake provider", () => {
   test("answers in pieces and ends with the full turn", async () => {
-    const events = await collect(fakeProvider().stream(req("Bia: @lia qual o status do pedido 42?")));
+    const events = await collect(fakeProvider().stream(req("Bia: @lia what is the status of order 42?")));
     expect(events[0]).toEqual({ type: "thinking" });
     const text = events.flatMap((e) => (e.type === "text" ? [e.text] : [])).join("");
     const turn = events.at(-1);
     if (turn?.type !== "turn") throw new Error("no turn");
     expect(turn.stop).toBe("end_turn");
     expect(turn.content).toEqual([{ type: "text", text }]);
-    expect(text).toContain("qual o status do pedido 42?");
+    expect(text).toContain("what is the status of order 42?");
     expect(turn.usage.inputTokens).toBeGreaterThan(0);
   });
 
   test("as the assignment verifier it answers the JSON: passes, and fails what carries [[reject]]", async () => {
     const prompt = [
-      "# Assignment: Guia",
-      "## Deliverable p1: Rascunho\nDone when: texto\n<evidence>\nWorker summary:\nFeito\n</evidence>",
-      "## Deliverable p1-fix1: Corrigir\nDone when: x\n<evidence>\nWorker summary:\n[[reject]]\n</evidence>",
+      "# Assignment: Guide",
+      "## Deliverable p1: Draft\nDone when: text\n<evidence>\nWorker summary:\nDone\n</evidence>",
+      "## Deliverable p1-fix1: Fix\nDone when: x\n<evidence>\nWorker summary:\n[[reject]]\n</evidence>",
     ].join("\n\n");
     const system = 'Answer with JSON only: {"verdicts":[{"id":"<id>","passes":true|false}]}';
     const events = await collect(fakeProvider().stream(req(prompt, { system })));
@@ -57,23 +57,23 @@ describe("fake provider", () => {
 
   test("a tool directive becomes tool_use and the result becomes the answer", async () => {
     const p = fakeProvider();
-    const events = await collect(p.stream(req('anote [[tool:remember {"text":"cliente paga em PIX"}]]')));
+    const events = await collect(p.stream(req('note [[tool:remember {"text":"customer pays by wire"}]]')));
     const turn = events.at(-1);
     if (turn?.type !== "turn") throw new Error("no turn");
     expect(turn.stop).toBe("tool_use");
     const call = turn.content.find((c) => c.type === "tool_use");
     if (call?.type !== "tool_use") throw new Error("no call");
-    expect(call).toMatchObject({ name: "remember", input: { text: "cliente paga em PIX" } });
+    expect(call).toMatchObject({ name: "remember", input: { text: "customer pays by wire" } });
 
     const next = await collect(
       p.stream(
         req("", {
           messages: [
-            { role: "user", content: [{ type: "text", text: "anote" }] },
+            { role: "user", content: [{ type: "text", text: "note" }] },
             { role: "assistant", content: turn.content },
             {
               role: "user",
-              content: [{ type: "tool_result", toolUseId: call.id, content: "salvo", isError: false }],
+              content: [{ type: "tool_result", toolUseId: call.id, content: "saved", isError: false }],
             },
           ],
         }),
@@ -82,7 +82,7 @@ describe("fake provider", () => {
     const last = next.at(-1);
     if (last?.type !== "turn") throw new Error("no turn");
     expect(last.stop).toBe("end_turn");
-    expect(last.content[0]).toEqual({ type: "text", text: "Saved to memory: cliente paga em PIX." });
+    expect(last.content[0]).toEqual({ type: "text", text: "Saved to memory: customer pays by wire." });
   });
 
   test("failure, silence and cancellation", async () => {
@@ -94,7 +94,7 @@ describe("fake provider", () => {
     expect(turn?.type === "turn" && turn.content).toEqual([]);
     const ctrl = new AbortController();
     const it = fakeProvider().stream(
-      req("[[slow:50]] um dois três quatro cinco seis sete", { signal: ctrl.signal }),
+      req("[[slow:50]] one two three four five six seven", { signal: ctrl.signal }),
     );
     const seen: ModelEvent[] = [];
     const run = (async () => {
@@ -108,7 +108,7 @@ describe("fake provider", () => {
   });
 
   test("pieces keep the text", () => {
-    const text = "um dois  três quatro\ncinco";
+    const text = "one two  three four\nfive";
     expect(chunksOf(text).join("")).toBe(text);
   });
 });
@@ -216,7 +216,7 @@ function sseWithAdvisor(): string {
     ],
     [
       "content_block_delta",
-      { type: "content_block_delta", index: 2, delta: { type: "text_delta", text: "feito" } },
+      { type: "content_block_delta", index: 2, delta: { type: "text_delta", text: "done" } },
     ],
     ["content_block_stop", { type: "content_block_stop", index: 2 }],
     [
@@ -259,7 +259,7 @@ describe("advisor", () => {
     }) as unknown as typeof fetch;
     const provider = anthropicProvider("sk-test", { fetch: fakeFetch });
     const advisor = { model: "claude-opus-5-5", maxUses: 2, maxTokens: 2048 };
-    const events = await collect(provider.stream(req("oi", { advisor })));
+    const events = await collect(provider.stream(req("hi", { advisor })));
     expect(seen[0]?.beta).toContain(ADVISOR_BETA);
     expect(seen[0]?.tools).toContainEqual({
       type: "advisor_20260301",
@@ -277,14 +277,14 @@ describe("advisor", () => {
       "advisor_tool_result",
       "text",
     ]);
-    expect(turn.content).toEqual([{ type: "text", text: "feito" }]);
+    expect(turn.content).toEqual([{ type: "text", text: "done" }]);
     expect(turn.usage.iterations?.map((i) => [i.type, i.model ?? null])).toEqual([
       ["message", null],
       ["advisor_message", "claude-opus-5-5"],
       ["message", null],
     ]);
 
-    await collect(provider.stream(req("oi")));
+    await collect(provider.stream(req("hi")));
     expect(seen[1]?.beta ?? "").not.toContain(ADVISOR_BETA);
     expect(JSON.stringify(seen[1]?.tools)).not.toContain("advisor");
   });
@@ -296,10 +296,10 @@ describe("advisor", () => {
       if (t?.type !== "turn") throw new Error("no turn");
       return t;
     };
-    const without = await turnOf(req("planeje [[advise]]"));
+    const without = await turnOf(req("plan [[advise]]"));
     expect(without.usage.iterations).toBeUndefined();
     const advisor = { model: "claude-opus-5-5", maxUses: 2, maxTokens: 2048 };
-    const once = await turnOf(req("planeje [[advise]]", { advisor }));
+    const once = await turnOf(req("plan [[advise]]", { advisor }));
     expect(once.usage.iterations?.map((i) => i.type)).toEqual(["message", "advisor_message"]);
     expect(once.usage.iterations?.[1]).toMatchObject({
       model: "claude-opus-5-5",
