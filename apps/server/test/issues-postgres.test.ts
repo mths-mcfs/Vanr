@@ -41,7 +41,7 @@ async function withServer(
   const server = await startTestServer({ env: { DATABASE_URL: url } });
   const admin = postgres(url, { max: 1, onnotice: () => {} });
   try {
-    const ana = await signedIn(server, "Ana", `ana@${prefix}.test`);
+    const ana = await signedIn(server, "Ana", `ana@${prefix.replaceAll("_", "-")}.test`);
     const { workspaceId } = await seedWorkspace(server, ana, "Board");
     // The board's columns exist before the race: only the transaction under test runs inside it.
     await columnsOf(server.deps.db, workspaceId);
