@@ -11,6 +11,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sealSecret } from "@vanr/contract";
@@ -230,6 +231,272 @@ test("a secret changed after a stop: the old file stays and the command fails na
   ]).toEqual([true, true, "old value"]);
   rmSync(join(root, "t-old"));
 });
+
+const mkfifo = (p: string) => {
+  if (Bun.spawnSync(["mkfifo", p]).exitCode !== 0) throw new Error("mkfifo");
+};
+const socketAt = async (p: string) => {
+  const server = createServer();
+  await new Promise<void>((done) => server.listen(p, done));
+  return server;
+};
+
+test("table: a FIFO or a socket at the path is rejected at once, never waited on or read", async () => {
+  const values = new Map([[agent.id, [{ name: "CONF", target: "file:t-special", value: "secret conf" }]]]);
+  rmSync(join(root, "t-special"), { force: true });
+  mkfifo(join(root, "t-special"));
+  const started = Date.now();
+  const fifo = await codeOf(
+    (await storeOf(mkdtempSync(join(dir, "home-")), values)).materialize(agent, root),
+  );
+  expect([
+    fifo.startsWith("not_allowed"),
+    lstatSync(join(root, "t-special")).isFIFO(),
+    Date.now() - started < 2000,
+  ]).toEqual([true, true, true]);
+  rmSync(join(root, "t-special"));
+  // A device cannot be made without root here; a socket is the other kind of special file a user can make.
+  const server = await socketAt(join(root, "t-special"));
+  try {
+    const sock = await codeOf(
+      (await storeOf(mkdtempSync(join(dir, "home-")), values)).materialize(agent, root),
+    );
+    expect([sock.startsWith("not_allowed"), lstatSync(join(root, "t-special")).isSocket()]).toEqual([
+      true,
+      true,
+    ]);
+  } finally {
+    server.close();
+    rmSync(join(root, "t-special"), { force: true });
+  }
+}, 5_000);
+
+test("table: a FIFO is never adopted, not even for an empty value, and opening it never blocks (in a child, with a deadline)", () => {
+  const work = mkdtempSync(join(dir, "fifo-"));
+  mkfifo(join(work, "conf"));
+  const script = join(work, "check.ts");
+  writeFileSync(
+    script,
+    `import { SecretStore } from ${JSON.stringify(join(import.meta.dir, "secrets.ts"))};
+const s = new SecretStore(${JSON.stringify(join(work, "home"))});
+await s.unlock(Buffer.alloc(32, 3).toString("base64"), "rnr_1");
+Reflect.set(s, "values", async () => [{ name: "EMPTY", target: "file:conf", value: "", browser: null }]);
+const out = await s.materialize({ id: "agt_0000000012345678", handle: "lia" }, ${JSON.stringify(work)}).then(() => "adopted", (e) => e.code);
+console.log(out);`,
+  );
+  const child = Bun.spawnSync([process.execPath, script], { timeout: 3000, stdout: "pipe", stderr: "pipe" });
+  // Not adopted (the empty value matches a FIFO's size 0) and not hung on the open.
+  expect([child.exitCode, child.stdout.toString().trim()]).toEqual([0, "not_allowed"]);
+  expect(lstatSync(join(work, "conf")).isFIFO()).toBe(true);
+}, 10_000);
+
+test("table: the same path in use, changed by the agent meanwhile: the second command fails instead of getting it", async () => {
+  const values = new Map([[agent.id, [{ name: "CONF", target: "file:t-swapped", value: "secret-A" }]]]);
+  const store = await storeOf(mkdtempSync(join(dir, "home-")), values);
+  const first = await store.materialize(agent, root);
+  rmSync(join(root, "t-swapped"));
+  writeFileSync(join(root, "t-swapped"), "the agent's own");
+  const why = await codeOf(store.materialize(agent, root));
+  expect([why.startsWith("not_allowed"), readFileSync(join(root, "t-swapped"), "utf8")]).toEqual([
+    true,
+    "the agent's own",
+  ]);
+  first.release();
+  expect(readFileSync(join(root, "t-swapped"), "utf8")).toBe("the agent's own");
+  rmSync(join(root, "t-swapped"));
+});
+
+test("table: a target outside the work folder fails before anything runs (not silently without the value)", async () => {
+  const values = new Map([[agent.id, [{ name: "CONF", target: "file:../t-outside", value: "secret conf" }]]]);
+  const why = await codeOf((await storeOf(mkdtempSync(join(dir, "home-")), values)).materialize(agent, root));
+  expect([why.startsWith("not_allowed"), existsSync(join(root, "..", "t-outside"))]).toEqual([true, false]);
+});
+
+test("table: a folder on the way that is a link or a file: nothing is created anywhere, inside or out", async () => {
+  const outside = mkdtempSync(join(dir, "outside-"));
+  symlinkSync(outside, join(root, "t-hop"));
+  writeFileSync(join(root, "t-file"), "a file, not a folder");
+  for (const target of ["file:t-hop/new/deep/conf", "file:t-file/conf", "file:t-new/t-hop2/conf"]) {
+    const values = new Map([[agent.id, [{ name: "CONF", target, value: "secret conf" }]]]);
+    const why = await codeOf(
+      (await storeOf(mkdtempSync(join(dir, "home-")), values)).materialize(agent, root),
+    );
+    if (target.startsWith("file:t-new")) {
+      // No link on the way: the missing folders are created one by one and the file goes in.
+      expect(why).toBe("went");
+      continue;
+    }
+    expect([target, why.startsWith("not_allowed")]).toEqual([target, true]);
+  }
+  expect([existsSync(join(outside, "new")), readFileSync(join(root, "t-file"), "utf8")]).toEqual([
+    false,
+    "a file, not a folder",
+  ]);
+  rmSync(join(root, "t-new"), { recursive: true, force: true });
+});
+
+test("release: what the agent put in place of the file during the command is left; the other files still go", async () => {
+  const values = new Map([
+    [
+      agent.id,
+      [
+        { name: "A", target: "file:t-r1", value: "secret one" },
+        { name: "B", target: "file:t-r2", value: "secret two" },
+        { name: "C", target: "file:t-r3", value: "secret three" },
+      ],
+    ],
+  ]);
+  const logs: string[] = [];
+  const store = new SecretStore(mkdtempSync(join(dir, "home-")), (l) => logs.push(l));
+  await store.unlock(Buffer.alloc(32, 3).toString("base64"), "rnr_1");
+  Reflect.set(store, "values", async (a: { id: string }) =>
+    (values.get(a.id) ?? []).map((v) => ({ ...v, browser: null })),
+  );
+  const m = await store.materialize(agent, root);
+  // During the command: the first becomes a folder, the second a file of the person (the same inode back).
+  rmSync(join(root, "t-r1"));
+  mkdirSync(join(root, "t-r1"));
+  rmSync(join(root, "t-r2"));
+  writeFileSync(join(root, "t-r2"), "the person's own");
+  m.release();
+  expect([
+    kind(join(root, "t-r1")),
+    readFileSync(join(root, "t-r2"), "utf8"),
+    existsSync(join(root, "t-r3")),
+  ]).toEqual(["other", "the person's own", false]);
+  expect(logs.join("\n")).toContain("t-r2");
+  for (const v of ["secret one", "secret two", "secret three"]) expect(logs.join("\n")).not.toContain(v);
+  rmSync(join(root, "t-r1"), { recursive: true });
+  rmSync(join(root, "t-r2"));
+});
+
+test("release: a file that cannot be removed now does not keep the others, is logged and removed at the next release", async () => {
+  const values = new Map([
+    [
+      agent.id,
+      [
+        { name: "A", target: "file:t-ro/conf", value: "secret one" },
+        { name: "B", target: "file:t-after", value: "secret two" },
+      ],
+    ],
+  ]);
+  const logs: string[] = [];
+  const store = new SecretStore(mkdtempSync(join(dir, "home-")), (l) => logs.push(l));
+  await store.unlock(Buffer.alloc(32, 3).toString("base64"), "rnr_1");
+  Reflect.set(store, "values", async (a: { id: string }) =>
+    (values.get(a.id) ?? []).map((v) => ({ ...v, browser: null })),
+  );
+  const m = await store.materialize(agent, root);
+  chmodSync(join(root, "t-ro"), 0o500);
+  m.release();
+  // The one that failed does not keep the next from going.
+  expect([
+    existsSync(join(root, "t-ro", "conf")),
+    existsSync(join(root, "t-after")),
+    logs.some((l) => l.includes("trying again")),
+  ]).toEqual([true, false, true]);
+  chmodSync(join(root, "t-ro"), 0o700);
+  // The next release (of any op) tries it again.
+  (await store.materialize(bob, root)).release();
+  expect(existsSync(join(root, "t-ro", "conf"))).toBe(false);
+  rmSync(join(root, "t-ro"), { recursive: true });
+});
+
+test("property: the agent changes what is at a path at any point between the runner's look and act: the invariants hold and nothing hangs", async () => {
+  const r = seeded(18018);
+  const rels = ["s-a", "s-b", "s-c"];
+  const kinds = ["file", "link", "folder", "fifo", "nothing"] as const;
+  let sequences = 0;
+  let steps = 0;
+  let violations = 0;
+  let hung = 0;
+  const look = (p: string) => {
+    try {
+      const l = lstatSync(p);
+      return l.isSymbolicLink()
+        ? "link"
+        : l.isFile()
+          ? `file:${readFileSync(p, "utf8")}`
+          : l.isFIFO()
+            ? "fifo"
+            : "folder";
+    } catch {
+      return "gone";
+    }
+  };
+  writeFileSync(join(root, "inside.txt"), "inside");
+  // What the agent put at each path (a swap), which the runner must leave as it is.
+  const foreign = new Map<string, string>();
+  const swap = (path: string) => {
+    if (r.int(3, "swap?") !== 0) return;
+    const rel = path.slice(root.length + 1);
+    rmSync(path, { recursive: true, force: true });
+    const k = r.pick(kinds, "kind");
+    if (k === "file") writeFileSync(path, `agent ${rel}`);
+    else if (k === "link") symlinkSync(join(root, "inside.txt"), path);
+    else if (k === "folder") mkdirSync(path);
+    else if (k === "fifo") mkfifo(path);
+    foreign.set(rel, look(path));
+  };
+  for (let round = 0; round < 80; round++) {
+    for (const rel of rels) rmSync(join(root, rel), { recursive: true, force: true });
+    foreign.clear();
+    const values = new Map(
+      [agent, bob].map((a) => [
+        a.id,
+        rels
+          .filter(() => r.int(2))
+          .map((rel) => ({ name: `S_${rel}`, target: `file:${rel}`, value: r.pick(["v1", "v2"], "value") })),
+      ]),
+    );
+    const home = mkdtempSync(join(dir, "home-"));
+    const store = new SecretStore(home, () => {}, {
+      beforeCreate: swap,
+      beforeLook: swap,
+      beforeRemove: swap,
+    });
+    await store.unlock(Buffer.alloc(32, 3).toString("base64"), "rnr_1");
+    Reflect.set(store, "values", async (a: { id: string }) =>
+      (values.get(a.id) ?? []).map((v) => ({ ...v, browser: null })),
+    );
+    const live: { release: () => void; files: Map<string, string> }[] = [];
+    for (let i = 0; i < 10; i++) {
+      const started = Date.now();
+      const a = r.pick([agent, bob], "agent");
+      const action = r.int(3, "action");
+      if (action === 0) {
+        const got = await store.materialize(a, root).then(
+          (m) => m,
+          () => null,
+        );
+        if (got) {
+          const files = new Map((values.get(a.id) ?? []).map((v) => [v.target.slice(5), v.value]));
+          // The command gets what is configured, or does not run.
+          for (const [rel, value] of files) if (look(join(root, rel)) !== `file:${value}`) violations++;
+          live.push({ release: got.release, files });
+        }
+      } else if (action === 1 && live.length) live.splice(r.int(live.length), 1)[0]?.release();
+      else for (const rel of rels) if (r.int(4) === 0) swap(join(root, rel));
+      // What the agent put is as it put it (unless the runner was right to take it: it never is).
+      for (const [rel, was] of foreign)
+        if (look(join(root, rel)) !== was && !live.some((l) => l.files.has(rel))) violations++;
+      if (Date.now() - started > 2000) hung++;
+      steps++;
+    }
+    for (const l of live.splice(0)) l.release();
+    // Released: nothing of the runner is left; what is there is the agent's.
+    for (const rel of rels) {
+      const now = look(join(root, rel));
+      if (now !== "gone" && foreign.get(rel) !== now) violations++;
+    }
+    sequences++;
+  }
+  for (const rel of rels) rmSync(join(root, rel), { recursive: true, force: true });
+  console.log(
+    `[secrets-swap] ${sequences} sequences, ${steps} steps, ${violations} violations, ${hung} hung; kinds ${JSON.stringify(r.spread("kind"))}`,
+  );
+  expect([violations, hung]).toEqual([0, 0]);
+}, 60_000);
 
 test("property: in any sequence (materialize, release, abort, stop, new value), no file the runner did not create or adopt is touched", async () => {
   const r = seeded(17017);

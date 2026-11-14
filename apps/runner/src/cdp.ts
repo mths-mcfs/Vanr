@@ -140,8 +140,19 @@ async function underSignal<T>(
   work: () => Promise<T>,
   timeoutMs?: number,
 ): Promise<T | undefined> {
+  if (signal?.aborted) throw canceled();
   if (s.unwinding.size) {
-    const settled = await within(Promise.allSettled([...s.unwinding]), UNWIND_WAIT_MS);
+    // Waiting for an aborted op to unwind, this op answers its own abort at once.
+    let leave: () => void = () => {};
+    const own = new Promise<"aborted">((done) => {
+      leave = () => done("aborted");
+      signal?.addEventListener("abort", leave, { once: true });
+    });
+    const settled = await within(
+      Promise.race([Promise.allSettled([...s.unwinding]), own]),
+      UNWIND_WAIT_MS,
+    ).finally(() => signal?.removeEventListener("abort", leave));
+    if (settled === "aborted" || signal?.aborted) throw canceled();
     if (!settled)
       throw new RunnerError("timeout", "The browser is still stopping a canceled action; try again");
   }
