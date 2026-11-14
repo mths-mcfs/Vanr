@@ -112,7 +112,8 @@ const ApiUsage = z.object({
   cache_creation: z
     .object({ ephemeral_5m_input_tokens: optionalCount, ephemeral_1h_input_tokens: optionalCount })
     .nullish(),
-  speed: z.enum(["standard", "fast"]).nullish(),
+  /** Any text: a new value must not break every agent (usage.ts charges it as the dearest known mode). */
+  speed: z.string().nullish(),
   inference_geo: z.string().nullish(),
   service_tier: z.string().nullish(),
   iterations: z.unknown().optional(),
@@ -134,7 +135,7 @@ const ApiIteration = z.object({
 function invalid(what: string, error: z.ZodError): ModelError {
   const issue = error.issues[0];
   return new ModelError(
-    "invalid_tool_input",
+    "invalid_response",
     `Invalid ${what} in the response: ${issue?.path.join(".")} ${issue?.message}`,
   );
 }

@@ -55,7 +55,8 @@ export interface UsageLine extends Omit<ModelCall, "usage"> {
   cacheWrite5mTokens: number;
   cacheWrite1hTokens: number;
   outputTokens: number;
-  speed: "standard" | "fast";
+  /** As the provider sent it: `standard`, `fast` or a value this version does not know. */
+  speed: string;
   inferenceGeo: string | null;
   serviceTier: string | null;
   costUsd: number;
@@ -181,7 +182,9 @@ function tokenCost(price: Price, t: Tokens, mult: number): number {
 
 function multiplier(price: Price, call: Pick<ModelCall, "usage" | "batch">): number {
   let m = call.batch ? 0.5 : 1;
-  if (call.usage.speed === "fast") m *= price.fast ?? 1;
+  // An unknown speed is charged as the dearest known mode (fast), so the budget errs upward, never down.
+  const speed = call.usage.speed ?? "standard";
+  if (speed !== "standard") m *= price.fast ?? 1;
   if (call.usage.inferenceGeo === "us") m *= price.usGeo ?? 1;
   return m;
 }

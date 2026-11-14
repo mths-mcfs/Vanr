@@ -2,6 +2,7 @@
 // or the tool runner. Usage with a broken iteration falls back to the top-level usage; a token count that
 // is not a non-negative integer, or a tool block without an id, fails the turn.
 import { describe, expect, test } from "bun:test";
+import type Anthropic from "@anthropic-ai/sdk";
 import { costUsd } from "../usage";
 import { anthropicProvider, usageOf } from "./anthropic";
 import { PRICES } from "./prices";
@@ -76,6 +77,7 @@ describe("Anthropic usage at the boundary", () => {
         thrown = e;
       }
       expect(thrown).toBeInstanceOf(ModelError);
+      expect(thrown).toMatchObject({ code: "invalid_response" });
     }
   });
 });
@@ -149,6 +151,154 @@ describe("Anthropic tool blocks at the boundary", () => {
         thrown = e;
       }
       expect(thrown).toBeInstanceOf(ModelError);
+      expect(thrown).toMatchObject({ code: "invalid_response" });
     }
+  });
+});
+
+/** Every field of the SDK's `Usage`, the nullable ones as `null`: `satisfies` breaks if the SDK adds one. */
+const nullUsage = {
+  cache_creation: null,
+  cache_creation_input_tokens: null,
+  cache_read_input_tokens: null,
+  inference_geo: null,
+  input_tokens: 10,
+  output_tokens: 5,
+  output_tokens_details: null,
+  server_tool_use: null,
+  service_tier: null,
+  speed: null,
+} satisfies Anthropic.Usage;
+
+/** Every field of the SDK's `Usage` filled in. */
+const fullUsage = {
+  cache_creation: { ephemeral_1h_input_tokens: 200, ephemeral_5m_input_tokens: 100 },
+  cache_creation_input_tokens: 300,
+  cache_read_input_tokens: 1000,
+  inference_geo: "us",
+  input_tokens: 10,
+  output_tokens: 5,
+  output_tokens_details: { thinking_tokens: 3 },
+  server_tool_use: { web_fetch_requests: 1, web_search_requests: 2 },
+  service_tier: "priority",
+  speed: "fast",
+} satisfies Anthropic.Usage;
+
+/** Every field of the SDK's `Message`, with a text block (and a citation) and a tool block in full. */
+const fullMessage = (usage: Anthropic.Usage, extra: Record<string, unknown> = {}) =>
+  ({
+    id: "msg_1",
+    container: null,
+    content: [
+      {
+        citations: [
+          {
+            cited_text: "cited",
+            end_block_index: 1,
+            search_result_index: 0,
+            source: "/wiki/a",
+            start_block_index: 0,
+            title: null,
+            type: "search_result_location",
+          },
+        ],
+        text: "answer",
+        type: "text",
+        ...extra,
+      },
+      { citations: null, text: "more", type: "text" },
+      {
+        id: "toolu_1",
+        caller: { type: "direct" },
+        input: { text: "hi" },
+        name: "remember",
+        type: "tool_use",
+        toolset_name: null,
+        ...extra,
+      },
+    ],
+    diagnostics: null,
+    model: "claude-haiku-5-5",
+    role: "assistant",
+    stop_details: null,
+    stop_reason: "tool_use",
+    stop_sequence: null,
+    type: "message",
+    usage,
+    ...extra,
+  }) satisfies Anthropic.Message;
+
+async function streamMessage(message: Record<string, unknown>): Promise<ModelEvent[]> {
+  const events = [
+    { type: "message_start", message },
+    {
+      type: "message_delta",
+      delta: { stop_reason: "tool_use", stop_sequence: null },
+      usage: { output_tokens: 5 },
+    },
+    { type: "message_stop" },
+  ];
+  const body = events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join("");
+  const fakeFetch = (async () =>
+    new Response(body, { headers: { "content-type": "text/event-stream" } })) as unknown as typeof fetch;
+  const out: ModelEvent[] = [];
+  for await (const e of anthropicProvider("sk-test", { fetch: fakeFetch }).stream({
+    model: "claude-haiku-5-5",
+    system: "s",
+    messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+    tools: [],
+    maxTokens: 100,
+    signal: new AbortController().signal,
+  }))
+    out.push(e);
+  return out;
+}
+
+describe("the validation is never stricter than the SDK's types", () => {
+  test("a usage with every SDK field, nullable ones as null or filled in, passes", () => {
+    expect(usageOf(nullUsage)).toEqual({
+      inputTokens: 10,
+      cachedTokens: 0,
+      cacheWriteTokens: 0,
+      outputTokens: 5,
+    });
+    expect(usageOf(fullUsage)).toEqual({
+      inputTokens: 10,
+      cachedTokens: 1000,
+      cacheWriteTokens: 300,
+      outputTokens: 5,
+      cacheWrite1hTokens: 200,
+      speed: "fast",
+      inferenceGeo: "us",
+      serviceTier: "priority",
+    });
+  });
+
+  test("a field the SDK does not know is ignored, in the usage and in the message", async () => {
+    expect(
+      usageOf({ ...fullUsage, brand_new_counter: -7, brand_new_object: { x: null } } as Anthropic.Usage),
+    ).toEqual(usageOf(fullUsage));
+    for (const message of [fullMessage(nullUsage), fullMessage(fullUsage, { brand_new_field: { x: -1 } })]) {
+      const turn = (await streamMessage(message)).at(-1);
+      if (turn?.type !== "turn") throw new Error("no turn");
+      expect(turn.content).toEqual([
+        {
+          type: "text",
+          text: "answer",
+          citations: [{ searchResultIndex: 0, source: "/wiki/a", title: null, citedText: "cited" }],
+        },
+        { type: "text", text: "more" },
+        { type: "tool_use", id: "toolu_1", name: "remember", input: { text: "hi" } },
+      ]);
+    }
+  });
+
+  test("an unknown speed does not fail the turn, is kept, and is charged as fast", () => {
+    const u = usageOf({ ...fullUsage, speed: "turbo" } as unknown as Anthropic.Usage);
+    expect(u.speed).toBe("turbo");
+    const at = new Date("2026-10-01T00:00:00Z");
+    const opus = (speed: string) => costUsd(PRICES, { model: "claude-opus-5-5", usage: { ...u, speed }, at });
+    expect(opus("turbo")).toBeCloseTo(opus("fast"), 12);
+    expect(opus("turbo")).toBeGreaterThan(opus("standard"));
   });
 });

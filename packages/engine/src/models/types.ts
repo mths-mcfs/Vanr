@@ -91,8 +91,8 @@ export interface Usage {
   outputTokens: number;
   /** Part of `cacheWriteTokens` written to the 1 h cache (costs 2x the input, against 1.25x for 5 min). */
   cacheWrite1hTokens?: number;
-  /** `fast`: fast mode (higher price). */
-  speed?: "standard" | "fast";
+  /** `fast`: fast mode (higher price). Any other value but `standard` is charged as `fast`. */
+  speed?: string;
   /** Where inference ran (`us` costs 1.1x). */
   inferenceGeo?: string;
   serviceTier?: string;
@@ -135,6 +135,8 @@ export type ModelErrorCode =
   | "bad_request"
   | "network"
   | "invalid_tool_input"
+  /** The provider answered something unusable (negative token count, tool block without an id). */
+  | "invalid_response"
   | "fake_failure";
 
 /** A provider failure with a stable code that the run records in `errorCode`. */
