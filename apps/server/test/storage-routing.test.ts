@@ -74,7 +74,7 @@ describe("routed storage", () => {
     await expect(
       saveStorage(server.deps, workspaceId, { kind: "s3", s3: input("/vanr/") }),
     ).rejects.toMatchObject({
-      code: "storage.test_failed",
+      code: "storage.bucket_check_failed",
     });
     s3.failOn.clear();
     expect((await testStorage(server.deps, workspaceId, input("vanr"))).ok).toBe(true);
