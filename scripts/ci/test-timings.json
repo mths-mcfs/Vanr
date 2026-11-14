@@ -53,16 +53,17 @@
     "apps/server/test/sql-guard-conformance.test.ts": 1585,
     "apps/server/test/sql-guard.test.ts": 1264,
     "apps/server/test/static.test.ts": 44,
+    "apps/server/test/storage-bucket.test.ts": 19513,
     "apps/server/test/storage-outage.test.ts": 9633,
     "apps/server/test/storage-postgres.test.ts": 626,
     "apps/server/test/storage-race.test.ts": 6496,
     "apps/server/test/storage-routing.test.ts": 9270,
     "apps/server/test/usage-ledger.test.ts": 1574,
-    "apps/server/test/wiki-collab.test.ts": 39528,
-    "apps/server/test/wiki-live-guards.test.ts": 35010,
+    "apps/server/test/wiki-collab.test.ts": 16476,
+    "apps/server/test/wiki-live-guards.test.ts": 34689,
     "apps/server/test/wiki-md.test.ts": 517,
     "apps/server/test/wiki-search.test.ts": 54,
-    "apps/server/test/wiki.test.ts": 18003,
+    "apps/server/test/wiki.test.ts": 15693,
     "packages/contract/src/permissions.test.ts": 1,
     "packages/contract/src/secret-box.test.ts": 10,
     "packages/engine/src/action-credential.test.ts": 3,
@@ -114,7 +115,6 @@
     "packages/engine/src/wiki/props-vault.test.ts": 1,
     "packages/engine/src/work-state.test.ts": 2,
     "scripts/ci/gate.test.ts": 14,
-    "scripts/typecheck.test.ts": 4,
-    "apps/server/test/storage-bucket.test.ts": 19513
+    "scripts/typecheck.test.ts": 4
   }
 }
