@@ -156,7 +156,7 @@ test("Codex: only with the ChatGPT login, no shell, the tool over MCP", async ()
     expect(argv).toContain(`features.${off}=false`);
   expect(argv).toContain('web_search="disabled"');
   expect(argv).toContain("--ignore-user-config");
-  expect(argv).toContain("--ignore-rules");
+  expect(argv).not.toContain("--ignore-rules");
   expect(argv[argv.indexOf("--sandbox") + 1]).toBe("read-only");
   expect(argv.some((a) => a.startsWith("developer_instructions="))).toBe(true);
 });

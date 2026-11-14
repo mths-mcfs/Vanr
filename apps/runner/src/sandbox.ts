@@ -520,8 +520,17 @@ export function fsPolicy(
   const writable = [...input.writable.filter(keepOut), ...innerWrite];
   const readable = [...input.readable.filter(keepOut), ...innerRead, ...writable, ...pathDirsInHome(ctx)];
   const scan = protectedUnder(input.writable.filter(keepOut), input.liberated ?? []);
+  const personal = [personalCliDir("claude_code", ctx), personalCliDir("codex", ctx)];
   return {
-    denyRead: existing([...HOME_ROOTS, ctx.home, runner, ...SOCKET_DIRS(ctx.uid), ...(input.denyRead ?? [])]),
+    denyRead: existing([
+      ...HOME_ROOTS,
+      ctx.home,
+      runner,
+      ...personal,
+      ...personal.map(realOrSelf),
+      ...SOCKET_DIRS(ctx.uid),
+      ...(input.denyRead ?? []),
+    ]),
     allowRead: [...new Set(readable.map((p) => resolve(p)))],
     allowWrite: [...new Set(writable.map((p) => resolve(p)))],
     denyWrite: [...new Set([...scan.paths, ...(input.denyWrite ?? []), ...secretsOfRunner])],
