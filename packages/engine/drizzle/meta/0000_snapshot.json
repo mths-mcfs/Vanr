@@ -13532,7 +13532,7 @@
             }
           ],
           "isUnique": true,
-          "where": "status = 'queued' and trigger <> 'retry'",
+          "where": "status = 'queued' and trigger is distinct from 'retry'",
           "concurrently": false,
           "method": "btree",
           "with": {}

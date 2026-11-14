@@ -74,11 +74,10 @@ export function ruleMatches(rule: NotificationRule, input: ClassifyInput): boole
 
 export function classify(input: ClassifyInput, rules: readonly NotificationRule[]): Classified {
   const reason = input.reason ?? REASON_OF_KIND[input.kind];
-  // Critical only with an open request: the notice of an approval already decided wakes nobody.
-  const critical = input.waiting && (input.priority === "critical" || CRITICAL_REASONS.has(reason));
+  const critical = input.priority === "critical" || (input.waiting && CRITICAL_REASONS.has(reason));
   if (input.waiting) return { tab: "action_needed", critical, reason, ruleId: null };
   const rule = rules.find((r) => ruleMatches(r, input));
-  if (rule) return { tab: rule.tab, critical: false, reason, ruleId: rule.id };
+  if (rule) return { tab: rule.tab, critical, reason, ruleId: rule.id };
   const tab: NotificationTab =
     input.priority === "critical" || input.priority === "action_needed"
       ? "action_needed"
@@ -87,7 +86,7 @@ export function classify(input: ClassifyInput, rules: readonly NotificationRule[
         : NEEDS_YOU_KINDS.has(input.kind)
           ? "action_needed"
           : "fyi";
-  return { tab, critical: false, reason, ruleId: null };
+  return { tab, critical, reason, ruleId: null };
 }
 
 // ---- preferences ----
@@ -212,7 +211,7 @@ export function silenceUntil(s: NotificationSettings, tz: string, now: Date): Da
   const end = parseClock(q.end);
   if (q.enabled && start !== null && end !== null && start !== end) {
     const inside = (m: number) => (start < end ? m >= start && m < end : m >= start || m < end);
-    const from = Math.floor(now.getTime() / MINUTE);
+    const from = Math.floor((until ?? now).getTime() / MINUTE);
     if (inside(minuteOfDay(wallMinutes(from, tz)))) {
       const quietEnd = new Date(quietExit(from, tz, inside, end) * MINUTE);
       if (!until || quietEnd > until) until = quietEnd;

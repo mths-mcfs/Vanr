@@ -34,6 +34,8 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup
       - run: bun run typecheck
+      # The component gallery is the visual proof sheet for @vanr/ui; it must keep building.
+      - run: bun run --cwd packages/ui gallery:build
 
   test:
     runs-on: ubuntu-latest
@@ -76,7 +78,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
-      - run: bun test packages/engine/src/db/catalog.test.ts --test-name-pattern Postgres
+      - run: bun test packages/engine/src/db/catalog.test.ts packages/engine/src/sqlconn.test.ts --test-name-pattern Postgres
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
       # Search with the vector leg (pgvector), each index in a database of its own.

@@ -109,7 +109,11 @@ export function answerKey(answer: string, options: readonly string[] = []): stri
     const i = letter.charCodeAt(0) - 97;
     if (i >= 0 && i < opts.length) return `option:${i}`;
   }
-  const inside = opts.flatMap((o, i) => (o && ` ${norm} `.includes(` ${o} `) ? [i] : []));
+  const inside = opts.flatMap((o, i) =>
+    o && new RegExp(`(?:^| )${o.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=$| |[.,](?: |$))`).test(norm)
+      ? [i]
+      : [],
+  );
   if (inside.length === 1) return `option:${inside[0]}`;
   return `other:${norm}`;
 }
@@ -132,21 +136,25 @@ export function parsePosition(
   const trimmed = text.trim();
   let argument = trimmed;
   let raw: Record<string, unknown> | null = null;
-  // The last JSON object with "answer" (the agent may quote JSON in its argument).
-  const candidates = [...trimmed.matchAll(/\{[^{}]*"answer"[^{}]*(\{[^{}]*\}[^{}]*)*\}/g)];
-  for (let i = candidates.length - 1; i >= 0 && !raw; i--) {
-    const m = candidates[i] as RegExpMatchArray;
-    try {
-      const v: unknown = JSON.parse(m[0]);
-      if (isRecord(v) && typeof v.answer === "string") {
-        raw = v;
-        argument = (trimmed.slice(0, m.index) + trimmed.slice((m.index ?? 0) + m[0].length))
-          .replace(/```(json)?\s*```/g, "")
-          .trim();
+  // Start at each object: quotes in the free-text argument are not JSON string delimiters.
+  for (const { index: start } of [...trimmed.matchAll(/\{/g)].reverse()) {
+    let depth = 0;
+    for (const m of trimmed.slice(start).matchAll(/"(?:\\[\s\S]|[^"\\])*"|[{}]/g)) {
+      if (m[0] === "{") depth++;
+      if (m[0] !== "}" || --depth !== 0) continue;
+      const end = start + m.index + 1;
+      try {
+        const v: unknown = JSON.parse(trimmed.slice(start, end));
+        if (isRecord(v) && typeof v.answer === "string") {
+          raw = v;
+          argument = (trimmed.slice(0, start) + trimmed.slice(end)).replace(/```(json)?\s*```/g, "").trim();
+        }
+      } catch {
+        // not JSON
       }
-    } catch {
-      // not JSON
+      break;
     }
+    if (raw) break;
   }
   if (!raw) {
     const first = trimmed.split(/(?<=[.!?])\s|\n/)[0]?.trim() ?? "";
