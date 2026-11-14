@@ -16,8 +16,10 @@ import { MAX_ROWS, type TableRow } from "../src/bases/core";
 import { queryRows } from "../src/bases/query";
 import { BASE_UNDOERS } from "../src/bases/undo";
 import {
+  baseLocks,
   createDatabase,
   createView,
+  deleteDatabase,
   deleteView,
   importRows,
   resumeRecalcs,
@@ -25,6 +27,7 @@ import {
   updateView,
 } from "../src/bases/write";
 import type { AppDeps } from "../src/context";
+import { HttpError } from "../src/http";
 import { backfillSearch } from "../src/search-index";
 import type { RunningServer } from "../src/server";
 import { apiError, type BasesApi, basesApi, baseWithTypes, fuzzAgainstOracle } from "./bases-api";
@@ -2233,6 +2236,154 @@ describe("bases: writes at the same time", () => {
       );
       expect([conflict.status, conflict.code]).toEqual([409, "base.schema_conflict"]);
       expect((await ana.api.query(workspaceId, base.id, table.id)).total).toBe(3);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("bases: a write that starts over, and a deadlock answered as busy", () => {
+  /** A source base with a row, as the delete below finds it. */
+  async function sourceBase() {
+    const { workspaceId, ana } = await team();
+    const { base, table } = await baseWithTypes(ana.api, workspaceId, "Source");
+    const row = await ana.api.createRow(workspaceId, base.id, table.id, {
+      props: { [table.titlePropId]: "kept" },
+    });
+    const [databaseRow] = await server.deps.db
+      .select()
+      .from(schema.dbDatabases)
+      .where(eq(schema.dbDatabases.id, base.id));
+    if (!databaseRow) throw new Error("no base");
+    return { workspaceId, ana, base, table, row, databaseRow };
+  }
+
+  /**
+   * The server's dependencies with `before` run right before each transaction opens (after the write found the
+   * databases it reaches, before it locks them); counts the transactions.
+   */
+  function beforeEachTransaction(deps: AppDeps, before: () => Promise<void>) {
+    const seen = { transactions: 0 };
+    const db = new Proxy(deps.db, {
+      get(target, key) {
+        if (key === "transaction")
+          return async (...args: Parameters<typeof target.transaction>) => {
+            seen.transactions++;
+            await before();
+            return target.transaction(...args);
+          };
+        const value = Reflect.get(target, key);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    return { deps: { ...deps, db }, seen };
+  }
+
+  /** A linked base created by someone else in the gap: the set the delete found has grown. */
+  const linkTo = (workspaceId: string, tableId: string, actor: ActorRef, title: string) =>
+    createDatabase(server.deps, { workspaceId, title, linkedTableId: tableId, actor });
+
+  test(
+    "a linked base created between finding the set and locking it: the delete starts over and takes it too",
+    async () => {
+      const { workspaceId, ana, base, table, databaseRow } = await sourceBase();
+      const actor = { type: "person" as const, id: ana.user.id };
+      let late: string | null = null;
+      const held = beforeEachTransaction(server.deps, async () => {
+        if (late) return;
+        late = (await linkTo(workspaceId, table.id, actor, "Late")).id;
+      });
+      const socket = workspaceEvents(workspaceId);
+      try {
+        await deleteDatabase(held.deps, databaseRow);
+        // the first transaction found the grown set after its locks and started over: two in all
+        expect(held.seen.transactions).toBe(2);
+        expect(late).not.toBeNull();
+        // the late linked base showed only the deleted source: it went with it, in the same delete
+        const left = await server.deps.db
+          .select({ id: schema.dbDatabases.id })
+          .from(schema.dbDatabases)
+          .where(eq(schema.dbDatabases.workspaceId, workspaceId));
+        expect(left).toEqual([]);
+        expect(new Set([socket.event("base.deleted").baseId, socket.event("base.deleted").baseId])).toEqual(
+          new Set([base.id, late]),
+        );
+      } finally {
+        socket.close();
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a set that grows on all three tries answers base.busy, with nothing of the delete written and no event",
+    async () => {
+      const { workspaceId, ana, base, table, row, databaseRow } = await sourceBase();
+      const actor = { type: "person" as const, id: ana.user.id };
+      const late: string[] = [];
+      const held = beforeEachTransaction(server.deps, async () => {
+        late.push((await linkTo(workspaceId, table.id, actor, `Late ${late.length}`)).id);
+      });
+      const socket = workspaceEvents(workspaceId);
+      try {
+        const err = await deleteDatabase(held.deps, databaseRow).then(
+          () => null,
+          (e: unknown) => e,
+        );
+        expect(err).toBeInstanceOf(HttpError);
+        expect(err).toMatchObject({ status: 409, code: "base.busy", params: { retryable: true } });
+        expect(held.seen.transactions).toBe(3);
+        // the delete wrote nothing: the source, its row and its view are there, and so is every late base
+        const after = await ana.api.get(workspaceId, base.id);
+        expect(after.views).toHaveLength(1);
+        expect((await ana.api.getRow(workspaceId, base.id, row.id)).props[table.titlePropId]).toBe("kept");
+        for (const id of late) expect((await ana.api.get(workspaceId, id)).views).toHaveLength(1);
+        expect(() => socket.event("base.deleted")).toThrow();
+        expect(() => socket.event("base.updated")).toThrow();
+      } finally {
+        socket.close();
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a deadlock (40P01) or a serialization failure (40001) inside the write answers base.busy, undone; another error doesn't",
+    async () => {
+      const original = baseLocks.pause;
+      try {
+        for (const code of ["40P01", "40001", "23503"]) {
+          const { workspaceId, ana, base, row, table, databaseRow } = await sourceBase();
+          // thrown inside the delete's transaction, after the base's row was deleted in it
+          baseLocks.pause = async (point) => {
+            if (point === "base:deleted") throw Object.assign(new Error(`injected ${code}`), { code });
+          };
+          const socket = workspaceEvents(workspaceId);
+          try {
+            const err = await deleteDatabase(server.deps, databaseRow).then(
+              () => null,
+              (e: unknown) => e,
+            );
+            if (code === "23503") {
+              expect(err).not.toBeInstanceOf(HttpError);
+              expect(err).toMatchObject({ code: "23503" });
+            } else {
+              expect(err).toBeInstanceOf(HttpError);
+              expect(err).toMatchObject({ status: 409, code: "base.busy", params: { retryable: true } });
+            }
+            // undone: the base, its view and its row are still there, and nothing was published
+            baseLocks.pause = original;
+            expect((await ana.api.get(workspaceId, base.id)).views).toHaveLength(1);
+            expect((await ana.api.getRow(workspaceId, base.id, row.id)).props[table.titlePropId]).toBe(
+              "kept",
+            );
+            expect(() => socket.event("base.deleted")).toThrow();
+          } finally {
+            socket.close();
+          }
+        }
+      } finally {
+        baseLocks.pause = original;
+      }
     },
     SERVER_TEST_MS,
   );
