@@ -2,7 +2,7 @@
 // from; that slice replaces the import with the real module and deletes the type here.
 
 import type { AgentAction, AgentActionKind, EffectClass, GateReason } from "@vanr/contract";
-import type { schema } from "@vanr/engine/db";
+import type { Db, schema } from "@vanr/engine/db";
 import type { Preview } from "@vanr/engine/effects";
 import type { ModelProvider } from "@vanr/engine/models/types";
 import type { BudgetScope } from "@vanr/engine/usage";
@@ -99,12 +99,18 @@ export interface ToolContext {
   workspaceId: string;
   agent: Pick<AgentRow, "id">;
   runId: string;
-  /** Records an action a person can undo; the receipt goes with the agent's next message. */
-  recordAction(action: {
-    kind: AgentActionKind;
-    target: AgentAction["target"];
-    params?: Record<string, unknown>;
-    /** Until when it can be undone; by default, the usual window (24 h). */
-    revertibleUntil?: Date;
-  }): Promise<void>;
+  /**
+   * Records an action a person can undo; the receipt goes with the agent's next message. With `tx`, the action is
+   * written in that transaction (the outbox's: the queued send and its receipt exist together or not at all).
+   */
+  recordAction(
+    action: {
+      kind: AgentActionKind;
+      target: AgentAction["target"];
+      params?: Record<string, unknown>;
+      /** Until when it can be undone; by default, the usual window (24 h). */
+      revertibleUntil?: Date;
+    },
+    tx: Parameters<Parameters<Db["transaction"]>[0]>[0],
+  ): Promise<void>;
 }

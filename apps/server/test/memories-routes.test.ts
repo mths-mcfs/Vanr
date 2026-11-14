@@ -6,8 +6,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Memory, MemoryReview, Message, Reminder } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
-import { MEMORY_ITEM_MAX_BYTES } from "@vanr/engine/memory";
-import { eq } from "drizzle-orm";
+import { MEMORY_ITEM_MAX_BYTES, MEMORY_STORE_MAX_ITEMS } from "@vanr/engine/memory";
+import { and, eq } from "drizzle-orm";
 import { createMemory } from "../src/agent-memory";
 import { channelInWorkspace } from "../src/channels";
 import { queueMemoryReview } from "../src/memory-reviews";
@@ -96,6 +96,20 @@ async function noteOf(t: Team, agentId: string, text = "The client pays on the 1
 const countMemories = async (workspaceId: string) =>
   (await server.deps.db.select().from(schema.memories).where(eq(schema.memories.workspaceId, workspaceId)))
     .length;
+
+/** Whether the person is in the channel (writing in a public channel joins it). */
+const inChannel = async (channelId: string, who: Person) =>
+  (
+    await server.deps.db
+      .select()
+      .from(schema.channelMemberships)
+      .where(
+        and(
+          eq(schema.channelMemberships.channelId, channelId),
+          eq(schema.channelMemberships.memberId, who.user.id),
+        ),
+      )
+  ).length > 0;
 
 describe("who may call", () => {
   test(
@@ -403,6 +417,42 @@ describe("feedback on an answer", () => {
     },
     SERVER_TEST_MS,
   );
+
+  test(
+    "with the agent's store full the answer is a 409 and nothing shows: no message, no lesson, no join",
+    async () => {
+      const t = await team();
+      const open = await seedChannel(server, t.workspaceId, { name: "open", members: [t.ana] });
+      const reply = await answer(t, open);
+      const origin = { by: null, name: null, channel: null, at: clock.toISOString() };
+      for (let i = 0; i < MEMORY_STORE_MAX_ITEMS; i += 1000)
+        await server.deps.db.insert(schema.memories).values(
+          Array.from({ length: Math.min(1000, MEMORY_STORE_MAX_ITEMS - i) }, (_, k) => ({
+            id: `mem_fb${n}_${i + k}`,
+            workspaceId: t.workspaceId,
+            agentId: t.lia,
+            scope: "agent" as const,
+            text: "full",
+            origin,
+            createdAt: clock,
+            updatedAt: clock,
+          })),
+        );
+      for (let i = 0; i < 2; i++) {
+        const res = await call(t.caio, t.workspaceId, "POST", `/messages/${reply.id}/feedback`, {
+          body: "It's 7 days.",
+        });
+        expect([res.status, res.json.error.code]).toEqual([409, "memory.store_full"]);
+      }
+      const bodies = (
+        await server.deps.db.select().from(schema.messages).where(eq(schema.messages.channelId, open))
+      ).map((m) => m.body);
+      expect(bodies).toEqual(["The refund takes 90 days."]);
+      expect(await countMemories(t.workspaceId)).toBe(MEMORY_STORE_MAX_ITEMS);
+      expect(await inChannel(open, t.caio)).toBe(false);
+    },
+    SERVER_TEST_MS * 2,
+  );
 });
 
 describe("reminders", () => {
@@ -453,6 +503,27 @@ describe("reminders", () => {
         .from(schema.reminders)
         .where(eq(schema.reminders.workspaceId, t.workspaceId));
       expect(rows.map((r) => r.text).sort()).toEqual(["Call the client", "edge"]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a rejected reminder doesn't join the person to the public channel; an accepted one does",
+    async () => {
+      const t = await team();
+      const open = await seedChannel(server, t.workspaceId, { name: "open", members: [t.ana] });
+      const create = (data: Record<string, unknown>) =>
+        call(t.caio, t.workspaceId, "POST", "/reminders", data);
+      expect((await create({ channelId: open, text: "past", at: inMinutes(0) })).status).toBe(400);
+      expect(
+        (await create({ channelId: open, threadId: "msg_none", text: "x", at: inMinutes(5) })).status,
+      ).toBe(400);
+      expect(
+        (await create({ channelId: open, agentId: "agt_none", text: "x", at: inMinutes(5) })).status,
+      ).toBe(404);
+      expect(await inChannel(open, t.caio)).toBe(false);
+      expect((await create({ channelId: open, text: "ok", at: inMinutes(5) })).status).toBe(201);
+      expect(await inChannel(open, t.caio)).toBe(true);
     },
     SERVER_TEST_MS,
   );

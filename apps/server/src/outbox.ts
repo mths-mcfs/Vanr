@@ -17,11 +17,10 @@ import { type AppDeps, requireRuntime } from "./context";
 import type { ToolContext } from "./forward-types";
 import { HttpError } from "./http";
 import { mailboxesOf, sentOutOf, transmitMail } from "./integrations/mail";
-import { releaseUsage } from "./integrations/usage";
 import { log } from "./logger";
 import { postMessage, publishActions } from "./messages";
 
-const { outbox, reversibleActions, agents, channels, mailConnections } = schema;
+const { outbox, reversibleActions, agents, channels, mailConnections, integrationUsage } = schema;
 
 export type OutboxRow = typeof outbox.$inferSelect;
 
@@ -57,25 +56,32 @@ export async function queueSend(ctx: ToolContext, item: Item & { title: string }
   const at = now();
   const sendAt = new Date(at.getTime() + config.undoSendMs);
   const payload: Record<string, unknown> = { ...item.payload };
-  const [row] = await db
-    .insert(outbox)
-    .values({
-      id: newId("out"),
-      workspaceId: ctx.workspaceId,
-      agentId: ctx.agent.id,
-      runId: ctx.runId,
-      kind: item.kind,
-      payload,
-      sendAt,
-      createdAt: at,
-    })
-    .returning();
-  if (!row) throw new Error("outbox insert returned nothing");
-  await ctx.recordAction({
-    kind: item.kind === "mail" ? "mail_sent" : "message_posted",
-    target: { type: "outbox", id: row.id, title: item.title },
-    params: { outboxId: row.id, sendAt: sendAt.toISOString() },
-    ...(item.kind === "mail" ? { revertibleUntil: sendAt } : {}),
+  // The item and its receipt in one transaction: a request that failed leaves nothing that goes out later.
+  const row = await db.transaction(async (tx) => {
+    const [inserted] = await tx
+      .insert(outbox)
+      .values({
+        id: newId("out"),
+        workspaceId: ctx.workspaceId,
+        agentId: ctx.agent.id,
+        runId: ctx.runId,
+        kind: item.kind,
+        payload,
+        sendAt,
+        createdAt: at,
+      })
+      .returning();
+    if (!inserted) throw new Error("outbox insert returned nothing");
+    await ctx.recordAction(
+      {
+        kind: item.kind === "mail" ? "mail_sent" : "message_posted",
+        target: { type: "outbox", id: inserted.id, title: item.title },
+        params: { outboxId: inserted.id, sendAt: sendAt.toISOString() },
+        ...(item.kind === "mail" ? { revertibleUntil: sendAt } : {}),
+      },
+      tx,
+    );
+    return inserted;
   });
   runtime.wakeAt(sendAt);
   return row;
@@ -120,13 +126,18 @@ async function deliver(deps: AppDeps, id: string): Promise<boolean> {
     } else {
       ok = false;
       log.warn("outbox.send_failed", { id: row.id, kind: row.kind, error });
-      await db.update(outbox).set({ status: "failed", error }).where(eq(outbox.id, row.id));
-      await db
-        .update(reversibleActions)
-        .set({
-          params: sql`${reversibleActions.params} || ${JSON.stringify({ failed: error.slice(0, 300) })}::jsonb`,
-        })
-        .where(sql`${reversibleActions.params}->>'outboxId' = ${row.id}`);
+      // Failed (or rejected when it was to go out): the state, the quota coming back and the receipt saying so are
+      // one transaction, so the reservation never comes back without the item failing, nor stays held after it.
+      await db.transaction(async (tx) => {
+        await tx.update(outbox).set({ status: "failed", error }).where(eq(outbox.id, row.id));
+        await giveQuotaBack(tx, row);
+        await tx
+          .update(reversibleActions)
+          .set({
+            params: sql`${reversibleActions.params} || ${JSON.stringify({ failed: error.slice(0, 300) })}::jsonb`,
+          })
+          .where(sql`${reversibleActions.params}->>'outboxId' = ${row.id}`);
+      });
     }
   }
   await publishFor(deps, row.id);
@@ -179,21 +190,26 @@ async function deliverMail(deps: AppDeps, row: OutboxRow) {
     .where(and(eq(mailConnections.id, item.accountId), eq(mailConnections.workspaceId, row.workspaceId)));
   // The mailbox may have been taken from the agent (or disconnected) during the window.
   const box = (await mailboxesOf(db, row.agentId)).find((b) => b.accountId === item.accountId);
-  if (account?.status !== "active" || !box || box.level === "none") {
-    await releaseUsage(deps, item.usageId);
+  // Rejected here, or failing before it got out: the failure path gives the quota back with the state.
+  if (account?.status !== "active" || !box || box.level === "none")
     throw new Error("The mailbox is no longer available to this agent");
-  }
-  try {
-    await transmitMail(deps, account, item.envelope, item.raw);
-  } catch (err) {
-    if (!sentOutOf(err)) await releaseUsage(deps, item.usageId);
-    throw err;
-  }
+  await transmitMail(deps, account, item.envelope, item.raw);
+}
+
+type Tx = Parameters<Parameters<AppDeps["db"]["transaction"]>[0]>[0];
+
+/** Gives an email's quota reservation back, in the caller's transaction (a post holds none). */
+async function giveQuotaBack(tx: Tx, row: OutboxRow) {
+  if (row.kind !== "mail") return;
+  const parsed = mailItem.safeParse(row.payload);
+  if (parsed.success) await tx.delete(integrationUsage).where(eq(integrationUsage.id, parsed.data.usageId));
 }
 
 /**
- * Undo within the window: cancels, and nothing goes out. Already out (or going out): 409, and whoever undoes sees
- * it came too late. Only an item of the caller's workspace; who may undo the action is the caller's check.
+ * Undo within the window: cancels, and nothing goes out. Canceling and giving the quota back are one transaction.
+ * Canceling again is the same answer (it was canceled) and never gives the quota back twice. Already out (or going
+ * out): 409, and whoever undoes sees it came too late. Only an item of the caller's workspace; who may undo the
+ * action is the caller's check.
  */
 export async function cancelQueued(
   deps: AppDeps,
@@ -201,16 +217,22 @@ export async function cancelQueued(
   id: string,
   actorUserId: string,
 ): Promise<void> {
-  const [row] = await deps.db
-    .update(outbox)
-    .set({ status: "canceled", canceledByUserId: actorUserId })
-    .where(and(eq(outbox.id, id), eq(outbox.workspaceId, workspaceId), eq(outbox.status, "pending")))
-    .returning();
-  if (!row) throw new HttpError(409, "action.changed_since", "It already went out");
-  if (row.kind === "mail") {
-    const parsed = mailItem.safeParse(row.payload);
-    if (parsed.success) await releaseUsage(deps, parsed.data.usageId);
-  }
+  const canceled = await deps.db.transaction(async (tx) => {
+    const [row] = await tx
+      .update(outbox)
+      .set({ status: "canceled", canceledByUserId: actorUserId })
+      .where(and(eq(outbox.id, id), eq(outbox.workspaceId, workspaceId), eq(outbox.status, "pending")))
+      .returning();
+    if (row) await giveQuotaBack(tx, row);
+    return row !== undefined;
+  });
+  if (canceled) return;
+  const [now] = await deps.db
+    .select({ status: outbox.status })
+    .from(outbox)
+    .where(and(eq(outbox.id, id), eq(outbox.workspaceId, workspaceId)));
+  if (now?.status === "canceled") return;
+  throw new HttpError(409, "action.changed_since", "It already went out");
 }
 
 /** The conversation's receipt follows: sent, failed. */
