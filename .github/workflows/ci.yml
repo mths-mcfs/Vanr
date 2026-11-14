@@ -55,6 +55,33 @@ jobs:
           SHARD: ${{ matrix.shard }}
           SHARDS: ${{ strategy.job-total }}
 
+  postgres:
+    # The migration against a real Postgres (with pgvector, as in production); PGlite covers the rest.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
+        env:
+          POSTGRES_DB: vanr_test
+          # A throwaway database that only this job can reach.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d vanr_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - run: bun test packages/engine/src/db/catalog.test.ts packages/engine/src/sqlconn.test.ts --test-name-pattern Postgres
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+
   workflows:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -128,7 +155,7 @@ jobs:
 
   ci-ok:
     if: always()
-    needs: [lint, typecheck, test, workflows, secrets]
+    needs: [lint, typecheck, test, postgres, workflows, secrets]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -136,6 +163,6 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
-      - run: bun scripts/ci/gate.ts lint typecheck test workflows secrets
+      - run: bun scripts/ci/gate.ts lint typecheck test postgres workflows secrets
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
