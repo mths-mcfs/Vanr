@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { createSealer } from "@vanr/engine/seal";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { channelInWorkspace } from "../src/channels";
 import type { AppDeps, WorkspaceMember } from "../src/context";
 import type { ToolContext } from "../src/forward-types";
@@ -80,8 +80,8 @@ async function team() {
     workspaceId,
     agent: { id: agentId },
     runId: newId("run"),
-    recordAction: async (action) => {
-      await server.deps.db.insert(reversibleActions).values({
+    recordAction: async (action, tx) => {
+      await tx.insert(reversibleActions).values({
         id: newId("act"),
         workspaceId,
         agentId,
@@ -173,7 +173,128 @@ describe("queueing", () => {
   );
 });
 
+describe("a queued send and its receipt", () => {
+  test(
+    "a receipt that can't be written leaves nothing queued: retrying doesn't send twice",
+    async () => {
+      const t = await team();
+      const failing: ToolContext = {
+        ...t.ctx(withWakeAt([])),
+        recordAction: async (action, tx) => {
+          await t.ctx().recordAction(action, tx);
+          throw new Error("receipt write failed");
+        },
+      };
+      for (let i = 0; i < 2; i++) {
+        const err = await queueSend(failing, {
+          kind: "post",
+          payload: { channelId: t.sales, text: "asked once", clientId: newId("c") },
+          title: "#sales",
+        }).catch((e: unknown) => e);
+        expect(err).toMatchObject({ message: "receipt write failed" });
+      }
+      expect(await server.deps.db.select().from(outbox).where(eq(outbox.workspaceId, t.workspaceId))).toEqual(
+        [],
+      );
+      expect(
+        await server.deps.db
+          .select()
+          .from(reversibleActions)
+          .where(eq(reversibleActions.workspaceId, t.workspaceId)),
+      ).toEqual([]);
+      later();
+      expect(await deliverDue(server.deps)).toBe(0);
+      expect(await bodiesIn(t.sales)).not.toContain("asked once");
+    },
+    SERVER_TEST_MS,
+  );
+});
+
 describe("a post with an undo window", () => {
+  test(
+    "a published post left sending after both status writes fail recovers its receipt without reposting",
+    async () => {
+      const t = await team();
+      const row = await queuePost(t, "published before the status write");
+      await server.deps.db.execute(sql`CREATE FUNCTION fail_sent_state() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.status = 'sent' THEN RAISE EXCEPTION 'sent state unavailable'; END IF; RETURN NEW; END $$`);
+      await server.deps.db.execute(sql`CREATE TRIGGER fail_sent_state BEFORE UPDATE ON outbox
+        FOR EACH ROW EXECUTE FUNCTION fail_sent_state()`);
+      try {
+        later();
+        await expect(deliverDue(server.deps)).rejects.toThrow("Failed query");
+        expect((await rowOf(row.id))?.status).toBe("sending");
+      } finally {
+        await server.deps.db.execute(sql`DROP TRIGGER fail_sent_state ON outbox`);
+        await server.deps.db.execute(sql`DROP FUNCTION fail_sent_state()`);
+      }
+      expect(await deliverDue(server.deps)).toBe(0);
+      const posted = await server.deps.db.select().from(messages).where(eq(messages.channelId, t.sales));
+      expect(posted).toHaveLength(1);
+      expect((await actionOf(row.id))?.target).toMatchObject({ type: "message", id: posted[0]?.id });
+      expect((await actionOf(row.id))?.params.failed).toBeUndefined();
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a published post stays sent if its receipt can't be retargeted; the next pass repairs it without reposting",
+    async () => {
+      const t = await team();
+      const row = await queuePost(t, "already published");
+      await server.deps.db.execute(sql`CREATE FUNCTION fail_retarget() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.target->>'type' = 'message' THEN RAISE EXCEPTION 'retarget failed'; END IF; RETURN NEW; END $$`);
+      await server.deps.db.execute(sql`CREATE TRIGGER fail_retarget BEFORE UPDATE ON reversible_actions
+        FOR EACH ROW EXECUTE FUNCTION fail_retarget()`);
+      try {
+        later();
+        expect(await deliverDue(server.deps)).toBe(1);
+        expect(await rowOf(row.id)).toMatchObject({ status: "sent", sentAt: clock });
+        expect((await actionOf(row.id))?.params.failed).toBeUndefined();
+      } finally {
+        await server.deps.db.execute(sql`DROP TRIGGER fail_retarget ON reversible_actions`);
+        await server.deps.db.execute(sql`DROP FUNCTION fail_retarget()`);
+      }
+      expect(await deliverDue(server.deps)).toBe(0);
+      const posted = await server.deps.db.select().from(messages).where(eq(messages.channelId, t.sales));
+      expect(posted).toHaveLength(1);
+      const [message] = posted;
+      if (!message) throw new Error("not posted");
+      expect((await actionOf(row.id))?.target).toEqual({
+        type: "message",
+        id: message.id,
+        title: "#sales",
+      });
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a postMessage failure after insertion keeps the published message and its retractable receipt",
+    async () => {
+      const t = await team();
+      const row = await queuePost(t, "notification failed");
+      const hub = new Proxy(server.deps.hub, {
+        get(target, prop) {
+          if (prop === "toUser")
+            return () => {
+              throw new Error("notification failed");
+            };
+          return Reflect.get(target, prop, target);
+        },
+      });
+      later();
+      expect(await deliverDue({ ...server.deps, hub })).toBe(1);
+      expect(await deliverDue(server.deps)).toBe(0);
+      const posted = await server.deps.db.select().from(messages).where(eq(messages.channelId, t.sales));
+      expect(posted).toHaveLength(1);
+      expect(await rowOf(row.id)).toMatchObject({ status: "sent", sentAt: clock });
+      expect((await actionOf(row.id))?.params.failed).toBeUndefined();
+      expect((await actionOf(row.id))?.target).toMatchObject({ type: "message", id: posted[0]?.id });
+    },
+    SERVER_TEST_MS,
+  );
+
   test(
     "it goes out once when the deadline passes, by the agent, and the receipt then points at the message",
     async () => {
@@ -199,7 +320,7 @@ describe("a post with an undo window", () => {
   );
 
   test(
-    "undo within the window: nothing goes out, not even after the deadline; late, it's a 409",
+    "undo within the window: nothing goes out, not even after the deadline; again, the same answer; late, a 409",
     async () => {
       const t = await team();
       const row = await queuePost(t, "Promo");
@@ -215,7 +336,13 @@ describe("a post with an undo window", () => {
       expect(await deliverDue(server.deps)).toBe(0);
       expect(await bodiesIn(t.sales)).not.toContain("Promo");
       expect(await rowOf(row.id)).toMatchObject({ status: "canceled", canceledByUserId: t.beto.user.id });
-      expect(cancelQueued(server.deps, t.workspaceId, row.id, t.beto.user.id)).rejects.toMatchObject({
+      // Undoing again answers what it is: canceled.
+      expect(await cancelQueued(server.deps, t.workspaceId, row.id, t.beto.user.id)).toBeUndefined();
+      // Too late is a 409: it went out.
+      const sent = await queuePost(t, "Out already");
+      later();
+      await deliverDue(server.deps);
+      expect(cancelQueued(server.deps, t.workspaceId, sent.id, t.beto.user.id)).rejects.toMatchObject({
         status: 409,
         code: "action.changed_since",
       });
@@ -317,9 +444,30 @@ describe("a post with an undo window", () => {
       const posted = (await bodiesIn(t.sales)).filter((b) => b === "cancel or send").length;
       expect({ status, canceled, posted }).toEqual(
         status === "canceled"
-          ? { status, canceled: 1, posted: 0 }
+          ? // Every undo answers canceled; only one of them made it so.
+            { status, canceled: 4, posted: 0 }
           : { status: "sent", canceled: 0, posted: 1 },
       );
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "an item whose deadline moved after a pass read it is not taken before its time",
+    async () => {
+      const t = await team();
+      const row = await queuePost(t, "not yet");
+      later();
+      // The pass reads the due list; before it claims, the item's deadline moves past the clock.
+      const db = afterDueRead(server.deps, () =>
+        server.deps.db
+          .update(outbox)
+          .set({ sendAt: new Date(clock.getTime() + WINDOW_MS) })
+          .where(eq(outbox.id, row.id)),
+      );
+      expect(await deliverDue({ ...server.deps, db })).toBe(0);
+      expect(await rowOf(row.id)).toMatchObject({ status: "pending" });
+      expect(await bodiesIn(t.sales)).not.toContain("not yet");
     },
     SERVER_TEST_MS,
   );
@@ -453,6 +601,46 @@ describe("an email with an undo window", () => {
     SERVER_TEST_MS,
   );
 
+  test.each(["read", "send disabled"] as const)(
+    "revoking send permission during the window (%s) blocks SMTP and refunds the reservation",
+    async (change) => {
+      const t = await mailbox();
+      mail.sent.length = 0;
+      const row = await t.queueMail();
+      if (change === "read")
+        await setAgentMailbox(server.deps, t.workspaceId, t.agentId, t.account, { level: "read" });
+      else
+        await server.deps.db
+          .update(schema.mailConnections)
+          .set({ disabledActions: ["send"] })
+          .where(eq(schema.mailConnections.id, t.account.id));
+      later();
+      expect(await deliverDue(server.deps)).toBe(0);
+      expect(mail.sent).toEqual([]);
+      expect((await rowOf(row.id))?.status).toBe("failed");
+      expect(await t.reserved()).toBe(0);
+      expect((await actionOf(row.id))?.params.failed).toEqual(expect.any(String));
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "archiving the agent during the window blocks SMTP, fails the receipt and refunds the reservation",
+    async () => {
+      const t = await mailbox();
+      mail.sent.length = 0;
+      const row = await t.queueMail();
+      await server.deps.db.update(agents).set({ archivedAt: clock }).where(eq(agents.id, t.agentId));
+      later();
+      expect(await deliverDue(server.deps)).toBe(0);
+      expect(mail.sent).toEqual([]);
+      expect((await rowOf(row.id))?.status).toBe("failed");
+      expect(await t.reserved()).toBe(0);
+      expect((await actionOf(row.id))?.params.failed).toEqual(expect.any(String));
+    },
+    SERVER_TEST_MS,
+  );
+
   test(
     "a send that fails before going out gives the quota back once and isn't tried again",
     async () => {
@@ -514,6 +702,69 @@ describe("an email with an undo window", () => {
       expect((await rowOf(row.id))?.status).toBe("sending");
       expect(await deliverDue(server.deps)).toBe(0);
       expect(mail.sent).toHaveLength(1);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a cancel whose quota can't come back changes nothing; retried, it cancels once and gives the quota back once",
+    async () => {
+      const t = await mailbox();
+      const row = await t.queueMail();
+      const broken = { ...server.deps, db: failingQuotaDelete(server.deps) };
+      await expect(cancelQueued(broken, t.workspaceId, row.id, t.beto.user.id)).rejects.toThrow(
+        "quota connection lost",
+      );
+      expect((await rowOf(row.id))?.status).toBe("pending");
+      expect(await t.reserved()).toBe(1);
+      await cancelQueued(server.deps, t.workspaceId, row.id, t.beto.user.id);
+      expect(await rowOf(row.id)).toMatchObject({ status: "canceled", canceledByUserId: t.beto.user.id });
+      expect(await t.reserved()).toBe(0);
+      // Canceling again answers the same and gives nothing back twice (another reservation stays).
+      const other = await t.queueMail();
+      await cancelQueued(server.deps, t.workspaceId, row.id, t.ana.user.id);
+      expect(await rowOf(row.id)).toMatchObject({ status: "canceled", canceledByUserId: t.beto.user.id });
+      expect(await t.reserved()).toBe(1);
+      await cancelQueued(server.deps, t.workspaceId, other.id, t.beto.user.id);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a failure whose quota can't come back keeps the pair: the item stays claimed with its reservation, never sent",
+    async () => {
+      const t = await mailbox();
+      mail.sent.length = 0;
+      const row = await t.queueMail();
+      await setAgentMailbox(server.deps, t.workspaceId, t.agentId, t.account, { level: "none" });
+      later();
+      await expect(deliverDue({ ...server.deps, db: failingQuotaDelete(server.deps) })).rejects.toThrow(
+        "quota connection lost",
+      );
+      expect((await rowOf(row.id))?.status).toBe("sending");
+      expect(await t.reserved()).toBe(1);
+      expect((await actionOf(row.id))?.params.failed).toBeUndefined();
+      expect(await deliverDue(server.deps)).toBe(0);
+      expect(mail.sent).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a saved email that isn't one fails instead of going out",
+    async () => {
+      const t = await mailbox();
+      mail.sent.length = 0;
+      const row = await t.queueMail();
+      const [saved] = await server.deps.db.select().from(outbox).where(eq(outbox.id, row.id));
+      await server.deps.db
+        .update(outbox)
+        .set({ payload: { ...saved?.payload, envelope: { from: mail.user, to: "joao@client.test" } } })
+        .where(eq(outbox.id, row.id));
+      later();
+      expect(await deliverDue(server.deps)).toBe(0);
+      expect(await rowOf(row.id)).toMatchObject({ status: "failed", error: "The queued send is malformed" });
+      expect(mail.sent).toEqual([]);
     },
     SERVER_TEST_MS,
   );
@@ -629,4 +880,61 @@ function holdSentWrite(deps: AppDeps) {
     },
   });
   return { db, begun, release, wrote: () => done };
+}
+
+/** The database whose transactions fail to give a quota reservation back (the delete of integration_usage). */
+function failingQuotaDelete(deps: AppDeps): AppDeps["db"] {
+  return new Proxy(deps.db, {
+    get(target, prop) {
+      if (prop !== "transaction") return Reflect.get(target, prop, target);
+      return (fn: (tx: Any) => Promise<unknown>) =>
+        target.transaction((tx) =>
+          fn(
+            new Proxy(tx, {
+              get(inner, key) {
+                if (key !== "delete") return Reflect.get(inner, key, inner);
+                return (table: Any) => {
+                  if (table === integrationUsage) throw new Error("quota connection lost");
+                  return inner.delete(table);
+                };
+              },
+            }),
+          ),
+        );
+    },
+  });
+}
+
+/** The database where `run` happens right after a pass read the due list, before it claims anything. */
+function afterDueRead(deps: AppDeps, run: () => Promise<unknown>): AppDeps["db"] {
+  let done = false;
+  return new Proxy(deps.db, {
+    get(target, prop) {
+      if (prop !== "select") return Reflect.get(target, prop, target);
+      return (fields: Any) => {
+        const query: Any = target.select(fields);
+        return {
+          from(table: Any) {
+            const q: Any = query.from(table);
+            if (table !== outbox || done) return q;
+            return {
+              where: (...w: Any[]) => ({
+                orderBy: (...o: Any[]) => ({
+                  limit: async (n: number) => {
+                    const rows = await q
+                      .where(...w)
+                      .orderBy(...o)
+                      .limit(n);
+                    done = true;
+                    await run();
+                    return rows;
+                  },
+                }),
+              }),
+            };
+          },
+        };
+      };
+    },
+  });
 }

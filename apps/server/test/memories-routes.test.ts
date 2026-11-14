@@ -6,8 +6,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Memory, MemoryReview, Message, Reminder } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
-import { MEMORY_ITEM_MAX_BYTES } from "@vanr/engine/memory";
-import { eq } from "drizzle-orm";
+import { contentSha256, MEMORY_ITEM_MAX_BYTES, MEMORY_STORE_MAX_ITEMS } from "@vanr/engine/memory";
+import { and, eq, sql } from "drizzle-orm";
 import { createMemory } from "../src/agent-memory";
 import { channelInWorkspace } from "../src/channels";
 import { queueMemoryReview } from "../src/memory-reviews";
@@ -96,6 +96,20 @@ async function noteOf(t: Team, agentId: string, text = "The client pays on the 1
 const countMemories = async (workspaceId: string) =>
   (await server.deps.db.select().from(schema.memories).where(eq(schema.memories.workspaceId, workspaceId)))
     .length;
+
+/** Whether the person is in the channel (writing in a public channel joins it). */
+const inChannel = async (channelId: string, who: Person) =>
+  (
+    await server.deps.db
+      .select()
+      .from(schema.channelMemberships)
+      .where(
+        and(
+          eq(schema.channelMemberships.channelId, channelId),
+          eq(schema.channelMemberships.memberId, who.user.id),
+        ),
+      )
+  ).length > 0;
 
 describe("who may call", () => {
   test(
@@ -207,6 +221,42 @@ describe("who may call", () => {
 });
 
 describe("size limits, rejected before anything is written", () => {
+  test(
+    "editing a file preserves indentation and trailing newlines; short notes still trim whitespace",
+    async () => {
+      const t = await team();
+      const file = await ok<Memory>(
+        call(t.ana, t.workspaceId, "POST", "/memories", {
+          scope: "person",
+          path: "code.md",
+          text: "before",
+        }),
+        201,
+      );
+      const text = "    after\n    code\n\n";
+      const patched = await ok<Memory>(
+        call(t.ana, t.workspaceId, "PATCH", `/memories/${file.id}`, {
+          text,
+          expectedSha256: file.sha256,
+        }),
+      );
+      expect(patched).toMatchObject({ text, sha256: contentSha256(text) });
+      const stored = await ok<{ memories: Memory[] }>(call(t.ana, t.workspaceId, "GET", "/memories/mine"));
+      expect(stored.memories.find((m) => m.id === file.id)?.text).toBe(text);
+      const note = await noteOf(t, t.lia);
+      expect(
+        (
+          await ok<Memory>(
+            call(t.ana, t.workspaceId, "PATCH", `/memories/${note.id}`, {
+              text: "  note\n",
+            }),
+          )
+        ).text,
+      ).toBe("note");
+    },
+    SERVER_TEST_MS,
+  );
+
   test(
     "a store file, a short note, a reason: one past the limit is a 400 and nothing changes",
     async () => {
@@ -341,6 +391,52 @@ describe("feedback on an answer", () => {
     return message;
   }
 
+  test.each(["insert", "thread update"] as const)(
+    "feedback keeps its lesson exactly when the message was persisted despite a failing %s",
+    async (failure) => {
+      const t = await team();
+      const reply = await answer(t, t.general);
+      const condition =
+        failure === "insert" ? sql`NEW.thread_id IS NOT NULL` : sql`NEW.reply_count > OLD.reply_count`;
+      await server.deps.db.execute(sql`CREATE FUNCTION fail_feedback() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF ${condition} THEN RAISE EXCEPTION 'feedback write failed'; END IF; RETURN NEW; END $$`);
+      await server.deps.db.execute(sql`CREATE TRIGGER fail_feedback BEFORE ${sql.raw(failure === "insert" ? "INSERT" : "UPDATE")}
+        ON messages FOR EACH ROW EXECUTE FUNCTION fail_feedback()`);
+      try {
+        const res = await call(t.caio, t.workspaceId, "POST", `/messages/${reply.id}/feedback`, {
+          body: "It's 7 days.",
+        });
+        const posts = await server.deps.db
+          .select()
+          .from(schema.messages)
+          .where(eq(schema.messages.threadId, reply.id));
+        const lessons = await server.deps.db
+          .select()
+          .from(schema.memories)
+          .where(eq(schema.memories.agentId, t.lia));
+        expect(res.status).toBe(failure === "insert" ? 500 : 201);
+        expect(posts).toHaveLength(failure === "insert" ? 0 : 1);
+        expect(lessons).toHaveLength(posts.length);
+        if (failure === "thread update") {
+          expect(res.json).toMatchObject({
+            id: posts[0]?.id,
+            body: "It's 7 days.",
+            memories: [{ id: lessons[0]?.id }],
+          });
+          expect(lessons[0]).toMatchObject({
+            kind: "lesson",
+            source: "feedback",
+            originMessageId: posts[0]?.id,
+          });
+        }
+      } finally {
+        await server.deps.db.execute(sql`DROP TRIGGER fail_feedback ON messages`);
+        await server.deps.db.execute(sql`DROP FUNCTION fail_feedback()`);
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
   test(
     "it goes into the answer's thread and becomes a lesson of the agent, with its origin",
     async () => {
@@ -403,6 +499,42 @@ describe("feedback on an answer", () => {
     },
     SERVER_TEST_MS,
   );
+
+  test(
+    "with the agent's store full the answer is a 409 and nothing shows: no message, no lesson, no join",
+    async () => {
+      const t = await team();
+      const open = await seedChannel(server, t.workspaceId, { name: "open", members: [t.ana] });
+      const reply = await answer(t, open);
+      const origin = { by: null, name: null, channel: null, at: clock.toISOString() };
+      for (let i = 0; i < MEMORY_STORE_MAX_ITEMS; i += 1000)
+        await server.deps.db.insert(schema.memories).values(
+          Array.from({ length: Math.min(1000, MEMORY_STORE_MAX_ITEMS - i) }, (_, k) => ({
+            id: `mem_fb${n}_${i + k}`,
+            workspaceId: t.workspaceId,
+            agentId: t.lia,
+            scope: "agent" as const,
+            text: "full",
+            origin,
+            createdAt: clock,
+            updatedAt: clock,
+          })),
+        );
+      for (let i = 0; i < 2; i++) {
+        const res = await call(t.caio, t.workspaceId, "POST", `/messages/${reply.id}/feedback`, {
+          body: "It's 7 days.",
+        });
+        expect([res.status, res.json.error.code]).toEqual([409, "memory.store_full"]);
+      }
+      const bodies = (
+        await server.deps.db.select().from(schema.messages).where(eq(schema.messages.channelId, open))
+      ).map((m) => m.body);
+      expect(bodies).toEqual(["The refund takes 90 days."]);
+      expect(await countMemories(t.workspaceId)).toBe(MEMORY_STORE_MAX_ITEMS);
+      expect(await inChannel(open, t.caio)).toBe(false);
+    },
+    SERVER_TEST_MS * 2,
+  );
 });
 
 describe("reminders", () => {
@@ -453,6 +585,27 @@ describe("reminders", () => {
         .from(schema.reminders)
         .where(eq(schema.reminders.workspaceId, t.workspaceId));
       expect(rows.map((r) => r.text).sort()).toEqual(["Call the client", "edge"]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a rejected reminder doesn't join the person to the public channel; an accepted one does",
+    async () => {
+      const t = await team();
+      const open = await seedChannel(server, t.workspaceId, { name: "open", members: [t.ana] });
+      const create = (data: Record<string, unknown>) =>
+        call(t.caio, t.workspaceId, "POST", "/reminders", data);
+      expect((await create({ channelId: open, text: "past", at: inMinutes(0) })).status).toBe(400);
+      expect(
+        (await create({ channelId: open, threadId: "msg_none", text: "x", at: inMinutes(5) })).status,
+      ).toBe(400);
+      expect(
+        (await create({ channelId: open, agentId: "agt_none", text: "x", at: inMinutes(5) })).status,
+      ).toBe(404);
+      expect(await inChannel(open, t.caio)).toBe(false);
+      expect((await create({ channelId: open, text: "ok", at: inMinutes(5) })).status).toBe(201);
+      expect(await inChannel(open, t.caio)).toBe(true);
     },
     SERVER_TEST_MS,
   );

@@ -242,9 +242,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       z
         .object({
           // The same cap as feedback (4000) on short notes; a file goes up to 100 kB.
-          text: z
-            .string()
-            .trim()
+          text: (row.path ? z.string() : z.string().trim())
             .min(1)
             .max(row.path ? MEMORY_ITEM_MAX_BYTES : MEMORY_NOTE_MAX)
             .optional(),
@@ -361,34 +359,26 @@ export function registerMemories(app: Hono<AppEnv>) {
     return c.json(toMemoryReview(row));
   });
 
-  // Feedback on an agent's answer: it goes into the answer's thread and becomes a lesson for the agent.
+  // Feedback on an agent's answer: it goes into the answer's thread and becomes a lesson for the agent. Everything
+  // that can reject it (the body, the message, the channel, the store's room and size) is checked before anything
+  // shows: the lesson is written first (the store's checks), the message goes out after it, and a message that
+  // can't go out takes the lesson back, so the two exist together or not at all.
   app.post(`${WORKSPACE}/messages/:messageId/feedback`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
     const { db } = deps;
-    const target = await messageInWorkspace(db, me.workspaceId, param(c, "messageId"));
-    if (!target) throw notFound("Message not found");
-    if (target.authorKind !== "agent") throw badRequest("Only agent replies take feedback");
-    const channel = await writableChannel(db, {
-      workspaceId: me.workspaceId,
-      userId: me.userId,
-      channelId: target.channelId,
-    });
     const input = await readJson(
       c,
       z.object({ body: z.string().trim().min(1).max(MEMORY_NOTE_MAX) }).strict(),
     );
-    const { message } = await postMessage(deps, {
-      workspaceId: me.workspaceId,
-      channel,
-      author: { type: "person", id: me.userId },
-      body: input.body,
-      clientId: `feedback:${target.id}:${newId("fb")}`,
-      threadId: target.threadId ?? target.id,
-      meta: { feedback: { messageId: target.id, agentId: target.authorId } },
-    });
+    const target = await messageInWorkspace(db, me.workspaceId, param(c, "messageId"));
+    if (!target) throw notFound("Message not found");
+    if (target.authorKind !== "agent") throw badRequest("Only agent replies take feedback");
+    const viewer = { workspaceId: me.workspaceId, userId: me.userId, channelId: target.channelId };
+    // The right to write, without joining the channel yet (joining is an effect).
+    const { channel } = await readableChannel(db, viewer);
     const at = deps.now();
-    const mem = await createMemory(
+    const lesson = await createMemory(
       db,
       at,
       {
@@ -405,12 +395,49 @@ export function registerMemories(app: Hono<AppEnv>) {
           channel: await channelNameOf(db, channel.id),
           at: at.toISOString(),
         },
-        originMessageId: message.id,
       },
       { author: person(me), reason: "feedback" },
     );
-    await publishMemory(deps, mem);
-    const [row] = await db.select().from(schema.messages).where(eq(schema.messages.id, message.id));
+    const clientId = `feedback:${target.id}:${newId("fb")}`;
+    let messageId: string;
+    try {
+      const { message } = await postMessage(deps, {
+        workspaceId: me.workspaceId,
+        channel: await writableChannel(db, viewer),
+        author: { type: "person", id: me.userId },
+        body: input.body,
+        clientId,
+        threadId: target.threadId ?? target.id,
+        meta: { feedback: { messageId: target.id, agentId: target.authorId } },
+      });
+      messageId = message.id;
+    } catch (err) {
+      // postMessage may reject after inserting and publishing. Only compensate an absent message.
+      const [posted] = await db
+        .select({ id: schema.messages.id })
+        .from(schema.messages)
+        .where(
+          and(
+            eq(schema.messages.workspaceId, me.workspaceId),
+            eq(schema.messages.channelId, channel.id),
+            eq(schema.messages.authorKind, "person"),
+            eq(schema.messages.authorId, me.userId),
+            eq(schema.messages.clientId, clientId),
+          ),
+        );
+      if (!posted) {
+        await db.delete(memories).where(eq(memories.id, lesson.id));
+        throw err;
+      }
+      messageId = posted.id;
+    }
+    const [mem] = await db
+      .update(memories)
+      .set({ originMessageId: messageId })
+      .where(eq(memories.id, lesson.id))
+      .returning();
+    if (mem) await publishMemory(deps, mem);
+    const [row] = await db.select().from(schema.messages).where(eq(schema.messages.id, messageId));
     if (!row) throw notFound("Message not found");
     const posted: Message = await hydrateOne(db, row);
     return c.json(posted, 201);
@@ -434,11 +461,9 @@ export function registerMemories(app: Hono<AppEnv>) {
         })
         .strict(),
     );
-    const channel = await writableChannel(db, {
-      workspaceId: me.workspaceId,
-      userId: me.userId,
-      channelId: input.channelId,
-    });
+    const viewer = { workspaceId: me.workspaceId, userId: me.userId, channelId: input.channelId };
+    // The right to write is checked here; joining a public channel (an effect) waits until nothing can reject it.
+    const { channel } = await readableChannel(db, viewer);
     const at = new Date(input.at);
     const nowMs = deps.now().getTime();
     if (at.getTime() <= nowMs) throw badRequest("Pick a time in the future", { field: "at" });
@@ -454,6 +479,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       const agent = await agentInWorkspace(db, me.workspaceId, input.agentId);
       if (agent.archivedAt) throw notFound("Agent not found");
     }
+    await writableChannel(db, viewer);
     const [row] = await db
       .insert(reminders)
       .values({
