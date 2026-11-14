@@ -347,6 +347,7 @@ function guardedBody(inner: globalThis.Blob, key: string): globalThis.Blob {
             if (done) controller.close();
             else controller.enqueue(value);
           } catch (err) {
+            void reader.cancel(err).catch(() => {});
             controller.error(classify("read", key, err));
           }
         },
@@ -542,7 +543,7 @@ export function routedBlobs(
       unconfirmed.set(key, target);
     },
     get: (key): Promise<Blob | null> => read(key, (store) => store.get(key)),
-    open: (key) => read(key, (store) => store.open(key)),
+    open: async (key) => (await base.open(key)) ?? read(key, (store) => store.open(key)),
     async delete(key) {
       const r = await route(key);
       await base.delete(key);

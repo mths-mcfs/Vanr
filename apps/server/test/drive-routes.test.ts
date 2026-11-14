@@ -12,7 +12,7 @@ import { extractPending } from "../src/drive-extract";
 import { expireUploads, PART_SIZE } from "../src/routes/drive-upload";
 import type { RunningServer } from "../src/server";
 import { makeDocx, makePdf, makePng, makePptx, makeXlsx } from "./files";
-import { Browser, body, signedIn, startTestServer } from "./harness";
+import { Browser, body, signedIn, startTestServer, waitFor } from "./harness";
 import { memberOf, type Person, seedChannel, seedDm, seedWorkspace } from "./seed";
 
 let server: RunningServer;
@@ -539,6 +539,7 @@ describe("download and the real type", () => {
     const link = await body(await ana.browser.fetch(`${W(workspaceId)}/files/${file.id}/download`));
     expect(link.url).toBe(`${W(workspaceId)}/files/${file.id}/blob?version=1&format=download`);
     const attachment = await ana.browser.fetch(link.url);
+    expect(attachment.headers.get("cache-control")).toBe("private, no-cache");
     expect(attachment.headers.get("content-disposition")).toBe("attachment; filename*=UTF-8''n.txt");
   });
 
@@ -857,3 +858,44 @@ describe("extraction, preview and search in the content", () => {
     expect(v?.extractError).toContain("pixel limit");
   });
 });
+
+test("the running server extracts uploaded PDFs for search", async () => {
+  const running = await startTestServer({ fileServicesMs: 20 });
+  try {
+    const ana = await signedIn(running, "Ana", "ana@automatic-extraction.test");
+    const { workspaceId } = await seedWorkspace(running, ana, "Automatic");
+    const pdf = await uploaded(ana, workspaceId, makePdf(["hiddenword"]), "report.pdf");
+    await waitFor(
+      async () =>
+        (await body(await ana.browser.fetch(`${W(workspaceId)}/search?q=hiddenword`))).hits[0]?.sourceId ===
+        pdf.id,
+    );
+  } finally {
+    await running.stop();
+  }
+}, 30_000);
+
+test("the running server removes expired staging files and trash after 30 days", async () => {
+  let now = new Date();
+  const running = await startTestServer({ fileServicesMs: 20, now: () => now });
+  try {
+    const ana = await signedIn(running, "Ana", "ana@automatic-cleanup.test");
+    const { workspaceId } = await seedWorkspace(running, ana, "Cleanup");
+    const session = await body(
+      await ana.browser.json(`${W(workspaceId)}/files/uploads`, "POST", { fileName: "left.bin", size: 1 }),
+    );
+    const staging = `${(await import("node:os")).tmpdir()}/vanr-uploads/${session.id}`;
+    expect(await Bun.file(staging).exists()).toBe(true);
+    const file = await uploaded(ana, workspaceId, "discarded", "old.txt");
+    await ana.browser.json(`${W(workspaceId)}/files/${file.id}`, "DELETE");
+    const [v] = await running.deps.db.select().from(fileVersions).where(eq(fileVersions.fileId, file.id));
+    if (!v?.blobKey) throw new Error("no blob");
+    now = new Date(now.getTime() + 31 * 86_400_000);
+    await waitFor(async () => (await running.deps.db.select().from(files)).length === 0);
+    expect(await running.deps.db.select().from(uploadSessions)).toHaveLength(0);
+    expect(await Bun.file(staging).exists()).toBe(false);
+    expect(await running.deps.blobs.get(v.blobKey)).toBeNull();
+  } finally {
+    await running.stop();
+  }
+}, 30_000);

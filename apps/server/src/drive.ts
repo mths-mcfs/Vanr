@@ -14,7 +14,7 @@ import { HttpError, notFound } from "./http";
 import { confirmBlobs, discardBlob } from "./integrations/storage";
 import { reindex, unindex } from "./search-index";
 
-const { files, fileVersions } = schema;
+const { files, fileVersions, uploadSessions } = schema;
 export type FileRow = typeof files.$inferSelect;
 export type FileVersionRow = typeof fileVersions.$inferSelect;
 
@@ -169,8 +169,12 @@ async function withBlob<T>(
   try {
     return await write();
   } catch (err) {
-    // Deleted where it was sent, which is not always the destination saved now.
-    await discardBlob(deps.blobs, key);
+    // A lost COMMIT reply may have saved the version. Delete bytes only after confirming they are unreferenced.
+    const [recorded] = await deps.db
+      .select({ id: fileVersions.fileId })
+      .from(fileVersions)
+      .where(eq(fileVersions.blobKey, key));
+    if (!recorded) await discardBlob(deps.blobs, key);
     throw err;
   }
 }
@@ -253,7 +257,31 @@ export async function readFormFile(form: Form): Promise<FilePayload> {
   };
 }
 
+type UploadClaim = Pick<typeof uploadSessions.$inferSelect, "id" | "updatedAt">;
+
+async function finishUpload(tx: Db, claim: UploadClaim | undefined, row: FileRow, version: FileVersionRow) {
+  if (!claim) return;
+  const [done] = await tx
+    .update(uploadSessions)
+    .set({
+      status: "done",
+      resultFileId: row.id,
+      resultVersion: version.version,
+      updatedAt: version.createdAt,
+    })
+    .where(
+      and(
+        eq(uploadSessions.id, claim.id),
+        eq(uploadSessions.status, "completing"),
+        eq(uploadSessions.updatedAt, claim.updatedAt),
+      ),
+    )
+    .returning({ id: uploadSessions.id });
+  if (!done) throw new HttpError(409, "upload.completing", "This upload is already finishing");
+}
+
 interface NewFile {
+  upload?: UploadClaim;
   workspaceId: string;
   title: string;
   author: ActorRef;
@@ -304,6 +332,7 @@ export async function createFile(
         })
         .returning();
       if (!row || !version) throw new Error("file insert failed");
+      await finishUpload(tx, input.upload, row, version);
       return { row, version };
     }),
   );
@@ -340,6 +369,7 @@ export async function addVersion(
     row: FileRow;
     author: ActorRef;
     parentVersion?: number;
+    upload?: UploadClaim;
     title?: string;
     note?: string | null;
   } & ({ content: StructuredContent } | { file: FilePayload }),
@@ -387,6 +417,7 @@ export async function addVersion(
         })
         .returning();
       if (!version) throw new Error("version insert failed");
+      await finishUpload(tx, input.upload, updated, version);
       return { row: updated, version };
     }),
   );
