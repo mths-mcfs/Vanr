@@ -85,7 +85,8 @@ async function resolveInput(
       keys: { accessKeyId: input.accessKeyId.trim(), secretAccessKey: input.secretAccessKey.trim() },
     };
   const row = await storageRow(deps.db, workspaceId);
-  if (!row?.secret) throw new HttpError(400, "storage.credentials_missing", "Enter the access key and the secret");
+  if (!row?.secret)
+    throw new HttpError(400, "storage.credentials_missing", "Enter the access key and the secret");
   return { cfg, keys: JSON.parse(storageSealer(deps.config.authSecret).open(row.secret)) as S3Keys };
 }
 
