@@ -45,6 +45,9 @@ const EnvSchema = z.object({
   GITHUB_APP_SLUG: z.string().optional(),
   /** PEM of the GitHub App key; a literal `\n` becomes a line break. */
   GITHUB_APP_PRIVATE_KEY: z.string().optional(),
+  /** The App's OAuth client: the install callback proves the person controls the installation with it. */
+  GITHUB_APP_CLIENT_ID: z.string().min(1).optional(),
+  GITHUB_APP_CLIENT_SECRET: z.string().min(1).optional(),
   GITHUB_API_URL: z.string().url().default("https://api.github.com"),
   GITHUB_WEB_URL: z.string().url().default("https://github.com"),
   /** Search embeddings: `voyage` (with VOYAGE_API_KEY), `fake` (tests and dev) or `off`. Default: voyage with a key, else off. */
@@ -122,7 +125,15 @@ export interface Config {
   runnerSigning: { seed: string; publicKey: string } | null;
   integrations: {
     allowPrivateNetworks: boolean;
-    githubApp: { appId: string; slug: string; privateKey: string; apiUrl: string; webUrl: string } | null;
+    githubApp: {
+      appId: string;
+      slug: string;
+      privateKey: string;
+      apiUrl: string;
+      webUrl: string;
+      /** Without it the App can't be installed from here (the callback has nothing to verify with). */
+      oauthClient: { clientId: string; clientSecret: string } | null;
+    } | null;
     composio: { apiKey: string; apiUrl: string; authConfigs: { gmail?: string; outlook?: string } } | null;
   };
 }
@@ -239,6 +250,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
               privateKey: e.GITHUB_APP_PRIVATE_KEY.replace(/\\n/g, "\n"),
               apiUrl: e.GITHUB_API_URL.replace(/\/$/, ""),
               webUrl: e.GITHUB_WEB_URL.replace(/\/$/, ""),
+              oauthClient: pair(e.GITHUB_APP_CLIENT_ID, e.GITHUB_APP_CLIENT_SECRET),
             }
           : null,
       composio: e.COMPOSIO_API_KEY
