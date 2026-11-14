@@ -8,7 +8,7 @@ export type SessionGate = {
   /** The server said the session is gone. Reported once per session, however many calls fail. */
   ended: () => void;
   /** The person signed out on purpose. */
-  signedOut: () => void;
+  leftOnPurpose: () => void;
   /** The person the open session belongs to, or null. */
   userId: () => string | null;
 };
@@ -31,7 +31,7 @@ export function createSessionGate(deps: {
       current = null;
       deps.onEnded();
     },
-    signedOut() {
+    leftOnPurpose() {
       current = null;
       deps.drafts.clear();
     },

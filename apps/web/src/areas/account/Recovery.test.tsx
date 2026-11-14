@@ -23,7 +23,7 @@ for (const wire of WIRES) {
       await send(app);
       expect(screen.getByRole("button", { name: "Send reset link" }).getAttribute("aria-busy")).toBe("true");
       held.release();
-      await screen.findByRole("heading", { level: 1, name: "Check your email" });
+      await screen.findByRole("heading", { level: 1, name: "Look in your inbox" });
       expect(
         screen.getByText("If an account uses ana@birchwood.example, the link is on its way."),
       ).toBeDefined();
@@ -38,7 +38,7 @@ for (const wire of WIRES) {
       const app = await renderApp({ path: "/forgot-password", wire });
       await app.user.type(await screen.findByLabelText("Email"), "nobody@elsewhere.example");
       await send(app);
-      await screen.findByRole("heading", { level: 1, name: "Check your email" });
+      await screen.findByRole("heading", { level: 1, name: "Look in your inbox" });
       expect(resets(app)).toEqual([]);
     });
 
@@ -58,7 +58,7 @@ for (const wire of WIRES) {
     const withLink = async () => {
       const app = await renderApp({ path: "/forgot-password?email=ana%40birchwood.example", wire });
       await app.user.click(await screen.findByRole("button", { name: "Send reset link" }));
-      await screen.findByRole("heading", { level: 1, name: "Check your email" });
+      await screen.findByRole("heading", { level: 1, name: "Look in your inbox" });
       const token = resets(app)[0]?.token ?? "";
       app.unmount();
       return renderApp({ path: `/reset-password?token=${token}`, server: app.server, wire });
@@ -134,7 +134,7 @@ for (const wire of WIRES) {
       await app.user.type(await screen.findByLabelText("Your name"), "Mel Okafor");
       await app.user.type(screen.getByLabelText("Email"), "mel@elsewhere.example");
       await app.user.type(screen.getByLabelText("Password"), "tar-and-birch");
-      await app.user.click(screen.getByRole("button", { name: "Create account" }));
+      await app.user.click(screen.getByRole("button", { name: "Create my account" }));
       await screen.findByRole("heading", { level: 1, name: "Name your workspace" });
       app.unmount();
       return app;

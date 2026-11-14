@@ -152,7 +152,7 @@ describe("the session gate", () => {
     const { gate, drafts, ended } = setup();
     gate.established("usr_ana");
     drafts.write("workspace.name", "Birchwood");
-    gate.signedOut();
+    gate.leftOnPurpose();
     gate.ended();
     expect(drafts.read("workspace.name")).toBeUndefined();
     expect(ended()).toBe(0);

@@ -29,13 +29,13 @@ for (const wire of WIRES) {
         context: "We print zines.",
       });
       expect(
-        screen.getByText("1 person and 0 agents work here. No agent is working right now."),
+        screen.getByText("1 person and 0 agents work here. No agent is at work right now."),
       ).toBeDefined();
-      expect(screen.getByRole("heading", { level: 2, name: "Start here" })).toBeDefined();
+      expect(screen.getByRole("heading", { level: 2, name: "First steps" })).toBeDefined();
       expect(screen.getByRole("link", { name: "Add an agent" }).getAttribute("href")).toMatch(
         /\/agents\/new$/,
       );
-      expect(screen.getByRole("link", { name: "Invite people" }).getAttribute("href")).toMatch(
+      expect(screen.getByRole("link", { name: "Bring people in" }).getAttribute("href")).toMatch(
         /\/settings\/members$/,
       );
     });

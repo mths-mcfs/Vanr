@@ -9,7 +9,7 @@ const HOME = "/workspace/workspace_birchwood";
 const open = (path = HOME, options: Partial<Parameters<typeof renderApp>[0]> = {}) =>
   renderApp({ path, signedInAs: "usr_ana", ...options });
 const areas = () => screen.getByRole("navigation", { name: "Areas" });
-const working = () => screen.getByRole("region", { name: "Working now" });
+const working = () => screen.getByRole("region", { name: "At work" });
 const calls = (app: App, method: string) => app.server.calls.filter((call) => call.method === method).length;
 
 afterEach(() => setViewportWidth(1024));
@@ -45,15 +45,15 @@ describe("navigation", () => {
 
   test("the navigation has no icons: the only images in the sidebar are agents and the person", async () => {
     await open();
-    await within(working()).findByRole("img", { name: "Scout, working" });
-    const sidebar = screen.getByRole("complementary", { name: "Workspace navigation" });
+    await within(working()).findByRole("img", { name: "Scout, at work" });
+    const sidebar = screen.getByRole("complementary", { name: "Workspace sidebar" });
     expect(within(areas()).queryAllByRole("img")).toEqual([]);
     expect(areas().querySelectorAll("svg")).toHaveLength(0);
     expect(
       within(sidebar)
         .getAllByRole("img")
         .map((image) => image.getAttribute("aria-label")),
-    ).toEqual(["Scout, working", "Ledger, working", "Ana Beatriz Souza"]);
+    ).toEqual(["Scout, at work", "Ledger, at work", "Ana Beatriz Souza"]);
   });
 
   test("every workspace route opens inside the frame, built or not, with its own title", async () => {
@@ -136,7 +136,7 @@ describe("the workspace menu", () => {
     await app.user.click(screen.getByRole("menuitemradio", { name: "Night Shift" }));
     await screen.findByRole("heading", { level: 1, name: "Night Shift" });
     expect(app.address()).toBe("/workspace/workspace_nightshift");
-    expect(await within(working()).findByText("No agent is working right now.")).toBeDefined();
+    expect(await within(working()).findByText("No agent is at work right now.")).toBeDefined();
   });
 
   test("leads to members, settings and creating a workspace", async () => {
@@ -169,7 +169,7 @@ describe("the account menu", () => {
     expect(document.documentElement.lang).toBe("pt-BR");
     app.unmount();
     await open(HOME, { server: app.server, store: app.runtime.store, languages: ["en-US"] });
-    expect(await screen.findByRole("region", { name: "Trabalhando agora" })).toBeDefined();
+    expect(await screen.findByRole("region", { name: "Em atividade" })).toBeDefined();
   });
 
   test("the language the person picked is the one sent with the calls that follow", async () => {
@@ -177,7 +177,7 @@ describe("the account menu", () => {
     expect(app.runtime.language.current).toBe("en");
     await menu(app);
     await app.user.click(await screen.findByRole("menuitemradio", { name: "Português (Brasil)" }));
-    await screen.findByRole("region", { name: "Trabalhando agora" });
+    await screen.findByRole("region", { name: "Em atividade" });
     expect(app.runtime.language.current).toBe("pt-BR");
   });
 
@@ -215,15 +215,15 @@ describe("the account menu", () => {
   });
 });
 
-describe("working now", () => {
+describe("agents at work", () => {
   test("lists the agents in the middle of a run, each with a lit sigil that says so", async () => {
     await open();
     const lit = await within(working()).findAllByRole("img");
     expect(
       lit.map((sigil) => [sigil.getAttribute("aria-label"), sigil.hasAttribute("data-working")]),
     ).toEqual([
-      ["Scout, working", true],
-      ["Ledger, working", true],
+      ["Scout, at work", true],
+      ["Ledger, at work", true],
     ]);
     expect(
       within(working())
@@ -234,14 +234,14 @@ describe("working now", () => {
 
   test("follows the workspace in real time, without a reload", async () => {
     const app = await open();
-    await within(working()).findByRole("img", { name: "Scout, working" });
+    await within(working()).findByRole("img", { name: "Scout, at work" });
     await act(async () => app.server.setAgentBusy("agt_tally", true));
-    await within(working()).findByRole("img", { name: "Tally, working" });
+    await within(working()).findByRole("img", { name: "Tally, at work" });
     await act(async () => {
       for (const id of ["agt_scout", "agt_ledger", "agt_tally"]) app.server.setAgentBusy(id, false);
     });
-    expect(await within(working()).findByText("No agent is working right now.")).toBeDefined();
-    expect(screen.getByText(/No agent is working right now\./, { selector: ".page__lead" })).toBeDefined();
+    expect(await within(working()).findByText("No agent is at work right now.")).toBeDefined();
+    expect(screen.getByText(/No agent is at work right now\./, { selector: ".page__lead" })).toBeDefined();
   });
 
   test("a failure to load the agents says so and can be retried", async () => {
@@ -249,8 +249,8 @@ describe("working now", () => {
     server.force("listAgents", { kind: "error", status: 403, code: "forbidden" });
     const app = await open(`${HOME}/wiki`, { server });
     expect(await within(working()).findByText("The agents could not be loaded.")).toBeDefined();
-    await app.user.click(within(working()).getByRole("button", { name: "Try again" }));
-    await within(working()).findByRole("img", { name: "Scout, working" });
+    await app.user.click(within(working()).getByRole("button", { name: "Retry" }));
+    await within(working()).findByRole("img", { name: "Scout, at work" });
   });
 
   test("the channel list is a place the chat area fills; until then it says so plainly", async () => {
@@ -266,7 +266,7 @@ describe("working now", () => {
 describe("a lost connection", () => {
   test("shows the banner, reconnects on request and refetches what may have changed", async () => {
     const app = await open();
-    await within(working()).findByRole("img", { name: "Scout, working" });
+    await within(working()).findByRole("img", { name: "Scout, at work" });
     expect(screen.queryByText("Connection lost. Reconnecting.")).toBeNull();
     await act(async () => {
       app.server.blockConnections(true);
@@ -280,13 +280,13 @@ describe("a lost connection", () => {
     const before = calls(app, "listAgents");
     await app.user.click(screen.getByRole("button", { name: "Reconnect now" }));
     await waitFor(() => expect(screen.queryByText("Connection lost. Reconnecting.")).toBeNull());
-    await within(working()).findByRole("img", { name: "Tally, working" });
+    await within(working()).findByRole("img", { name: "Tally, at work" });
     expect(calls(app, "listAgents")).toBeGreaterThan(before);
   });
 
   test("it also comes back on its own, after the first wait", async () => {
     const app = await open();
-    await within(working()).findByRole("img", { name: "Scout, working" });
+    await within(working()).findByRole("img", { name: "Scout, at work" });
     await act(async () => app.server.dropConnections());
     await screen.findByText("Connection lost. Reconnecting.");
     await app.advance(500);
@@ -307,13 +307,13 @@ describe("the sidebar on a small screen", () => {
   test("it is a drawer: closed at first, with the working agents kept in the header", async () => {
     await setViewportWidth(390);
     const app = await open();
-    const count = await screen.findByRole("button", { name: "2 agents working. Open navigation." });
+    const count = await screen.findByRole("button", { name: "2 agents at work. Open navigation." });
     expect(screen.queryByRole("navigation", { name: "Areas" })).toBeNull();
     expect(screen.queryByRole("complementary")).toBeNull();
     await app.user.click(count);
-    const drawer = await screen.findByRole("dialog", { name: "Workspace navigation" });
+    const drawer = await screen.findByRole("dialog", { name: "Workspace sidebar" });
     expect(within(drawer).getByRole("navigation", { name: "Areas" })).toBeDefined();
-    expect(within(drawer).getByRole("region", { name: "Working now" })).toBeDefined();
+    expect(within(drawer).getByRole("region", { name: "At work" })).toBeDefined();
     expect(within(drawer).getByRole("button", { name: "Ana Beatriz Souza, account menu" })).toBeDefined();
   });
 
@@ -335,17 +335,17 @@ describe("the sidebar on a small screen", () => {
     await setViewportWidth(390);
     await open("/workspace/workspace_nightshift");
     await screen.findByRole("heading", { level: 1, name: "Night Shift" });
-    expect(screen.queryByRole("button", { name: /working\. Open navigation\.$/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /at work\. Open navigation\.$/ })).toBeNull();
   });
 });
 
 describe("the sidebar on a wide screen", () => {
   test("it can be hidden, the choice is remembered, and the working agents move to the header", async () => {
     const app = await open();
-    await within(working()).findByRole("img", { name: "Scout, working" });
+    await within(working()).findByRole("img", { name: "Scout, at work" });
     await app.user.click(screen.getByRole("button", { name: "Hide navigation" }));
     expect(screen.queryByRole("complementary")).toBeNull();
-    expect(screen.getByRole("button", { name: "2 agents working. Open navigation." })).toBeDefined();
+    expect(screen.getByRole("button", { name: "2 agents at work. Open navigation." })).toBeDefined();
     expect(screen.getByRole("button", { name: "Show navigation" }).getAttribute("aria-expanded")).toBe(
       "false",
     );
@@ -354,7 +354,7 @@ describe("the sidebar on a wide screen", () => {
     await screen.findByRole("heading", { level: 1, name: "Birchwood Labs" });
     expect(screen.queryByRole("complementary")).toBeNull();
     await again.user.click(screen.getByRole("button", { name: "Show navigation" }));
-    expect(screen.getByRole("complementary", { name: "Workspace navigation" })).toBeDefined();
+    expect(screen.getByRole("complementary", { name: "Workspace sidebar" })).toBeDefined();
   });
 
   test("a stored choice that is not one leaves the sidebar shown", async () => {
@@ -362,7 +362,7 @@ describe("the sidebar on a wide screen", () => {
     app.unmount();
     app.runtime.store.setItem(STORAGE_KEYS.sidebar, '{"hidden":true}');
     await open(HOME, { server: app.server, store: app.runtime.store });
-    expect(await screen.findByRole("complementary", { name: "Workspace navigation" })).toBeDefined();
+    expect(await screen.findByRole("complementary", { name: "Workspace sidebar" })).toBeDefined();
   });
 });
 
@@ -371,16 +371,16 @@ describe("the home of a workspace", () => {
     await open();
     expect(
       await screen.findByText(
-        "4 people and 3 agents work here. Scout and Ledger are working now. 2 approvals are waiting for you. 38% of this month's agent budget is spent.",
+        "4 people and 3 agents work here. Scout and Ledger are at work. 2 approvals are waiting for you. 38% of this month's agent budget is spent.",
       ),
     ).toBeDefined();
-    expect(screen.queryByRole("heading", { level: 2, name: "Start here" })).toBeNull();
+    expect(screen.queryByRole("heading", { level: 2, name: "First steps" })).toBeNull();
   });
 
   test("a member without the right to see usage is not told the budget", async () => {
     await open(HOME, { signedInAs: "usr_iris" });
     expect(
-      await screen.findByText("4 people and 3 agents work here. Scout and Ledger are working now."),
+      await screen.findByText("4 people and 3 agents work here. Scout and Ledger are at work."),
     ).toBeDefined();
   });
 
@@ -391,7 +391,7 @@ describe("the home of a workspace", () => {
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("This could not be loaded");
     expect(alert.textContent).toContain("You don't have permission to do that.");
-    await app.user.click(within(alert).getByRole("button", { name: "Try again" }));
+    await app.user.click(within(alert).getByRole("button", { name: "Retry" }));
     await screen.findByText(/4 people and 3 agents work here\./);
   });
 });

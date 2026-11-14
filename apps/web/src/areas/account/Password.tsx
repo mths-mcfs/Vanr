@@ -46,12 +46,12 @@ export function ForgotPasswordScreen() {
       <AccountPage
         title={t("forgot.sent.title")}
         why={t("forgot.sent.body", { email: sentTo })}
-        foot={back}
+        footer={back}
       />
     );
   }
   return (
-    <AccountPage title={t("forgot.title")} why={t("forgot.why")} foot={back}>
+    <AccountPage title={t("forgot.title")} why={t("forgot.why")} footer={back}>
       <AccountForm
         onSubmit={() => {
           setChecked(true);
@@ -72,7 +72,11 @@ export function ForgotPasswordScreen() {
             onChange={(event) => setEmail(event.target.value)}
           />
         </Field>
-        <ServerProblem error={submit.error} failedAt={submit.failedAt} onRetry={() => void submit.run()} />
+        <ServerProblem
+          error={submit.error}
+          failureTime={submit.failureTime}
+          onRetry={() => void submit.run()}
+        />
         <div className="acct__actions">
           <Button type="submit" variant="primary" size="lg" loading={submit.busy}>
             {t("forgot.submit")}
@@ -134,7 +138,11 @@ export function ResetPasswordScreen() {
             onChange={(event) => setPassword(event.target.value)}
           />
         </Field>
-        <ServerProblem error={submit.error} failedAt={submit.failedAt} onRetry={() => void submit.run()} />
+        <ServerProblem
+          error={submit.error}
+          failureTime={submit.failureTime}
+          onRetry={() => void submit.run()}
+        />
         <div className="acct__actions">
           <Button type="submit" variant="primary" size="lg" loading={submit.busy}>
             {t("reset.submit")}

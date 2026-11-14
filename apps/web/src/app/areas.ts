@@ -11,7 +11,7 @@ export type AreaScreens<A extends Area> = { readonly [Id in RouteIdOf<A>]?: Comp
 export type AreaModule<A extends Area> = {
   readonly screens: AreaScreens<A>;
   /** Chat only: the list of channels and direct messages in the sidebar. */
-  readonly channelList?: ComponentType;
+  readonly sidebarChannels?: ComponentType;
   /** The settings sections the area fills (see SETTINGS_SECTIONS in src/routes.ts). */
   readonly settings?: { readonly [Section in SettingsSection]?: ComponentType };
 };
@@ -36,8 +36,8 @@ export async function loadScreen(id: RouteId): Promise<ComponentType | undefined
 }
 
 /** The chat area's channel list, or undefined while chat has not built one. */
-export async function loadChannelList(): Promise<ComponentType | undefined> {
-  return (await MODULES.chat()).channelList;
+export async function loadSidebarChannels(): Promise<ComponentType | undefined> {
+  return (await MODULES.chat()).sidebarChannels;
 }
 
 /** The content an area built for a settings section, or undefined when it has none yet. */

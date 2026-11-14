@@ -81,10 +81,10 @@ export type Area = (typeof AREAS)[number];
  * Who may open a route.
  * - public: anyone, signed in or not.
  * - guest: the sign-in screens; someone already signed in is sent onward.
- * - signedIn: needs a session, but no workspace.
+ * - session: needs a session, but no workspace.
  * - member: needs a session and membership of the workspace in the path; rendered inside the frame.
  */
-export type Access = "public" | "guest" | "signedIn" | "member";
+export type Access = "public" | "guest" | "session" | "member";
 
 type RouteSpec = { readonly path: string; readonly area: Area; readonly access: Access };
 
@@ -109,8 +109,8 @@ export const ROUTES = {
   resetPassword: account("/reset-password", "public"),
   verifyEmail: account("/verify-email", "public"),
   invitation: account("/invite/$token", "public"),
-  onboarding: account("/onboarding", "signedIn"),
-  runnerPairing: { path: "/connect", area: "agents", access: "signedIn" },
+  onboarding: account("/onboarding", "session"),
+  runnerPairing: { path: "/connect", area: "agents", access: "session" },
 
   // Shell, inside a workspace.
   home: inWorkspace("", "shell"),

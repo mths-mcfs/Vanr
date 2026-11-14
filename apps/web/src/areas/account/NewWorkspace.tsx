@@ -47,7 +47,7 @@ export function NewWorkspaceScreen() {
     <AccountPage
       title={t("workspace.title")}
       why={t("workspace.why")}
-      foot={
+      footer={
         me !== null &&
         me !== undefined && (
           <>
@@ -85,7 +85,11 @@ export function NewWorkspaceScreen() {
             onChange={(event) => setContext(event.target.value)}
           />
         </Field>
-        <ServerProblem error={submit.error} failedAt={submit.failedAt} onRetry={() => void submit.run()} />
+        <ServerProblem
+          error={submit.error}
+          failureTime={submit.failureTime}
+          onRetry={() => void submit.run()}
+        />
         <div className="acct__actions">
           <Button type="submit" variant="primary" size="lg" loading={submit.busy}>
             {t("workspace.submit")}

@@ -129,7 +129,7 @@ for (const wire of WIRES) {
         "Vanr could not be reached. Check your connection and try again.",
       );
       expect(screen.queryByRole("button", { name: "Ask for a new one" })).toBeNull();
-      await again.user.click(screen.getByRole("button", { name: "Try again" }));
+      await again.user.click(screen.getByRole("button", { name: "Retry" }));
       await screen.findByRole("heading", { level: 1, name: "You are invited to Birchwood Labs" });
     });
 

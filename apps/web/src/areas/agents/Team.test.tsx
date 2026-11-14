@@ -15,7 +15,7 @@ describe("the agents of a workspace", () => {
     await renderApp({ path: PATH, signedInAs: "usr_ana" });
     await screen.findByRole("heading", { level: 1, name: "Agents" });
     expect(await screen.findByText("3 agents in this workspace.")).toBeDefined();
-    expect(rows()).toEqual(["Scout@scoutWorking", "Ledger@ledgerWorking", "Tally@tallyIdle"]);
+    expect(rows()).toEqual(["Scout@scoutAt work", "Ledger@ledgerAt work", "Tally@tallyIdle"]);
     expect(screen.getByRole("link", { name: "Scout" }).getAttribute("href")).toBe(`${PATH}/agt_scout`);
     expect(document.title).toBe("Agents | Birchwood Labs | Vanr");
   });
@@ -37,7 +37,7 @@ describe("the agents of a workspace", () => {
     const alert = await within(screen.getByRole("main")).findByRole("alert");
     expect(alert.textContent).toContain("The agents could not be loaded");
     expect(alert.textContent).toContain("The server ran into a problem. Try again.");
-    await app.user.click(within(alert).getByRole("button", { name: "Try again" }));
+    await app.user.click(within(alert).getByRole("button", { name: "Retry" }));
     await screen.findByRole("list", { name: "Agents" });
   });
 
@@ -54,12 +54,12 @@ describe("the agents of a workspace", () => {
     const server = newServer();
     server.state.agents = [];
     const app = await renderApp({ path: PATH, signedInAs: "usr_ana", server });
-    expect(await screen.findByText("No agents yet")).toBeDefined();
+    expect(await screen.findByText("No agents in this workspace")).toBeDefined();
     expect(
       screen.getByText("An agent takes a role, joins channels and works alongside people."),
     ).toBeDefined();
     await app.user.click(screen.getByRole("button", { name: "Add an agent" }));
-    await screen.findByRole("heading", { level: 1, name: "New agent" });
+    await screen.findByRole("heading", { level: 1, name: "Add an agent" });
     expect(app.address()).toBe(`${PATH}/new`);
   });
 
@@ -68,7 +68,7 @@ describe("the agents of a workspace", () => {
     await screen.findByRole("list", { name: "Agents" });
     await act(async () => app.server.setAgentBusy("agt_tally", true));
     await waitFor(() =>
-      expect(rows()).toEqual(["Scout@scoutWorking", "Ledger@ledgerWorking", "Tally@tallyWorking"]),
+      expect(rows()).toEqual(["Scout@scoutAt work", "Ledger@ledgerAt work", "Tally@tallyAt work"]),
     );
   });
 });

@@ -65,21 +65,21 @@ export function AccountForm({ onSubmit, children }: { onSubmit: () => void; chil
  */
 export function ServerProblem({
   error,
-  failedAt,
+  failureTime,
   onRetry,
 }: {
   error: ApiError | null;
   /** The clock time of the failure, to count the server's wait from. */
-  failedAt: number | undefined;
+  failureTime: number | undefined;
   onRetry: () => void;
 }) {
   const t = useMessages("account");
   const common = useMessages("common");
   const describe = useErrorMessage();
   const waitUntil =
-    error?.retryAfterSeconds === undefined || failedAt === undefined
+    error?.retryAfterSeconds === undefined || failureTime === undefined
       ? undefined
-      : failedAt + error.retryAfterSeconds * 1000;
+      : failureTime + error.retryAfterSeconds * 1000;
   const seconds = useSecondsUntil(waitUntil);
   if (error === null) return null;
   if (error.status === 503 && error.retryAfterSeconds !== undefined) {
@@ -111,23 +111,25 @@ export function ServerProblem({
  */
 export function useSubmit(action: () => Promise<void>) {
   const clock = useClock();
-  const [state, setState] = useState<{ busy: boolean; error: ApiError | null; failedAt: number | undefined }>(
-    {
-      busy: false,
-      error: null,
-      failedAt: undefined,
-    },
-  );
+  const [state, setState] = useState<{
+    busy: boolean;
+    error: ApiError | null;
+    failureTime: number | undefined;
+  }>({
+    busy: false,
+    error: null,
+    failureTime: undefined,
+  });
   const running = useRef(false);
   const run = async () => {
     if (running.current) return;
     running.current = true;
-    setState({ busy: true, error: null, failedAt: undefined });
+    setState({ busy: true, error: null, failureTime: undefined });
     try {
       await action();
-      setState({ busy: false, error: null, failedAt: undefined });
+      setState({ busy: false, error: null, failureTime: undefined });
     } catch (cause) {
-      setState({ busy: false, error: toApiError(cause), failedAt: clock.now() });
+      setState({ busy: false, error: toApiError(cause), failureTime: clock.now() });
     } finally {
       running.current = false;
     }

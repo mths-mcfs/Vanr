@@ -55,13 +55,13 @@ export function StandalonePage({
   title,
   why,
   children,
-  foot,
+  footer,
 }: {
   title: string;
   why?: ReactNode;
   children?: ReactNode;
   /** A line under a rule at the end: the way to the neighbouring screen. */
-  foot?: ReactNode;
+  footer?: ReactNode;
 }) {
   useDocumentTitle(title);
   const heading = useRef<HTMLHeadingElement>(null);
@@ -81,7 +81,7 @@ export function StandalonePage({
           {why !== undefined && <p className="acct__why">{why}</p>}
         </div>
         {children}
-        {foot !== undefined && <p className="acct__foot">{foot}</p>}
+        {footer !== undefined && <p className="acct__foot">{footer}</p>}
       </main>
     </div>
   );

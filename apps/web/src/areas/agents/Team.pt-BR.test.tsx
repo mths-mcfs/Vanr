@@ -13,8 +13,8 @@ test("the agents of a workspace, in Portuguese", async () => {
   expect(await screen.findByText("3 agentes neste espaço de trabalho.")).toBeDefined();
   const rows = within(screen.getByRole("list", { name: "Agentes" })).getAllByRole("listitem");
   expect(rows.map((row) => row.textContent)).toEqual([
-    "Scout@scoutTrabalhando",
-    "Ledger@ledgerTrabalhando",
+    "Scout@scoutEm atividade",
+    "Ledger@ledgerEm atividade",
     "Tally@tallyParado",
   ]);
   expect(document.title).toBe("Agentes | Birchwood Labs | Vanr");

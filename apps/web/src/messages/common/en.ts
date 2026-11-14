@@ -2,7 +2,7 @@ import type { Catalog } from "../../i18n/format.ts";
 
 /** Words every screen uses. */
 export default {
-  "action.retry": "Try again",
+  "action.retry": "Retry",
   "action.close": "Close",
   "action.cancel": "Cancel",
   "state.loading": "Loading",

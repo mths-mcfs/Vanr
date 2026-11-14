@@ -10,7 +10,7 @@ const fill = async (app: App, fields: { name?: string; email?: string; password?
   if (fields.email !== undefined) await app.user.type(screen.getByLabelText("Email"), fields.email);
   if (fields.password !== undefined) await app.user.type(screen.getByLabelText("Password"), fields.password);
 };
-const submit = (app: App) => app.user.click(screen.getByRole("button", { name: "Create account" }));
+const submit = (app: App) => app.user.click(screen.getByRole("button", { name: "Create my account" }));
 const signUps = (app: App) => app.server.calls.filter((call) => call.method === "signUp");
 const NEW = { name: "Mel Okafor", email: "mel@elsewhere.example", password: "tar-and-birch" };
 
@@ -20,7 +20,7 @@ for (const wire of WIRES) {
       await renderApp({ path: "/signup", wire });
       await screen.findByRole("heading", { level: 1, name: "Create your account" });
       expect(screen.getByText("One account works in every workspace you join.")).toBeDefined();
-      expect(screen.getByText("At least 8 characters.")).toBeDefined();
+      expect(screen.getByText("8 characters or more.")).toBeDefined();
     });
 
     test("idle, first run: the reason says this account owns the installation", async () => {
@@ -38,11 +38,11 @@ for (const wire of WIRES) {
       expect(screen.getByText("Enter your email.")).toBeDefined();
       expect(screen.getByText("Use at least 8 characters.")).toBeDefined();
       // The error says the rule, so the hint steps aside instead of saying it twice.
-      expect(screen.queryByText("At least 8 characters.")).toBeNull();
+      expect(screen.queryByText("8 characters or more.")).toBeNull();
       expect(signUps(app)).toEqual([]);
       await app.user.type(screen.getByLabelText("Password"), "7");
       expect(screen.queryByText("Use at least 8 characters.")).toBeNull();
-      expect(screen.getByText("At least 8 characters.")).toBeDefined();
+      expect(screen.getByText("8 characters or more.")).toBeDefined();
     });
 
     test("sending: the button is busy until the server answers", async () => {
@@ -50,7 +50,9 @@ for (const wire of WIRES) {
       const held = app.server.hold("signUp");
       await fill(app, NEW);
       await submit(app);
-      expect(screen.getByRole("button", { name: "Create account" }).getAttribute("aria-busy")).toBe("true");
+      expect(screen.getByRole("button", { name: "Create my account" }).getAttribute("aria-busy")).toBe(
+        "true",
+      );
       await submit(app);
       expect(signUps(app)).toHaveLength(1);
       held.release();
@@ -89,9 +91,9 @@ for (const wire of WIRES) {
         expect((await screen.findByRole("alert")).textContent).toContain(
           "Another sign-up is creating the first account. Try again in 5 seconds.",
         );
-        expect(screen.getByRole<HTMLButtonElement>("button", { name: "Try again" }).disabled).toBe(true);
+        expect(screen.getByRole<HTMLButtonElement>("button", { name: "Retry" }).disabled).toBe(true);
         await app.advance(5000);
-        await app.user.click(screen.getByRole("button", { name: "Try again" }));
+        await app.user.click(screen.getByRole("button", { name: "Retry" }));
         await screen.findByRole("heading", { level: 1, name: "Name your workspace" });
         expect(signUps(app)).toHaveLength(2);
       },

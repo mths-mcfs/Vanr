@@ -19,7 +19,7 @@ import {
 import { ChevronsUpDown, Ellipsis } from "lucide-react";
 import { type ComponentType, Suspense, use } from "react";
 import type { AgentSummary } from "../api/index.ts";
-import { loadChannelList } from "../app/areas.ts";
+import { loadSidebarChannels } from "../app/areas.ts";
 import { AppLink, useGo } from "../app/navigation.tsx";
 import { isTheme, THEMES, useTheme } from "../app/theme.tsx";
 import { LOCALES } from "../i18n/locales.ts";
@@ -148,13 +148,13 @@ function PersonMenu({ me, workspace }: Pick<SidebarProps, "me" | "workspace">) {
 }
 
 // One promise for the life of the page, so `use` sees a stable value.
-let channelListPromise: Promise<ComponentType | undefined> | undefined;
+let sidebarChannelsPromise: Promise<ComponentType | undefined> | undefined;
 
 /** The chat area's channel list, once chat has built one; until then, a plain statement. */
-function ChannelList() {
+function SidebarChannels() {
   const t = useMessages("shell");
-  channelListPromise ??= loadChannelList();
-  const List = use(channelListPromise);
+  sidebarChannelsPromise ??= loadSidebarChannels();
+  const List = use(sidebarChannelsPromise);
   return List === undefined ? <p className="side__quiet">{t("channels.reserved")}</p> : <List />;
 }
 
@@ -256,7 +256,7 @@ export function Sidebar({ me, workspace, counts, working, onRetryWorking }: Side
             {t("channels.title")}
           </h2>
           <Suspense fallback={null}>
-            <ChannelList />
+            <SidebarChannels />
           </Suspense>
         </section>
       </div>

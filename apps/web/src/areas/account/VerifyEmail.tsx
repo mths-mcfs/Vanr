@@ -74,7 +74,7 @@ function LinkFailed() {
           <>
             <ServerProblem
               error={resend.error}
-              failedAt={resend.failedAt}
+              failureTime={resend.failureTime}
               onRetry={() => void resend.run()}
             />
             <div className="acct__actions">

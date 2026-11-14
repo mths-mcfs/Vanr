@@ -51,7 +51,7 @@ export function useSignOut(): (search?: Record<string, string>) => Promise<void>
       } catch {
         // Without an answer the cookie may live on; the screens still forget the person.
       }
-      gate.signedOut();
+      gate.leftOnPurpose();
       session.forget();
       await go("login", {}, { search: search ?? { reason: "signed_out" } });
     },

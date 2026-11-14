@@ -87,14 +87,14 @@ for (const wire of WIRES) {
       const alert = await screen.findByRole("alert");
       expect(alert.textContent).toContain("The server is busy");
       expect(alert.textContent).toContain("Try again in 5 seconds.");
-      const retry = screen.getByRole<HTMLButtonElement>("button", { name: "Try again" });
+      const retry = screen.getByRole<HTMLButtonElement>("button", { name: "Retry" });
       expect(retry.disabled).toBe(true);
       await app.advance(4000);
       expect(screen.getByRole("alert").textContent).toContain("Try again in 1 second.");
       expect(retry.disabled).toBe(true);
       await app.advance(1000);
       expect(screen.getByRole("alert").textContent).toContain("Try again now.");
-      await app.user.click(screen.getByRole("button", { name: "Try again" }));
+      await app.user.click(screen.getByRole("button", { name: "Retry" }));
       await screen.findByRole("heading", { level: 1, name: "Birchwood Labs" });
     });
 

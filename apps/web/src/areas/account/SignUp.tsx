@@ -100,7 +100,7 @@ function SignUpForm({
     <AccountPage
       title={t("signUp.title")}
       why={why}
-      foot={
+      footer={
         <>
           {t("signUp.toSignIn.lead")}{" "}
           <AppLink
@@ -162,7 +162,11 @@ function SignUpForm({
             onChange={(event) => setPassword(event.target.value)}
           />
         </Field>
-        <ServerProblem error={submit.error} failedAt={submit.failedAt} onRetry={() => void submit.run()} />
+        <ServerProblem
+          error={submit.error}
+          failureTime={submit.failureTime}
+          onRetry={() => void submit.run()}
+        />
         <div className="acct__actions">
           <Button type="submit" variant="primary" size="lg" loading={submit.busy}>
             {t("signUp.submit")}

@@ -27,7 +27,7 @@ export function WaitlistForm({
     setJoined(email.trim());
   });
 
-  const foot = (
+  const footer = (
     <>
       {t("signUp.toSignIn.lead")}{" "}
       <AppLink
@@ -46,12 +46,12 @@ export function WaitlistForm({
       <AccountPage
         title={t("waitlist.done.title")}
         why={t("waitlist.done.body", { email: joined })}
-        foot={foot}
+        footer={footer}
       />
     );
   }
   return (
-    <AccountPage title={t("waitlist.title")} why={t("waitlist.why")} foot={foot}>
+    <AccountPage title={t("waitlist.title")} why={t("waitlist.why")} footer={footer}>
       <AccountForm
         onSubmit={() => {
           setChecked(true);
@@ -72,7 +72,11 @@ export function WaitlistForm({
             onChange={(event) => setEmail(event.target.value)}
           />
         </Field>
-        <ServerProblem error={submit.error} failedAt={submit.failedAt} onRetry={() => void submit.run()} />
+        <ServerProblem
+          error={submit.error}
+          failureTime={submit.failureTime}
+          onRetry={() => void submit.run()}
+        />
         <div className="acct__actions">
           <Button type="submit" variant="primary" size="lg" loading={submit.busy}>
             {t("waitlist.submit")}

@@ -42,7 +42,7 @@ export function InvitationScreen() {
   }
   if (invitation.isError) {
     if (invitation.error.code === "invitation.used")
-      return <Used signedIn={me !== null && me !== undefined} />;
+      return <Used hasSession={me !== null && me !== undefined} />;
     if (invitation.error.status === 404) return <Gone token={token} />;
     return (
       <AccountPage title={t("invite.failed.title")}>
@@ -180,7 +180,11 @@ function Open({
       {me !== null && me !== undefined && !member && !wrongEmail && (
         <>
           <p className="acct__why">{t("invite.accept.why", { email: me.user.email })}</p>
-          <ServerProblem error={accept.error} failedAt={accept.failedAt} onRetry={() => void accept.run()} />
+          <ServerProblem
+            error={accept.error}
+            failureTime={accept.failureTime}
+            onRetry={() => void accept.run()}
+          />
           <div className="acct__actions">
             <Button variant="primary" size="lg" loading={accept.busy} onClick={() => void accept.run()}>
               {t("invite.accept.submit")}
@@ -207,7 +211,7 @@ function Gone({ token }: { token: string }) {
         <p role="status">{t("invite.gone.requested")}</p>
       ) : (
         <>
-          <ServerProblem error={ask.error} failedAt={ask.failedAt} onRetry={() => void ask.run()} />
+          <ServerProblem error={ask.error} failureTime={ask.failureTime} onRetry={() => void ask.run()} />
           <div className="acct__actions">
             <Button variant="primary" size="lg" loading={ask.busy} onClick={() => void ask.run()}>
               {t("invite.gone.action")}
@@ -220,11 +224,11 @@ function Gone({ token }: { token: string }) {
 }
 
 /** Already used: asking for another does not apply to it. */
-function Used({ signedIn }: { signedIn: boolean }) {
+function Used({ hasSession }: { hasSession: boolean }) {
   const t = useMessages("account");
   return (
-    <AccountPage title={t("invite.used.title")} why={signedIn ? undefined : t("invite.used.body")}>
-      {!signedIn && (
+    <AccountPage title={t("invite.used.title")} why={hasSession ? undefined : t("invite.used.body")}>
+      {!hasSession && (
         <p>
           <AppLink className="app-link" route="login" params={{}}>
             {t("invite.used.action")}
