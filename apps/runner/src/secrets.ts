@@ -57,7 +57,8 @@ const b64 = (b: ArrayBuffer | Uint8Array) =>
 const unb64 = (s: string) => new Uint8Array(Buffer.from(s, "base64"));
 /** An open request lasts 24 h; after that the private key goes away. */
 const PENDING_TTL_MS = 24 * 3600_000;
-const MIN_MASK = 4;
+/** Shorter values are not masked in command output: a short number shows up by chance. */
+export const MIN_MASK = 4;
 
 export interface SecretValue {
   name: string;
@@ -65,6 +66,13 @@ export interface SecretValue {
   browser: SecretBrowserBinding | null;
   value: string;
 }
+
+/** Each value of 4 characters or more becomes `[secret:NAME]`, longest first. */
+const masksOf = (values: readonly SecretValue[]): [string, string][] =>
+  values
+    .filter((v) => v.value.length >= MIN_MASK)
+    .sort((a, b) => b.value.length - a.value.length)
+    .map((v) => [v.value, `[secret:${v.name}]`]);
 
 export class SecretStore {
   private key: CryptoKey | null = null;
@@ -227,6 +235,12 @@ export class SecretStore {
   }
 
   /** The command's environment and the secret files created for it (they go away with `release`). */
+  /** The masks of what goes to the server, without writing any secret file; none while locked. */
+  async masks(agent: AgentRef): Promise<[string, string][]> {
+    if (!this.key) return [];
+    return masksOf(await this.values(agent));
+  }
+
   async materialize(
     agent: AgentRef,
     root: string,
@@ -252,10 +266,7 @@ export class SecretStore {
         files.push(path);
       }
     }
-    const masks = values
-      .filter((v) => v.value.length >= MIN_MASK)
-      .sort((a, b) => b.value.length - a.value.length)
-      .map((v) => [v.value, `[secret:${v.name}]`] as [string, string]);
+    const masks = masksOf(values);
     let released = false;
     return {
       env,
@@ -291,11 +302,90 @@ export class SecretStore {
   }
 }
 
-/** Replaces each secret value with its name (longest first). */
+/**
+ * The masks as the scan uses them: no empty value, and a value with line breaks also in its `\r\n` form
+ * (what a terminal sends back), under the same label.
+ */
+function prepare(masks: readonly [string, string][]): [string, string][] {
+  const crlf = masks
+    .filter(([v]) => v.includes("\n"))
+    .map(([v, label]): [string, string] => [v.replace(/\r?\n/g, "\r\n"), label]);
+  return [...masks, ...crlf].filter(([v]) => v.length > 0);
+}
+
+/**
+ * One pass over `text`: at each position, the longest secret that starts there is replaced by its label and
+ * the scan goes on after it (leftmost match, no overlap). Not `final`: the scan stops at the first position
+ * where a secret could still start with more input, and returns the rest to be held.
+ */
+function scan(
+  text: string,
+  masks: readonly [string, string][],
+  final: boolean,
+): { out: string; rest: string } {
+  let out = "";
+  let plain = 0;
+  let i = 0;
+  while (i < text.length) {
+    let match: [string, string] | null = null;
+    let open = false;
+    for (const m of masks) {
+      const [v] = m;
+      if (text.startsWith(v, i)) {
+        if (!match || v.length > match[0].length) match = m;
+      } else if (!final && text.length - i < v.length && v.startsWith(text.slice(i))) open = true;
+    }
+    // A longer secret could still match here: wait for the next piece before deciding.
+    if (open) break;
+    if (match) {
+      out += text.slice(plain, i) + match[1];
+      i += match[0].length;
+      plain = i;
+    } else i++;
+  }
+  return { out: out + text.slice(plain, i), rest: text.slice(i) };
+}
+
+/** Replaces each secret value with its label: leftmost match first, the longest one there, no overlap. */
 export function maskSecrets(text: string, masks: [string, string][]): string {
-  let out = text;
-  for (const [value, label] of masks) out = out.split(value).join(label);
-  return out;
+  const prepared = prepare(masks);
+  return prepared.length ? scan(text, prepared, true).out : text;
+}
+
+/**
+ * Mask for output that arrives in pieces (the stream of a command, the capture that cuts it). What it
+ * returns, concatenated, is `maskSecrets` of the whole output. It holds only the end of the text where a
+ * secret could still start, so at most the longest secret minus one character; `end` releases it, masked.
+ */
+export class StreamMasker {
+  private held = "";
+  private readonly masks: [string, string][];
+
+  constructor(masks: [string, string][]) {
+    this.masks = prepare(masks);
+  }
+
+  push(chunk: string): string {
+    if (!this.masks.length) return chunk;
+    const { out, rest } = scan(this.held + chunk, this.masks, false);
+    this.held = rest;
+    return out;
+  }
+
+  end(): string {
+    const rest = this.masks.length ? scan(this.held, this.masks, true).out : this.held;
+    this.held = "";
+    return rest;
+  }
+}
+
+/** `maskSecrets` over bytes: each UTF-8 occurrence of a secret becomes the bytes of its label. */
+export function maskBytes(data: Uint8Array, masks: [string, string][]): Buffer {
+  if (!masks.length) return Buffer.from(data);
+  // One latin1 character per byte: the same scan, byte for byte.
+  const bytes = (s: string) => Buffer.from(s, "utf8").toString("latin1");
+  const asBytes = masks.map(([v, label]): [string, string] => [bytes(v), bytes(label)]);
+  return Buffer.from(maskSecrets(Buffer.from(data).toString("latin1"), asBytes), "latin1");
 }
 
 const escapeRe = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

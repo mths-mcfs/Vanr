@@ -69,21 +69,21 @@ export const catalogEntry = (id: string) => CATALOG.find((c) => c.id === id) ?? 
 
 /** Built-in area → tools per level. The ones not listed here always apply (conversation). */
 export const BUILTIN_AREAS = {
-  context: { read: ["search"], write: ["remember", "update_memory", "forget"] },
+  context: { read: ["search"], write: ["remember", "edit_memory", "forget"] },
   drive: {
     read: ["list_drive_files", "read_drive_file"],
     write: ["create_drive_file", "update_drive_file", "share_drive_file"],
   },
   issues: { read: ["list_issues"], write: ["create_issue", "update_issue", "comment_issue"] },
-  calendar: { read: ["list_events", "find_free_time"], write: ["propose_event"] },
+  calendar: { read: ["list_events", "find_available_time"], write: ["propose_calendar_event"] },
   wiki: {
-    read: ["read_wiki_page"],
-    write: ["create_wiki_page", "update_wiki_page", "link_to_wiki"],
+    read: ["open_wiki_page"],
+    write: ["add_wiki_page", "update_wiki_page", "link_to_wiki"],
   },
-  skills: { read: ["load_skill", "read_skill_file"], write: [] },
+  skills: { read: ["use_skill", "open_skill_file"], write: [] },
   schedule: {
     read: ["list_reminders", "list_routines"],
-    write: ["schedule_reminder", "cancel_reminder", "create_routine", "update_routine"],
+    write: ["schedule_reminder", "delete_reminder", "schedule_routine", "update_routine"],
   },
   debate: { read: ["read_debate"], write: ["open_debate", "post_in_debate"] },
   bases: { read: ["list_bases", "read_base_schema", "query_base"], write: ["upsert_base_rows"] },

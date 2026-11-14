@@ -245,7 +245,7 @@ export class CdpBrowser implements BrowserDriver {
       case "browser.inspect": {
         const a = args as OpArgs<"browser.inspect">;
         const s = this.sessions.get(agent.id);
-        if (!s) throw new RunnerError("not_found", "Your browser is not open; call browser_open first");
+        if (!s) throw new RunnerError("not_found", "Your browser is not open; call browser_navigate first");
         const run = s.lock.then(async () => {
           if (s.policy.driver === "person") throw personDriving();
           const r = await within(this.inspect(s, a), this.opts.opTimeoutMs ?? OP_TIMEOUT_MS);
@@ -874,7 +874,7 @@ export class CdpBrowser implements BrowserDriver {
     if (pos.frame)
       throw new RunnerError(
         "not_allowed",
-        "That spot is inside an embedded frame from another page; you can only act on the page itself. Open the frame's page with browser_open if you need it.",
+        "That spot is inside an embedded frame from another page; you can only act on the page itself. Open the frame's page with browser_navigate if you need it.",
       );
     return pos;
   }
@@ -1266,7 +1266,7 @@ export class CdpBrowser implements BrowserDriver {
       sessionId,
     );
     // The screencast only sends a frame when the page changes: the first one goes out right away, without waiting. The capture
-    // never answers if the stream restarts midway (the browser_open that started Chrome switches
+    // never answers if the stream restarts midway (the browser_navigate that started Chrome switches
     // the active tab), and the stream request would be stuck until the server gave up.
     const stream = s.stream;
     void s.cdp

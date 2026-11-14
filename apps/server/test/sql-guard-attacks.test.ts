@@ -4,7 +4,7 @@
 // anything reaches the database, and has to split statements exactly where Postgres does.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { memoryPostgres } from "@vanr/engine/sqlconn";
-import { checkPlan, guardStatement, singleStatement } from "../src/integrations/sql-guard";
+import { checkPlan, guardStatement } from "../src/integrations/sql-guard";
 
 let pg: Awaited<ReturnType<typeof memoryPostgres>>;
 beforeAll(async () => {
@@ -69,9 +69,10 @@ describe("a second command hidden in one string", () => {
     "select e'\\\\'; delete from orders; --'",
     // A `$` inside an identifier is part of the name: `foo$$` does not open a dollar quote.
     "select 1 as foo$$; delete from orders; select 1 as bar$$",
-    "select 1 as a$x$; delete from orders; select $x$",
+    "select 1 as a$x$; delete from orders; select $x$ $x$",
+    // A `--` comment also ends at a carriage return.
+    "select 1--\r;delete from orders;select\n 2",
   ])("%p is rejected as more than one statement", (sql) => {
-    expect(singleStatement(sql)).toBeNull();
     expect(failureOf(sql)).toEqual({ reason: "multiple_statements" });
   });
 
@@ -95,7 +96,7 @@ describe("a second command hidden in one string", () => {
       } catch {
         continue; // Postgres rejects the text: nothing ran, nothing to compare.
       }
-      expect({ sql, single: singleStatement(sql) !== null }).toEqual({ sql, single: statements === 1 });
+      expect({ sql, single: "statement" in guardStatement(sql) }).toEqual({ sql, single: statements === 1 });
     }
   });
 });
@@ -107,9 +108,53 @@ describe("writes in a query", () => {
     expect(failureOf("select id into stolen from orders")).toEqual({ reason: "write" });
     expect(failureOf("select * into stolen from customers")).toEqual({ reason: "write" });
     for (const sql of [cte, "with x as (select 1) delete from orders"]) {
+      expect(failureOf(sql)).toEqual({ reason: "write" });
       const res = await pg.query<{ "QUERY PLAN": unknown }>(`explain (verbose, format json) ${sql}`);
       expect(checkPlan(res.rows[0]?.["QUERY PLAN"], policy)).toEqual({ reason: "write" });
     }
+    expect(failureOf("with x as (delete from orders returning *) select * from x")).toEqual({
+      reason: "write",
+    });
+    for (const lock of ["for update", "for no key update", "for share", "for key share"])
+      expect(failureOf(`select id from orders ${lock}`)).toEqual({ reason: "write" });
+  });
+
+  test("a sequence function is rejected by the plan check (the read-only transaction rejects it too)", async () => {
+    await pg.exec("create sequence if not exists counter");
+    for (const sql of [
+      "select nextval('counter')",
+      "select setval('counter', 9)",
+      "select \"nextval\"('counter')",
+    ]) {
+      expect(guardStatement(sql)).toEqual({ statement: sql });
+      const res = await pg.query<{ "QUERY PLAN": unknown }>(`explain (verbose, format json) ${sql}`);
+      expect(checkPlan(res.rows[0]?.["QUERY PLAN"], policy)?.reason).toBe("function");
+    }
+  });
+});
+
+describe("string constants read the way Postgres reads them", () => {
+  test("a literal glued across a newline keeps the E'' escapes: the second command is seen", () => {
+    expect(failureOf("select E''\n'\\'';delete from orders;--'")).toEqual({ reason: "multiple_statements" });
+    expect(failureOf("select 'a'\n'b'")).toBeNull();
+  });
+
+  test("a boundary that depends on standard_conforming_strings is rejected", () => {
+    expect(failureOf("select '\\'';delete from orders;--'")).toEqual({ reason: "ambiguous" });
+    expect(failureOf("select 'C:\\temp\\'")).toEqual({ reason: "ambiguous" });
+    expect(failureOf("select 'a\\b', '\\d+'")).toBeNull();
+  });
+
+  test("a text Postgres would not parse is rejected", () => {
+    for (const sql of [
+      "select 'open",
+      "select 1 /* open",
+      "select $x$ open",
+      'select "open',
+      "select 1\0",
+      "select 1abc",
+    ])
+      expect(failureOf(sql)).toEqual({ reason: "malformed" });
   });
 
   test("reads still pass, with the trailing semicolon and comments stripped", () => {

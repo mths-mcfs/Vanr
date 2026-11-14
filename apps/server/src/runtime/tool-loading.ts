@@ -16,7 +16,7 @@ const { gateDecisions } = schema;
 export const DEFER_FROM_TOKENS = 3_000;
 export const PINNED_MAX = 5;
 /** Pinned without history: what almost every run uses (search, ask, remember, reply in another channel, skill). */
-export const DEFAULT_PINNED = ["search", "ask_user", "remember", "post_message", "load_skill"];
+export const DEFAULT_PINNED = ["search", "ask_user", "remember", "post_message", "use_skill"];
 const WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** The ones the agent used most in the last 30 days, topped up by the default list. */

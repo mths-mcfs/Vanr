@@ -25,7 +25,7 @@ export const searchChunks = pgTable(
     tsv: tsvector("tsv").notNull(),
     url: text("url").notNull(),
     /**
-     * Scope: `org`, `channel` (with `channel_id`; `principals` also read from outside) or `private`
+     * Scope: `workspace`, `channel` (with `channel_id`; `principals` also read from outside) or `private`
      * (`principals` only).
      */
     scopeKind: text("scope_kind", { enum: ["workspace", "channel", "private"] }).notNull(),

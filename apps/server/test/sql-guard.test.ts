@@ -1,6 +1,12 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { memoryPostgres } from "@vanr/engine/sqlconn";
-import { checkPlan, singleStatement } from "../src/integrations/sql-guard";
+import { checkPlan, guardStatement } from "../src/integrations/sql-guard";
+
+/** The statement the guard accepts, or null. */
+const accepted = (sql: string) => {
+  const out = guardStatement(sql);
+  return "statement" in out ? out.statement : null;
+};
 
 let pg: Awaited<ReturnType<typeof memoryPostgres>>;
 beforeAll(async () => {
@@ -75,15 +81,15 @@ test("rejects a table outside the list, writes and a function that reads outside
 });
 
 test("a single statement, ignoring ; inside a string, identifier and comment", () => {
-  expect(singleStatement("select 1;")).toBe("select 1");
-  expect(singleStatement("  select 1 ;  ; ")).toBe("select 1");
-  expect(singleStatement("select ';' as x")).toBe("select ';' as x");
-  expect(singleStatement(`select 1 as ";"`)).toBe(`select 1 as ";"`);
-  expect(singleStatement("select $$a;b$$")).toBe("select $$a;b$$");
-  expect(singleStatement("select 1 -- ; drop\n")).toBe("select 1");
-  expect(singleStatement("select 1; drop table customers")).toBeNull();
-  expect(singleStatement("select 1; /* x */ select 2")).toBeNull();
-  expect(singleStatement("   ")).toBeNull();
+  expect(accepted("select 1;")).toBe("select 1");
+  expect(accepted("  select 1 ;  ; ")).toBe("select 1");
+  expect(accepted("select ';' as x")).toBe("select ';' as x");
+  expect(accepted(`select 1 as ";"`)).toBe(`select 1 as ";"`);
+  expect(accepted("select $$a;b$$")).toBe("select $$a;b$$");
+  expect(accepted("select 1 -- ; drop\n")).toBe("select 1");
+  expect(accepted("select 1; drop table customers")).toBeNull();
+  expect(accepted("select 1; /* x */ select 2")).toBeNull();
+  expect(accepted("   ")).toBeNull();
 });
 
 test("a function that runs SQL from text or reads the system does not pass; a plain set-returning function passes", async () => {

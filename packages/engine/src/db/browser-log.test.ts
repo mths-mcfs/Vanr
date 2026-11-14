@@ -7,7 +7,7 @@ const entry = (id: string) => ({
   workspaceId: "ws_1",
   agentId: "agt_1",
   runnerId: "run_1",
-  tool: "browser_open",
+  tool: "browser_navigate",
   action: { url: "https://example.com/" },
   outcome: "ok" as const,
   at: new Date(),

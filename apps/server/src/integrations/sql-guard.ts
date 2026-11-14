@@ -5,53 +5,99 @@ import { z } from "zod";
 export type GuardFailure =
   | { reason: "multiple_statements" }
   | { reason: "statement"; keyword: string }
+  | { reason: "malformed" }
+  | { reason: "ambiguous" }
   | { reason: "write" }
   | { reason: "table"; table: string }
   | { reason: "column"; column: string }
   | { reason: "function"; name: string };
 
-/** Identifier characters as Postgres lexes them (`$` too, after the first character). */
-const isIdentChar = (c: string | undefined) => c !== undefined && /[A-Za-z0-9_$\u0080-\uffff]/.test(c);
-const DOLLAR_TAG = /^\$(?:[A-Za-z_\u0080-\uffff][A-Za-z0-9_\u0080-\uffff]*)?\$/;
+// The lexer below follows the lexical structure of Postgres (src/backend/parser/scan.l) for everything that
+// decides where a command ends: whitespace and `--` comments end at `\n` or `\r`, block comments nest, string
+// constants ('…', E'…', U&'…', B'…', X'…', N'…') with their escapes and their continuation across a newline,
+// dollar quotes, quoted identifiers, identifiers (where `$` is a name character) and numbers (after which `$` opens
+// a dollar quote). Reading any of these differently lets a second command hide in what the guard took for a
+// comment or a string.
 
-interface Scan {
-  /** The statement without the trailing `;` and trailing comments; null when there is none or more than one. */
-  body: string | null;
-  /** More than one statement. */
-  multiple: boolean;
-  /** The bare words of the code (outside strings, quoted identifiers, dollar quotes and comments), in lowercase. */
-  words: string[];
+type TokenKind = "word" | "quoted" | "literal" | "number" | "semicolon" | "punct";
+interface Token {
+  kind: TokenKind;
+  start: number;
+  end: number;
 }
 
+const SPACE = /[ \t\n\r\f\v]/;
+const IDENT_START = /[A-Za-z_\u0080-￿]/;
+const IDENT_CHAR = /[A-Za-z0-9_$\u0080-￿]/;
+/** `$tag$`, at the current position. */
+const DOLLAR_TAG = /\$(?:[A-Za-z_\u0080-￿][A-Za-z0-9_\u0080-￿]*)?\$/y;
+/** A number, with what Postgres takes into the same token. */
+const NUMBER =
+  /(?:0[xXoObB][0-9A-Fa-f_]+|[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9]+)?|\.[0-9][0-9_]*(?:[eE][+-]?[0-9]+)?)/y;
 /**
- * Splits the text the way Postgres lexes it, for what decides where a statement ends: block comments nest,
- * `E'…'` strings take backslash escapes, a `$` inside an identifier is part of it (`foo$$` is a name, not a
- * dollar quote). Reading it any other way lets a second command hide in what the guard took for a comment or a
- * string.
+ * What glues the next string constant to the one that just closed: horizontal space or `--` comments, at least
+ * one newline, then space or comments ending in a newline, then the quote. The glued part keeps the first part's
+ * kind (its backslashes still escape after an E'…').
  */
-function scan(sql: string): Scan {
+const CONTINUATION = /(?:[ \t\f\v]|--[^\n\r]*)*[\n\r](?:[ \t\n\r\f\v]|--[^\n\r]*[\n\r])*'/y;
+
+type StringKind = "plain" | "escape" | "unicode" | "bits";
+
+/**
+ * Tokens of the text, or null when Postgres would reject it as it stands (an unterminated comment, string,
+ * dollar quote or quoted identifier, a NUL byte, junk after a number): nothing of it would run.
+ * `standardStrings` is the server's `standard_conforming_strings`: off, a backslash escapes in a plain '…' too.
+ */
+function lex(sql: string, standardStrings: boolean): Token[] | null {
   const n = sql.length;
-  const words: string[] = [];
+  const tokens: Token[] = [];
   let i = 0;
-  let lastCode = -1;
-  let sawSemicolon = false;
-  const code = (end: number) => {
-    if (sawSemicolon) return false;
-    lastCode = end;
-    return true;
+  const at = (re: RegExp, pos: number) => {
+    re.lastIndex = pos;
+    return re.exec(sql);
   };
+  /** Index just past the string constant whose opening quote is at `q`, continuations included; -1 if open. */
+  const stringEnd = (q: number, kind: StringKind): number => {
+    const backslash = kind === "escape" || (kind === "plain" && !standardStrings);
+    let j = q + 1;
+    for (;;) {
+      if (j >= n) return -1;
+      const ch = sql[j];
+      if (backslash && ch === "\\") {
+        j += 2;
+        continue;
+      }
+      if (ch !== "'") {
+        j++;
+        continue;
+      }
+      if (kind !== "bits" && sql[j + 1] === "'") {
+        j += 2;
+        continue;
+      }
+      const glued = at(CONTINUATION, j + 1);
+      if (!glued) return j + 1;
+      j = j + 1 + glued[0].length;
+    }
+  };
+  const push = (kind: TokenKind, start: number, end: number) => tokens.push({ kind, start, end });
   while (i < n) {
-    const ch = sql[i];
+    const ch = sql[i] ?? "";
     const next = sql[i + 1];
+    if (ch === "\0") return null;
+    if (SPACE.test(ch)) {
+      i++;
+      continue;
+    }
     if (ch === "-" && next === "-") {
-      const end = sql.indexOf("\n", i);
-      i = end === -1 ? n : end + 1;
+      while (i < n && sql[i] !== "\n" && sql[i] !== "\r") i++;
       continue;
     }
     if (ch === "/" && next === "*") {
-      let depth = 1;
-      let j = i + 2;
-      while (j < n && depth > 0) {
+      let depth = 0;
+      let j = i;
+      do {
+        if (j >= n) return null;
         if (sql[j] === "/" && sql[j + 1] === "*") {
           depth++;
           j += 2;
@@ -59,84 +105,116 @@ function scan(sql: string): Scan {
           depth--;
           j += 2;
         } else j++;
-      }
+      } while (depth > 0);
       i = j;
       continue;
     }
-    if (ch === "'" || ch === '"') {
-      const escapes = ch === "'" && /[eE]/.test(sql[i - 1] ?? "") && !isIdentChar(sql[i - 2]);
-      let j = i + 1;
-      while (j < n) {
-        if (escapes && sql[j] === "\\") {
-          j += 2;
-          continue;
-        }
-        if (sql[j] === ch) {
-          if (sql[j + 1] === ch) {
-            j += 2;
-            continue;
-          }
-          break;
+    let quote = -1;
+    let kind: StringKind = "plain";
+    if (ch === "'") quote = i;
+    else if (/[eE]/.test(ch) && next === "'") [quote, kind] = [i + 1, "escape"];
+    else if (/[bBxX]/.test(ch) && next === "'") [quote, kind] = [i + 1, "bits"];
+    else if (/[nN]/.test(ch) && next === "'") quote = i + 1;
+    else if (/[uU]/.test(ch) && next === "&" && sql[i + 2] === "'") [quote, kind] = [i + 2, "unicode"];
+    if (quote >= 0) {
+      const end = stringEnd(quote, kind);
+      if (end < 0) return null;
+      push("literal", i, end);
+      i = end;
+      continue;
+    }
+    const identQuote = ch === '"' ? i : /[uU]/.test(ch) && next === "&" && sql[i + 2] === '"' ? i + 2 : -1;
+    if (identQuote >= 0) {
+      let j = identQuote + 1;
+      for (;;) {
+        if (j >= n) return null;
+        if (sql[j] === '"') {
+          if (sql[j + 1] !== '"') break;
+          j++;
         }
         j++;
       }
-      if (!code(j)) return { body: null, multiple: true, words };
+      push("quoted", i, j + 1);
       i = j + 1;
       continue;
     }
-    if (ch === "$" && !isIdentChar(sql[i - 1])) {
-      const tag = DOLLAR_TAG.exec(sql.slice(i))?.[0];
+    if (ch === "$") {
+      const tag = at(DOLLAR_TAG, i)?.[0];
       if (tag) {
-        const end = sql.indexOf(tag, i + tag.length);
-        const stop = end === -1 ? n : end + tag.length;
-        if (!code(stop - 1)) return { body: null, multiple: true, words };
-        i = stop;
+        const close = sql.indexOf(tag, i + tag.length);
+        if (close < 0) return null;
+        push("literal", i, close + tag.length);
+        i = close + tag.length;
         continue;
       }
     }
-    if (ch === ";") {
-      sawSemicolon = true;
-      i++;
-      continue;
-    }
-    if (ch !== undefined && /[A-Za-z_\u0080-\uffff]/.test(ch)) {
+    if (IDENT_START.test(ch)) {
       let j = i + 1;
-      while (isIdentChar(sql[j])) j++;
-      if (!code(j - 1)) return { body: null, multiple: true, words };
-      words.push(sql.slice(i, j).toLowerCase());
+      while (j < n && IDENT_CHAR.test(sql[j] ?? "")) j++;
+      push("word", i, j);
       i = j;
       continue;
     }
-    if (ch !== undefined && !/\s/.test(ch) && !code(i)) return { body: null, multiple: true, words };
+    const number = /[0-9.]/.test(ch) ? at(NUMBER, i)?.[0] : undefined;
+    if (number) {
+      const end = i + number.length;
+      if (IDENT_START.test(sql[end] ?? "")) return null;
+      push("number", i, end);
+      i = end;
+      continue;
+    }
+    push(ch === ";" ? "semicolon" : "punct", i, i + 1);
     i++;
   }
-  const body = sql.slice(0, lastCode + 1).trim();
-  return { body: body || null, multiple: false, words };
+  return tokens;
 }
 
-/**
- * Strips the trailing `;` and rejects when another one is left outside a string, quoted identifier,
- * dollar quote or comment: only one statement at a time.
- */
-export function singleStatement(sql: string): string | null {
-  return scan(sql).body;
-}
+const sameTokens = (a: readonly Token[], b: readonly Token[]) =>
+  a.length === b.length &&
+  a.every((t, k) => t.kind === b[k]?.kind && t.start === b[k]?.start && t.end === b[k]?.end);
 
 /** What a statement may start with: a query that only reads. */
 const READ_KEYWORDS = new Set(["select", "with", "values", "table"]);
+/** Data-modifying commands, which can sit inside a WITH or after it. */
+const WRITE_KEYWORDS = new Set(["insert", "update", "delete", "merge"]);
+/** `FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`, `FOR KEY SHARE`: row locks are writes. */
+const LOCK_KEYWORDS = new Set(["update", "share", "no", "key"]);
 
 /**
- * The statement an agent may send, before anything reaches the database: one statement, a query (not `SET`,
- * `BEGIN`, `COMMIT`, `COPY`, `EXPLAIN` or any other command, which could undo the read-only transaction or its
- * timeout) and no `SELECT … INTO`, which creates a table.
+ * The statement an agent may send, decided before anything reaches the database: the text is ONE command that
+ * only reads. Rejected: more than one command; a text Postgres would not even parse; a text whose command
+ * boundary depends on `standard_conforming_strings` (the customer's server may have it off, and then a backslash
+ * escapes a quote in a plain string); a command that is not a query (`SET`, `BEGIN`, `COMMIT`, `COPY`, `EXPLAIN`...,
+ * which could undo the read-only transaction or its timeout); and a write inside a query (a data-modifying
+ * WITH, `SELECT … INTO`, `FOR UPDATE`/`FOR SHARE`). The plan check still runs after this, as the second layer.
  */
 export function guardStatement(sql: string): { statement: string } | { failure: GuardFailure } {
-  const { body, multiple, words } = scan(sql);
-  if (multiple) return { failure: { reason: "multiple_statements" } };
-  const keyword = words[0] ?? "";
-  if (!body || !READ_KEYWORDS.has(keyword)) return { failure: { reason: "statement", keyword } };
-  if (words.includes("into")) return { failure: { reason: "write" } };
-  return { statement: body };
+  const tokens = lex(sql, true);
+  const loose = lex(sql, false);
+  if (!tokens) return { failure: { reason: "malformed" } };
+  if (!loose || !sameTokens(tokens, loose)) return { failure: { reason: "ambiguous" } };
+  const code = tokens.filter((t) => t.kind !== "semicolon");
+  const lastCode = code.at(-1);
+  if (lastCode && tokens.some((t) => t.kind === "semicolon" && t.start < lastCode.start))
+    return { failure: { reason: "multiple_statements" } };
+  const text = (t: Token | undefined) => (t ? sql.slice(t.start, t.end).toLowerCase() : "");
+  const isWord = (t: Token | undefined, words: ReadonlySet<string>) =>
+    t?.kind === "word" && words.has(text(t));
+  const first = code.findIndex((t) => !(t.kind === "punct" && text(t) === "("));
+  const keyword = code[first]?.kind === "word" ? text(code[first]) : "";
+  if (!lastCode || !READ_KEYWORDS.has(keyword)) return { failure: { reason: "statement", keyword } };
+  for (let k = 0; k < code.length; k++) {
+    const t = code[k];
+    if (t?.kind !== "word") continue;
+    const word = text(t);
+    const before = code[k - 1];
+    const opensCommand =
+      !before || (before.kind === "punct" && (text(before) === "(" || text(before) === ")"));
+    if (word === "into" || (WRITE_KEYWORDS.has(word) && opensCommand))
+      return { failure: { reason: "write" } };
+    if (word === "for" && isWord(code[k + 1], LOCK_KEYWORDS)) return { failure: { reason: "write" } };
+  }
+  return { statement: sql.slice(0, lastCode.end).replace(/^[ \t\n\r\f\v]+/, "") };
 }
 
 interface PlanNode {
@@ -174,10 +252,11 @@ export const qualified = (name: string) => (name.includes(".") ? name : `public.
  * Functions that read outside the allowed tables, by family: the system ones (`pg_*`: files, other
  * sessions, configuration), the ones that run SQL passed as text (`ts_stat`, `ts_rewrite`,
  * `*_to_xml`), large objects, other databases and the session configuration. The text passed to them
- * becomes a literal and drops out of the column check, so they cannot run.
+ * becomes a literal and drops out of the column check, so they cannot run. `nextval` and `setval` change a
+ * sequence: the read-only transaction already rejects them, and this keeps a second layer.
  */
 const BLOCKED_FUNCTION =
-  /\b(pg_\w+|lo_\w+|dblink\w*|set_config|current_setting|ts_stat|ts_rewrite|inet_(?:server|client)_\w+|(?:query|cursor|table|schema|database)_to_xml\w*)\s*\(/i;
+  /\b(pg_\w+|lo_\w+|dblink\w*|nextval|setval|set_config|current_setting|ts_stat|ts_rewrite|inet_(?:server|client)_\w+|(?:query|cursor|table|schema|database)_to_xml\w*)\s*\(/i;
 
 /** In FROM (Function Scan), only set-returning functions that work on what they receive. */
 const SAFE_SET_FUNCTION =

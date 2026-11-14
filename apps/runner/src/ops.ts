@@ -29,7 +29,7 @@ import {
   SESSION_ENV,
   type Wrapped,
 } from "./sandbox";
-import { maskSecrets, type SecretStore } from "./secrets";
+import { maskBytes, maskSecrets, type SecretStore, StreamMasker } from "./secrets";
 
 const OUTPUT_MAX = 2_000_000;
 const STREAM_EVERY_MS = 100;
@@ -48,12 +48,22 @@ export interface OpContext {
   onOutput?: (stream: "stdout" | "stderr", chunk: string) => void;
 }
 
-/** Collects output up to the cap, keeping half from the start and half from the end. */
+/**
+ * Collects output up to the cap, keeping half from the start and half from the end. It masks before it
+ * cuts: a secret that crosses the cap is replaced whole, never left half visible.
+ */
 class Capture {
   private head = "";
   private tail = "";
+  private readonly mask: StreamMasker;
   cut = false;
-  push(s: string) {
+  constructor(masks: [string, string][]) {
+    this.mask = new StreamMasker(masks);
+  }
+  push(raw: string) {
+    this.add(this.mask.push(raw));
+  }
+  private add(s: string) {
     if (!this.cut && this.head.length + s.length <= OUTPUT_MAX) {
       this.head += s;
       return;
@@ -66,7 +76,9 @@ class Capture {
     }
     this.tail = (this.tail + s).slice(-OUTPUT_MAX / 2);
   }
+  /** The masked output, with what the mask still held. Call once, at the end. */
   text() {
+    this.add(this.mask.end());
     return this.cut ? `${this.head}\n[… cut …]\n${this.tail}` : this.head;
   }
 }
@@ -182,20 +194,23 @@ export async function execOp(
           stdio: ["ignore", "pipe", "pipe"],
         },
       );
-      const out = new Capture();
-      const err = new Capture();
+      const out = new Capture(secrets.masks);
+      const err = new Capture(secrets.masks);
       let streamed = 0;
       let pending: { stream: "stdout" | "stderr"; chunk: string }[] = [];
+      // One mask per stream: a secret cut between two pieces of the same stream is held, not sent.
+      const live = { stdout: new StreamMasker(secrets.masks), stderr: new StreamMasker(secrets.masks) };
+      const emit = (stream: "stdout" | "stderr", masked: string) => {
+        if (!ctx.onOutput || !masked || streamed >= STREAM_MAX) return;
+        const chunk = masked.slice(0, STREAM_MAX - streamed);
+        streamed += chunk.length;
+        ctx.onOutput(stream, chunk);
+      };
       let timedOut = false;
       let canceled = false;
       const flush = () => {
         if (!ctx.onOutput || pending.length === 0) return;
-        for (const p of pending) {
-          if (streamed >= STREAM_MAX) break;
-          const chunk = maskSecrets(p.chunk, secrets.masks).slice(0, STREAM_MAX - streamed);
-          streamed += chunk.length;
-          ctx.onOutput(p.stream, chunk);
-        }
+        for (const p of pending) emit(p.stream, live[p.stream].push(p.chunk));
         pending = [];
       };
       const flusher = setInterval(flush, STREAM_EVERY_MS);
@@ -235,10 +250,13 @@ export async function execOp(
         clearInterval(flusher);
         ctx.signal.removeEventListener("abort", onAbort);
         flush();
+        // What the masks still held goes out at the end, masked.
+        emit("stdout", live.stdout.end());
+        emit("stderr", live.stderr.end());
         resolve({
           exitCode: timedOut ? 124 : canceled ? 130 : code,
-          stdout: maskSecrets(out.text(), secrets.masks),
-          stderr: uncheckedNote(wrapped?.unchecked) + maskSecrets(err.text(), secrets.masks),
+          stdout: out.text(),
+          stderr: uncheckedNote(wrapped?.unchecked) + err.text(),
           truncated: out.cut || err.cut,
           timedOut,
           durationMs: Date.now() - started,
@@ -265,7 +283,10 @@ const looksBinary = (buf: Buffer) => {
   }
 };
 
-export function readOp(ctx: OpContext, args: { path: string; maxBytes?: number }): ReadResult {
+/** The masks of the agent's secrets (none without an agent, or while the secrets are locked). */
+const masksOf = (ctx: OpContext) => (ctx.agent ? ctx.secrets.masks(ctx.agent) : Promise.resolve([]));
+
+export async function readOp(ctx: OpContext, args: { path: string; maxBytes?: number }): Promise<ReadResult> {
   ctx.access.requireActive();
   const path = ctx.access.resolve(ctx.agent, args.path);
   blockedSecretFile(ctx, path);
@@ -273,14 +294,22 @@ export function readOp(ctx: OpContext, args: { path: string; maxBytes?: number }
   const st = statSync(path);
   if (!st.isFile()) throw new RunnerError("bad_request", `${args.path} is not a file`);
   const max = Math.min(args.maxBytes ?? READ_MAX, READ_MAX);
-  const buf = readFileSync(path).subarray(0, max);
+  const all = readFileSync(path);
+  const masks = await masksOf(ctx);
+  // The bytes are masked before the cut, over a window a little past it, so a secret across the cut is
+  // replaced whole. Text and binary alike: what goes out as base64 (a cut inside a character, a NUL byte)
+  // is masked too, so a real binary that holds a secret comes back changed.
+  const longest = Math.max(0, ...masks.map(([v]) => Buffer.byteLength(v)));
+  const window = all.subarray(0, max + longest);
+  const masked = masks.length ? maskBytes(window, masks) : window;
+  const buf = masked.subarray(0, max);
   const binary = looksBinary(buf);
   return {
     path: args.path,
     content: binary ? buf.toString("base64") : buf.toString("utf8"),
     encoding: binary ? "base64" : "utf8",
     size: st.size,
-    truncated: st.size > max,
+    truncated: masks.length ? masked.byteLength > max || st.size > window.byteLength : st.size > max,
   };
 }
 
@@ -308,7 +337,7 @@ export function writeOp(
   return { path: args.path, bytes: data.byteLength };
 }
 
-export function listOp(ctx: OpContext, args: { path: string }): ListResult {
+export async function listOp(ctx: OpContext, args: { path: string }): Promise<ListResult> {
   ctx.access.requireActive();
   const path = ctx.access.resolve(ctx.agent, args.path);
   if (!existsSync(path)) throw new RunnerError("not_found", `${args.path} does not exist`);
@@ -317,6 +346,8 @@ export function listOp(ctx: OpContext, args: { path: string }): ListResult {
     ctx.agent ? ctx.secrets.secretFiles(ctx.agent, ctx.access.agentRoot(ctx.agent)) : [],
   );
   const names = readdirSync(path).sort();
+  // A file name can carry a secret's value too (`touch "$TOKEN"`).
+  const masks = await masksOf(ctx);
   const entries: ListResult["entries"] = [];
   for (const name of names) {
     if (entries.length >= LIST_MAX) break;
@@ -324,7 +355,7 @@ export function listOp(ctx: OpContext, args: { path: string }): ListResult {
     if (hidden.has(full)) continue;
     const st = lstatSync(full);
     entries.push({
-      name,
+      name: maskSecrets(name, masks),
       kind: st.isSymbolicLink() ? "link" : st.isDirectory() ? "dir" : st.isFile() ? "file" : "other",
       size: st.isFile() ? st.size : 0,
     });
