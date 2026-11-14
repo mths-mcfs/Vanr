@@ -54,10 +54,10 @@ function NewWorkspaceForm({ me }: { me: Me | null | undefined }) {
       );
       workspaceId = workspace.id;
       setCreatedId(workspaceId);
+      discardName();
+      discardContext();
     }
     await completeSignIn();
-    discardName();
-    discardContext();
     await go("home", { workspaceId }, { replace: true });
   });
 

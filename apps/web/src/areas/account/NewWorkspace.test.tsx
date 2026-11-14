@@ -16,6 +16,26 @@ describe("first workspace", () => {
     expect(app.server.calls.filter((call) => call.method === "createWorkspace")).toHaveLength(1);
   });
 
+  test("reloading after a failed session refresh does not restore the completed creation", async () => {
+    const app = await renderApp({ path: "/onboarding", signedInAs: "usr_noor" });
+    await app.user.type(await screen.findByLabelText("Workspace name"), "Elsewhere Press");
+    await app.user.type(screen.getByLabelText("What does this team do?"), "We print zines.");
+    app.server.force("getMe", { kind: "offline" });
+    await create(app);
+    await screen.findByRole("alert");
+    app.unmount();
+    const reloaded = await renderApp({
+      path: "/onboarding",
+      server: app.server,
+      jar: app.jar,
+      tabStore: app.tabStore,
+    });
+    expect((await screen.findByLabelText<HTMLInputElement>("Workspace name")).value).toBe("");
+    expect(screen.getByLabelText<HTMLTextAreaElement>("What does this team do?").value).toBe("");
+    await create(reloaded);
+    expect(app.server.calls.filter((call) => call.method === "createWorkspace")).toHaveLength(1);
+  });
+
   test("idle and field error", async () => {
     const app = await renderApp({ path: "/onboarding", signedInAs: "usr_noor" });
     await screen.findByRole("heading", { level: 1, name: "Name your workspace" });
