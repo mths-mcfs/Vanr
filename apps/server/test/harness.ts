@@ -2,6 +2,7 @@ import type { Me } from "@vanr/contract";
 import type { SqlConnector } from "@vanr/engine/sqlconn";
 import { loadConfig } from "../src/config";
 import { type BootSteps, type RunningServer, startServer } from "../src/server";
+import type { SignupQueueLimits } from "../src/signup-queue";
 
 // Later slices add here what they unlock: the real Postgres option (`postgres`, S2), the live wiki timings
 // (S3), the assignment engine and the model provider options (S5, S6), the typed API client (`apiFor`,
@@ -9,6 +10,8 @@ import { type BootSteps, type RunningServer, startServer } from "../src/server";
 // and `holdNextIndexWrite` (search-index, S2).
 
 export interface TestServerOptions {
+  /** Shorter limits for the closed sign-up queue. */
+  signupQueue?: Partial<SignupQueueLimits>;
   /** Replaces a boot step that touches the outside (see `BootSteps`). */
   steps?: Partial<BootSteps>;
   env?: Record<string, string>;
@@ -18,6 +21,12 @@ export interface TestServerOptions {
   /** No forcing of the fake provider: the production rule of the lookup applies (production tests). */
   realModels?: boolean;
 }
+
+/**
+ * Timeout of every test that starts or stops a server: the boot opens and migrates a PGlite (seconds on a
+ * busy CI host), more than bun's 5 s default allows.
+ */
+export const SERVER_TEST_MS = 30_000;
 
 /** Starts the real server on a free port, with an in-memory PGlite and in-memory email. */
 export async function startTestServer(opts: TestServerOptions = {}): Promise<RunningServer> {
@@ -38,6 +47,7 @@ export async function startTestServer(opts: TestServerOptions = {}): Promise<Run
     sql: opts.sql,
     forceFakeModels: opts.realModels !== true,
     steps: opts.steps,
+    signupQueue: opts.signupQueue,
   });
 }
 
