@@ -7,6 +7,8 @@ import { registerAccount } from "./routes/account";
 import { registerInvitations } from "./routes/invitations";
 import { registerNotifications } from "./routes/notifications";
 import { registerPush } from "./routes/push";
+import { registerRunnerRequests } from "./routes/runner-requests";
+import { registerRunners } from "./routes/runners";
 import { registerWaitlist } from "./routes/waitlist";
 import { type FirstUserPlace, SIGNUP_QUEUE_LIMITS, type SignupQueueLimits, signupGate } from "./signup-queue";
 import { createStatic } from "./static";
@@ -108,6 +110,8 @@ export function createApp(
   registerInvitations(app);
   registerNotifications(app);
   registerPush(app);
+  registerRunners(app);
+  registerRunnerRequests(app);
 
   app.all("/api/*", (c) =>
     c.json(errorBody("route_not_found", `No route for ${c.req.method} ${c.req.path}`), 404),

@@ -8,7 +8,7 @@ import { count } from "drizzle-orm";
 import { createApp } from "./app";
 import { createAuth, type SignupDecision } from "./auth";
 import type { Config } from "./config";
-import type { AppDeps, RuntimePort } from "./context";
+import { ABSENT, type AppDeps, type RuntimePort } from "./context";
 import { HttpError } from "./http";
 import { holdInstanceLock } from "./instance-lock";
 import { guardedFetch } from "./integrations/net";
@@ -16,9 +16,12 @@ import { log } from "./logger";
 import { createMailer, type Mailer } from "./mailer";
 import { testModelCheck } from "./models";
 import { loadVapid, webPushSender } from "./push";
-import { Hub } from "./realtime/hub";
+import { browserClose, browserMessage, browserOpen, checkBrowserUpgrade } from "./realtime/browser-socket";
+import { type BrowserSocket, type BrowserSocketData, Hub } from "./realtime/hub";
 import { hasPendingInvite, INVITE_COOKIE } from "./routes/invitations";
-import { RunnerHub } from "./runners/hub";
+import { dropAllLiveViews } from "./runners/browser-live";
+import { RunnerHub, type RunnerSocketData } from "./runners/hub";
+import { runnerClose, runnerMessage, runnerOpen, runnerSocketData } from "./runners/socket";
 import { BackgroundWork } from "./runtime/background";
 import { FirstUserPlace, type SignupQueueLimits } from "./signup-queue";
 import { postgresLedger } from "./usage-ledger";
@@ -117,15 +120,65 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
 
   const runnersHub = new RunnerHub();
   // Slice S3 (wiki-collab) adds here the wiki editor (wikiMarkdown) and the live wiki sessions.
+  // The sockets answer only once the deps exist; until then an upgrade gets the 503 of `handler`.
+  let depsRef: AppDeps | null = null;
+  let origins: string[] = [];
+  // Slice S3 (wiki-collab) adds CollabSocketData to the union and its upgrade and handlers below.
+  type SocketData = BrowserSocketData | RunnerSocketData;
+  const isRunner = (ws: Bun.ServerWebSocket<SocketData>): ws is Bun.ServerWebSocket<RunnerSocketData> =>
+    ws.data.kind === "runner";
+  const isBrowser = (ws: Bun.ServerWebSocket<SocketData>): ws is BrowserSocket => ws.data.kind === "browser";
+  const upgradeRequired = () =>
+    Response.json({ error: { code: "upgrade_required", message: "Use WebSocket" } }, { status: 426 });
 
-  const server = Bun.serve({
+  const server = Bun.serve<SocketData>({
     port: config.port,
-    fetch(req) {
-      // Slice S2 (realtime/browser-socket, runners/socket) and S3 (wiki-collab) add here the WebSocket
-      // upgrades of /api/v1/realtime, /api/v1/runners/connect and /api/v1/wiki/collab, and their handlers.
+    async fetch(req, srv) {
+      const path = new URL(req.url).pathname;
+      // The browser's real time: the session cookie and the origin are checked before the upgrade.
+      if (depsRef && path === "/api/v1/realtime") {
+        const check = await checkBrowserUpgrade(depsRef, req, origins);
+        if (!check.ok) return check.response;
+        if (srv.upgrade(req, { data: check.data })) return undefined;
+        return upgradeRequired();
+      }
+      // The paired runners: the authentication is the `hello` with the session, inside the socket.
+      if (depsRef && path === "/api/v1/runners/connect") {
+        if (srv.upgrade(req, { data: runnerSocketData() })) return undefined;
+        return upgradeRequired();
+      }
       return handler(req);
     },
+    websocket: {
+      // The biggest frame either side may send (a runner's live view frame); each handler has its own limit.
+      maxPayloadLength: 8 * 1024 * 1024,
+      open(ws) {
+        if (!depsRef) return;
+        if (isRunner(ws)) runnerOpen(depsRef, ws);
+        else if (isBrowser(ws)) browserOpen(depsRef, ws);
+      },
+      async message(ws, raw) {
+        if (!depsRef) return;
+        try {
+          if (isRunner(ws)) await runnerMessage(depsRef, ws, raw);
+          else if (isBrowser(ws)) await browserMessage(depsRef, ws, raw);
+        } catch (err) {
+          log.error("ws.message_failed", { err });
+          if (isBrowser(ws)) ws.send(JSON.stringify({ type: "error", code: "internal" }));
+        }
+      },
+      close(ws) {
+        if (!depsRef) return;
+        if (isRunner(ws)) {
+          const deps = depsRef;
+          void runnerClose(deps, ws).catch((err) => log.error("runner.close_failed", { err }));
+        } else if (isBrowser(ws)) browserClose(depsRef, ws);
+      },
+    },
   });
+  // After the listener in the undo (it runs before the database closes): the browsers' close handlers ran in
+  // server.stop and left the live views' stop timers; they go away here.
+  undo.push(() => dropAllLiveViews());
   undo.push(() => server.stop(true));
   // Before the listener in the undo (as in stop): closes the runners' connections. Before the listener is
   // up there is no connection to close. Slice S3 (wiki-collab) also saves here what the wiki held in memory.
@@ -150,7 +203,7 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     if (await hasPendingInvite(deps, email, readInviteCookie(headers))) return "allow";
     return empty ? "busy" : "closed";
   };
-  const origins = [publicUrl, ...(opts.extraOrigins ?? [])];
+  origins = [publicUrl, ...(opts.extraOrigins ?? [])];
   const auth = createAuth({ db, config: effective, mailer, trustedOrigins: origins, signupAllowed });
   // Background work (the notification queue today); stopping waits for what is running. Slice S6
   // (runtime/runtime) creates the AgentRuntime here instead, which takes this work over.
@@ -186,6 +239,7 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   // engine's start (S5) and resumeRecalcs (S2), all before the app takes requests.
   const app = createApp(deps, { firstUser, signupQueue: opts.signupQueue });
   handler = (req) => app.fetch(req);
+  depsRef = deps;
   log.info("server.started", { url: publicUrl, db: opened.kind });
 
   // Every stop, at once or later, gets the same shutdown: it ends (or fails) once for all of them.
@@ -241,8 +295,12 @@ export class NotAvailable extends HttpError {
  * one of them; a later route that can is rejected at its entry, before any write.
  */
 function runtimePort(background: BackgroundWork): RuntimePort {
-  const absent = (method: keyof RuntimePort) => () => {
-    throw new NotAvailable(method);
+  const absent = (method: keyof RuntimePort) => {
+    const fail = () => {
+      throw new NotAvailable(method);
+    };
+    // The mark lets an entry reject before any write (requireRuntime in context.ts).
+    return Object.assign(fail, { [ABSENT]: fail });
   };
   return {
     track: (work, what) => background.track(work, what),

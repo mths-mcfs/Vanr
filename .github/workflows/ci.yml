@@ -93,6 +93,10 @@ jobs:
       - run: bun test apps/server/test/concurrency-postgres.test.ts
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # One runner per pairing code, one open browser intervention per agent and one delivery per secret request.
+      - run: bun test apps/server/test/runners-postgres.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
 
   sandbox:
     # The runner's real sandbox (bubblewrap + socat): the attack tests of the isolation of the agent's

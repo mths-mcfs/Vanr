@@ -7,8 +7,8 @@ import type { AgentHarness, HarnessOption, HarnessUnavailableReason } from "@van
 import { type Db, schema } from "@vanr/engine/db";
 import { DEFAULT_MODEL, MODELS } from "@vanr/engine/models/catalog";
 import { and, eq, inArray, isNull } from "drizzle-orm";
+import type { AgentRow } from "../agents";
 import type { AppDeps } from "../context";
-import type { AgentRow } from "../forward-types";
 import { forbidden, HttpError } from "../http";
 import { talkBlock } from "../runtime/route";
 import type { RunnerRow } from "./runners";
