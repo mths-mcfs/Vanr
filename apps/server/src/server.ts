@@ -141,7 +141,7 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     if (effective.signupOpen) return true;
     const [row] = await db.select({ n: count() }).from(schema.users);
     if ((row?.n ?? 0) === 0) return true;
-    return hasPendingInvite(deps, email, readCookie(headers, INVITE_COOKIE));
+    return hasPendingInvite(deps, email, readInviteCookie(headers));
   };
   const origins = [publicUrl, ...(opts.extraOrigins ?? [])];
   const auth = createAuth({ db, config: effective, mailer, trustedOrigins: origins, signupAllowed });
@@ -196,13 +196,26 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   };
 }
 
-/** A cookie of the request (the invitation token the invite page leaves), or null. */
-function readCookie(headers: Headers | null, name: string): string | null {
+/** An invitation token as the server makes them (base64url), with room to spare; anything else is not one. */
+const INVITE_TOKEN = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * The invitation token the invite page leaves in a cookie, or null. The cookie comes from outside: a value
+ * that doesn't decode, is too long or isn't a token counts as absent (and is never logged).
+ */
+function readInviteCookie(headers: Headers | null): string | null {
   const raw = headers?.get("cookie");
   if (!raw) return null;
   for (const part of raw.split(";")) {
     const eq = part.indexOf("=");
-    if (eq > 0 && part.slice(0, eq).trim() === name) return decodeURIComponent(part.slice(eq + 1).trim());
+    if (eq <= 0 || part.slice(0, eq).trim() !== INVITE_COOKIE) continue;
+    let value: string;
+    try {
+      value = decodeURIComponent(part.slice(eq + 1).trim());
+    } catch {
+      return null;
+    }
+    return INVITE_TOKEN.test(value) ? value : null;
   }
   return null;
 }

@@ -220,81 +220,85 @@ export async function notify(deps: AppDeps, input: NotifyInput): Promise<void> {
     eq(notifications.userId, input.userId),
     eq(notifications.groupKey, input.groupKey),
   );
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const [old] = await db.select().from(notifications).where(key);
-    if (old) {
-      const reopened = !!old.doneAt;
-      const actors = input.actor
-        ? [
-            input.actor,
-            ...(reopened
-              ? []
-              : old.actors.filter((a) => !(a.type === input.actor?.type && a.id === input.actor?.id))),
-          ]
-        : reopened
-          ? []
-          : old.actors;
-      const waiting = input.waiting ?? (reopened ? false : old.waiting);
+  // The whole read-merge-write runs in one transaction with the group's row locked (FOR UPDATE): the count,
+  // the actors, the latest (with its emojis), the reopening of a done notice and the snooze are all decided on
+  // the row as it is now, so notices for one group at the same time add up instead of overwriting each other.
+  // A first notice that loses the insert to another one waits for it (the unique index) and adds to it.
+  const row = await db.transaction(async (tx) => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const [old] = await tx.select().from(notifications).where(key).for("update");
+      if (old) {
+        const reopened = !!old.doneAt;
+        const actors = input.actor
+          ? [
+              input.actor,
+              ...(reopened
+                ? []
+                : old.actors.filter((a) => !(a.type === input.actor?.type && a.id === input.actor?.id))),
+            ]
+          : reopened
+            ? []
+            : old.actors;
+        const waiting = input.waiting ?? (reopened ? false : old.waiting);
+        const c = classifyFor(input, waiting, settings);
+        const snoozed = old.mutedUntil && old.mutedUntil > at ? old.mutedUntil : null;
+        const [updated] = await tx
+          .update(notifications)
+          .set({
+            kind: input.kind,
+            count: reopened ? 1 : sql`${notifications.count} + 1`,
+            actors: actors.slice(0, MAX_ACTORS),
+            waiting,
+            tab: c.tab,
+            critical: c.critical,
+            reason: c.reason,
+            ruleId: c.ruleId,
+            priority: input.priority ?? null,
+            source: { ...old.source, ...input.source },
+            latest: mergeLatest(reopened ? {} : old.latest, input.latest),
+            readAt: null,
+            doneAt: null,
+            mutedUntil: reopened || cancelsSnooze(input.kind) ? null : snoozed,
+            updatedAt: at,
+            ...(reopened ? { createdAt: at, remindAt: null } : {}),
+          })
+          .where(eq(notifications.id, old.id))
+          .returning();
+        return updated ?? null;
+      }
+      const waiting = input.waiting ?? false;
       const c = classifyFor(input, waiting, settings);
-      const snoozed = old.mutedUntil && old.mutedUntil > at ? old.mutedUntil : null;
-      const [row] = await db
-        .update(notifications)
-        .set({
+      const inserted = await tx
+        .insert(notifications)
+        .values({
+          id: newId("ntf"),
+          workspaceId: input.workspaceId,
+          userId: input.userId,
           kind: input.kind,
-          count: reopened ? 1 : old.count + 1,
-          actors: actors.slice(0, MAX_ACTORS),
+          groupKey: input.groupKey,
           waiting,
           tab: c.tab,
           critical: c.critical,
           reason: c.reason,
           ruleId: c.ruleId,
           priority: input.priority ?? null,
-          source: { ...old.source, ...input.source },
-          latest: mergeLatest(reopened ? {} : old.latest, input.latest),
-          readAt: null,
-          doneAt: null,
-          mutedUntil: reopened || cancelsSnooze(input.kind) ? null : snoozed,
+          actors: input.actor ? [input.actor] : [],
+          source: input.source,
+          latest: input.latest,
+          createdAt: at,
           updatedAt: at,
-          ...(reopened ? { createdAt: at, remindAt: null } : {}),
         })
-        .where(eq(notifications.id, old.id))
+        .onConflictDoNothing()
         .returning();
-      if (row) {
-        await publishNotification(deps, row);
-        await scheduleDeliveries(deps, row, { settings });
-      }
-      return;
+      // Another notice from the same source went in at the same time: on the second round, add to it.
+      if (inserted[0]) return inserted[0];
     }
-    const waiting = input.waiting ?? false;
-    const c = classifyFor(input, waiting, settings);
-    const inserted = await db
-      .insert(notifications)
-      .values({
-        id: newId("ntf"),
-        workspaceId: input.workspaceId,
-        userId: input.userId,
-        kind: input.kind,
-        groupKey: input.groupKey,
-        waiting,
-        tab: c.tab,
-        critical: c.critical,
-        reason: c.reason,
-        ruleId: c.ruleId,
-        priority: input.priority ?? null,
-        actors: input.actor ? [input.actor] : [],
-        source: input.source,
-        latest: input.latest,
-        createdAt: at,
-        updatedAt: at,
-      })
-      .onConflictDoNothing()
-      .returning();
-    // Another notice from the same source went in at the same time: on the second round, add to it.
-    if (inserted[0]) {
-      await publishNotification(deps, inserted[0]);
-      await scheduleDeliveries(deps, inserted[0], { settings });
-      return;
-    }
+    return null;
+  });
+  // Outside the transaction: the realtime event and the counters read what was committed.
+  if (row) {
+    await publishNotification(deps, row);
+    await scheduleDeliveries(deps, row, { settings });
   }
 }
 

@@ -6,11 +6,11 @@ import {
   type InvitationWithStatus,
   type Role,
 } from "@vanr/contract";
-import { schema } from "@vanr/engine/db";
+import { type Db, schema } from "@vanr/engine/db";
 import { newId, newToken, sha256Hex } from "@vanr/engine/ids";
 import { ROLES } from "@vanr/engine/roles";
 import { PRODUCT } from "@vanr/product";
-import { and, desc, eq, gt } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, lt, or, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { setCookie } from "hono/cookie";
 import { z } from "zod";
@@ -65,20 +65,35 @@ async function sendInviteMail(
   });
 }
 
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/**
+ * Who an invitation is for: the normalized email, or the link itself (a link invitation has no email). Every
+ * write that decides on the invitations of one invitee (create, bulk, resend, revoke, accept) runs in a
+ * transaction holding this lock, so "revoke the pending one, then create the new one" and "check, then claim"
+ * never interleave: on Postgres with several connections and on PGlite alike.
+ */
+const inviteeOf = (r: { email: string | null; id: string }) => r.email ?? `link:${r.id}`;
+
+async function lockInvitee(tx: Tx, workspaceId: string, invitee: string) {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`invitation:${workspaceId}:${invitee}`}))`);
+}
+
 /**
  * Creates (or renews) the invitation of an email. An email has at most one pending invitation per workspace:
- * inviting again changes the token and the deadline, and the old link stops working.
+ * inviting again changes the token and the deadline, and the old link stops working. The caller holds the
+ * invitee's lock (`lockInvitee`) in the transaction `tx`.
  */
 async function issueInvite(
-  c: Ctx,
+  tx: Tx,
+  deps: AppDeps,
   input: { workspaceId: string; email: string | null; role: Role; invitedBy: string },
 ): Promise<{ row: Row; url: string }> {
-  const deps = c.get("deps");
   const token = newToken();
   const now = deps.now();
   const expiresAt = new Date(now.getTime() + INVITE_TTL_MS);
   if (input.email) {
-    await deps.db
+    await tx
       .update(invitations)
       .set({ status: "revoked" })
       .where(
@@ -89,7 +104,7 @@ async function issueInvite(
         ),
       );
   }
-  const [row] = await deps.db
+  const [row] = await tx
     .insert(invitations)
     .values({
       id: newId("inv"),
@@ -116,10 +131,9 @@ async function workspaceAndInviter(c: Ctx, workspaceId: string) {
   return { workspaceName: workspace?.name ?? "", inviter: user.name };
 }
 
-async function isMemberByEmail(c: Ctx, workspaceId: string, email: string): Promise<boolean> {
-  const [row] = await c
-    .get("deps")
-    .db.select({ id: members.userId })
+async function isMemberByEmail(tx: Tx, workspaceId: string, email: string): Promise<boolean> {
+  const [row] = await tx
+    .select({ id: members.userId })
     .from(members)
     .innerJoin(users, eq(users.id, members.userId))
     .where(and(eq(members.workspaceId, workspaceId), eq(users.email, email)));
@@ -214,16 +228,20 @@ export function registerInvitations(app: Hono<AppEnv>) {
       z.object({ email: z.string().trim().toLowerCase().pipe(emailSchema), role: z.enum(ROLES) }),
     );
     const me = requireRoleAllowed(c, input.role);
-    if (await isMemberByEmail(c, me.workspaceId, input.email)) {
-      throw new HttpError(409, "already_member", "This person is already a member", { email: input.email });
-    }
-    const { row, url } = await issueInvite(c, {
-      workspaceId: me.workspaceId,
-      email: input.email,
-      role: input.role,
-      invitedBy: me.userId,
+    const deps = c.get("deps");
+    const { row, url } = await deps.db.transaction(async (tx) => {
+      await lockInvitee(tx, me.workspaceId, input.email);
+      if (await isMemberByEmail(tx, me.workspaceId, input.email)) {
+        throw new HttpError(409, "already_member", "This person is already a member", { email: input.email });
+      }
+      return issueInvite(tx, deps, {
+        workspaceId: me.workspaceId,
+        email: input.email,
+        role: input.role,
+        invitedBy: me.userId,
+      });
     });
-    await sendInviteMail(c.get("deps"), {
+    await sendInviteMail(deps, {
       to: input.email,
       url,
       ...(await workspaceAndInviter(c, me.workspaceId)),
@@ -250,33 +268,35 @@ export function registerInvitations(app: Hono<AppEnv>) {
         results.push({ email, status: "bad_email" });
         continue;
       }
-      if (await isMemberByEmail(c, me.workspaceId, email)) {
-        results.push({ email, status: "already_member" });
-        continue;
-      }
-      const [pending] = await deps.db
-        .select({ id: invitations.id })
-        .from(invitations)
-        .where(
-          and(
-            eq(invitations.workspaceId, me.workspaceId),
-            eq(invitations.email, email),
-            eq(invitations.status, "pending"),
-            gt(invitations.expiresAt, now),
-          ),
-        );
-      if (pending) {
-        results.push({ email, status: "already_invited" });
-        continue;
-      }
-      const { url } = await issueInvite(c, {
-        workspaceId: me.workspaceId,
-        email,
-        role: input.role,
-        invitedBy: me.userId,
+      const outcome = await deps.db.transaction(async (tx) => {
+        await lockInvitee(tx, me.workspaceId, email);
+        if (await isMemberByEmail(tx, me.workspaceId, email)) return { status: "already_member" as const };
+        const [pending] = await tx
+          .select({ id: invitations.id })
+          .from(invitations)
+          .where(
+            and(
+              eq(invitations.workspaceId, me.workspaceId),
+              eq(invitations.email, email),
+              eq(invitations.status, "pending"),
+              gt(invitations.expiresAt, now),
+            ),
+          );
+        if (pending) return { status: "already_invited" as const };
+        const { url } = await issueInvite(tx, deps, {
+          workspaceId: me.workspaceId,
+          email,
+          role: input.role,
+          invitedBy: me.userId,
+        });
+        return { status: "invited" as const, url };
       });
-      await sendInviteMail(deps, { to: email, url, ...from });
-      results.push({ email, status: "invited", url });
+      if (outcome.status !== "invited") {
+        results.push({ email, status: outcome.status });
+        continue;
+      }
+      await sendInviteMail(deps, { to: email, url: outcome.url, ...from });
+      results.push({ email, status: "invited", url: outcome.url });
     }
     return c.json({ results });
   });
@@ -284,21 +304,32 @@ export function registerInvitations(app: Hono<AppEnv>) {
   app.post(`${WORKSPACE}/invitations/:invitationId/resend`, async (c) => {
     const me = requirePermission(c, "manage_members");
     const deps = c.get("deps");
-    const [old] = await deps.db
-      .select()
-      .from(invitations)
-      .where(and(eq(invitations.workspaceId, me.workspaceId), eq(invitations.id, param(c, "invitationId"))));
-    if (!old || old.status === "accepted") throw notFound("Invitation not found");
-    requireRoleAllowed(c, old.role);
-    const { row, url } = await issueInvite(c, {
-      workspaceId: me.workspaceId,
-      email: old.email,
-      role: old.role,
-      invitedBy: me.userId,
+    const id = param(c, "invitationId");
+    const current = (tx: Tx) =>
+      tx
+        .select()
+        .from(invitations)
+        .where(and(eq(invitations.workspaceId, me.workspaceId), eq(invitations.id, id)))
+        .then((rows) => rows[0]);
+    const { row, url } = await deps.db.transaction(async (tx) => {
+      const seen = await current(tx);
+      if (!seen) throw notFound("Invitation not found");
+      await lockInvitee(tx, me.workspaceId, inviteeOf(seen));
+      // Read again under the lock: an accept or another resend may have changed it meanwhile.
+      const old = await current(tx);
+      if (!old || old.status === "accepted") throw notFound("Invitation not found");
+      requireRoleAllowed(c, old.role);
+      const issued = await issueInvite(tx, deps, {
+        workspaceId: me.workspaceId,
+        email: old.email,
+        role: old.role,
+        invitedBy: me.userId,
+      });
+      if (old.status === "pending") {
+        await tx.update(invitations).set({ status: "revoked" }).where(eq(invitations.id, old.id));
+      }
+      return issued;
     });
-    if (old.status === "pending") {
-      await deps.db.update(invitations).set({ status: "revoked" }).where(eq(invitations.id, old.id));
-    }
     if (row.email) {
       await sendInviteMail(deps, { to: row.email, url, ...(await workspaceAndInviter(c, me.workspaceId)) });
     }
@@ -307,18 +338,27 @@ export function registerInvitations(app: Hono<AppEnv>) {
 
   app.delete(`${WORKSPACE}/invitations/:invitationId`, async (c) => {
     const me = requirePermission(c, "manage_members");
-    const [row] = await c
-      .get("deps")
-      .db.update(invitations)
-      .set({ status: "revoked" })
-      .where(
-        and(
-          eq(invitations.workspaceId, me.workspaceId),
-          eq(invitations.id, param(c, "invitationId")),
-          eq(invitations.status, "pending"),
-        ),
-      )
-      .returning({ id: invitations.id });
+    const id = param(c, "invitationId");
+    const row = await c.get("deps").db.transaction(async (tx) => {
+      const [seen] = await tx
+        .select({ id: invitations.id, email: invitations.email })
+        .from(invitations)
+        .where(and(eq(invitations.workspaceId, me.workspaceId), eq(invitations.id, id)));
+      if (!seen) return null;
+      await lockInvitee(tx, me.workspaceId, inviteeOf(seen));
+      const [revoked] = await tx
+        .update(invitations)
+        .set({ status: "revoked" })
+        .where(
+          and(
+            eq(invitations.workspaceId, me.workspaceId),
+            eq(invitations.id, id),
+            eq(invitations.status, "pending"),
+          ),
+        )
+        .returning({ id: invitations.id });
+      return revoked ?? null;
+    });
     if (!row) throw notFound("Invitation not found");
     return c.body(null, 204);
   });
@@ -326,12 +366,16 @@ export function registerInvitations(app: Hono<AppEnv>) {
   // Invite link: without an email, joins as a member, valid for 7 days and accepts several people.
   app.post(`${WORKSPACE}/invite-links`, async (c) => {
     const me = requirePermission(c, "manage_members");
-    const { row, url } = await issueInvite(c, {
-      workspaceId: me.workspaceId,
-      email: null,
-      role: "member",
-      invitedBy: me.userId,
-    });
+    const deps = c.get("deps");
+    // A new link has no invitee to share a lock with: nothing else writes it before it exists.
+    const { row, url } = await deps.db.transaction((tx) =>
+      issueInvite(tx, deps, {
+        workspaceId: me.workspaceId,
+        email: null,
+        role: "member",
+        invitedBy: me.userId,
+      }),
+    );
     return c.json({ url, expiresAt: row.expiresAt.toISOString() }, 201);
   });
 
@@ -399,21 +443,31 @@ export function registerInvitations(app: Hono<AppEnv>) {
         email: row.email,
       });
     }
-    // An email invitation works once: it is marked before joining, on the condition it is still pending.
+    const join = { workspaceId: row.workspaceId, userId: user.id, name: user.name, role: row.role };
     if (row.email) {
-      const [claimed] = await deps.db
-        .update(invitations)
-        .set({ status: "accepted", acceptedAt: deps.now(), endorsedBy: user.id })
-        .where(and(eq(invitations.id, row.id), eq(invitations.status, "pending")))
-        .returning({ id: invitations.id });
-      if (!claimed) throw invitationGone();
+      // An email invitation works once: it is claimed (still pending, under the invitee's lock, so a renewal
+      // of the same email waits) and the person joins in the same transaction.
+      const email = row.email;
+      await deps.db.transaction(async (tx) => {
+        await lockInvitee(tx, row.workspaceId, email);
+        const [claimed] = await tx
+          .update(invitations)
+          .set({ status: "accepted", acceptedAt: deps.now(), endorsedBy: user.id })
+          .where(
+            and(
+              eq(invitations.id, row.id),
+              eq(invitations.status, "pending"),
+              gt(invitations.expiresAt, deps.now()),
+            ),
+          )
+          .returning({ id: invitations.id });
+        if (!claimed) throw invitationGone();
+        await joinWorkspace(tx, join);
+      });
+    } else {
+      // A link accepts several people; joining is idempotent per person.
+      await joinWorkspace(deps.db, join);
     }
-    await joinWorkspace(deps.db, {
-      workspaceId: row.workspaceId,
-      userId: user.id,
-      name: user.name,
-      role: row.role,
-    });
     return c.json({ workspaceId: row.workspaceId });
   });
 
@@ -426,9 +480,21 @@ export function registerInvitations(app: Hono<AppEnv>) {
       .where(eq(invitations.tokenHash, sha256Hex(param(c, "invitationId"))));
     if (!row || row.status === "accepted") throw invitationGone();
     const now = deps.now();
-    if (row.requestedNewAt && now.getTime() - row.requestedNewAt.getTime() < 3600_000)
-      return c.body(null, 204);
-    await deps.db.update(invitations).set({ requestedNewAt: now }).where(eq(invitations.id, row.id));
+    // Check and mark in one statement: of the requests within the hour, only the one that marks sends the email.
+    const [marked] = await deps.db
+      .update(invitations)
+      .set({ requestedNewAt: now })
+      .where(
+        and(
+          eq(invitations.id, row.id),
+          or(
+            isNull(invitations.requestedNewAt),
+            lt(invitations.requestedNewAt, new Date(now.getTime() - 3600_000)),
+          ),
+        ),
+      )
+      .returning({ id: invitations.id });
+    if (!marked) return c.body(null, 204);
     const [inviter] = row.invitedBy
       ? await deps.db.select({ email: users.email }).from(users).where(eq(users.id, row.invitedBy))
       : [];

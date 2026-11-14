@@ -89,6 +89,10 @@ jobs:
       - run: bun test apps/server/test/production.test.ts apps/server/test/usage-ledger.test.ts
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # One pending invitation per email and every notice counted, with requests on several connections at once.
+      - run: bun test apps/server/test/concurrency-postgres.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
 
   sandbox:
     # The runner's real sandbox (bubblewrap + socat): the attack tests of the isolation of the agent's

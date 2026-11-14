@@ -4,8 +4,12 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { sha256Hex } from "@vanr/engine/ids";
-import { count, eq } from "drizzle-orm";
+import { and, count, eq } from "drizzle-orm";
+import { Hono } from "hono";
+import type { AppEnv } from "../src/context";
+import { errorBody, HttpError } from "../src/http";
 import { createWorkspace, memberRows } from "../src/members";
+import { registerInvitations } from "../src/routes/invitations";
 import type { RunningServer } from "../src/server";
 import { Browser, body as read, signedIn, startTestServer } from "./harness";
 
@@ -428,6 +432,33 @@ describe("invitation rules", () => {
       const after = (await closed.deps.db.select({ n: count() }).from(schema.users))[0]?.n ?? 0;
       expect(after - before).toBe(1);
     });
+
+    test("an invitation cookie that doesn't decode, or is too long, counts as absent", async () => {
+      await invite(una.browser, una.workspaceId, "pending@ws.test", "member");
+      const logged: string[] = [];
+      const write = process.stderr.write.bind(process.stderr);
+      process.stderr.write = ((chunk: string | Uint8Array, ...rest: never[]) => {
+        logged.push(String(chunk));
+        return write(chunk, ...rest);
+      }) as typeof process.stderr.write;
+      try {
+        const malformed = new Browser(closed.url);
+        malformed.cookies.set("vanr.invite", "%E0%A4%A");
+        // The email has a pending invitation: the broken cookie doesn't get in the way.
+        expect((await malformed.signUp("Pending", "pending@ws.test")).status).toBe(200);
+        const link = (await call(una.browser, "POST", `${ws(una.workspaceId)}/invite-links`)).body;
+        // A valid token padded past the limit is not read: the link doesn't let this email in.
+        const long = new Browser(closed.url);
+        long.cookies.set("vanr.invite", tokenOf(link.url) + "A".repeat(300));
+        expect((await long.signUp("Long", "long@ws.test")).status).toBe(403);
+        const badOnly = new Browser(closed.url);
+        badOnly.cookies.set("vanr.invite", "%E0%A4%A");
+        expect((await badOnly.signUp("Nobody", "nobody2@ws.test")).status).toBe(403);
+      } finally {
+        process.stderr.write = write;
+      }
+      expect(logged.filter((l) => /URIError|%E0%A4%A|AAAAAAAAAA/.test(l))).toEqual([]);
+    });
   });
 
   test("two simultaneous accepts of one email invitation: one member, the invitation accepted once", async () => {
@@ -468,5 +499,169 @@ describe("invitation rules", () => {
     expect((await call(xia.browser, "GET", `${ws(id)}/invitations?scope=everything`)).status).toBe(400);
     const all = (await call(xia.browser, "GET", `${ws(id)}/invitations?scope=all`)).body.invitations;
     expect(all).toEqual([]);
+  });
+});
+
+// The pair (workspace, email) has at most one pending invitation, whatever runs at the same time.
+describe("invitations at the same time", () => {
+  const N = 20;
+  /**
+   * The invitation routes in the process with the session already resolved: Better Auth's session lookup runs
+   * the requests of one person one after the other, so through the whole app they rarely overlap on PGlite.
+   * Here every request's queries interleave on the database, as they do on Postgres with a pool.
+   */
+  const callNow = async (b: Browser, method: string, path: string, payload?: unknown) => {
+    const me = await call(b, "GET", "/api/v1/me");
+    const app = new Hono<AppEnv>();
+    app.onError((err, c) =>
+      err instanceof HttpError
+        ? c.json(errorBody(err.code, err.message), err.status)
+        : c.json({ error: String(err) }, 500),
+    );
+    app.use("*", async (c, next) => {
+      c.set("deps", server.deps);
+      c.set("user", me.body.user);
+      const workspaceId = c.req.param("workspaceId") ?? /workspaces\/([^/]+)/.exec(c.req.path)?.[1];
+      const [m] = workspaceId
+        ? await server.deps.db
+            .select()
+            .from(schema.members)
+            .where(
+              and(eq(schema.members.workspaceId, workspaceId), eq(schema.members.userId, me.body.user.id)),
+            )
+        : [];
+      c.set(
+        "member",
+        m && workspaceId ? { workspaceId, userId: m.userId, role: m.role, handle: m.handle } : null,
+      );
+      await next();
+    });
+    registerInvitations(app);
+    return async () => {
+      const res = await app.request(path, {
+        method,
+        headers: { "content-type": "application/json" },
+        body: method === "GET" ? undefined : JSON.stringify(payload ?? {}),
+      });
+      const text = await res.text();
+      // biome-ignore lint/suspicious/noExplicitAny: in tests the body is checked by the assertions
+      const json: any = text ? JSON.parse(text) : null;
+      return { status: res.status, body: json };
+    };
+  };
+  /** Prepares every request first (the session lookups), then fires them all at once. */
+  const together = async <R>(calls: Promise<() => Promise<R>>[]) => {
+    const ready = await Promise.all(calls);
+    return Promise.all(ready.map((go) => go()));
+  };
+  const pendingOf = async (workspaceId: string, email: string) =>
+    server.deps.db
+      .select()
+      .from(schema.invitations)
+      .where(
+        and(
+          eq(schema.invitations.workspaceId, workspaceId),
+          eq(schema.invitations.email, email),
+          eq(schema.invitations.status, "pending"),
+        ),
+      );
+  /** How many of the links still open a preview. */
+  const working = async (urls: string[]) => {
+    const anon = new Browser(server.url);
+    const statuses = await Promise.all(urls.map(async (u) => (await preview(anon, tokenOf(u))).status));
+    return urls.filter((_, i) => statuses[i] === 200);
+  };
+
+  test("N invitations to one email with different roles and cases: one pending, and only its link works", async () => {
+    const o = await owner(server, "Nia", "nia@ws.test", "Same time");
+    const results = await together(
+      Array.from({ length: N }, (_, i) =>
+        callNow(o.browser, "POST", `${ws(o.workspaceId)}/invitations`, {
+          email: i % 2 ? " Same@WS.test " : "same@ws.test",
+          role: i % 2 ? "admin" : "member",
+        }),
+      ),
+    );
+    expect(results.map((r) => r.status)).toEqual(Array(N).fill(201));
+    const pending = await pendingOf(o.workspaceId, "same@ws.test");
+    expect(pending.length).toBe(1);
+    const alive = await working(results.map((r) => r.body.url));
+    expect(alive.length).toBe(1);
+    expect(sha256Hex(tokenOf(alive[0] ?? ""))).toBe(pending[0]?.tokenHash ?? "");
+  });
+
+  test("N bulk requests that repeat one email: one pending, one result says invited", async () => {
+    const o = await owner(server, "Bo", "bo@ws.test", "Bulk same time");
+    const results = await together(
+      Array.from({ length: N }, () =>
+        callNow(o.browser, "POST", `${ws(o.workspaceId)}/invitations/bulk`, {
+          emails: ["twice@ws.test", "TWICE@ws.test"],
+          role: "member",
+        }),
+      ),
+    );
+    const statuses = results.flatMap((r) => r.body.results.map((x: { status: string }) => x.status));
+    expect(statuses.filter((x) => x === "invited").length).toBe(1);
+    expect(statuses.filter((x) => x === "already_invited").length).toBe(N - 1);
+    expect((await pendingOf(o.workspaceId, "twice@ws.test")).length).toBe(1);
+  });
+
+  test("N resends together with a revoke: one pending at most, and only its link works", async () => {
+    const o = await owner(server, "Rex", "rex@ws.test", "Resend same time");
+    const { invitation, url } = await invite(o.browser, o.workspaceId, "again@ws.test", "member");
+    const base = `${ws(o.workspaceId)}/invitations/${invitation.id}`;
+    const results = await together([
+      ...Array.from({ length: N }, () => callNow(o.browser, "POST", `${base}/resend`)),
+      callNow(o.browser, "DELETE", base),
+    ]);
+    const urls = [url, ...results.filter((r) => r.status === 200).map((r) => r.body.url)];
+    const pending = await pendingOf(o.workspaceId, "again@ws.test");
+    expect(pending.length).toBeLessThanOrEqual(1);
+    const alive = await working(urls);
+    expect(alive.length).toBe(pending.length);
+    if (alive[0]) expect(sha256Hex(tokenOf(alive[0]))).toBe(pending[0]?.tokenHash ?? "");
+  });
+
+  test("accepting while the same email is invited again: never a member with a pending invitation", async () => {
+    const o = await owner(server, "Ace", "ace@ws.test", "Accept same time");
+    const { url } = await invite(o.browser, o.workspaceId, "both@ws.test", "member");
+    const both = await signedIn(server, "Both", "both@ws.test");
+    const [accepted, again] = await together([
+      callNow(both.browser, "POST", `/api/v1/invitations/${tokenOf(url)}/accept`),
+      callNow(o.browser, "POST", `${ws(o.workspaceId)}/invitations`, {
+        email: "both@ws.test",
+        role: "admin",
+      }),
+    ]);
+    const member = (await memberRows(server.deps.db, o.workspaceId)).some((m) => m.userId === both.user.id);
+    const pending = await pendingOf(o.workspaceId, "both@ws.test");
+    expect([member, pending.length]).toEqual(member ? [true, 0] : [false, 1]);
+    // Either the accept came first (member, the new invitation rejected) or the renewal did (old link gone).
+    expect([accepted?.status, again?.status]).toEqual(member ? [200, 409] : [404, 201]);
+  });
+
+  test("N requests for a new invitation at once tell whoever invited once", async () => {
+    let frozenHere = new Date();
+    frozen = frozenHere;
+    try {
+      const o = await owner(server, "Req", "req@ws.test", "Ask same time");
+      const { url } = await invite(o.browser, o.workspaceId, "late@ws.test", "member");
+      frozenHere = new Date(frozenHere.getTime() + 8 * 24 * 3600_000);
+      frozen = frozenHere;
+      const before = server.mailer
+        .sent()
+        .filter((m) => m.kind === "invite_request" && m.to === "req@ws.test").length;
+      const anon = new Browser(server.url);
+      const results = await together(
+        Array.from({ length: N }, () =>
+          callNow(anon, "POST", `/api/v1/invitations/${tokenOf(url)}/request-new`),
+        ),
+      );
+      expect(results.map((r) => r.status)).toEqual(Array(N).fill(204));
+      const asks = server.mailer.sent().filter((m) => m.kind === "invite_request" && m.to === "req@ws.test");
+      expect(asks.length - before).toBe(1);
+    } finally {
+      frozen = null;
+    }
   });
 });

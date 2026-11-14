@@ -628,3 +628,144 @@ describe("inbox routes", () => {
     ]);
   });
 });
+
+describe("one person in two workspaces", () => {
+  test("the path of workspace A doesn't reach the person's notice of workspace B", async () => {
+    const a = await team();
+    const { workspaceId: otherId } = await createWorkspace(server.deps.db, {
+      name: "Other",
+      context: "",
+      timezone: "UTC",
+      user: a.ana.user,
+    });
+    await joinWorkspace(server.deps.db, {
+      workspaceId: otherId,
+      userId: a.beto.user.id,
+      name: "Beto",
+      role: "member",
+    });
+    const b: Team = { ...a, workspaceId: otherId, base: `/api/v1/workspaces/${otherId}` };
+    await mention(b, a.beto.user, a.ana.user, "in B");
+    const [inB] = (await inbox(b, a.beto)).items;
+    if (!inB) throw new Error("no notice in B");
+    const future = new Date(Date.now() + skew + HOUR).toISOString();
+    for (const [action, payload] of [
+      ["read", { read: true }],
+      ["complete", { done: true }],
+      ["save", { saved: true }],
+      ["snooze", { until: future }],
+      ["remind", { at: future }],
+    ] as const) {
+      const res = await call(a.beto.browser, "POST", `${a.base}/notifications/${inB.id}/${action}`, payload);
+      expect([action, res.status]).toEqual([action, 404]);
+    }
+    expect((await call(a.beto.browser, "POST", `${a.base}/notifications/read-all`, {})).body.ids).toEqual([]);
+    expect((await inbox(a, a.beto)).items).toEqual([]);
+    const [row] = await server.deps.db
+      .select()
+      .from(schema.notifications)
+      .where(eq(schema.notifications.id, inB.id));
+    expect(row).toMatchObject({
+      readAt: null,
+      doneAt: null,
+      savedAt: null,
+      mutedUntil: null,
+      remindAt: null,
+    });
+  });
+});
+
+// Notices for one group at the same time add up in one row, without losing any.
+describe("notices at the same time", () => {
+  const N = 20;
+  const rowsOf = (t: Team, userId: string, groupKey: string) =>
+    server.deps.db
+      .select()
+      .from(schema.notifications)
+      .where(
+        and(
+          eq(schema.notifications.workspaceId, t.workspaceId),
+          eq(schema.notifications.userId, userId),
+          eq(schema.notifications.groupKey, groupKey),
+        ),
+      );
+  const dm = (t: Team, groupKey: string, i: number, actorId: string) =>
+    notify(server.deps, {
+      workspaceId: t.workspaceId,
+      userId: t.beto.user.id,
+      kind: "dm",
+      groupKey,
+      actor: { type: "person", id: actorId },
+      source: { channelId: t.general, dmId: t.general },
+      latest: { text: `message ${i}` },
+    });
+
+  test("N first notices of a new group: one row with count N", async () => {
+    const t = await team();
+    await Promise.all(Array.from({ length: N }, (_, i) => dm(t, "dm:fresh", i, t.ana.user.id)));
+    await settle();
+    const rows = await rowsOf(t, t.beto.user.id, "dm:fresh");
+    expect(rows.length).toBe(1);
+    expect(rows[0]?.count).toBe(N);
+  });
+
+  test("an existing notice and N more at once: count N + 1, the latest text is one of them", async () => {
+    const t = await team();
+    await dm(t, "dm:open", 0, t.ana.user.id);
+    await Promise.all(Array.from({ length: N }, (_, i) => dm(t, "dm:open", i + 1, t.ana.user.id)));
+    await settle();
+    const [row, ...rest] = await rowsOf(t, t.beto.user.id, "dm:open");
+    expect(rest).toEqual([]);
+    expect(row?.count).toBe(N + 1);
+    expect(Array.from({ length: N }, (_, i) => `message ${i + 1}`)).toContain(String(row?.latest.text));
+  });
+
+  test("N reactions at once by different people: every emoji kept, the latest actors first and once each", async () => {
+    const t = await team();
+    const people = await Promise.all(
+      Array.from({ length: N }, async (_, i) => {
+        const p = await server.deps.db
+          .insert(schema.users)
+          .values({ id: newId("u"), name: `R${i}`, email: email(`r${i}`) })
+          .returning();
+        return p[0]?.id ?? "";
+      }),
+    );
+    const groupKey = `reaction:${newId("msg")}`;
+    await Promise.all(
+      people.map((id, i) =>
+        notify(server.deps, {
+          workspaceId: t.workspaceId,
+          userId: t.beto.user.id,
+          kind: "reaction",
+          groupKey,
+          actor: { type: "person", id },
+          source: { channelId: t.general },
+          latest: { quote: "mine", emojis: [`e${i}`] },
+        }),
+      ),
+    );
+    await settle();
+    const [row, ...rest] = await rowsOf(t, t.beto.user.id, groupKey);
+    expect(rest).toEqual([]);
+    expect(row?.count).toBe(N);
+    expect([...((row?.latest.emojis as string[] | undefined) ?? [])].sort()).toEqual(
+      Array.from({ length: N }, (_, i) => `e${i}`).sort(),
+    );
+    const ids = row?.actors.map((x) => x.id) ?? [];
+    expect(ids.length).toBe(5);
+    expect(new Set(ids).size).toBe(5);
+  });
+
+  test("a done notice and N new ones at once: it reopens once, with count N", async () => {
+    const t = await team();
+    await dm(t, "dm:done", 0, t.ana.user.id);
+    const [first] = await rowsOf(t, t.beto.user.id, "dm:done");
+    await call(t.beto.browser, "POST", `${t.base}/notifications/${first?.id}/complete`, { done: true });
+    await Promise.all(Array.from({ length: N }, (_, i) => dm(t, "dm:done", i + 1, t.ana.user.id)));
+    await settle();
+    const [row, ...rest] = await rowsOf(t, t.beto.user.id, "dm:done");
+    expect(rest).toEqual([]);
+    expect(row).toMatchObject({ count: N, doneAt: null, id: first?.id });
+  });
+});
