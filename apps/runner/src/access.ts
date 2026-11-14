@@ -88,9 +88,14 @@ const PROTECTED_GIT = ["hooks", "config", "config.worktree", "commondir", "modul
  */
 const GIT_ALWAYS = new Set<string>(["hooks", "config"]);
 
-/** Rejection reason if the path is an escalation one; `null` if it may be written. */
-export function protectedPath(path: string): string | null {
-  const parts = resolve(path).split(sep).filter(Boolean);
+/**
+ * Rejection reason if the path is an escalation one; `null` if it may be written. It is the same rule the
+ * sandbox applies (`protectedUnder`): the file ops and the commands reject the same paths. `wholeGit` are the
+ * folders the person allowed: there the whole `.git` of a repository is read-only, index and HEAD included.
+ */
+export function protectedPath(path: string, wholeGit: readonly string[] = []): string | null {
+  const full = resolve(path);
+  const parts = full.split(sep).filter(Boolean);
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i] as string;
     const last = i === parts.length - 1;
@@ -100,6 +105,7 @@ export function protectedPath(path: string): string | null {
     if ((PROTECTED_DIRS as readonly string[]).includes(part)) return part;
     if (part === ".git" && (PROTECTED_GIT as readonly string[]).includes(parts[i + 1] ?? ""))
       return `.git/${parts[i + 1]}`;
+    if (part === ".git" && wholeGit.some((w) => inside(full, w))) return ".git";
   }
   return null;
 }

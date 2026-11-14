@@ -244,7 +244,6 @@ describe("policy", () => {
 test("attack: write_file into a git hook, .mcp.json or .bashrc of the agent's folder is rejected", () => {
   const ctx = ctxWith({
     status: () => ({ state: "off", engine: null, reason: null }),
-    setMode: () => {},
     wrap: async () => {
       throw new Error("unused");
     },
@@ -268,6 +267,64 @@ test("attack: write_file into a git hook, .mcp.json or .bashrc of the agent's fo
   expect(writeOp(ctx, { path: "notes.md", content: "ok", encoding: "utf8", append: false }).bytes).toBe(2);
 });
 
+test("one rule for .git: in an allowed folder and in the agent's, write_file rejects what the sandbox makes read-only, and only that", () => {
+  const lib = mkdtempSync(join(dir, "allowed-git-"));
+  const libAccess = new Access(() => ({
+    access: { folders: [{ path: lib, agents: [] }], tools } as RunnerAccess,
+    workDir: join(dir, "ws"),
+    paused: false,
+  }));
+  const off: CommandSandbox = {
+    status: () => ({ state: "off", engine: null, reason: null }),
+    wrap: async () => {
+      throw new Error("unused");
+    },
+    close: async () => {},
+  };
+  const ctx: OpContext = { ...ctxWith(off), access: libAccess };
+  const root = libAccess.agentRoot(agent);
+  // The same files in a repository of the allowed folder, of a nested one, and of one in the agent's folder.
+  const files = [
+    "a.txt",
+    ".git/index",
+    ".git/HEAD",
+    ".git/objects/ab/cdef",
+    ".git/refs/heads/main",
+    ".git/hooks/pre-commit",
+    ".git/config",
+    "nested/.git/index",
+    "nested/b.txt",
+  ];
+  for (const base of [lib, root])
+    for (const f of files) {
+      mkdirSync(join(base, f, ".."), { recursive: true });
+      writeFileSync(join(base, f), "original");
+    }
+  for (const [base, liberated] of [
+    [lib, [lib]],
+    [root, []],
+  ] as const) {
+    const denied = protectedUnder([base], liberated).paths;
+    for (const f of files) {
+      const path = join(base, f);
+      const bySandbox = denied.some((d) => path === d || path.startsWith(`${d}/`));
+      let byWrite = false;
+      try {
+        writeOp(ctx, { path, content: "changed", encoding: "utf8", append: false });
+      } catch (err) {
+        if (!(err instanceof RunnerError) || err.code !== "not_allowed") throw err;
+        byWrite = true;
+      }
+      expect({ path, rejected: byWrite }).toEqual({ path, rejected: bySandbox });
+      expect(readFileSync(path, "utf8")).toBe(byWrite ? "original" : "changed");
+    }
+  }
+  // In the allowed folder the whole .git is read-only for both; index and HEAD included.
+  expect(protectedPath(join(lib, ".git", "index"), [lib])).toBe(".git");
+  expect(protectedPath(join(lib, ".git", "HEAD"), [lib])).toBe(".git");
+  expect(protectedPath(join(root, ".git", "index"), [lib])).toBeNull();
+});
+
 test("with no sandbox available (no bubblewrap or socat), the command is rejected before it starts", async () => {
   const ctx = ctxWith({
     status: () => ({
@@ -275,7 +332,6 @@ test("with no sandbox available (no bubblewrap or socat), the command is rejecte
       engine: null,
       reason: "Install socat to run commands in a sandbox",
     }),
-    setMode: () => {},
     wrap: async () => {
       throw new Error("must not wrap");
     },
@@ -324,6 +380,8 @@ describe("real srt", async () => {
     expect(readFileSync(join(home, "config.json"), "utf8")).toContain(TOKEN);
     const r = await execOp(ctx, {
       command: [
+        // The messages below are matched in English: the host's language does not change them.
+        "export LC_ALL=C LANG=C LANGUAGE=C",
         `cat ${join(home, "config.json")}`,
         `ls -A ${h}`,
         `ls ${join(h, ".ssh")}`,
@@ -371,7 +429,7 @@ describe("real srt", async () => {
 
   /** Runs a line in the sandbox with the given policy, outside execOp (for hand-built policies). */
   const runIn = async (fs: FsPolicy, command: string, cwd: string) => {
-    const w = await sandbox.wrap({ command, fs, domains: [] });
+    const w = await sandbox.wrap({ command, fs, domains: [], mode: "off" });
     try {
       const r = spawnSync("/bin/sh", ["-c", w.command], { cwd, encoding: "utf8", timeout: 30_000 });
       return { stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
@@ -528,10 +586,12 @@ describe("real srt", async () => {
         fetch: () => new Response("hello-from-server"),
       });
       try {
-        const curl = `curl -sS -m 10 --noproxy '' -x "$HTTP_PROXY" http://localhost:${server.port}/; echo " rc=$?"`;
+        // By the address the server listens on: `localhost` may resolve to ::1 first on one host and not on
+        // another, and the server listens on IPv4 only.
+        const curl = `curl -sS -m 10 --noproxy '' -x "$HTTP_PROXY" http://127.0.0.1:${server.port}/; echo " rc=$?"`;
         const allowed = await execOp(ctx, {
           command: curl,
-          network: { mode: "allowlist", domains: ["localhost"] },
+          network: { mode: "allowlist", domains: ["127.0.0.1"] },
           timeoutSeconds: 30,
         });
         expect(allowed.stdout).toContain("hello-from-server");
@@ -542,10 +602,10 @@ describe("real srt", async () => {
           timeoutSeconds: 30,
         });
         expect(denied.stdout).not.toContain("hello-from-server");
-        expect(denied.blocked).toEqual(["localhost"]);
+        expect(denied.blocked).toEqual(["127.0.0.1"]);
         const off = await execOp(ctx, {
           command: curl,
-          network: { mode: "off", domains: ["localhost"] },
+          network: { mode: "off", domains: ["127.0.0.1"] },
           timeoutSeconds: 30,
         });
         expect(off.stdout).not.toContain("hello-from-server");

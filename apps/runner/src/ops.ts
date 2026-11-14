@@ -85,10 +85,27 @@ class Capture {
   }
 }
 
-function blockedSecretFile(ctx: OpContext, path: string) {
+function blockedSecretFile(ctx: Pick<OpContext, "access" | "secrets" | "agent">, path: string) {
   if (!ctx.agent) return;
   const files = ctx.secrets.secretFiles(ctx.agent, ctx.access.agentRoot(ctx.agent));
   if (files.includes(path)) throw new RunnerError("bad_request", "Secret files are not readable by agents");
+}
+
+/**
+ * The one check before any file leaves the agent's folders (read_file, the browser's upload): the path is
+ * resolved to its real path (a symlink counts by its target) inside the agent's folder or one allowed for it,
+ * is not one of the agent's secret files and is a file. Returns the real path to read.
+ */
+export function readableFile(
+  ctx: Pick<OpContext, "access" | "secrets" | "agent">,
+  requested: string,
+): { path: string; size: number } {
+  const path = ctx.access.resolve(ctx.agent, requested);
+  blockedSecretFile(ctx, path);
+  if (!existsSync(path)) throw new RunnerError("not_found", `${requested} does not exist`);
+  const st = statSync(path);
+  if (!st.isFile()) throw new RunnerError("bad_request", `${requested} is not a file`);
+  return { path, size: st.size };
 }
 
 /** Without a policy from the server, no network. */
@@ -120,12 +137,12 @@ export async function sandboxed(
   if (status.state === "off") return null;
   if (!isolated(status))
     throw new RunnerError("sandbox_not_ready", status.reason ?? "No sandbox in this environment");
-  ctx.sandbox.setMode(input.network.mode);
   const { unchecked, ...fs } = fsPolicy(ctx.policy, input);
   const wrapped = await ctx.sandbox.wrap({
     command: input.command,
     fs,
     domains: input.domains,
+    mode: input.network.mode,
     ...(input.signal ? { signal: input.signal } : {}),
   });
   return unchecked.length ? { ...wrapped, unchecked } : wrapped;
@@ -296,11 +313,7 @@ const masksOf = (ctx: OpContext) => (ctx.agent ? ctx.secrets.masks(ctx.agent) : 
 
 export async function readOp(ctx: OpContext, args: { path: string; maxBytes?: number }): Promise<ReadResult> {
   ctx.access.requireActive();
-  const path = ctx.access.resolve(ctx.agent, args.path);
-  blockedSecretFile(ctx, path);
-  if (!existsSync(path)) throw new RunnerError("not_found", `${args.path} does not exist`);
-  const st = statSync(path);
-  if (!st.isFile()) throw new RunnerError("bad_request", `${args.path} is not a file`);
+  const { path, size } = readableFile(ctx, args.path);
   const max = Math.min(args.maxBytes ?? READ_MAX, READ_MAX);
   const all = readFileSync(path);
   // Masked before the cut, in every byte form of a secret (UTF-8 and its escaped forms, UTF-16, Latin-1):
@@ -312,7 +325,7 @@ export async function readOp(ctx: OpContext, args: { path: string; maxBytes?: nu
     path: args.path,
     content: binary ? buf.toString("base64") : buf.toString("utf8"),
     encoding: binary ? "base64" : "utf8",
-    size: st.size,
+    size,
     truncated,
   };
 }
@@ -327,7 +340,7 @@ export function writeOp(
   if (path === ctx.access.agentRoot(ctx.agent))
     throw new RunnerError("bad_request", "Cannot write the folder itself");
   // The same rule as the sandbox: git hook, shell rc, config of a tool that runs outside it.
-  const escalation = protectedPath(path);
+  const escalation = protectedPath(path, ctx.access.foldersFor(ctx.agent));
   if (escalation)
     throw new RunnerError("not_allowed", `${args.path} is protected (${escalation}); agents cannot write it`);
   if (existsSync(path) && statSync(path).isDirectory())

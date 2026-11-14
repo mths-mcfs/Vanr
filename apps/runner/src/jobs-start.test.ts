@@ -133,7 +133,6 @@ test("sandbox failure removes the job's git snapshot", async () => {
   opts.access.access.tools.claude = true;
   opts.cli = { requireSubscription() {} };
   opts.sandbox = {
-    setMode() {},
     status: () => ({ state: "on" }),
     wrap: async () => {
       throw new RunnerError("sandbox_not_ready", "no sandbox");

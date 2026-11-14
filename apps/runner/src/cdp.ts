@@ -3,7 +3,6 @@
 // the person did through the browser request keeps working). The page elements get numbers in
 // `read`; the actions take that number or a CSS selector.
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
   ACTION_NEEDS,
@@ -31,6 +30,7 @@ import { Cdp, sleep, within } from "./cdp-connection";
 import { ensureDir } from "./config";
 import { FrameGate } from "./frame-gate";
 import { type NetBlock, type NetGuard, startNetGuard } from "./net-guard";
+import { readableFile } from "./ops";
 import {
   DESCRIBE_FN,
   FRAME_TAGS,
@@ -1293,6 +1293,15 @@ export class CdpBrowser implements BrowserDriver {
       if (!v) throw new RunnerError("bad_request", `${a.action} needs ${what}`);
       return v;
     };
+    // The file to upload passes the same check as read_file (the agent's folders, the secret files, the
+    // symlinks), before any command to the browser.
+    const upload =
+      a.action === "upload"
+        ? readableFile(
+            { access: this.opts.access, secrets: this.opts.secrets, agent: s.agent },
+            need(a.text, "a file path"),
+          ).path
+        : null;
     const sid = this.page(s).sessionId;
     if (ACTION_NEEDS[a.action] !== "none") {
       const { info, site } = await this.here(s);
@@ -1416,9 +1425,7 @@ export class CdpBrowser implements BrowserDriver {
         return { ...(await this.info(s)), screenshot: shot.data };
       }
       case "upload": {
-        const path = this.opts.access.resolve(s.agent, need(a.text, "a file path"));
-        if (!existsSync(path) || !statSync(path).isFile())
-          throw new RunnerError("not_found", `No file ${a.text}`);
+        const path = need(upload ?? undefined, "a file path");
         need(a.selector, "an element");
         await this.expectSame(s, a, "upload");
         const sel = JSON.stringify(selectorOf(need(a.selector, "an element")));
