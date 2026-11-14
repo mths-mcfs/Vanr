@@ -318,6 +318,13 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     wikiLive: collab.live,
     // S5 (assignments/motor, assignments/verify) adds `assignmentEngine` and `assignmentVerifier`.
   };
+  // A session that expires, or a membership or channel lost outside this server's routes, is caught here. It
+  // comes before the recalculations so that their halt is the first step of the stop, in the same tick.
+  const sweep = setInterval(() => {
+    void revalidateBrowsers(deps).catch((err) => log.warn("ws.revalidate_failed", { err }));
+  }, REVALIDATE_MS);
+  sweep.unref?.();
+  undo.push(() => clearInterval(sweep));
   // Here, in this order: the undo of stopRecalcs (S2, bases/write) and of the assignment engine's stop
   // (S5); the provider lookup (S6); runtime.start (S6), the engine's start (S5) and resumeRecalcs (S2),
   // all before the app takes requests.
@@ -331,12 +338,6 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   const app = createApp(deps, { firstUser, signupQueue: signupLimits });
   handler = (req) => app.fetch(req);
   depsRef = deps;
-  // A session that expires, or a membership or channel lost outside this server's routes, is caught here.
-  const sweep = setInterval(() => {
-    void revalidateBrowsers(deps).catch((err) => log.warn("ws.revalidate_failed", { err }));
-  }, REVALIDATE_MS);
-  sweep.unref?.();
-  undo.push(() => clearInterval(sweep));
   log.info("server.started", { url: publicUrl, db: opened.kind });
 
   // Every stop, at once or later, gets the same shutdown: it ends (or fails) once for all of them.
