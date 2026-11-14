@@ -175,7 +175,9 @@ export function registerThreads(app: Hono<AppEnv>) {
     return c.json(await infoOf(c, viewer, row.id));
   });
 
-  // Opens a thread from a channel message (before any reply).
+  // Opens a thread from a channel message (before any reply). Opening is idempotent: on a root that already
+  // has a thread it answers that thread as it is and changes nothing (the title and the rest change only
+  // through the PATCH, which checks who manages the thread).
   app.post(`${WORKSPACE}/threads`, async (c) => {
     const viewer = requireMember(c);
     const deps = c.get("deps");
@@ -192,15 +194,13 @@ export function registerThreads(app: Hono<AppEnv>) {
     if (!root || root.channelId !== input.channelId) throw notFound("Message not found");
     if (root.threadId !== null) throw conflict("thread.not_root", "Replies can't start a thread");
     const at = deps.now();
-    await ensureThread(deps.db, {
+    const created = await ensureThread(deps.db, {
       root,
       by: { type: "person", id: viewer.userId },
       at,
       title: input.title ?? "",
     });
-    if (input.title) {
-      await deps.db.update(threads).set({ title: input.title }).where(eq(threads.id, root.id));
-    }
+    if (!created) return c.json(await infoOf(c, viewer, root.id), 200);
     await deps.db
       .insert(threadSubscriptions)
       .values({ threadId: root.id, userId: viewer.userId, following: true, updatedAt: at })
@@ -215,12 +215,15 @@ export function registerThreads(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const patch = await readJson(
       c,
-      z.object({
-        title: z.string().trim().max(200).optional(),
-        rootMessageId: id.optional(),
-        lastMessageId: id.optional(),
-        omittedMessageIds: z.array(id).max(500).optional(),
-      }),
+      z
+        .object({
+          title: z.string().trim().max(200).optional(),
+          rootMessageId: id.optional(),
+          lastMessageId: id.optional(),
+          omittedMessageIds: z.array(id).max(500).optional(),
+        })
+        // A body without anything to change is rejected here: an UPDATE with nothing to set can't run.
+        .refine((p) => Object.values(p).some((v) => v !== undefined), { message: "Nothing to change" }),
     );
     // The context cut only takes messages of the thread itself (or the root).
     for (const mid of [patch.rootMessageId, patch.lastMessageId, ...(patch.omittedMessageIds ?? [])]) {

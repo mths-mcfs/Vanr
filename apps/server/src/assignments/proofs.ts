@@ -63,13 +63,13 @@ export function toProof(row: ProofRow): AssignmentProof {
 /**
  * Saves proofs of the assignment. A screenshot is a Drive file the agent sees and that whoever reads the
  * assignment also sees (the whole workspace's, the assignment channel's or its thread's): another channel's file doesn't leak.
+ * The whole batch is checked before anything is written and saved in one statement: a rejected batch leaves no row.
  */
 export async function addProofs(
   deps: AppDeps,
   assignment: { id: string; workspaceId: string; channelId: string; threadId: string; agentId: string },
   input: { itemId: string | null; jobId?: string | null; by: AssignmentActor; proofs: readonly ProofInput[] },
 ): Promise<ProofRow[]> {
-  const out: ProofRow[] = [];
   for (const p of input.proofs) {
     if (p.kind === "screenshot" && p.fileId) {
       const art = await fileFor(deps.db, assignment.workspaceId, p.fileId, {
@@ -86,9 +86,13 @@ export async function addProofs(
           fileId: p.fileId,
         });
     }
-    const [row] = await deps.db
-      .insert(assignmentProofs)
-      .values({
+  }
+  if (input.proofs.length === 0) return [];
+  const at = deps.now();
+  return deps.db
+    .insert(assignmentProofs)
+    .values(
+      input.proofs.map((p) => ({
         id: newId("apf"),
         assignmentId: assignment.id,
         itemId: input.itemId,
@@ -99,12 +103,10 @@ export async function addProofs(
         fileId: p.kind === "screenshot" ? (p.fileId ?? null) : null,
         url: p.kind === "preview" ? (p.url ?? null) : null,
         by: input.by,
-        createdAt: deps.now(),
-      })
-      .returning();
-    if (row) out.push(row);
-  }
-  return out;
+        createdAt: at,
+      })),
+    )
+    .returning();
 }
 
 /** The diff and file list of a job that ended (the runner sends them in the snapshot). */

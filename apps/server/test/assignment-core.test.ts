@@ -23,6 +23,7 @@ import {
   addProofs,
   clip,
   PROOF_TEXT_MAX,
+  type ProofInput,
   proofInput,
   proofsOf,
 } from "../src/assignments/proofs";
@@ -375,6 +376,43 @@ describe("proofs", () => {
       expect((await proofsOf(server.deps, t.row.id)).map((p) => p.fileId).sort()).toEqual(
         [shared, here].sort(),
       );
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a batch with one bad proof, wherever it sits, is rejected whole: no proof of it is saved",
+    async () => {
+      const t = await team();
+      const bad = { kind: "screenshot" as const, title: "bad", fileId: "fil_missing" };
+      const good = [
+        { kind: "diff" as const, title: "diff", text: "+ok" },
+        { kind: "preview" as const, title: "site", url: "https://example.com" },
+      ];
+      for (const at of [0, 1, 2]) {
+        const proofs: ProofInput[] = [...good];
+        proofs.splice(at, 0, bad);
+        const err = await addProofs(server.deps, t.row, {
+          itemId: `s${at}`,
+          by: { type: "agent", id: t.agentId },
+          proofs,
+        }).catch((e) => e);
+        expect(err).toMatchObject({ status: 400, code: "assignment.proof_file" });
+      }
+      expect(await proofsOf(server.deps, t.row.id)).toEqual([]);
+      const saved = await addProofs(server.deps, t.row, {
+        itemId: "s9",
+        by: { type: "agent", id: t.agentId },
+        proofs: good,
+      });
+      expect(saved.map((p) => p.kind).sort()).toEqual(["diff", "preview"]);
+      expect(
+        await addProofs(server.deps, t.row, {
+          itemId: "s9",
+          by: { type: "agent", id: t.agentId },
+          proofs: [],
+        }),
+      ).toEqual([]);
     },
     SERVER_TEST_MS,
   );
