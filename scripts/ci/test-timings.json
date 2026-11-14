@@ -23,6 +23,10 @@
     "packages/engine/src/recurrence.test.ts": 59,
     "packages/engine/src/seal.test.ts": 17,
     "packages/engine/src/skill-md.test.ts": 17,
-    "packages/engine/src/work-state.test.ts": 51
+    "packages/engine/src/work-state.test.ts": 51,
+    "packages/engine/src/blobs-metadata.test.ts": 10,
+    "packages/engine/src/notify-quiet-end.test.ts": 13,
+    "packages/engine/src/recurrence-dst.test.ts": 14,
+    "packages/engine/src/recurrence-calendar.test.ts": 12
   }
 }

@@ -38,6 +38,7 @@ function formatter(tz: string): Intl.DateTimeFormat {
       hour: "2-digit",
       minute: "2-digit",
       second: "2-digit",
+      era: "short",
     });
     formatters.set(tz, f);
   }
@@ -53,45 +54,100 @@ export function isTimezone(tz: string): boolean {
   }
 }
 
-/** Local date and time of an instant in the time zone. */
-export function localParts(at: Date, tz: string): LocalParts {
+/**
+ * Instant of a UTC date and time. `Date.UTC` maps years 0 to 99 to 1900 to 1999; this keeps the year as
+ * given. Month (0-based) and day overflow carry over as in `Date.UTC`.
+ */
+function utcMs(y: number, m: number, d: number, hh = 0, mm = 0, ss = 0): number {
+  const at = new Date(0);
+  at.setUTCFullYear(y, m, d);
+  at.setUTCHours(hh, mm, ss, 0);
+  return at.getTime();
+}
+
+/** Local parts of an instant, with the astronomical year (1 BC is year 0) and the seconds. */
+function wallParts(at: Date, tz: string): LocalParts & { ss: number } {
   const parts: Record<string, number> = {};
+  let bc = false;
   for (const p of formatter(tz).formatToParts(at)) {
-    if (p.type !== "literal") parts[p.type] = Number(p.value);
+    if (p.type === "era") bc = p.value === "BC";
+    else if (p.type !== "literal") parts[p.type] = Number(p.value);
   }
+  const year = parts.year ?? 1970;
   return {
-    y: parts.year ?? 1970,
+    y: bc ? 1 - year : year,
     m: parts.month ?? 1,
     d: parts.day ?? 1,
     hh: (parts.hour ?? 0) % 24,
     mm: parts.minute ?? 0,
+    ss: parts.second ?? 0,
   };
 }
 
-/** Offset of the time zone from UTC, in ms, at the given instant. */
+/** Local date and time of an instant in the time zone. */
+export function localParts(at: Date, tz: string): LocalParts {
+  const { y, m, d, hh, mm } = wallParts(at, tz);
+  return { y, m, d, hh, mm };
+}
+
+/** The day exists in the calendar (no February 31, month 1 to 12). */
+function isCalendarDay(y: number, m: number, d: number): boolean {
+  return m >= 1 && m <= 12 && d >= 1 && d <= daysInMonth(y, m);
+}
+
+/**
+ * Instant of a rule's `start` or `until`, or null if it is not a date. An ISO date whose day does not exist
+ * (`2026-02-31`) is not a date: `Date.parse` would roll it over into March.
+ */
+function parseInstant(text: string): number | null {
+  const iso = /^(\d{4})-(\d{2})-(\d{2})/.exec(text.trim());
+  if (iso && !isCalendarDay(Number(iso[1]), Number(iso[2]), Number(iso[3]))) return null;
+  const at = Date.parse(text);
+  return Number.isNaN(at) ? null : at;
+}
+
+/** Offset of the time zone from UTC, in ms, at the given instant (to the second: old local mean times). */
 function offsetAt(at: Date, tz: string): number {
-  const p = localParts(at, tz);
-  const asUtc = Date.UTC(p.y, p.m - 1, p.d, p.hh, p.mm);
-  return asUtc - Math.floor(at.getTime() / 60_000) * 60_000;
+  const p = wallParts(at, tz);
+  return utcMs(p.y, p.m - 1, p.d, p.hh, p.mm, p.ss) - Math.floor(at.getTime() / 1000) * 1000;
 }
 
-/** Instant of a local date and time in the time zone. A time that does not exist (daylight saving) moves forward. */
+/**
+ * Instant of a local date and time in the time zone. The offsets a day before and a day after bound the
+ * candidates: a time in the repeated hour (daylight saving ends) is its first occurrence, so a series runs
+ * once; a time that does not exist (daylight saving starts) moves forward to the first valid instant after
+ * the gap, the transition itself.
+ */
 export function zonedTime(date: LocalDate, hh: number, mm: number, tz: string): Date {
-  const guess = Date.UTC(date.y, date.m - 1, date.d, hh, mm);
-  let at = guess - offsetAt(new Date(guess), tz);
-  const second = guess - offsetAt(new Date(at), tz);
-  if (second !== at) at = second;
-  return new Date(at);
+  const wall = utcMs(date.y, date.m - 1, date.d, hh, mm);
+  const before = offsetAt(new Date(wall - DAY_MS), tz);
+  const after = offsetAt(new Date(wall + DAY_MS), tz);
+  const shows = (at: number) => at + offsetAt(new Date(at), tz) === wall;
+  const valid = [wall - before, wall - after].filter(shows).sort((x, y) => x - y);
+  if (valid[0] !== undefined) return new Date(valid[0]);
+  // In the gap: before the transition the clock is still behind `wall`, after it already past. Bisect the
+  // transition minute.
+  let lo = Math.min(wall - before, wall - after);
+  let hi = Math.max(wall - before, wall - after);
+  const offsetLo = offsetAt(new Date(lo), tz);
+  while (hi - lo > 60_000) {
+    const mid = lo + Math.floor((hi - lo) / 120_000) * 60_000;
+    if (offsetAt(new Date(mid), tz) === offsetLo) lo = mid;
+    else hi = mid;
+  }
+  return new Date(hi);
 }
 
-const dayNumber = (d: LocalDate) => Math.floor(Date.UTC(d.y, d.m - 1, d.d) / DAY_MS);
+const dayNumber = (d: LocalDate) => Math.floor(utcMs(d.y, d.m - 1, d.d) / DAY_MS);
 const fromDayNumber = (n: number): LocalDate => {
   const dt = new Date(n * DAY_MS);
   return { y: dt.getUTCFullYear(), m: dt.getUTCMonth() + 1, d: dt.getUTCDate() };
 };
 /** 0 = Monday ... 6 = Sunday. */
 const weekdayIndex = (n: number) => (((n + 3) % 7) + 7) % 7;
-const daysInMonth = (y: number, m: number) => new Date(Date.UTC(y, m, 0)).getUTCDate();
+function daysInMonth(y: number, m: number): number {
+  return new Date(utcMs(y, m, 0)).getUTCDate();
+}
 
 function parseTime(s: string): { hh: number; mm: number } | null {
   const m = /^(\d{1,2}):(\d{2})$/.exec(s.trim());
@@ -102,8 +158,8 @@ function parseTime(s: string): { hh: number; mm: number } | null {
 }
 
 function anchorOf(rule: RecurrenceRule, fallback: Date): Date {
-  const start = rule.start ? new Date(rule.start) : fallback;
-  return Number.isNaN(start.getTime()) ? fallback : start;
+  const start = rule.start ? parseInstant(rule.start) : null;
+  return start === null ? fallback : new Date(start);
 }
 
 function timesOf(rule: RecurrenceRule, anchor: Date): { hh: number; mm: number }[] {
@@ -180,7 +236,8 @@ export function occurrences(rule: RecurrenceRule, opts: ExpandOptions): Date[] {
   const out: Date[] = [];
   const limit = opts.limit ?? 500;
   const anchor = anchorOf(rule, opts.anchor ?? opts.from);
-  const until = rule.until ? new Date(rule.until) : null;
+  const untilMs = rule.until ? parseInstant(rule.until) : null;
+  const until = untilMs === null ? null : new Date(untilMs);
   const end = opts.to ?? null;
   const tz = rule.timezone;
   let produced = 0;
@@ -237,7 +294,7 @@ export function validateRule(rule: RecurrenceRule): string | null {
   if (rule.times?.some((t) => !parseTime(t))) return "rule.time";
   if (rule.byMonthDay?.some((d) => d === 0 || d > 31 || d < -31)) return "rule.month_day";
   if (rule.byMonth?.some((m) => m < 1 || m > 12)) return "rule.month";
-  if (rule.start && Number.isNaN(Date.parse(rule.start))) return "rule.start";
-  if (rule.until && Number.isNaN(Date.parse(rule.until))) return "rule.until";
+  if (rule.start && parseInstant(rule.start) === null) return "rule.start";
+  if (rule.until && parseInstant(rule.until) === null) return "rule.until";
   return null;
 }

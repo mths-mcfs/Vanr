@@ -40,52 +40,64 @@ export function memoryBlobs(): BlobStore {
   };
 }
 
+/**
+ * Blobs on disk. The bytes live under `<root>/data/<key>` and the content type under `<root>/meta/<key>`: two
+ * separate trees, so no key can name another key's metadata (a key must stay inside `data`).
+ */
 export function diskBlobs(root: string): BlobStore {
   const base = normalize(root).replace(/[/\\]+$/, "");
-  // With a trailing separator: "blobs-x/..." cannot pass as inside "blobs".
-  const pathOf = (key: string) => {
-    const p = normalize(join(base, key));
-    if (!p.startsWith(base + sep)) throw new Error("blob key escapes the store");
-    return p;
+  const dataRoot = join(base, "data");
+  const metaRoot = join(base, "meta");
+  // With a trailing separator: "data-x/..." cannot pass as inside "data".
+  const pathsOf = (key: string) => {
+    const data = normalize(join(dataRoot, key));
+    if (!data.startsWith(dataRoot + sep)) throw new Error("blob key escapes the store");
+    return { data, meta: join(metaRoot, data.slice(dataRoot.length + 1)) };
   };
+  const typeOf = (meta: string) =>
+    readFile(meta, "utf8")
+      .catch(() => "")
+      .then((type) => type || "application/octet-stream");
   return {
     async put(key, data, contentType) {
-      const p = pathOf(key);
-      await mkdir(dirname(p), { recursive: true });
-      await Bun.write(p, data);
-      await writeFile(`${p}.type`, contentType);
+      const p = pathsOf(key);
+      await mkdir(dirname(p.data), { recursive: true });
+      await mkdir(dirname(p.meta), { recursive: true });
+      await Bun.write(p.data, data);
+      await writeFile(p.meta, contentType);
     },
     async open(key) {
-      const p = pathOf(key);
+      const p = pathsOf(key);
       let size: number;
       try {
-        size = (await stat(p)).size;
+        size = (await stat(p.data)).size;
       } catch {
         return null;
       }
-      const type = await readFile(`${p}.type`, "utf8").catch(() => "");
-      return { size, contentType: type || "application/octet-stream", body: Bun.file(p) };
+      return { size, contentType: await typeOf(p.meta), body: Bun.file(p.data) };
     },
     async get(key) {
-      const p = pathOf(key);
+      const p = pathsOf(key);
       try {
-        await stat(p);
+        await stat(p.data);
       } catch {
         return null;
       }
-      const [bytes, type] = await Promise.all([readFile(p), readFile(`${p}.type`, "utf8").catch(() => "")]);
-      return { bytes: new Uint8Array(bytes), contentType: type || "application/octet-stream" };
+      const [bytes, contentType] = await Promise.all([readFile(p.data), typeOf(p.meta)]);
+      return { bytes: new Uint8Array(bytes), contentType };
     },
     async delete(key) {
-      const p = pathOf(key);
-      await rm(p, { force: true });
-      await rm(`${p}.type`, { force: true });
+      const p = pathsOf(key);
+      await rm(p.data, { force: true });
+      await rm(p.meta, { force: true });
     },
     async keys() {
       const out: string[] = [];
       const glob = new Bun.Glob("**/*");
-      for await (const file of glob.scan({ cwd: base, onlyFiles: true })) {
-        if (!file.endsWith(".type")) out.push(file);
+      try {
+        for await (const file of glob.scan({ cwd: dataRoot, onlyFiles: true })) out.push(file);
+      } catch {
+        // nothing stored yet: the data folder does not exist
       }
       return out;
     },

@@ -134,32 +134,72 @@ function parseClock(v: string): number | null {
   return m ? Number(m[1]) * 60 + Number(m[2]) : null;
 }
 
-/** Minutes of the day of `at` in the time zone `tz` (an invalid zone falls back to UTC). */
-function localClock(at: Date, tz: string): { minutes: number } {
-  let parts: Intl.DateTimeFormatPart[];
-  try {
-    parts = new Intl.DateTimeFormat("en-US", {
-      timeZone: tz,
+const MINUTE = 60_000;
+const DAY_MINUTES = 1440;
+const formatters = new Map<string, Intl.DateTimeFormat>();
+
+/** Wall-clock formatter of the time zone; an invalid zone falls back to UTC. */
+function wallFormatter(tz: string): Intl.DateTimeFormat {
+  let f = formatters.get(tz);
+  if (!f) {
+    const options: Intl.DateTimeFormatOptions = {
+      hourCycle: "h23",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
       hour: "2-digit",
       minute: "2-digit",
-      hourCycle: "h23",
-    }).formatToParts(at);
-  } catch {
-    parts = new Intl.DateTimeFormat("en-US", {
-      timeZone: "UTC",
-      hour: "2-digit",
-      minute: "2-digit",
-      hourCycle: "h23",
-    }).formatToParts(at);
+    };
+    try {
+      f = new Intl.DateTimeFormat("en-US", { ...options, timeZone: tz });
+    } catch {
+      f = new Intl.DateTimeFormat("en-US", { ...options, timeZone: "UTC" });
+    }
+    formatters.set(tz, f);
   }
-  const get = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? 0);
-  return { minutes: get("hour") * 60 + get("minute") };
+  return f;
+}
+
+/** The wall clock at the minute `t` (epoch minutes) in the zone, as epoch minutes of that local date and time. */
+function wallMinutes(t: number, tz: string): number {
+  const parts = wallFormatter(tz).formatToParts(new Date(t * MINUTE));
+  const get = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? 0);
+  return Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute")) / MINUTE;
+}
+
+const offsetAt = (t: number, tz: string) => wallMinutes(t, tz) - t;
+const minuteOfDay = (wall: number) => ((wall % DAY_MINUTES) + DAY_MINUTES) % DAY_MINUTES;
+
+/**
+ * First minute at or after `from` (epoch minutes) whose local clock is outside the window. Between two time
+ * zone transitions the clock moves with real time, so the exit is exactly the minutes left to `end`; when a
+ * transition falls inside that stretch, the walk restarts at the transition (found by bisection), where the
+ * clock may jump over the end (a skipped hour) or back into the window (a repeated hour).
+ */
+function quietExit(from: number, tz: string, inside: (minute: number) => boolean, end: number): number {
+  let t = from;
+  for (let hop = 0; hop < 8; hop++) {
+    const wall = wallMinutes(t, tz);
+    if (!inside(minuteOfDay(wall))) return t;
+    const next = t + ((end - minuteOfDay(wall) + DAY_MINUTES) % DAY_MINUTES);
+    const offset = offsetAt(t, tz);
+    if (offsetAt(next, tz) === offset) return next;
+    let lo = t;
+    let hi = next;
+    while (hi - lo > 1) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (offsetAt(mid, tz) === offset) lo = mid;
+      else hi = mid;
+    }
+    t = hi;
+  }
+  return t;
 }
 
 /**
  * Until when the person is quiet at `now` (do not disturb or quiet hours), or null if not. The end of the quiet
- * hours is found by walking minute by minute in their time zone, which gets daylight saving switches right
- * without a time zone table.
+ * hours is the first minute their local clock is outside the window, computed exactly in their time zone
+ * (daylight saving switches included). A window with `start` equal to `end` is off, not a quiet without end.
  */
 export function silenceUntil(s: NotificationSettings, tz: string, now: Date): Date | null {
   let until: Date | null = null;
@@ -172,13 +212,9 @@ export function silenceUntil(s: NotificationSettings, tz: string, now: Date): Da
   const end = parseClock(q.end);
   if (q.enabled && start !== null && end !== null && start !== end) {
     const inside = (m: number) => (start < end ? m >= start && m < end : m >= start || m < end);
-    if (inside(localClock(now, tz).minutes)) {
-      // Walk until leaving the window (at most 24 h, in 15 min steps and then minute by minute).
-      let t = now.getTime();
-      const limit = t + 24 * 3_600_000;
-      while (t < limit && inside(localClock(new Date(t + 15 * 60_000), tz).minutes)) t += 15 * 60_000;
-      while (t < limit && inside(localClock(new Date(t), tz).minutes)) t += 60_000;
-      const quietEnd = new Date(Math.floor(t / 60_000) * 60_000);
+    const from = Math.floor(now.getTime() / MINUTE);
+    if (inside(minuteOfDay(wallMinutes(from, tz)))) {
+      const quietEnd = new Date(quietExit(from, tz, inside, end) * MINUTE);
       if (!until || quietEnd > until) until = quietEnd;
     }
   }
