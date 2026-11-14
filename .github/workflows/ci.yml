@@ -42,8 +42,8 @@ jobs:
       fail-fast: false
       matrix:
         # The shard count is the length of this list.
-        # Three keep each one near 30 s with the times in scripts/ci/test-timings.json.
-        shard: [1, 2, 3]
+        # Four keep each one under ~40 s with the CI times in scripts/ci/test-timings.json.
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -93,6 +93,35 @@ jobs:
       - run: bun test apps/server/test/concurrency-postgres.test.ts
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # The same forced tests with the locks left out by the test's own double: both must fail on the outcome
+      # the lock is for (LOCK_OUTCOME_MISMATCH), or they would pass without the locks too and prove nothing.
+      # A failure for any other reason (the wait timed out, a connection closed, an error between tests)
+      # proves nothing either, so this step fails then.
+      - name: The forced lock tests fail without the locks
+        run: |
+          set +e
+          bun test apps/server/test/concurrency-postgres.test.ts --test-name-pattern forced > forced.log 2>&1
+          status=$?
+          cat forced.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the forced lock tests passed without the locks"
+            exit 1
+          fi
+          for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -qF "$broken" forced.log; then
+              echo "::error::the forced lock tests broke ($broken) instead of failing on their outcome"
+              exit 1
+            fi
+          done
+          for label in invite notice; do
+            if ! grep -qF "LOCK_OUTCOME_MISMATCH($label)" forced.log; then
+              echo "::error::the forced $label test did not fail on its outcome without the lock"
+              exit 1
+            fi
+          done
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_DROP_LOCKS: "1"
       # One runner per pairing code, one open browser intervention per agent and one delivery per secret request.
       - run: bun test apps/server/test/runners-postgres.test.ts
         env:

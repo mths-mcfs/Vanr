@@ -59,9 +59,12 @@ test("every frame the runner sends passes the engine schema, and the runner acce
   const results = new Map<string, (frame: RunnerFrame) => void>();
   const waiters: { match: (f: RunnerFrame) => boolean; done: (f: RunnerFrame) => void }[] = [];
   let socket: { send: (data: string) => void } | null = null;
-  let hello: () => void = () => {};
-  const helloSeen = new Promise<void>((r) => {
-    hello = r;
+  // Like the server, a welcome answers every hello. The first hello of a process is neutral (no secret is known
+  // yet); once the secrets are read the runner opens a new connection with the real one.
+  const hellos: RunnerFrame[] = [];
+  let realHello: () => void = () => {};
+  const realHelloSeen = new Promise<void>((r) => {
+    realHello = r;
   });
   const push = (frame: ServerFrame) => {
     // The server side of the contract: what goes out is a valid `serverFrame`.
@@ -77,7 +80,7 @@ test("every frame the runner sends passes the engine schema, and the runner acce
     fetch(req, srv) {
       const path = new URL(req.url).pathname;
       if (path === "/api/v1/runners/session")
-        return Response.json({ session: "s".repeat(24), credential: "cred_rotated_0001" });
+        return Response.json({ session: `rst_${"s".repeat(24)}`, credential: "rrt_rotated_0001" });
       if (path === "/api/v1/runners/connect" && srv.upgrade(req)) return undefined;
       return new Response("not found", { status: 404 });
     },
@@ -94,7 +97,18 @@ test("every frame the runner sends passes the engine schema, and the runner acce
         }
         const frame = parsed.data;
         sent.push(frame);
-        if (frame.type === "hello") hello();
+        if (frame.type === "hello") {
+          hellos.push(frame);
+          push({
+            type: "welcome",
+            runnerId: config.runnerId,
+            name: "laptop",
+            heartbeatMs: 25_000,
+            storeKey: Buffer.alloc(32, 7).toString("base64"),
+            agents: [{ ...agent, name: "Lia" }],
+          });
+          if (frame.hostname !== "unknown") realHello();
+        }
         if (frame.type === "result") results.get(frame.id)?.(frame);
         for (const w of waiters.splice(0)) {
           if (w.match(frame)) w.done(frame);
@@ -109,8 +123,8 @@ test("every frame the runner sends passes the engine schema, and the runner acce
     server: `http://127.0.0.1:${server.port}`,
     runnerId: "rnr_0000000000000001",
     name: "laptop",
-    token: "cred_initial_0001",
-    workspaceId: "wsp_1",
+    token: "rrt_initial_0001",
+    workspaceId: "workspace_1",
     workspaceName: "Workspace",
     workDir: join(dir, "work"),
     access: { folders: [], tools: { claude: true, codex: false, commands: true, browser: true } },
@@ -136,6 +150,7 @@ test("every frame the runner sends passes the engine schema, and the runner acce
       secrets: { values: async () => [] } as unknown as SecretStore,
     }),
     log: (l) => logs.push(l),
+    backoffBaseMs: 10,
   });
   let seq = 0;
   const ask = (op: string, args: Record<string, unknown>, stream = false) => {
@@ -152,16 +167,12 @@ test("every frame the runner sends passes the engine schema, and the runner acce
 
   try {
     client.start();
-    await helloSeen;
-    push({
-      type: "welcome",
-      runnerId: config.runnerId,
-      name: "laptop",
-      heartbeatMs: 25_000,
-      storeKey: Buffer.alloc(32, 7).toString("base64"),
-      agents: [{ ...agent, name: "Lia" }],
-    });
+    await realHelloSeen;
     await client.ready();
+    expect(hellos.map((h) => h.type === "hello" && [h.hostname === "unknown", h.workDir])).toEqual([
+      [true, null],
+      [false, config.workDir],
+    ]);
     push({ type: "agents", agents: [{ ...agent, name: "Lia" }] });
     push({ type: "ping", at: 1 });
     await next((f) => f.type === "pong");
@@ -204,10 +215,18 @@ test("every frame the runner sends passes the engine schema, and the runner acce
     const ended = next((f) => f.type === "live_view.stream_ended");
     await ok("browser.close", {});
     await ended;
+    // The error codes of the engine, made by the runner itself: a path out of the work folder, and the
+    // browser used after it closed.
+    const outside = await ask("read", { path: "../../outside.txt" });
+    expect(outside.type === "result" && !outside.ok && outside.error.code).toBe("outside_work_dir");
+    const closed = await ask("live_view.input", {
+      events: [{ type: "navigate", url: "https://example.com" }],
+    });
+    expect(closed.type === "result" && !closed.ok && closed.error.code).toBe("browser_not_running");
 
     // The person pauses the runner from its CLI (the config on disk): `runner.state`.
     const paused = next((f) => f.type === "runner.state");
-    writeConfig(home, { ...config, paused: true, token: "cred_rotated_0001" });
+    writeConfig(home, { ...config, paused: true, token: "rrt_rotated_0001" });
     await paused;
 
     // Errors are protocol frames too.
@@ -227,6 +246,8 @@ test("every frame the runner sends passes the engine schema, and the runner acce
   expect([...types].sort()).toEqual(
     [
       "access.changed",
+      // The first hello of a process goes before any mask is read: the CLI states follow the welcome.
+      "cli.changed",
       "harness.event",
       "harness.tool",
       "hello",
@@ -261,4 +282,21 @@ test("the frames built outside the request loop pass the schema too", () => {
     { type: "sandbox.changed", sandbox: sandboxOff().status() },
   ];
   for (const f of frames) expect(runnerFrame.safeParse(f).success).toBe(true);
+});
+
+test("each renamed error code goes out as a valid result frame by the client's real send", () => {
+  for (const code of ["outside_work_dir", "browser_not_running", "sandbox_not_ready"] as const) {
+    const frame: RunnerFrame = { type: "result", id: "req_1", ok: false, error: { code, message: "m" } };
+    expect([code, runnerFrame.safeParse(frame).success]).toEqual([code, true]);
+    const sent: string[] = [];
+    const c = Object.create(RunnerClient.prototype) as Record<string, unknown>;
+    Object.assign(c, {
+      ws: { readyState: WebSocket.OPEN, send: (s: string) => sent.push(s) },
+      maskState: { kind: "empty" },
+      heldFrames: [],
+      opts: { log: () => {} },
+    });
+    (Reflect.get(c, "send") as (f: RunnerFrame, m: [string, string][]) => boolean).call(c, frame, []);
+    expect(sent.map((s) => JSON.parse(s))).toEqual([frame]);
+  }
 });

@@ -757,6 +757,53 @@ describe("notices at the same time", () => {
     expect(new Set(ids).size).toBe(5);
   });
 
+  test("N notices at once by N authors: the actors and the latest are what a serial order gives", async () => {
+    const t = await team();
+    const authors = await Promise.all(
+      Array.from({ length: N }, async (_, i) => {
+        const [u] = await server.deps.db
+          .insert(schema.users)
+          .values({ id: newId("u"), name: `A${i}`, email: email(`a${i}`) })
+          .returning();
+        return u?.id ?? "";
+      }),
+    );
+    const groupKey = `dm:${newId("ch")}`;
+    const target = `user:${t.workspaceId}:${t.beto.user.id}`;
+    const from = events.length;
+    await Promise.all(
+      authors.map((id, i) =>
+        notify(server.deps, {
+          workspaceId: t.workspaceId,
+          userId: t.beto.user.id,
+          kind: "dm",
+          groupKey,
+          actor: { type: "person", id },
+          source: {},
+          latest: { text: `from ${i}` },
+        }),
+      ),
+    );
+    await settle();
+    // Each notify publishes the row its own write returned: ordered by count, these are the serial steps.
+    type Shown = { count: number; actors: { id: string }[]; latest: { text?: string } };
+    const steps = events
+      .slice(from)
+      .filter((e) => e.target === target && e.event.type === "notification.shown")
+      .map((e) => e.event.notification as Shown)
+      .sort((x, y) => x.count - y.count);
+    expect(steps.map((x) => x.count)).toEqual(Array.from({ length: N }, (_, i) => i + 1));
+    const order = steps.map((x) => x.actors[0]?.id ?? "");
+    expect(new Set(order).size).toBe(N);
+    const [row, ...rest] = await rowsOf(t, t.beto.user.id, groupKey);
+    expect(rest).toEqual([]);
+    expect(row?.count).toBe(N);
+    // The serial order: each step puts its author first and keeps the 5 newest.
+    expect(row?.actors.map((x) => x.id)).toEqual(order.slice(-5).reverse());
+    const last = order[N - 1] ?? "";
+    expect(row?.latest.text).toBe(`from ${authors.indexOf(last)}`);
+  });
+
   test("a done notice and N new ones at once: it reopens once, with count N", async () => {
     const t = await team();
     await dm(t, "dm:done", 0, t.ana.user.id);

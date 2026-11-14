@@ -212,6 +212,38 @@ describe("invitations", () => {
   }, 30_000);
 });
 
+describe("asking for a new invitation", () => {
+  test("once an hour: one millisecond before the hour is quiet, the exact hour and later tell whoever invited", async () => {
+    const o = await owner(server, "Hal", "hal@ws.test", "Hourly");
+    const start = new Date(Math.floor(Date.now() / 1000) * 1000);
+    frozen = start;
+    try {
+      const { url } = await invite(o.browser, o.workspaceId, "hourly@ws.test", "member");
+      const asks = () =>
+        server.mailer.sent().filter((m) => m.kind === "invite_request" && m.to === "hal@ws.test");
+      const ask = async (at: number) => {
+        frozen = new Date(at);
+        return (
+          await call(new Browser(server.url), "POST", `/api/v1/invitations/${tokenOf(url)}/request-new`)
+        ).status;
+      };
+      // The invitation expired 8 days in; the first request tells the inviter.
+      const t0 = start.getTime() + 8 * 24 * 3600_000;
+      expect(await ask(t0)).toBe(204);
+      expect(asks().length).toBe(1);
+      expect(await ask(t0 + 3600_000 - 1)).toBe(204);
+      expect(asks().length).toBe(1);
+      expect(await ask(t0 + 3600_000)).toBe(204);
+      expect(asks().length).toBe(2);
+      // The window now counts from the exact hour: one millisecond later is still inside it.
+      expect(await ask(t0 + 3600_000 + 1)).toBe(204);
+      expect(asks().length).toBe(2);
+    } finally {
+      frozen = null;
+    }
+  });
+});
+
 describe("roles", () => {
   test("a member doesn't manage invitations; an admin doesn't invite an owner", async () => {
     const sol = await owner(server, "Sol", "sol@ws.test", "Roles");

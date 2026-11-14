@@ -238,7 +238,7 @@ async function deliver(deps: AppDeps, d: Delivery): Promise<Outcome> {
   } as Pick<AppNotification, "reason" | "latest" | "source">;
   return d.channel === "push"
     ? sendPush(deps, row, settings, who, n)
-    : sendEmail(deps, row, settings, who, n);
+    : sendEmail(deps, row, settings, who, n, d.id);
 }
 
 async function actorName(deps: AppDeps, row: Row): Promise<string> {
@@ -316,6 +316,7 @@ async function sendEmail(
   settings: NotificationSettings,
   who: string,
   n: Pick<AppNotification, "reason" | "latest" | "source">,
+  deliveryId: string,
 ): Promise<Outcome> {
   const [user] = await deps.db.select({ email: users.email }).from(users).where(eq(users.id, row.userId));
   if (!user) return { status: "skipped", note: "no_user" };
@@ -339,6 +340,9 @@ async function sendEmail(
     text: mail.text,
     kind: "notification",
     link,
+    // Every attempt of this delivery carries the same key, so an accepted attempt that timed out here is
+    // not sent twice.
+    idempotencyKey: `notification-delivery/${deliveryId}`,
   });
   if (sent.ok) return { status: "sent" };
   // A rejection worth retrying goes back to the queue with the same growing wait as a push; a final one is

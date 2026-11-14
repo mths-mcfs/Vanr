@@ -44,6 +44,15 @@ import { Harnesses } from "./harness";
 import { Jobs, which } from "./jobs";
 import { McpBridge, type ToolOutcome } from "./mcp";
 import { execOp, listOp, type OpContext, readOp, writeOp } from "./ops";
+import {
+  assemble,
+  Flows,
+  HELLO_JOBS_BYTES,
+  HELLO_JOBS_MAX,
+  type Masks,
+  neutralHello,
+  serialize,
+} from "./outbound";
 import { type CommandSandbox, defaultPolicyContext, openSandbox, type PolicyContext } from "./sandbox";
 import { SecretStore } from "./secrets";
 import { runningBundle, UpdateError, update } from "./update";
@@ -77,6 +86,18 @@ export interface RunnerClientOptions {
 const UPDATE_RETRY_MS = 30 * 60_000;
 
 /** How often the runner checks the Claude Code and Codex login again. */
+/**
+ * What the runner knows of its secrets. `unknown`: it has not read them yet, or every read failed, or the read
+ * is in progress; no text from outside goes. `empty`: read, and no agent has a secret. `known`: read, with the
+ * masks of each agent (they only grow while the process lives, across reconnections).
+ */
+type MaskState =
+  | { kind: "unknown" }
+  | { kind: "empty" }
+  | { kind: "known"; byAgent: ReadonlyMap<string, Masks>; all: Masks };
+
+const SECRETS_UNREAD = "The runner could not read its secrets yet; try again in a moment";
+
 const CLI_CHECK_MS = 10 * 60_000;
 
 type WsLike = WebSocket;
@@ -112,6 +133,16 @@ export class RunnerClient {
   private cliSent = "";
   private cliCheckedAt = 0;
   agents: { id: string; handle: string; name: string }[] = [];
+  /** What the runner knows of its secrets: the masks of every frame come from here (see MaskState). */
+  private maskState: MaskState = { kind: "unknown" };
+  /** The read of the masks in progress, which a request waits for before it runs. */
+  private reading: Promise<void> | null = null;
+  private readRetry: ReturnType<typeof setTimeout> | null = null;
+  private readFailures = 0;
+  /** Frames that carry text from outside, held while the runner does not know its secrets, in order. */
+  private heldFrames: { frame: RunnerFrame; masks: Masks }[] = [];
+  /** This connection's hello went neutral: the real one goes on a new connection once the secrets are read. */
+  private helloNeutral = false;
   private welcomeWaiters: (() => void)[] = [];
   private readonly executors: ("claude_code" | "codex")[];
   private readonly browser: BrowserDriver | null;
@@ -142,7 +173,7 @@ export class RunnerClient {
       status: () => ({ state: "unavailable", engine: null, reason: "Starting" }),
       setMode: () => {},
       wrap: async () => {
-        throw new RunnerError("sandbox_unavailable", "The sandbox is starting");
+        throw new RunnerError("sandbox_not_ready", "The sandbox is starting");
       },
       close: async () => {},
     };
@@ -181,6 +212,7 @@ export class RunnerClient {
       maxConcurrent: () => this.config.maxConcurrentJobs,
       maxSeconds: () => this.config.jobMaxSeconds,
       send: (event) => this.send(event),
+      knownMasks: (agentId) => this.masksOf(agentId),
       bins,
       get sandbox() {
         return client.sandbox;
@@ -241,6 +273,7 @@ export class RunnerClient {
     this.stopped = true;
     if (this.poller) clearInterval(this.poller);
     if (this.retry) clearTimeout(this.retry);
+    if (this.readRetry) clearTimeout(this.readRetry);
     if (this.watchdog) clearTimeout(this.watchdog);
     for (const c of this.inflight.values()) c.abort();
     this.jobs.stopAll();
@@ -252,9 +285,39 @@ export class RunnerClient {
     this.exit(reason);
   }
 
-  private send(frame: RunnerFrame): boolean {
+  /**
+   * The one way out to the server: the frame is assembled in outbound.ts (every string masked with `masks`
+   * and the secrets of every agent, cut to the schema, validated); a frame that cannot be made valid goes in
+   * its minimal form, or not at all.
+   */
+  private send(frame: RunnerFrame, masks: Masks = []): boolean {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
-    this.ws.send(JSON.stringify(frame));
+    const all = this.allMasks();
+    if (all === null) {
+      // Not knowing the secrets, no text from outside goes: a hello goes neutral, a pong as it is, the rest
+      // waits for the read, in order.
+      if (frame.type === "hello") {
+        const hello = assemble(frame, []);
+        if (hello?.type !== "hello") return false;
+        this.helloNeutral = true;
+        return this.write(serialize(neutralHello(hello, [BROWSER_GUARD_FEATURE]), []), frame);
+      }
+      if (frame.type !== "pong") {
+        this.heldFrames.push({ frame, masks });
+        return true;
+      }
+    }
+    return this.write(serialize(frame, [...masks, ...(all ?? [])]), frame);
+  }
+
+  private write(json: string | null, frame: RunnerFrame): boolean {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
+    if (json === null) {
+      this.log(`did not send an invalid ${frame.type} frame`);
+      if (frame.type === "cli.changed") this.cliSent = "";
+      return false;
+    }
+    this.ws.send(json);
     return true;
   }
 
@@ -334,9 +397,12 @@ export class RunnerClient {
     this.hadWelcome = false;
     this.armWatchdog();
     ws.onopen = () => {
-      const cli = this.cli.states(true);
-      this.cliSent = JSON.stringify(cli);
-      this.cliCheckedAt = Date.now();
+      // A runner that has not read its masks yet (it just started) sends no text from outside in the hello:
+      // the CLI states and the pending jobs go after the welcome, masked (cli.changed, redeliver).
+      const known = this.maskState.kind !== "unknown";
+      const cli = known ? this.cli.states(true) : {};
+      this.cliSent = known ? JSON.stringify(cli) : "";
+      this.cliCheckedAt = known ? Date.now() : 0;
       this.send({
         type: "hello",
         session,
@@ -351,7 +417,8 @@ export class RunnerClient {
         browser: !!this.browser,
         executors: this.executors,
         cli,
-        jobs: this.jobs.pending(),
+        // The rest of the pending jobs goes as job.done after the welcome (redeliver), in the journal's order.
+        jobs: known ? this.helloJobs() : [],
         sandbox: this.sandbox.status(),
         features: this.browser ? [BROWSER_GUARD_FEATURE] : [],
       });
@@ -397,9 +464,12 @@ export class RunnerClient {
         this.saveAgents(frame.agents);
         await this.secrets.unlock(frame.storeKey, frame.runnerId);
         this.hadWelcome = true;
+        await this.refreshMasks();
         if (frame.name !== this.config.name) this.saveConfig({ ...this.config, name: frame.name });
         this.log(`connected as ${frame.name}`);
         this.jobs.redeliver();
+        // A hello sent without the CLI states (before any mask): they go now.
+        if (this.cliSent === "") this.recheckCli();
         for (const w of this.welcomeWaiters.splice(0)) w();
         if (frame.update && this.config.autoUpdate && newer(frame.update.version, this.version)) {
           this.pendingUpdate = frame.update.version;
@@ -408,6 +478,7 @@ export class RunnerClient {
         return;
       case "agents":
         this.saveAgents(frame.agents);
+        await this.refreshMasks();
         return;
       case "ping":
         this.send({ type: "pong", at: frame.at });
@@ -434,8 +505,8 @@ export class RunnerClient {
     }
   }
 
-  private fail(id: string, error: RunnerErrorBody) {
-    this.send({ type: "result", id, ok: false, error });
+  private fail(id: string, error: RunnerErrorBody, masks: Masks = []) {
+    this.send({ type: "result", id, ok: false, error }, masks);
   }
 
   private async onRequest(frame: Extract<ServerFrame, { type: "request" }>) {
@@ -450,6 +521,35 @@ export class RunnerClient {
       return this.fail(id, { code: "bad_request", message: parsed.error.issues[0]?.message ?? "" });
     const controller = new AbortController();
     this.inflight.set(id, controller);
+    // The agent's secrets, for every frame this request sends.
+    // Not knowing the secrets yet: the request waits for the read in progress, and is rejected if it fails.
+    if (this.maskState.kind === "unknown") await this.reading;
+    if (this.maskState.kind === "unknown") {
+      this.inflight.delete(id);
+      return this.write(
+        serialize(
+          { type: "result", id, ok: false, error: { code: "internal", message: SECRETS_UNREAD } },
+          [],
+        ),
+        { type: "result", id, ok: false, error: { code: "internal", message: SECRETS_UNREAD } },
+      );
+    }
+    // The agent's secrets, for every frame this request sends (the last ones read if this read fails).
+    const agentRef = frame.agent;
+    const masks = agentRef ? await this.secrets.masks(agentRef).catch(() => this.masksOf(agentRef.id)) : [];
+    // The pieces of one text (a command's output, a harness turn's text) go through one flow each.
+    const flows = new Flows(() => [...masks, ...(this.allMasks() ?? [])]);
+    const piece = (key: string, text: string) => flows.push(key, text);
+    const flush = () => {
+      for (const key of flows.keys()) {
+        const tail = flows.end(key);
+        if (!tail) continue;
+        if (key === "text")
+          this.send({ type: "harness.event", id, event: { kind: "text", text: tail } }, masks);
+        else if (key === "stdout" || key === "stderr")
+          this.send({ type: "output", id, stream: key, chunk: tail }, masks);
+      }
+    };
     const ctx: OpContext = {
       access: this.access,
       secrets: this.secrets,
@@ -458,7 +558,12 @@ export class RunnerClient {
       agent: frame.agent,
       signal: controller.signal,
       ...(frame.stream
-        ? { onOutput: (stream, chunk) => this.send({ type: "output", id, stream, chunk }) }
+        ? {
+            onOutput: (stream, chunk) => {
+              const safe = piece(stream, chunk);
+              if (safe) this.send({ type: "output", id, stream, chunk: safe }, masks);
+            },
+          }
         : {}),
     };
     try {
@@ -466,25 +571,32 @@ export class RunnerClient {
         op === "harness.turn"
           ? await this.harnesses.turn(this.needAgent(ctx.agent), parsed.data as never, {
               signal: controller.signal,
-              emit: (event) => this.send({ type: "harness.event", id, event }),
-              callTool: (name, input) => this.callTool(id, name, input),
+              emit: (event) => {
+                const text = piece("text", event.text);
+                if (text) this.send({ type: "harness.event", id, event: { ...event, text } }, masks);
+              },
+              callTool: (name, input) => this.callTool(id, name, input, masks),
             })
-          : await this.run(op as RunnerOp, parsed.data, ctx);
-      this.send({ type: "result", id, ok: true, data });
+          : await this.run(op as RunnerOp, parsed.data, ctx, masks);
+      flush();
+      this.send({ type: "result", id, ok: true, data }, masks);
+      if (op === "secret.store" || op === "secret.remove") await this.refreshMasks();
     } catch (err) {
-      if (err instanceof RunnerError) this.fail(id, { code: err.code, message: err.message });
-      else this.fail(id, { code: "internal", message: err instanceof Error ? err.message : String(err) });
+      flush();
+      if (err instanceof RunnerError) this.fail(id, { code: err.code, message: err.message }, masks);
+      else
+        this.fail(id, { code: "internal", message: err instanceof Error ? err.message : String(err) }, masks);
     } finally {
       this.inflight.delete(id);
     }
   }
 
   /** An agent tool asked for by the harness: it runs on the server, which returns `harness.tool_result`. */
-  private callTool(id: string, name: string, input: unknown): Promise<ToolOutcome> {
+  private callTool(id: string, name: string, input: unknown, masks: Masks): Promise<ToolOutcome> {
     const callId = randomUUID();
     return new Promise((resolve) => {
       this.toolCalls.set(callId, resolve);
-      if (!this.send({ type: "harness.tool", id, callId, name, input })) {
+      if (!this.send({ type: "harness.tool", id, callId, name, input }, masks)) {
         this.toolCalls.delete(callId);
         resolve({ content: "The server is not reachable right now", isError: true });
       }
@@ -514,7 +626,7 @@ export class RunnerClient {
   }
 
   // biome-ignore lint/suspicious/noExplicitAny: each op validates its own args with the schema before getting here
-  private async run(op: RunnerOp, args: any, ctx: OpContext): Promise<unknown> {
+  private async run(op: RunnerOp, args: any, ctx: OpContext, masks: Masks): Promise<unknown> {
     switch (op) {
       case "exec":
         return execOp(ctx, args);
@@ -554,11 +666,108 @@ export class RunnerClient {
       case "browser.policy":
       case "live_view.input": {
         const driver = this.browser;
-        if (!driver) throw new RunnerError("browser_unavailable", "No browser in this environment");
+        if (!driver) throw new RunnerError("browser_not_running", "No browser in this environment");
         this.access.requireTool("browser");
-        return driver.handle(op, this.needAgent(ctx.agent), args, (frame) => this.send(frame));
+        return driver.handle(op, this.needAgent(ctx.agent), args, (frame) => this.send(frame, masks));
       }
     }
+  }
+
+  /**
+   * The running jobs first (only the hello reports them), then the ended ones, in the journal's order, while
+   * they fit the hello's count and byte budget. The server finishes a task from the hello's snapshot, so a job
+   * goes whole or not at all; the rest goes as job.done after the welcome.
+   */
+  private helloJobs() {
+    const pending = this.jobs.pending();
+    const ordered = [
+      ...pending.filter((j) => j.status === "running"),
+      ...pending.filter((j) => j.status !== "running"),
+    ];
+    const out: typeof pending = [];
+    let size = 0;
+    for (const job of ordered) {
+      size += Buffer.byteLength(JSON.stringify(job));
+      if (out.length >= HELLO_JOBS_MAX || size > HELLO_JOBS_BYTES) break;
+      out.push(job);
+    }
+    return out;
+  }
+
+  /**
+   * Reads the masks of every known agent's secrets (at the welcome, when a secret changes, again after a
+   * failure) and adds them to what the runner knows. A read that fails leaves the state as it was: not
+   * knowing stays not knowing (nothing from outside goes), knowing keeps the last list that was read; it is
+   * tried again with a growing wait. The first read that works lets the held frames go, in order, and, when
+   * this connection's hello went neutral, opens a new connection for the real one.
+   */
+  private refreshMasks(): Promise<void> {
+    const run = async () => {
+      const before = this.maskState;
+      try {
+        if (this.secrets.locked === true) throw new Error("the secret store is locked");
+        const next = new Map(before.kind === "known" ? before.byAgent : []);
+        for (const agent of this.agents) {
+          const read = await this.secrets.masks(agent);
+          const had = next.get(agent.id) ?? [];
+          const added = read.filter(([v]) => !had.some(([b]) => b === v));
+          if (added.length) next.set(agent.id, [...had, ...added]);
+        }
+        this.maskState = next.size
+          ? { kind: "known", byAgent: next, all: [...next.values()].flat() }
+          : { kind: "empty" };
+        this.readFailures = 0;
+      } catch (err) {
+        this.readFailures += 1;
+        this.log(
+          `could not read the secrets (${err instanceof Error ? err.message : String(err)}); trying again`,
+        );
+        this.retryRead();
+        return;
+      }
+      if (before.kind === "unknown") this.firstRead();
+    };
+    const reading = run().finally(() => {
+      if (this.reading === reading) this.reading = null;
+    });
+    this.reading = reading;
+    return reading;
+  }
+
+  private retryRead() {
+    if (this.readRetry) clearTimeout(this.readRetry);
+    const base = this.opts?.backoffBaseMs ?? 1000;
+    const delay = Math.min(base * 2 ** (this.readFailures - 1), 60_000);
+    this.readRetry = setTimeout(() => {
+      this.readRetry = null;
+      if (this.connected) void this.refreshMasks();
+    }, delay);
+    this.readRetry.unref?.();
+  }
+
+  /** The secrets are known for the first time: the held frames go, then the real hello on a new connection. */
+  private firstRead() {
+    for (const { frame, masks } of this.heldFrames.splice(0)) this.send(frame, masks);
+    if (this.cliSent === "") {
+      this.cliCheckedAt = 0;
+      this.recheckCli();
+    }
+    if (this.helloNeutral && this.ws?.readyState === WebSocket.OPEN) {
+      this.helloNeutral = false;
+      this.log("reconnecting to send the hello with the real state");
+      this.ws.close(4006, "real hello");
+    }
+  }
+
+  /** The masks of one agent the runner knows (for the jobs, which read them at each line). */
+  masksOf(agentId: string): Masks {
+    return this.maskState.kind === "known" ? (this.maskState.byAgent.get(agentId) ?? []) : [];
+  }
+
+  /** Every mask the runner knows; `null` while it does not know them. */
+  private allMasks(): Masks | null {
+    if (this.maskState.kind === "unknown") return null;
+    return this.maskState.kind === "known" ? this.maskState.all : [];
   }
 
   private saveAgents(agents: { id: string; handle: string; name: string }[]) {
