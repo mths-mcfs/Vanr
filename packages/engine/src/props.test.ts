@@ -145,6 +145,30 @@ test("unknown checkbox words are not silently converted to false", () => {
   expect(normalizeProps([def], { c: "maybe" })).toEqual({});
 });
 
+test("multi-select names beginning with a bracket remain importable and convertible", () => {
+  const def: PropDef = {
+    id: "m",
+    name: "M",
+    type: "multi_select",
+    options: [
+      { id: "review", name: "[Review]" },
+      { id: "number", name: "[1]" },
+      { id: "design", name: 'Design, "UX"' },
+    ],
+  };
+  for (const { name, id } of [
+    { name: "[Review]", id: "review" },
+    { name: "[1]", id: "number" },
+  ]) {
+    expect(parsePropText(def, name)).toEqual([id]);
+    expect(normalizeProps([def], { m: name })).toEqual({ m: [id] });
+  }
+  const selected = ["review", "design"];
+  expect(parsePropText(def, propText(def, selected))).toEqual(selected);
+  expect(parsePropText(def, "[Review], [1]")).toEqual(["review", "number"]);
+  expect(parsePropText(def, '["Unknown"]')).toBeUndefined();
+});
+
 test("date writes reject invalid clocks and offsets on either endpoint", () => {
   const def: PropDef = { id: "d", name: "D", type: "date" };
   for (const time of ["99:30:00Z", "12:00:00+99:00"]) {

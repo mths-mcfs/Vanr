@@ -116,4 +116,76 @@ describe("wiki editor markdown round trip", () => {
     expect(parse(saved).child(0).child(1).childCount).toBe(2);
     expect(serialize(parse(saved))).toBe(saved);
   });
+  test.each(["- [x] Done\n- [ ] Todo\n", "- [x] Task\n  - [ ] Subtask\n  - [x] Done\n"])(
+    "task states survive saving: %s",
+    (source) => {
+      const doc = parse(source);
+      const checked: unknown[] = [];
+      doc.descendants((node) => {
+        if (node.type.name === "list_item") checked.push(node.attrs.checked);
+      });
+      expect(checked).toEqual(source.includes("Subtask") ? [true, false, true] : [true, false]);
+      expect(serialize(doc)).toBe(source);
+      expect(serialize(parse(serialize(doc)))).toBe(source);
+    },
+  );
+  test.each(["-\n  -\n", "-\n  - [ ] Nested\n", "-\n  - <br />\n"])(
+    "an empty list parent keeps its children without acquiring HTML: %s",
+    (source) => {
+      expect(serialize(parse(source))).toBe(source);
+      expect(serialize(parse(serialize(parse(source))))).toBe(source);
+    },
+  );
+  test.each(["[[Page|hello\tworld]]\n", "[[Page|Press [ to begin]]\n", "![[Page|[draft]]\n"])(
+    "accepted wiki link characters survive saving: %s",
+    (source) => {
+      const doc = parse(source);
+      expect(doc.firstChild?.firstChild?.type.name).toBe("wiki_link");
+      expect(doc.firstChild?.firstChild?.attrs.raw).toBe(source.trimEnd());
+      expect(serialize(doc)).toBe(source);
+      expect(serialize(parse(serialize(doc)))).toBe(source);
+    },
+  );
+  test.each(["[!note]\n", "[!WARNING]+ Title\n", "[!custom-type]- Title\n"])(
+    "valid callouts survive saving: %s",
+    (source) => expect(serialize(parse(source))).toBe(source),
+  );
+});
+
+test("unclosed callouts consume a bounded amount of real remark input", async () => {
+  const { remarkCtx } = await import("@milkdown/kit/core");
+  const { remarkWikiSyntax } = await import("./wiki/milkdown");
+  for (const source of ["[!note ".repeat(400), "[!note ".repeat(800), "[!note".repeat(800)]) {
+    let consumed = 0;
+    const processor = remarkCtx
+      .create(new Map())
+      .get()()
+      .use(function () {
+        const transform = remarkWikiSyntax.call(this);
+        const construct = this.data().micromarkExtensions?.at(-1)?.text?.[91];
+        if (!construct || Array.isArray(construct)) throw new Error("Missing wiki tokenizer");
+        const tokenize = construct.tokenize;
+        construct.tokenize = function (effects, ok, nok) {
+          return tokenize.call(
+            this,
+            {
+              ...effects,
+              consume(code) {
+                consumed++;
+                effects.consume(code);
+              },
+            },
+            ok,
+            nok,
+          );
+        };
+        return transform;
+      });
+    const tree = processor.runSync(processor.parse(source), { value: source });
+    expect(tree).toMatchObject({
+      type: "root",
+      children: [{ type: "paragraph", children: [{ type: "text", value: source.trimEnd() }] }],
+    });
+    expect(consumed).toBeLessThanOrEqual(source.length * 2);
+  }
 });

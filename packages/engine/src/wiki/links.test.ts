@@ -155,3 +155,31 @@ test("CRLF headings and literal underscores keep their anchor text", () => {
     "API_key and a_b with bold and italic",
   );
 });
+
+test("comments can surround fences without exposing links, headings or tags", () => {
+  for (const fence of ["```md", "~~~md"]) {
+    const comment = `%%\n## Hidden [[Old]] #hidden\n${fence}\nexample\n${fence.slice(0, 3)}\n## Hidden [[Old]] #hidden\n%%\n\n`;
+    const source = `${comment}## Visible\n[[Old]] #visible\n`;
+    expect(parseWikiLinks(source).map((link) => link.start)).toEqual([source.lastIndexOf("[[Old]]")]);
+    expect(rewriteLinks(source, () => ({ target: "New" }))).toEqual({
+      md: `${comment}## Visible\n[[New]] #visible\n`,
+      count: 1,
+    });
+    expect(headings(source).map((heading) => heading.text)).toEqual(["Visible"]);
+    expect(bodyTags(source)).toEqual(["visible"]);
+  }
+});
+
+test.each([
+  ["***Important***", "Important"],
+  ["___Important___", "Important"],
+  ["**bold *italic***", "bold italic"],
+  ["__bold _italic___", "bold italic"],
+  ["*italic **bold***", "italic bold"],
+  ["_italic __bold___", "italic bold"],
+  ["API_key and `***a_b***` with **_nested_**", "API_key and ***a_b*** with nested"],
+  ["Literal \\*stars\\* and under_score", "Literal *stars* and under_score"],
+])("nested emphasis is omitted from heading anchors: %s", (markup, text) => {
+  expect(headings(`## ${markup}`)[0]?.text).toBe(text);
+  expect(headings(`${markup}\n---\n`)[0]?.text).toBe(text);
+});

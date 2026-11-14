@@ -1,6 +1,8 @@
 // Wiki links in markdown, in the Obsidian format: [[target]], [[target|text]], [[target#Heading]],
 // [[target#^block]], ![[embed]] and block ids `^id` at the end of a line. Code (fenced blocks and inline
 // code spans) and %% %% comments do not count. Pure functions: the server and the front end use the same ones.
+import { remarkCtx } from "@milkdown/kit/core";
+import type { Root } from "@milkdown/kit/transformer";
 
 export interface WikiLinkRef {
   /** The whole text as it is in the markdown, with `!`, brackets, heading and link text. */
@@ -97,7 +99,7 @@ export function codeRanges(md: string): [number, number][] {
     const end = mark && marks[mark.next];
     if (!mark || !end) continue;
     // A span must stay outside fenced code, even if its delimiters have the same length.
-    if (mark.section !== end.section) continue;
+    if (mark.key !== "comment" && mark.section !== end.section) continue;
     ranges.push([mark.at, end.end]);
     i = mark.next;
   }
@@ -188,22 +190,32 @@ export function headings(md: string): Heading[] {
   return out;
 }
 
+const headingMarkdown = remarkCtx.create(new Map()).get()();
+
 /** Heading text as Obsidian uses it in the anchor: no emphasis or code markup, links by their text. */
 export function cleanHeading(text: string): string {
   text = text
     .replace(/!?\[\[([^\]|]+?)(?:\|([^\]]+))?\]\]/g, (_, t: string, a?: string) => a ?? t)
     .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");
-  const plain = (s: string) =>
-    s
-      .replace(/(?<![\p{L}\p{N}])(__|_)(?=\S)(.+?)\1(?![\p{L}\p{N}])/gu, "$2")
-      .replace(/(\*\*|\*|~~|==)(?=\S)(.+?)\1/g, "$2");
+  const plain = (s: string) => s.replace(/(~~|==)(?=\S)(.+?)\1/g, "$2");
   let out = "";
-  let last = 0;
-  for (const [a, b] of codeRanges(text)) {
-    out += plain(text.slice(last, a)) + text.slice(a, b).replace(/^(`+)([\s\S]*?)\1$/, "$2");
-    last = b;
-  }
-  return (out + plain(text.slice(last))).replace(/\s+\^[A-Za-z0-9-]+$/, "").trim();
+  let pending = "";
+  const walk = (nodes: Extract<Root["children"][number], { type: "paragraph" }>["children"]) => {
+    for (const node of nodes) {
+      if ("children" in node) walk(node.children);
+      else if (node.type === "inlineCode") {
+        out += plain(pending) + node.value;
+        pending = "";
+      } else if ("value" in node) pending += node.value;
+    }
+  };
+  // Keep literal block markers in heading content inside a paragraph.
+  const paragraph = headingMarkdown.parse(`x ${text}`).children[0];
+  if (paragraph?.type === "paragraph") walk(paragraph.children);
+  return (out + plain(pending))
+    .slice(2)
+    .replace(/\s+\^[A-Za-z0-9-]+$/, "")
+    .trim();
 }
 
 /**

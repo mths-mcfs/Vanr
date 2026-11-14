@@ -264,13 +264,15 @@ export function parsePropText(def: PropDef, text: string): PropValue | undefined
     case "status":
       return byName(t);
     case "multi_select": {
-      let names: unknown;
-      try {
-        names = t.startsWith("[") ? JSON.parse(t) : t.split(",").map((s) => s.trim());
-      } catch {
-        return undefined;
+      let names = t.split(",").map((s) => s.trim());
+      if (t.startsWith("[")) {
+        try {
+          const parsed: unknown = JSON.parse(t);
+          if (Array.isArray(parsed) && parsed.every((name) => typeof name === "string")) names = parsed;
+        } catch {
+          // A literal option name, such as [Review], need not be JSON.
+        }
       }
-      if (!Array.isArray(names) || !names.every((n) => typeof n === "string")) return undefined;
       const ids = names.map(byName);
       return ids.every((id) => id) ? (ids as string[]) : undefined;
     }

@@ -6,8 +6,13 @@
 //   definition (`[x][ref]`, `[ref]: url`), a lone `<br>`, $$ and %% blocks.
 import { remarkStringifyOptionsCtx } from "@milkdown/kit/core";
 import type { Ctx, MilkdownPlugin } from "@milkdown/kit/ctx";
-import { commonmark, listItemSchema, syncHeadingIdPlugin } from "@milkdown/kit/preset/commonmark";
-import { gfm, tableCellSchema, tableHeaderSchema } from "@milkdown/kit/preset/gfm";
+import { commonmark, syncHeadingIdPlugin } from "@milkdown/kit/preset/commonmark";
+import {
+  extendListItemSchemaForTask,
+  gfm,
+  tableCellSchema,
+  tableHeaderSchema,
+} from "@milkdown/kit/preset/gfm";
 import type { RemarkPluginRaw } from "@milkdown/kit/transformer";
 import { $nodeSchema, $remark, type GetNodeSchema } from "@milkdown/kit/utils";
 import { parseLinkInner } from "./links";
@@ -72,7 +77,7 @@ export function remarkWikiSyntax(this: ThisParameterType<RemarkPluginRaw<unknown
         return read(code);
       }
       function read(code: number | null): State | undefined {
-        const c = String.fromCharCode(code ?? 0);
+        const c = code === -2 ? "\t" : String.fromCharCode(code ?? 0);
         if (raw.length >= prefix.length + close.length && suffix === close) {
           if (close === "$" && /\d/.test(c)) return nok(code);
           if (raw.startsWith("\\[[") || inline.test(raw)) {
@@ -81,14 +86,20 @@ export function remarkWikiSyntax(this: ThisParameterType<RemarkPluginRaw<unknown
           }
           return nok(code);
         }
-        if (code === null || code < 0) return nok(code);
+        if (code === null || code < -2) return nok(code);
+        if (code === -1) {
+          effects.consume(code);
+          return read;
+        }
         if (raw === "[" && c === "!") {
           prefix = "[!";
           close = "]";
         }
         if (raw.length < prefix.length) {
           if (c !== prefix[raw.length]) return nok(code);
-        } else if (c === "[" && close === "]]") return nok(code);
+        } else if (close === "]" && c !== "]" && !/[A-Za-z-]/.test(c)) return nok(code);
+        else if (c === "[" && close === "]]" && raw.length > prefix.length && suffix.endsWith("["))
+          return nok(code);
         raw += c;
         suffix = (suffix + c).slice(-close.length);
         effects.consume(code);
@@ -301,23 +312,25 @@ export const wikiMarkdownPlugins: MilkdownPlugin[] = [
   gfm,
   tableCellSchema.extendSchema(alignNull),
   tableHeaderSchema.extendSchema(alignNull),
-  listItemSchema.extendSchema((prev) => (ctx) => {
+  extendListItemSchemaForTask.extendSchema((prev) => (ctx) => {
     const spec = prev(ctx);
     return {
       ...spec,
       toMarkdown: {
         ...spec.toMarkdown,
         runner: (state, node) => {
-          if (
-            node.childCount === 1 &&
-            node.firstChild?.type.name === "paragraph" &&
-            node.firstChild.content.size === 0
-          )
-            state.addNode("listItem", [{ type: "paragraph", children: [] }], undefined, {
+          const first = node.firstChild;
+          if (first?.type.name === "paragraph" && first.content.size === 0) {
+            state.openNode("listItem", undefined, {
+              label: node.attrs.label,
+              listType: node.attrs.listType,
               spread: node.attrs.spread,
               checked: node.attrs.checked,
             });
-          else spec.toMarkdown.runner(state, node);
+            state.addNode("paragraph", []);
+            state.next(node.content.cut(first.nodeSize));
+            state.closeNode();
+          } else spec.toMarkdown.runner(state, node);
         },
       },
     };
