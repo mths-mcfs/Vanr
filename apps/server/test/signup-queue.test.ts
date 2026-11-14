@@ -15,24 +15,104 @@ async function rawRequest(server: RunningServer, head: string) {
   const socket = net.createConnection({ host: "localhost", port: server.port });
   await new Promise((r) => socket.once("connect", r));
   let received = "";
+  let answered!: (status: number) => void;
+  const status = new Promise<number>((r) => {
+    answered = r;
+  });
   socket.on("data", (d) => {
     received += String(d);
+    const m = /^HTTP\/1\.1 (\d{3})/.exec(received);
+    if (m) answered(Number(m[1]));
   });
   socket.on("error", () => {});
   socket.write(head);
+  /** The status line of the response, when it arrives. */
+  return { socket, status: () => status };
+}
+
+/**
+ * A clock of the test's own for one kind of deadline: a deadline passes only when the test says so, and the
+ * test hears each one being set and cancelled (a request started reading its body, began to wait, left).
+ */
+function signalClock() {
+  const all: { fire: () => void; cancelled: boolean; passed: boolean }[] = [];
+  const watchers: (() => void)[] = [];
+  const changed = () => {
+    for (const w of watchers.splice(0)) w();
+  };
+  const until = async (ok: () => boolean) => {
+    while (!ok()) await new Promise<void>((r) => watchers.push(r));
+  };
   return {
-    socket,
-    /** The status line of the response, once it arrives (or null by the deadline). */
-    async status(ms: number): Promise<number | null> {
-      const until = Date.now() + ms;
-      while (Date.now() < until) {
-        const m = /^HTTP\/1\.1 (\d{3})/.exec(received);
-        if (m) return Number(m[1]);
-        await Bun.sleep(10);
-      }
-      return null;
+    deadline: (_ms: number) => {
+      let fire!: () => void;
+      const passed = new Promise<void>((r) => {
+        fire = r;
+      });
+      const entry = { fire, cancelled: false, passed: false };
+      all.push(entry);
+      changed();
+      return {
+        passed,
+        cancel: () => {
+          entry.cancelled = true;
+          changed();
+        },
+      };
     },
-    received: () => received,
+    /** Resolves once `n` deadlines were set. */
+    set: (n: number) => until(() => all.length >= n),
+    /** Resolves once `n` deadlines were cancelled. */
+    cancelled: (n: number) => until(() => all.filter((d) => d.cancelled).length >= n),
+    /** The `i`-th deadline set (0 first) passes. */
+    pass(i: number) {
+      const d = all[i];
+      if (!d) throw new Error(`no deadline ${i}`);
+      d.passed = true;
+      d.fire();
+    },
+    /** Every deadline set and not cancelled passes. */
+    passAll() {
+      for (const d of all) {
+        if (d.cancelled || d.passed) continue;
+        d.passed = true;
+        d.fire();
+      }
+    },
+    passedCount: () => all.filter((d) => d.passed).length,
+  };
+}
+
+/** The queue's three deadlines on clocks of the test's own. */
+function queueClocks() {
+  const body = signalClock();
+  const wait = signalClock();
+  const section = signalClock();
+  return {
+    body,
+    wait,
+    section,
+    limits: { bodyDeadline: body.deadline, waitDeadline: wait.deadline, sectionDeadline: section.deadline },
+  };
+}
+
+/** Counts Better Auth's handler calls in flight; `idle` resolves when none is. */
+function trackSections(server: RunningServer) {
+  const auth = server.deps.auth;
+  const inner = auth.handler.bind(auth);
+  let running = 0;
+  const waiters: (() => void)[] = [];
+  auth.handler = async (req: Request) => {
+    running++;
+    try {
+      return await inner(req);
+    } finally {
+      running--;
+      if (running === 0) for (const w of waiters.splice(0)) w();
+    }
+  };
+  return {
+    idle: () => (running === 0 ? Promise.resolve() : new Promise<void>((r) => waiters.push(r))),
   };
 }
 
@@ -60,6 +140,10 @@ function holdFirstSection(server: RunningServer) {
   const released = new Promise<void>((r) => {
     release = r;
   });
+  let entered!: () => void;
+  const atSection = new Promise<void>((r) => {
+    entered = r;
+  });
   let held = false;
   auth.handler = async (req: Request) => {
     const body: unknown = await req
@@ -70,19 +154,21 @@ function holdFirstSection(server: RunningServer) {
     reached.push(email);
     if (!held) {
       held = true;
+      entered();
       await released;
       return new Response("held", { status: 500 });
     }
     return real(req);
   };
-  return { reached, release };
+  return { reached, release, atSection };
 }
 
 describe("closed sign-up queue", () => {
   test(
     "the body limit counts what arrives: a chunked body past it, in one piece or many, gets 413; a short Content-Length reads no further",
     async () => {
-      const server = await startTestServer({ env: CLOSED });
+      const clocks = queueClocks();
+      const server = await startTestServer({ env: CLOSED, signupQueue: clocks.limits });
       const chunkedHead =
         `POST /api/auth/sign-up/email HTTP/1.1\r\nHost: localhost:${server.port}\r\nOrigin: ${server.url}\r\n` +
         "Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n";
@@ -96,12 +182,12 @@ describe("closed sign-up queue", () => {
       // The head says 20 bytes and 20 000 follow: only the 20 declared bytes are the body.
       const lying = await rawRequest(server, `${signUpHead(server, 20)}${big}`);
       try {
-        expect(await onePiece.status(5_000)).toBe(413);
-        expect(await manyPieces.status(5_000)).toBe(413);
-        const short = await lying.status(5_000);
-        expect(short).not.toBeNull();
-        expect(short).not.toBe(200);
+        expect(await onePiece.status()).toBe(413);
+        expect(await manyPieces.status()).toBe(413);
+        expect(await lying.status()).not.toBe(200);
         expect(await users(server)).toBe(0);
+        // No deadline had to pass: the size alone decided.
+        expect(clocks.body.passedCount()).toBe(0);
       } finally {
         for (const c of [onePiece, manyPieces, lying]) c.socket.destroy();
         await server.stop();
@@ -113,26 +199,30 @@ describe("closed sign-up queue", () => {
   test(
     "a slow body, a mute client and a huge body hold nobody; the sign-ups behind them answer and exactly one gets in",
     async () => {
-      const server = await startTestServer({ env: CLOSED, signupQueue: { bodyMs: 1_000 } });
+      const clocks = queueClocks();
+      const server = await startTestServer({ env: CLOSED, signupQueue: clocks.limits });
       const slow = await rawRequest(server, `${signUpHead(server, 1_000)}{`);
-      const tick = setInterval(() => slow.socket.write(" "), 100);
       const mute = await rawRequest(server, signUpHead(server, 200));
       const huge = await rawRequest(server, signUpHead(server, 50_000_000));
       try {
-        const started = Date.now();
+        expect(await huge.status()).toBe(413);
+        // Both are reading their bodies now.
+        await clocks.body.set(2);
         const results = await Promise.all(
           Array.from({ length: 5 }, (_, i) =>
             new Browser(server.url).signUp(`Person ${i}`, `p${i}@example.com`),
           ),
         );
-        expect(Date.now() - started).toBeLessThan(5_000);
         expect(results.map((r) => r.status).sort()).toEqual([200, 403, 403, 403, 403]);
         expect(await users(server)).toBe(1);
-        expect(await huge.status(1_000)).toBe(413);
-        expect(await slow.status(2_000)).toBe(408);
-        expect(await mute.status(2_000)).toBe(408);
+        // They all answered while the slow and the mute client still hung, with no deadline passed.
+        expect(clocks.body.passedCount() + clocks.wait.passedCount() + clocks.section.passedCount()).toBe(0);
+        // The two body deadlines pass: each of them gets 408.
+        clocks.body.pass(0);
+        clocks.body.pass(1);
+        expect(await slow.status()).toBe(408);
+        expect(await mute.status()).toBe(408);
       } finally {
-        clearInterval(tick);
         for (const c of [slow, mute, huge]) c.socket.destroy();
         await server.stop();
       }
@@ -143,16 +233,18 @@ describe("closed sign-up queue", () => {
   test(
     "a client that gives up while waiting leaves the queue without running",
     async () => {
-      const server = await startTestServer({ env: CLOSED });
-      const { reached, release } = holdFirstSection(server);
+      const clocks = queueClocks();
+      const server = await startTestServer({ env: CLOSED, signupQueue: clocks.limits });
+      const { reached, release, atSection } = holdFirstSection(server);
       try {
         const first = new Browser(server.url).signUp("First", "first@example.com");
-        while (reached.length === 0) await Bun.sleep(5);
+        await atSection;
         const body = signUpBody("Quitter", "quitter@example.com");
         const quitter = await rawRequest(server, `${signUpHead(server, body.length)}${body}`);
-        await Bun.sleep(150);
+        // It waits for its turn, then gives up; leaving cancels its wait.
+        await clocks.wait.set(1);
         quitter.socket.destroy();
-        await Bun.sleep(100);
+        await clocks.wait.cancelled(1);
         release();
         expect((await first).status).toBe(500);
         const after = await new Browser(server.url).signUp("Later", "later@example.com");
@@ -169,14 +261,16 @@ describe("closed sign-up queue", () => {
   test(
     "waiting past the deadline answers 503 with Retry-After",
     async () => {
-      const server = await startTestServer({ env: CLOSED, signupQueue: { waitMs: 300, sectionMs: 10_000 } });
-      const { reached, release } = holdFirstSection(server);
+      const clocks = queueClocks();
+      const server = await startTestServer({ env: CLOSED, signupQueue: clocks.limits });
+      const { reached, release, atSection } = holdFirstSection(server);
       try {
         const first = new Browser(server.url).signUp("First", "first@example.com");
-        while (reached.length === 0) await Bun.sleep(5);
-        const started = Date.now();
-        const waiting = await new Browser(server.url).signUp("Second", "second@example.com");
-        expect(Date.now() - started).toBeLessThan(2_000);
+        await atSection;
+        const second = new Browser(server.url).signUp("Second", "second@example.com");
+        await clocks.wait.set(1);
+        clocks.wait.pass(0);
+        const waiting = await second;
         expect(waiting.status).toBe(503);
         expect(Number(waiting.headers.get("retry-after"))).toBeGreaterThan(0);
         expect(reached).toEqual(["first@example.com"]);
@@ -193,18 +287,20 @@ describe("closed sign-up queue", () => {
   test(
     "a section past its deadline frees the queue for the next one",
     async () => {
-      const server = await startTestServer({
-        env: CLOSED,
-        signupQueue: { sectionMs: 3_000, waitMs: 10_000 },
-      });
-      const { reached, release } = holdFirstSection(server);
+      const clocks = queueClocks();
+      const server = await startTestServer({ env: CLOSED, signupQueue: clocks.limits });
+      const { release, atSection } = holdFirstSection(server);
       try {
         const first = new Browser(server.url).signUp("Stuck", "stuck@example.com");
-        while (reached.length === 0) await Bun.sleep(5);
-        const next = await new Browser(server.url).signUp("Next", "next@example.com");
-        expect(next.status).toBe(200);
+        await atSection;
+        const next = new Browser(server.url).signUp("Next", "next@example.com");
+        await clocks.wait.set(1);
+        // The held turn's deadline passes: it answers 503 and the waiting one runs.
+        clocks.section.pass(0);
         expect((await first).status).toBe(503);
+        expect((await next).status).toBe(200);
         expect(await users(server)).toBe(1);
+        expect(clocks.wait.passedCount()).toBe(0);
       } finally {
         release();
         await server.stop();
@@ -216,18 +312,20 @@ describe("closed sign-up queue", () => {
   test(
     "the queue has a maximum size: past it the request answers 503 at once",
     async () => {
-      const server = await startTestServer({ env: CLOSED, signupQueue: { maxWaiting: 1, waitMs: 10_000 } });
-      const { reached, release } = holdFirstSection(server);
+      const clocks = queueClocks();
+      const server = await startTestServer({ env: CLOSED, signupQueue: { ...clocks.limits, maxWaiting: 1 } });
+      const { release, atSection } = holdFirstSection(server);
       try {
         const first = new Browser(server.url).signUp("First", "first@example.com");
-        while (reached.length === 0) await Bun.sleep(5);
+        await atSection;
         const second = new Browser(server.url).signUp("Second", "second@example.com");
-        await Bun.sleep(100);
-        const started = Date.now();
+        await clocks.wait.set(1);
         const third = await new Browser(server.url).signUp("Third", "third@example.com");
-        expect(Date.now() - started).toBeLessThan(1_000);
+        // It never waited: still a single wait set, and no deadline passed.
         expect(third.status).toBe(503);
         expect(third.headers.get("retry-after")).toBeTruthy();
+        await clocks.wait.set(1);
+        expect(clocks.wait.passedCount() + clocks.section.passedCount()).toBe(0);
         release();
         await first;
         expect((await second).status).toBe(200);
@@ -242,17 +340,23 @@ describe("closed sign-up queue", () => {
   test(
     "with a user in the installation, a rejected sign-up and a sign-in don't wait for a held section",
     async () => {
-      const server = await startTestServer({ env: CLOSED });
+      const clocks = queueClocks();
+      const server = await startTestServer({ env: CLOSED, signupQueue: clocks.limits });
       try {
         expect((await new Browser(server.url).signUp("Owner", "owner@example.com")).status).toBe(200);
-        const { reached, release } = holdFirstSection(server);
-        const held = new Browser(server.url).signUp("Held", "held@example.com");
-        while (reached.length === 0) await Bun.sleep(5);
-        const started = Date.now();
+        const { release, atSection } = holdFirstSection(server);
+        let heldDone = false;
+        const held = new Browser(server.url).signUp("Held", "held@example.com").then((r) => {
+          heldDone = true;
+          return r;
+        });
+        await atSection;
         const rejected = await new Browser(server.url).signUp("Other", "other@example.com");
         const signIn = await new Browser(server.url).signIn("owner@example.com");
-        expect(Date.now() - started).toBeLessThan(2_000);
         expect([rejected.status, signIn.status]).toEqual([403, 200]);
+        // Both answered while the held one was still held, and nothing waited on a deadline.
+        expect(heldDone).toBe(false);
+        expect(clocks.wait.passedCount() + clocks.section.passedCount()).toBe(0);
         release();
         await held;
       } finally {
@@ -262,26 +366,6 @@ describe("closed sign-up queue", () => {
     SERVER_TEST_MS,
   );
 });
-
-/** A clock of the test's own for the turns' deadlines: a deadline passes only when the test says so. */
-function testClock() {
-  const pending = new Set<() => void>();
-  return {
-    deadline: (_ms: number) => {
-      let fire!: () => void;
-      const passed = new Promise<void>((r) => {
-        fire = r;
-      });
-      pending.add(fire);
-      return { passed, cancel: () => pending.delete(fire) };
-    },
-    /** Every deadline running now passes. */
-    pass() {
-      for (const fire of [...pending]) fire();
-      pending.clear();
-    },
-  };
-}
 
 /**
  * Holds the first creation of a user in the database (past the hook that let it in) until the test
@@ -325,11 +409,22 @@ describe("the first user's place", () => {
     test(
       `the first section outlives its deadline and then ${first}: never two first users`,
       async () => {
-        const clock = testClock();
+        const clocks = queueClocks();
+        // The server's clock (when the INSERT started, how long it waits) and the watch's ticks are the test's.
+        let now = new Date("2026-11-14T12:00:00Z");
+        const watch: (() => void)[] = [];
         const server = await startTestServer({
           env: CLOSED,
-          signupQueue: { sectionDeadline: clock.deadline, stuckInsertMs: 100 },
+          now: () => now,
+          signupQueue: {
+            ...clocks.limits,
+            every: (_ms, check) => {
+              watch.push(check);
+              return () => {};
+            },
+          },
         });
+        const sections = trackSections(server);
         const creation = holdFirstUserCreation(server);
         const logged: string[] = [];
         const stderr = spyOn(process.stderr, "write").mockImplementation((chunk) => {
@@ -345,15 +440,20 @@ describe("the first user's place", () => {
           );
           await creation.atCreation;
           // The held section's deadline passes: the queue moves on while its creation is still pending.
-          clock.pass();
+          clocks.section.pass(0);
           // The turns after it run to their end (their deadlines never pass), all while the held creation is
           // still pending.
           const statuses = await Promise.all(answers);
           expect(await users(server)).toBe(0);
           // The held one answered 503 at its deadline; the others were turned away while it held the place.
           expect(statuses).toEqual(Array.from({ length: n }, () => "503 retry-after=5"));
-          // Past the limit, the log and the health check say that sign-up waits for the database.
-          await Bun.sleep(350);
+          // Under the limit, nothing to report; past it, the log and the health check say that sign-up waits
+          // for the database.
+          for (const check of watch) check();
+          expect(logged.filter((l) => l.includes("signup.first_user_insert_waiting"))).toEqual([]);
+          expect((await read(await fetch(`${server.url}/api/v1/health`))).signup).toEqual({ status: "ok" });
+          now = new Date(now.getTime() + 61_000);
+          for (const check of watch) check();
           const health = await read(await fetch(`${server.url}/api/v1/health`));
           expect(health.signup).toMatchObject({ status: "waiting_for_database" });
           const waiting = logged.filter((l) => l.includes("signup.first_user_insert_waiting"));
@@ -362,7 +462,7 @@ describe("the first user's place", () => {
           if (first === "succeeds") creation.succeed();
           else creation.fail();
           // Its work really ends now: the place goes back (or the count is no longer zero).
-          await Bun.sleep(100);
+          await sections.idle();
           expect(await users(server)).toBe(first === "succeeds" ? 1 : 0);
           expect((await read(await fetch(`${server.url}/api/v1/health`))).signup).toEqual({
             status: "ok",
@@ -385,17 +485,15 @@ describe("the first user's place", () => {
     test(
       `a section still deciding past its deadline loses the place, and when it goes on it creates nobody (${meanwhile})`,
       async () => {
-        const clock = testClock();
-        const server = await startTestServer({
-          env: CLOSED,
-          signupQueue: { sectionDeadline: clock.deadline },
-        });
+        const clocks = queueClocks();
+        const server = await startTestServer({ env: CLOSED, signupQueue: clocks.limits });
+        const sections = trackSections(server);
         // The second count read is the first sign-up's hook (the first is the gate's check before the queue).
         const check = holdCountRead(server, 2);
         try {
           const late = new Browser(server.url).signUp("Late", "late@example.com");
           await check.reached;
-          clock.pass();
+          clocks.section.pass(0);
           expect((await late).status).toBe(503);
           if (meanwhile === "another one becomes the first user") {
             expect((await new Browser(server.url).signUp("Next", "next@example.com")).status).toBe(200);
@@ -403,7 +501,7 @@ describe("the first user's place", () => {
           }
           // The late section reads its (now stale) count and reaches the hook without the place.
           check.release();
-          await Bun.sleep(200);
+          await sections.idle();
           expect(await users(server)).toBe(meanwhile === "nobody else comes" ? 0 : 1);
           if (meanwhile === "nobody else comes") {
             expect((await new Browser(server.url).signUp("Next", "next@example.com")).status).toBe(200);

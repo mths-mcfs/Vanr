@@ -9,9 +9,12 @@ export interface FakeS3 {
   unsigned: number;
   /**
    * Answers a request instead of the bucket when it returns a response (any status, a body that breaks in
-   * the middle); null lets the bucket answer. `list` is true for ListObjectsV2.
+   * the middle, a promise that never settles for a deadline); null lets the bucket answer. `list` is true for
+   * ListObjectsV2.
    */
-  override: ((req: { method: string; key: string; list: boolean }) => Response | null) | null;
+  override:
+    | ((req: { method: string; key: string; list: boolean }) => Response | Promise<Response> | null)
+    | null;
   stop(): void;
 }
 
@@ -23,6 +26,9 @@ export function startFakeS3(bucket = "workshop"): FakeS3 {
   const state: { unsigned: number; override: FakeS3["override"] } = { unsigned: 0, override: null };
   const server = Bun.serve({
     port: 0,
+    // No idle timeout: a request the test holds open stays open until the client closes it (or the stop),
+    // so a test can see whether the server closed its connection to the bucket.
+    idleTimeout: 0,
     async fetch(req) {
       const url = new URL(req.url);
       if (!req.headers.get("authorization")?.startsWith("AWS4-HMAC-SHA256")) state.unsigned++;
@@ -31,7 +37,7 @@ export function startFakeS3(bucket = "workshop"): FakeS3 {
       const key = decodeURIComponent(rest.join("/"));
       const denied = () => new Response("<Error><Code>AccessDenied</Code></Error>", { status: 403 });
       const forced = state.override?.({ method: req.method, key, list: !key && req.method === "GET" });
-      if (forced) return forced;
+      if (forced) return await forced;
       if (!key && req.method === "GET") {
         if (failOn.has("LIST")) return denied();
         const prefix = url.searchParams.get("prefix") ?? "";
@@ -67,6 +73,23 @@ export function startFakeS3(bucket = "workshop"): FakeS3 {
           etag: '"x"',
           "last-modified": new Date().toUTCString(),
         };
+        // A GET with `Range: bytes=a-b` answers that slice, as S3 does (the client reads ranges this way).
+        const range =
+          req.method === "GET" ? /^bytes=(\d+)-(\d*)$/.exec(req.headers.get("range") ?? "") : null;
+        if (range) {
+          const start = Number(range[1]);
+          const end = range[2] ? Math.min(Number(range[2]), obj.bytes.length - 1) : obj.bytes.length - 1;
+          if (start >= obj.bytes.length || end < start)
+            return new Response("<Error><Code>InvalidRange</Code></Error>", { status: 416 });
+          return new Response(obj.bytes.slice(start, end + 1), {
+            status: 206,
+            headers: {
+              ...headers,
+              "content-length": String(end - start + 1),
+              "content-range": `bytes ${start}-${end}/${obj.bytes.length}`,
+            },
+          });
+        }
         return new Response(req.method === "HEAD" ? null : obj.bytes, { headers });
       }
       return new Response("unsupported", { status: 405 });

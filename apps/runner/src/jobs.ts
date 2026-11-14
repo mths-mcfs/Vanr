@@ -782,6 +782,7 @@ export class Jobs {
   async start(
     agent: AgentRef,
     args: JobStartArgs,
+    signal?: AbortSignal,
   ): Promise<{ jobId: string; startedAt: string; cwd: string }> {
     if (!/^[A-Za-z0-9_-]{8,64}$/.test(args.jobId)) throw new RunnerError("bad_request", "Bad job id");
     if (this.journal.some((t) => t.jobId === args.jobId) || this.starting.has(args.jobId))
@@ -796,7 +797,7 @@ export class Jobs {
     // past the cap, arriving while this one prepares, is rejected above instead of running the job twice.
     this.starting.add(args.jobId);
     try {
-      return await this.launch(agent, args);
+      return await this.launch(agent, args, signal);
     } finally {
       this.starting.delete(args.jobId);
       this.canceledStarts.delete(args.jobId);
@@ -806,6 +807,7 @@ export class Jobs {
   private async launch(
     agent: AgentRef,
     args: JobStartArgs,
+    signal?: AbortSignal,
   ): Promise<{ jobId: string; startedAt: string; cwd: string }> {
     const root = this.opts.access.agentRoot(agent);
     const cwd = args.cwd ? this.opts.access.resolve(agent, args.cwd) : root;
@@ -839,11 +841,19 @@ export class Jobs {
       domains: [...domainsFor(network), ...(args.executor === "shell" ? [] : CLI_DOMAINS[args.executor])],
       network,
     });
-    const secrets = await this.opts.secrets.materialize(agent, root).catch((err) => {
+    const secrets = await this.opts.secrets.materialize(agent, root, signal).catch((err) => {
       wrapped?.release();
       dropSnapshot();
       throw err;
     });
+    // The request was aborted while the job prepared (the connection dropped): the job does not start, and
+    // nothing of it is kept.
+    if (signal?.aborted) {
+      secrets.release();
+      wrapped?.release();
+      dropSnapshot();
+      throw new RunnerError("canceled", "Canceled");
+    }
     // The job's secrets and the ones the runner learns while it runs, read again at each line and each frame.
     let merged: Masks = secrets.masks;
     let mergedFrom: Masks | null = null;

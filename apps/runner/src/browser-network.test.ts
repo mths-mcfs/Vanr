@@ -6,6 +6,7 @@ import { html, SITE_IP } from "./testing/attack-sites";
 import {
   act,
   agent,
+  blockNoted,
   browser,
   chrome,
   failure,
@@ -211,11 +212,12 @@ test.skipIf(!chrome)(
     );
     const first = await open(a, sites.http("site.test", "/later"));
     expect(first.blocked ?? []).toEqual([]);
+    // The page runs into the block only now, and the next action goes only once the runner noted it: the
+    // block is between the two answers by construction (a block noted during an action belongs to it).
+    const noted = blockNoted(a.id, (b) => b.reason === "private_network");
     go = true;
-    // Reads until the page's timer has run into the block (a condition, not a time): each read reports what
-    // was blocked since the previous answer.
-    let next = await act(a, { action: "read" });
-    for (let i = 0; i < 200 && !(next.blocked ?? []).length; i++) next = await act(a, { action: "read" });
+    await noted;
+    const next = await act(a, { action: "read" });
     // It was the page, after the previous answer: it was not the read that ran into it.
     expect(next.blocked).toContainEqual({
       url: `127.0.0.1:${sites.port}`,

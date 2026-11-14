@@ -96,6 +96,9 @@ type MaskState =
   | { kind: "empty" }
   | { kind: "known"; byAgent: ReadonlyMap<string, Masks>; all: Masks };
 
+const heldKey = (frame: RunnerFrame) =>
+  frame.type === "job.done" ? `job:${frame.job.jobId}` : frame.type === "cli.changed" ? "cli" : null;
+
 const SECRETS_UNREAD = "The runner could not read its secrets yet; try again in a moment";
 
 const CLI_CHECK_MS = 10 * 60_000;
@@ -254,9 +257,18 @@ export class RunnerClient {
     return this.hadWelcome && this.ws?.readyState === WebSocket.OPEN;
   }
 
-  /** For tests and for the CLI: resolves when the server accepts the connection. */
+  /**
+   * Settled: the server accepted the connection whose hello carried the real state (not the neutral hello of a
+   * runner that had not read its secrets yet, which the runner replaces with a new connection), and the
+   * masks are read. What the server knows of this runner is then what the runner is.
+   */
+  private get settled() {
+    return this.connected && !this.helloNeutral && this.maskState.kind !== "unknown";
+  }
+
+  /** For tests and for the CLI: resolves once the runner is settled with the server (see `settled`). */
   ready(): Promise<void> {
-    if (this.connected) return Promise.resolve();
+    if (this.settled) return Promise.resolve();
     return new Promise((r) => this.welcomeWaiters.push(r));
   }
 
@@ -303,11 +315,23 @@ export class RunnerClient {
         return this.write(serialize(neutralHello(hello, [BROWSER_GUARD_FEATURE]), []), frame);
       }
       if (frame.type !== "pong") {
-        this.heldFrames.push({ frame, masks });
+        this.hold(frame, masks);
         return true;
       }
     }
     return this.write(serialize(frame, [...masks, ...(all ?? [])]), frame);
+  }
+
+  /**
+   * Holds a frame until the secrets are read. Invariant: at most one held copy per job (a job.done) and one
+   * CLI state (a cli.changed), however many times the runner reconnects and redelivers; a newer copy takes
+   * the place of the older one, so the order of first arrival is kept.
+   */
+  private hold(frame: RunnerFrame, masks: Masks) {
+    const key = heldKey(frame);
+    const at = key === null ? -1 : this.heldFrames.findIndex((h) => heldKey(h.frame) === key);
+    if (at >= 0) this.heldFrames[at] = { frame, masks };
+    else this.heldFrames.push({ frame, masks });
   }
 
   private write(json: string | null, frame: RunnerFrame): boolean {
@@ -470,7 +494,7 @@ export class RunnerClient {
         this.jobs.redeliver();
         // A hello sent without the CLI states (before any mask): they go now.
         if (this.cliSent === "") this.recheckCli();
-        for (const w of this.welcomeWaiters.splice(0)) w();
+        if (this.settled) for (const w of this.welcomeWaiters.splice(0)) w();
         if (frame.update && this.config.autoUpdate && newer(frame.update.version, this.version)) {
           this.pendingUpdate = frame.update.version;
           void this.tryUpdate();
@@ -524,6 +548,10 @@ export class RunnerClient {
     // The agent's secrets, for every frame this request sends.
     // Not knowing the secrets yet: the request waits for the read in progress, and is rejected if it fails.
     if (this.maskState.kind === "unknown") await this.reading;
+    if (controller.signal.aborted) {
+      this.inflight.delete(id);
+      return;
+    }
     if (this.maskState.kind === "unknown") {
       this.inflight.delete(id);
       return this.write(
@@ -537,6 +565,12 @@ export class RunnerClient {
     // The agent's secrets, for every frame this request sends (the last ones read if this read fails).
     const agentRef = frame.agent;
     const masks = agentRef ? await this.secrets.masks(agentRef).catch(() => this.masksOf(agentRef.id)) : [];
+    // Invariant: a request aborted (the connection dropped, the server canceled) has no effect and gets no
+    // answer. Checked here, after the last await before the op, and by each op before its own effect.
+    if (controller.signal.aborted) {
+      this.inflight.delete(id);
+      return;
+    }
     // The pieces of one text (a command's output, a harness turn's text) go through one flow each.
     const flows = new Flows(() => [...masks, ...(this.allMasks() ?? [])]);
     const piece = (key: string, text: string) => flows.push(key, text);
@@ -578,10 +612,12 @@ export class RunnerClient {
               callTool: (name, input) => this.callTool(id, name, input, masks),
             })
           : await this.run(op as RunnerOp, parsed.data, ctx, masks);
+      if (controller.signal.aborted) return;
       flush();
       this.send({ type: "result", id, ok: true, data }, masks);
       if (op === "secret.store" || op === "secret.remove") await this.refreshMasks();
     } catch (err) {
+      if (controller.signal.aborted) return;
       flush();
       if (err instanceof RunnerError) this.fail(id, { code: err.code, message: err.message }, masks);
       else
@@ -637,7 +673,7 @@ export class RunnerClient {
       case "list":
         return listOp(ctx, args);
       case "job.start":
-        return this.jobs.start(this.needAgent(ctx.agent), args);
+        return this.jobs.start(this.needAgent(ctx.agent), args, ctx.signal);
       case "job.status":
         return this.jobs.status(args.jobId);
       case "job.cancel":
@@ -646,9 +682,9 @@ export class RunnerClient {
         return this.jobs.output(args.jobId, args.tail);
       case "secret.prepare":
         this.needAgent(ctx.agent);
-        return this.secrets.prepare(args.requestId);
+        return this.secrets.prepare(args.requestId, ctx.signal);
       case "secret.store":
-        return this.secrets.store(this.needAgent(ctx.agent), args);
+        return this.secrets.store(this.needAgent(ctx.agent), args, ctx.signal);
       case "secret.list":
         return { secrets: this.secrets.list(this.needAgent(ctx.agent)) };
       case "secret.remove":
@@ -668,7 +704,13 @@ export class RunnerClient {
         const driver = this.browser;
         if (!driver) throw new RunnerError("browser_not_running", "No browser in this environment");
         this.access.requireTool("browser");
-        return driver.handle(op, this.needAgent(ctx.agent), args, (frame) => this.send(frame, masks));
+        return driver.handle(
+          op,
+          this.needAgent(ctx.agent),
+          args,
+          (frame) => this.send(frame, masks),
+          ctx.signal,
+        );
       }
     }
   }
@@ -703,20 +745,10 @@ export class RunnerClient {
    */
   private refreshMasks(): Promise<void> {
     const run = async () => {
-      const before = this.maskState;
+      const read = new Map<string, Masks>();
       try {
         if (this.secrets.locked === true) throw new Error("the secret store is locked");
-        const next = new Map(before.kind === "known" ? before.byAgent : []);
-        for (const agent of this.agents) {
-          const read = await this.secrets.masks(agent);
-          const had = next.get(agent.id) ?? [];
-          const added = read.filter(([v]) => !had.some(([b]) => b === v));
-          if (added.length) next.set(agent.id, [...had, ...added]);
-        }
-        this.maskState = next.size
-          ? { kind: "known", byAgent: next, all: [...next.values()].flat() }
-          : { kind: "empty" };
-        this.readFailures = 0;
+        for (const agent of this.agents) read.set(agent.id, await this.secrets.masks(agent));
       } catch (err) {
         this.readFailures += 1;
         this.log(
@@ -725,13 +757,33 @@ export class RunnerClient {
         this.retryRead();
         return;
       }
-      if (before.kind === "unknown") this.firstRead();
+      this.readFailures = 0;
+      this.learn(read);
     };
     const reading = run().finally(() => {
       if (this.reading === reading) this.reading = null;
     });
     this.reading = reading;
     return reading;
+  }
+
+  /**
+   * The one place the masks change. Invariant: the list only grows while the process lives; a read joins what
+   * is known (a union taken now, not from a copy made before the read's awaits), so reads that end out of
+   * order never take a mask out, and a secret removed from the store stays masked until a restart.
+   */
+  private learn(read: ReadonlyMap<string, Masks>) {
+    const before = this.maskState;
+    const next = new Map(before.kind === "known" ? before.byAgent : []);
+    for (const [agentId, masks] of read) {
+      const had = next.get(agentId) ?? [];
+      const added = masks.filter(([v]) => !had.some(([b]) => b === v));
+      if (added.length) next.set(agentId, [...had, ...added]);
+    }
+    this.maskState = next.size
+      ? { kind: "known", byAgent: next, all: [...next.values()].flat() }
+      : { kind: "empty" };
+    if (before.kind === "unknown") this.firstRead();
   }
 
   private retryRead() {

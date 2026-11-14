@@ -175,11 +175,17 @@ export async function execOp(
         signal: ctx.signal,
       });
   const secrets = ctx.agent
-    ? await ctx.secrets.materialize(ctx.agent, root).catch((err) => {
+    ? await ctx.secrets.materialize(ctx.agent, root, ctx.signal).catch((err) => {
         wrapped?.release();
         throw err;
       })
     : { env: {}, masks: [] as [string, string][], release: () => {} };
+  // Aborted while preparing (the sandbox, the secrets): no process starts.
+  if (ctx.signal.aborted) {
+    secrets.release();
+    wrapped?.release();
+    throw new RunnerError("canceled", "Canceled");
+  }
   const started = Date.now();
   const timeoutMs = (args.timeoutSeconds ?? 60) * 1000;
   try {
@@ -328,6 +334,8 @@ export function writeOp(
     args.encoding === "base64" ? Buffer.from(args.content, "base64") : Buffer.from(args.content, "utf8");
   if (data.byteLength > READ_MAX) throw new RunnerError("too_large", "File is larger than 5 MB");
   mkdirSync(dirname(path), { recursive: true });
+  // Aborted: nothing is written. The write goes into the file itself (its mode, its owner, a link stay).
+  if (ctx.signal.aborted) throw new RunnerError("canceled", "Canceled");
   if (args.append) appendFileSync(path, data);
   else writeFileSync(path, data);
   return { path: args.path, bytes: data.byteLength };

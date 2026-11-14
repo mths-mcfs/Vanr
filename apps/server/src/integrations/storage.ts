@@ -17,7 +17,7 @@ import type { AppDeps } from "../context";
 import { HttpError, notFound } from "../http";
 import { log } from "../logger";
 import { checkServerUrl } from "./net";
-import { type S3Settings, s3Blobs, testS3 } from "./s3";
+import { client, type S3Settings, s3Blobs, testS3 } from "./s3";
 
 const { workspaceStorage, files, fileVersions } = schema;
 type StorageRow = typeof workspaceStorage.$inferSelect;
@@ -233,9 +233,36 @@ function classify(what: string, key: string, err: unknown): HttpError {
   return new StorageUnavailable();
 }
 
-async function bucket<T>(what: string, key: string, call: () => Promise<T>): Promise<T> {
+/**
+ * How long a bucket call may take before it counts as unavailable. `call` covers the short ones (HEAD, a
+ * whole read of a small object, delete, list); `write` a whole upload; `piece` the wait for each next piece
+ * of a streamed body. Tests shorten them.
+ */
+export const bucketDeadlines = { callMs: 30_000, writeMs: 15 * 60_000, pieceMs: 60_000 };
+
+class BucketDeadline extends Error {
+  constructor(what: string, ms: number) {
+    super(`bucket ${what} took longer than ${ms} ms`);
+  }
+}
+
+/** Rejects past `ms` (the client's own request can't be cancelled, so it is left to end by itself). */
+function within<T>(what: string, ms: number, work: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new BucketDeadline(what, ms)), ms);
+  });
+  return Promise.race([work, late]).finally(() => clearTimeout(timer));
+}
+
+async function bucket<T>(
+  what: string,
+  key: string,
+  call: () => Promise<T>,
+  ms = bucketDeadlines.callMs,
+): Promise<T> {
   try {
-    return await call();
+    return await within(what, ms, call());
   } catch (err) {
     throw classify(what, key, err);
   }
@@ -260,7 +287,7 @@ function guardedBody(inner: globalThis.Blob, key: string): globalThis.Blob {
       return new ReadableStream<Uint8Array<ArrayBuffer>>({
         async pull(controller) {
           try {
-            const { done, value } = await reader.read();
+            const { done, value } = await within("read", bucketDeadlines.pieceMs, reader.read());
             if (done) controller.close();
             else controller.enqueue(value);
           } catch (err) {
@@ -279,14 +306,28 @@ interface RemoteStore extends BlobStore {
 }
 
 function remoteStore(cfg: S3ConfigRow, keys: S3Keys): RemoteStore {
-  const inner = s3Blobs(settingsOf(cfg, keys));
+  const settings = settingsOf(cfg, keys);
+  const inner = s3Blobs(settings);
+  /**
+   * The object is missing (its HEAD answered 404): a 404 without a body can't tell a missing object from a
+   * missing bucket, so the bucket is asked directly (a listing of at most one key, the cheapest bucket-level
+   * call the client has). A bucket that is gone or rejects the call makes the read unavailable, not "no file".
+   */
+  const missing = async (key: string) => {
+    await bucket("check the bucket", key, () =>
+      client(settings).list({ maxKeys: 1, prefix: settings.prefix }),
+    );
+    return null;
+  };
   return {
     destination: cfg,
-    put: (key, data, type) => bucket("write", key, () => inner.put(key, data, type)),
-    get: (key) => bucket("read", key, () => inner.get(key)),
+    put: (key, data, type) => bucket("write", key, () => inner.put(key, data, type), bucketDeadlines.writeMs),
+    async get(key) {
+      return (await bucket("read", key, () => inner.get(key))) ?? missing(key);
+    },
     async open(key) {
       const handle = await bucket("read", key, () => inner.open(key));
-      return handle ? { ...handle, body: guardedBody(handle.body, key) } : null;
+      return handle ? { ...handle, body: guardedBody(handle.body, key) } : missing(key);
     },
     delete: (key) => bucket("delete", key, () => inner.delete(key)),
     keys: () => bucket("list", "", () => inner.keys()),

@@ -5,6 +5,7 @@
 // 10 min; after 3 attempts it gives up with an error.
 import { schema } from "@vanr/engine/db";
 import { isLegacyOffice, isOffice, isTextual, SNIFF_BYTES, sniffType } from "@vanr/engine/file-type";
+import { randomId } from "@vanr/engine/ids";
 import { and, asc, eq, inArray, lt, or, sql } from "drizzle-orm";
 import sharp from "sharp";
 import type { AppDeps } from "./context";
@@ -22,10 +23,11 @@ const STALE_MS = 10 * 60_000;
 /** Attempts for a failure OF THE FILE (its content breaks the extractor); storage outages don't count. */
 const MAX_ATTEMPTS = 3;
 /**
- * The storage outage backoff: the first wait is 1 min, doubling up to 1 h per wait. After 24 h of waits the
- * version is marked with STORAGE_GAVE_UP, and once an hour a new pass tries it again (ready once the bucket
- * is back). The count of waits lives in the reason (`storage unavailable (wait N)`): the schema has no field
- * for it.
+ * The storage outage backoff: the first wait is 1 min, doubling up to 1 h per wait. Once the outage has lasted
+ * 24 h (time already gone by since its first failure, not counting the wait about to start) the version is
+ * marked with STORAGE_GAVE_UP, and once an hour a new pass tries it again (ready once the bucket is back).
+ * When the outage began and the count of waits live in the reason (`storage unavailable since <ISO>; wait
+ * N`): the schema has no field for them.
  */
 export const STORAGE_BACKOFF = {
   firstMs: 60_000,
@@ -34,11 +36,15 @@ export const STORAGE_BACKOFF = {
   recheckMs: 60 * 60_000,
 };
 export const STORAGE_GAVE_UP = "storage unavailable for over 24 h";
-const STORAGE_WAIT = /^storage unavailable \(wait (\d+)\)$/;
+const STORAGE_WAIT = /^storage unavailable since (\S+); wait (\d+)$/;
 const waitOf = (n: number) => Math.min(STORAGE_BACKOFF.firstMs * 2 ** (n - 1), STORAGE_BACKOFF.maxMs);
-/** How long the first `n` waits add up to. */
-const waitedFor = (n: number) =>
-  Array.from({ length: n }, (_, i) => waitOf(i + 1)).reduce((a, b) => a + b, 0);
+
+/** The outage this version is waiting out: when it began and how many waits it had (none: a new one). */
+function outageOf(reason: string | null): { since: number; waits: number } | null {
+  const m = STORAGE_WAIT.exec(reason ?? "");
+  const since = m ? Date.parse(m[1] ?? "") : Number.NaN;
+  return m && Number.isFinite(since) ? { since, waits: Number(m[2]) } : null;
+}
 /** An image with more pixels than this doesn't become a thumbnail (decompression bomb). */
 const MAX_THUMB_PIXELS = 40_000_000;
 const THUMB_TYPES = /^image\/(png|jpeg|gif|webp|avif)$/;
@@ -150,11 +156,16 @@ async function claim(deps: AppDeps, batch: number): Promise<VersionRow[]> {
   });
 }
 
-const sameVersion = (v: VersionRow) =>
+/**
+ * The row as this pass claimed it: the claim's mark is the `extractClaimedAt` it set. A pass whose claim went
+ * stale and was taken by another one matches nothing, so it can't record its result over the winner's.
+ */
+const ownClaim = (v: VersionRow) =>
   and(
     eq(fileVersions.fileId, v.fileId),
     eq(fileVersions.version, v.version),
     eq(fileVersions.extractStatus, "working"),
+    v.extractClaimedAt ? eq(fileVersions.extractClaimedAt, v.extractClaimedAt) : undefined,
   );
 
 async function finish(
@@ -169,10 +180,11 @@ async function finish(
     return tx
       .update(fileVersions)
       .set({ ...set, extractClaimedAt: null })
-      .where(sameVersion(v))
+      .where(ownClaim(v))
       .returning({ id: fileVersions.fileId });
   });
-  // The version went away in the middle (the trash was emptied): what was written now would be orphaned.
+  // The claim was lost (another pass took it after it went stale) or the version went away (the trash was
+  // emptied): nothing was recorded, so only what this pass wrote, under its own keys, is removed.
   if (!saved.length) for (const key of written) await discardBlob(deps.blobs, key);
 }
 
@@ -183,9 +195,13 @@ async function finish(
  */
 async function waitForStorage(deps: AppDeps, v: VersionRow, written: string[]): Promise<void> {
   for (const key of written) await discardBlob(deps.blobs, key);
-  const waits = Number(STORAGE_WAIT.exec(v.extractError ?? "")?.[1] ?? 0) + 1;
   const now = deps.now().getTime();
-  const gaveUp = v.extractError === STORAGE_GAVE_UP || waitedFor(waits) > STORAGE_BACKOFF.giveUpMs;
+  const outage = outageOf(v.extractError);
+  const since = outage?.since ?? now;
+  const waits = (outage?.waits ?? 0) + 1;
+  // Only the time already gone by counts. A clock that went back (now before `since`) gives a negative
+  // elapsed time: it keeps waiting, and the outage keeps its start.
+  const gaveUp = v.extractError === STORAGE_GAVE_UP || now - since >= STORAGE_BACKOFF.giveUpMs;
   log.warn("drive.extract_storage_unavailable", { fileId: v.fileId, version: v.version, waits, gaveUp });
   const attempts = Math.max(0, v.extractAttempts - 1);
   await deps.db
@@ -200,13 +216,13 @@ async function waitForStorage(deps: AppDeps, v: VersionRow, written: string[]): 
           }
         : {
             extractStatus: "working",
-            extractError: `storage unavailable (wait ${waits})`,
+            extractError: `storage unavailable since ${new Date(since).toISOString()}; wait ${waits}`,
             // The stale-claim rule takes it back once the wait has passed.
             extractClaimedAt: new Date(now - STALE_MS + waitOf(waits)),
             extractAttempts: attempts,
           },
     )
-    .where(and(eq(fileVersions.fileId, v.fileId), eq(fileVersions.version, v.version)));
+    .where(ownClaim(v));
 }
 
 async function extractOne(deps: AppDeps, v: VersionRow, timeoutMs: number): Promise<void> {
@@ -223,7 +239,8 @@ async function extractOne(deps: AppDeps, v: VersionRow, timeoutMs: number): Prom
     const type = v.detectedType ?? sniffType(bytes.subarray(0, SNIFF_BYTES), v.fileName ?? "") ?? "";
     const set: Partial<VersionRow> = { extractStatus: "ready", extractError: null };
     if (THUMB_TYPES.test(type)) {
-      const key = `${v.blobKey}.thumb.webp`;
+      // A key per attempt: a pass that lost its claim removes only its own thumbnail, never the winner's.
+      const key = `${v.blobKey}.thumb-${randomId(8)}.webp`;
       await deps.blobs.put(key, await thumbnail(bytes), "image/webp");
       written.push(key);
       set.thumbKey = key;
@@ -233,7 +250,7 @@ async function extractOne(deps: AppDeps, v: VersionRow, timeoutMs: number): Prom
     const gotenberg = deps.config.drive.gotenbergUrl;
     if (gotenberg && (isOffice(type) || isLegacyOffice(type))) {
       const pdf = await officeToPdf(gotenberg, bytes, v.fileName ?? "file");
-      const key = `${v.blobKey}.preview.pdf`;
+      const key = `${v.blobKey}.preview-${randomId(8)}.pdf`;
       await deps.blobs.put(key, pdf, "application/pdf");
       written.push(key);
       set.previewKey = key;

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type RunnerFrame, runnerFrame } from "@vanr/engine/runner-protocol";
@@ -464,4 +464,299 @@ test("a request that arrives before the secrets are read waits for the read, and
   });
   await reading;
   expect(sent).toMatchObject([{ type: "result", id: "req_1", ok: false, error: { code: "internal" } }]);
+});
+
+test("property: reads of the secrets that end in any order never take a mask out (the list only grows)", async () => {
+  const r = seeded(4040);
+  const values = ["SECRET-A-0001", "SECRET-B-0002", "SECRET-C-0003", "SECRET-D-0004"];
+  for (let round = 0; round < 300; round++) {
+    const reads: { masks: [string, string][]; done: (m: [string, string][]) => void }[] = [];
+    const { c, call } = fakeClient({
+      maskState: { kind: "empty" },
+      agents: [agent],
+      secrets: {
+        masks: () =>
+          new Promise<[string, string][]>((done) => {
+            const masks = values
+              .filter(() => r.int(2, "has"))
+              .map((v): [string, string] => [v, `[secret:${v}]`]);
+            reads.push({ masks, done });
+          }),
+        lock: () => {},
+      },
+    });
+    const n = 2 + r.int(4, "reads");
+    const pending = Array.from({ length: n }, () => call("refreshMasks"));
+    // The reads end in an order the generator picks; each one, as it ends, may only add.
+    const order = reads.map((_, i) => i).sort(() => r.int(3) - 1);
+    const expected = new Set<string>();
+    for (const i of order) {
+      const read = reads[i];
+      if (!read) continue;
+      read.done(read.masks);
+      await pending[i];
+      for (const [v] of read.masks) expected.add(v);
+      const state = Reflect.get(c, "maskState") as { kind: string; all?: [string, string][] };
+      expect(new Set((state.all ?? []).map(([v]) => v))).toEqual(expected);
+    }
+  }
+});
+
+test("property: a request aborted at any point of waiting has no effect and no answer (write, exec, job.start, secret.remove)", async () => {
+  const home = mkdtempSync(join(tmpdir(), "runner-abort-"));
+  try {
+    const work = join(home, "ws");
+    const { Access } = await import("./access");
+    const { defaultPolicyContext } = await import("./sandbox");
+    const tools = { claude: false, codex: false, commands: true, browser: false };
+    const access = new Access(() => ({ access: { folders: [], tools }, workDir: work, paused: false }));
+    const root = access.agentRoot(agent);
+    let points = 0;
+    let abortAt = -1;
+    let abort: () => void = () => {};
+    // Each async step of the secrets is a point where the request can be aborted (the connection drops).
+    const gate = async <T>(value: T): Promise<T> => {
+      const k = points++;
+      await Promise.resolve();
+      if (k === abortAt) abort();
+      return value;
+    };
+    const removed: string[] = [];
+    // The point at which the op's effect happened: an abort after it is not "before the effect".
+    let effectAt = Number.POSITIVE_INFINITY;
+    const secrets = {
+      masks: () => gate([] as [string, string][]),
+      materialize: () => gate({ env: {}, masks: [] as [string, string][], release: () => {} }),
+      secretFiles: () => [],
+      lock: () => {},
+      // A sync op: only the check of the request itself stands between the abort and its effect.
+      remove: (_a: unknown, name: string) => {
+        effectAt = points;
+        removed.push(name);
+        return { removed: true };
+      },
+    };
+    const policy = defaultPolicyContext(home);
+    const cases = [
+      {
+        op: "write",
+        args: (n: number) => ({ path: `w${n}.txt`, content: "x" }),
+        effect: (n: number) => existsSync(join(root, `w${n}.txt`)),
+      },
+      {
+        op: "exec",
+        args: (n: number) => ({ command: `touch '${join(home, `e${n}`)}'` }),
+        effect: (n: number) => existsSync(join(home, `e${n}`)),
+      },
+      {
+        op: "job.start",
+        args: (n: number) => ({
+          jobId: `job_${String(n).padStart(8, "0")}`,
+          executor: "shell",
+          title: "t",
+          prompt: "true",
+        }),
+        effect: (n: number, jobs?: Jobs) =>
+          (jobs?.pending() ?? []).some((j) => j.jobId === `job_${String(n).padStart(8, "0")}`),
+      },
+    ];
+    const all: { op: string; args: (n: number) => object; effect: (n: number, jobs?: Jobs) => boolean }[] = [
+      ...cases,
+      { op: "secret.remove", args: (n) => ({ name: `S${n}` }), effect: (n) => removed.includes(`S${n}`) },
+    ];
+    let n = 0;
+    const tried: Record<string, number> = {};
+    for (const kase of all) {
+      for (let at = -1; ; at++) {
+        n++;
+        points = 0;
+        abortAt = at;
+        effectAt = Number.POSITIVE_INFINITY;
+        const jobs = new Jobs({
+          home: join(home, `h${n}`),
+          access,
+          secrets: secrets as never,
+          cli: {} as never,
+          maxConcurrent: () => 5,
+          maxSeconds: () => 30,
+          send: () => true,
+          bins: { claude: "claude", codex: "codex" },
+          sandbox: sandboxOff(),
+          policy,
+        } as never);
+        const { c, sent, call } = fakeClient({
+          maskState: { kind: "unknown" },
+          agents: [agent],
+          secrets,
+          access,
+          sandbox: sandboxOff(),
+          policy,
+          jobs,
+          opts: { log: () => {}, backoffBaseMs: 60_000 },
+        });
+        abort = () => (Reflect.get(c, "inflight") as Map<string, AbortController>).get("req_1")?.abort();
+        const reading = call("refreshMasks");
+        await call("onRequest", {
+          type: "request",
+          id: "req_1",
+          op: kase.op,
+          agent,
+          stream: false,
+          args: kase.args(n),
+        });
+        await reading;
+        clearTimeout(Reflect.get(c, "readRetry") as ReturnType<typeof setTimeout>);
+        const effect = kase.effect(n, jobs);
+        const answered = sent.some((f) => f.type === "result");
+        if (at === -1) {
+          // Not aborted: the op happens and answers (the check is not vacuous).
+          expect([kase.op, effect, answered]).toEqual([kase.op, true, true]);
+          continue;
+        }
+        if (at >= Math.min(points, effectAt)) break;
+        expect([kase.op, at, effect, answered]).toEqual([kase.op, at, false, false]);
+        tried[kase.op] = (tried[kase.op] ?? 0) + 1;
+      }
+    }
+    console.log(`[abort] aborted at every waiting point: ${JSON.stringify(tried)}`);
+    expect(Object.keys(tried).sort()).toEqual(["exec", "job.start", "secret.remove", "write"]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("property: however many reconnections fail to read the secrets, each pending job is held once", async () => {
+  const home = mkdtempSync(join(tmpdir(), "runner-held-"));
+  try {
+    mkdirSync(join(home, "jobs"));
+    const job = (i: number) => ({
+      jobId: `job_${String(i).padStart(8, "0")}`,
+      status: "done",
+      exitCode: 0,
+      result: "ok",
+      files: [],
+      session: null,
+      startedAt: null,
+      endedAt: null,
+      denied: [],
+      blocked: [],
+      diff: "x".repeat(50_000),
+      agent,
+      executor: "shell",
+      delivered: false,
+    });
+    const journal = [job(1), job(2), job(3)];
+    writeFileSync(join(home, "jobs", "journal.json"), JSON.stringify(journal));
+    let client: { call: (name: string, ...a: unknown[]) => unknown } | undefined;
+    const jobs = new Jobs({
+      home,
+      send: (e: RunnerFrame) => client?.call("send", e),
+    } as unknown as ConstructorParameters<typeof Jobs>[0]);
+    const made = fakeClient({
+      maskState: { kind: "unknown" },
+      jobs,
+      agents: [agent],
+      opts: { log: () => {}, backoffBaseMs: 60_000 },
+      secrets: { masks: async () => Promise.reject(new Error("cannot decrypt")), lock: () => {} },
+    });
+    client = made;
+    const held = () => Reflect.get(made.c, "heldFrames") as { frame: RunnerFrame }[];
+    const sizes: number[] = [];
+    for (let i = 0; i < 300; i++) {
+      jobs.redeliver();
+      await made.call("refreshMasks");
+      sizes.push(held().length);
+    }
+    clearTimeout(Reflect.get(made.c, "readRetry") as ReturnType<typeof setTimeout>);
+    expect(new Set(sizes)).toEqual(new Set([3]));
+    expect(held().map((h) => h.frame.type === "job.done" && h.frame.job.jobId)).toEqual(
+      journal.map((j) => j.jobId),
+    );
+    // The read works: each job goes once.
+    Reflect.set(made.c, "secrets", { masks: async () => MASKS, lock: () => {} });
+    await made.call("refreshMasks");
+    expect(
+      made.sent.filter((f) => f.type === "job.done").map((f) => f.type === "job.done" && f.job.jobId),
+    ).toEqual(journal.map((j) => j.jobId));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("ready() resolves at the welcome of the connection with the real hello, not at the neutral one before it", async () => {
+  const real = globalThis.WebSocket;
+  const hellos: string[] = [];
+  const closes: number[] = [];
+  class FakeSocket {
+    static OPEN = 1;
+    readyState = 1;
+    onopen: (() => void) | null = null;
+    onclose: (() => void) | null = null;
+    send(s: string) {
+      const f = JSON.parse(s);
+      if (f.type === "hello") hellos.push(f.hostname);
+    }
+    close(code: number) {
+      closes.push(code);
+      this.readyState = 3;
+      this.onclose?.();
+    }
+  }
+  globalThis.WebSocket = FakeSocket as unknown as typeof WebSocket;
+  try {
+    const { c, call } = fakeClient({
+      maskState: { kind: "unknown" },
+      config: {
+        server: "https://example.invalid",
+        name: "laptop",
+        workDir: "/w",
+        paused: false,
+        access: { folders: [], tools: { claude: false, codex: false, commands: true, browser: false } },
+      },
+      opts: {
+        version: "1.2.3",
+        log: () => {},
+        backoffBaseMs: 60_000,
+        home: mkdtempSync(join(tmpdir(), "runner-ready-")),
+      },
+      cli: { states: () => ({}) },
+      jobs: { pending: () => [], redeliver: () => {} },
+      executors: [],
+      sandbox: sandboxOff(),
+      heartbeatMs: 25_000,
+      agents: [agent],
+      toolCalls: new Map(),
+      welcomeWaiters: [],
+      retryLater: () => {},
+      secrets: { masks: async () => MASKS, lock: () => {}, unlock: async () => {} },
+    });
+    const order: string[] = [];
+    const ready = (call("ready") as Promise<void>).then(() => order.push("ready"));
+    const welcome = {
+      type: "welcome",
+      runnerId: "rnr_1",
+      name: "laptop",
+      heartbeatMs: 25_000,
+      storeKey: "k",
+      agents: [{ ...agent, name: "Lia" }],
+    };
+    const connect = () => {
+      call("openSocket", "rst_fixture_session_1234");
+      (Reflect.get(c, "ws") as FakeSocket).onopen?.();
+      clearTimeout(Reflect.get(c, "watchdog") as ReturnType<typeof setTimeout>);
+    };
+    // The first connection: a neutral hello; its welcome reads the secrets and the runner reconnects.
+    connect();
+    await call("onFrame", welcome);
+    order.push("first welcome handled");
+    expect(closes).toEqual([4006]);
+    // The second connection: the real hello; its welcome settles the runner.
+    connect();
+    await call("onFrame", welcome);
+    await ready;
+    expect(hellos).toEqual(["unknown", expect.not.stringMatching(/^unknown$/)]);
+    expect(order).toEqual(["first welcome handled", "ready"]);
+  } finally {
+    globalThis.WebSocket = real;
+  }
 });

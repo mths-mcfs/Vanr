@@ -6,7 +6,8 @@
     "apps/runner/src/browser-network.test.ts": 13770,
     "apps/runner/src/cdp.test.ts": 4255,
     "apps/runner/src/cli.test.ts": 2,
-    "apps/runner/src/client-send.test.ts": 300,
+    "apps/runner/src/client-send.test.ts": 500,
+    "apps/runner/src/effects.test.ts": 500,
     "apps/runner/src/frame-gate.test.ts": 1,
     "apps/runner/src/harness.test.ts": 840,
     "apps/runner/src/jobs-diff.test.ts": 6700,
@@ -39,7 +40,7 @@
     "apps/server/test/drive-extract.test.ts": 3377,
     "apps/server/test/drive-routes.test.ts": 26950,
     "apps/server/test/drive-upload-race.test.ts": 27444,
-    "apps/server/test/extract-outage.test.ts": 9231,
+    "apps/server/test/extract-outage.test.ts": 16520,
     "apps/server/test/mail-protocols.test.ts": 19,
     "apps/server/test/notify-text.test.ts": 1,
     "apps/server/test/production.test.ts": 1,
@@ -113,6 +114,7 @@
     "packages/engine/src/wiki/props-vault.test.ts": 1,
     "packages/engine/src/work-state.test.ts": 2,
     "scripts/ci/gate.test.ts": 14,
-    "scripts/typecheck.test.ts": 4
+    "scripts/typecheck.test.ts": 4,
+    "apps/server/test/storage-bucket.test.ts": 19513
   }
 }
