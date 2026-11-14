@@ -4,6 +4,9 @@ import type { AppDeps, AppEnv } from "./context";
 import { errorBody, HttpError } from "./http";
 import { log } from "./logger";
 import { registerAccount } from "./routes/account";
+import { registerInvitations } from "./routes/invitations";
+import { registerNotifications } from "./routes/notifications";
+import { registerPush } from "./routes/push";
 import { registerWaitlist } from "./routes/waitlist";
 import { createStatic } from "./static";
 import { registerWorkspaceScope } from "./workspace-scope";
@@ -101,6 +104,9 @@ export function createApp(deps: AppDeps) {
   // control S5, invitations S2, notifications S2, push S2, drive uploads S3, drive S2, wiki S4, bases S3,
   // issues S4, debates S4, routines S4, calendar S4, search S2, connectors S6, integrations S5, runners S2,
   // runner pairings S3, assignments S5.
+  registerInvitations(app);
+  registerNotifications(app);
+  registerPush(app);
 
   app.all("/api/*", (c) =>
     c.json(errorBody("route_not_found", `No route for ${c.req.method} ${c.req.path}`), 404),

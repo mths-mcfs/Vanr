@@ -17,6 +17,7 @@ import { createMailer, type Mailer } from "./mailer";
 import { testModelCheck } from "./models";
 import { loadVapid, webPushSender } from "./push";
 import { Hub } from "./realtime/hub";
+import { hasPendingInvite, INVITE_COOKIE } from "./routes/invitations";
 import { RunnerHub } from "./runners/hub";
 import { BackgroundWork } from "./runtime/background";
 import { postgresLedger } from "./usage-ledger";
@@ -140,7 +141,7 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     if (effective.signupOpen) return true;
     const [row] = await db.select({ n: count() }).from(schema.users);
     if ((row?.n ?? 0) === 0) return true;
-    return hasPendingInvite(email, headers);
+    return hasPendingInvite(deps, email, readCookie(headers, INVITE_COOKIE));
   };
   const origins = [publicUrl, ...(opts.extraOrigins ?? [])];
   const auth = createAuth({ db, config: effective, mailer, trustedOrigins: origins, signupAllowed });
@@ -195,12 +196,15 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   };
 }
 
-/**
- * Pending invite by email or by the cookie the invite page leaves. The invitations slice replaces this with
- * `hasPendingInvite` from routes/invitations; until then nobody has an invite.
- */
-async function hasPendingInvite(_email: string, _headers: Headers | null): Promise<boolean> {
-  return false;
+/** A cookie of the request (the invitation token the invite page leaves), or null. */
+function readCookie(headers: Headers | null, name: string): string | null {
+  const raw = headers?.get("cookie");
+  if (!raw) return null;
+  for (const part of raw.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq > 0 && part.slice(0, eq).trim() === name) return decodeURIComponent(part.slice(eq + 1).trim());
+  }
+  return null;
 }
 
 /** A runtime method the server doesn't have yet (slice S6 brings the agent runtime). */
