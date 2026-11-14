@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { strToU8, UnzipInflate, zipSync } from "fflate";
-import { DEFAULT_LIMITS, extractPages, readZip } from "../src/drive-extract-core";
+import { DEFAULT_LIMITS, ExtractError, extractPages, readZip } from "../src/drive-extract-core";
 
 const zip = (files: Record<string, string>) =>
   zipSync(Object.fromEntries(Object.entries(files).map(([k, v]) => [k, strToU8(v)])));
@@ -9,6 +9,59 @@ const sheet = (rows: string) => `<worksheet><sheetData>${rows}</sheetData></work
 const manifest = '<sheet name="First" r:id="rId2"/><sheet name="Second" r:id="rId1"/>';
 const rels = (folder: string, part: string) =>
   `<Relationships><Relationship Id="rId1" Target="${folder}/${part}1.xml"/><Relationship Id="rId2" Target="/${folder === "slides" ? "ppt" : "xl"}/${folder}/${part}2.xml"/></Relationships>`;
+const workbook = (rows: string) =>
+  zip({
+    "xl/workbook.xml": `<workbook><sheets>${manifest}</sheets></workbook>`,
+    "xl/_rels/workbook.xml.rels": rels("worksheets", "sheet"),
+    "xl/worksheets/sheet1.xml": sheet(rows),
+    "xl/worksheets/sheet2.xml": sheet(`<row>${cell("A1", "Start")}</row>`),
+  });
+
+test.each(["A", "XFD"])("XLSX bounds text and sparse gaps before assembly: %s", async (column) => {
+  const limit = 1024;
+  const value = column === "A" ? "x".repeat(limit) : "END";
+  const bytes = workbook(
+    Array.from({ length: 10 }, (_, i) => `<row>${cell(`${column}${i + 1}`, value)}</row>`).join(""),
+  );
+  let joined = 0;
+  const join = Array.prototype.join;
+  const spy = spyOn(Array.prototype, "join").mockImplementation(function (this: unknown[], separator) {
+    const out = join.call(this, separator);
+    if (separator === "\t" || separator === "\n") joined += out.length;
+    return out;
+  });
+  try {
+    const pages = await extractPages(
+      bytes,
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      { ...DEFAULT_LIMITS, textChars: limit },
+    );
+    spy.mockRestore();
+    const first = "## First\n\nStart";
+    const second = "## Second\n\n";
+    expect(pages).toEqual([
+      { page: 1, markdown: first },
+      {
+        page: 2,
+        markdown: second + (column === "A" ? "x" : "\t").repeat(limit - first.length - second.length),
+      },
+    ]);
+    expect(joined + "## First\n\n".length + second.length).toBeLessThanOrEqual(limit);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+test("XLSX rejects columns beyond XFD before expanding gaps", async () => {
+  for (const column of ["XFE", "ZZZZZ"])
+    await expect(
+      extractPages(
+        workbook(`<row>${cell(`${column}1`, "END")}</row>`),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        { ...DEFAULT_LIMITS, textChars: 1024 },
+      ),
+    ).rejects.toBeInstanceOf(ExtractError);
+});
 
 test("Office manifests preserve reordered pages, sheet names and sparse cell columns", async () => {
   const pages = await extractPages(

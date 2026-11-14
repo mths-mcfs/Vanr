@@ -192,28 +192,58 @@ function pptx(files: Map<string, Uint8Array>): Page[] {
 }
 
 /** Excel: one sheet per page, rows separated by tabs (values and shared strings). */
-function xlsx(files: Map<string, Uint8Array>): Page[] {
+function xlsx(files: Map<string, Uint8Array>, left: number): Page[] {
   const shared = [...elements(decode(files.get("xl/sharedStrings.xml")), "si")].map((e) => runs(e.body, "t"));
   const pages: Page[] = [];
   for (const s of officeParts(files, "xl/workbook.xml", "sheet")) {
+    if (left <= 0) break;
     const xml = decode(files.get(s.name));
+    const heading = s.title ? `## ${s.title.slice(0, left)}\n\n`.slice(0, left) : "";
     const rows: string[] = [];
+    let size = heading.length;
     for (const row of elements(xml, "row")) {
+      const room = Math.max(0, left - size - (rows.length ? 1 : 0));
       const cells: string[] = [];
+      let columns = 0;
+      let hasText = false;
       for (const { attrs, body } of elements(row.body, "c")) {
-        const column = /^[A-Z]+/i.exec(attr(attrs, "r"))?.[0];
+        const reference = attr(attrs, "r");
+        const column = /^([A-Z]{1,3})[1-9][0-9]*$/i.exec(reference)?.[1];
+        if (reference && !column) throw new ExtractError("invalid XLSX cell reference");
         const at = column
           ? [...column.toUpperCase()].reduce((n, c) => n * 26 + c.charCodeAt(0) - 64, 0) - 1
-          : cells.length;
+          : columns;
+        if (at >= 16_384) throw new ExtractError("XLSX column exceeds XFD");
+        columns = Math.max(columns, at + 1);
         const v = elements(body, "v").next().value?.body;
-        if (/\bt="s"/.test(attrs)) cells[at] = shared[Number(v)] ?? "";
-        else if (/\bt="inlineStr"/.test(attrs)) cells[at] = runs(body, "t");
-        else cells[at] = v === undefined ? "" : unescapeXml(v);
+        const value = /\bt="s"/.test(attrs)
+          ? (shared[Number(v)] ?? "")
+          : /\bt="inlineStr"/.test(attrs)
+            ? runs(body, "t")
+            : v === undefined
+              ? ""
+              : unescapeXml(v);
+        if (value.trim()) hasText = true;
+        // Columns beyond the visible prefix must not expand the array.
+        if (at < room) cells[at] = value;
       }
-      if (cells.some((x) => x.trim())) rows.push(cells.join("\t"));
+      if (!hasText) continue;
+      let line = "";
+      let previous = 0;
+      cells.forEach((value, at) => {
+        if (line.length >= room) return;
+        line += "\t".repeat(Math.min(at - previous, room - line.length));
+        line += value.slice(0, room - line.length);
+        previous = at;
+      });
+      line += "\t".repeat(Math.min(columns - 1 - previous, room - line.length));
+      rows.push(line);
+      size += line.length + (rows.length > 1 ? 1 : 0);
+      if (size >= left) break;
     }
     if (rows.length) {
-      pages.push({ page: s.page, markdown: `${s.title ? `## ${s.title}\n\n` : ""}${rows.join("\n")}` });
+      pages.push({ page: s.page, markdown: heading + rows.join("\n") });
+      left -= size;
     }
   }
   return pages;
@@ -266,7 +296,7 @@ export async function extractPages(
     const kind = officeKind(type);
     if (kind) {
       const files = readZip(bytes, OFFICE_ENTRIES[kind], limits);
-      pages = kind === "docx" ? docx(files) : kind === "pptx" ? pptx(files) : xlsx(files);
+      pages = kind === "docx" ? docx(files) : kind === "pptx" ? pptx(files) : xlsx(files, limits.textChars);
     }
   }
   return capped(pages, limits.textChars);
