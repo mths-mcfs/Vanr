@@ -10,8 +10,8 @@ import type postgres from "postgres";
 export const DROP_LOCKS = process.env.VANR_TEST_DROP_LOCKS === "1";
 
 export interface Hooks {
-  /** Runs once after the first matching query resolves, at the point where the lock matters. */
-  after?: { kind: "select" | "update"; sqlIncludes?: string; run: () => Promise<void> };
+  /** Runs once after a query of `kind` resolves, optionally matching its SQL (the hold point). */
+  after?: { kind: "select" | "update"; match?: string; run: () => Promise<void> };
   /** Runs before the first query of `kind` is sent (the second transaction says it is about to read). */
   before?: { kind: "select"; run: () => void };
   pids: Set<number>;
@@ -69,7 +69,7 @@ export function instrumented(db: Db, hooks: Hooks): Db {
               if (
                 hooks.after?.kind === kind &&
                 !fired.has(`after:${kind}`) &&
-                (!hooks.after.sqlIncludes || query.toSQL().sql.includes(hooks.after.sqlIncludes))
+                (!hooks.after.match || query.toSQL().sql.includes(hooks.after.match))
               ) {
                 fired.add(`after:${kind}`);
                 await hooks.after.run();
@@ -139,7 +139,7 @@ export async function forcedPair<T>(
   label: string,
   kind: "select" | "update",
   start: (side: "A" | "B", hooks: Hooks) => Promise<T>,
-  sqlIncludes?: string,
+  match?: string,
 ): Promise<{ a: T; b: T; aPids: number[]; bPids: number[] }> {
   const aPids = new Set<number>();
   const bPids = new Set<number>();
@@ -152,7 +152,7 @@ export async function forcedPair<T>(
       pids: aPids,
       after: {
         kind,
-        sqlIncludes,
+        match,
         run: async () => {
           held.open();
           await release.opened;
@@ -172,7 +172,7 @@ export async function forcedPair<T>(
       pids: bPids,
       after: {
         kind,
-        sqlIncludes,
+        match,
         run: async () => {
           bPassed = true;
         },

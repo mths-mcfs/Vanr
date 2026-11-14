@@ -352,10 +352,40 @@ describe("invitation rules", () => {
       `${ws(id)}/invitations/${ownerInvite.invitation.id}/resend`,
     );
     expect(resend.status).toBe(403);
+    const revoke = await call(adm.browser, "DELETE", `${ws(id)}/invitations/${ownerInvite.invitation.id}`);
+    expect(revoke.status).toBe(403);
+    const replace = await call(adm.browser, "POST", `${ws(id)}/invitations`, {
+      email: "other-owner@ws.test",
+      role: "member",
+    });
+    expect(replace.status).toBe(403);
     // The owner's invitation was left as it was.
     expect((await preview(new Browser(server.url), tokenOf(ownerInvite.url))).body).toMatchObject({
       role: "owner",
     });
+    const renewed = await invite(olga.browser, id, "other-owner@ws.test", "member");
+    expect((await preview(new Browser(server.url), tokenOf(ownerInvite.url))).status).toBe(404);
+    expect((await preview(new Browser(server.url), tokenOf(renewed.url))).body.role).toBe("member");
+    const revocable = await invite(olga.browser, id, "revoke-owner@ws.test", "owner");
+    expect(
+      (await call(olga.browser, "DELETE", `${ws(id)}/invitations/${revocable.invitation.id}`)).status,
+    ).toBe(204);
+
+    // Bulk skips a live invitation, but must also protect an expired owner invitation it would replace.
+    const expired = await invite(olga.browser, id, "expired-owner@ws.test", "owner");
+    await server.deps.db
+      .update(schema.invitations)
+      .set({ expiresAt: new Date(0) })
+      .where(eq(schema.invitations.id, expired.invitation.id));
+    const bulk = (b: Browser) =>
+      call(b, "POST", `${ws(id)}/invitations/bulk`, { emails: ["expired-owner@ws.test"], role: "member" });
+    expect((await bulk(adm.browser)).status).toBe(403);
+    const [unchanged] = await server.deps.db
+      .select()
+      .from(schema.invitations)
+      .where(eq(schema.invitations.id, expired.invitation.id));
+    expect(unchanged?.status).toBe("pending");
+    expect((await bulk(olga.browser)).body.results[0].status).toBe("invited");
   });
 
   test("inviting the same email again renews the invitation: the old link stops and only one stays pending", async () => {
