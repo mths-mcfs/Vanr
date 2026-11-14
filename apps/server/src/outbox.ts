@@ -10,7 +10,7 @@
 // 0 (config), the tools send at once, without coming here.
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
-import { and, asc, eq, lte, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import { z } from "zod";
 import { agentCanPost } from "./channels";
 import { type AppDeps, requireRuntime } from "./context";
@@ -120,7 +120,7 @@ export async function deliverDue(deps: AppDeps): Promise<number> {
       .where(
         and(
           eq(outbox.kind, "post"),
-          eq(outbox.status, "sent"),
+          inArray(outbox.status, ["sending", "sent"]),
           eq(reversibleActions.workspaceId, outbox.workspaceId),
           sql`${reversibleActions.params}->>'outboxId' = ${outbox.id}`,
           sql`${reversibleActions.target}->>'type' = 'outbox'`,

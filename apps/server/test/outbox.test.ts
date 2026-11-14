@@ -212,6 +212,32 @@ describe("a queued send and its receipt", () => {
 
 describe("a post with an undo window", () => {
   test(
+    "a published post left sending after both status writes fail recovers its receipt without reposting",
+    async () => {
+      const t = await team();
+      const row = await queuePost(t, "published before the status write");
+      await server.deps.db.execute(sql`CREATE FUNCTION fail_sent_state() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.status = 'sent' THEN RAISE EXCEPTION 'sent state unavailable'; END IF; RETURN NEW; END $$`);
+      await server.deps.db.execute(sql`CREATE TRIGGER fail_sent_state BEFORE UPDATE ON outbox
+        FOR EACH ROW EXECUTE FUNCTION fail_sent_state()`);
+      try {
+        later();
+        await expect(deliverDue(server.deps)).rejects.toThrow("Failed query");
+        expect((await rowOf(row.id))?.status).toBe("sending");
+      } finally {
+        await server.deps.db.execute(sql`DROP TRIGGER fail_sent_state ON outbox`);
+        await server.deps.db.execute(sql`DROP FUNCTION fail_sent_state()`);
+      }
+      expect(await deliverDue(server.deps)).toBe(0);
+      const posted = await server.deps.db.select().from(messages).where(eq(messages.channelId, t.sales));
+      expect(posted).toHaveLength(1);
+      expect((await actionOf(row.id))?.target).toMatchObject({ type: "message", id: posted[0]?.id });
+      expect((await actionOf(row.id))?.params.failed).toBeUndefined();
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "a published post stays sent if its receipt can't be retargeted; the next pass repairs it without reposting",
     async () => {
       const t = await team();
