@@ -131,6 +131,7 @@ const ApiIteration = z.object({
   output_tokens: tokenCount,
   cache_read_input_tokens: optionalCount,
   cache_creation_input_tokens: optionalCount,
+  cache_creation: ApiUsage.shape.cache_creation,
 });
 
 function invalid(what: string, error: z.ZodError): ModelError {
@@ -188,6 +189,9 @@ function iterationsOf(raw: unknown): UsageIteration[] {
       inputTokens: it.input_tokens,
       cachedTokens: it.cache_read_input_tokens ?? 0,
       cacheWriteTokens: it.cache_creation_input_tokens ?? 0,
+      ...(it.cache_creation?.ephemeral_1h_input_tokens
+        ? { cacheWrite1hTokens: it.cache_creation.ephemeral_1h_input_tokens }
+        : {}),
       outputTokens: it.output_tokens,
     });
   }
@@ -273,6 +277,7 @@ class StreamAssembler {
   private usage: Record<string, unknown> = {};
   private iterations: unknown;
   endedWith: string | null = null;
+  toolInputError: ToolInputJsonError | null = null;
 
   /** Checks one event and returns what the consumer sees now (text pieces, the thinking signal). */
   push(raw: unknown): ModelEvent[] {
@@ -312,7 +317,8 @@ class StreamAssembler {
           try {
             block.input = JSON.parse(json);
           } catch {
-            throw new ToolInputJsonError(`Tool input of block ${index} is not JSON`);
+            // Drain the response for its final usage before retrying this paid attempt.
+            this.toolInputError ??= new ToolInputJsonError(`Tool input of block ${index} is not JSON`);
           }
         }
         this.open = null;
@@ -422,17 +428,18 @@ class StreamAssembler {
   }
 }
 
-function mapError(err: unknown): unknown {
+function mapError(err: unknown, usage?: Usage): unknown {
+  if (err instanceof ModelError) return usage ? new ModelError(err.code, err.message, usage) : err;
   if (err instanceof Anthropic.AuthenticationError || err instanceof Anthropic.PermissionDeniedError) {
-    return new ModelError("auth", err.message);
+    return new ModelError("auth", err.message, usage);
   }
-  if (err instanceof Anthropic.RateLimitError) return new ModelError("rate_limit", err.message);
-  if (err instanceof Anthropic.BadRequestError) return new ModelError("bad_request", err.message);
-  if (err instanceof Anthropic.APIConnectionError) return new ModelError("network", err.message);
+  if (err instanceof Anthropic.RateLimitError) return new ModelError("rate_limit", err.message, usage);
+  if (err instanceof Anthropic.BadRequestError) return new ModelError("bad_request", err.message, usage);
+  if (err instanceof Anthropic.APIConnectionError) return new ModelError("network", err.message, usage);
   if (err instanceof Anthropic.APIError) {
     return err.status === 529
-      ? new ModelError("overloaded", err.message)
-      : new ModelError("network", err.message);
+      ? new ModelError("overloaded", err.message, usage)
+      : new ModelError("network", err.message, usage);
   }
   return err;
 }
@@ -488,6 +495,8 @@ export function anthropicProvider(apiKey: string, opts: { fetch?: typeof fetch }
         // And the conversation history, on the last block.
         cache_control: { type: "ephemeral" },
       };
+      const paid: UsageIteration[] = [];
+      let billedUsage: Usage | undefined;
       for (let attempt = 0; ; attempt++) {
         const assembler = new StreamAssembler();
         let streamed = false;
@@ -495,32 +504,46 @@ export function anthropicProvider(apiKey: string, opts: { fetch?: typeof fetch }
           // The raw event stream: the SDK's accumulator would merge events before they could be checked.
           const stream = await client.messages.create(params, options);
           for await (const event of stream) {
-            for (const out of assembler.push(event)) {
+            const output = assembler.push(event);
+            if (assembler.toolInputError) continue;
+            for (const out of output) {
               if (out.type === "text") streamed = true;
               yield out;
             }
           }
           const { blocks, usage } = assembler.finish();
+          const iterations = usage.iterations?.length ? usage.iterations : [{ ...usage, type: "message" }];
+          paid.push(
+            ...iterations.map((it) => ({
+              speed: usage.speed,
+              inferenceGeo: usage.inferenceGeo,
+              serviceTier: usage.serviceTier,
+              ...it,
+            })),
+          );
+          billedUsage = attempt ? { ...usage, iterations: [...paid] } : usage;
+          if (assembler.toolInputError) throw assembler.toolInputError;
           const stop = stopOf(assembler.endedWith);
           const content = contentOf(blocks);
           // Tool input cut at the token limit does not run.
           if (stop === "max_tokens" && content.some((c) => c.type === "tool_use")) {
             throw new ModelError("invalid_tool_input", "Tool input was cut at max_tokens");
           }
-          yield { type: "turn", content, raw: blocks, stop, usage };
+          yield { type: "turn", content, raw: blocks, stop, usage: billedUsage };
           return;
         } catch (err) {
-          if (req.signal.aborted || err instanceof ModelError) throw err;
-          if (err instanceof Anthropic.APIError) throw mapError(err);
+          if (req.signal.aborted || err instanceof ModelError || err instanceof Anthropic.APIError)
+            throw mapError(err, billedUsage);
           // With eager_input_streaming, an input that does not parse as JSON rejects the turn. Retries a
           // few times, only if nothing was shown yet (otherwise the streamed text would come out twice).
           if (err instanceof ToolInputJsonError) {
             if (!streamed && attempt < JSON_RETRIES) continue;
-            throw new ModelError("invalid_tool_input", err.message);
+            throw new ModelError("invalid_tool_input", err.message, billedUsage);
           }
           // The SDK could not read the stream itself (an event that is not JSON): a malformed response.
-          if (err instanceof Anthropic.AnthropicError) throw new ModelError("invalid_response", err.message);
-          throw new ModelError("network", err instanceof Error ? err.message : String(err));
+          if (err instanceof Anthropic.AnthropicError)
+            throw new ModelError("invalid_response", err.message, billedUsage);
+          throw new ModelError("network", err instanceof Error ? err.message : String(err), billedUsage);
         }
       }
     },

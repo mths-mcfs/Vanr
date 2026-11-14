@@ -103,15 +103,11 @@ export interface Usage {
   iterations?: UsageIteration[];
 }
 
-export interface UsageIteration {
+export interface UsageIteration extends Omit<Usage, "iterations"> {
   /** `message` (executor), `advisor_message` (advisor), `compaction`, `fallback_message`... */
   type: string;
   /** Model of this iteration; without it, the call's model. */
   model?: string;
-  inputTokens: number;
-  cachedTokens: number;
-  cacheWriteTokens: number;
-  outputTokens: number;
 }
 
 /** `pause`: the API stopped in the middle of one of its own tools (tool search) and the turn goes on. */
@@ -144,6 +140,8 @@ export class ModelError extends Error {
   constructor(
     readonly code: ModelErrorCode,
     message: string,
+    /** Usage already billed before the failure, including discarded attempts. */
+    readonly usage?: Usage,
   ) {
     super(message);
     this.name = "ModelError";

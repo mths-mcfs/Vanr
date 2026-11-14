@@ -154,6 +154,10 @@ describe("request shortcuts: always allow and reviewer", () => {
     }
   });
 
+  test("explicit human policy remains human when risk also asks", () => {
+    for (const c of all.filter((c) => c.policy === "ask")) expect(reviewable(c.decision)).toBe(false);
+  });
+
   test("always allow: only a workspace request, without A in the run; reviewer: only rule of two and A to public", () => {
     for (const c of all) {
       if (rememberable(c.decision)) {

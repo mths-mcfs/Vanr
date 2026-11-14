@@ -1,7 +1,7 @@
 {
   "version": 1,
   "files": {
-    "scripts/typecheck.test.ts": 10,
+    "scripts/typecheck.test.ts": 9,
     "scripts/ci/gate.test.ts": 21,
     "packages/contract/src/secret-box.test.ts": 14,
     "packages/contract/src/permissions.test.ts": 1,
@@ -77,6 +77,12 @@
     "apps/runner/src/client-send.test.ts": 500,
     "apps/runner/src/results.test.ts": 100,
     "apps/runner/src/effects.test.ts": 600,
-    "apps/runner/src/cdp-unwind.test.ts": 200
+    "apps/runner/src/cdp-unwind.test.ts": 200,
+    "packages/ui/test/contrast.test.ts": 286,
+    "packages/ui/test/field.test.tsx": 10,
+    "packages/ui/test/hydration.test.tsx": 257,
+    "packages/ui/test/identity.test.ts": 8,
+    "packages/ui/test/smoke.test.tsx": 208,
+    "packages/ui/test/styles.test.ts": 4
   }
 }

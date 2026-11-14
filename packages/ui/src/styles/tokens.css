@@ -1,0 +1,138 @@
+/*
+ * Vanr design tokens.
+ *
+ * Every color is written once as light-dark(<birch>, <tar>). The active scheme comes from
+ * `color-scheme`: it follows the OS by default and is pinned by <html data-theme="light|dark">.
+ * Portalled overlays (dialog, menu, tooltip, select, toast) live in <body>, so they inherit the
+ * scheme from the document root.
+ *
+ * The contrast test (test/contrast.test.ts) parses this file: keep color values as literal hex.
+ */
+@layer vanr.tokens {
+  :root {
+    color-scheme: light dark;
+
+    /* Surfaces */
+    --vr-bg-canvas: light-dark(#ecebe6, #1a1814);
+    --vr-bg-raised: light-dark(#f7f6f2, #23211c);
+    --vr-bg-sunken: light-dark(#e2e0d9, #14130f);
+    --vr-bg-overlay: light-dark(#fbfaf7, #2a2722);
+    --vr-bg-hover: light-dark(#e3e1da, #322f29);
+    --vr-bg-active: light-dark(#d9d6ce, #3b3730);
+    --vr-bg-inverse: light-dark(#23211c, #ede9e0);
+    /* Behind a dialog: always darkens the page, in both themes. */
+    --vr-scrim: light-dark(#1d1c19, #000000);
+
+    /* Text */
+    --vr-fg: light-dark(#1d1c19, #ede9e0);
+    --vr-fg-muted: light-dark(#4d4a43, #bdb7aa);
+    --vr-fg-subtle: light-dark(#5f5b52, #aba598);
+    --vr-fg-disabled: light-dark(#625e55, #9d978a);
+    --vr-fg-inverse: light-dark(#f7f6f2, #1a1814);
+
+    /* Lines */
+    --vr-line: light-dark(#d3d0c7, #39352f);
+    --vr-line-control: light-dark(#78746a, #858074);
+    --vr-focus: light-dark(#2944c8, #9aacff);
+
+    /* Accent: cobalt underglaze on birch */
+    --vr-accent: light-dark(#2944c8, #8ea1ff);
+    --vr-accent-hover: light-dark(#2139ae, #a9b7ff);
+    --vr-on-accent: light-dark(#ffffff, #10173a);
+    --vr-accent-fg: light-dark(#2944c8, #9aacff);
+    --vr-accent-wash: light-dark(#dde2f6, #252b47);
+
+    /* Destructive fill */
+    --vr-danger: light-dark(#b42318, #ee8579);
+    --vr-danger-hover: light-dark(#961c13, #f5a39a);
+    --vr-on-danger: light-dark(#ffffff, #2b0b07);
+
+    /* Tones: text and wash pairs for callouts, toasts and status badges */
+    --vr-info-fg: light-dark(#2944c8, #9aacff);
+    --vr-info-wash: light-dark(#dde2f6, #252b47);
+    --vr-success-fg: light-dark(#2b6637, #7ccb8f);
+    --vr-success-wash: light-dark(#dbe9dc, #1d3123);
+    --vr-warning-fg: light-dark(#7f4d00, #e8b04e);
+    --vr-warning-wash: light-dark(#f2e4c9, #382c16);
+    --vr-danger-fg: light-dark(#a8221a, #f2867b);
+    --vr-danger-wash: light-dark(#f4dcd7, #3c1f1b);
+    --vr-neutral-fg: light-dark(#4d4a43, #bdb7aa);
+    --vr-neutral-wash: light-dark(#e2e0d9, #14130f);
+
+    /* Type */
+    --vr-font-ui: "Schibsted Grotesk Variable", "Schibsted Grotesk", ui-sans-serif, sans-serif;
+    --vr-font-mono: "Commit Mono", ui-monospace, "SFMono-Regular", monospace;
+    --vr-font-title: "Young Serif", Georgia, serif;
+
+    --vr-text-xs: 0.6875rem;
+    --vr-text-xs-lh: 1rem;
+    --vr-text-sm: 0.75rem;
+    --vr-text-sm-lh: 1rem;
+    --vr-text-md: 0.875rem;
+    --vr-text-md-lh: 1.25rem;
+    --vr-text-lg: 1rem;
+    --vr-text-lg-lh: 1.5rem;
+    --vr-text-xl: 1.25rem;
+    --vr-text-xl-lh: 1.75rem;
+    --vr-text-2xl: 1.75rem;
+    --vr-text-2xl-lh: 2.25rem;
+
+    --vr-weight-regular: 400;
+    --vr-weight-medium: 520;
+    --vr-weight-strong: 640;
+
+    /* Space: 4 px grid */
+    --vr-space-1: 0.25rem;
+    --vr-space-2: 0.5rem;
+    --vr-space-3: 0.75rem;
+    --vr-space-4: 1rem;
+    --vr-space-5: 1.25rem;
+    --vr-space-6: 1.5rem;
+    --vr-space-8: 2rem;
+    --vr-space-10: 2.5rem;
+    --vr-space-12: 3rem;
+
+    /* Shape */
+    --vr-radius-1: 2px;
+    --vr-radius-2: 4px;
+    --vr-radius-3: 6px;
+    --vr-border: 1px;
+    --vr-ring: 2px;
+
+    /* Control heights */
+    --vr-control-sm: 1.5rem;
+    --vr-control-md: 2rem;
+    --vr-control-lg: 2.5rem;
+
+    /* Layers. Everything that floats from a control (list, menu, tooltip) sits above the modal,
+       because those controls can live inside a dialog. */
+    --vr-z-raised: 10;
+    --vr-z-overlay: 300;
+    --vr-z-modal: 400;
+    --vr-z-dropdown: 500;
+    --vr-z-toast: 600;
+    --vr-z-tooltip: 700;
+
+    /* Motion */
+    --vr-duration-fast: 120ms;
+    --vr-duration-base: 150ms;
+    --vr-duration-slow: 180ms;
+    --vr-ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+
+  :root[data-theme="light"] {
+    color-scheme: light;
+  }
+
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    :root {
+      --vr-duration-fast: 0ms;
+      --vr-duration-base: 0ms;
+      --vr-duration-slow: 0ms;
+    }
+  }
+}
