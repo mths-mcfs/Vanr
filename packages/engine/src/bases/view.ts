@@ -3,7 +3,7 @@
 // oracle of the same rule (the server test compares the two by fuzzing) and lets the front end update the
 // screen before the response arrives.
 import { z } from "zod";
-import { utcMs } from "../formula/values";
+import { parseIso, utcMs } from "../formula/values";
 import { isCalendarIso, type PropActor, type PropDef } from "../props";
 
 export const VIEW_TYPES = [
@@ -74,6 +74,8 @@ export function filterKind(def: PropDef): FilterKind {
           return "date";
         case "list":
           return "file";
+        case "person":
+          return "person";
         default:
           return "text";
       }
@@ -243,6 +245,11 @@ export function checkFilter(filter: Filter, defs: readonly PropDef[], depth = 1)
   if (!ops.includes(filter.op)) return [`bad_op:${filter.prop}:${filter.op}`];
   const value = (VALUES[kind] as Partial<Record<string, z.ZodType>>)[filter.op];
   if (value && !value.safeParse(filter.value).success) return [`bad_value:${filter.prop}:${filter.op}`];
+  if (value && (kind === "option" || kind === "status" || kind === "multi") && filter.op !== "group") {
+    const ids = Array.isArray(filter.value) ? filter.value : [filter.value];
+    if (ids.some((id) => !def.options?.some((o) => o.id === id)))
+      return [`bad_value:${filter.prop}:${filter.op}`];
+  }
   return [];
 }
 
@@ -266,14 +273,23 @@ export function countConditions(filter: Filter): number {
 }
 
 /** The view's effective filter: the saved one AND the quick filters that have a value. */
-export function effectiveFilter(config: ViewConfig, extra?: Filter | null): Filter | null {
+export function effectiveFilter(
+  config: ViewConfig,
+  defs: readonly PropDef[],
+  extra?: Filter | null,
+): Filter | null {
   const parts: Filter[] = [];
   if (config.filter) parts.push(config.filter);
   for (const q of config.quickFilters ?? []) {
     if (q.value === undefined && q.op !== "empty" && q.op !== "not_empty") continue;
     parts.push({
       prop: q.prop,
-      op: q.op ?? defaultOp(q.value),
+      op:
+        q.op ??
+        defaultOp(
+          defs.find((d) => d.id === q.prop),
+          q.value,
+        ),
       ...(q.value === undefined ? {} : { value: q.value }),
     });
   }
@@ -282,9 +298,11 @@ export function effectiveFilter(config: ViewConfig, extra?: Filter | null): Filt
   return parts.length === 1 ? (parts[0] as Filter) : { and: parts };
 }
 
-function defaultOp(value: unknown): string {
-  if (Array.isArray(value)) return "in";
-  if (typeof value === "object" && value !== null && "type" in value) return "has";
+function defaultOp(def: PropDef | undefined, value: unknown): string {
+  const kind = def && filterKind(def);
+  if (kind === "person") return "has";
+  if (kind === "multi") return Array.isArray(value) ? "has_any" : "has";
+  if (Array.isArray(value)) return kind === "date" ? "between" : "in";
   return "eq";
 }
 
@@ -375,9 +393,14 @@ function isEmpty(v: unknown): boolean {
 /** Day of a date cell: `start` (props, formula) or the recorded instant (created/edited at). */
 function dayOf(def: PropDef, v: unknown): string | null {
   if (v === undefined || v === null) return null;
-  if (def.type === "created_time" || def.type === "edited_time") return isoDay(Date.parse(String(v)));
-  if (typeof v === "object" && "start" in (v as object))
-    return String((v as { start: string }).start).slice(0, 10);
+  const text =
+    def.type === "created_time" || def.type === "edited_time"
+      ? String(v)
+      : typeof v === "object" && "start" in v
+        ? String(v.start)
+        : "";
+  const parsed = parseIso(text);
+  if (parsed) return isoDay(parsed.ms);
   return null;
 }
 

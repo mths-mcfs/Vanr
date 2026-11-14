@@ -43,7 +43,7 @@ export function splitFrontmatter(text: string): {
   const m = FM.exec(text);
   if (!m) return { data: {}, body: text, error: null };
   const body = text.slice(m[0].length);
-  const src = m[1] ?? "";
+  const src = m[1] === undefined ? "" : `${m[1]}\n`;
   if (!src.trim()) return { data: {}, body, error: null };
   try {
     const doc = parseDocument(src, { schema: "core", uniqueKeys: false, prettyErrors: false });
