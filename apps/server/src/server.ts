@@ -126,6 +126,9 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     new Response("starting", { status: 503 });
 
   const runnersHub = new RunnerHub();
+  // After the listener's stop in the undo (its close handlers queue the runners' last transitions) and before
+  // the database closes: those transitions run to the end.
+  undo.push(() => runnersHub.settled());
   // Slice S3 (wiki-collab) adds here the wiki editor (wikiMarkdown) and the live wiki sessions.
   // The sockets answer only once the deps exist; until then an upgrade gets the 503 of `handler`.
   let depsRef: AppDeps | null = null;
