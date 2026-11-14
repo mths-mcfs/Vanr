@@ -25,7 +25,10 @@ function fakeGitHub() {
   const installs = new Map([
     ["101", { id: 101, account: { login: "acme" }, repository_selection: "selected", suspended_at: null }],
     ["202", { id: 202, account: { login: "other" }, repository_selection: "all", suspended_at: null }],
-    ["909", { id: 909, account: { login: "victim-account" }, repository_selection: "all", suspended_at: null }],
+    [
+      "909",
+      { id: 909, account: { login: "victim-account" }, repository_selection: "all", suspended_at: null },
+    ],
   ]);
   /** A code works once and belongs to one user. */
   const codes = new Map([
