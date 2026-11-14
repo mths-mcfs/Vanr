@@ -13,12 +13,22 @@ import * as Y from "yjs";
 import { log } from "../src/logger";
 import type { RunningServer } from "../src/server";
 import { MAX_BODY, pageBySlug, savePage } from "../src/wiki";
-import { COLLAB_PATH, MAX_UPDATE, RIGHT_TTL_MS } from "../src/wiki-collab";
+import { MAX_UPDATE, RIGHT_TTL_MS } from "../src/wiki-collab";
 import { wikiMarkdown, YFRAGMENT } from "../src/wiki-md";
-import { type Browser, holdNextIndexWrite, SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
+import { holdNextIndexWrite, SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
 import { memberOf, type Person, seedWorkspace } from "./seed";
 import { apiError, wikiApi } from "./wiki-api";
-import { connect, unloaded, until } from "./wiki-live";
+import {
+  authMessage,
+  connect,
+  paragraphUpdate,
+  rawSocket,
+  startsWith,
+  unloaded,
+  until,
+  updateMessage,
+  varString,
+} from "./wiki-live";
 
 let server: RunningServer;
 /** The injected clock's offset: moving it past RIGHT_TTL_MS makes the next message read the right again. */
@@ -454,72 +464,6 @@ describe("the live draft's limits", () => {
     expect((await ana.api.wiki.getWikiPage(workspaceId, page.slug)).version).toBe(1);
   });
 });
-
-// ---- A bare socket speaking the wire format, to send what the provider never would.
-
-const enc = new TextEncoder();
-function varUintBytes(n: number): number[] {
-  const out: number[] = [];
-  for (;;) {
-    out.push((n & 0x7f) | (n > 0x7f ? 0x80 : 0));
-    n = Math.floor(n / 128);
-    if (!n) return out;
-  }
-}
-const varString = (s: string) => {
-  const b = enc.encode(s);
-  return [...varUintBytes(b.length), ...b];
-};
-const varBytes = (b: Uint8Array) => [...varUintBytes(b.length), ...b];
-const authMessage = (doc: string) => new Uint8Array([...varString(doc), 2, 0, ...varString("cookie")]);
-const updateMessage = (doc: string, update: Uint8Array) =>
-  new Uint8Array([...varString(doc), 0, 2, ...varBytes(update)]);
-
-interface Raw {
-  ws: WebSocket;
-  received: Uint8Array[];
-  closed: Promise<number>;
-  /** Waits for the server's answer to an authentication: true when authenticated. */
-  authenticated(doc: string): Promise<boolean>;
-  /** Waits for a SyncStatus on `doc` (the answer to an update). */
-  synced(doc: string): Promise<boolean>;
-}
-
-function rawSocket(srv: RunningServer, browser: Browser, workspaceId: string): Promise<Raw> {
-  const cookie = [...browser.cookies].map(([k, v]) => `${k}=${v}`).join("; ");
-  const ws = new WebSocket(`${srv.url.replace(/^http/, "ws")}${COLLAB_PATH}?workspaceId=${workspaceId}`, {
-    headers: { cookie, origin: srv.url },
-  } as never);
-  ws.binaryType = "arraybuffer";
-  const received: Uint8Array[] = [];
-  const closed = new Promise<number>((r) => ws.addEventListener("close", (e) => r(e.code)));
-  ws.addEventListener("message", (e) => received.push(new Uint8Array(e.data as ArrayBuffer)));
-  const answer = (doc: string, type: number) =>
-    until(() => received.some((m) => startsWith(m, [...varString(doc), type]))).then(
-      () => received.find((m) => startsWith(m, [...varString(doc), type])) as Uint8Array,
-    );
-  const prefix = (doc: string) => varString(doc).length;
-  return new Promise((resolve) =>
-    ws.addEventListener("open", () =>
-      resolve({
-        ws,
-        received,
-        closed,
-        authenticated: async (doc) => (await answer(doc, 2))[prefix(doc) + 1] === 2,
-        synced: async (doc) => (await answer(doc, 8))[prefix(doc) + 1] === 1,
-      }),
-    ),
-  );
-}
-const startsWith = (m: Uint8Array, head: number[]) => head.every((b, i) => m[i] === b);
-
-function paragraphUpdate(text: string): Uint8Array {
-  const doc = new Y.Doc();
-  const para = new Y.XmlElement("paragraph");
-  para.insert(0, [new Y.XmlText(text)]);
-  doc.getXmlFragment(YFRAGMENT).push([para]);
-  return Y.encodeStateAsUpdate(doc);
-}
 
 describe("what a client shouldn't send", () => {
   test("an update that depends on one the server never got is not acknowledged: SyncStatus false and the socket closes (4412)", async () => {
