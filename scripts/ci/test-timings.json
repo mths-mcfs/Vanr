@@ -26,7 +26,7 @@
     "apps/server/src/runners/hub.test.ts": 292,
     "apps/server/src/runtime/preview.test.ts": 123,
     "apps/server/src/runtime/route.test.ts": 13,
-    "apps/server/test/base.test.ts": 14183,
+    "apps/server/test/base.test.ts": 15077,
     "apps/server/test/boot.test.ts": 22025,
     "apps/server/test/config.test.ts": 51,
     "apps/server/test/mail-protocols.test.ts": 41,
@@ -93,6 +93,9 @@
     "scripts/ci/gate.test.ts": 21,
     "scripts/typecheck.test.ts": 10,
     "apps/server/src/runtime/background.test.ts": 97,
-    "apps/server/test/runtime-port.test.ts": 7994
+    "apps/server/test/runtime-port.test.ts": 9442,
+    "apps/server/test/signup-queue.test.ts": 23692,
+    "apps/server/src/mailer.test.ts": 84,
+    "apps/server/src/notify-delivery.test.ts": 5994
   }
 }
