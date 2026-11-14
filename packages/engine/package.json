@@ -5,16 +5,22 @@
   "type": "module",
   "license": "AGPL-3.0-only",
   "exports": {
+    ".": "./src/index.ts",
     "./action-credential": "./src/action-credential.ts",
+    "./bases/*": "./src/bases/*.ts",
     "./blobs": "./src/blobs.ts",
     "./browser-policy": "./src/browser-policy.ts",
     "./db": "./src/db/index.ts",
     "./debate-protocol": "./src/debate-protocol.ts",
     "./effects": "./src/effects.ts",
     "./file-type": "./src/file-type.ts",
+    "./formula": "./src/formula/index.ts",
+    "./formula/*": "./src/formula/*.ts",
+    "./ids": "./src/ids.ts",
     "./memory": "./src/memory.ts",
     "./net-address": "./src/net-address.ts",
     "./notify-rules": "./src/notify-rules.ts",
+    "./props": "./src/props.ts",
     "./recurrence": "./src/recurrence.ts",
     "./recurrence-text": "./src/recurrence-text.ts",
     "./roles": "./src/roles.ts",
@@ -23,6 +29,8 @@
     "./seal": "./src/seal.ts",
     "./skill-md": "./src/skill-md.ts",
     "./sqlconn": "./src/sqlconn.ts",
+    "./wiki-edit": "./src/wiki-edit.ts",
+    "./wiki/*": "./src/wiki/*.ts",
     "./work-state": "./src/work-state.ts"
   },
   "scripts": {
@@ -30,9 +38,12 @@
   },
   "dependencies": {
     "@electric-sql/pglite": "0.5.10",
+    "@milkdown/kit": "7.22.3",
     "@vanr/contract": "workspace:*",
+    "diff": "9.0.0",
     "drizzle-orm": "0.45.4",
     "postgres": "3.4.9",
+    "yaml": "2.9.1",
     "zod": "4.6.7"
   },
   "devDependencies": {
