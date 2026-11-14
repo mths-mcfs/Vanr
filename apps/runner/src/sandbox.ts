@@ -340,9 +340,19 @@ export function cliPaths(
  * `CODEX_HOME` (`codex exec --help`: "auth still uses CODEX_HOME").
  */
 const CLI_STATE = {
-  claude_code: { dir: ".claude", login: ".credentials.json", env: "CLAUDE_CONFIG_DIR", folder: "claude" },
-  codex: { dir: ".codex", login: "auth.json", env: "CODEX_HOME", folder: "codex" },
+  claude_code: {
+    name: "Claude Code",
+    dir: ".claude",
+    login: ".credentials.json",
+    env: "CLAUDE_CONFIG_DIR",
+    folder: "claude",
+  },
+  codex: { name: "Codex", dir: ".codex", login: "auth.json", env: "CODEX_HOME", folder: "codex" },
 } as const;
+
+/** Why an agent session does not start when the CLI's login is not a file the sandbox can open read-only. */
+export const noLoginFile = (executor: "claude_code" | "codex") =>
+  `On this computer ${CLI_STATE[executor].name} keeps its login outside a file (the system keychain), or nobody has signed in to it yet; agent sessions cannot use that login yet.`;
 
 /** The person's own folder of a CLI. */
 export const personalCliDir = (executor: "claude_code" | "codex", ctx: PolicyContext) =>
@@ -401,8 +411,8 @@ function unlinkLogin(dest: string): void {
 
 export interface AgentCli {
   /**
-   * `own`: the agent's state in the runner folder, with the person's login read-only. `personal`: the login
-   * is not in a file (the system keychain), so the CLI keeps reading the person's folder under `cliPaths`.
+   * `own`: the agent's state in the runner folder, with the person's login read-only (the sandbox is on).
+   * `personal`: the person turned the sandbox off, so the CLI runs as before, in their folder (`cliPaths`).
    */
   kind: "own" | "personal";
   read: string[];
@@ -424,7 +434,9 @@ export interface AgentCli {
  * person's CLI folder is not mounted at all, not even for reading. The person's login enters that state alone
  * and read-only, at the name the CLI looks for: a session never writes nor removes it, and if the CLI needs to
  * renew it the session ends asking the person to sign in again on this computer. Where the login is not a file
- * (the macOS keychain, a system keyring), the current rules stay (`cliPaths`).
+ * (the macOS keychain, a system keyring) or there is none yet, the session does not start: `not_logged_in`,
+ * before any process, and the person's folder never opens. Only with the sandbox turned off by the person do
+ * the previous rules stay (`cliPaths`).
  */
 export function agentCli(
   executor: "claude_code" | "codex",
@@ -436,15 +448,7 @@ export function agentCli(
   sandboxOn: boolean,
 ): AgentCli {
   const spec = CLI_STATE[executor];
-  let source: string | null = null;
-  if (sandboxOn)
-    try {
-      const real = realpathSync(join(personalCliDir(executor, ctx), spec.login));
-      if (statSync(real).isFile()) source = real;
-    } catch {
-      source = null;
-    }
-  if (!source)
+  if (!sandboxOn)
     return {
       kind: "personal",
       ...cliPaths(executor, ctx, bin, ownCwd),
@@ -452,6 +456,14 @@ export function agentCli(
       env: {},
       release: () => {},
     };
+  let source: string | null = null;
+  try {
+    const real = realpathSync(join(personalCliDir(executor, ctx), spec.login));
+    if (statSync(real).isFile()) source = real;
+  } catch {
+    source = null;
+  }
+  if (!source) throw new RunnerError("not_logged_in", noLoginFile(executor));
   const binDir = bin ? dirname(realOrSelf(bin)) : null;
   const state = agentCliStateDir(ctx, agent, executor);
   mkdirSync(state, { recursive: true, mode: 0o700 });

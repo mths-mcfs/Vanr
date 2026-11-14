@@ -11,15 +11,23 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { executorCommand } from "./jobs";
+import type { RunnerAccess } from "@vanr/contract";
+import { Access, RunnerError } from "./access";
+import { CliWatch } from "./cli";
+import { Harnesses } from "./harness";
+import { executorCommand, Jobs } from "./jobs";
+import { McpBridge } from "./mcp";
 import {
   agentCli,
   agentCliStateDir,
   defaultPolicyContext,
   type FsPolicy,
   fsPolicy,
+  noLoginFile,
   shellLine,
 } from "./sandbox";
+import { SecretStore } from "./secrets";
+import { fakeCliBin, testMcpCommand } from "./testing/fake-cli";
 import { realSandbox } from "./testing/sandbox";
 
 // The CLI folders are the person's: a session an agent runs (harness or job) keeps its own state in the
@@ -56,16 +64,61 @@ function personHome(name: string) {
   return { home, files };
 }
 
-test("a CLI login outside a file (the keychain) keeps the current rules; with the sandbox off, the person's folder", () => {
-  const home = join(dir, "keychain-home");
-  mkdirSync(join(home, ".claude"), { recursive: true });
+/** The same home, with the CLIs signed in through the system keychain: no login file anywhere. */
+function keychainHome(name: string) {
+  const person = personHome(name);
+  for (const f of [".claude/.credentials.json", ".codex/auth.json"]) {
+    rmSync(join(person.home, f));
+    delete person.files[f];
+  }
+  return person;
+}
+
+/** Every name and content under the person's CLI folders, to compare before and after. */
+function snapshot(home: string) {
+  const out: Record<string, string> = {};
+  const walk = (d: string) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else out[p] = readFileSync(p, "utf8");
+    }
+  };
+  for (const d of [".claude", ".codex"]) walk(join(home, d));
+  out[join(home, ".claude.json")] = readFileSync(join(home, ".claude.json"), "utf8");
+  return out;
+}
+
+test("sandbox on and no login file (keychain, or not signed in): not_logged_in before anything, for both CLIs", () => {
+  const { home } = keychainHome("keychain-home");
   const ctx = { ...defaultPolicyContext(join(home, ".runner")), home, cliDirs: {} };
-  const keychain = agentCli("claude_code", ctx, null, agent, null, true);
-  expect(keychain.kind).toBe("personal");
-  expect(keychain.env).toEqual({});
-  const { home: h } = personHome("sandbox-off-home");
-  const off = agentCli("codex", { ...ctx, home: h }, null, agent, null, false);
-  expect(off.kind).toBe("personal");
+  for (const executor of ["claude_code", "codex"] as const) {
+    let err: unknown = null;
+    try {
+      agentCli(executor, ctx, null, agent, null, true).release();
+    } catch (e) {
+      err = e;
+    }
+    if (!(err instanceof RunnerError)) throw new Error(`expected a RunnerError, got ${String(err)}`);
+    expect(err.code).toBe("not_logged_in");
+    expect(err.message).toBe(noLoginFile(executor));
+    expect(err.message).toContain("outside a file");
+  }
+  // Nothing was prepared for the session: no state folder, no link.
+  expect(existsSync(join(home, ".runner", "cli"))).toBe(false);
+});
+
+test("sandbox turned off by the person: the CLI keeps the previous rules, in the person's folder", () => {
+  for (const person of [personHome("sandbox-off-home"), keychainHome("sandbox-off-keychain")]) {
+    const ctx = { ...defaultPolicyContext(join(person.home, ".runner")), home: person.home, cliDirs: {} };
+    const off = agentCli("codex", ctx, null, agent, null, false);
+    expect(off.kind).toBe("personal");
+    expect(off.env).toEqual({});
+    expect(off.write).toEqual([join(person.home, ".codex")]);
+    const claude = agentCli("claude_code", ctx, null, agent, null, false);
+    expect(claude.kind).toBe("personal");
+    expect(claude.write).toEqual([join(person.home, ".claude")]);
+  }
 });
 
 test("each agent and each CLI has its own state, outside the work folder and the person's CLI folder", () => {
@@ -131,6 +184,80 @@ describe("real srt", async () => {
       w.release();
     }
   };
+
+  test.if(on)(
+    "keychain login: a harness turn and a job end in not_logged_in, the CLI never starts, the person's folder stays as it was",
+    async () => {
+      const { home } = keychainHome("real-keychain");
+      const runnerHome = join(home, ".runner");
+      const policy = { ...defaultPolicyContext(runnerHome), home, cliDirs: {} };
+      const before = snapshot(home);
+      const log = join(dir, "keychain-cli-log.jsonl");
+      // The CLI says it is signed in (through the keychain): only the missing file stops the session.
+      const bin = fakeCliBin(dir, "claude-keychain", { kind: "claude", log, probe: [join(home, ".claude")] });
+      const bins = { claude: bin, codex: "/bin/false" };
+      const tools = { claude: true, codex: true, commands: true, browser: false };
+      const access = new Access(() => ({
+        access: { folders: [], tools } as RunnerAccess,
+        workDir: join(dir, "keychain-ws"),
+        paused: false,
+      }));
+      const cli = new CliWatch({ bins, installed: ["claude_code"] });
+      const bridge = new McpBridge(runnerHome);
+      const codeOf = (p: Promise<unknown>) =>
+        p.then(
+          () => "started",
+          (e: unknown) => (e instanceof RunnerError ? `${e.code}: ${e.message}` : String(e)),
+        );
+      try {
+        const harnesses = new Harnesses({
+          home: runnerHome,
+          access,
+          bins,
+          cli,
+          bridge,
+          mcpCommand: testMcpCommand(),
+          sandbox,
+          policy,
+        });
+        const turn = await codeOf(
+          harnesses.turn(
+            agent,
+            { runId: "run_keychain_01", executor: "claude_code", system: "s", prompt: "p", tools: [] },
+            {
+              signal: new AbortController().signal,
+              emit: () => {},
+              callTool: async () => ({ content: "", isError: false }),
+            },
+          ),
+        );
+        expect(turn).toBe(`not_logged_in: ${noLoginFile("claude_code")}`);
+        const jobs = new Jobs({
+          home: runnerHome,
+          access,
+          secrets: new SecretStore(runnerHome),
+          cli,
+          maxConcurrent: () => 1,
+          maxSeconds: () => 30,
+          send: () => true,
+          bins,
+          sandbox,
+          policy,
+        });
+        const job = await codeOf(
+          jobs.start(agent, { jobId: "job_keychain1", executor: "claude_code", title: "t", prompt: "p" }),
+        );
+        expect(job).toBe(`not_logged_in: ${noLoginFile("claude_code")}`);
+        expect(jobs.runningCount()).toBe(0);
+      } finally {
+        bridge.close();
+      }
+      // The CLI never ran (it logs every session), and nothing of the person changed or appeared.
+      expect(existsSync(log)).toBe(false);
+      expect(snapshot(home)).toEqual(before);
+      expect(existsSync(join(runnerHome, "cli"))).toBe(false);
+    },
+  );
 
   for (const executor of ["claude_code", "codex"] as const)
     test.if(on)(
