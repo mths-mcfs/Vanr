@@ -106,7 +106,7 @@ const ERROR_CODES = [
   "paused",
   "not_allowed",
   "exec_disabled",
-  "outside_workspace",
+  "outside_work_dir",
   "no_slot",
   "browser_not_running",
   "too_large",
