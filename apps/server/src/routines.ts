@@ -561,9 +561,9 @@ async function claim(
  */
 export async function startRoutineRun(deps: AppDeps, registered: ExecutionRow): Promise<ExecutionRow> {
   const { db } = deps;
-  const [routine] = await db.select().from(routines).where(eq(routines.id, registered.routineId));
-  if (!routine) return registered;
-  const method = runtimeFor(targetOf(routine));
+  const [before] = await db.select().from(routines).where(eq(routines.id, registered.routineId));
+  if (!before) return registered;
+  const method = runtimeFor(targetOf(before));
   if (method) requireRuntime(deps.runtime, method);
   let run = registered;
   if (run.status === "pending") {
@@ -571,17 +571,31 @@ export async function startRoutineRun(deps: AppDeps, registered: ExecutionRow): 
     if (!owned) return run;
     run = owned;
   }
-  const policy = policyOf(routine);
-  // A fire from before a person's pause doesn't run any more, and the key goes
-  // (the sender delivers again once it is turned on). A routine whose series ended isn't paused: the fire recorded
-  // before the end (in the same transaction that turned it off) runs, even as an orphan after a fall. "Run now" and
-  // "once" (and their retries) were asked for already, so they run with the routine paused.
-  const paused = !routine.active && routine.pausedReason !== SERIES_ENDED;
-  if (paused && !(await askedExplicitly(deps, run)))
-    return (
-      (await finishRun(
-        deps,
-        run,
+  const mine = run;
+  // The definition the execution runs with is read under the routine's row lock, in the transaction that claims
+  // it: an edit or a pause committed before this point is seen, and one that comes later waits for the claim. Read
+  // before the transaction, a concurrent edit or pause could run the fire with the old definition. FOR NO KEY
+  // UPDATE: an execution inserted at the same time (its foreign key takes KEY SHARE on this row) doesn't wait.
+  const decided = await db.transaction(async (tx) => {
+    const scoped = { ...deps, db: tx };
+    const [fresh] = await tx
+      .select()
+      .from(routines)
+      .where(eq(routines.id, mine.routineId))
+      .for("no key update");
+    if (!fresh) return { kind: "gone" as const };
+    const freshMethod = runtimeFor(targetOf(fresh));
+    if (freshMethod) requireRuntime(deps.runtime, freshMethod);
+    const policy = policyOf(fresh);
+    // A fire from before a person's pause doesn't run any more, and the key goes (the sender delivers again once
+    // it is turned on). A routine whose series ended isn't paused: the fire recorded before the end (in the same
+    // transaction that turned it off) runs, even as an orphan after a fall. "Run now" and "once" (and their
+    // retries) were asked for already, so they run with the routine paused.
+    const paused = !fresh.active && fresh.pausedReason !== SERIES_ENDED;
+    if (paused && !(await askedExplicitly(scoped, mine))) {
+      const skipped = await finishRun(
+        scoped,
+        mine,
         {
           status: "skipped",
           reason: "paused",
@@ -589,23 +603,25 @@ export async function startRoutineRun(deps: AppDeps, registered: ExecutionRow): 
           summaryKey: "routines.run.paused",
           dedupeKey: null,
         },
-        [run.status],
-      )) ?? run
-    );
-  const claimed = await db.transaction(async (tx) => {
-    const scoped = { ...deps, db: tx };
-    const lock = await claim(scoped, routine, policy);
-    if (!lock) return null;
+        [mine.status],
+      );
+      return { kind: "skipped" as const, row: skipped ?? mine };
+    }
+    const lock = await claim(scoped, fresh, policy);
+    if (!lock) return { kind: "busy" as const, policy };
     const running = await updateRun(
       scoped,
-      run.id,
+      mine.id,
       { status: "running", startedAt: lock.at, deadlineAt: lock.until },
       ["pending", "queued"],
     );
-    if (!running) await release(scoped, routine.id, lock.at);
-    return { running };
+    if (!running) await release(scoped, fresh.id, lock.at);
+    return { kind: "claimed" as const, routine: fresh, policy, running };
   });
-  if (!claimed) {
+  if (decided.kind === "gone") return run;
+  if (decided.kind === "skipped") return decided.row;
+  if (decided.kind === "busy") {
+    const { policy } = decided;
     if (run.status === "queued") return run;
     if (policy.overlap === "queue" && run.trigger !== "retry") {
       try {
@@ -633,7 +649,7 @@ export async function startRoutineRun(deps: AppDeps, registered: ExecutionRow): 
       )) ?? run
     );
   }
-  const { running } = claimed;
+  const { routine, policy, running } = decided;
   if (!running) return run;
   let outcome: Outcome;
   try {

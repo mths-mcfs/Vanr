@@ -481,7 +481,7 @@ async function lockDebate(tx: Tx, id: string): Promise<DebateRow | null> {
  * Reads the debate under its lock, lets `decide` look at that state and writes what it returns, in one
  * transaction; null (and nothing written) when `decide` says no. The event and the search go after the commit.
  */
-async function changeDebate(
+export async function changeDebate(
   deps: AppDeps,
   id: string,
   decide: (row: DebateRow) => DebateSet | null,

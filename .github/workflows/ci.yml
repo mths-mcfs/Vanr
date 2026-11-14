@@ -285,6 +285,47 @@ jobs:
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_DROP_LOCKS: "1"
+      # A routine's fire reads its definition under the routine's row lock: an edit or a pause committed while it
+      # starts is seen; and N "run now" with one key next to N edits leave one execution.
+      - run: bun test apps/server/test/routines-postgres.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      - name: The forced routine fire test fails without the lock
+        run: |
+          set +e
+          bun test apps/server/test/routines-postgres.test.ts --test-name-pattern forced > forced-routines.log 2>&1
+          status=$?
+          cat forced-routines.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the forced routine fire test passed without the lock"
+            exit 1
+          fi
+          for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -aqF "$broken" forced-routines.log; then
+              echo "::error::the forced routine fire test broke ($broken) instead of failing on its outcome"
+              exit 1
+            fi
+          done
+          set -- routine-fire
+          for label in "$@"; do
+            if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" forced-routines.log; then
+              echo "::error::the forced $label test did not fail on its outcome without the lock"
+              exit 1
+            fi
+          done
+          failed=$(grep -a '^(fail) ' forced-routines.log | sed -E 's/^\(fail\) //; s/ \[[0-9.]+m?s\]$//' | sort -u)
+          if printf '%s\n' "$failed" | grep -qv forced; then
+            echo "::error::a test outside the forced ones failed without the lock: $failed"
+            exit 1
+          fi
+          count=$(printf '%s\n' "$failed" | grep -c .)
+          if [ "$count" -ne "$#" ]; then
+            echo "::error::$count distinct forced tests failed without the lock, expected $#"
+            exit 1
+          fi
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_DROP_LOCKS: "1"
       # One refresh exchange per expiring OAuth token, one step-up card per scope set and no secret written onto a
       # connection revoked during the OAuth callback, from two connections.
       - run: bun test apps/server/test/connectors-postgres.test.ts
