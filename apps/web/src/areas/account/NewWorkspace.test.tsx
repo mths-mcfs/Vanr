@@ -1,0 +1,61 @@
+import { describe, expect, test } from "bun:test";
+import { screen } from "@testing-library/react";
+import { type App, renderApp, WIRES } from "../../../test/app.tsx";
+
+const create = (app: App) => app.user.click(screen.getByRole("button", { name: "Create workspace" }));
+
+for (const wire of WIRES) {
+  describe(`first workspace (${wire} wire)`, () => {
+    test("idle and field error", async () => {
+      const app = await renderApp({ path: "/onboarding", signedInAs: "usr_noor", wire });
+      await screen.findByRole("heading", { level: 1, name: "Name your workspace" });
+      expect(screen.getByText("Signed in as noor@elsewhere.example.")).toBeDefined();
+      await create(app);
+      expect(screen.getByText("Give the workspace a name.")).toBeDefined();
+      expect(app.server.calls.filter((call) => call.method === "createWorkspace")).toEqual([]);
+    });
+
+    test("sending, then the new workspace opens with its first steps", async () => {
+      const app = await renderApp({ path: "/onboarding", signedInAs: "usr_noor", wire });
+      await app.user.type(await screen.findByLabelText("Workspace name"), "  Elsewhere Press ");
+      await app.user.type(screen.getByLabelText("What does this team do?"), "We print zines.");
+      const held = app.server.hold("createWorkspace");
+      await create(app);
+      expect(screen.getByRole("button", { name: "Create workspace" }).getAttribute("aria-busy")).toBe("true");
+      held.release();
+      await screen.findByRole("heading", { level: 1, name: "Elsewhere Press" });
+      expect(app.server.calls.find((call) => call.method === "createWorkspace")?.params).toMatchObject({
+        name: "Elsewhere Press",
+        context: "We print zines.",
+      });
+      expect(
+        screen.getByText("1 person and 0 agents work here. No agent is working right now."),
+      ).toBeDefined();
+      expect(screen.getByRole("heading", { level: 2, name: "Start here" })).toBeDefined();
+      expect(screen.getByRole("link", { name: "Add an agent" }).getAttribute("href")).toMatch(
+        /\/agents\/new$/,
+      );
+      expect(screen.getByRole("link", { name: "Invite people" }).getAttribute("href")).toMatch(
+        /\/settings\/members$/,
+      );
+    });
+
+    test("server error keeps the form and what was typed", async () => {
+      const app = await renderApp({ path: "/onboarding", signedInAs: "usr_noor", wire });
+      app.server.force("createWorkspace", { kind: "error", status: 500, code: "internal" });
+      await app.user.type(await screen.findByLabelText("Workspace name"), "Elsewhere Press");
+      await create(app);
+      expect((await screen.findByRole("alert")).textContent).toBe(
+        "The server ran into a problem. Try again.",
+      );
+      expect(screen.getByLabelText<HTMLInputElement>("Workspace name").value).toBe("Elsewhere Press");
+    });
+
+    test("signing out from here goes to sign-in with the notice", async () => {
+      const app = await renderApp({ path: "/onboarding", signedInAs: "usr_noor", wire });
+      await app.user.click(await screen.findByRole("button", { name: "Sign out" }));
+      expect((await screen.findByRole("status")).textContent).toBe("You signed out.");
+      expect(app.address()).toBe("/login?reason=signed_out");
+    });
+  });
+}

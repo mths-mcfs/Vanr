@@ -133,12 +133,30 @@ export type AgentSigilProps = Omit<ComponentPropsWithRef<"span">, "children"> & 
   /** The agent's name, used as the accessible name. */
   name: string;
   size?: "sm" | "md" | "lg";
+  /**
+   * The agent is in the middle of a run: the tile is lit (filled with the accent). The name does
+   * not change, so say "working" in the text next to it or in `name`.
+   */
+  working?: boolean;
 };
 
 /** An agent. A square tile with a rune-like mark; people use the round <Avatar /> instead. */
-export function AgentSigil({ agentId, name, size = "md", className, ...props }: AgentSigilProps) {
+export function AgentSigil({
+  agentId,
+  name,
+  size = "md",
+  working = false,
+  className,
+  ...props
+}: AgentSigilProps) {
   return (
-    <span {...props} role="img" aria-label={name} className={cx("vr-sigil", `vr-sigil--${size}`, className)}>
+    <span
+      {...props}
+      role="img"
+      aria-label={name}
+      data-working={working || undefined}
+      className={cx("vr-sigil", `vr-sigil--${size}`, className)}
+    >
       <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
         <path d={sigilPath(agentId)} />
       </svg>

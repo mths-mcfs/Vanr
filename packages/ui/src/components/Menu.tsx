@@ -1,6 +1,8 @@
+import { Check } from "lucide-react";
 import { ContextMenu as ContextPrimitive, DropdownMenu as DropdownPrimitive } from "radix-ui";
 import type { ComponentPropsWithRef, ReactNode } from "react";
 import { cx } from "../internal/cx.ts";
+import { Icon } from "./Icon.tsx";
 
 type ItemExtras = {
   /** Leading icon, usually an <Icon />. */
@@ -61,6 +63,23 @@ export function MenuSeparator({
   ...props
 }: ComponentPropsWithRef<typeof DropdownPrimitive.Separator>) {
   return <DropdownPrimitive.Separator {...props} className={cx("vr-menu-separator", className)} />;
+}
+
+/** A set of <MenuRadioItem /> options where one is chosen, such as a language or a theme. */
+export const MenuRadioGroup = DropdownPrimitive.RadioGroup;
+
+export type MenuRadioItemProps = ComponentPropsWithRef<typeof DropdownPrimitive.RadioItem>;
+
+/** One option of a MenuRadioGroup. The chosen one carries a check mark. */
+export function MenuRadioItem({ children, className, ...props }: MenuRadioItemProps) {
+  return (
+    <DropdownPrimitive.RadioItem {...props} className={cx("vr-menu-item", "vr-menu-item--choice", className)}>
+      <span className="vr-menu-item__label">{children}</span>
+      <DropdownPrimitive.ItemIndicator className="vr-menu-item__end">
+        <Icon icon={Check} size="sm" />
+      </DropdownPrimitive.ItemIndicator>
+    </DropdownPrimitive.RadioItem>
+  );
 }
 
 /* Context menu */
