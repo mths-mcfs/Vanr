@@ -155,6 +155,7 @@ test("Codex: only with the ChatGPT login, no shell, the tool over MCP", async ()
     expect(argv).toContain(`features.${off}=false`);
   expect(argv).toContain('web_search="disabled"');
   expect(argv).toContain("--ignore-user-config");
+  expect(argv).toContain("--ignore-rules");
   expect(argv[argv.indexOf("--sandbox") + 1]).toBe("read-only");
   expect(argv.some((a) => a.startsWith("developer_instructions="))).toBe(true);
 });
@@ -203,7 +204,6 @@ test("a turn aborted while its sandbox opens does not start the CLI", async () =
   // The sandbox the turn opens: the request is aborted while it opens (the connection dropped).
   const sandbox = {
     status: () => ({ state: "on" as const, engine: "bubblewrap" as const, reason: null }),
-    setMode: () => {},
     wrap: async (input: { command: string }) => {
       controller.abort();
       return { command: input.command, blocked: () => [], release: () => {} };

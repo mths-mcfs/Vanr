@@ -112,6 +112,9 @@ const sessionAnswer = z.object({
   error: z.object({ code: z.string().optional(), message: z.string().optional() }).optional(),
 });
 
+/** The only frames a connection takes before its welcome. */
+const PRE_WELCOME: ReadonlySet<ServerFrame["type"]> = new Set(["welcome", "ping", "rejected"]);
+
 export class RunnerClient {
   private config: RunnerConfig;
   private ws: WsLike | null = null;
@@ -174,7 +177,6 @@ export class RunnerClient {
     // Until the sandbox opens, nothing runs: the off one rejects `wrap` and the `unavailable` state does too.
     this.sandbox = {
       status: () => ({ state: "unavailable", engine: null, reason: "Starting" }),
-      setMode: () => {},
       wrap: async () => {
         throw new RunnerError("sandbox_not_ready", "The sandbox is starting");
       },
@@ -452,15 +454,31 @@ export class RunnerClient {
         features: this.browser ? [BROWSER_GUARD_FEATURE] : [],
       });
     };
+    // Until the welcome of THIS connection the server has not proven who it is: only the welcome, a ping and a
+    // rejection are taken; any other frame ends the connection without running anything.
+    let welcomed = false;
     ws.onmessage = (ev) => {
+      // A socket that is no longer the current one (a reconnection replaced it) runs nothing.
+      if (this.ws !== ws) return;
       this.armWatchdog();
-      let frame: ServerFrame;
+      let frame: ServerFrame | null = null;
       try {
         frame = serverFrame.parse(JSON.parse(String(ev.data)));
       } catch {
+        frame = null;
+      }
+      if (!welcomed && !(frame && PRE_WELCOME.has(frame.type))) {
+        this.log(
+          `the server sent ${frame ? frame.type : "an unknown frame"} before the welcome; reconnecting`,
+        );
+        ws.close(4001, "frame before welcome");
+        return;
+      }
+      if (!frame) {
         this.log("ignored a frame the runner does not understand");
         return;
       }
+      if (frame.type === "welcome") welcomed = true;
       void this.onFrame(frame).catch((err) => this.log(`frame failed: ${String(err)}`));
     };
     ws.onclose = () => {
