@@ -31,6 +31,22 @@ import { requireMember, WORKSPACE } from "../workspace-scope";
 
 const { files, fileVersions, threads } = schema;
 const KINDS = ["document", "table", "diff", "diagram", "html", "file"] as const satisfies readonly FileKind[];
+/**
+ * The inactivity limit of the Drive's transfers (download of a file, its thumbnail or preview; a form upload
+ * and a part of a chunked upload): a slow phone between two cells may go quiet for a while without the
+ * transfer being dead. Bun's per-request limit is used (`server.timeout`); the server option caps at 255 s
+ * (measured: `idleTimeout: 256` is rejected). 120 s keeps a dead client from holding its connection for long.
+ */
+export const TRANSFER_IDLE_SECONDS = 120;
+const TRANSFER_PATHS = [
+  /\/files\/[^/]+\/blob$/,
+  /\/files\/files$/,
+  /\/files\/[^/]+\/files$/,
+  /\/files\/uploads\/[^/]+$/,
+];
+export const isTransfer = (path: string) =>
+  path.startsWith("/api/v1/workspaces/") && TRANSFER_PATHS.some((re) => re.test(path));
+
 export const me$ = (me: WorkspaceMember): ActorRef => ({ type: "person", id: me.userId });
 const versionQuery = z.object({ version: z.coerce.number().int().min(1).optional() });
 

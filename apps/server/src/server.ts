@@ -18,6 +18,7 @@ import { createMailer, type Mailer } from "./mailer";
 import { testModelCheck } from "./models";
 import { loadVapid, webPushSender } from "./push";
 import { Hub } from "./realtime/hub";
+import { isTransfer, TRANSFER_IDLE_SECONDS } from "./routes/drive";
 import { RunnerHub } from "./runners/hub";
 import { BackgroundWork } from "./runtime/background";
 import { createSearchIndex } from "./search-index";
@@ -40,6 +41,8 @@ interface StartOptions {
   onInstanceLockLost?: () => void;
   /** Tests: shorter limits for the closed sign-up queue (signup-queue.ts). */
   signupQueue?: Partial<SignupQueueLimits>;
+  /** Tests: the inactivity limit of every request (Bun's default is 10 s); the Drive's transfers keep theirs. */
+  idleTimeoutSeconds?: number;
   /** Tests: replaces a step of the boot that touches the outside, to break it or hold it. */
   steps?: Partial<BootSteps>;
 }
@@ -121,7 +124,10 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
 
   const server = Bun.serve({
     port: config.port,
-    fetch(req) {
+    ...(opts.idleTimeoutSeconds !== undefined ? { idleTimeout: opts.idleTimeoutSeconds } : {}),
+    fetch(req, srv) {
+      // Large bodies (Drive downloads and uploads) get a longer inactivity limit than the rest.
+      if (isTransfer(new URL(req.url).pathname)) srv.timeout(req, TRANSFER_IDLE_SECONDS);
       // Slice S2 (realtime/browser-socket, runners/socket) and S3 (wiki-collab) add here the WebSocket
       // upgrades of /api/v1/realtime, /api/v1/runners/connect and /api/v1/wiki/collab, and their handlers.
       return handler(req);
