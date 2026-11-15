@@ -2344,11 +2344,16 @@ describe("bases: a write that starts over, and a deadlock answered as busy", () 
         if (late) return;
         late = (await linkTo(workspaceId, table.id, actor, "Late")).id;
       });
+      let deleteAttempts = 0;
+      const off = server.deps.hub.onPublish((_, event) => {
+        if (event.type === "base.deleted" && event.baseId === base.id)
+          deleteAttempts = held.seen.transactions;
+      });
       const socket = workspaceEvents(workspaceId);
       try {
         await deleteDatabase(held.deps, databaseRow);
-        // the first transaction found the grown set after its locks and started over: two in all
-        expect(held.seen.transactions).toBe(2);
+        // Two delete attempts before the commit event; propagation can open more transactions afterward.
+        expect(deleteAttempts).toBe(2);
         expect(late).not.toBeNull();
         // the late linked base showed only the deleted source: it went with it, in the same delete
         const left = await server.deps.db
@@ -2360,6 +2365,7 @@ describe("bases: a write that starts over, and a deadlock answered as busy", () 
           new Set([base.id, late]),
         );
       } finally {
+        off();
         socket.close();
       }
     },

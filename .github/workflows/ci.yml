@@ -144,6 +144,42 @@ jobs:
           grep -q ' 3 fail' <<< "$none"
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # Relation and rollup on Postgres: the propagation between linked sources never waits for a lock.
+      - run: bun test apps/server/test/bases-relations-postgres.test.ts --test-name-pattern "on Postgres"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # The forced interleavings of the relations with one of the propagation's locks swapped for a double
+      # (VANR_TEST_BASES_LINKS): `late` takes the dependent rows before their source, `wait` waits for a held
+      # dependent row. Each run must FAIL, and only for its own interleaving: every "(fail)" line names that
+      # test, one distinct test fails, and the failure is the wait it proves (`Expected: false`).
+      - name: The bases links tests fail with the rows locked before the source and with a waiting row lock
+        run: |
+          check() {
+            mode="$1"; label="$2"
+            set +e
+            out=$(VANR_TEST_BASES_LINKS="$mode" bun test apps/server/test/bases-relations-postgres.test.ts --test-name-pattern "forced interleaving: links" 2>&1)
+            status=$?
+            set -e
+            echo "$out"
+            if [ "$status" -eq 0 ]; then
+              echo "::error::the bases links tests passed with VANR_TEST_BASES_LINKS=$mode"
+              exit 1
+            fi
+            fails=$(grep -a '^(fail)' <<< "$out" | sed 's/ \[[0-9.]*m\?s\]$//' | sort -u)
+            if [ -z "$fails" ] || grep -av "forced interleaving: links: $label" <<< "$fails" | grep -aq .; then
+              echo "::error::VANR_TEST_BASES_LINKS=$mode failed a test other than \"$label\": $fails"
+              exit 1
+            fi
+            if [ "$(wc -l <<< "$fails")" -ne 1 ]; then
+              echo "::error::VANR_TEST_BASES_LINKS=$mode: expected one failing test, got: $fails"
+              exit 1
+            fi
+            grep -aq 'Expected: false' <<< "$out"
+          }
+          check late "a source another write holds"
+          check wait "a dependent row another transaction holds"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
 
   sandbox:
     # The runner's real sandbox (bubblewrap + socat): the attack tests of the isolation of the agent's

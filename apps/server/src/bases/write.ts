@@ -6,8 +6,15 @@
 // normalizes the values (a type change), recalculates and saves the version it calculated with. It can stop
 // and start again at any moment (a crash, a deploy, two processes): it converges on its own. A small table
 // recalculates inside the request; a big one goes to the background, with progress in the `base.recalc` event.
+//
+// Relation and rollup: a row's calculation loads the linked rows (`links.ts`) and computes the linked values
+// and the rollups before its own formulas; every row write notes the dependent sources in its transaction
+// and, after the commit, `settleLinks` marks the dependents and recalculates them (inside the request when
+// the source is small, as for the schema).
 import type { ActorRef, BaseViewType } from "@vanr/contract";
 import { keyBetween, keysBetween } from "@vanr/engine/bases/position";
+import { linkedValues, rollupReadable } from "@vanr/engine/bases/rollup";
+import { summaryFns } from "@vanr/engine/bases/summary";
 import {
   checkFilter,
   effectiveFilter,
@@ -23,11 +30,13 @@ import { evaluateRow, planFormulas, resultTypeOf, rewritePropRefs } from "@vanr/
 import { newId, randomId } from "@vanr/engine/ids";
 import {
   applyProps,
+  COMPUTED_TYPES,
   checkDefs,
   normalizeProps,
   type PropDef,
   type PropError,
   type Props,
+  parsePropText,
   rawText,
 } from "@vanr/engine/props";
 import { and, asc, count, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
@@ -53,6 +62,15 @@ import {
   toTable,
   type ViewRow,
 } from "./core";
+import {
+  checkRelationIds,
+  dependentsOf,
+  type Linked,
+  loadLinked,
+  noteChanged,
+  propagate,
+  withRollupTypes,
+} from "./links";
 import { groupable, validateFilter, validateSorts } from "./query";
 
 const { dbDatabases, dbTables, dbRows, dbViews, knowledgePages, files, members, agents } = schema;
@@ -394,7 +412,10 @@ async function validWrite(
 ): Promise<Props> {
   const applied = applyProps(table.defs, current, write);
   if (!applied.ok) throw bad("base.invalid_props", "Invalid property values", { errors: applied.errors });
-  const refErrors = await checkRefs(db, table.workspaceId, table.defs, write as Props);
+  const refErrors = [
+    ...(await checkRefs(db, table.workspaceId, table.defs, write as Props)),
+    ...(await checkRelationIds(db, table, current, write as Props)),
+  ];
   if (refErrors.length) throw bad("base.invalid_props", "Invalid property values", { errors: refErrors });
   return applied.props;
 }
@@ -473,14 +494,25 @@ function withResultTypes(defs: PropDef[]): PropDef[] {
   );
 }
 
+type CalcRow = {
+  id: string;
+  props: Props;
+  createdAt: Date;
+  createdBy: ActorRef;
+  editedAt: Date;
+  editedBy: ActorRef;
+};
+
+/** A row's rollups and formulas, with the linked rows already loaded (`loadLinked`): the linked values first. */
 function computeRow(
   table: TableRow,
-  row: { id: string; props: Props; createdAt: Date; createdBy: ActorRef; editedAt: Date; editedBy: ActorRef },
-  ctx: { now: number; names: Names },
+  row: CalcRow,
+  ctx: { now: number; names: Names; linked: Linked },
 ): Record<string, unknown> {
   const plan = planFormulas(table.defs);
-  if (!plan.order.length && !plan.errors.size) return {};
-  return evaluateRow(
+  const links = linkedValues(table.defs, row.props, ctx.linked, ctx.names);
+  if (!plan.order.length && !plan.errors.size) return links.computed;
+  const formulas = evaluateRow(
     plan,
     table.defs,
     {
@@ -490,9 +522,31 @@ function computeRow(
       createdBy: row.createdBy,
       editedAt: row.editedAt.toISOString(),
       editedBy: row.editedBy,
+      extra: links.extra,
     },
     { now: ctx.now, names: ctx.names },
+    links.output,
   ).computed;
+  return { ...links.computed, ...formulas };
+}
+
+/**
+ * What a dependent source can read of the row changed: a stored value, or a formula a rollup can read
+ * (`rollupReadable`). A rollup and a formula over a relation can't be read across, so their change alone
+ * notifies no one: that is what ends the propagation.
+ */
+function readableMoved(
+  table: TableRow,
+  before: { props: Props; computed: Record<string, unknown> },
+  after: { props: Props; computed: Record<string, unknown> },
+): boolean {
+  if (JSON.stringify(before.props) !== JSON.stringify(after.props)) return true;
+  const plan = planFormulas(table.defs);
+  return plan.order.some(
+    (f) =>
+      rollupReadable(table.defs, f.propId, plan) &&
+      JSON.stringify(before.computed[f.propId]) !== JSON.stringify(after.computed[f.propId]),
+  );
 }
 
 // ---------- rows ----------
@@ -542,7 +596,7 @@ async function createRowTx(tx: Tx, table: TableRow, input: RowWrite, w: WriteCtx
   const computed = computeRow(
     table,
     { id, props, createdAt: w.at, createdBy: w.actor, editedAt: w.at, editedBy: w.actor },
-    { now: w.at.getTime(), names: w.names },
+    { now: w.at.getTime(), names: w.names, linked: await loadLinked(tx, table, [{ props }]) },
   );
   const [created] = await tx
     .insert(dbRows)
@@ -561,6 +615,7 @@ async function createRowTx(tx: Tx, table: TableRow, input: RowWrite, w: WriteCtx
       editedAt: w.at,
     })
     .returning();
+  await noteChanged(tx, table, [id]);
   return created as RowRow;
 }
 
@@ -576,6 +631,7 @@ export async function createRow(
   const row = await writeTx(db, async (tx) => createRowTx(tx, await lockTable(tx, table.id), input, w));
   publishRows(deps, table.workspaceId, table, { rowIds: [row.id], by: input.actor });
   await indexRows(deps, [row]);
+  await settleLinks(deps, true);
   return row;
 }
 
@@ -622,7 +678,7 @@ async function updateRowTx(
       editedAt: w.at,
       editedBy: w.actor,
     },
-    { now: w.at.getTime(), names: w.names },
+    { now: w.at.getTime(), names: w.names, linked: await loadLinked(tx, fresh, [{ props }]) },
   );
   const [saved] = await tx
     .update(dbRows)
@@ -638,6 +694,7 @@ async function updateRowTx(
     })
     .where(eq(dbRows.id, current.id))
     .returning();
+  await noteChanged(tx, fresh, [current.id]);
   return { row: saved as RowRow, before: current };
 }
 
@@ -654,7 +711,9 @@ export async function updateRow(
   const result = await writeTx(db, async (tx) => updateRowTx(tx, table, rowId, input, w));
   publishRows(deps, table.workspaceId, table, { rowIds: [rowId], by: input.actor });
   await indexRows(deps, [result.row]);
-  return result;
+  await settleLinks(deps, true);
+  const [row] = await db.select().from(dbRows).where(eq(dbRows.id, rowId));
+  return { ...result, row: row ?? result.row };
 }
 
 /** Deletes rows inside the caller's transaction and takes them out of the search in the same commit. */
@@ -669,6 +728,11 @@ async function deleteRowsTx(tx: Tx, table: TableRow, rowIds: string[]): Promise<
     "db_row",
     gone.map((r) => r.id),
   );
+  await noteChanged(
+    tx,
+    table,
+    gone.map((r) => r.id),
+  );
   return gone;
 }
 
@@ -676,6 +740,7 @@ export async function deleteRows(deps: AppDeps, table: TableRow, rowIds: string[
   if (!rowIds.length) return [];
   const gone = await writeTx(deps.db, async (tx) => deleteRowsTx(tx, table, rowIds));
   publishRows(deps, table.workspaceId, table, { deleted: gone.map((r) => r.id), by: actor });
+  await settleLinks(deps, true);
   return gone;
 }
 
@@ -716,6 +781,7 @@ async function insertRowsTx(
   const keys = keysBetween(last?.p ?? null, null, rows.length);
   const inserted: RowRow[] = [];
   for (let i = 0; i < rows.length; i += BATCH) {
+    const linked = await loadLinked(tx, table, rows.slice(i, i + BATCH));
     const chunk = rows.slice(i, i + BATCH).map((r, j) => {
       const id = newId("dbr");
       return {
@@ -727,7 +793,7 @@ async function insertRowsTx(
         computed: computeRow(
           table,
           { id, props: r.props, createdAt: w.at, createdBy: w.actor, editedAt: w.at, editedBy: w.actor },
-          { now: w.at.getTime(), names: w.names },
+          { now: w.at.getTime(), names: w.names, linked },
         ),
         body: r.body ?? null,
         calcVersion: table.calcVersion,
@@ -739,10 +805,18 @@ async function insertRowsTx(
     });
     inserted.push(...((await tx.insert(dbRows).values(chunk).returning()) as RowRow[]));
   }
+  await noteChanged(
+    tx,
+    table,
+    inserted.map((r) => r.id),
+  );
   return inserted;
 }
 
-/** Undo and redo of the agent's writes: all in one transaction, with the source locked before the rows. */
+/**
+ * Several row writes of the same source in one transaction, with the source locked before the rows: the undo
+ * and redo of the agent's writes and the grid's bulk write. Returns the rows written, in order.
+ */
 export async function rewriteRows(
   deps: AppDeps,
   table: TableRow,
@@ -754,7 +828,7 @@ export async function rewriteRows(
     create: (input: RowWrite) => Promise<RowRow>;
     remove: (rowIds: string[]) => Promise<RowRow[]>;
   }) => Promise<void>,
-) {
+): Promise<RowRow[]> {
   const w = { actor, names: await namesOf(deps.db, table.workspaceId), at: deps.now() };
   const touched: RowRow[] = [];
   const gone: string[] = [];
@@ -782,6 +856,95 @@ export async function rewriteRows(
   });
   publishRows(deps, table.workspaceId, table, { rowIds: touched.map((r) => r.id), deleted: gone, by: actor });
   await indexRows(deps, touched);
+  await settleLinks(deps, true);
+  const current = touched.length
+    ? await deps.db
+        .select()
+        .from(dbRows)
+        .where(
+          inArray(
+            dbRows.id,
+            touched.map((r) => r.id),
+          ),
+        )
+    : [];
+  const byId = new Map(current.map((r) => [r.id, r]));
+  return touched.map((r) => byId.get(r.id) ?? r);
+}
+
+// ---------- the grid's bulk write ----------
+
+/** Cap of the grid's bulk write (a paste, the fill handle, clearing a range): rows and cells per request. */
+export const MAX_BULK_ROWS = 500;
+export const MAX_BULK_CELLS = 5_000;
+
+export interface BulkOp {
+  /** Without an id: a new row at the end of the source. */
+  rowId?: string;
+  parentVersion?: number;
+  /** Values already in the column's type (the fill handle, clearing). */
+  props?: Record<string, unknown>;
+  /** Pasted text, converted by the column's type as in the CSV; empty clears the cell. */
+  text?: Record<string, string>;
+}
+
+const badBulk = (message: string, params?: Record<string, unknown>) => bad("base.bad_bulk", message, params);
+
+/**
+ * Writes a bulk of the grid in one transaction: all goes in, or nothing does (an old version of one row
+ * answers 409 and undoes the rest). The caps, a row twice and the row cap of the source are rejected before
+ * anything is written. Text that doesn't fit the type, or that falls on a computed column, is skipped and
+ * counted, as in the import; an invalid typed value answers 400.
+ */
+export async function bulkRows(
+  deps: AppDeps,
+  table: TableRow,
+  ops: BulkOp[],
+  actor: ActorRef,
+): Promise<{ rows: RowRow[]; skipped: number }> {
+  if (ops.length > MAX_BULK_ROWS) throw badBulk("Too many rows", { max: MAX_BULK_ROWS });
+  const cells = ops.reduce(
+    (n, op) => n + Object.keys(op.props ?? {}).length + Object.keys(op.text ?? {}).length,
+    0,
+  );
+  if (cells > MAX_BULK_CELLS) throw badBulk("Too many cells", { max: MAX_BULK_CELLS });
+  const ids = ops.flatMap((op) => (op.rowId ? [op.rowId] : []));
+  if (new Set(ids).size !== ids.length) throw badBulk("The same row twice in one bulk write");
+  const creates = ops.length - ids.length;
+  let skipped = 0;
+  const rows = await rewriteRows(deps, table, actor, async ({ tx, table: fresh, update, create }) => {
+    if (creates && (await rowTotal(tx, fresh.id)) + creates > MAX_ROWS)
+      throw conflict("base.too_many_rows", "This database would pass the row limit", { max: MAX_ROWS });
+    for (const op of ops) {
+      const write: Record<string, unknown> = { ...op.props };
+      for (const [propId, text] of Object.entries(op.text ?? {})) {
+        const def = fresh.defs.find((d) => d.id === propId);
+        if (!def)
+          throw bad("base.invalid_props", "Invalid property values", {
+            errors: [{ propId, code: "unknown_prop" }],
+          });
+        if (COMPUTED_TYPES.has(def.type)) {
+          skipped++;
+          continue;
+        }
+        if (!text.trim()) {
+          write[propId] = null;
+          continue;
+        }
+        const value = parsePropText(def, text);
+        const ok = value === undefined ? null : applyProps([def], {}, { [def.id]: value });
+        if (ok?.ok && ok.props[def.id] !== undefined) write[propId] = ok.props[def.id];
+        else skipped++;
+      }
+      if (op.rowId)
+        await update(op.rowId, {
+          props: write,
+          ...(op.parentVersion !== undefined ? { parentVersion: op.parentVersion } : {}),
+        });
+      else await create({ props: write });
+    }
+  });
+  return { rows, skipped };
 }
 
 // ---------- schema ----------
@@ -799,6 +962,8 @@ function calcSignature(defs: readonly PropDef[]): string {
       d.groups ?? null,
       d.formula?.expression ?? null,
       d.withTime ?? null,
+      d.relation?.tableId ?? null,
+      d.rollup ? [d.rollup.relationPropId, d.rollup.targetPropId, d.rollup.fn] : null,
     ]),
   );
 }
@@ -848,8 +1013,28 @@ async function prepareSchema(db: Db | Tx, table: TableRow, input: PropDef[]): Pr
       : d,
   );
   defs = await withOptionsFromValues(db, table, defs);
-  defs = withResultTypes(defs);
+  // the rollups' types first, then the formulas' (a formula over a rollup reads its type): the order the
+  // values are calculated in
+  const linked = await withRollupTypes(db, table, defs);
+  // a relation or a rollup saved before stays as it was when its source went away (the cell shows the
+  // error): only a new or changed one has to close
+  const unclosed = linked.problems.filter((p) => {
+    const before = table.defs.find((d) => d.id === p.propId);
+    const now = defs.find((d) => d.id === p.propId);
+    return !before || JSON.stringify(linkShape(before)) !== JSON.stringify(now && linkShape(now));
+  });
+  if (unclosed.length) throw bad("base.invalid_schema", "Invalid schema", { problems: unclosed });
+  defs = withResultTypes(linked.defs);
   return { defs, recalc: calcSignature(defs) !== calcSignature(table.defs) };
+}
+
+/** What a relation or a rollup points to (their name, their color and the result type don't count). */
+function linkShape(d: PropDef) {
+  return [
+    d.type,
+    d.relation?.tableId ?? null,
+    d.rollup ? [d.rollup.relationPropId, d.rollup.targetPropId, d.rollup.fn] : null,
+  ];
 }
 
 /**
@@ -900,6 +1085,8 @@ async function afterSchema(
   saved: { table: TableRow; touched: Set<string>; recalc: boolean },
 ): Promise<TableRow> {
   if (saved.recalc) await recalcPolicy(deps, saved.table);
+  // whoever sums or reads this source by a relation recalculates whole: the target may have changed type or gone
+  if (saved.recalc) for (const id of await refreshDependents(deps, saved.table)) saved.touched.add(id);
   for (const id of saved.touched) publishBase(deps, saved.table.workspaceId, id);
   const [after] = await deps.db.select().from(dbTables).where(eq(dbTables.id, saved.table.id));
   return after ?? saved.table;
@@ -937,6 +1124,7 @@ export async function importRows(
   if (done.inserted.length) {
     publishRows(deps, table.workspaceId, after, { rowIds: [], by: input.actor });
     await indexRows(deps, done.inserted);
+    await settleLinks(deps, true);
   }
   return { table: after, created: done.inserted.length };
 }
@@ -1004,6 +1192,8 @@ function normalizeRowProps(defs: readonly PropDef[], props: Props): Props {
 // ---------- recalculation ----------
 
 const running = new WeakMap<AppDeps, Map<string, Promise<void>>>();
+/** The propagations of the relations in progress (a request's, or a retry waiting for a held row). */
+const settling = new WeakMap<AppDeps, Set<Promise<void>>>();
 const halted = new WeakSet<AppDeps>();
 
 /** One batch: up to 500 stale rows, locked without waiting for whoever is already on them. */
@@ -1011,7 +1201,7 @@ async function recalcBatch(
   deps: AppDeps,
   tableId: string,
   names: Names,
-): Promise<{ done: boolean; changed: RowRow[] }> {
+): Promise<{ done: boolean; changed: RowRow[]; busy?: boolean }> {
   const { db } = deps;
   return writeTx(db, async (tx) => {
     const [table] = await tx.select().from(dbTables).where(eq(dbTables.id, tableId));
@@ -1024,23 +1214,36 @@ async function recalcBatch(
       .limit(BATCH)
       .for("update", { skipLocked: true });
     if (!stale.length) {
-      const [left] = await tx
-        .select({ n: count() })
-        .from(dbRows)
-        .where(and(eq(dbRows.tableId, tableId), lt(dbRows.calcVersion, table.calcVersion)));
-      if (Number(left?.n ?? 0) > 0) return { done: false, changed: [] }; // another process is on them
-      await tx
+      // "done" only if, in the same statement, no row is stale: a relation's propagation may have marked one
+      // after the search above, and then its `least()` can't be undone by this update
+      const [ok] = await tx
         .update(dbTables)
         .set({ calcDoneVersion: table.calcVersion })
-        .where(and(eq(dbTables.id, tableId), eq(dbTables.calcVersion, table.calcVersion)));
-      return { done: true, changed: [] };
+        .where(
+          and(
+            eq(dbTables.id, tableId),
+            eq(dbTables.calcVersion, table.calcVersion),
+            sql`not exists (select 1 from ${dbRows} where ${dbRows.tableId} = ${tableId} and ${dbRows.calcVersion} < ${table.calcVersion})`,
+          ),
+        )
+        .returning({ id: dbTables.id });
+      if (ok) return { done: true, changed: [] };
+      const [again] = await tx
+        .select({ v: dbTables.calcVersion })
+        .from(dbTables)
+        .where(eq(dbTables.id, tableId));
+      // the version moved (a new schema): another round; otherwise a stale row is held by another process
+      return { done: false, changed: [], busy: again?.v === table.calcVersion };
     }
     const now = deps.now().getTime();
-    const values = stale.map((r) => {
-      const props = normalizeRowProps(table.defs, r.props);
-      const changedProps = JSON.stringify(props) !== JSON.stringify(r.props);
-      const computed = computeRow(table, { ...r, props }, { now, names });
-      return { id: r.id, props, computed, bump: changedProps ? 1 : 0 };
+    const normalized = stale.map((r) => ({ ...r, props: normalizeRowProps(table.defs, r.props) }));
+    const linked = await loadLinked(tx, table, normalized);
+    const values = normalized.map((r, i) => {
+      const old = stale[i] as RowRow;
+      const changedProps = JSON.stringify(r.props) !== JSON.stringify(old.props);
+      const computed = computeRow(table, r, { now, names, linked });
+      const moved = readableMoved(table, old, { props: r.props, computed });
+      return { id: r.id, props: r.props, computed, bump: changedProps ? 1 : 0, moved };
     });
     const rows = sql.join(
       values.map(
@@ -1054,6 +1257,12 @@ async function recalcBatch(
          set props = v.props, computed = v.computed, version = r.version + v.bump, calc_version = ${table.calcVersion}
         from (values ${rows}) as v(id, props, computed, bump)
        where r.id = v.id`);
+    // only what dependents can read and that really changed notifies them: that is what ends the propagation
+    await noteChanged(
+      tx,
+      table,
+      values.filter((v) => v.moved).map((v) => v.id),
+    );
     const changed = stale.map((r, i) => ({
       ...r,
       props: values[i]?.props ?? r.props,
@@ -1070,9 +1279,10 @@ export async function runRecalc(deps: AppDeps, tableId: string): Promise<void> {
   const names = await namesOf(deps.db, table.workspaceId);
   let processed = 0;
   for (let spins = 0; !halted.has(deps); ) {
-    const { done, changed } = await recalcBatch(deps, tableId, names);
+    const { done, changed, busy } = await recalcBatch(deps, tableId, names);
     if (done) break;
     if (!changed.length) {
+      if (!busy) continue;
       // another process holds the rows left: wait a little and check again
       if (++spins > 50) break;
       await Bun.sleep(100);
@@ -1099,11 +1309,14 @@ export async function runRecalc(deps: AppDeps, tableId: string): Promise<void> {
     });
     publishRows(deps, after.workspaceId, after, {});
   }
+  // the dependents of this source recalculate in the background: waiting here could wait for itself
+  await settleLinks(deps, false);
 }
 
 /**
- * Schedules (or joins) a background recalculation of the source. It is the server's background work
- * (`runtime.track`): `settle` waits for it, and `stopRecalcs` halts it between two batches.
+ * Schedules a background recalculation of the source. It is the server's background work (`runtime.track`):
+ * `settle` waits for it, and `stopRecalcs` halts it between two batches. With one already running, another
+ * round is queued after it: the round in progress may have gone past the rows someone just marked.
  */
 export function scheduleRecalc(deps: AppDeps, tableId: string): Promise<void> {
   let map = running.get(deps);
@@ -1152,8 +1365,9 @@ export async function refreshVolatile(deps: AppDeps, table: TableRow): Promise<T
   return after ?? bumped;
 }
 
-/** When the server starts: resumes the recalculation left halfway (a crash, a deploy). */
+/** When the server starts: resumes the relations' notices and the recalculation left halfway (a crash, a deploy). */
 export async function resumeRecalcs(deps: AppDeps) {
+  await settleLinks(deps, false);
   const pending = await deps.db
     .select({ id: dbTables.id })
     .from(dbTables)
@@ -1163,11 +1377,133 @@ export async function resumeRecalcs(deps: AppDeps) {
 
 /**
  * Stops the recalculations (the server is about to close the database): each one ends after the batch it is
- * in, which commits whole, and the rows left stay stale for `resumeRecalcs` on the next start.
+ * in, which commits whole, a propagation in progress ends its round, and a retry waiting for a held row
+ * gives up. The rows left stay stale, and the notices left stay in the database, for `resumeRecalcs` on the
+ * next start.
  */
 export async function stopRecalcs(deps: AppDeps) {
   halted.add(deps);
-  await Promise.all([...(running.get(deps)?.values() ?? [])]);
+  for (;;) {
+    const jobs = [...(running.get(deps)?.values() ?? []), ...(settling.get(deps) ?? [])];
+    if (!jobs.length) return;
+    await Promise.allSettled(jobs);
+  }
+}
+
+/** How long a notice left by a held row waits before the next try. */
+export const LINK_RETRY_MS = 200;
+/** Failed propagations in a row before the retries stop (the notice stays for later). */
+export const MAX_LINK_FAILURES = 5;
+const failures = new WeakMap<AppDeps, number>();
+
+/**
+ * After the commit: marks the rows that depend on what changed and recalculates their sources. `wait` (the
+ * writer's request) recalculates the small sources now, as for the schema; without `wait` (inside a
+ * recalculation, on the start) all goes to the background. A notice left by a held row, or a propagation that
+ * failed (the write is committed: its error doesn't reach the writer), tries again in `LINK_RETRY_MS`.
+ */
+export function settleLinks(deps: AppDeps, wait: boolean): Promise<void> {
+  if (halted.has(deps)) return Promise.resolve();
+  const set = settling.get(deps) ?? new Set<Promise<void>>();
+  settling.set(deps, set);
+  const work: Promise<void> = (async () => {
+    let pending = true;
+    try {
+      const marked = new Set<string>();
+      try {
+        pending = await propagate(deps.db, marked);
+      } finally {
+        for (const id of marked) {
+          if (!wait) {
+            void scheduleRecalc(deps, id);
+            continue;
+          }
+          const [t] = await deps.db.select().from(dbTables).where(eq(dbTables.id, id));
+          if (t) await recalcPolicy(deps, t);
+        }
+      }
+      failures.delete(deps);
+    } catch (err) {
+      // a failure that repeats (the database gone, a bug) stops trying after a few: the notice stays in the
+      // database for the next write or the next start
+      const n = (failures.get(deps) ?? 0) + 1;
+      failures.set(deps, n);
+      log.error("base.links_failed", { err, attempt: n });
+      if (n >= MAX_LINK_FAILURES) {
+        failures.delete(deps);
+        pending = false;
+      }
+    }
+    if (pending) retryLinks(deps);
+  })().finally(() => set.delete(work));
+  set.add(work);
+  deps.runtime.track(work, "base.links");
+  return work;
+}
+
+/** One retry at a time: it leaves the set before trying, so one that still finds a held row queues the next. */
+const retries = new WeakMap<AppDeps, Promise<void>>();
+
+function retryLinks(deps: AppDeps) {
+  if (halted.has(deps) || retries.has(deps)) return;
+  const set = settling.get(deps) ?? new Set<Promise<void>>();
+  settling.set(deps, set);
+  const retry: Promise<void> = Bun.sleep(LINK_RETRY_MS)
+    .then(() => {
+      retries.delete(deps);
+      return settleLinks(deps, false);
+    })
+    .finally(() => set.delete(retry));
+  retries.set(deps, retry);
+  set.add(retry);
+  deps.runtime.track(retry, "base.links");
+}
+
+/**
+ * The schema of `table` changed: each source that reads this one by a relation recalculates whole (a rollup's
+ * target may have changed type or gone) and gets its rollups' new result type, as a schema write of its own:
+ * its database and the ones with a view of it locked first, then the source, read again under the lock (a
+ * schema save of it meanwhile isn't overwritten). Returns the databases touched (for `base.updated`).
+ */
+async function refreshDependents(deps: AppDeps, table: Pick<TableRow, "id" | "workspaceId">) {
+  const touched: string[] = [];
+  for (const { table: y } of await dependentsOf(deps.db, table.workspaceId, table.id)) {
+    if (y.id === table.id) continue;
+    const saved = await lockedTx(
+      deps,
+      (q) => reachOfSources(q, y.databaseId, [y.id]),
+      async (tx, held) => {
+        const [current] = await tx.select().from(dbTables).where(eq(dbTables.id, y.id)).for("update");
+        if (!current) return null;
+        await held.recheck();
+        // the rollups' new types, then the formulas that read them
+        const defs = withResultTypes((await withRollupTypes(tx, current, current.defs)).defs);
+        const changed = JSON.stringify(defs) !== JSON.stringify(current.defs);
+        const at = deps.now();
+        const [row] = await tx
+          .update(dbTables)
+          .set({
+            ...(changed ? { defs, schemaVersion: current.schemaVersion + 1, updatedAt: at } : {}),
+            calcVersion: current.calcVersion + 1,
+          })
+          .where(eq(dbTables.id, y.id))
+          .returning();
+        const views = new Set<string>();
+        if (changed)
+          for (const v of await tx.select().from(dbViews).where(eq(dbViews.tableId, y.id))) {
+            const pruned = pruneConfig(v.config, defs);
+            if (JSON.stringify(pruned) === JSON.stringify(v.config)) continue;
+            await tx.update(dbViews).set({ config: pruned, updatedAt: at }).where(eq(dbViews.id, v.id));
+            views.add(v.databaseId);
+          }
+        return row ? { row, changed, views } : null;
+      },
+    );
+    if (!saved) continue;
+    if (saved.changed) touched.push(saved.row.databaseId, ...saved.views);
+    await recalcPolicy(deps, saved.row);
+  }
+  return touched;
 }
 
 // ---------- views ----------
@@ -1208,7 +1544,12 @@ function pruneConfig(cfg: ViewConfig, defs: readonly PropDef[]): ViewConfig {
   }
   if (cfg.formProps) out.formProps = cfg.formProps.filter(known);
   if (cfg.summaries)
-    out.summaries = Object.fromEntries(Object.entries(cfg.summaries).filter(([k]) => known(k)));
+    out.summaries = Object.fromEntries(
+      Object.entries(cfg.summaries).filter(([k, fn]) => {
+        const def = byId.get(k);
+        return def && summaryFns(def).some((f) => f === fn);
+      }),
+    );
   return out;
 }
 
@@ -1410,6 +1751,17 @@ export async function deleteDatabase(deps: AppDeps, database: DatabaseRow) {
       await baseLocks.pause("base:deleted", tx);
       // the rows went by cascade above; their chunks after them (rows before chunks, as reindex locks them)
       await unindexMany(tx, "db_row", rowIds);
+      const sources = tables.map((t) => t.id);
+      // No source FK: this full invalidation survives the cascade, even for empty relations.
+      if (sources.length)
+        await tx.insert(schema.dbCalcDirty).values(
+          sources.map((tableId) => ({
+            id: newId("dcd"),
+            workspaceId: database.workspaceId,
+            tableId,
+            rowIds: [],
+          })),
+        );
       const reached = [...held.found].filter((id) => id !== database.id);
       if (!reached.length) return { gone: [], healed: [] };
       const bare = sql`not exists (select 1 from ${dbViews} where ${dbViews.databaseId} = ${dbDatabases.id})`;
@@ -1446,4 +1798,5 @@ export async function deleteDatabase(deps: AppDeps, database: DatabaseRow) {
   for (const id of result.healed) publishBase(deps, database.workspaceId, id);
   for (const id of [database.id, ...result.gone.map((g) => g.id)])
     deps.hub.toWorkspace(database.workspaceId, { type: "base.deleted", baseId: id });
+  await settleLinks(deps, true);
 }

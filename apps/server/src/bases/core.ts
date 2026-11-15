@@ -8,6 +8,8 @@ import {
   type ActorRef,
   type Base,
   type BaseFormulaError,
+  type BaseLinkedRow,
+  type BaseRelationTarget,
   type BaseRow,
   type BaseSummary,
   type BaseTable,
@@ -197,6 +199,7 @@ export async function toSummaries(db: Db, rows: DatabaseRow[]): Promise<BaseSumm
     title: r.title,
     icon: r.icon,
     kind: r.kind,
+    tableId: tables.find((t) => t.databaseId === r.id)?.id ?? null,
     page: pageOf(pages, r.pageId),
     rowCount: byDb.get(r.id) ?? 0,
     createdBy: r.createdBy,
@@ -217,12 +220,87 @@ export async function toBase(db: Db, row: DatabaseRow, me: WorkspaceMember | nul
     : [];
   const [summary] = await toSummaries(db, [row]);
   if (!summary) throw notFound("Database not found");
+  const tables = [...own, ...linked];
   return {
     ...summary,
-    tables: [...own, ...linked].map(toTable),
+    tables: tables.map(toTable),
     views: views.map(toView),
     deletable: me ? canDeleteDatabase(row, me) : false,
+    relationTargets: await relationTargets(db, row.workspaceId, tables),
   };
+}
+
+/** The ids of the sources the relations of `defs` point to. */
+export function relationTableIds(defs: readonly PropDef[]): string[] {
+  return [...new Set(defs.flatMap((d) => (d.type === "relation" && d.relation ? [d.relation.tableId] : [])))];
+}
+
+/** The sources the relations point to (only the workspace's own), with the database of each. */
+async function relationTargets(
+  db: Db,
+  workspaceId: string,
+  tables: readonly TableRow[],
+): Promise<BaseRelationTarget[]> {
+  const ids = relationTableIds(tables.flatMap((t) => t.defs));
+  if (!ids.length) return [];
+  return db
+    .select({
+      tableId: dbTables.id,
+      databaseId: dbTables.databaseId,
+      databaseTitle: dbDatabases.title,
+      titlePropId: dbTables.titlePropId,
+    })
+    .from(dbTables)
+    .innerJoin(dbDatabases, eq(dbDatabases.id, dbTables.databaseId))
+    .where(and(eq(dbTables.workspaceId, workspaceId), inArray(dbTables.id, ids)));
+}
+
+/** Rows looked up per statement (the size of an `in` list). */
+const LOOKUP_CHUNK = 500;
+
+/**
+ * Title and place of the rows the relations of `rows` link (the ones that exist, of the right source and of
+ * the same workspace): a relation cell shows the name, not the id.
+ */
+export async function linkedTitles(
+  db: Db,
+  table: TableRow,
+  rows: readonly Pick<RowRow, "props">[],
+): Promise<Record<string, BaseLinkedRow>> {
+  const want = new Map<string, Set<string>>();
+  for (const rel of table.defs) {
+    if (rel.type !== "relation" || !rel.relation) continue;
+    const set = want.get(rel.relation.tableId) ?? new Set<string>();
+    for (const r of rows) {
+      const v = r.props[rel.id];
+      if (Array.isArray(v)) for (const x of v) if (typeof x === "string") set.add(x);
+    }
+    want.set(rel.relation.tableId, set);
+  }
+  const out: Record<string, BaseLinkedRow> = {};
+  for (const [tableId, idSet] of want) {
+    const ids = [...idSet];
+    if (!ids.length) continue;
+    const [t] = await db
+      .select({ databaseId: dbTables.databaseId, titlePropId: dbTables.titlePropId })
+      .from(dbTables)
+      .where(and(eq(dbTables.id, tableId), eq(dbTables.workspaceId, table.workspaceId)));
+    if (!t) continue;
+    for (let i = 0; i < ids.length; i += LOOKUP_CHUNK) {
+      const found = await db
+        .select({ id: dbRows.id, title: sql<string | null>`${dbRows.props} ->> ${t.titlePropId}::text` })
+        .from(dbRows)
+        .where(
+          and(
+            eq(dbRows.tableId, tableId),
+            eq(dbRows.workspaceId, table.workspaceId),
+            inArray(dbRows.id, ids.slice(i, i + LOOKUP_CHUNK)),
+          ),
+        );
+      for (const f of found) out[f.id] = { title: f.title ?? "", tableId, databaseId: t.databaseId };
+    }
+  }
+  return out;
 }
 
 // ---------- names (the `name()` formula, CSV, search) ----------
@@ -317,12 +395,27 @@ export type CellRow = Pick<
 >;
 
 /**
- * The text of a cell (a formula's too, by its computed value). The automatic properties live in the row's
- * columns, not in `props`: the times go out as ISO instants, the people by name.
+ * The text of a cell (a formula's and a rollup's too, by the computed value). The automatic properties live in
+ * the row's columns, not in `props`: the times go out as ISO instants, the people by name. A relation becomes
+ * the titles of the linked rows when `linked` comes; without it, it stays out (an id says nothing to a reader).
  */
-export function cellText(def: PropDef, row: CellRow, names: Names): string {
+export function cellText(
+  def: PropDef,
+  row: CellRow,
+  names: Names,
+  linked?: Readonly<Record<string, BaseLinkedRow>>,
+): string {
   switch (def.type) {
-    case "formula": {
+    case "relation": {
+      const ids = row.props[def.id];
+      if (!linked || !Array.isArray(ids)) return "";
+      return ids
+        .map((id) => linked[String(id)]?.title)
+        .filter((t): t is string => Boolean(t))
+        .join(", ");
+    }
+    case "formula":
+    case "rollup": {
       const v = row.computed[def.id];
       if (v === undefined || v === null) return "";
       if (typeof v === "object" && !Array.isArray(v) && "err" in v) return `#${String(v.err)}`;
