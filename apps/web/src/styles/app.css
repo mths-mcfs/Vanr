@@ -1,0 +1,611 @@
+/*
+ * The web's own layout: the account column, the frame and its sidebar, and a page. Everything is
+ * drawn with the @vanr/ui tokens; a color, a size or a face that is not a token does not belong
+ * here (src/styles/styles.test.ts checks it). Components live in @vanr/ui, not in this file.
+ */
+@import "@vanr/ui/styles.css";
+
+@layer vanr.app {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  .app-skip {
+    position: absolute;
+    cursor: pointer;
+    top: var(--vr-space-2);
+    left: var(--vr-space-2);
+    z-index: var(--vr-z-tooltip);
+    padding: var(--vr-space-2) var(--vr-space-3);
+    border: var(--vr-border) solid var(--vr-line-control);
+    border-radius: var(--vr-radius-2);
+    background-color: var(--vr-bg-overlay);
+    color: var(--vr-fg);
+    translate: 0 -200%;
+  }
+
+  .app-skip:focus-visible {
+    translate: 0 0;
+  }
+
+  .app-link {
+    color: var(--vr-accent-fg);
+    text-underline-offset: 0.2em;
+  }
+
+  /* A button that reads as a link, for an action in the middle of a sentence. */
+  .app-link-button {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--vr-accent-fg);
+    text-decoration: underline;
+    text-underline-offset: 0.2em;
+    cursor: pointer;
+  }
+
+  /* ---------- Account: one open column on the canvas ---------- */
+
+  .acct {
+    position: relative;
+    min-height: 100%;
+    background-color: var(--vr-bg-canvas);
+  }
+
+  /* Each control is as wide as its own text, so a choice is never cut. */
+  .acct__controls {
+    position: absolute;
+    top: var(--vr-space-3);
+    right: var(--vr-space-4);
+    display: grid;
+    grid-auto-columns: max-content;
+    grid-auto-flow: column;
+    gap: var(--vr-space-2);
+  }
+
+  .acct__column {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-6);
+    width: min(24rem, calc(100% - 2 * var(--vr-space-4)));
+    margin-inline: auto;
+    padding-block: max(var(--vr-space-4), 12vh) var(--vr-space-12);
+  }
+
+  .acct__head {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-2);
+  }
+
+  .acct__title {
+    font-family: var(--vr-font-title);
+    font-size: var(--vr-text-2xl);
+    line-height: var(--vr-text-2xl-lh);
+    font-weight: var(--vr-weight-regular);
+    text-wrap: balance;
+    overflow-wrap: break-word;
+  }
+
+  .acct__title:focus-visible {
+    outline: none;
+  }
+
+  .acct__why {
+    max-width: 44ch;
+    font-size: var(--vr-text-lg);
+    line-height: var(--vr-text-lg-lh);
+    color: var(--vr-fg-muted);
+    overflow-wrap: break-word;
+  }
+
+  .acct__form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-4);
+  }
+
+  .acct__actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--vr-space-3) var(--vr-space-4);
+  }
+
+  .acct__foot {
+    color: var(--vr-fg-muted);
+  }
+
+  /* The facts of an invitation: a ruled list, label on the left, value on the right. */
+  .acct__facts {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    margin: 0;
+    border-top: var(--vr-border) solid var(--vr-line);
+  }
+
+  .acct__facts > div {
+    display: grid;
+    grid-template-columns: subgrid;
+    grid-column: 1 / -1;
+    gap: var(--vr-space-6);
+    padding-block: var(--vr-space-2);
+    border-bottom: var(--vr-border) solid var(--vr-line);
+  }
+
+  .acct__facts dt {
+    color: var(--vr-fg-muted);
+  }
+
+  .acct__facts dd {
+    margin: 0;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .acct__data {
+    font-family: var(--vr-font-mono);
+    font-size: 0.92em;
+  }
+
+  @media (max-width: 480px) {
+    .acct__controls {
+      position: static;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      padding: var(--vr-space-3) var(--vr-space-4) 0;
+    }
+
+    .acct__column {
+      padding-top: var(--vr-space-4);
+    }
+
+    .acct__actions > .vr-button {
+      width: 100%;
+    }
+  }
+
+  /* ---------- Frame ---------- */
+
+  .frame {
+    display: grid;
+    grid-template-columns: 16.5rem minmax(0, 1fr);
+    height: 100%;
+    background-color: var(--vr-bg-canvas);
+  }
+
+  .frame[data-sidebar="hidden"],
+  .frame[data-sidebar="drawer"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .frame__sidebar {
+    min-height: 0;
+    border-right: var(--vr-border) solid var(--vr-line);
+    background-color: var(--vr-bg-sunken);
+  }
+
+  .frame__main {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .frame__header {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: var(--vr-space-2);
+    height: var(--vr-space-12);
+    padding-inline: var(--vr-space-3) var(--vr-space-4);
+    border-bottom: var(--vr-border) solid var(--vr-line);
+  }
+
+  .frame__title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    font-size: var(--vr-text-md);
+    line-height: var(--vr-text-md-lh);
+    font-weight: var(--vr-weight-strong);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* The way to search: reads as a field, works as a link. */
+  .frame__search {
+    display: inline-flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--vr-space-6);
+    height: var(--vr-control-md);
+    padding-inline: var(--vr-space-3) var(--vr-space-2);
+    border: var(--vr-border) solid var(--vr-line-control);
+    border-radius: var(--vr-radius-2);
+    background-color: var(--vr-bg-raised);
+    color: var(--vr-fg-muted);
+    text-decoration: none;
+  }
+
+  .frame__search:hover {
+    background-color: var(--vr-bg-hover);
+    color: var(--vr-fg);
+  }
+
+  /* Working agents in the header, when the sidebar is out of sight. */
+  .frame__working {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--vr-space-1);
+    height: var(--vr-control-md);
+    padding-inline: var(--vr-space-2);
+    border: 0;
+    border-radius: var(--vr-radius-2);
+    background: none;
+    color: var(--vr-fg);
+    cursor: pointer;
+  }
+
+  .frame__working:hover {
+    background-color: var(--vr-bg-hover);
+  }
+
+  .frame__working-count {
+    margin-inline-start: var(--vr-space-1);
+    font-family: var(--vr-font-mono);
+    font-size: var(--vr-text-sm);
+  }
+
+  .frame__content {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .frame__content:focus-visible {
+    outline: none;
+  }
+
+  /* ---------- Sidebar: three ruled bands. The only shapes in it are people and agents. ---------- */
+
+  .side {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    color: var(--vr-fg);
+  }
+
+  .side__workspace {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    height: var(--vr-space-12);
+    padding-inline: var(--vr-space-2);
+    border-bottom: var(--vr-border) solid var(--vr-line);
+  }
+
+  .side__button {
+    display: flex;
+    align-items: center;
+    gap: var(--vr-space-2);
+    width: 100%;
+    min-width: 0;
+    padding-inline: var(--vr-space-2);
+    border: 0;
+    border-radius: var(--vr-radius-2);
+    background: none;
+    color: var(--vr-fg);
+    text-align: start;
+    cursor: pointer;
+  }
+
+  .side__button:hover,
+  .side__button[data-state="open"] {
+    background-color: var(--vr-bg-hover);
+  }
+
+  .side__button--workspace {
+    justify-content: space-between;
+    height: var(--vr-control-md);
+    font-weight: var(--vr-weight-strong);
+  }
+
+  .side__button--person {
+    height: var(--vr-control-lg);
+  }
+
+  .side__name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .side__chevron {
+    flex-shrink: 0;
+    color: var(--vr-fg-muted);
+  }
+
+  .side__scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .side__nav {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-4);
+    padding: var(--vr-space-3) var(--vr-space-2);
+  }
+
+  .side__group {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .side__link {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--vr-space-2);
+    min-height: 1.75rem;
+    padding-inline: var(--vr-space-3) var(--vr-space-2);
+    border-radius: var(--vr-radius-2);
+    color: var(--vr-fg-muted);
+    text-decoration: none;
+  }
+
+  .side__link:hover {
+    background-color: var(--vr-bg-hover);
+    color: var(--vr-fg);
+  }
+
+  .side__link[aria-current="page"] {
+    background-color: var(--vr-bg-active);
+    color: var(--vr-fg);
+    font-weight: var(--vr-weight-strong);
+  }
+
+  .side__link[aria-current="page"]::before {
+    content: "";
+    position: absolute;
+    top: var(--vr-space-1);
+    bottom: var(--vr-space-1);
+    left: 0;
+    width: var(--vr-ring);
+    background-color: var(--vr-accent);
+  }
+
+  .side__count {
+    font-family: var(--vr-font-mono);
+    font-size: var(--vr-text-sm);
+    font-weight: var(--vr-weight-regular);
+    color: var(--vr-fg-muted);
+  }
+
+  .side__band {
+    padding: var(--vr-space-3) var(--vr-space-2);
+    border-top: var(--vr-border) solid var(--vr-line);
+  }
+
+  .side__band-title {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--vr-space-2);
+    margin-bottom: var(--vr-space-1);
+    padding-inline: var(--vr-space-3) var(--vr-space-2);
+    font-size: var(--vr-text-sm);
+    line-height: var(--vr-text-sm-lh);
+    font-weight: var(--vr-weight-medium);
+    color: var(--vr-fg-subtle);
+  }
+
+  .side__quiet {
+    padding-inline: var(--vr-space-3);
+    font-size: var(--vr-text-sm);
+    line-height: var(--vr-text-sm-lh);
+    color: var(--vr-fg-subtle);
+  }
+
+  .side__agents {
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .side__link--agent {
+    justify-content: flex-start;
+    color: var(--vr-fg);
+  }
+
+  .side__person {
+    flex-shrink: 0;
+    padding: var(--vr-space-2);
+    border-top: var(--vr-border) solid var(--vr-line);
+  }
+
+  /* ---------- A page inside the frame ---------- */
+
+  .page {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-6);
+    max-width: 60rem;
+    padding: var(--vr-space-8);
+  }
+
+  .page__title {
+    font-family: var(--vr-font-title);
+    font-size: var(--vr-text-2xl);
+    line-height: var(--vr-text-2xl-lh);
+    font-weight: var(--vr-weight-regular);
+    overflow-wrap: break-word;
+  }
+
+  .page__lead {
+    max-width: 58ch;
+    font-size: var(--vr-text-lg);
+    line-height: var(--vr-text-lg-lh);
+    overflow-wrap: break-word;
+  }
+
+  .page__muted {
+    max-width: 68ch;
+    color: var(--vr-fg-muted);
+  }
+
+  /* A block that should not stretch across a wide page: an empty state, a short form. */
+  .page__narrow {
+    max-width: 36rem;
+  }
+
+  .page__section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-2);
+  }
+
+  .page__heading {
+    font-size: var(--vr-text-md);
+    line-height: var(--vr-text-md-lh);
+    font-weight: var(--vr-weight-strong);
+  }
+
+  .page__steps {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: var(--vr-space-1) var(--vr-space-6);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .page__steps li {
+    display: grid;
+    grid-template-columns: subgrid;
+    grid-column: 1 / -1;
+  }
+
+  .page__steps span {
+    color: var(--vr-fg-muted);
+  }
+
+  .page__loading {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-3);
+    max-width: 30rem;
+  }
+
+  /* Rows of people or agents: shape, name, then what is known about them. */
+  .listing {
+    display: flex;
+    flex-direction: column;
+    max-width: 40rem;
+    margin: 0;
+    padding: 0;
+    border-top: var(--vr-border) solid var(--vr-line);
+    list-style: none;
+  }
+
+  .listing__row {
+    display: flex;
+    align-items: center;
+    gap: var(--vr-space-3);
+    min-height: var(--vr-control-lg);
+    padding-inline: var(--vr-space-1);
+    border-bottom: var(--vr-border) solid var(--vr-line);
+  }
+
+  .listing__name {
+    font-weight: var(--vr-weight-medium);
+  }
+
+  .listing__handle {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    font-family: var(--vr-font-mono);
+    font-size: var(--vr-text-sm);
+    color: var(--vr-fg-subtle);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .listing__state {
+    font-size: var(--vr-text-sm);
+    color: var(--vr-fg-muted);
+  }
+
+  /* Settings: the sections on the left, the open one beside them. */
+  .settings {
+    display: grid;
+    grid-template-columns: 12rem minmax(0, 1fr);
+    gap: var(--vr-space-8);
+    align-items: start;
+  }
+
+  .settings__nav {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .settings__body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-4);
+    min-width: 0;
+  }
+
+  @media (max-width: 640px) {
+    .settings {
+      grid-template-columns: minmax(0, 1fr);
+      gap: var(--vr-space-4);
+    }
+
+    .settings__nav {
+      flex-direction: row;
+      overflow-x: auto;
+      padding-bottom: var(--vr-space-1);
+    }
+
+    .settings__nav .side__link {
+      white-space: nowrap;
+    }
+
+    .page {
+      padding: var(--vr-space-6) var(--vr-space-4);
+    }
+
+    .page__steps {
+      grid-template-columns: minmax(0, 1fr);
+      gap: var(--vr-space-3);
+    }
+
+    .page__steps li {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .frame__search span {
+      display: none;
+    }
+  }
+}

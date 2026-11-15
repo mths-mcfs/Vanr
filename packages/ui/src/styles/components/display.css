@@ -254,6 +254,13 @@
     color: var(--vr-accent-fg);
   }
 
+  /* A working agent: the tile is lit. A state, not an alert, so it does not move. */
+  .vr-sigil[data-working] {
+    border-color: var(--vr-accent);
+    background-color: var(--vr-accent);
+    color: var(--vr-on-accent);
+  }
+
   .vr-sigil svg {
     width: 82%;
     height: 82%;
@@ -503,6 +510,96 @@
 
   .vr-empty__action {
     margin-top: var(--vr-space-3);
+  }
+
+  /* Error state: a view that failed to load */
+
+  .vr-error-state {
+    display: flex;
+    gap: var(--vr-space-3);
+    max-width: 60ch;
+    padding: var(--vr-space-4);
+    border: var(--vr-border) solid var(--vr-line-control);
+    border-radius: var(--vr-radius-3);
+    color: var(--vr-fg);
+  }
+
+  .vr-error-state__icon {
+    flex-shrink: 0;
+    margin-top: 2px;
+    color: var(--vr-danger-fg);
+  }
+
+  .vr-error-state__text {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-1);
+    min-width: 0;
+    overflow-wrap: break-word;
+  }
+
+  .vr-error-state__title {
+    font-weight: var(--vr-weight-strong);
+  }
+
+  .vr-error-state__description {
+    color: var(--vr-fg-muted);
+  }
+
+  .vr-error-state__action {
+    margin-top: var(--vr-space-2);
+  }
+
+  /* Banner: a strip across the top of a region */
+
+  .vr-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--vr-space-3);
+    min-height: var(--vr-control-lg);
+    padding: var(--vr-space-1) var(--vr-space-4);
+    border-bottom: var(--vr-border) solid var(--_edge);
+    background-color: var(--_wash);
+    color: var(--vr-fg);
+  }
+
+  .vr-banner[data-tone="info"] {
+    --_wash: var(--vr-info-wash);
+    --_ink: var(--vr-info-fg);
+    --_edge: color-mix(in srgb, var(--vr-info-fg) 30%, transparent);
+  }
+
+  .vr-banner[data-tone="success"] {
+    --_wash: var(--vr-success-wash);
+    --_ink: var(--vr-success-fg);
+    --_edge: color-mix(in srgb, var(--vr-success-fg) 30%, transparent);
+  }
+
+  .vr-banner[data-tone="warning"] {
+    --_wash: var(--vr-warning-wash);
+    --_ink: var(--vr-warning-fg);
+    --_edge: color-mix(in srgb, var(--vr-warning-fg) 30%, transparent);
+  }
+
+  .vr-banner[data-tone="danger"] {
+    --_wash: var(--vr-danger-wash);
+    --_ink: var(--vr-danger-fg);
+    --_edge: color-mix(in srgb, var(--vr-danger-fg) 30%, transparent);
+  }
+
+  .vr-banner__icon {
+    flex-shrink: 0;
+    color: var(--_ink);
+  }
+
+  .vr-banner__text {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: break-word;
+  }
+
+  .vr-banner__action {
+    flex-shrink: 0;
   }
 
   /* Wordmark */
