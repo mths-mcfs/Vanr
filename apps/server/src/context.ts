@@ -3,6 +3,7 @@ import type { BlobStore } from "@vanr/engine/blobs";
 import type { Db } from "@vanr/engine/db";
 import type { ModelProvider } from "@vanr/engine/models/types";
 import type { Sealer } from "@vanr/engine/seal";
+import type { PgSearchIndex } from "@vanr/engine/search-pg";
 import type { SqlConnector } from "@vanr/engine/sqlconn";
 import type { BudgetScope, UsageLedger, UsageSource } from "@vanr/engine/usage";
 import type { Context } from "hono";
@@ -25,8 +26,7 @@ import type { Hub } from "./realtime/hub";
 import type { RunnerHub } from "./runners/hub";
 
 /**
- * Everything the routes need. Each slice of the server adds what it uses: S2 adds `search` (search-index),
- * S3 adds `wikiLive` (wiki-collab) and S5 adds `assignmentEngine` and `assignmentVerifier` (assignments/motor,
+ * Everything the routes need. Each slice of the server adds what it uses: S3 adds `wikiLive` (wiki-collab) and S5 adds `assignmentEngine` and `assignmentVerifier` (assignments/motor,
  * assignments/verify). The runtime is already here as a port; S6 puts the real one behind it.
  */
 export interface AppDeps {
@@ -41,6 +41,11 @@ export interface AppDeps {
   now: () => Date;
   /** Real time: who is connected and where each event goes. */
   hub: Hub;
+  /**
+   * The search index (Postgres). Whoever saves a source calls `reindex`, which reads the source back from the
+   * database (search-index.ts); whoever hides it calls `unindex` in the same transaction.
+   */
+  search: PgSearchIndex;
   /**
    * Usage ledger and cap: every model call reserves before and records after. Routines, assignments,
    * debates and teams use it through here, with their own scopes.

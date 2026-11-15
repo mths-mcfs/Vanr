@@ -153,6 +153,97 @@ jobs:
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_DROP_LOCKS: "1"
+      # The server's search with the vector leg the boot turns on (ensureVector) and the embedding tick.
+      - run: bun test apps/server/test/search-postgres.test.ts --test-name-pattern "on Postgres"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # A Drive write and a storage destination change from two connections: the change waits for the
+      # write's row lock and is rejected. The second run takes the locks out (a double in the test) and must
+      # fail, so the first one can't pass without them.
+      - run: bun test apps/server/test/storage-postgres.test.ts --test-name-pattern "on Postgres"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      - name: The storage race test fails without the row locks
+        run: |
+          if out=$(bun test apps/server/test/storage-postgres.test.ts --test-name-pattern "on Postgres" 2>&1); then
+            echo "$out"
+            echo "::error::the storage race test passed without the row locks"
+            exit 1
+          fi
+          echo "$out"
+          # It must fail for the race (the change was accepted), not for anything else.
+          grep -q 'Received: "accepted"' <<< "$out"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_STORAGE_UNLOCKED: "1"
+      # The bases' locks and the query against the oracle on Postgres (one database for the file).
+      - run: bun test apps/server/test/bases-postgres.test.ts --test-name-pattern "on Postgres"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # The same forced interleavings with the one lock order of the bases swapped for a double in the test
+      # (VANR_TEST_BASES_LOCKS): each write locks only its own database, and the two deletes must FAIL for the
+      # deadlock (one side answers base.busy); with no database lock at all, the three view writes must FAIL
+      # for the race (the cap passed, the last view taken, one place shared). Nothing else counts.
+      - name: The bases lock tests fail without the one order and without the view locks
+        run: |
+          set +e
+          own=$(VANR_TEST_BASES_LOCKS=own bun test apps/server/test/bases-postgres.test.ts --test-name-pattern "forced interleaving: deleting" 2>&1)
+          own_status=$?
+          none=$(VANR_TEST_BASES_LOCKS=none bun test apps/server/test/bases-postgres.test.ts --test-name-pattern "forced interleaving: views" 2>&1)
+          none_status=$?
+          set -e
+          echo "$own"
+          echo "$none"
+          if [ "$own_status" -eq 0 ] || [ "$none_status" -eq 0 ]; then
+            echo "::error::a bases lock test passed with its lock turned off"
+            exit 1
+          fi
+          # On a GitHub runner bun prints each failure twice (the plain line and the annotation), so the
+          # line is only looked for; " 2 fail" below is what says both tests failed.
+          grep -q 'Expected to not contain: "base.busy"' <<< "$own"
+          grep -q ' 2 fail' <<< "$own"
+          grep -q 'Expected: "base.too_many_views"' <<< "$none"
+          grep -q 'Expected: "base.last_view"' <<< "$none"
+          grep -q 'Expected: 4' <<< "$none"
+          grep -q ' 3 fail' <<< "$none"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # Relation and rollup on Postgres: the propagation between linked sources never waits for a lock.
+      - run: bun test apps/server/test/bases-relations-postgres.test.ts --test-name-pattern "on Postgres"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # The forced interleavings of the relations with one of the propagation's locks swapped for a double
+      # (VANR_TEST_BASES_LINKS): `late` takes the dependent rows before their source, `wait` waits for a held
+      # dependent row. Each run must FAIL, and only for its own interleaving: every "(fail)" line names that
+      # test, one distinct test fails, and the failure is the wait it proves (`Expected: false`).
+      - name: The bases links tests fail with the rows locked before the source and with a waiting row lock
+        run: |
+          check() {
+            mode="$1"; label="$2"
+            set +e
+            out=$(VANR_TEST_BASES_LINKS="$mode" bun test apps/server/test/bases-relations-postgres.test.ts --test-name-pattern "forced interleaving: links" 2>&1)
+            status=$?
+            set -e
+            echo "$out"
+            if [ "$status" -eq 0 ]; then
+              echo "::error::the bases links tests passed with VANR_TEST_BASES_LINKS=$mode"
+              exit 1
+            fi
+            fails=$(grep -a '^(fail)' <<< "$out" | sed 's/ \[[0-9.]*m\?s\]$//' | sort -u)
+            if [ -z "$fails" ] || grep -av "forced interleaving: links: $label" <<< "$fails" | grep -aq .; then
+              echo "::error::VANR_TEST_BASES_LINKS=$mode failed a test other than \"$label\": $fails"
+              exit 1
+            fi
+            if [ "$(wc -l <<< "$fails")" -ne 1 ]; then
+              echo "::error::VANR_TEST_BASES_LINKS=$mode: expected one failing test, got: $fails"
+              exit 1
+            fi
+            grep -aq 'Expected: false' <<< "$out"
+          }
+          check late "a source another write holds"
+          check wait "a dependent row another transaction holds"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
 
   sandbox:
     # The runner's real sandbox (bubblewrap + socat): the attack tests of the isolation of the agent's

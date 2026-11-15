@@ -7,11 +7,15 @@ import { postgresConnector, type SqlConnector } from "@vanr/engine/sqlconn";
 import { count } from "drizzle-orm";
 import { createApp } from "./app";
 import { createAuth, type SignupDecision } from "./auth";
+import { resumeRecalcs, stopRecalcs } from "./bases/write";
 import type { Config } from "./config";
 import { ABSENT, type AppDeps, type RuntimePort } from "./context";
+import { purgeTrash } from "./drive";
+import { extractPending } from "./drive-extract";
 import { HttpError } from "./http";
 import { holdInstanceLock } from "./instance-lock";
 import { guardedFetch } from "./integrations/net";
+import { routedBlobs } from "./integrations/storage";
 import { log } from "./logger";
 import { createMailer, type Mailer } from "./mailer";
 import { testModelCheck } from "./models";
@@ -25,12 +29,15 @@ import {
   revalidateBrowsers,
 } from "./realtime/browser-socket";
 import { type BrowserSocket, type BrowserSocketData, Hub } from "./realtime/hub";
+import { isTransfer, TRANSFER_IDLE_SECONDS } from "./routes/drive";
+import { expireUploads } from "./routes/drive-upload";
 import { hasPendingInvite, INVITE_COOKIE } from "./routes/invitations";
 import { dropAllLiveViews } from "./runners/browser-live";
 import { RunnerHub, type RunnerSocketData } from "./runners/hub";
 import { revalidateInterventions } from "./runners/requests";
 import { runnerClose, runnerMessage, runnerOpen, runnerSocketData } from "./runners/socket";
 import { BackgroundWork } from "./runtime/background";
+import { backfillSearch, createSearchIndex, searchTick } from "./search-index";
 import { FirstUserPlace, SIGNUP_QUEUE_LIMITS, type SignupQueueLimits, signupDecision } from "./signup-queue";
 import { postgresLedger } from "./usage-ledger";
 
@@ -50,8 +57,12 @@ interface StartOptions {
   onInstanceLockLost?: () => void;
   /** Tests: shorter limits for the closed sign-up queue (signup-queue.ts). */
   signupQueue?: Partial<SignupQueueLimits>;
+  /** Tests: the inactivity limit of every request (Bun's default is 10 s); the Drive's transfers keep theirs. */
+  idleTimeoutSeconds?: number;
   /** Tests: replaces a step of the boot that touches the outside, to break it or hold it. */
   steps?: Partial<BootSteps>;
+  /** Tests: shorten the interval between file service cycles. */
+  fileServicesMs?: number;
 }
 
 /** The boot's steps that touch the outside: the instance lock, the database and the VAPID keys. */
@@ -144,8 +155,11 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
 
   const server = Bun.serve<SocketData>({
     port: config.port,
+    ...(opts.idleTimeoutSeconds !== undefined ? { idleTimeout: opts.idleTimeoutSeconds } : {}),
     async fetch(req, srv) {
       const path = new URL(req.url).pathname;
+      // Large bodies (Drive downloads and uploads) get a longer inactivity limit than the rest.
+      if (isTransfer(path)) srv.timeout(req, TRANSFER_IDLE_SECONDS);
       // The browser's real time: the session cookie and the origin are checked before the upgrade.
       if (depsRef && path === "/api/v1/realtime") {
         const check = await checkBrowserUpgrade(depsRef, req, origins);
@@ -200,8 +214,16 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
 
   const db = opened.db;
   const localBlobs = config.dataDir === "memory" ? memoryBlobs() : diskBlobs(join(config.dataDir, "blobs"));
-  // Slice S2 (integrations/storage) wraps this in routedBlobs (Drive files go to the workspace's S3).
-  const blobs = localBlobs;
+  // Drive files go to the workspace's S3 when it configured one; everything else stays local.
+  // A bucket call that ends after its deadline is undone as background work (the stop waits for it).
+  const blobs = routedBlobs(localBlobs, () => ({
+    db,
+    authSecret: effective.authSecret,
+    allowPrivateNetworks: effective.integrations.allowPrivateNetworks,
+    allowPlaintext: effective.integrations.allowPlaintext,
+    track: (work, what) => deps.runtime.track(work, what),
+    now,
+  }));
   const now = opts.now ?? (() => new Date());
   // Closed sign-up still accepts the installation's first user and whoever has a pending invite. The first
   // user's place (signup-queue.ts) lets one sign-up section at a time become it; an invite doesn't need it.
@@ -255,7 +277,7 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     now,
     hub,
     ledger,
-    // Slice S2 (search-index) adds `search` (createSearchIndex).
+    search: createSearchIndex({ db, config: effective, ledger, now }, opts.fetchExternal),
     sealer: createSealer(effective.authSecret, "credentials"),
     // Every integration fetch checks the destination (and each redirect) against the internal network.
     fetchExternal: guardedFetch(
@@ -275,13 +297,11 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     // `assignmentEngine` and `assignmentVerifier`.
   };
   // Here, in this order: the undo of stopRecalcs (S2, bases/write) and of the assignment engine's stop
-  // (S5); the provider lookup (S6); search.ensureVector (S2, search-index); runtime.start (S6), the
-  // engine's start (S5) and resumeRecalcs (S2), all before the app takes requests.
+  // (S5); the provider lookup (S6); runtime.start (S6), the engine's start (S5) and resumeRecalcs (S2),
+  // all before the app takes requests.
   await revalidateBrowsers(deps);
-  const app = createApp(deps, { firstUser, signupQueue: signupLimits });
-  handler = (req) => app.fetch(req);
-  depsRef = deps;
-  // A session that expires, or a membership or channel lost outside this server's routes, is caught here.
+  // A session that expires, or a membership or channel lost outside this server's routes, is caught here. It
+  // comes before the recalculations so that their halt is the first step of the stop, in the same tick.
   let sweeping: Promise<void> | null = null;
   const sweep = setInterval(() => {
     sweeping ??= revalidateBrowsers(deps)
@@ -297,6 +317,37 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     runnersHub.closeAll();
     await sweeping;
   });
+  // The vector leg only with an embedder and pgvector in the database; without them the search is lexical
+  // and by name. It acquires nothing, so there is nothing to undo.
+  if (effective.search.embedder.kind !== "off") await deps.search.ensureVector();
+  await backfillSearch(deps);
+  let stopped = false;
+  let work = Promise.resolve();
+  let timer = setTimeout(cycle, opts.fileServicesMs ?? 60_000);
+  function cycle() {
+    work = (async () => {
+      for (const run of [expireUploads, purgeTrash, extractPending, backfillSearch, searchTick]) {
+        try {
+          await run(deps);
+        } catch (err) {
+          log.error("server.file_service_failed", { service: run.name, err });
+        }
+      }
+      if (!stopped) timer = setTimeout(cycle, opts.fileServicesMs ?? 60_000);
+    })();
+  }
+  undo.push(async () => {
+    stopped = true;
+    clearTimeout(timer);
+    await work;
+  });
+  // The formula recalculations: halted before the database closes, then the ones a crash or a deploy left
+  // halfway resume in the background.
+  undo.push(() => stopRecalcs(deps));
+  await resumeRecalcs(deps);
+  const app = createApp(deps, { firstUser, signupQueue: signupLimits });
+  handler = (req) => app.fetch(req);
+  depsRef = deps;
   log.info("server.started", { url: publicUrl, db: opened.kind });
 
   // Every stop, at once or later, gets the same shutdown: it ends (or fails) once for all of them.

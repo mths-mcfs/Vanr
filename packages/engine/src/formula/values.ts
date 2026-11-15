@@ -164,3 +164,25 @@ export function toJson(v: FValue): ComputedJson | undefined {
   }
   return { type: v.type, id: v.id };
 }
+
+/** The inverse of `toJson`: the value stored in `computed` as the formula and the rollup see it. */
+export function fromJson(v: unknown, names?: (a: PropActor) => string): FValue {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "number" || typeof v === "string" || typeof v === "boolean") return v;
+  if (Array.isArray(v)) return v.map((x) => fromJson(x, names));
+  if (typeof v !== "object") return null;
+  if ("err" in v) return null;
+  if ("start" in v && typeof v.start === "string") {
+    const s = parseIso(v.start);
+    if (!s) return null;
+    const e = "end" in v && typeof v.end === "string" ? parseIso(v.end) : null;
+    return e
+      ? { kind: "date", start: s.ms, end: e.ms, time: s.time }
+      : { kind: "date", start: s.ms, time: s.time };
+  }
+  if ("type" in v && "id" in v && (v.type === "person" || v.type === "agent") && typeof v.id === "string") {
+    const a: PropActor = { type: v.type, id: v.id };
+    return { kind: "person", type: a.type, id: a.id, name: names?.(a) ?? a.id };
+  }
+  return null;
+}

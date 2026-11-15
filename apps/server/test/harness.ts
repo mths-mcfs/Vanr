@@ -11,6 +11,7 @@ import type { SignupQueueLimits } from "../src/signup-queue";
 export interface TestServerOptions {
   /** Shorter limits for the closed sign-up queue. */
   signupQueue?: Partial<SignupQueueLimits>;
+  fileServicesMs?: number;
   /** Replaces a boot step that touches the outside (see `BootSteps`). */
   steps?: Partial<BootSteps>;
   env?: Record<string, string>;
@@ -19,6 +20,8 @@ export interface TestServerOptions {
   sql?: SqlConnector;
   /** No forcing of the fake provider: the production rule of the lookup applies (production tests). */
   realModels?: boolean;
+  /** The inactivity limit of every request, in seconds (Bun's default is 10). */
+  idleTimeoutSeconds?: number;
 }
 
 /**
@@ -47,6 +50,8 @@ export async function startTestServer(opts: TestServerOptions = {}): Promise<Run
     forceFakeModels: opts.realModels !== true,
     steps: opts.steps,
     signupQueue: opts.signupQueue,
+    idleTimeoutSeconds: opts.idleTimeoutSeconds,
+    fileServicesMs: opts.fileServicesMs,
   });
 }
 
@@ -215,3 +220,12 @@ const isFrame = (v: unknown): v is RealtimeFrame =>
 /** An event in the same envelope the browser client validates. */
 export const isEvent = (f: RealtimeFrame, type: string): f is RealtimeFrame & { event: RealtimeFrame } =>
   f.type === "event" && isFrame(f.event) && f.event.type === type;
+
+/** Waits for an observable effect of the server's periodic work. */
+export async function waitFor(check: () => Promise<boolean>): Promise<void> {
+  const end = Date.now() + 5000;
+  while (!(await check())) {
+    if (Date.now() >= end) throw new Error("server work did not finish");
+    await Bun.sleep(20);
+  }
+}

@@ -417,12 +417,12 @@ describe("S3", () => {
       );
     expect(await put(CLOSED, { endpoint: s3.endpoint.replace("http:", "https:") })).toBe("blocked_host");
     expect(await put({ ...LOCAL, allowPlaintext: false })).toBe("invalid_url");
-    // Virtual-hosted style: the bucket is part of the host, and that name resolves on its own.
+    // Virtual-hosted style: the endpoint already carries the bucket in its host, and that name resolves on its own.
     const dns = async (host: string) => (host.startsWith("evil.") ? ["169.254.169.254"] : [PUBLIC_IP]);
     expect(
       await put(
         { ...CLOSED, resolve: dns },
-        { endpoint: "https://s3.example.test", bucket: "evil", pathAddressing: false },
+        { endpoint: "https://evil.s3.example.test", bucket: "evil", pathAddressing: false },
       ),
     ).toBe("blocked_host");
     expect(s3.objects.size).toBe(0);

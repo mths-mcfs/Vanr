@@ -2013,7 +2013,8 @@ function stepHolder(srv: RunningServer) {
   srv.deps.db = new Proxy(db, {
     get(target, prop) {
       const value = Reflect.get(target, prop, target);
-      if (!["select", "update", "insert", "delete"].includes(String(prop)))
+      // A transaction is one step: what runs inside it goes through `tx`, which this proxy doesn't see.
+      if (!["select", "update", "insert", "delete", "transaction"].includes(String(prop)))
         return typeof value === "function" ? value.bind(target) : value;
       return (...args: unknown[]) =>
         wrapQuery(value.apply(target, args), async () => {
@@ -2276,11 +2277,11 @@ describe("a runner's connection transitions", () => {
       const presence = presenceOf(first.runnerId);
       const hold = stepHolder(server);
       try {
-        const [b, c] = await Promise.all([
-          connectProtocolRunner(server.url, await nextSession(paired)),
-          connectProtocolRunner(server.url, await nextSession(paired)),
-        ]);
-        open.push(b, c);
+        // Each session is minted right before its hello: a newer one supersedes it (credentials.ts).
+        const b = await connectProtocolRunner(server.url, await nextSession(paired));
+        open.push(b);
+        const c = await connectProtocolRunner(server.url, await nextSession(paired));
+        open.push(c);
         await server.deps.runners.settled();
         expect(server.deps.runners.isOnline(first.runnerId)).toBe(true);
         expect((await rowOf(first.runnerId))?.disconnectedAt ?? null).toBeNull();
@@ -2288,12 +2289,31 @@ describe("a runner's connection transitions", () => {
         expect(presence.seen.includes(false)).toBe(false);
 
         // With a hello held in its turn, more connections at once than the queue holds are turned away.
-        const sessions: string[] = [];
-        for (let i = 0; i < MAX_TRANSITIONS + 4; i++) sessions.push(await nextSession(paired));
+        // Each hello spends its session before the next one is minted (a newer session supersedes an unspent
+        // one): the next is minted once the hello asked for its turn in the queue.
+        const transition = server.deps.runners.transition;
+        let asked: (() => void) | null = null;
+        server.deps.runners.transition = (runnerId, run) => {
+          asked?.();
+          return transition.call(server.deps.runners, runnerId, run);
+        };
+        const helloInTurn = async () => {
+          const inQueue = new Promise<void>((r) => {
+            asked = r;
+          });
+          const h = await rawHello(server, await nextSession(paired));
+          await inQueue;
+          return h;
+        };
         const step = hold.arm(helloTurn);
-        const firstHello = await rawHello(server, sessions[0] ?? "");
+        const firstHello = await helloInTurn();
         await step.reached;
-        const rest = await Promise.all(sessions.slice(1).map((s) => rawHello(server, s)));
+        const rest: Awaited<ReturnType<typeof rawHello>>[] = [];
+        try {
+          for (let i = 1; i < MAX_TRANSITIONS + 4; i++) rest.push(await helloInTurn());
+        } finally {
+          server.deps.runners.transition = transition;
+        }
         // The ones past the queue's room close with 1013 at once, without waiting for the held turn.
         const codes = await Promise.all(
           rest.map((h) =>
