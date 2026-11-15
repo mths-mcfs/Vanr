@@ -6,8 +6,9 @@ import { join } from "node:path";
 import { Access, RunnerError } from "./access";
 import type { CliWatch } from "./cli";
 import { type JobEvent, Jobs } from "./jobs";
-import { defaultPolicyContext, sandboxOff } from "./sandbox";
+import { sandboxOff } from "./sandbox";
 import type { SecretStore } from "./secrets";
+import { signedInPolicy } from "./testing/sandbox";
 
 // Two `job.start` arriving in the same tick: the id and the slot are taken before the first await, so the
 // job runs once and the cap is never exceeded; a start that fails gives both back.
@@ -45,7 +46,7 @@ function setup(opts: { max: number; failSecrets?: () => boolean; waitSecrets?: (
     },
     bins: { claude: "claude", codex: "codex" },
     sandbox: sandboxOff(),
-    policy: defaultPolicyContext(home),
+    policy: signedInPolicy(home, join(home, "person")),
   });
   const untilDone = (count: number) =>
     new Promise<void>((resolve) => {

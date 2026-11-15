@@ -30,6 +30,7 @@ import { maybe } from "./lines";
 import { agentEnv, domainsFor, sandboxed } from "./ops";
 import { assemble, assembleSnapshot, type Masks } from "./outbound";
 import {
+  type AgentCli,
   agentCli,
   CLI_DOMAINS,
   type CommandSandbox,
@@ -109,6 +110,7 @@ export function executorCommand(
   executor: "claude_code" | "codex" | "shell",
   input: { prompt: string; cwd: string; model?: string; session?: string; allow?: string[] },
   bins: { claude: string; codex: string },
+  cliKind: AgentCli["kind"] | null,
 ): { cmd: string; args: string[]; stdin: string | null } {
   if (executor === "shell") return { cmd: "/bin/sh", args: ["-c", input.prompt], stdin: null };
   if (executor === "claude_code") {
@@ -120,8 +122,7 @@ export function executorCommand(
       "--permission-mode",
       "acceptEdits",
       // Without the person's settings, hooks and instructions (`user`); the project's own still apply.
-      "--setting-sources",
-      "project,local",
+      ...(cliKind === "own" ? ["--setting-sources", "project,local"] : []),
     ];
     // The assignment rule `npm test *` becomes `Bash(npm test:*)` for Claude Code.
     if (input.allow?.length)
@@ -139,8 +140,7 @@ export function executorCommand(
     "--sandbox",
     "workspace-write",
     // Without the person's config.toml (their MCP servers, another model provider) nor their rules.
-    "--ignore-user-config",
-    "--ignore-rules",
+    ...(cliKind === "own" ? ["--ignore-user-config", "--ignore-rules"] : []),
     // Only with the ChatGPT login: with an API key Codex will not run.
     "-c",
     'forced_login_method="chatgpt"',
@@ -831,7 +831,6 @@ export class Jobs {
   ): Promise<{ jobId: string; startedAt: string; cwd: string }> {
     const root = this.opts.access.agentRoot(agent);
     const cwd = args.cwd ? this.opts.access.resolve(agent, args.cwd) : root;
-    const { cmd, args: argv, stdin } = executorCommand(args.executor, { ...args, cwd }, this.opts.bins);
     // Claude Code and Codex read the login of whoever paired and talk to their own service; the rest is the
     // same as a command: the agent's folders and the workspace's network.
     const network = args.network ?? { mode: "off" as const, domains: [] };
@@ -849,6 +848,11 @@ export class Jobs {
             inside(cwd, root) ? cwd : null,
             isolated(this.opts.sandbox.status()),
           );
+    const {
+      cmd,
+      args: argv,
+      stdin,
+    } = executorCommand(args.executor, { ...args, cwd }, this.opts.bins, cli?.kind ?? null);
     for (const d of cli?.ensure ?? []) mkdirSync(d, { recursive: true, mode: 0o700 });
     // The starting snapshot before the secret becomes a file in the folder: that way it does not enter the diff.
     const snapStore = join(this.dir, args.jobId, "snapshot.git");
