@@ -172,10 +172,35 @@ function lex(sql: string, standardStrings: boolean): Token[] | null {
 /** Characters an operator name is made of (Postgres' `Op` in scan.l). */
 const OPERATOR_CHAR = /[+\-*/<>=~!@#%^&|`?]/;
 
+/** The value of UESCAPE's single-character string, including E escapes, dollar quotes and continuation. */
+function unicodeEscape(text: string): string {
+  if (text.startsWith("$")) {
+    const tagLength = text.indexOf("$", 1) + 1;
+    return text.slice(tagLength, -tagLength);
+  }
+  const value = text
+    .slice(text.indexOf("'") + 1, -1)
+    .replace(new RegExp(`'${CONTINUATION.source}`, "g"), "")
+    .replace(/''/g, "'");
+  if (!/^[eE]'/.test(text)) return value;
+  return value.replace(
+    /\\([0-7]{1,3}|x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|[\s\S])/g,
+    (match, code: string) => {
+      if (/^[0-7]/.test(code)) return String.fromCharCode(Number.parseInt(code, 8) % 256);
+      if (code.length > 1) {
+        const point = Number.parseInt(code.slice(1), 16);
+        return point <= 0x10ffff ? String.fromCodePoint(point) : match;
+      }
+      const simple: Record<string, string> = { b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" };
+      return simple[code] ?? code;
+    },
+  );
+}
+
 /**
- * The names a statement could call and the operators it writes: identifiers folded to lower case (a quoted one
- * as written) and runs of operator characters. Literals and comments don't count. For the catalog lookup of
- * the customer's code (`sql-identity.ts`), done before the statement is planned.
+ * The names a statement could call and the operators it writes: unquoted identifiers folded to lower case,
+ * quoted identifiers decoded and operators split as in Postgres. Literals and comments don't count. For the
+ * catalog lookup of the customer's code (`sql-identity.ts`), done before the statement is planned.
  */
 export function lexWords(sql: string): { words: string[]; operators: string[] } {
   const tokens = lex(sql, true) ?? [];
@@ -184,10 +209,14 @@ export function lexWords(sql: string): { words: string[]; operators: string[] } 
   let run = "";
   let runEnd = -1;
   const flush = () => {
-    if (run) operators.push(run);
+    if (!run) return;
+    // scan.l strips trailing signs from a multi-character SQL operator, then scans each sign separately.
+    let end = run.length;
+    if (!/[~!@#%^&|`?]/.test(run)) while (end > 1 && /[+-]/.test(run[end - 1] ?? "")) end--;
+    operators.push(run.slice(0, end), ...run.slice(end));
     run = "";
   };
-  for (const t of tokens) {
+  for (const [k, t] of tokens.entries()) {
     const text = sql.slice(t.start, t.end);
     if (t.kind === "punct" && OPERATOR_CHAR.test(text)) {
       if (t.start !== runEnd) flush();
@@ -197,13 +226,33 @@ export function lexWords(sql: string): { words: string[]; operators: string[] } 
     }
     flush();
     if (t.kind === "word") words.push(text.toLowerCase());
-    else if (t.kind === "quoted")
-      words.push(
-        text
-          .replace(/^[uU]&/, "")
-          .slice(1, -1)
-          .replace(/""/g, '"'),
-      );
+    else if (t.kind === "quoted") {
+      const unicode = /^[uU]&/.test(text);
+      let name = text.slice(unicode ? 3 : 1, -1).replace(/""/g, '"');
+      if (unicode) {
+        const keyword = tokens[k + 1];
+        const literal = tokens[k + 2];
+        const escapeChar =
+          keyword?.kind === "word" &&
+          sql.slice(keyword.start, keyword.end).toLowerCase() === "uescape" &&
+          literal?.kind === "literal"
+            ? unicodeEscape(sql.slice(literal.start, literal.end))
+            : "\\";
+        if (escapeChar.length === 1) {
+          const mark = escapeRe(escapeChar);
+          name = name.replace(
+            new RegExp(`${mark}(?:${mark}|\\+([0-9A-Fa-f]{6})|([0-9A-Fa-f]{4}))`, "g"),
+            (match, six: string | undefined, four: string | undefined) => {
+              const hex = six ?? four;
+              if (!hex) return escapeChar;
+              const point = Number.parseInt(hex, 16);
+              return point <= 0x10ffff ? String.fromCodePoint(point) : match;
+            },
+          );
+        }
+      }
+      words.push(name);
+    }
   }
   flush();
   return { words, operators };

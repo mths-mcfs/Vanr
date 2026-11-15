@@ -94,6 +94,14 @@ for (const kind of ["PGlite", "Postgres"] as const) {
         result: { fields: ["l", "u", "n", "t"], rows: [{ l: "alice", u: "ALICE", n: 5, t: "Alice" }] },
       });
       expect(
+        await q(
+          String.raw`select U&"\006cower"(name) as l, U&"!0075pper" UESCAPE '!'(name) as u,
+            id+-1 as a, id++1 as b, id*-1 as c from customers`,
+        ),
+      ).toEqual({
+        result: { fields: ["l", "u", "a", "b", "c"], rows: [{ l: "alice", u: "ALICE", a: 6, b: 8, c: -7 }] },
+      });
+      expect(
         await q("select o.total from orders o join customers c on c.id = o.customer_id where c.id in (7)"),
       ).toMatchObject({
         result: { rows: [{ total: expect.anything() }] },
@@ -121,6 +129,25 @@ for (const kind of ["PGlite", "Postgres"] as const) {
       expect(await q("select lower(name) from customers")).toMatchObject({ failure: { reason: "function" } });
       // A query that calls neither name is not affected.
       expect(await q("select id from customers")).toEqual({ result: { fields: ["id"], rows: [{ id: 7 }] } });
+    });
+  });
+
+  run.each([
+    [String.raw`select U&"\006cower"(id) from customers`, "lower"],
+    [String.raw`select u&"\+00006cower"(id) from customers`, "lower"],
+    [`select U&"!006cower" /*a*/ UESCAPE /*b*/ '!'(id) from customers`, "lower"],
+    [String.raw`select U&"!006cower" UESCAPE E'\041'(id) from customers`, "lower"],
+    [`select U&"!006cower" UESCAPE $esc$!$esc$(id) from customers`, "lower"],
+    [`select U&"!006cower" UESCAPE ''\n'!'(id) from customers`, "lower"],
+    [String.raw`select U&"\0075pper"(7) from customers`, "upper"],
+  ])(`${kind}: Unicode function identity is checked before planning: %s`, async (sql, name) => {
+    const setup =
+      evil("public.lower(x integer)", "text", "stable") +
+      evil("public.upper(x integer)", "text", "immutable");
+    await withDatabase(kind, setup, async (q) => {
+      expect(await q(sql)).toEqual({
+        failure: { reason: "function", name: `public.${name}(x integer)` },
+      });
     });
   });
 
@@ -176,6 +203,21 @@ for (const kind of ["PGlite", "Postgres"] as const) {
         };
         expect(out.out).toEqual({ result: { fields: ["id"], rows: [{ id: 7 }] } });
         expect(Object.values(out.raw[0] ?? {})).toEqual(['pg_catalog, "public", pg_temp']);
+      });
+    },
+  );
+
+  run.each(["select name+-1 from customers", "select name++1 from customers", "select 'x'::text+-1"])(
+    `${kind}: adjacent signs cannot hide a customer operator before planning: %s`,
+    async (sql) => {
+      const setup = `
+      ${evil("public.text_plus_int(a text, b integer)", "text", "immutable")}
+      create operator public.+ (leftarg = text, rightarg = integer, function = public.text_plus_int);
+    `;
+      await withDatabase(kind, setup, async (q) => {
+        expect(await q(sql)).toEqual({
+          failure: { reason: "function", name: "public.operator(+)" },
+        });
       });
     },
   );
