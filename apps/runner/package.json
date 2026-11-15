@@ -1,0 +1,23 @@
+{
+  "name": "@vanr/runner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "bin": {
+    "vanr-runner": "./src/main.ts"
+  },
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "build": "bun src/bundle.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.81",
+    "@vanr/contract": "workspace:*",
+    "@vanr/engine": "workspace:*",
+    "@vanr/product": "workspace:*",
+    "zod": "4.6.7"
+  }
+}
