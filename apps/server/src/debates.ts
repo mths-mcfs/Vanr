@@ -1249,8 +1249,11 @@ export async function openDebate(deps: AppDeps, input: NewDebate): Promise<Debat
     .onConflictDoNothing({ target: debates.id })
     .returning();
   if (!row) {
-    if (input.id) return debateById(deps.db, input.workspaceId, input.id);
-    throw new Error("debate insert failed");
+    if (!input.id) throw new Error("debate insert failed");
+    const existing = await debateById(deps.db, input.workspaceId, input.id);
+    await reindex(deps, { kind: "debate", id: existing.id });
+    scheduleAdvance(deps, existing.id);
+    return existing;
   }
   await reindex(deps, { kind: "debate", id: row.id });
   await publishDebate(deps, row);
