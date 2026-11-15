@@ -82,7 +82,8 @@ export function isoOf(ms: number, time: boolean): string {
   const d = new Date(ms);
   const day = `${pad(d.getUTCFullYear(), 4)}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
   if (!time) return day;
-  return `${day}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}Z`;
+  const fraction = d.getUTCMilliseconds() ? `.${pad(d.getUTCMilliseconds(), 3)}` : "";
+  return `${day}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}${fraction}Z`;
 }
 
 /**
@@ -145,7 +146,8 @@ export function jsonSize(v: FValue, cap: number): number {
         n += 1;
         walk(y);
       }
-    } else n += 80;
+    } else if (x.kind === "person") n += 15 + escapedSize(x.type) + escapedSize(x.id);
+    else n += 80; // Two ISO instants with milliseconds and their keys fit in 80 characters.
   };
   walk(v);
   return n;

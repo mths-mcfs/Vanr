@@ -887,7 +887,7 @@ describe("intervention regressions", () => {
   );
 
   test(
-    "expired control is refused, start replaces it, and the production sweep releases active control",
+    "expired control is rejected, start replaces it, and the production sweep releases active control",
     async () => {
       const t = await team();
       const runner = await online(await pairOverHttp(t, t.ana), { browser: true });
@@ -1120,7 +1120,7 @@ describe("a secret delivered against a decline", () => {
   );
 
   test(
-    "a failed delivery cannot roll back another delivered secret's metadata",
+    "a failed send cannot roll back the metadata of another secret already sent",
     async () => {
       const t = await team();
       const { paired, runner, held } = await holdingRunner(t);
@@ -1149,7 +1149,7 @@ describe("a secret delivered against a decline", () => {
   );
 
   test(
-    "moving, detaching, removing or revoking the runner closes its old requests, including a racing delivery",
+    "moving, detaching, removing or revoking the runner closes its old requests, including a racing send",
     async () => {
       const t = await team();
       const other = await online(await pairOverHttp(t, t.ana), { browser: true });

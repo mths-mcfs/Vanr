@@ -1513,7 +1513,7 @@ function quickOk(q: QuickFilter, defs: readonly PropDef[]): boolean {
   const def = defs.find((d) => d.id === q.prop);
   if (!def) return false;
   if (q.op && !(OPS_BY_KIND[filterKind(def)] as readonly string[]).includes(q.op)) return false;
-  const cond = effectiveFilter({ quickFilters: [q] });
+  const cond = effectiveFilter({ quickFilters: [q] }, defs);
   return !cond || checkFilter(cond, defs).length === 0;
 }
 
@@ -1558,7 +1558,7 @@ function validateViewConfig(config: unknown, table: TableRow): ViewConfig {
   if (!parsed.success) throw bad("base.bad_view", "Invalid view settings");
   const cfg: ViewConfig = parsed.data;
   // the effective filter includes the quick filters with a value: what would error in the query isn't saved
-  validateFilter(effectiveFilter(cfg), table.defs);
+  validateFilter(effectiveFilter(cfg, table.defs), table.defs);
   validateSorts(cfg.sorts, table.defs);
   const known = new Set(table.defs.map((d) => d.id));
   const refs = [

@@ -1,6 +1,7 @@
 import {
   AgentSigil,
   Avatar,
+  Banner,
   Button,
   Callout,
   Checkbox,
@@ -15,7 +16,11 @@ import {
   DialogClose,
   DialogContent,
   DialogTrigger,
+  Drawer,
+  DrawerContent,
+  DrawerTrigger,
   EmptyState,
+  ErrorState,
   Field,
   Icon,
   Input,
@@ -24,6 +29,8 @@ import {
   MenuContent,
   MenuItem,
   MenuLabel,
+  MenuRadioGroup,
+  MenuRadioItem,
   MenuSeparator,
   MenuTrigger,
   Radio,
@@ -352,6 +359,7 @@ function ThreadMenuItems({ t }: { t: Copy }) {
 function OverlaysSection({ t }: { t: Copy }) {
   const [all, setAll] = useState(() => readParam("overlays") === "open");
   const [confirming, setConfirming] = useState(false);
+  const [theme, setTheme] = useState("system");
   return (
     <Section id="overlays" t={t}>
       <div className="g-row">
@@ -421,6 +429,32 @@ function OverlaysSection({ t }: { t: Copy }) {
             <ThreadMenuItems t={t} />
           </MenuContent>
         </Menu>
+        <Menu>
+          <MenuTrigger asChild>
+            <Button>{t.frameParts.themeTrigger}</Button>
+          </MenuTrigger>
+          <MenuContent>
+            <MenuRadioGroup value={theme} onValueChange={setTheme}>
+              {(["system", "light", "dark"] as const).map((choice) => (
+                <MenuRadioItem key={choice} value={choice}>
+                  {t.frameParts.themeChoices[choice]}
+                </MenuRadioItem>
+              ))}
+            </MenuRadioGroup>
+          </MenuContent>
+        </Menu>
+        <Drawer>
+          <DrawerTrigger asChild>
+            <Button>{t.frameParts.drawerTrigger}</Button>
+          </DrawerTrigger>
+          <DrawerContent title={t.frameParts.drawerName}>
+            <ul className="g-drawer-links">
+              {t.frameParts.drawerLinks.map((link) => (
+                <li key={link}>{link}</li>
+              ))}
+            </ul>
+          </DrawerContent>
+        </Drawer>
         <Tooltip content={t.copyIdTooltip.hint} {...(all && { open: true })} side="bottom">
           <Button variant="ghost" icon={<Icon icon={CopyIcon} />} aria-label={t.copyIdTooltip.buttonName} />
         </Tooltip>
@@ -502,6 +536,9 @@ function FeedbackSection({ t }: { t: Copy }) {
           </Callout>
         ))}
       </div>
+      <Banner action={<Button size="sm">{t.frameParts.bannerButton}</Button>}>
+        {t.frameParts.bannerText}
+      </Banner>
       <div className="g-row">
         {TONES.map((tone) => (
           <Button key={tone} size="sm" onClick={() => show(tone)}>
@@ -543,6 +580,15 @@ function IdentitySection({ t }: { t: Copy }) {
         <AgentSigil agentId="agt_01JD7Z3K9M" name="Scout" size="sm" />
         <AgentSigil agentId="agt_01JD7Z3K9M" name="Scout" />
         <AgentSigil agentId="agt_01JD7Z3K9M" name="Scout" size="lg" />
+      </div>
+      <div className="g-row">
+        {AGENTS.slice(0, 2).map((agent) => (
+          <span key={agent.id} className="g-identity">
+            <AgentSigil agentId={agent.id} name={t.frameParts.workingName(agent.name)} working />
+            {agent.name}
+          </span>
+        ))}
+        <span className="g-caption">{t.frameParts.workingCaption}</span>
       </div>
       <div className="g-row">
         <Wordmark size="sm" />
@@ -665,6 +711,15 @@ function EmptySection({ t }: { t: Copy }) {
         action={
           <Button variant="primary" icon={<Icon icon={Plus} />}>
             {t.emptyRoutines.createButton}
+          </Button>
+        }
+      />
+      <ErrorState
+        title={t.frameParts.failedHeading}
+        description={t.frameParts.failedExplanation}
+        action={
+          <Button size="sm" icon={<Icon icon={RotateCw} />}>
+            {t.frameParts.retryButton}
           </Button>
         }
       />

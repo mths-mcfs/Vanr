@@ -56,6 +56,21 @@ jobs:
           SHARD: ${{ matrix.shard }}
           SHARDS: ${{ strategy.job-total }}
 
+  web:
+    # The web app: its tests run with a DOM, from its own folder (bunfig.toml there), and the
+    # production build must keep working. The root test job leaves apps/web out.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - run: bun test
+        working-directory: apps/web
+      - run: bun run build
+        working-directory: apps/web
+
   postgres:
     # The migration against a real Postgres (with pgvector, as in production); PGlite covers the rest.
     runs-on: ubuntu-latest
@@ -244,6 +259,10 @@ jobs:
           check wait "a dependent row another transaction holds"
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # The identity check of the functions a connected database's query may call, each case in a database of its own.
+      - run: bun test apps/server/test/sql-guard-identity.test.ts --test-name-pattern Postgres
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
 
   sandbox:
     # The runner's real sandbox (bubblewrap + socat): the attack tests of the isolation of the agent's
@@ -352,7 +371,7 @@ jobs:
 
   ci-ok:
     if: always()
-    needs: [lint, typecheck, test, postgres, sandbox, workflows, secrets]
+    needs: [lint, typecheck, test, web, postgres, sandbox, workflows, secrets]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -360,6 +379,6 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
-      - run: bun scripts/ci/gate.ts lint typecheck test postgres sandbox workflows secrets
+      - run: bun scripts/ci/gate.ts lint typecheck test web postgres sandbox workflows secrets
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}

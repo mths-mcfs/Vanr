@@ -94,6 +94,7 @@ const CODEX_FEATURES_OFF = [
 ];
 
 function codexHarnessArgs(input: {
+  cliKind: AgentCli["kind"];
   cwd: string;
   model?: string;
   system: string | null;
@@ -124,9 +125,9 @@ function codexHarnessArgs(input: {
     "--json",
     "--skip-git-repo-check",
     "--ephemeral",
-    // Without the person's config.toml (their MCP servers, another model provider) nor their rules.
+    // Without the person's config.toml (their MCP servers, another model provider).
     "--ignore-user-config",
-    "--ignore-rules",
+    ...(input.cliKind === "own" ? ["--ignore-rules"] : []),
     "-C",
     input.cwd,
     "--sandbox",
@@ -423,6 +424,7 @@ export class Harnesses {
         executor: "codex",
         cmd: this.opts.bins.codex,
         argv: codexHarnessArgs({
+          cliKind: cli.kind,
           cwd,
           model: args.model,
           system: inArgv ? args.system : null,

@@ -67,10 +67,12 @@ const icon = z.string().max(40).nullable();
 const id = z.string().min(1).max(100);
 /** A CSV in the JSON body: up to 10 MB of text (the reader rejects more than that). */
 const csv = z.string().min(1).max(10_000_000);
+/** The body that carries a CSV: its 10 MB of text and the JSON around it, past the default JSON limit. */
+export const CSV_BODY_LIMIT = 10 * 1024 * 1024 + 64 * 1024;
 
 // A NUL or half a surrogate pair doesn't go into Postgres (the insert and the LIKE would give a 500): the edge rejects it.
-async function readBody<S extends ZodType>(c: Context, schema: S): Promise<z.infer<S>> {
-  const body = await readJson(c, schema);
+async function readBody<S extends ZodType>(c: Context, schema: S, limit?: number): Promise<z.infer<S>> {
+  const body = await readJson(c, schema, limit);
   if (!isStorable(body))
     throw new HttpError(400, "base.invalid_text", "Text with a NUL or a broken character");
   return body;
@@ -128,7 +130,7 @@ export function registerBases(app: Hono<AppEnv>) {
   app.post(`${B}/import`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
-    const input = await readBody(c, z.object({ title, csv }).strict());
+    const input = await readBody(c, z.object({ title, csv }).strict(), CSV_BODY_LIMIT);
     const row = await createFromCsv(deps, me.workspaceId, input.title, input.csv, me$(me));
     return c.json(await toBase(deps.db, row, me), 201);
   });
@@ -209,7 +211,7 @@ export function registerBases(app: Hono<AppEnv>) {
     );
     table = await refreshVolatile(deps, table);
     const cfg = await viewConfigOf(c, row, table.id, q.viewId);
-    const filter = q.filter !== undefined ? q.filter : effectiveFilter(cfg);
+    const filter = q.filter !== undefined ? q.filter : effectiveFilter(cfg, table.defs);
     const page = await queryRows(
       deps.db,
       table,
@@ -264,7 +266,7 @@ export function registerBases(app: Hono<AppEnv>) {
       deps.db,
       table,
       {
-        filter: q.filter !== undefined ? q.filter : effectiveFilter(cfg),
+        filter: q.filter !== undefined ? q.filter : effectiveFilter(cfg, table.defs),
         ...(q.search ? { search: q.search } : {}),
         within: q.within ?? null,
         summaries: q.summaries ?? cfg.summaries ?? {},
@@ -296,7 +298,7 @@ export function registerBases(app: Hono<AppEnv>) {
       deps.db,
       table,
       {
-        filter: q.filter !== undefined ? q.filter : effectiveFilter(cfg),
+        filter: q.filter !== undefined ? q.filter : effectiveFilter(cfg, table.defs),
         ...(q.search ? { search: q.search } : {}),
         within: q.within ?? null,
         x: q.x !== undefined ? q.x : (cfg.chart?.x ?? null),
@@ -444,7 +446,7 @@ export function registerBases(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const row = await database(c, me);
     const table = await tableIn(deps.db, me.workspaceId, row.id, idOf(c, "tableId"));
-    const input = await readBody(c, z.object({ csv }).strict());
+    const input = await readBody(c, z.object({ csv }).strict(), CSV_BODY_LIMIT);
     const r = await importCsv(deps, table, input.csv, me$(me));
     return c.json({
       created: r.created,

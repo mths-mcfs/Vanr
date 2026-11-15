@@ -194,7 +194,7 @@ export async function exportCsv(deps: AppDeps, table: TableRow, view: ViewRow | 
   const cols = title ? [title, ...defs.filter((d) => d !== title)] : defs;
   const names = await namesOf(deps.db, table.workspaceId);
   const lines: string[][] = [cols.map((d) => d.name)];
-  const filter = effectiveFilter(cfg);
+  const filter = effectiveFilter(cfg, table.defs);
   let cursor: string | null = null;
   do {
     const page = await queryRows(

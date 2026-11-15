@@ -26,7 +26,7 @@ import {
 } from "./sandbox";
 import { SecretStore } from "./secrets";
 import { fakeCliBin, fakeCliLog, testMcpCommand } from "./testing/fake-cli";
-import { realSandbox, testSocat } from "./testing/sandbox";
+import { realSandbox, signedInPolicy, testSocat } from "./testing/sandbox";
 
 // Sandbox of the agent's processes (F5-3.3-P0-02, 03 and 04). The policy part is pure; the attack part
 // runs the real `srt` (bubblewrap + socat) when the host has it, and proves the rejection when it does not.
@@ -658,7 +658,7 @@ describe("real srt", async () => {
           bridge,
           mcpCommand: testMcpCommand(),
           sandbox,
-          policy,
+          policy: signedInPolicy(home, join(dir, "person")),
         });
         const res = await harnesses.turn(
           agent,

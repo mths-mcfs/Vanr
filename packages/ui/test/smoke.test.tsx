@@ -5,6 +5,7 @@ import { renderToString } from "react-dom/server";
 import {
   AgentSigil,
   Avatar,
+  Banner,
   Button,
   Callout,
   Checkbox,
@@ -17,7 +18,11 @@ import {
   Dialog,
   DialogContent,
   DialogTrigger,
+  Drawer,
+  DrawerContent,
+  DrawerTrigger,
   EmptyState,
+  ErrorState,
   Field,
   Icon,
   Input,
@@ -26,6 +31,8 @@ import {
   MenuContent,
   MenuItem,
   MenuLabel,
+  MenuRadioGroup,
+  MenuRadioItem,
   MenuSeparator,
   MenuTrigger,
   Radio,
@@ -292,6 +299,54 @@ add(
 );
 add("Kbd", <Kbd>K</Kbd>);
 add("Wordmark mark", <Wordmark variant="mark" />);
+for (const size of ["sm", "md", "lg"] as const) {
+  add(`AgentSigil working ${size}`, <AgentSigil agentId="agt_1" name="Scout, working" size={size} working />);
+}
+add("ErrorState", <ErrorState title="The agents could not be loaded" />);
+add(
+  "ErrorState with description and action",
+  <ErrorState
+    title="The agents could not be loaded"
+    description="The server could not be reached."
+    action={<Button>Try again</Button>}
+  />,
+);
+for (const tone of ["info", "success", "warning", "danger"] as const) {
+  add(
+    `Banner ${tone}`,
+    <Banner tone={tone} action={<Button size="sm">Reconnect now</Button>}>
+      Connection lost. Reconnecting.
+    </Banner>,
+  );
+}
+add("Banner without action", <Banner>Connection lost. Reconnecting.</Banner>);
+for (const side of ["left", "right"] as const) {
+  add(
+    `Drawer ${side}`,
+    <Drawer>
+      <DrawerTrigger asChild>
+        <Button>Open navigation</Button>
+      </DrawerTrigger>
+      <DrawerContent title="Workspace navigation" side={side}>
+        content
+      </DrawerContent>
+    </Drawer>,
+  );
+}
+add(
+  "Menu with a radio group",
+  <Menu>
+    <MenuTrigger asChild>
+      <Button>Theme</Button>
+    </MenuTrigger>
+    <MenuContent>
+      <MenuRadioGroup value="light">
+        <MenuRadioItem value="light">Light</MenuRadioItem>
+        <MenuRadioItem value="dark">Dark</MenuRadioItem>
+      </MenuRadioGroup>
+    </MenuContent>
+  </Menu>,
+);
 
 describe("server render without React warnings", () => {
   for (const [name, element] of cases) {
@@ -376,6 +431,27 @@ describe("accessible wiring", () => {
     expect(html).toContain('aria-disabled="true"');
     expect(html).not.toMatch(/<button[^>]* disabled=""/);
     expect(html).toContain("Save");
+  });
+
+  test("a working sigil is marked as such and keeps the name it was given", () => {
+    const lit = render(<AgentSigil agentId="agt_9" name="Fjell, trabalhando" working />);
+    expect(lit).toContain('data-working="true"');
+    expect(lit).toContain('aria-label="Fjell, trabalhando"');
+    expect(render(<AgentSigil agentId="agt_9" name="Fjell" />)).not.toContain("data-working");
+  });
+
+  test("the lit sigil is the same drawing as the idle one", () => {
+    const path = (html: string) => html.match(/ d="([^"]+)"/)?.[1];
+    expect(path(render(<AgentSigil agentId="agt_9" name="Fjell" working />))).toBe(
+      path(render(<AgentSigil agentId="agt_9" name="Fjell" />)),
+    );
+  });
+
+  test("a failed view is announced as an alert, a banner as a status", () => {
+    expect(render(<ErrorState title="Could not load" />)).toContain('role="alert"');
+    const banner = render(<Banner tone="danger">Offline</Banner>);
+    expect(banner).toContain('role="status"');
+    expect(banner).toContain('data-tone="danger"');
   });
 
   test("an icon is hidden from assistive tech unless it has a label", () => {

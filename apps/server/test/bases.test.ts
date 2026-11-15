@@ -28,6 +28,7 @@ import {
 } from "../src/bases/write";
 import type { AppDeps } from "../src/context";
 import { HttpError } from "../src/http";
+import { CSV_BODY_LIMIT } from "../src/routes/bases";
 import { backfillSearch } from "../src/search-index";
 import type { RunningServer } from "../src/server";
 import { apiError, type BasesApi, basesApi, baseWithTypes, fuzzAgainstOracle } from "./bases-api";
@@ -708,16 +709,16 @@ describe("bases: SQL query = oracle", () => {
               ["eq", 7],
             ];
           case "g_sel":
-            // ids that aren't options, made of the nasty characters, are plain values: they match nothing
+            // only the property's own option ids: any other id is rejected at the edge (checked below)
             return [
-              ["eq", pick([...options.map((o) => o.id), word()])],
-              ["in", [pick(options).id, word()]],
-              ["not_in", [word()]],
+              ["eq", pick(options).id],
+              ["in", [pick(options).id, pick(options).id]],
+              ["not_in", [pick(options).id]],
             ];
           case "g_multi":
             return [
-              ["has", pick([...options.map((o) => o.id), word()])],
-              ["has_any", [word(), pick(options).id]],
+              ["has", pick(options).id],
+              ["has_any", [pick(options).id, pick(options).id]],
               ["has_all", [pick(options).id]],
             ];
           case "g_date":
@@ -767,6 +768,17 @@ describe("bases: SQL query = oracle", () => {
         );
       }
       expect(checked).toBeGreaterThan(50);
+      // an option id that isn't one of the property's, made of those characters, never reaches the SQL
+      for (const [prop, op, v] of [
+        ["g_sel", "eq", word()],
+        ["g_sel", "in", [pick(options).id, word()]],
+        ["g_multi", "has_any", [word()]],
+      ] as const) {
+        const err = await apiError(
+          ana.api.query(workspaceId, base.id, saved.id, { filter: { prop, op, value: v } as Filter }),
+        );
+        expect([err.status, err.code]).toEqual([400, "base.bad_filter"]);
+      }
       // a property id that isn't in the schema, made of those characters, never reaches the SQL
       for (const prop of ["g_num'; drop table db_rows; --", "$1", 'a"b', "\\"]) {
         const err = await apiError(
@@ -1117,6 +1129,11 @@ describe("bases: CSV and Drive", () => {
         ana.api.importCsv(workspaceId, base.id, table.id, { csv: "x".repeat(10_000_001) }),
       );
       expect(tooBig.status).toBe(400);
+      // A CSV body past the default JSON limit still reaches the CSV rule; past the CSV body limit, the reader stops it.
+      const pastBody = await apiError(
+        ana.api.importCsv(workspaceId, base.id, table.id, { csv: "x".repeat(CSV_BODY_LIMIT) }),
+      );
+      expect([pastBody.status, pastBody.code]).toEqual([413, "payload_too_large"]);
       expect((await apiError(ana.api.createFromCsv(workspaceId, { title: "Wide", csv: wide }))).code).toBe(
         "base.csv_too_many_columns",
       );

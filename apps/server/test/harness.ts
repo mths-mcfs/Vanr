@@ -29,6 +29,8 @@ export interface TestServerOptions {
  * busy CI host), more than bun's 5 s default allows.
  */
 export const SERVER_TEST_MS = 30_000;
+/** The longest timer delay: the file services never come round during a test that didn't ask for them. */
+const FILE_SERVICES_OFF_MS = 2 ** 31 - 1;
 
 /** Starts the real server on a free port, with an in-memory PGlite and in-memory email. */
 export async function startTestServer(opts: TestServerOptions = {}): Promise<RunningServer> {
@@ -39,6 +41,9 @@ export async function startTestServer(opts: TestServerOptions = {}): Promise<Run
     FAKE_MODEL_DELAY_MS: "0",
     // No undo window: email and posts go out at once (the window's test passes another value).
     UNDO_SEND_SECONDS: "0",
+    // Sign-up is closed by default in the product (config.ts); the tests open it, and a closed-sign-up test
+    // passes SIGNUP_OPEN: "false".
+    SIGNUP_OPEN: "true",
     ...opts.env,
   });
   return startServer({
@@ -51,7 +56,9 @@ export async function startTestServer(opts: TestServerOptions = {}): Promise<Run
     steps: opts.steps,
     signupQueue: opts.signupQueue,
     idleTimeoutSeconds: opts.idleTimeoutSeconds,
-    fileServicesMs: opts.fileServicesMs,
+    // The file services' cycle runs only where a test asks for it: the production period (60 s of real time)
+    // would fire in the middle of a long file, over whatever rows the earlier tests left.
+    fileServicesMs: opts.fileServicesMs ?? FILE_SERVICES_OFF_MS,
   });
 }
 

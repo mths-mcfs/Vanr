@@ -649,10 +649,11 @@ export function evaluateRow(
     const ev = new RowEvaluator(defs, row, ctx, values, budget);
     try {
       const v = ev.eval(f.ast, new Map());
-      output += v === null ? 0 : jsonSize(v, FORMULA_LIMITS.maxRowOutput - output);
-      if (output > FORMULA_LIMITS.maxRowOutput)
+      const size = v === null ? 0 : jsonSize(v, FORMULA_LIMITS.maxRowOutput - output);
+      if (output + size > FORMULA_LIMITS.maxRowOutput)
         throw new FormulaRuntimeError("too_large", f.ast.at, { max: FORMULA_LIMITS.maxRowOutput });
       const json = toJson(v);
+      output += size;
       values.set(f.propId, v);
       if (json !== undefined) computed[f.propId] = json;
     } catch (err) {
