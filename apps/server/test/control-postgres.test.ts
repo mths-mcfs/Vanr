@@ -270,4 +270,47 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("undo at the same time on Postgre
       outcome("undo-vs-edit", [run.a, run.b, title], ["A:edited", "B:action.changed_since", "Beto's"]);
     });
   }, 60_000);
+
+  test("forced: the send at the deadline waits on the undo's lock of the queued item and finds it canceled", async () => {
+    await withServer("undo_vs_send", async (server, admin, ctx) => {
+      const sendAt = new Date(Date.now() + 60_000);
+      const id = newId("out");
+      await server.deps.db.insert(outbox).values({
+        id,
+        workspaceId: ctx.workspaceId,
+        agentId: ctx.agentId,
+        runId: null,
+        kind: "post",
+        payload: { channelId: ctx.general, text: "Flash sale", clientId: "c-forced" },
+        sendAt,
+      });
+      const action = await seedAction(
+        server,
+        ctx,
+        "message_posted",
+        { type: "outbox", id },
+        { outboxId: id },
+      );
+      // A is the undo, held right after locking the queued item (its second select, after the action's). With the
+      // lock the sweep's claim waits, then finds it canceled; without it, the sweep claims and posts it, and the
+      // undo that got there first finds it gone out.
+      const run = await forcedPair(
+        admin,
+        "undo-vs-send",
+        "select",
+        (side, hooks) =>
+          side === "A"
+            ? undoing(withDb(server.deps, hooks), ctx.carla, action).then((r) => `A:${r}`)
+            : instrumented(server.deps.db, hooks)
+                .transaction((tx) => deliverDue({ ...server.deps, db: tx, now: () => sendAt }))
+                .then((sent) => `B:${sent}`),
+        "update",
+        2,
+      );
+      expect(run.aPids[0]).not.toBe(run.bPids[0]);
+      const [row] = await server.deps.db.select().from(outbox).where(eq(outbox.id, id));
+      const posted = await server.deps.db.select().from(messages).where(eq(messages.body, "Flash sale"));
+      outcome("undo-vs-send", [run.a, run.b, row?.status, posted.length], ["A:ok", "B:0", "canceled", 0]);
+    });
+  }, 60_000);
 });

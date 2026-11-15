@@ -55,7 +55,7 @@ import { requireMember, requirePermission, WORKSPACE } from "../workspace-scope"
 const rememberedEntry = (at: Date, name: string, label: string) =>
   trailEntry(at, "remembered", `${name} allowed this for 30 days (${label})`, { name, label });
 
-const { approvals, proposals, questions, reversibleActions, gateDecisions } = schema;
+const { approvals, proposals, questions, reversibleActions, gateDecisions, messages } = schema;
 
 const decideBody = z.object({
   reason: z.string().trim().max(1000).optional(),
@@ -586,19 +586,37 @@ export function registerControl(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const { db } = deps;
     const messageId = param(c, "messageId");
+    const none = () => notFound("No actions on this message");
+    const [message] = await db
+      .select({ channelId: messages.channelId })
+      .from(messages)
+      .where(and(eq(messages.id, messageId), eq(messages.workspaceId, me.workspaceId)));
+    // A message in a channel the person can't read has nothing for them, like one that doesn't exist.
+    if (
+      !message ||
+      !(await canReadChannel(db, {
+        workspaceId: me.workspaceId,
+        userId: me.userId,
+        channelId: message.channelId,
+      }))
+    )
+      throw none();
     const rows = await db
       .select()
       .from(reversibleActions)
       .where(
         and(eq(reversibleActions.workspaceId, me.workspaceId), eq(reversibleActions.messageId, messageId)),
       );
-    if (rows.length === 0) throw notFound("No actions on this message");
+    // Only the actions the person may undo are listed or touched; the others don't show at all.
+    const mine = new Set<string>();
+    for (const row of rows) if (await canUndo(db, me, row)) mine.add(row.id);
+    if (mine.size === 0) throw none();
     const now = deps.now().getTime();
     const failed: UndoAllResult["failed"] = [];
     for (const row of rows) {
-      // "Undo all" only takes what is still open and is the person's; the rest stays as it is.
+      // "Undo all" only takes what is still open; the rest stays as it is.
+      if (!mine.has(row.id)) continue;
       if (row.revertedAt || !row.revertibleUntil || row.revertibleUntil.getTime() <= now) continue;
-      if (!(await canUndo(db, me, row))) continue;
       try {
         await applyUndo(deps, me, row, "undo");
       } catch (err) {
@@ -614,7 +632,7 @@ export function registerControl(app: Hono<AppEnv>) {
         and(eq(reversibleActions.workspaceId, me.workspaceId), eq(reversibleActions.messageId, messageId)),
       );
     return c.json({
-      actions: after.flatMap((r) => toAction(r) ?? []),
+      actions: after.flatMap((r) => (mine.has(r.id) ? (toAction(r) ?? []) : [])),
       failed,
     } satisfies UndoAllResult);
   });

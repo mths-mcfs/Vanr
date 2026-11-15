@@ -10,8 +10,8 @@ import type postgres from "postgres";
 export const DROP_LOCKS = process.env.VANR_TEST_DROP_LOCKS === "1";
 
 export interface Hooks {
-  /** Runs once, after the first query of `kind` of the transaction resolved (the point where it holds). */
-  after?: { kind: "select" | "update"; run: () => Promise<void> };
+  /** Runs once, after the `nth` (default first) query of `kind` of the transaction resolved (where it holds). */
+  after?: { kind: "select" | "update"; run: () => Promise<void>; nth?: number };
   /** Runs before the first query of `kind` is sent (the second transaction says it is about to read). */
   before?: { kind: "select"; run: () => void };
   pids: Set<number>;
@@ -60,6 +60,7 @@ export function instrumented(db: Db, hooks: Hooks): Db {
           const me = (Array.isArray(res) ? res : (res?.rows ?? []))[0];
           if (typeof me?.pid === "number") hooks.pids.add(me.pid);
           const fired = new Set<string>();
+          const seen = new Map<string, number>();
           const tap = (kind: "select" | "update") => (q: Any) => {
             if (hooks.before?.kind === kind && !fired.has(`before:${kind}`)) {
               fired.add(`before:${kind}`);
@@ -67,6 +68,9 @@ export function instrumented(db: Db, hooks: Hooks): Db {
             }
             return wrapQuery(q, async () => {
               if (hooks.after?.kind === kind && !fired.has(`after:${kind}`)) {
+                const count = (seen.get(kind) ?? 0) + 1;
+                seen.set(kind, count);
+                if (count < (hooks.after.nth ?? 1)) return;
                 fired.add(`after:${kind}`);
                 await hooks.after.run();
               }
@@ -137,6 +141,8 @@ export async function forcedPair<T>(
   start: (side: "A" | "B", hooks: Hooks) => Promise<T>,
   /** The first query of B that counts as "passed" (B can be another operation than A); default `kind`. */
   bKind: "select" | "update" = kind,
+  /** Which query of `kind` A holds after (the lock under test may not be its first); default the first. */
+  aNth = 1,
 ): Promise<{ a: T; b: T; aPids: number[]; bPids: number[] }> {
   const aPids = new Set<number>();
   const bPids = new Set<number>();
@@ -149,6 +155,7 @@ export async function forcedPair<T>(
       pids: aPids,
       after: {
         kind,
+        nth: aNth,
         run: async () => {
           held.open();
           await release.opened;

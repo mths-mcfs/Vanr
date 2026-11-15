@@ -2,7 +2,8 @@
 //
 // Approval: the agent's owner decides; if they left the workspace, whoever has `manage_agents`.
 // Proposal: the agent's instructions -> the owner or `manage_agents`; workspace context -> `configure`.
-// Action: undone by whoever asked the agent, the owner or `manage_agents`, until `revertibleUntil`.
+// Action: undone by whoever asked the agent, the owner or `manage_agents`, until `revertibleUntil`; an accepted
+// proposal only by who could accept it.
 import {
   type AgentActionKind,
   type AgentQuestion,
@@ -40,7 +41,7 @@ const {
   memories,
   reminders,
 } = schema;
-const { messages, users } = schema;
+const { messages, outbox, users } = schema;
 
 export type ApprovalRow = typeof approvals.$inferSelect;
 export type ProposalRow = typeof proposals.$inferSelect;
@@ -254,14 +255,22 @@ export function proposalTrail(
   return { at: at.toISOString(), text, code, params };
 }
 
-function undoableBy(
-  action: ActionRow | undefined,
-  me: WorkspaceMember,
-  ownerUserId: string | undefined,
-  at: Date,
+/** Inside its window (undone or not: the same window redoes it). */
+const inWindow = (action: ActionRow | undefined, at: Date): boolean =>
+  !!action?.revertibleUntil && action.revertibleUntil.getTime() > at.getTime();
+
+/**
+ * Who decides a proposal's target. The same right accepts it and undoes or redoes what accepting did: owning the
+ * agent that proposed doesn't reach the workspace's context or memory.
+ */
+function decidesTarget(
+  me: Pick<WorkspaceMember, "userId" | "role">,
+  kind: ProposalRow["targetKind"],
+  targetOwnerUserId: string | undefined,
 ): boolean {
-  if (!action?.revertibleUntil || action.revertibleUntil.getTime() <= at.getTime()) return false;
-  return action.requesterUserId === me.userId || can(me.role, "manage_agents") || ownerUserId === me.userId;
+  if (kind === "workspace_context") return can(me.role, "configure");
+  if (kind === "workspace_memory") return can(me.role, "manage_agents");
+  return can(me.role, "manage_agents") || targetOwnerUserId === me.userId;
 }
 
 /** The undo action of each accepted proposal (`proposal_applied`, target = the proposal). */
@@ -330,12 +339,7 @@ export async function proposalsView(
         : r.targetKind === "workspace_memory"
           ? (fileText.get(r.targetPath ?? "") ?? "")
           : (target?.instructions ?? "");
-    const decidable =
-      r.targetKind === "workspace_context"
-        ? can(me.role, "configure")
-        : r.targetKind === "workspace_memory"
-          ? can(me.role, "manage_agents")
-          : can(me.role, "manage_agents") || target?.ownerUserId === me.userId;
+    const decidable = decidesTarget(me, r.targetKind, target?.ownerUserId);
     const action = actions.get(r.id);
     return {
       id: r.id,
@@ -360,7 +364,7 @@ export async function proposalsView(
       trail: proposalTrailOf(r.trail),
       actionId: action?.id ?? null,
       undone: !!action?.revertedAt,
-      canUndo: undoableBy(action, me, target?.ownerUserId, at),
+      canUndo: decidable && inWindow(action, at),
     };
   });
 }
@@ -511,6 +515,19 @@ async function lockedMessage(deps: AppDeps, row: ActionRow) {
   return msg;
 }
 
+/**
+ * Cancels a send still in its window, with the queued row locked first: an undo that got there before the deadline
+ * wins, and the send's claim (a conditional update) waits for this transaction and then finds it canceled.
+ */
+async function cancelInWindow(deps: AppDeps, row: ActionRow, actorUserId: string) {
+  await deps.db
+    .select({ id: outbox.id })
+    .from(outbox)
+    .where(and(eq(outbox.id, row.target.id), eq(outbox.workspaceId, row.workspaceId)))
+    .for("update");
+  await cancelQueued(deps, row.workspaceId, row.target.id, actorUserId);
+}
+
 /** What each kind of action does on undo and redo (the content ones live in content-undo.ts). */
 const UNDOERS: Partial<Record<AgentActionKind, Undoer>> = {
   ...CONTENT_UNDOERS,
@@ -518,7 +535,7 @@ const UNDOERS: Partial<Record<AgentActionKind, Undoer>> = {
   // An email can only be undone while it waits in the queue (until `sendAt`); once out there is no way back.
   mail_sent: {
     async undo(deps, row, actorUserId) {
-      await cancelQueued(deps, row.workspaceId, row.target.id, actorUserId);
+      await cancelInWindow(deps, row, actorUserId);
     },
     async redo() {
       throw notSent();
@@ -577,8 +594,7 @@ const UNDOERS: Partial<Record<AgentActionKind, Undoer>> = {
   // undo retracts the message.
   message_posted: {
     async undo(deps, row, actorUserId) {
-      if (row.target.type === "outbox")
-        return cancelQueued(deps, row.workspaceId, row.target.id, actorUserId);
+      if (row.target.type === "outbox") return cancelInWindow(deps, row, actorUserId);
       const msg = await lockedMessage(deps, row);
       const meta = { ...msg.meta, retracted: { actorUserId: actorUserId, at: deps.now().toISOString() } };
       // Retracting and leaving the search in the same commit: there is no moment with the retracted text findable.
@@ -786,6 +802,21 @@ export async function actionInWorkspace(db: Db, workspaceId: string, id: string)
 }
 
 export async function canUndo(db: Db, me: WorkspaceMember, row: ActionRow): Promise<boolean> {
+  if (row.kind === "proposal_applied") {
+    const [proposal] = await db
+      .select({ targetKind: proposals.targetKind, recipientAgentId: proposals.recipientAgentId })
+      .from(proposals)
+      .where(and(eq(proposals.id, row.target.id), eq(proposals.workspaceId, row.workspaceId)));
+    // Gone: the undoer answers that (action.gone).
+    if (!proposal) return true;
+    const [target] = proposal.recipientAgentId
+      ? await db
+          .select({ ownerUserId: agents.ownerUserId })
+          .from(agents)
+          .where(and(eq(agents.id, proposal.recipientAgentId), eq(agents.workspaceId, row.workspaceId)))
+      : [];
+    return decidesTarget(me, proposal.targetKind, target?.ownerUserId);
+  }
   if (row.requesterUserId === me.userId || can(me.role, "manage_agents")) return true;
   const [agent] = await db
     .select({ ownerUserId: agents.ownerUserId })

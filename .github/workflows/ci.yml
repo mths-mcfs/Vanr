@@ -243,7 +243,7 @@ jobs:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_DROP_LOCKS: "1"
       # Undo against another undo, a person's edit and the send: one result each, nothing a person wrote lost (the
-      # action's row lock and the content's row lock in the undo's transaction).
+      # action's row lock and the content's or queued item's row lock in the undo's transaction).
       - run: bun test apps/server/test/control-postgres.test.ts
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
@@ -263,7 +263,7 @@ jobs:
               exit 1
             fi
           done
-          set -- undo-twice undo-vs-edit
+          set -- undo-twice undo-vs-edit undo-vs-send
           for label in "$@"; do
             if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" forced-undo.log; then
               echo "::error::the forced $label test did not fail on its outcome without the lock"
@@ -283,6 +283,34 @@ jobs:
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_DROP_LOCKS: "1"
+      # PGlite runs one transaction at a time, so only here does a missing lock on the action's row show: the
+      # mutant leaves out that one lock in the source and the forced undo-twice test must fail on its outcome.
+      - name: The forced undo-twice test fails without the action's lock alone
+        run: |
+          set +e
+          bun test --preload ./apps/server/test/drop-action-lock.ts apps/server/test/control-postgres.test.ts --test-name-pattern "forced: the second undo" > action-lock.log 2>&1
+          status=$?
+          cat action-lock.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the forced undo-twice test passed without the action's lock"
+            exit 1
+          fi
+          if ! grep -aqF "drop-action-lock: the undo's action lock is left out" action-lock.log; then
+            echo "::error::the mutant was not applied"
+            exit 1
+          fi
+          for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -aqF "$broken" action-lock.log; then
+              echo "::error::the forced undo-twice test broke ($broken) instead of failing on its outcome"
+              exit 1
+            fi
+          done
+          if ! grep -aqF "LOCK_OUTCOME_MISMATCH(undo-twice)" action-lock.log; then
+            echo "::error::the forced undo-twice test did not fail on its outcome without the action's lock"
+            exit 1
+          fi
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
       # Every answer of a round kept once and an answer that meets the stop finds the queue closed (the debate's row
       # lock); one routine execution per fire, scheduled time and queued run, with callers on several connections.
       - run: bun test apps/server/test/debates-postgres.test.ts

@@ -663,6 +663,46 @@ describe("proposals", () => {
     },
     SERVER_TEST_MS,
   );
+  test(
+    "undoing an accepted proposal takes the right accepting took: the agent's owner can't undo the workspace context",
+    async () => {
+      const t = await team();
+      const ctx = await seedProposal(t, {
+        targetKind: "workspace_context",
+        recipientAgentId: null,
+        before: "",
+        after: "Approved context",
+      });
+      // Beto owns the proposing agent but doesn't configure the workspace.
+      expect((await t.beto.browser.json(t.url(`/proposals/${ctx.id}/accept`), "POST")).status).toBe(403);
+      const accepted = await body(await t.ana.browser.json(t.url(`/proposals/${ctx.id}/accept`), "POST"));
+      expect(accepted.status).toBe("accepted");
+      const contextNow = async () =>
+        (await server.deps.db.select().from(workspaces).where(eq(workspaces.id, t.workspaceId)))[0]?.context;
+
+      const listed = (await body(await t.beto.browser.fetch(t.url("/proposals")))).proposals.find(
+        (x: { id: string }) => x.id === ctx.id,
+      );
+      expect(listed).toMatchObject({ canUndo: false });
+      const undo = await t.beto.browser.json(t.url(`/actions/${accepted.actionId}/undo`), "POST");
+      expect(undo.status).toBe(403);
+      expect(await code(undo)).toBe("action.not_yours");
+      expect(await contextNow()).toBe("Approved context");
+      // The action stays open.
+      const [action] = await server.deps.db
+        .select()
+        .from(reversibleActions)
+        .where(eq(reversibleActions.id, accepted.actionId));
+      expect(action?.revertedAt).toBeNull();
+
+      // Ana, who configures, can.
+      expect((await t.ana.browser.json(t.url(`/actions/${accepted.actionId}/undo`), "POST")).status).toBe(
+        200,
+      );
+      expect(await contextNow()).toBe("");
+    },
+    SERVER_TEST_MS,
+  );
 });
 
 describe("questions", () => {
@@ -712,6 +752,114 @@ describe("questions", () => {
 });
 
 describe("undo", () => {
+  test(
+    "undo all on a message in a private channel: who can't read it gets the same answer as for no message",
+    async () => {
+      const t = await team();
+      const channel = await channelInWorkspace(server.deps.db, t.workspaceId, t.secret);
+      if (!channel) throw new Error("no channel");
+      const { message } = await postMessage(server.deps, {
+        workspaceId: t.workspaceId,
+        channel,
+        author: { type: "agent", id: t.agentId },
+        body: "Sent the offer",
+        clientId: null,
+      });
+      const action = await seedAction(
+        t,
+        "mail_sent",
+        { type: "outbox", id: newId("out"), title: "confidential@client.test" },
+        { messageId: message.id, requesterUserId: t.beto.user.id, params: { subject: "Acquisition" } },
+      );
+      const undoAll = (who: Person, id: string) =>
+        who.browser.json(t.url(`/messages/${id}/actions/undo`), "POST");
+      const missing = await undoAll(t.carla, newId("msg"));
+      expect(missing.status).toBe(404);
+      const missingBody = await body(missing);
+
+      // Carla isn't in #secret and didn't ask for the action.
+      const hidden = await undoAll(t.carla, message.id);
+      expect(hidden.status).toBe(404);
+      const hiddenBody = await body(hidden);
+      expect(hiddenBody).toEqual(missingBody);
+      expect(JSON.stringify(hiddenBody)).not.toContain("confidential");
+      expect(JSON.stringify(hiddenBody)).not.toContain("Acquisition");
+
+      // In a channel Carla reads, actions she may not undo don't show either.
+      const reply = await agentReply(t, "Done in general");
+      const notHers = await seedAction(
+        t,
+        "mail_sent",
+        { type: "outbox", id: newId("out"), title: "boss@client.test" },
+        { messageId: reply.id, requesterUserId: t.beto.user.id },
+      );
+      const readable = await undoAll(t.carla, reply.id);
+      expect(readable.status).toBe(404);
+      expect(await body(readable)).toEqual(missingBody);
+
+      const reverted = await server.deps.db
+        .select({ revertedAt: reversibleActions.revertedAt })
+        .from(reversibleActions)
+        .where(eq(reversibleActions.workspaceId, t.workspaceId));
+      expect(reverted.every((r) => r.revertedAt === null)).toBe(true);
+      void action;
+      void notHers;
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a wiki edit: undo brings back the text, the title and the properties; redo the agent's again",
+    async () => {
+      const t = await team();
+      const agent = { type: "agent" as const, id: t.agentId };
+      const page = await createPage(server.deps, {
+        workspaceId: t.workspaceId,
+        title: `Roadmap ${n}`,
+        body: "old",
+        props: { status: "old" },
+        author: agent,
+      });
+      await savePage(server.deps, {
+        row: page,
+        author: agent,
+        canBypassLock: false,
+        parentVersion: 1,
+        title: `Roadmap ${n} (agent)`,
+        body: "new",
+        props: { status: "new" },
+      });
+      const edit = await seedAction(
+        t,
+        "wiki_updated",
+        { type: "wiki", id: page.id },
+        { params: { fromVersion: 1, toVersion: 2 } },
+      );
+      const pageNow = async () =>
+        (
+          await server.deps.db
+            .select()
+            .from(schema.knowledgePages)
+            .where(eq(schema.knowledgePages.id, page.id))
+        )[0];
+      expect((await t.carla.browser.json(t.url(`/actions/${edit.id}/undo`), "POST")).status).toBe(200);
+      expect(await pageNow()).toMatchObject({
+        body: "old",
+        title: page.title,
+        props: { status: "old" },
+        version: 3,
+      });
+      expect((await t.carla.browser.json(t.url(`/actions/${edit.id}/redo`), "POST")).status).toBe(200);
+      expect(await pageNow()).toMatchObject({
+        body: "new",
+        title: `Roadmap ${n} (agent)`,
+        props: { status: "new" },
+        version: 4,
+      });
+    },
+    SERVER_TEST_MS,
+  );
+
   test(
     "a posted message: undo retracts, redo brings it back; who may; twice; undo all; the deadline",
     async () => {
@@ -764,8 +912,13 @@ describe("undo", () => {
       expect(state.get(action.id)).not.toBeNull();
       expect(state.get(second.id)).not.toBeNull();
       expect(all.failed).toEqual([]);
-      // Ana asked for that one: Carla's "undo all" leaves it as it is.
-      expect(state.get(notMine.id)).toBeNull();
+      // Ana asked for that one: Carla's "undo all" neither lists nor touches it.
+      expect(state.has(notMine.id)).toBe(false);
+      const [untouched] = await server.deps.db
+        .select()
+        .from(reversibleActions)
+        .where(eq(reversibleActions.id, notMine.id));
+      expect(untouched?.revertedAt).toBeNull();
       expect(
         (await t.carla.browser.json(t.url(`/messages/${newId("msg")}/actions/undo`), "POST")).status,
       ).toBe(404);

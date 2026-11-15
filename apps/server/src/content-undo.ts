@@ -161,6 +161,8 @@ async function copyPageVersion(
     parentVersion: expect,
     body: old.body,
     title: old.title,
+    // A revision from before properties were kept has none: the page keeps the ones it has.
+    props: old.props ?? undefined,
     note: `restored version ${from}`,
   });
   return saved.version;
