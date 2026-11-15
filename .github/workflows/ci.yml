@@ -157,7 +157,7 @@ jobs:
           fi
           echo "$out"
           # It must fail for the race (the removal committed before the attachment), not for anything else.
-          grep -q '"removal, then attachment"' <<< "$out"
+          grep -q '"the removal ended before the attachment"' <<< "$out"
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_WIKI_MEMBER_UNLOCKED: "1"

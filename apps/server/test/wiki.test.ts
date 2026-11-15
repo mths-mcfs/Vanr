@@ -1756,24 +1756,23 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki attachments on Postgres"), 
         }
         return role;
       };
-      const order: string[] = [];
-      const importing = beto.api.wiki
-        .importWikiVault(workspaceId, { file: new Blob([zipSync({ "photo.png": PNG })]), fileName: "p.zip" })
-        .then((r) => {
-          order.push("attachment");
-          return r;
-        });
+      const importing = beto.api.wiki.importWikiVault(workspaceId, {
+        file: new Blob([zipSync({ "photo.png": PNG })]),
+        fileName: "p.zip",
+      });
       await reachedP;
-      const removing = removeMember(pg, workspaceId, beto.user.id).then(() => order.push("removal"));
-      // Release once the removal waits for the membership's lock (or already ended without waiting).
-      await Promise.race([
-        removing,
-        waitingForLock(pg, "the removal never waited for the membership's lock"),
+      const removing = removeMember(pg, workspaceId, beto.user.id);
+      // With the lock the removal waits for the attachment's transaction; without it, it ends at once.
+      const first = await Promise.race([
+        removing.then(() => "the removal ended before the attachment"),
+        waitingForLock(pg, "the removal neither ended nor waited").then(
+          () => "the removal waited for the attachment",
+        ),
       ]);
       release();
       const r = await importing;
       await removing;
-      expect(order.join(", then ")).toBe("attachment, then removal");
+      expect(first).toBe("the removal waited for the attachment");
       expect(r.attachments).toBe(1);
     } finally {
       memberLock.role = locked;
