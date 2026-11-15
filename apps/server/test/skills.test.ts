@@ -125,7 +125,12 @@ const skillsOf = async (who: Person, workspaceId: string) =>
     (s) => s.name,
   );
 
-async function seedRun(workspaceId: string, owner: Person, channelId: string | null) {
+async function seedRun(
+  workspaceId: string,
+  owner: Person,
+  channelId: string | null,
+  status: "running" | "done" = "done",
+) {
   const agentId = newId("agt");
   await server.deps.db.insert(schema.agents).values({
     id: agentId,
@@ -142,7 +147,7 @@ async function seedRun(workspaceId: string, owner: Person, channelId: string | n
     workspaceId,
     agentId,
     channelId,
-    status: "done",
+    status,
     what: "Weekly report",
     model: "claude-haiku-5-5",
   });
@@ -399,6 +404,35 @@ describe("a run's draft saved as a skill", () => {
       const run = await seedRun(workspaceId, ana, general);
       const me = { workspaceId, userId: ana.user.id, role: "owner" as const, handle: "ana" };
       await expect(draftSkillFromRun(server.deps, me, run)).rejects.toMatchObject({ code: "not_available" });
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "with the runtime there, the draft is only of a finished run",
+    async () => {
+      const { workspaceId, general, ana } = await team();
+      const me = { workspaceId, userId: ana.user.id, role: "owner" as const, handle: "ana" };
+      let asked = 0;
+      const deps = {
+        ...server.deps,
+        runtime: {
+          ...server.deps.runtime,
+          complete: async () => {
+            asked++;
+            throw new Error("the model is not asked in this test");
+          },
+        },
+      };
+      const running = await seedRun(workspaceId, ana, general, "running");
+      await expect(draftSkillFromRun(deps, me, running)).rejects.toMatchObject({
+        status: 409,
+        code: "skill_draft.run_not_done",
+      });
+      // A finished run gets past that check (this one has no steps, so it stops at the next).
+      const done = await seedRun(workspaceId, ana, general);
+      await expect(draftSkillFromRun(deps, me, done)).rejects.toMatchObject({ code: "skill_draft.empty" });
+      expect(asked).toBe(0);
     },
     SERVER_TEST_MS,
   );

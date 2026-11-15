@@ -55,6 +55,8 @@ const dueDate = z.iso.date().nullable();
 const labels = z.array(z.string().trim().min(1).max(40)).max(20);
 /** A short number as the URL carries it: digits only, no sign, no leading zero. */
 const issueSeq = /^[1-9][0-9]{0,9}$/;
+/** The issue number is a Postgres integer: anything above it can't be one. */
+const ISSUE_SEQ_MAX = 2_147_483_647;
 
 export const createIssueBody = z
   .object({
@@ -150,7 +152,7 @@ export function registerIssues(app: Hono<AppEnv>) {
     const me = requireMember(c);
     const { db } = c.get("deps");
     const raw = param(c, "issueSeq");
-    if (!issueSeq.test(raw)) throw notFound("Issue not found");
+    if (!issueSeq.test(raw) || Number(raw) > ISSUE_SEQ_MAX) throw notFound("Issue not found");
     return c.json(await toIssue(db, await issueByNumber(db, me.workspaceId, Number(raw))));
   });
 

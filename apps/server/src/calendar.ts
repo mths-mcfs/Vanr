@@ -21,7 +21,7 @@ const localDate = (at: Date, tz: string) => {
 export const ruleOf = (row: EventRow) => (row.rule as RecurrenceRule | null) ?? null;
 
 /** The series rule anchored at the event's start (the time comes from the event itself). */
-function seriesRule(row: EventRow): RecurrenceRule | null {
+export function seriesRule(row: EventRow): RecurrenceRule | null {
   const rule = ruleOf(row);
   if (!rule) return null;
   const { times: _t, ...rest } = rule;

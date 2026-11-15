@@ -333,6 +333,79 @@ describe("calendar", () => {
   );
 
   test(
+    'a split series with a count keeps its total; "all" after a split changes every part',
+    async () => {
+      const { workspaceId, ana } = await team();
+      const listed = async (from: string, to: string) =>
+        (await range(ana, workspaceId, from, to)).events.map((x) => [x.start, x.title]);
+      const daily = (title: string, count?: number) =>
+        create(ana, workspaceId, {
+          title,
+          start: "2026-11-15T10:00:00Z",
+          end: "2026-11-15T11:00:00Z",
+          timezone: "UTC",
+          rule: { freq: "daily", interval: 1, timezone: "UTC", ...(count ? { count } : {}) },
+        });
+
+      // Three days, split at the second: still three, the continuation never runs on.
+      const three = await daily("Three days", 3);
+      const rest = await update(ana, workspaceId, three.id, {
+        scope: "following",
+        instanceStart: "2026-11-16T10:00:00Z",
+        title: "The rest",
+      });
+      expect(rest.rule?.count).toBe(2);
+      expect(await listed("2026-11-14T00:00:00Z", "2026-12-01T00:00:00Z")).toEqual([
+        ["2026-11-15T10:00:00.000Z", "Three days"],
+        ["2026-11-16T10:00:00.000Z", "The rest"],
+        ["2026-11-17T10:00:00.000Z", "The rest"],
+      ]);
+      await remove(ana, workspaceId, three.id, { scope: "all" });
+
+      // An occurrence taken out before the split still counts: four days, the second out, split at the third.
+      const four = await daily("Four days", 4);
+      await remove(ana, workspaceId, four.id, { scope: "this", instanceStart: "2026-11-16T10:00:00Z" });
+      await update(ana, workspaceId, four.id, {
+        scope: "following",
+        instanceStart: "2026-11-17T10:00:00Z",
+        title: "Later",
+      });
+      expect(await listed("2026-11-14T00:00:00Z", "2026-12-01T00:00:00Z")).toEqual([
+        ["2026-11-15T10:00:00.000Z", "Four days"],
+        ["2026-11-17T10:00:00.000Z", "Later"],
+        ["2026-11-18T10:00:00.000Z", "Later"],
+      ]);
+      await remove(ana, workspaceId, four.id, { scope: "all" });
+
+      // Split, an occurrence moved on its own, then "all" from the continuation: every part takes the new title
+      // and keeps its own times.
+      const open = await daily("Stand-up");
+      const part = await update(ana, workspaceId, open.id, {
+        scope: "following",
+        instanceStart: "2026-11-17T10:00:00Z",
+        title: "Later stand-up",
+      });
+      await update(ana, workspaceId, part.id, {
+        scope: "this",
+        instanceStart: "2026-11-18T10:00:00Z",
+        start: "2026-11-18T14:00:00Z",
+        end: "2026-11-18T15:00:00Z",
+      });
+      await update(ana, workspaceId, part.id, { scope: "all", title: "Renamed", location: "Room 2" });
+      const after = await range(ana, workspaceId, "2026-11-15T00:00:00Z", "2026-11-20T00:00:00Z");
+      expect(after.events.map((x) => [x.start, x.title, x.location])).toEqual([
+        ["2026-11-15T10:00:00.000Z", "Renamed", "Room 2"],
+        ["2026-11-16T10:00:00.000Z", "Renamed", "Room 2"],
+        ["2026-11-17T10:00:00.000Z", "Renamed", "Room 2"],
+        ["2026-11-18T14:00:00.000Z", "Renamed", "Room 2"],
+        ["2026-11-19T10:00:00.000Z", "Renamed", "Room 2"],
+      ]);
+      await remove(ana, workspaceId, open.id, { scope: "all" });
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "the agents' proposals, the routines' times and the issues' due dates in the range",
     async () => {
       const { workspaceId, general, ana, beto } = await team();

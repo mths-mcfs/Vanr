@@ -12,12 +12,13 @@ import { can } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { isTimezone, occurrences } from "@vanr/engine/recurrence";
-import { and, eq, gte, inArray, isNull, lte, notInArray, or } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, lte, ne, notInArray, or } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
 import {
   type EventRow,
   eventFor,
+  seriesRule as eventRule,
   eventsInRange,
   expand,
   isPersonIn,
@@ -321,7 +322,32 @@ export function registerCalendar(app: Hono<AppEnv>) {
         if (!updated) throw notFound("Event not found");
         return { saved: [updated], reply: updated };
       };
-      if (!series || scope === "all") return whole();
+      if (!series) return whole();
+      if (scope === "all") {
+        // "All" is the whole family: the parts "this and the following" made and the occurrences edited on their
+        // own point to the root. What is the same across the family follows the edit; the times stay with each part.
+        const edited = await whole();
+        const shared = {
+          ...(patch.title !== undefined ? { title: patch.title } : {}),
+          ...(patch.participants !== undefined ? { participants: patch.participants } : {}),
+          ...(patch.location !== undefined ? { location: patch.location } : {}),
+          ...(patch.description !== undefined ? { description: patch.description } : {}),
+        };
+        if (Object.keys(shared).length === 0) return edited;
+        const root = row.seriesId ?? row.id;
+        const others = await tx
+          .update(calendarEntries)
+          .set({ ...shared, updatedAt: at })
+          .where(
+            and(
+              eq(calendarEntries.workspaceId, row.workspaceId),
+              or(eq(calendarEntries.seriesId, root), eq(calendarEntries.id, root)),
+              ne(calendarEntries.id, row.id),
+            ),
+          )
+          .returning();
+        return { saved: [...edited.saved, ...others], reply: edited.reply };
+      }
 
       const occ = checkOccurrence(row, instanceStart);
       const base = { start: occ, end: new Date(occ.getTime() + duration) };
@@ -360,14 +386,24 @@ export function registerCalendar(app: Hono<AppEnv>) {
         })
         .where(eq(calendarEntries.id, row.id))
         .returning();
-      const nextRule = patch.rule === undefined ? series : patch.rule;
+      // A series with a count keeps its total: the continuation gets only the occurrences left after the ones
+      // before the split (the ones taken out count too, as they did in the series). A new rule is the person's.
+      const before = series.count
+        ? occurrences(eventRule(row) ?? series, { from: row.start, to: occ, limit: series.count }).length
+        : 0;
+      const nextRule =
+        patch.rule !== undefined
+          ? patch.rule
+          : series.count
+            ? { ...series, count: series.count - before }
+            : series;
       const [following] = await tx
         .insert(calendarEntries)
         .values({
           id: newId("evt"),
           workspaceId: row.workspaceId,
           ...fields(base),
-          rule: nextRule ? { ...nextRule, ...(series.count ? { count: undefined } : {}) } : null,
+          rule: nextRule,
           exdates: row.exdates.filter((x) => x >= occ.toISOString()),
           seriesId: row.seriesId ?? row.id,
           createdBy: row.createdBy,

@@ -408,6 +408,9 @@ describe("who may call", () => {
         "01",
         "1e3",
         "99999999999",
+        // Ten digits pass the shape but are above the integer the number is stored in.
+        "9999999999",
+        "2147483648",
       ]) {
         const res = await call(ana, workspaceId, "GET", `/issues/seq/${seq}`);
         expect([seq, res.status, res.json]).toEqual([seq, 404, missing]);
