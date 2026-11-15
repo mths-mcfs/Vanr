@@ -176,6 +176,10 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   // The stop admits no new request or upgrade, and waits for the handlers already admitted before the wiki,
   // the background work and the database close under them.
   let closing = false;
+  // The answer to what the stop doesn't admit, also after a check awaited at an upgrade (the stop may begin
+  // during it).
+  const stoppingResponse = () =>
+    Response.json(errorBody("unavailable", "The server is stopping"), { status: 503 });
   const admitted = new Set<Promise<unknown>>();
   async function serve(req: Request, srv: Bun.Server<SocketData>): Promise<Response | undefined> {
     const path = new URL(req.url).pathname;
@@ -185,6 +189,7 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     if (depsRef && path === "/api/v1/realtime") {
       const check = await checkBrowserUpgrade(depsRef, req, origins);
       if (!check.ok) return check.response;
+      if (closing) return stoppingResponse();
       if (srv.upgrade(req, { data: check.data })) return undefined;
       return upgradeRequired();
     }
@@ -197,6 +202,7 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     if (depsRef && path === COLLAB_PATH) {
       const check = await collab.upgrade(req, origins);
       if (!check.ok) return check.response;
+      if (closing) return stoppingResponse();
       if (srv.upgrade(req, { data: check.data })) return undefined;
       return upgradeRequired();
     }
@@ -207,7 +213,7 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     port: config.port,
     ...(opts.idleTimeoutSeconds !== undefined ? { idleTimeout: opts.idleTimeoutSeconds } : {}),
     fetch(req, srv) {
-      if (closing) return Response.json(errorBody("unavailable", "The server is stopping"), { status: 503 });
+      if (closing) return stoppingResponse();
       const answer = serve(req, srv);
       const done = () => admitted.delete(answer);
       admitted.add(answer);
@@ -409,11 +415,14 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   depsRef = deps;
   log.info("server.started", { url: publicUrl, db: opened.kind });
 
-  // The first step of the stop: no new request, then the admitted ones end (a runner call they await fails).
+  // The first step of the stop, in the tick it starts: no new request or upgrade, and the recalculations halt
+  // before their next batch. Then the admitted handlers end (a runner call they await fails).
   undo.push(async () => {
     closing = true;
+    const halting = stopRecalcs(deps);
     runnersHub.closeAll();
     while (admitted.size > 0) await Promise.allSettled([...admitted]);
+    await halting;
   });
   // Every stop, at once or later, gets the same shutdown: it ends (or fails) once for all of them.
   let stopping: Promise<void> | null = null;
