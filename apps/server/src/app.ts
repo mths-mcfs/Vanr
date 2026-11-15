@@ -4,6 +4,11 @@ import type { AppDeps, AppEnv } from "./context";
 import { errorBody, HttpError } from "./http";
 import { log } from "./logger";
 import { registerAccount } from "./routes/account";
+import { registerInvitations } from "./routes/invitations";
+import { registerNotifications } from "./routes/notifications";
+import { registerPush } from "./routes/push";
+import { registerRunnerRequests } from "./routes/runner-requests";
+import { registerRunners } from "./routes/runners";
 import { registerWaitlist } from "./routes/waitlist";
 import { type FirstUserPlace, type SignupQueueLimits, signupGate } from "./signup-queue";
 import { createStatic } from "./static";
@@ -35,6 +40,7 @@ export function createApp(
   app.use("*", async (c, next) => {
     c.set("deps", deps);
     c.set("user", null);
+    c.set("sessionId", null);
     c.set("member", null);
     await next();
   });
@@ -90,6 +96,7 @@ export function createApp(
   app.use("/api/v1/*", async (c, next) => {
     const session = await deps.auth.api.getSession({ headers: c.req.raw.headers });
     if (session) {
+      c.set("sessionId", session.session.id);
       const u = session.user;
       c.set("user", { id: u.id, name: u.name, email: u.email, image: u.image ?? null });
     }
@@ -104,6 +111,11 @@ export function createApp(
   // control S5, invitations S2, notifications S2, push S2, drive uploads S3, drive S2, wiki S4, bases S3,
   // issues S4, debates S4, routines S4, calendar S4, search S2, connectors S6, integrations S5, runners S2,
   // runner pairings S3, assignments S5.
+  registerInvitations(app);
+  registerNotifications(app);
+  registerPush(app);
+  registerRunners(app);
+  registerRunnerRequests(app);
 
   app.all("/api/*", (c) =>
     c.json(errorBody("route_not_found", `No route for ${c.req.method} ${c.req.path}`), 404),

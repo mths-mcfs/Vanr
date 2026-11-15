@@ -12,6 +12,8 @@ import { and, eq, gt, isNull, lt, or, sql } from "drizzle-orm";
 import type { AppDeps } from "../context";
 import { HttpError } from "../http";
 import { log } from "../logger";
+import { endLiveViewsOf } from "./browser-live";
+import { cancelRunnerRequests, publishRunnerRequests } from "./requests";
 import type { RunnerRow } from "./runners";
 
 const { runners, runnerSessions } = schema;
@@ -33,11 +35,14 @@ export async function revokeRunner(
 ): Promise<void> {
   const now = deps.now();
   // The hashes stay: the current, the pending and the old one now get "revoked" (403), not "not paired".
-  await deps.db
-    .update(runners)
-    .set({ revokedAt: now, revokedReason: reason, updatedAt: now })
-    .where(eq(runners.id, row.id));
-  await deps.db.delete(runnerSessions).where(eq(runnerSessions.runnerId, row.id));
+  const closed = await deps.db.transaction(async (tx) => {
+    await tx
+      .update(runners)
+      .set({ revokedAt: now, revokedReason: reason, updatedAt: now })
+      .where(eq(runners.id, row.id));
+    await tx.delete(runnerSessions).where(eq(runnerSessions.runnerId, row.id));
+    return cancelRunnerRequests(tx, now, row.id);
+  });
   deps.runners.close(row.id, {
     type: "rejected",
     reason: "revoked",
@@ -46,6 +51,8 @@ export async function revokeRunner(
         ? "This runner's credential was used from somewhere else; pair it again"
         : "This runner's access was revoked; pair it again",
   });
+  endLiveViewsOf(deps, row.id);
+  await publishRunnerRequests(deps, closed);
   deps.hub.toWorkspace(row.workspaceId, { type: "runner.revoked", runnerId: row.id, reason });
   log.warn("runner.revoked", { runnerId: row.id, reason });
 }
@@ -89,7 +96,8 @@ export async function mintSession(
         credentialRotatedAt: now,
         updatedAt: now,
       })
-      // Two sessions at once with the same credential: only one rotates.
+      // Two sessions at once with the same credential: only one rotates (the pending one is part of the state read,
+      // or both would pass when the current one doesn't change, and the runner would keep a credential nobody holds).
       .where(
         and(
           eq(runners.id, row.id),

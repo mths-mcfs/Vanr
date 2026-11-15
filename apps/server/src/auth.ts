@@ -20,6 +20,8 @@ export interface AuthDeps {
    * `busy`: the installation is empty but another sign-up holds the first user's place; try again soon.
    */
   signupAllowed: (email: string, headers: Headers | null) => Promise<SignupDecision>;
+  /** A session was deleted (sign-out, revoked): the live connections it opened close. */
+  onSessionEnded?: (sessionId: string) => void | Promise<void>;
 }
 
 /**
@@ -100,6 +102,13 @@ export function createAuth(deps: AuthDeps) {
     },
     logger: { level: "error" },
     databaseHooks: {
+      session: {
+        delete: {
+          after: async (session) => {
+            await deps.onSessionEnded?.(session.id);
+          },
+        },
+      },
       user: {
         create: {
           before: async (user, ctx) => {

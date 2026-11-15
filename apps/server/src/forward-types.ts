@@ -6,9 +6,7 @@ import type { schema } from "@vanr/engine/db";
 import type { Preview } from "@vanr/engine/effects";
 import type { ModelProvider } from "@vanr/engine/models/types";
 import type { BudgetScope } from "@vanr/engine/usage";
-
-/** From `agents`. */
-export type AgentRow = typeof schema.agents.$inferSelect;
+import type { AgentRow } from "./agents";
 
 /** From `wiki`. */
 export type WikiRow = typeof schema.knowledgePages.$inferSelect;

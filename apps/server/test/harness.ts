@@ -6,8 +6,7 @@ import type { SignupQueueLimits } from "../src/signup-queue";
 
 // Later slices add here what they unlock: the real Postgres option (`postgres`, S2), the live wiki timings
 // (S3), the assignment engine and the model provider options (S5, S6), the typed API client (`apiFor`,
-// `apiError`, `memberOf`, `toolResults`, with the client package), the browser WebSocket (`TestSocket`, S2)
-// and `holdNextIndexWrite` (search-index, S2).
+// `apiError`, `memberOf`, `toolResults`, with the client package) and `holdNextIndexWrite` (search-index, S2).
 
 export interface TestServerOptions {
   /** Shorter limits for the closed sign-up queue. */
@@ -124,3 +123,95 @@ export async function signedIn(server: RunningServer, name: string, email: strin
 export function settle(server: RunningServer): Promise<void> {
   return server.deps.runtime.settle();
 }
+
+/** A frame the real-time socket sends the browser (`ready`, `event`, `subscribed`, `error`, the live view's). */
+export interface RealtimeFrame {
+  type: string;
+  [key: string]: unknown;
+}
+
+/** The browser's real-time WebSocket, with the session cookie of a `Browser` and its origin. */
+export class TestSocket {
+  readonly frames: RealtimeFrame[] = [];
+  private waiters: { match: (f: RealtimeFrame) => boolean; resolve: (f: RealtimeFrame) => void }[] = [];
+  /** Resolves when the server closes the socket (or it fails to open), with the close code. */
+  readonly closed: Promise<number>;
+  private constructor(readonly ws: WebSocket) {
+    ws.addEventListener("message", (ev) => {
+      const frame: RealtimeFrame = JSON.parse(String(ev.data));
+      this.frames.push(frame);
+      for (const w of [...this.waiters]) {
+        if (w.match(frame)) {
+          this.waiters.splice(this.waiters.indexOf(w), 1);
+          w.resolve(frame);
+        }
+      }
+    });
+    this.closed = new Promise((resolve) => ws.addEventListener("close", (ev) => resolve(ev.code)));
+  }
+
+  /** The socket without waiting for `ready` (to see an upgrade the server rejects). */
+  static connect(browser: Browser, workspaceId: string, origin = browser.base): TestSocket {
+    const url = `${browser.base.replace(/^http/, "ws")}/api/v1/realtime?workspaceId=${encodeURIComponent(workspaceId)}`;
+    const cookie = [...browser.cookies].map(([k, v]) => `${k}=${v}`).join("; ");
+    return new TestSocket(new WebSocket(url, { headers: { cookie, origin } }));
+  }
+
+  static async open(browser: Browser, workspaceId: string, origin = browser.base): Promise<TestSocket> {
+    const socket = TestSocket.connect(browser, workspaceId, origin);
+    await socket.next((f) => f.type === "ready");
+    return socket;
+  }
+
+  /** The next frame (already received or to come) that matches the filter. */
+  next(match: (f: RealtimeFrame) => boolean, timeoutMs = 5000): Promise<RealtimeFrame> {
+    const seen = this.frames.find(match);
+    if (seen) {
+      this.frames.splice(this.frames.indexOf(seen), 1);
+      return Promise.resolve(seen);
+    }
+    return new Promise((resolve, reject) => {
+      const waiter = {
+        match,
+        resolve: (f: RealtimeFrame) => {
+          clearTimeout(timer);
+          this.frames.splice(this.frames.indexOf(f), 1);
+          resolve(f);
+        },
+      };
+      const timer = setTimeout(() => {
+        this.waiters.splice(this.waiters.indexOf(waiter), 1);
+        reject(new Error(`timeout waiting for frame; got ${JSON.stringify(this.frames.map((f) => f.type))}`));
+      }, timeoutMs);
+      this.waiters.push(waiter);
+    });
+  }
+
+  /** A channel, user or workspace event with this event.type. */
+  event(type: string, timeoutMs?: number): Promise<RealtimeFrame & { event: RealtimeFrame }> {
+    return this.next(
+      (f) => f.type === "event" && isFrame(f.event) && f.event.type === type,
+      timeoutMs,
+    ) as Promise<RealtimeFrame & { event: RealtimeFrame }>;
+  }
+
+  send(frame: Record<string, unknown>) {
+    this.ws.send(JSON.stringify(frame));
+  }
+
+  async subscribe(channelId: string) {
+    this.send({ type: "subscribe", channelId });
+    return this.next((f) => (f.type === "subscribed" || f.type === "error") && f.channelId === channelId);
+  }
+
+  close() {
+    this.ws.close();
+  }
+}
+
+const isFrame = (v: unknown): v is RealtimeFrame =>
+  typeof v === "object" && v !== null && "type" in v && typeof v.type === "string";
+
+/** An event in the same envelope the browser client validates. */
+export const isEvent = (f: RealtimeFrame, type: string): f is RealtimeFrame & { event: RealtimeFrame } =>
+  f.type === "event" && isFrame(f.event) && f.event.type === type;

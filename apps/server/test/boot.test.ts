@@ -270,6 +270,7 @@ describe("stop", () => {
               lastFrameAt: 0,
               helloTimer: null,
               pingTimer: null,
+              closed: false,
             },
           })
             ? undefined
