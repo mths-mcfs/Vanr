@@ -21,7 +21,16 @@ import type { Context, Hono } from "hono";
 import { type ZodType, z } from "zod";
 import type { AppEnv, Ctx, WorkspaceMember } from "../context";
 import { type Form, readFormFile } from "../drive";
-import { badRequest, forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
+import {
+  badRequest,
+  forbidden,
+  HttpError,
+  handOverBody,
+  notFound,
+  param,
+  readJson,
+  readQuery,
+} from "../http";
 import { unindex } from "../search-index";
 import {
   accessManagerOnly,
@@ -201,7 +210,7 @@ export function registerWiki(app: Hono<AppEnv>) {
     const type = c.req.header("content-type") ?? "";
     if (c.req.method !== "GET" && c.req.method !== "HEAD" && !type.startsWith("multipart/form-data")) {
       const text = await cappedText(c.req.raw, WIKI_JSON_BYTES);
-      c.req.bodyCache.text = text;
+      handOverBody(c.req.raw, text);
       let body: unknown = null;
       try {
         body = JSON.parse(text);
