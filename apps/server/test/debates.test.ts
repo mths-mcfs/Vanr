@@ -449,6 +449,104 @@ describe("anonymity through the routes", () => {
   );
 });
 
+describe("anonymity when the table changes", () => {
+  test(
+    "an agent added to an anonymous debate can't be told by its pseudonym: every label is drawn again, old posts keep theirs",
+    async () => {
+      const { workspaceId, general, base, open, ana, beto, lia, rui } = await team();
+      const eva = await seedAgent(server, workspaceId, ana, "eva", [general]);
+      const t = await open(ana, {
+        title: "Recast",
+        goal: "Who joined?",
+        agentIds: [lia.id, rui.id],
+        rounds: 5,
+        speakers: [
+          { type: "agent", id: lia.id },
+          { type: "agent", id: rui.id },
+          { type: "person", id: beto.user.id },
+        ],
+      });
+      await settle();
+      /**
+       * One round: each agent still in the queue answers the way its turn does (each its own answer, a new one
+       * every round, so the table neither agrees nor settles and goes on), then Beto closes it.
+       */
+      let played = 0;
+      const round = async (agents: { id: string }[]) => {
+        played++;
+        for (const [i, agent] of agents.entries()) {
+          const answer = `answer ${played}.${i}`;
+          const row = await debateById(server.deps.db, workspaceId, t.id);
+          await answerRound(
+            server.deps,
+            row,
+            { type: "agent", id: agent.id },
+            {
+              kind: "turn",
+              body: "neutral",
+              claimData: {
+                answer,
+                key: answer,
+                confidence: 0.7,
+                reason: "",
+                evidence: [],
+                changed: played > 1,
+              },
+            },
+          );
+        }
+        const closing = await call(beto, "POST", `${base}/${t.id}/posts`, {
+          body: "neutral",
+          answer: `mine ${played}`,
+        });
+        expect(closing.status).toBe(201);
+        await settle();
+      };
+      type Shown = { id: string; kind: string; pseudonym: string | null; author: unknown };
+      const turns = async () =>
+        ((await call(beto, "GET", `${base}/${t.id}`)).body.posts as Shown[]).filter((p) => p.kind === "turn");
+      await round([lia, rui]);
+      const before = await turns();
+      expect(before).toHaveLength(2);
+      const oldLabels = new Set(before.map((p) => p.pseudonym));
+      expect(oldLabels.size).toBe(2);
+
+      const added = await call(ana, "PUT", `${base}/${t.id}/participants`, { agentsToAdd: [eva.id] });
+      expect(added.status).toBe(200);
+      expect(added.body).toMatchObject({ anonymous: true, pseudonyms: null });
+      await settle();
+      // The newcomer speaks from the next round on; play rounds until it has.
+      for (let i = 0; i < 3; i++) {
+        const posts = await server.deps.db
+          .select()
+          .from(schema.debatePosts)
+          .where(eq(schema.debatePosts.debateId, t.id));
+        if (posts.some((p) => p.author.id === eva.id)) break;
+        await round([lia, rui, eva]);
+      }
+      const after = await turns();
+      // What was published keeps its label.
+      for (const p of before) expect(after.find((q) => q.id === p.id)?.pseudonym).toBe(p.pseudonym);
+      const later = after.filter((p) => !before.some((q) => q.id === p.id));
+      for (const p of later) expect(p.author).toBeNull();
+      // After the change, the three agents show under three labels the debate never showed before: none is "the
+      // one label that is new", so the newcomer's posts look like anyone's.
+      const newLabels = new Set(later.map((p) => p.pseudonym));
+      expect(newLabels.size).toBe(3);
+      for (const label of newLabels) expect(oldLabels.has(label)).toBe(false);
+
+      // Once closed, the posts show who spoke, and the newcomer is one of the new labels.
+      const canceled = (await call(ana, "POST", `${base}/${t.id}/cancel`)).body;
+      const evaLabels = canceled.posts
+        .filter((p: { author: ActorRef | null }) => p.author?.id === eva.id)
+        .map((p: Shown) => p.pseudonym);
+      expect(evaLabels.length).toBeGreaterThan(0);
+      for (const label of evaLabels) expect(newLabels.has(label)).toBe(true);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
 describe("debates: who may call each route", () => {
   test(
     "another workspace, a non-member, a signed-out caller, the wrong role and a private channel are rejected",
@@ -525,6 +623,18 @@ describe("debates: who may call each route", () => {
       expect((await call(beto, "PUT", `${base}/${t.id}/participants`, {})).status).toBe(403);
       // Not their turn: skipping is rejected without saying whose turn it is.
       expect((await call(beto, "POST", `${base}/${t.id}/skip`)).body.error.code).toBe("debate.out_of_turn");
+      // Whoever runs the debate can't bring to the table someone outside the workspace, as a reader or a speaker.
+      const table = await debateById(server.deps.db, workspaceId, t.id);
+      for (const body of [{ peopleToAdd: [outsider.user.id] }, { addSpeakerUserIds: [outsider.user.id] }]) {
+        const res = await call(ana, "PUT", `${base}/${t.id}/participants`, body);
+        expect([Object.keys(body)[0], res.status, res.body.error?.code]).toEqual([
+          Object.keys(body)[0],
+          404,
+          "not_found",
+        ]);
+      }
+      const untouched = await debateById(server.deps.db, workspaceId, t.id);
+      expect([untouched.userIds, untouched.speakers]).toEqual([table.userIds, table.speakers]);
       // An admin runs anyone's debate.
       const admin = await memberOf(server, workspaceId, "Adm", email("adm"), "admin");
       expect((await call(admin, "POST", `${base}/${t.id}/cancel`)).body.status).toBe("canceled");

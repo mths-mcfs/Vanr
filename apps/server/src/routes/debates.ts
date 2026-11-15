@@ -46,10 +46,12 @@ import {
   type DebatePostRow,
   type DebateRow,
   debateById,
+  freezePseudonyms,
   insertPost,
   leaveRound,
   MAX_ROUNDS,
   openDebate,
+  recastPseudonyms,
   saveDebate,
   scheduleAdvance,
   stopDebate,
@@ -59,7 +61,6 @@ import {
   turnKey,
   visibleDebateById,
   visibleDebates,
-  withPseudonym,
 } from "../debates";
 import { debateEstimate, speakerAgents } from "../estimates";
 import { conflict, forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
@@ -160,7 +161,7 @@ const debateOf = (c: Ctx, me: WorkspaceMember) =>
 async function changeLocked(
   deps: AppDeps,
   row: DebateRow,
-  decide: (fresh: DebateRow) => Partial<typeof debates.$inferInsert> | null,
+  decide: Parameters<typeof changeDebate>[2],
 ): Promise<DebateRow> {
   const saved = await changeDebate(deps, row.id, decide);
   return saved ?? debateById(deps.db, row.workspaceId, row.id);
@@ -565,7 +566,7 @@ export function registerDebates(app: Hono<AppEnv>) {
     const removeUsers = new Set(input.peopleToRemove ?? []);
     const unseat = new Set([...(input.removeSpeakerUserIds ?? []), ...removeUsers]);
     const gone = (s: ActorRef) => (s.type === "agent" ? removeAgents.has(s.id) : unseat.has(s.id));
-    const saved = await changeLocked(deps, row, (fresh) => {
+    const saved = await changeLocked(deps, row, async (fresh, tx) => {
       const agentIds = [
         ...new Set([...fresh.agentIds.filter((id) => !removeAgents.has(id)), ...agentsToAdd]),
       ];
@@ -588,7 +589,7 @@ export function registerDebates(app: Hono<AppEnv>) {
         userIds,
         speakers,
         pendingSpeakers: fresh.pendingSpeakers.filter((s) => !gone(s)),
-        pseudonyms: withPseudonym(fresh.pseudonyms, agentIds),
+        pseudonyms: recastPseudonyms(fresh.pseudonyms, agentIds, await freezePseudonyms(tx, fresh)),
         leadAgentId:
           fresh.leadAgentId && agentIds.includes(fresh.leadAgentId)
             ? fresh.leadAgentId

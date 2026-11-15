@@ -1,10 +1,10 @@
 // A routine's email trigger: each check looks at the folder of every active routine (at most once a minute) and
-// runs the routine for each new message that passes the filter. The cursor (UIDVALIDITY + the last UID handled)
-// lives on the routine; the first check only marks where the mailbox is, without firing.
+// runs the routine for each new message that passes the filter. The cursor (the folder, its UIDVALIDITY and the last
+// UID handled) lives on the routine; the first check of a folder only marks where it is, without firing.
 // Nothing gets lost: the cursor only moves up to the last message that already has an execution recorded (or that
 // the filter dropped). A batch cut at MAX_PER_POLL, a busy routine or a server that fell in the middle leave the
 // rest for the next check, which starts right after the cursor. Each email has the key
-// `email:<account>:<UIDVALIDITY>:<UID>`: two instances reading the same folder (or the same email read again after
+// `email:<account>:<folder>:<UIDVALIDITY>:<UID>`: two instances reading the same folder (or the same email read again after
 // the IMAP reconnects) record one execution, and a failure belongs to the routine's queue (retries with a growing
 // wait, with the same email).
 //
@@ -64,6 +64,13 @@ export async function pollEmailRoutines(deps: AppDeps): Promise<number> {
   return fired;
 }
 
+/**
+ * One email, one execution: a UID only means something inside its folder and its UIDVALIDITY, so the key carries
+ * the account, the folder (encoded: a folder name can hold ":"), the UIDVALIDITY and the UID.
+ */
+export const emailKey = (accountId: string, folder: string, uidValidity: number | null, uid: number) =>
+  `email:${accountId}:${encodeURIComponent(folder)}:${uidValidity ?? "-"}:${uid}`;
+
 async function pollOne(deps: AppDeps, row: RoutineRow): Promise<number> {
   const trigger = triggerOf(row);
   if (trigger.kind !== "email") return 0;
@@ -84,7 +91,10 @@ async function pollOne(deps: AppDeps, row: RoutineRow): Promise<number> {
 
   const found = await withImap(deps, account, async (imap) => {
     const { uidValidity } = await imap.open(trigger.folder, true);
-    const cursor = row.cursor;
+    // The cursor belongs to one folder: after the routine moves to another one, UIDs and UIDVALIDITY are those of
+    // another folder (they can even repeat), so the new folder starts as a first check does. A cursor without a
+    // folder was written for the folder the routine watched then.
+    const cursor = row.cursor && (row.cursor.folder ?? trigger.folder) === trigger.folder ? row.cursor : null;
     const all = await imap.search("ALL");
     const top = all.at(-1) ?? 0;
     if (!cursor || cursor.uidValidity !== uidValidity) return { uidValidity, end: top, messages: [] };
@@ -109,7 +119,7 @@ async function pollOne(deps: AppDeps, row: RoutineRow): Promise<number> {
   const save = (lastUid: number) =>
     deps.db
       .update(routines)
-      .set({ cursor: { uidValidity: found.uidValidity, lastUid } })
+      .set({ cursor: { uidValidity: found.uidValidity, lastUid, folder: trigger.folder } })
       .where(eq(routines.id, row.id));
 
   const queue: { uid: number; context: RoutineContext }[] = [];
@@ -147,7 +157,7 @@ async function pollOne(deps: AppDeps, row: RoutineRow): Promise<number> {
         for (const item of queue) {
           const { run } = await fireRoutine(deps, row.id, {
             trigger: "email",
-            key: `email:${account.id}:${found.uidValidity ?? "-"}:${item.uid}`,
+            key: emailKey(account.id, trigger.folder, found.uidValidity, item.uid),
             context: item.context,
           });
           if (!run || (run.status === "skipped" && (run.reason === "overlap" || run.reason === "paused"))) {

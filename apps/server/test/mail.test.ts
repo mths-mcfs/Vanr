@@ -170,12 +170,66 @@ describe("routine by email", () => {
       const row = await routineRow(routine.id);
       await server.deps.db
         .update(schema.routines)
-        .set({ cursor: { uidValidity: row?.cursor?.uidValidity ?? null, lastUid: 0 } })
+        .set({ cursor: { uidValidity: row?.cursor?.uidValidity ?? null, lastUid: 0, folder: "INBOX" } })
         .where(eq(schema.routines.id, routine.id));
       await poll();
       const after = await executions(routine.id);
       expect(after).toHaveLength(1);
-      expect(after[0]?.dedupeKey).toMatch(/^email:.+:\d+:1$/);
+      expect(after[0]?.dedupeKey).toMatch(/^email:.+:INBOX:\d+:1$/);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "another folder with the same UIDVALIDITY and UID is another email: moving the routine to it loses nothing",
+    async () => {
+      const { workspaceId, ana, lia, connect, debateTarget } = await team();
+      const account = await connect();
+      await setAgentMailbox(server.deps, workspaceId, lia.id, account, { level: "read" });
+      const base = `${ws(workspaceId)}/routines`;
+      const routine = (
+        await call(ana, "POST", base, {
+          active: true,
+          agentId: lia.id,
+          prompt: "Read",
+          target: debateTarget,
+          trigger: { kind: "email", accountId: account.id, folder: "INBOX" },
+        })
+      ).body;
+      await poll(); // marks INBOX
+      mail.deliver("INBOX", incoming("x@client.test", "First", "in the inbox"));
+      await poll();
+      expect(await executions(routine.id)).toHaveLength(1);
+      const inbox = (await routineRow(routine.id))?.cursor;
+      expect(inbox).toMatchObject({ folder: "INBOX", lastUid: 1 });
+
+      const moved = await call(ana, "PATCH", `${base}/${routine.id}`, {
+        trigger: { kind: "email", accountId: account.id, folder: "Sent" },
+      });
+      expect(moved.status).toBe(200);
+      await poll(); // Sent has no cursor of its own yet: this check marks it, the INBOX one doesn't count
+      expect((await routineRow(routine.id))?.cursor).toMatchObject({ folder: "Sent", lastUid: 0 });
+      mail.deliver("Sent", incoming("x@client.test", "Second", "in sent"));
+      await poll();
+      const runs = await executions(routine.id);
+      expect(runs).toHaveLength(2);
+      const sent = (await routineRow(routine.id))?.cursor;
+      // Same UIDVALIDITY and UID in both folders: only the folder tells the two emails apart.
+      expect(sent).toMatchObject({ folder: "Sent", uidValidity: inbox?.uidValidity, lastUid: 1 });
+      expect(runs.map((r) => r.dedupeKey).sort()).toEqual(
+        [
+          `email:${account.id}:INBOX:${inbox?.uidValidity}:1`,
+          `email:${account.id}:Sent:${inbox?.uidValidity}:1`,
+        ].sort(),
+      );
+
+      // The same email of Sent read again (the cursor back before it) is still one execution.
+      await server.deps.db
+        .update(schema.routines)
+        .set({ cursor: { uidValidity: sent?.uidValidity ?? null, lastUid: 0, folder: "Sent" } })
+        .where(eq(schema.routines.id, routine.id));
+      await poll();
+      expect(await executions(routine.id)).toHaveLength(2);
     },
     SERVER_TEST_MS,
   );

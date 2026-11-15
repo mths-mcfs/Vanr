@@ -187,7 +187,9 @@ export function toDebate(row: DebateRow): Debate {
 /** The post as it goes out: while the debate is open, an agent's post loses its author and run (the pseudonym stays). */
 export function toPost(row: DebatePostRow, debate: Pick<DebateRow, "status" | "pseudonyms">): DebatePost {
   const agentAuthor = row.author.type === "agent";
-  const pseudonym = agentAuthor ? (debate.pseudonyms[row.author.id] ?? null) : null;
+  // A post written before the table changed keeps the pseudonym it was shown with (see `recastPseudonyms`).
+  const frozen = typeof row.meta.pseudonym === "string" ? row.meta.pseudonym : null;
+  const pseudonym = agentAuthor ? (frozen ?? debate.pseudonyms[row.author.id] ?? null) : null;
   const masked = agentAuthor && row.kind !== "synthesis" && isAnonymous(debate);
   return {
     id: row.id,
@@ -484,11 +486,11 @@ async function lockDebate(tx: Tx, id: string): Promise<DebateRow | null> {
 export async function changeDebate(
   deps: AppDeps,
   id: string,
-  decide: (row: DebateRow) => DebateSet | null,
+  decide: (row: DebateRow, tx: Tx) => DebateSet | null | Promise<DebateSet | null>,
 ): Promise<DebateRow | null> {
   const done = await deps.db.transaction(async (tx) => {
     const row = await lockDebate(tx, id);
-    const set = row ? decide(row) : null;
+    const set = row ? await decide(row, tx) : null;
     if (!set) return null;
     const [updated] = await tx
       .update(debates)
@@ -1269,21 +1271,49 @@ export async function openDebate(deps: AppDeps, input: NewDebate): Promise<Debat
   return row;
 }
 
-/** A new agent at the table gets a pseudonym (without changing the ones that exist). */
-export function withPseudonym(
+/**
+ * The table's agents changed: every agent gets a new pseudonym, drawn at random from labels this debate never
+ * showed. Keeping the old ones would leave the newcomer as the only new label (or the leaver as the one that stops
+ * showing), which says who it is while the debate is still anonymous. The posts already written keep the
+ * pseudonym they were shown with (`freezePseudonyms`), so nothing published changes. Same agents: same map.
+ */
+export function recastPseudonyms(
   pseudonyms: Record<string, string>,
   agentIds: readonly string[],
+  shown: Iterable<string>,
 ): Record<string, string> {
-  const missing = [...new Set(agentIds)].filter((id) => !pseudonyms[id]);
-  if (!missing.length) return pseudonyms;
-  const used = new Set(Object.values(pseudonyms));
-  const total = used.size + missing.length;
-  const labels = Array.from({ length: Math.max(26, total) + 26 }, (_, i) =>
-    i < 26 ? String.fromCharCode(65 + i) : `${String.fromCharCode(65 + (i % 26))}${Math.floor(i / 26) + 1}`,
-  ).filter((l) => !used.has(l));
-  const letters = labels.filter((l) => l.length === 1);
-  const pool = shuffled(letters.length >= missing.length ? letters : labels, seededRng(randomId()));
-  return { ...pseudonyms, ...Object.fromEntries(missing.map((id, i) => [id, pool[i] as string])) };
+  const unique = [...new Set(agentIds)];
+  const same = unique.length === Object.keys(pseudonyms).length && unique.every((id) => pseudonyms[id]);
+  if (same) return pseudonyms;
+  const used = new Set([...shown, ...Object.values(pseudonyms)]);
+  const labels: string[] = [];
+  for (let i = 0; labels.length < unique.length; i++) {
+    const label =
+      i < 26 ? String.fromCharCode(65 + i) : `${String.fromCharCode(65 + (i % 26))}${Math.floor(i / 26) + 1}`;
+    if (!used.has(label)) labels.push(label);
+  }
+  const pool = shuffled(labels, seededRng(randomId()));
+  return Object.fromEntries(unique.map((id, i) => [id, pool[i] as string]));
+}
+
+/**
+ * Writes on each agent post of the debate the pseudonym it shows now (posts that already carry one keep it), and
+ * returns every label the debate has shown. Runs under the debate's lock, before the map changes.
+ */
+export async function freezePseudonyms(tx: Tx, row: Pick<DebateRow, "id" | "pseudonyms">): Promise<string[]> {
+  const map = JSON.stringify(row.pseudonyms);
+  await tx.execute(sql`
+    update ${debatePosts}
+    set meta = ${debatePosts.meta} || jsonb_build_object('pseudonym', ${map}::jsonb ->> (${debatePosts.author} ->> 'id'))
+    where ${debatePosts.debateId} = ${row.id}
+      and ${debatePosts.author} ->> 'type' = 'agent'
+      and not (${debatePosts.meta} ? 'pseudonym')
+      and ${map}::jsonb ? (${debatePosts.author} ->> 'id')`);
+  const shown = await tx
+    .selectDistinct({ label: sql<string | null>`${debatePosts.meta} ->> 'pseudonym'` })
+    .from(debatePosts)
+    .where(eq(debatePosts.debateId, row.id));
+  return shown.flatMap((r) => (r.label ? [r.label] : []));
 }
 
 export { turnKey };
