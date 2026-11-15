@@ -220,7 +220,7 @@ jobs:
               exit 1
             fi
           done
-          set -- issue-number issue-move issue-place consolidation-apply
+          set -- issue-number issue-move issue-place consolidation-apply issue-criterion issue-column-add skill-from-run
           for label in "$@"; do
             if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" forced-issues.log; then
               echo "::error::the forced $label test did not fail on its outcome without the lock"
