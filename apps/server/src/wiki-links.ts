@@ -15,12 +15,15 @@ import {
 import { and, asc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { HttpError } from "./http";
 import type { WikiRow } from "./wiki";
+import { readablePagesSql, type WikiViewer } from "./wiki-access";
 
 const { knowledgePages, pageLinks } = schema;
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type Conn = Db | Tx;
 
-export type LinkTarget = Pick<WikiRow, "id" | "slug" | "title" | "folder" | "aliases">;
+export type LinkTarget = Pick<WikiRow, "id" | "slug" | "title" | "folder" | "aliases"> & {
+  restricted: boolean;
+};
 
 /** The most [[links]] one page keeps: a body past it is rejected before anything is written. */
 export const MAX_LINKS = 5_000;
@@ -43,8 +46,16 @@ export function namesOf(p: Pick<WikiRow, "slug" | "title" | "folder" | "aliases"
   return [...out];
 }
 
-/** Pages that can be the target of these texts (lean query, no body). */
-async function candidates(db: Conn, workspaceId: string, targets: string[]): Promise<LinkTarget[]> {
+/**
+ * Pages that can be the target of these texts (lean query, no body); with a viewer, only the ones they
+ * read.
+ */
+async function candidates(
+  db: Conn,
+  workspaceId: string,
+  targets: string[],
+  viewer?: WikiViewer,
+): Promise<LinkTarget[]> {
   if (!targets.length) return [];
   const names = [...new Set(targets.map((t) => stripMd(t).toLowerCase()))];
   // The title can be the whole target or the end of folder/title (and the title may contain "/").
@@ -57,12 +68,14 @@ async function candidates(db: Conn, workspaceId: string, targets: string[]): Pro
       title: knowledgePages.title,
       folder: knowledgePages.folder,
       aliases: knowledgePages.aliases,
+      restricted: sql<boolean>`${knowledgePages.access} is not null`,
     })
     .from(knowledgePages)
     .where(
       and(
         eq(knowledgePages.workspaceId, workspaceId),
         isNull(knowledgePages.deletedAt),
+        viewer ? readablePagesSql(viewer) : undefined,
         sql`(
           lower(${knowledgePages.title}) in ${titles}
           or ${knowledgePages.slug} in ${slugs}
@@ -70,6 +83,136 @@ async function candidates(db: Conn, workspaceId: string, targets: string[]): Pro
         )`,
       ),
     );
+}
+
+/** A stored link: where its text points and the page it was resolved to (`page_links`). */
+export interface StoredLink {
+  sourceId: string;
+  ordinal: number;
+  targetId: string | null;
+  targetText: string;
+}
+
+/**
+ * Where each link leads for the viewer, in the order given. `page_links` resolves a link among every page of
+ * the workspace; when the viewer reads that page, it is also the best among the pages they read and stays.
+ * When they don't, the link is resolved again among the pages they read only, so a page they can't read
+ * never changes where a link leads for them (nor shows it exists by turning a link into "missing").
+ */
+export async function targetsFor(
+  db: Conn,
+  viewer: WikiViewer,
+  links: readonly StoredLink[],
+): Promise<(string | null)[]> {
+  const stored = [...new Set(links.flatMap((l) => (l.targetId ? [l.targetId] : [])))];
+  const readable = new Set(
+    stored.length
+      ? (
+          await db
+            .select({ id: knowledgePages.id })
+            .from(knowledgePages)
+            .where(
+              and(
+                eq(knowledgePages.workspaceId, viewer.workspaceId),
+                inArray(knowledgePages.id, stored),
+                readablePagesSql(viewer),
+              ),
+            )
+        ).map((r) => r.id)
+      : [],
+  );
+  const again = links.filter((l) => l.targetId && !readable.has(l.targetId));
+  const pages = again.length
+    ? await candidates(db, viewer.workspaceId, [...new Set(again.map((l) => l.targetText))], viewer)
+    : [];
+  return links.map((l) => {
+    if (!l.targetId || readable.has(l.targetId)) return l.targetId;
+    return resolveTarget(l.targetText, pages)?.id ?? null;
+  });
+}
+
+/**
+ * The links that lead to `row` for the viewer, from pages outside the trash they read (not the page itself):
+ * the ones stored on it, and the ones stored on a page they don't read whose text leads here among theirs.
+ */
+export async function inboundFor(
+  db: Conn,
+  row: Pick<WikiRow, "id" | "workspaceId" | "slug" | "title" | "folder" | "aliases">,
+  viewer: WikiViewer,
+): Promise<{ sourceId: string; ordinal: number; slug: string; title: string; body: string }[]> {
+  const keys = namesOf(row);
+  const withMd = [...keys, ...keys.map((n) => `${n}.md`)];
+  const rows = await db
+    .select({
+      sourceId: pageLinks.sourceId,
+      ordinal: pageLinks.ordinal,
+      targetId: pageLinks.targetId,
+      targetText: pageLinks.targetText,
+      slug: knowledgePages.slug,
+      title: knowledgePages.title,
+      body: knowledgePages.body,
+    })
+    .from(pageLinks)
+    .innerJoin(knowledgePages, eq(knowledgePages.id, pageLinks.sourceId))
+    .where(
+      and(
+        eq(pageLinks.workspaceId, row.workspaceId),
+        ne(pageLinks.sourceId, row.id),
+        isNull(knowledgePages.deletedAt),
+        readablePagesSql(viewer),
+        or(
+          eq(pageLinks.targetId, row.id),
+          and(
+            sql`${pageLinks.targetId} is not null`,
+            or(sql`lower(trim(${pageLinks.targetText})) in ${withMd}`, inArray(pageLinks.targetSlug, keys)),
+          ),
+        ),
+      ),
+    )
+    .orderBy(asc(knowledgePages.title), asc(pageLinks.sourceId), asc(pageLinks.ordinal));
+  const targets = await targetsFor(db, viewer, rows);
+  return rows.filter((_, i) => targets[i] === row.id);
+}
+
+/** The graph's edges for the viewer: links between pages outside the trash they read, as slugs. */
+export async function viewerEdges(db: Conn, viewer: WikiViewer): Promise<{ from: string; to: string }[]> {
+  const pages = await db
+    .select({ id: knowledgePages.id, slug: knowledgePages.slug })
+    .from(knowledgePages)
+    .where(
+      and(
+        eq(knowledgePages.workspaceId, viewer.workspaceId),
+        isNull(knowledgePages.deletedAt),
+        readablePagesSql(viewer),
+      ),
+    );
+  const slugOf = new Map(pages.map((p) => [p.id, p.slug]));
+  const links = await db
+    .select({
+      sourceId: pageLinks.sourceId,
+      ordinal: pageLinks.ordinal,
+      targetId: pageLinks.targetId,
+      targetText: pageLinks.targetText,
+    })
+    .from(pageLinks)
+    .where(eq(pageLinks.workspaceId, viewer.workspaceId));
+  const mine = links.filter((l) => slugOf.has(l.sourceId));
+  const targets = await targetsFor(db, viewer, mine);
+  const seen = new Set<string>();
+  const edges: { from: string; to: string }[] = [];
+  mine.forEach((l, i) => {
+    const from = slugOf.get(l.sourceId);
+    const to = targets[i] ? slugOf.get(targets[i] ?? "") : undefined;
+    if (!from || !to || targets[i] === l.sourceId) return;
+    const key = `${from}\n${to}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    edges.push({ from, to });
+  });
+  // In the pages' order, not the rows': where an updated link row lands on disk is no one's business.
+  return edges.sort((a, b) =>
+    a.from < b.from ? -1 : a.from > b.from ? 1 : a.to < b.to ? -1 : a.to > b.to ? 1 : 0,
+  );
 }
 
 /** Targets of the text's [[links]] that lead to no page outside the trash (attachment embeds are left out). */
@@ -163,23 +306,14 @@ function snippetAt(body: string, at: number, len: number): string {
 
 const escapeLike = (s: string) => s.replace(/[%_\\]/g, "\\$&");
 
-/** Side panel: who points to the page, who cites it without a link, where it points and the outline. */
-export async function panelOf(db: Db, row: WikiRow): Promise<WikiPanel> {
-  // Backlinks: links of pages outside the trash that point to this one.
-  const back = await db
-    .select({
-      slug: knowledgePages.slug,
-      title: knowledgePages.title,
-      body: knowledgePages.body,
-      sourceId: pageLinks.sourceId,
-      ordinal: pageLinks.ordinal,
-    })
-    .from(pageLinks)
-    .innerJoin(knowledgePages, eq(knowledgePages.id, pageLinks.sourceId))
-    .where(
-      and(eq(pageLinks.targetId, row.id), ne(pageLinks.sourceId, row.id), isNull(knowledgePages.deletedAt)),
-    )
-    .orderBy(asc(knowledgePages.title), asc(pageLinks.ordinal));
+/**
+ * Side panel, for the reader: who points to the page, who cites it without a link, where it points and the
+ * outline. An inbound link or a mention from a page the reader doesn't read stays out, and a link to a page
+ * they don't read shows as a page that doesn't exist.
+ */
+export async function panelOf(db: Db, row: WikiRow, viewer: WikiViewer): Promise<WikiPanel> {
+  // Inbound links: links of pages outside the trash the reader reads that lead here for them.
+  const back = await inboundFor(db, row, viewer);
   const bySource = new Map<string, WikiPanel["inboundLinks"][number]>();
   for (const b of back) {
     const entry = bySource.get(b.sourceId);
@@ -215,6 +349,7 @@ export async function panelOf(db: Db, row: WikiRow): Promise<WikiPanel> {
           eq(knowledgePages.workspaceId, row.workspaceId),
           isNull(knowledgePages.deletedAt),
           ne(knowledgePages.id, row.id),
+          readablePagesSql(viewer),
           sql`(${sql.join(
             names.map((n) => sql`${knowledgePages.body} ilike ${`%${escapeLike(n)}%`}`),
             sql` or `,
@@ -240,23 +375,29 @@ export async function panelOf(db: Db, row: WikiRow): Promise<WikiPanel> {
     }
   }
 
-  // Outgoing links, with the state of the destination and of the anchor.
-  const outs = await db
-    .select({
-      link: pageLinks,
-      target: {
-        slug: knowledgePages.slug,
-        title: knowledgePages.title,
-        body: knowledgePages.body,
-        deletedAt: knowledgePages.deletedAt,
-      },
-    })
+  // Outgoing links, with the state of the destination and of the anchor, where they lead for the reader.
+  const links = await db
+    .select()
     .from(pageLinks)
-    .leftJoin(knowledgePages, eq(knowledgePages.id, pageLinks.targetId))
     .where(eq(pageLinks.sourceId, row.id))
     .orderBy(asc(pageLinks.ordinal));
-  const outgoing: WikiPanel["outgoing"] = outs.map(({ link, target }) => {
-    const self = link.targetId === row.id;
+  const targetIds = await targetsFor(db, viewer, links);
+  const wanted = [...new Set(targetIds.flatMap((id) => (id ? [id] : [])))];
+  const targetPages = wanted.length
+    ? await db
+        .select({
+          id: knowledgePages.id,
+          slug: knowledgePages.slug,
+          title: knowledgePages.title,
+          body: knowledgePages.body,
+          deletedAt: knowledgePages.deletedAt,
+        })
+        .from(knowledgePages)
+        .where(inArray(knowledgePages.id, wanted))
+    : [];
+  const outgoing: WikiPanel["outgoing"] = links.map((link, i) => {
+    const target = targetPages.find((p) => p.id === targetIds[i]) ?? null;
+    const self = targetIds[i] === row.id;
     const body = self ? row.body : target?.body;
     let anchorOk = true;
     if (link.anchor && body !== undefined) {

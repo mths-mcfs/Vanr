@@ -8,6 +8,7 @@ import postgres from "postgres";
 import { type Catalog, type CatalogQuery, readCatalog } from "./catalog";
 import expected from "./fixtures/catalog.json";
 import basesRelations from "./fixtures/catalog-bases-relations.json";
+import wikiAnnotations from "./fixtures/catalog-wiki-annotations.json";
 import { MIGRATIONS_DIR, openDb } from "./index";
 
 // The fixture is the catalog of the database the product ran on before the port, with every name
@@ -16,7 +17,7 @@ import { MIGRATIONS_DIR, openDb } from "./index";
 // historical catalog plus those additions.
 const fixture: Catalog = expected;
 /** What each migration after the initial one adds, in the order of the journal. */
-const additions: Partial<Catalog>[] = [basesRelations];
+const additions: Partial<Catalog>[] = [basesRelations, wikiAnnotations];
 
 const sections = [
   "extensions",

@@ -46,7 +46,7 @@ async function team() {
 }
 
 async function storedState(workspaceId: string, slug: string) {
-  const page = await pageBySlug(server.deps.db, workspaceId, slug);
+  const page = await pageBySlug(server.deps.db, { workspaceId, system: true }, slug);
   const [d] = await server.deps.db
     .select()
     .from(schema.wikiPageDocs)
@@ -142,7 +142,7 @@ describe("the live document's limits", () => {
         const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Offline draft", body: BODY });
         await server.deps.wikiLive.settled();
         expect(server.deps.wikiLive.loaded()).toBe(0);
-        const row = await pageBySlug(server.deps.db, workspaceId, page.slug);
+        const row = await pageBySlug(server.deps.db, { workspaceId, system: true }, page.slug);
         const md = await wikiMarkdown();
         let draftBody = "Draft.\n";
         const doc = md.toYDoc(draftBody);

@@ -1141,7 +1141,7 @@ describe("limits at the border", () => {
     ).toEqual([400, "wiki.too_many_links"]);
     expect(await ana.api.wiki.listWikiPages(workspaceId)).toHaveLength(0);
     const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Linked", body: links(MAX_LINKS) });
-    const row = await pageBySlug(server.deps.db, workspaceId, page.slug);
+    const row = await pageBySlug(server.deps.db, { workspaceId, system: true }, page.slug);
     const [{ count }] = (await server.deps.db
       .select({ count: sql<number>`count(*)::int` })
       .from(schema.pageLinks)
@@ -1370,7 +1370,7 @@ describe("limits at the border", () => {
       return get(...args);
     }) as typeof get;
     try {
-      const stream = await exportVault(server.deps, workspaceId);
+      const stream = await exportVault(server.deps, { workspaceId });
       expect(reads).toBe(0);
       const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
       expect(reads).toBe(1);
@@ -1665,7 +1665,10 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki saves on Postgres"), () => 
         // Release the lock once the write waits for the page's row lock (or already ended without one).
         await Promise.race([writing, waitingForLock(pg, "the write never waited for the page's lock")]);
         hold.release();
-        await locking;
+        // The lock answers with the page as Ana reads it now: 404 when the unlocked run let the trash in.
+        await locking.catch((e: { status?: number }) => {
+          if (e.status !== 404) throw e;
+        });
         outcomes.push(`${what} ${await writing}`);
         const now = await ana.api.wiki.getWikiPage(workspaceId, page.slug).catch(() => null);
         states.push([what, now?.locked, now?.body, now?.folder]);

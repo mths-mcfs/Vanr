@@ -34,6 +34,7 @@ import {
   type WikiRow,
   writeTx,
 } from "./wiki";
+import { readablePagesSql } from "./wiki-access";
 import { checkLinks } from "./wiki-links";
 import { type WikiMarkdown, wikiMarkdown, YFRAGMENT } from "./wiki-md";
 
@@ -546,6 +547,8 @@ export function createWikiCollab(
       return "ok";
     }
     const slugs = [...p.docs.values()].map((d) => d.slug);
+    // Only the pages the person still reads: one restricted away from them (or to a channel they left)
+    // is gone for this connection, like a deleted one.
     const pages = await db
       .select({
         slug: knowledgePages.slug,
@@ -553,7 +556,13 @@ export function createWikiCollab(
         deletedAt: knowledgePages.deletedAt,
       })
       .from(knowledgePages)
-      .where(and(eq(knowledgePages.workspaceId, workspaceId), inArray(knowledgePages.slug, slugs)));
+      .where(
+        and(
+          eq(knowledgePages.workspaceId, workspaceId),
+          inArray(knowledgePages.slug, slugs),
+          readablePagesSql({ workspaceId, userId }),
+        ),
+      );
     if (closing) return "revoked";
     for (const doc of p.docs.values()) {
       const page = pages.find((x) => x.slug === doc.slug);
@@ -873,7 +882,8 @@ export function createWikiCollab(
         .from(members)
         .where(and(eq(members.workspaceId, workspaceId), eq(members.userId, context.userId)));
       if (closing || !m) throw new Error("forbidden");
-      const page = await pageBySlug(deps.db, workspaceId, slug).catch(() => null);
+      // The page must be one the person reads; one they don't is gone, like one that doesn't exist.
+      const page = await pageBySlug(deps.db, { workspaceId, userId: context.userId }, slug).catch(() => null);
       if (closing || !page) throw new Error("not_found");
       if (page.locked && !can(m.role, "configure")) connectionConfig.readOnly = true;
       // One person's sockets on one page (tabs): past the cap the newest one closes.
@@ -890,7 +900,7 @@ export function createWikiCollab(
     onLoadDocument: track(async ({ document, documentName }) => {
       const [, workspaceId = "", slug = ""] = documentName.split("/");
       const deps = getDeps();
-      const page = await pageBySlug(deps.db, workspaceId, slug);
+      const page = await pageBySlug(deps.db, { workspaceId, system: true }, slug);
       if (closing) throw new Error("wiki live session stopped");
       return serial(page.id, async () => {
         if (closing) throw new Error("wiki live session stopped");
