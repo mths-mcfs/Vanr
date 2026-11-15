@@ -6,7 +6,7 @@
 
 import { Editor, parserCtx, rootCtx, schemaCtx, serializerCtx } from "@milkdown/kit/core";
 import type { Node as PMNode, Schema } from "@milkdown/kit/prose/model";
-import { configureWikiMarkdown, finishMarkdown, wikiMarkdownPlugins } from "@vanr/engine/wiki/milkdown";
+import { configureWikiMarkdown, wikiMarkdownPlugins } from "@vanr/engine/wiki/milkdown";
 import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
 import { unified } from "unified";
@@ -106,13 +106,12 @@ function topBlocks(md: string): Block[] {
 let ready: Promise<WikiMarkdown> | null = null;
 
 export function wikiMarkdown(): Promise<WikiMarkdown> {
-  ready ??= createEditor().then(({ schema, parse, serialize }) => {
+  ready ??= createEditor().then(({ schema, parse, serialize: ser }) => {
     const toDoc = (md: string): PMNode => {
       const doc = parse(md);
       if (!doc) throw new Error("wiki markdown: parse failed");
       return doc;
     };
-    const ser = (doc: PMNode) => finishMarkdown(serialize(doc));
     const canon = (text: string): string => ser(toDoc(text)).trim();
 
     // Canonical forms of the blocks of each base, cached: autosave serializes the same base
