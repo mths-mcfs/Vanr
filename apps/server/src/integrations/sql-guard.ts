@@ -169,6 +169,46 @@ function lex(sql: string, standardStrings: boolean): Token[] | null {
   return tokens;
 }
 
+/** Characters an operator name is made of (Postgres' `Op` in scan.l). */
+const OPERATOR_CHAR = /[+\-*/<>=~!@#%^&|`?]/;
+
+/**
+ * The names a statement could call and the operators it writes: identifiers folded to lower case (a quoted one
+ * as written) and runs of operator characters. Literals and comments don't count. For the catalog lookup of
+ * the customer's code (`sql-identity.ts`), done before the statement is planned.
+ */
+export function lexWords(sql: string): { words: string[]; operators: string[] } {
+  const tokens = lex(sql, true) ?? [];
+  const words: string[] = [];
+  const operators: string[] = [];
+  let run = "";
+  let runEnd = -1;
+  const flush = () => {
+    if (run) operators.push(run);
+    run = "";
+  };
+  for (const t of tokens) {
+    const text = sql.slice(t.start, t.end);
+    if (t.kind === "punct" && OPERATOR_CHAR.test(text)) {
+      if (t.start !== runEnd) flush();
+      run += text;
+      runEnd = t.end;
+      continue;
+    }
+    flush();
+    if (t.kind === "word") words.push(text.toLowerCase());
+    else if (t.kind === "quoted")
+      words.push(
+        text
+          .replace(/^[uU]&/, "")
+          .slice(1, -1)
+          .replace(/""/g, '"'),
+      );
+  }
+  flush();
+  return { words, operators };
+}
+
 const sameTokens = (a: readonly Token[], b: readonly Token[]) =>
   a.length === b.length &&
   a.every((t, k) => t.kind === b[k]?.kind && t.start === b[k]?.start && t.end === b[k]?.end);
@@ -273,6 +313,8 @@ const BLOCKED_FUNCTION =
  * this list (a function of the customer's own, which can read any table; `xpath`; `xmltable`) is rejected: a
  * function the guard doesn't know reads what the plan doesn't show. The names come from what the tests and the
  * data sources of the origin use, plus the rest of each family.
+ * The plan prints a function by name only: that the name is pg_catalog's own function is proven before planning,
+ * by `guardedQuery` (sql-identity.ts), the only way a caller may run an agent's query.
  */
 const ALLOWED_FUNCTIONS = new Set([
   // aggregates

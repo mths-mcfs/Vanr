@@ -1,0 +1,182 @@
+// The allowlist holds by the function's resolved identity, not by the name the plan prints: a customer function
+// named like an allowed one (any schema, any argument types), one the planner would fold, one behind a view or
+// an operator, is rejected before the query is planned. Each customer function here raises when it runs, so a
+// rejection that comes back without that error proves it never ran, not even while planning.
+// On PGlite always; on a real Postgres too in the CI `postgres` job (VANR_TEST_POSTGRES_URL), each case in a
+// database of its own.
+import { expect, test } from "bun:test";
+import { memoryPostgres } from "@vanr/engine/sqlconn";
+import postgres from "postgres";
+import {
+  type GuardedSession,
+  guardedQuery,
+  pgliteGuardedSession,
+  postgresGuardedSession,
+} from "../src/integrations/sql-identity";
+
+const url = process.env.VANR_TEST_POSTGRES_URL;
+const policy = { tables: ["customers", "orders"], maskedColumns: ["customers.ssn"] };
+
+const FIXTURES = `
+  create table customers (id int primary key, name text, ssn text);
+  insert into customers values (7, 'Alice', '999-00-1111');
+  create table orders (id int, customer_id int, total numeric);
+  insert into orders values (10, 7, 50);
+  create table secrets (v text);
+  insert into secrets values ('top-secret');
+`;
+
+/** A customer function that raises when it runs (it would read the secret in a real attack). */
+const evil = (signature: string, returns: string, extra = "") =>
+  `create function ${signature} returns ${returns} language plpgsql ${extra} as $$
+     begin raise exception 'customer function ran: %', (select v from secrets limit 1); end $$;`;
+
+type Policy = typeof policy;
+type Run = (sql: string, p?: Policy, raw?: (s: GuardedSession) => Promise<unknown>) => Promise<unknown>;
+
+/** A fresh database with the fixtures plus `setup`, and a runner of guarded queries in one read-only transaction. */
+async function withDatabase(kind: "PGlite" | "Postgres", setup: string, fn: (run: Run) => Promise<void>) {
+  if (kind === "PGlite") {
+    const pg = await memoryPostgres();
+    try {
+      await pg.exec(FIXTURES + setup);
+      await fn((sql, p = policy, raw) =>
+        pg.transaction(async (tx) => {
+          await tx.exec("set transaction read only");
+          const session = pgliteGuardedSession(tx);
+          const out = await guardedQuery(session, sql, p);
+          return raw ? { out, raw: await raw(session) } : out;
+        }),
+      );
+    } finally {
+      await pg.close();
+    }
+    return;
+  }
+  if (!url) throw new Error("VANR_TEST_POSTGRES_URL is required");
+  const name = `vanr_identity_${Math.random().toString(36).slice(2, 10)}`;
+  const admin = postgres(url, { max: 1, onnotice: () => {} });
+  await admin.unsafe(`create database ${name}`);
+  const target = new URL(url);
+  target.pathname = `/${name}`;
+  const db = postgres(target.toString(), { max: 1, onnotice: () => {}, prepare: false });
+  try {
+    await db.unsafe(FIXTURES + setup);
+    await fn(async (sql, p = policy, raw) => {
+      let result: unknown;
+      await db.begin("read only", async (tx) => {
+        const session = postgresGuardedSession(tx);
+        const out = await guardedQuery(session, sql, p);
+        result = raw ? { out, raw: await raw(session) } : out;
+      });
+      return result;
+    });
+  } finally {
+    await db.end({ timeout: 2 });
+    try {
+      await admin.unsafe(`drop database ${name}`);
+    } finally {
+      await admin.end({ timeout: 2 });
+    }
+  }
+}
+
+for (const kind of ["PGlite", "Postgres"] as const) {
+  const run = test.skipIf(kind === "Postgres" && !url);
+
+  run(`${kind}: native functions still pass and run, with the masked column still masked`, async () => {
+    await withDatabase(kind, "", async (q) => {
+      expect(
+        await q(
+          "select lower(name) as l, upper(name) as u, length(name) as n, trim(name) as t from customers",
+        ),
+      ).toEqual({
+        result: { fields: ["l", "u", "n", "t"], rows: [{ l: "alice", u: "ALICE", n: 5, t: "Alice" }] },
+      });
+      expect(
+        await q("select o.total from orders o join customers c on c.id = o.customer_id where c.id in (7)"),
+      ).toMatchObject({
+        result: { rows: [{ total: expect.anything() }] },
+      });
+      expect(await q("select ssn from customers")).toEqual({
+        failure: { reason: "column", column: "public.customers.ssn" },
+      });
+      expect(await q("select c from customers c")).toMatchObject({ failure: { reason: "column" } });
+      expect(await q("select v from secrets")).toEqual({
+        failure: { reason: "table", table: "public.secrets" },
+      });
+    });
+  });
+
+  run(`${kind}: public.lower(integer) and public.upper(integer) are rejected before they run`, async () => {
+    const setup = evil("public.lower(x integer)", "text") + evil("public.upper(x integer)", "text");
+    await withDatabase(kind, setup, async (q) => {
+      expect(await q("select lower(id) from customers")).toEqual({
+        failure: { reason: "function", name: "public.lower(x integer)" },
+      });
+      expect(await q("select upper(id) from customers")).toEqual({
+        failure: { reason: "function", name: "public.upper(x integer)" },
+      });
+      // The native overload is shadowed too: the name alone already reaches the customer's code.
+      expect(await q("select lower(name) from customers")).toMatchObject({ failure: { reason: "function" } });
+      // A query that calls neither name is not affected.
+      expect(await q("select id from customers")).toEqual({ result: { fields: ["id"], rows: [{ id: 7 }] } });
+    });
+  });
+
+  run(
+    `${kind}: an IMMUTABLE customer function with constant arguments never runs while planning`,
+    async () => {
+      await withDatabase(kind, evil("public.leak_immutable()", "text", "immutable"), async (q) => {
+        expect(await q("select leak_immutable() from customers")).toEqual({
+          failure: { reason: "function", name: "public.leak_immutable()" },
+        });
+        expect(await q('select "leak_immutable"() as x')).toMatchObject({ failure: { reason: "function" } });
+      });
+    },
+  );
+
+  run(`${kind}: a customer function in another schema, behind a keyword or a view, is rejected`, async () => {
+    const setup = `
+      create schema extra;
+      ${evil("extra.btrim(x text)", "text", "immutable")}
+      ${evil("extra.leak_view()", "text", "immutable")}
+      create view public.customer_names as select id, name, extra.leak_view() as tag from customers;
+    `;
+    await withDatabase(kind, setup, async (q) => {
+      // `trim(name)` calls btrim: the keyword hides the name.
+      expect(await q("select trim(name) from customers")).toMatchObject({
+        failure: { reason: "function", name: "extra.btrim(x text)" },
+      });
+      // The view is allowed and the query names neither the function nor its schema: the view's dependency
+      // on the customer's function is what rejects it (planning would fold the IMMUTABLE call).
+      const withView = { ...policy, tables: [...policy.tables, "customer_names"] };
+      expect(await q("select id, tag from customer_names", withView)).toEqual({
+        failure: { reason: "function", name: "extra.leak_view (used by an allowed relation)" },
+      });
+    });
+  });
+
+  run(
+    `${kind}: a customer operator in SQL is rejected; the search_path is fixed for check and run`,
+    async () => {
+      const setup = `
+      ${evil("public.int_plus_text(a integer, b text)", "integer")}
+      create operator public.+ (leftarg = integer, rightarg = text, function = public.int_plus_text);
+    `;
+      await withDatabase(kind, setup, async (q) => {
+        expect(await q("select id + 'x' from customers")).toEqual({
+          failure: { reason: "function", name: "public.operator(+)" },
+        });
+        const out = (await q("select id from customers", policy, async (s) =>
+          s.rows("select pg_catalog.current_setting('search_path') as path", []),
+        )) as {
+          out: unknown;
+          raw: Record<string, unknown>[];
+        };
+        expect(out.out).toEqual({ result: { fields: ["id"], rows: [{ id: 7 }] } });
+        expect(Object.values(out.raw[0] ?? {})).toEqual(['pg_catalog, "public", pg_temp']);
+      });
+    },
+  );
+}

@@ -86,6 +86,10 @@ jobs:
       - run: bun test packages/engine/src/search-pg.test.ts --test-name-pattern "real Postgres"
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # The identity check of the functions a connected database's query may call, each case in a database of its own.
+      - run: bun test apps/server/test/sql-guard-identity.test.ts --test-name-pattern Postgres
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
 
   sandbox:
     # The runner's real sandbox (bubblewrap + socat): the attack tests of the isolation of the agent's
