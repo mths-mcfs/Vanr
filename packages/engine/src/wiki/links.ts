@@ -22,11 +22,10 @@ export interface Heading {
   line: number;
 }
 
-const LINK = /(!?)\[\[([^\]\n]+?)\]\]/g;
-
 /**
  * Ranges of the markdown that are not running text: fenced code blocks (``` and ~~~, up to 3 spaces
- * of indentation), inline code spans and %%…%% comments. Returns sorted [start, end) pairs.
+ * of indentation), inline code spans and %%…%% comments. Returns sorted [start, end) pairs. Linear in the
+ * text: a page within the limits never holds the server (no expression here backtracks).
  */
 export function codeRanges(md: string): [number, number][] {
   const ranges: [number, number][] = [];
@@ -36,7 +35,7 @@ export function codeRanges(md: string): [number, number][] {
     const mark = m[1] ?? "";
     const at = m.index ?? 0;
     if (!open) {
-      if (mark[0] === "`" && /`/.test(m[0].slice(m[0].indexOf(mark) + mark.length))) continue;
+      if (mark[0] === "`" && m[0].slice(m[0].indexOf(mark) + mark.length).includes("`")) continue;
       open = { char: mark[0] ?? "`", len: mark.length, start: at };
     } else if (mark[0] === open.char && mark.length >= open.len && m[0].trim() === mark) {
       ranges.push([open.start, at + m[0].length]);
@@ -44,24 +43,134 @@ export function codeRanges(md: string): [number, number][] {
     }
   }
   if (open) ranges.push([open.start, md.length]);
-  const inFence = (i: number) => ranges.some(([a, b]) => i >= a && i < b);
+  const inFence = covers(ranges);
   const extra: [number, number][] = [];
-  for (const m of md.matchAll(/(`+)(?!`)[\s\S]*?[^`]\1(?!`)|%%[\s\S]*?%%/g)) {
-    const at = m.index ?? 0;
+  for (const [at, end] of inlineSpans(md)) {
     if (inFence(at)) continue;
     // An inline code span does not cross a paragraph (blank line).
-    if (m[0].startsWith("`") && /\n\s*\n/.test(m[0])) continue;
-    extra.push([at, at + m[0].length]);
+    if (md[at] === "`" && /\n\s*\n/.test(md.slice(at, end))) continue;
+    extra.push([at, end]);
   }
   return [...ranges, ...extra].sort((a, b) => a[0] - b[0]);
 }
 
-function inside(ranges: [number, number][], at: number): boolean {
-  for (const [a, b] of ranges) {
-    if (at < a) return false;
-    if (at < b) return true;
+/**
+ * The spans `/(`+)(?!`)[\s\S]*?[^`]\1(?!`)|%%[\s\S]*?%%/g` finds, in one pass. A code span opens with a run
+ * of backticks and closes at the first later run of exactly the same length; a run with no such closing
+ * opens with its tail instead (the longest tail that has one), as the expression would after trying every
+ * start inside the run. The expression itself took time quadratic in a run (or worse) with no closing.
+ */
+function inlineSpans(md: string): [number, number][] {
+  // Every backtick run, and for each length the runs that have it, in order.
+  const runs: { start: number; len: number }[] = [];
+  const byLen = new Map<number, number[]>();
+  for (let i = 0; i < md.length; ) {
+    if (md[i] !== "`") {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (md[j] === "`") j++;
+    const same = byLen.get(j - i);
+    if (same) same.push(runs.length);
+    else byLen.set(j - i, [runs.length]);
+    runs.push({ start: i, len: j - i });
+    i = j;
   }
-  return false;
+  // Per length, the first run of that length still ahead of the scan (queries only move forward).
+  const ahead = new Map<number, number>();
+  const nextOfLen = (len: number, after: number): number | undefined => {
+    const list = byLen.get(len);
+    if (!list) return undefined;
+    let k = ahead.get(len) ?? 0;
+    while (k < list.length && (list[k] as number) <= after) k++;
+    ahead.set(len, k);
+    return list[k];
+  };
+  // Where the next `%%` starts at or after each position, read from the end.
+  const nextPair = new Int32Array(md.length + 2).fill(-1);
+  for (let i = md.length - 2; i >= 0; i--)
+    nextPair[i] = md[i] === "%" && md[i + 1] === "%" ? i : (nextPair[i + 1] as number);
+
+  const out: [number, number][] = [];
+  let r = 0;
+  for (let i = 0; i < md.length; ) {
+    while (r < runs.length && (runs[r] as { start: number }).start + (runs[r] as { len: number }).len <= i)
+      r++;
+    const run = runs[r];
+    if (run && run.start <= i) {
+      // In a run (from its start, or where the last span ended): the longest tail that closes.
+      const end = run.start + run.len;
+      let closed = false;
+      for (let len = end - i; len >= 1; len--) {
+        const close = nextOfLen(len, r);
+        if (close === undefined) continue;
+        const c = runs[close] as { start: number; len: number };
+        out.push([end - len, c.start + c.len]);
+        i = c.start + c.len;
+        closed = true;
+        break;
+      }
+      if (!closed) i = end;
+      continue;
+    }
+    if (md[i] === "%" && md[i + 1] === "%") {
+      const close = i + 2 < md.length ? (nextPair[i + 2] as number) : -1;
+      if (close >= 0) {
+        out.push([i, close + 2]);
+        i = close + 2;
+        continue;
+      }
+    }
+    i++;
+  }
+  return out;
+}
+
+/** Whether a position falls in any of the ranges (sorted by start; they may overlap), by binary search. */
+function covers(ranges: readonly [number, number][]): (at: number) => boolean {
+  const reach: number[] = [];
+  let far = Number.NEGATIVE_INFINITY;
+  for (const [, b] of ranges) {
+    far = Math.max(far, b);
+    reach.push(far);
+  }
+  return (at) => {
+    let lo = 0;
+    let hi = ranges.length - 1;
+    let last = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if ((ranges[mid] as [number, number])[0] <= at) {
+        last = mid;
+        lo = mid + 1;
+      } else hi = mid - 1;
+    }
+    return last >= 0 && (reach[last] as number) > at;
+  };
+}
+
+/**
+ * The links `/(!?)\[\[([^\]\n]+?)\]\]/g` finds, in one pass: after `[[` (or `![[`), the inner text runs to
+ * the first `]` or line break, and it is a link when that is `]]` with something before it. The
+ * expression rescanned that stretch from every `[[` in it.
+ */
+function linkMatches(md: string): { start: number; end: number; embed: boolean; inner: string }[] {
+  const stop = new Int32Array(md.length + 1).fill(md.length);
+  for (let i = md.length - 1; i >= 0; i--)
+    stop[i] = md[i] === "]" || md[i] === "\n" ? i : (stop[i + 1] as number);
+  const out: { start: number; end: number; embed: boolean; inner: string }[] = [];
+  for (let i = 0; i < md.length; i++) {
+    const embed = md[i] === "!";
+    const from = embed ? i + 3 : i + 2;
+    if (!md.startsWith("[[", embed ? i + 1 : i)) continue;
+    const k = stop[from] ?? md.length;
+    if (k > from && md[k] === "]" && md[k + 1] === "]") {
+      out.push({ start: i, end: k + 2, embed, inner: md.slice(from, k) });
+      i = k + 1;
+    }
+  }
+  return out;
 }
 
 export function parseLinkInner(inner: string): Pick<WikiLinkRef, "target" | "anchor" | "linkText"> {
@@ -76,27 +185,27 @@ export function parseLinkInner(inner: string): Pick<WikiLinkRef, "target" | "anc
 
 /** Every link and embed outside code, in the order they appear. */
 export function parseWikiLinks(md: string): WikiLinkRef[] {
-  const skip = codeRanges(md);
+  const inCode = covers(codeRanges(md));
   const out: WikiLinkRef[] = [];
-  for (const m of md.matchAll(LINK)) {
-    const start = m.index ?? 0;
-    if (inside(skip, start)) continue;
+  for (const m of linkMatches(md)) {
+    const { start, end } = m;
+    if (inCode(start)) continue;
     // An escaped `\[[` is not a link.
     if (start > 0 && md[start - 1] === "\\") continue;
-    const parsed = parseLinkInner(m[2] ?? "");
+    const parsed = parseLinkInner(m.inner);
     // [[#Heading]] points at the page itself: empty target.
     if (!parsed.target && !parsed.anchor) continue;
-    out.push({ raw: m[0], embed: m[1] === "!", start, end: start + m[0].length, ...parsed });
+    out.push({ raw: md.slice(start, end), embed: m.embed, start, end, ...parsed });
   }
   return out;
 }
 
 /** Block ids: `text ^id` at the end of a line, or `^id` alone on a line (after a table). */
 export function blockIds(md: string): string[] {
-  const skip = codeRanges(md);
+  const inCode = covers(codeRanges(md));
   const out: string[] = [];
   for (const m of md.matchAll(/(?:^|[ \t])\^([A-Za-z0-9-]+)[ \t]*$/gm)) {
-    if (inside(skip, m.index ?? 0)) continue;
+    if (inCode(m.index ?? 0)) continue;
     if (m[1]) out.push(m[1]);
   }
   return [...new Set(out)];
@@ -104,7 +213,7 @@ export function blockIds(md: string): string[] {
 
 /** ATX and setext headings outside code, with the (0-based) line where they start. */
 export function headings(md: string): Heading[] {
-  const skip = codeRanges(md);
+  const inCode = covers(codeRanges(md));
   const lines = md.split("\n");
   const out: Heading[] = [];
   let offset = 0;
@@ -112,7 +221,7 @@ export function headings(md: string): Heading[] {
     const line = lines[i] ?? "";
     const here = offset;
     offset += line.length + 1;
-    if (inside(skip, here)) continue;
+    if (inCode(here)) continue;
     const atx = /^ {0,3}(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$/.exec(line);
     if (atx) {
       out.push({ level: (atx[1] ?? "#").length, text: cleanHeading(atx[2] ?? ""), line: i });
@@ -141,11 +250,11 @@ export function cleanHeading(text: string): string {
  * one letter (Obsidian does not accept a tag made only of digits). Headings (`# `) are not tags.
  */
 export function bodyTags(md: string): string[] {
-  const skip = codeRanges(md);
+  const inCode = covers(codeRanges(md));
   const out = new Set<string>();
   for (const m of md.matchAll(/(^|[ \t(])#([\p{L}\p{N}_/-]*\p{L}[\p{L}\p{N}_/-]*)/gmu)) {
     const at = (m.index ?? 0) + (m[1] ?? "").length;
-    if (inside(skip, at)) continue;
+    if (inCode(at)) continue;
     const tag = (m[2] ?? "").replace(/\/+$/, "").toLowerCase();
     if (tag) out.add(tag);
   }

@@ -7,7 +7,7 @@ import { schema } from "@vanr/engine/db";
 import { eq } from "drizzle-orm";
 import * as Y from "yjs";
 import type { RunningServer } from "../src/server";
-import { pageBySlug } from "../src/wiki";
+import { MAX_BODY, pageBySlug } from "../src/wiki";
 import { COLLAB_PATH, LIVE_LIMITS } from "../src/wiki-collab";
 import { wikiMarkdown, YFRAGMENT } from "../src/wiki-md";
 import { type Browser, SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
@@ -331,6 +331,29 @@ describe("the live document's limits", () => {
 });
 
 describe("one abusive client", () => {
+  test("a live draft over a page of unmatched backticks publishes at once; the server keeps answering", async () => {
+    const { workspaceId, ana } = await team();
+    // The editor escapes a backtick it is given; a page saved over the API keeps the raw run in the draft.
+    const ticks = "`".repeat(MAX_BODY - 100);
+    const page = await ana.api.wiki.createWikiPage(workspaceId, {
+      title: "Live ticks",
+      body: `${ticks}\n\nend\n`,
+    });
+    const a = connect(server, ana.browser, workspaceId, docName(workspaceId, page.slug));
+    await a.synced;
+    await a.edit((md) => md.replace("end", "the end"));
+    await until(() => !a.provider.hasUnsyncedChanges);
+    const started = Date.now();
+    const [published, health] = await Promise.all([
+      ana.api.wiki.publishWikiPageDraft(workspaceId, page.slug),
+      fetch(`${server.url}/api/v1/health`).then((r) => r.status),
+    ]);
+    expect(health).toBe(200);
+    expect(published.body).toContain("the end");
+    expect(Date.now() - started).toBeLessThan(10_000);
+    a.close();
+  });
+
   test("an update that brings a NUL into the page closes its socket (4400) and is not applied", async () => {
     const { workspaceId, ana } = await team();
     const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Nul live", body: BODY });

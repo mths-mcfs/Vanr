@@ -82,11 +82,34 @@ function normalizeAltTitles(aliases: string[] | undefined, title: string): strin
   return out;
 }
 
-function excerptOf(body: string): string {
-  const plain = body
-    .replace(/```[\s\S]*?```/g, " ")
-    .replace(/%%[\s\S]*?%%/g, " ")
-    .replace(/!?\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]/g, "$1")
+/**
+ * `[[target#…|…]]` (or `![[…]]`) → `target`, as `/!?\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]/g` would replace it,
+ * in one pass: the inner text runs to the first `]`. That expression rescanned the rest of the text from
+ * every `[[` with no closing.
+ */
+function linkTargets(text: string): string {
+  const stop = new Int32Array(text.length + 1).fill(text.length);
+  for (let i = text.length - 1; i >= 0; i--) stop[i] = text[i] === "]" ? i : (stop[i + 1] as number);
+  let out = "";
+  let last = 0;
+  for (let i = 0; i < text.length; i++) {
+    const bang = text[i] === "!" && text.startsWith("[[", i + 1);
+    if (!bang && !text.startsWith("[[", i)) continue;
+    const from = i + (bang ? 3 : 2);
+    const k = stop[from] as number;
+    const first = text[from];
+    if (k === from || first === "|" || first === "#" || text[k + 1] !== "]") continue;
+    const inner = text.slice(from, k);
+    const cut = inner.search(/[|#]/);
+    out += text.slice(last, i) + (cut < 0 ? inner : inner.slice(0, cut));
+    last = k + 2;
+    i = k + 1;
+  }
+  return out + text.slice(last);
+}
+
+export function excerptOf(body: string): string {
+  const plain = linkTargets(body.replace(/```[\s\S]*?```/g, " ").replace(/%%[\s\S]*?%%/g, " "))
     .replace(/[#>*_`~[\]()!-]/g, " ")
     .replace(/\s+/g, " ")
     .trim();

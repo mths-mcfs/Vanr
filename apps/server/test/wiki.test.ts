@@ -1112,6 +1112,32 @@ describe("limits at the border", () => {
     expect((await ana.api.wiki.getWikiPage(workspaceId, page.slug)).version).toBe(1);
   });
 
+  test("pages at the maximum size made of unmatched delimiters save at once and the server keeps answering (health)", async () => {
+    const { workspaceId, ana } = await team();
+    const worst = [
+      "`".repeat(MAX_BODY),
+      `${"[[a".repeat(MAX_BODY / 3 - 1)}[[`,
+      "![[".repeat(Math.floor(MAX_BODY / 3)),
+      "```\n```\n\n".repeat(Math.floor(MAX_BODY / 9)),
+    ];
+    const created = await ana.api.wiki.createWikiPage(workspaceId, { title: "Delimiters", body: "x" });
+    let version = 1;
+    for (const body of worst) {
+      const started = Date.now();
+      const [saved, health] = await Promise.all([
+        ana.api.wiki.replaceWikiPage(workspaceId, created.slug, { body, parentVersion: version }),
+        fetch(`${server.url}/api/v1/health`).then((r) => r.status),
+      ]);
+      expect([body.slice(0, 6), health, saved.body.length]).toEqual([body.slice(0, 6), 200, body.length]);
+      expect([body.slice(0, 6), Date.now() - started < 5_000]).toEqual([body.slice(0, 6), true]);
+      version = saved.version;
+    }
+    const imported = await ana.api.wiki.importWiki(workspaceId, {
+      files: [{ path: "Ticks.md", text: "`".repeat(MAX_BODY) }],
+    });
+    expect(imported.created).toBe(1);
+  });
+
   test("a NUL character is rejected with 400 on every way in: body, title, folder, properties, path, query, import", async () => {
     const { workspaceId, ana } = await team();
     const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Clean", body: "x" });
