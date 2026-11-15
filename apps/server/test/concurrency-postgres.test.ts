@@ -282,8 +282,10 @@ describe.skipIf(!TEST_POSTGRES_URL)(
             side === "A" ? "from ana" : "from caio",
           ),
         );
-        expect(run.aPids.length).toBe(1);
-        expect(run.bPids.length).toBe(1);
+        // Each side runs the notice's transaction and then its deliveries' own (notify-delivery.ts): the first
+        // one, which takes the group's row lock, ran on a connection of its own on each side.
+        expect(run.aPids.length).toBeGreaterThanOrEqual(1);
+        expect(run.bPids.length).toBeGreaterThanOrEqual(1);
         expect(run.aPids[0]).not.toBe(run.bPids[0]);
         await server.deps.runtime.settle();
         const [row, ...rest] = await server.deps.db

@@ -481,7 +481,7 @@ async function rowsById(db: Db, tableId: string, ids: string[]): Promise<RowRow[
 // ---------- the footer's summary and the chart ----------
 
 const ARRAY_KINDS: ReadonlySet<string> = new Set(["multi", "person", "file"]);
-const ISO_TIME = `'YYYY-MM-DD"T"HH24:MI:SS"Z"'`;
+const ISO_TIME = `'YYYY-MM-DD"T"HH24:MI:SS'`;
 const ISO_DAY = `'YYYY-MM-DD'`;
 const timeCol = (def: PropDef) => (def.type === "created_time" ? R.createdAt : R.editedAt);
 const isTime = (def: PropDef) => def.type === "created_time" || def.type === "edited_time";
@@ -490,9 +490,14 @@ const isActor = (def: PropDef) => def.type === "creator" || def.type === "editor
 /** A cell that holds a list (tags, people, files, a relation): its unique count counts the items. */
 const isList = (def: PropDef) => ARRAY_KINDS.has(filterKind(def)) && !isActor(def);
 
-/** An instant back as the date text the oracle writes (`isoOf`): the day alone, or the time in UTC. */
-const isoText = (at: SQL, time: SQL) =>
-  sql`(case when ${time} then to_char(${at} at time zone 'UTC', ${sql.raw(ISO_TIME)}) else to_char(${at} at time zone 'UTC', ${sql.raw(ISO_DAY)}) end)`;
+/**
+ * An instant back as the date text the oracle writes (`isoOf`): the day alone, or the time in UTC with the
+ * milliseconds only when there are any.
+ */
+const isoText = (at: SQL, time: SQL) => {
+  const utc = sql`(${at} at time zone 'UTC')`;
+  return sql`(case when ${time} then to_char(${utc}, ${sql.raw(ISO_TIME)}) || (case when to_char(${utc}, 'MS') = '000' then '' else '.' || to_char(${utc}, 'MS') end) || 'Z' else to_char(${utc}, ${sql.raw(ISO_DAY)}) end)`;
+};
 
 /** The start and end instants of the cell's date, and whether it has a time (the start's, as in the oracle). */
 function dateParts(def: PropDef): { start: SQL; end: SQL; time: SQL } {
