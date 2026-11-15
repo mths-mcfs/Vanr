@@ -39,13 +39,13 @@ export default {
 
   "waitlist.title": "Sign-up is by invitation",
   "waitlist.why":
-    "Leave your email and we will write when a place opens. If someone invited you, open the link in that email instead.",
+    "Leave your email to join the waitlist. If someone invited you, open the link in that email instead.",
   "waitlist.submit": "Join the waitlist",
   "waitlist.done.title": "You are on the list",
   "waitlist.done.body": "We sent a link to {email}. Open it to confirm your place.",
   "waitlist.confirm.working": "Confirming your place",
   "waitlist.confirm.done.title": "Your place is confirmed",
-  "waitlist.confirm.done.body": "We will write to you when a place opens.",
+  "waitlist.confirm.done.body": "Your email is confirmed and you are on the waitlist.",
   "waitlist.confirm.failed.title": "This confirmation link did not work",
   "waitlist.confirm.failed.body": "It may be incomplete. Join the waitlist again to get a new one.",
   "waitlist.confirm.again": "Join the waitlist",

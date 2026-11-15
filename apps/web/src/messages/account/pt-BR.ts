@@ -39,13 +39,13 @@ export default {
 
   "waitlist.title": "O cadastro é por convite",
   "waitlist.why":
-    "Deixe seu e-mail e escrevemos quando abrir uma vaga. Se alguém convidou você, abra o link que veio naquele e-mail.",
+    "Deixe seu e-mail para entrar na lista de espera. Se alguém convidou você, abra o link que veio naquele e-mail.",
   "waitlist.submit": "Entrar na lista de espera",
   "waitlist.done.title": "Você está na lista",
   "waitlist.done.body": "Mandamos um link para {email}. Abra para confirmar seu lugar.",
   "waitlist.confirm.working": "Confirmando seu lugar",
   "waitlist.confirm.done.title": "Seu lugar está confirmado",
-  "waitlist.confirm.done.body": "Escrevemos para você quando abrir uma vaga.",
+  "waitlist.confirm.done.body": "Seu e-mail está confirmado e você está na lista de espera.",
   "waitlist.confirm.failed.title": "Este link de confirmação não funcionou",
   "waitlist.confirm.failed.body": "Ele pode estar incompleto. Entre na lista de novo para receber outro.",
   "waitlist.confirm.again": "Entrar na lista de espera",
