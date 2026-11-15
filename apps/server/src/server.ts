@@ -7,6 +7,7 @@ import { postgresConnector, type SqlConnector } from "@vanr/engine/sqlconn";
 import { count } from "drizzle-orm";
 import { createApp } from "./app";
 import { createAuth, type SignupDecision } from "./auth";
+import { resumeRecalcs, stopRecalcs } from "./bases/write";
 import type { Config } from "./config";
 import type { AppDeps, RuntimePort } from "./context";
 import { purgeTrash } from "./drive";
@@ -240,6 +241,10 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     clearTimeout(timer);
     await work;
   });
+  // The formula recalculations: halted before the database closes, then the ones a crash or a deploy left
+  // halfway resume in the background.
+  undo.push(() => stopRecalcs(deps));
+  await resumeRecalcs(deps);
   const app = createApp(deps, { firstUser, signupQueue: signupLimits });
   handler = (req) => app.fetch(req);
   log.info("server.started", { url: publicUrl, db: opened.kind });

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
 import { drizzle } from "drizzle-orm/pglite";
@@ -6,39 +7,78 @@ import { migrate } from "drizzle-orm/pglite/migrator";
 import postgres from "postgres";
 import { type Catalog, type CatalogQuery, readCatalog } from "./catalog";
 import expected from "./fixtures/catalog.json";
+import basesRelations from "./fixtures/catalog-bases-relations.json";
 import { MIGRATIONS_DIR, openDb } from "./index";
 
 // The fixture is the catalog of the database the product ran on before the port, with every name
-// translated to the Vanr vocabulary. The single initial migration has to rebuild it exactly.
+// translated to the Vanr vocabulary. The initial migration alone has to rebuild it exactly; each later
+// migration adds what its own fixture lists (and changes nothing else), so the whole chain builds the
+// historical catalog plus those additions.
 const fixture: Catalog = expected;
+/** What each migration after the initial one adds, in the order of the journal. */
+const additions: Partial<Catalog>[] = [basesRelations];
 
-/** Compares section by section, so a failure names what differs instead of dumping the whole catalog. */
-async function expectFixture(query: CatalogQuery) {
+const sections = [
+  "extensions",
+  "tables",
+  "columns",
+  "constraints",
+  "indexes",
+  "sequences",
+  "triggers",
+  "functions",
+] as const;
+
+const key = (x: unknown) => JSON.stringify(x);
+const sorted = <T>(xs: readonly T[]) =>
+  [...xs].sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
+
+/**
+ * Compares section by section, so a failure names what differs instead of dumping the whole catalog. With
+ * `added`, the expected catalog is the fixture plus those additions.
+ */
+async function expectFixture(query: CatalogQuery, added: readonly Partial<Catalog>[] = []) {
   const actual = await readCatalog(query);
-  const sections = [
-    "extensions",
-    "tables",
-    "columns",
-    "constraints",
-    "indexes",
-    "sequences",
-    "triggers",
-    "functions",
-  ] as const;
-  for (const key of sections) {
-    expect({ [key]: actual[key] }).toEqual({ [key]: fixture[key] });
+  for (const section of sections) {
+    const want: unknown[] = [...fixture[section], ...added.flatMap((a): unknown[] => a[section] ?? [])];
+    const got: unknown[] = actual[section];
+    expect({ [section]: added.length ? sorted(got) : got }).toEqual({
+      [section]: added.length ? sorted(want) : want,
+    });
   }
 }
 
-describe("the initial migration", () => {
-  test("builds the expected catalog on PGlite", async () => {
+/** Applies only the initial migration's statements, as the migrator would. */
+async function initialOnly(pg: PGlite) {
+  const text = await Bun.file(join(MIGRATIONS_DIR, "0000_init.sql")).text();
+  for (const statement of text.split("--> statement-breakpoint"))
+    if (statement.trim()) await pg.exec(statement);
+}
+
+describe("the migrations", () => {
+  test("the initial one alone builds the historical catalog on PGlite", async () => {
     const pg = new PGlite({ extensions: { pg_trgm } });
     try {
-      await migrate(drizzle({ client: pg }), { migrationsFolder: MIGRATIONS_DIR });
+      await initialOnly(pg);
       await expectFixture(async (text) => (await pg.query<Record<string, unknown>>(text)).rows);
     } finally {
       await pg.close();
     }
+  });
+
+  test("the whole chain builds the historical catalog plus each migration's additions on PGlite", async () => {
+    const pg = new PGlite({ extensions: { pg_trgm } });
+    try {
+      await migrate(drizzle({ client: pg }), { migrationsFolder: MIGRATIONS_DIR });
+      await expectFixture(async (text) => (await pg.query<Record<string, unknown>>(text)).rows, additions);
+    } finally {
+      await pg.close();
+    }
+  });
+
+  test("every migration in the journal has its additions listed", async () => {
+    const journal = await Bun.file(join(MIGRATIONS_DIR, "meta", "_journal.json")).json();
+    expect(journal.entries.length).toBe(1 + additions.length);
   });
 
   // The comparison has to see these drifts; each one leaves every other part of the catalog alone.
@@ -51,11 +91,11 @@ describe("the initial migration", () => {
       const pg = new PGlite({ extensions: { pg_trgm } });
       try {
         await migrate(drizzle({ client: pg }), { migrationsFolder: MIGRATIONS_DIR });
+        const query = async (text: string) => (await pg.query<Record<string, unknown>>(text)).rows;
+        // the chain's catalog is the fixture plus the additions: the drift must show against that
+        const before = await readCatalog(query);
         await pg.exec(statement);
-        const actual = await readCatalog(
-          async (text) => (await pg.query<Record<string, unknown>>(text)).rows,
-        );
-        expect(actual).not.toEqual(fixture);
+        expect(await readCatalog(query)).not.toEqual(before);
       } finally {
         await pg.close();
       }
@@ -86,7 +126,7 @@ describe("the initial migration", () => {
     await close();
     const sql = postgres(url ?? "", { max: 1, onnotice: () => {} });
     try {
-      await expectFixture(async (text) => [...(await sql.unsafe(text))]);
+      await expectFixture(async (text) => [...(await sql.unsafe(text))], additions);
     } finally {
       await sql.end({ timeout: 5 });
     }
