@@ -6,11 +6,11 @@ import type { Sealer } from "@vanr/engine/seal";
 import type { SqlConnector } from "@vanr/engine/sqlconn";
 import type { BudgetScope, UsageLedger, UsageSource } from "@vanr/engine/usage";
 import type { Context } from "hono";
+import type { AgentRow } from "./agents";
 import type { Auth } from "./auth";
 import type { ChannelRow } from "./channels";
 import type { Config } from "./config";
 import type {
-  AgentRow,
   ApprovalOutcome,
   MessageRow,
   QuestionRow,
@@ -176,6 +176,18 @@ export interface RuntimePort {
   wakeAt(at: Date): void;
 }
 
+/** Marks a runtime method that isn't there yet (the port in server.ts until slice S6); it holds the thrower. */
+export const ABSENT = Symbol("runtime.absent");
+
+/**
+ * Rejects at an entry, before any write, when a runtime method the flow will reach isn't there yet: the absent
+ * method throws `not_available` itself. With the real runtime (S6) it does nothing.
+ */
+export function requireRuntime(runtime: RuntimePort, method: keyof RuntimePort): void {
+  const absent: unknown = Reflect.get(runtime[method], ABSENT);
+  if (typeof absent === "function") absent();
+}
+
 export interface SessionUser {
   id: string;
   name: string;
@@ -194,6 +206,7 @@ export type AppEnv = {
   Variables: {
     deps: AppDeps;
     user: SessionUser | null;
+    sessionId: string | null;
     /** Set by the middleware of /api/v1/workspaces/:workspaceId. */
     member: WorkspaceMember | null;
   };

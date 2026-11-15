@@ -12,7 +12,7 @@ import { type BrowserDriver, type BrowserPolicy, DEFAULT_BROWSER_LEVEL } from "@
 import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import type { BlockedLoad } from "@vanr/engine/runner-protocol";
-import { and, desc, eq, inArray, lt, or } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, lt, or } from "drizzle-orm";
 import type { AppDeps } from "../context";
 import { log } from "../logger";
 
@@ -49,13 +49,14 @@ export function toBrowserSettings(row: BrowserSettingsRow | undefined): AgentBro
 }
 
 /** The agent's open browser request (at most one). */
-export async function openIntervention(db: Db, agentId: string) {
+export async function openIntervention(db: Db, agentId: string, now = new Date()) {
   const [h] = await db
     .select()
     .from(browserInterventions)
     .where(
       and(
         eq(browserInterventions.agentId, agentId),
+        gt(browserInterventions.expiresAt, now),
         inArray(browserInterventions.status, ["pending", "active"]),
       ),
     );
@@ -63,8 +64,8 @@ export async function openIntervention(db: Db, agentId: string) {
 }
 
 /** Who drives the browser now: the person who took over (active request) or the agent. */
-export async function driverOf(db: Db, agentId: string): Promise<BrowserDriver> {
-  return (await openIntervention(db, agentId))?.status === "active" ? "person" : "agent";
+export async function driverOf(db: Db, agentId: string, now = new Date()): Promise<BrowserDriver> {
+  return (await openIntervention(db, agentId, now))?.status === "active" ? "person" : "agent";
 }
 
 /** The agent's policy on runner `runnerId`. A private range only holds on the runner where it was allowed. */
@@ -93,7 +94,12 @@ export async function pushPolicy(deps: AppDeps, agentId: string) {
     .from(agents)
     .where(eq(agents.id, agentId));
   if (!agent?.environmentId || !deps.runners.isOnline(agent.environmentId)) return;
-  const policy = await policyFor(deps, agentId, agent.environmentId, await driverOf(deps.db, agentId));
+  const policy = await policyFor(
+    deps,
+    agentId,
+    agent.environmentId,
+    await driverOf(deps.db, agentId, deps.now()),
+  );
   await deps.runners
     .call(
       agent.environmentId,
@@ -111,8 +117,8 @@ const STEP_TEXT_MAX = 500;
 const clipValue = (v: unknown): unknown =>
   typeof v === "string" && v.length > STEP_TEXT_MAX ? `${v.slice(0, STEP_TEXT_MAX)}…` : v;
 
-const stepShotKey = (workspaceId: string, agentId: string, stepId: string) =>
-  `browser-log/${workspaceId}/${agentId}/${stepId}.jpg`;
+const entryShotKey = (workspaceId: string, agentId: string, entryId: string) =>
+  `browser-log/${workspaceId}/${agentId}/${entryId}.jpg`;
 
 interface StepInput {
   workspaceId: string;
@@ -137,7 +143,7 @@ export async function recordStep(deps: AppDeps, input: StepInput): Promise<void>
   try {
     let shotKey: string | null = null;
     if (input.shot) {
-      shotKey = stepShotKey(input.workspaceId, input.agentId, id);
+      shotKey = entryShotKey(input.workspaceId, input.agentId, id);
       await deps.blobs.put(shotKey, new Uint8Array(Buffer.from(input.shot, "base64")), "image/jpeg");
     }
     await deps.db.insert(browserLogEntries).values({

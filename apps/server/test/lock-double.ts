@@ -128,8 +128,8 @@ export async function diagnose(admin: postgres.Sql, label: string, a: number[], 
 export const WAIT_MS = 5_000;
 
 /**
- * Forces the interleaving. A runs until the end of its first `kind` query (where it holds the lock under test)
- * and holds there; then B starts. B either passes its own first `kind` query (no lock to wait for) or its
+ * Forces the interleaving. A runs until the end of its first matching `kind` query (where it holds the lock)
+ * and holds there; then B starts. B either passes its own matching query (no lock to wait for) or its
  * backend waits on a lock, seen in pg_stat_activity as `wait_event_type = 'Lock'` (the same for the advisory
  * lock and for a row lock). Then A goes on. Past WAIT_MS it fails with LOCK_WAIT_TIMEOUT and the state of both
  * backends. A is always released and both are always awaited, so nothing is left running on the pool.
@@ -139,6 +139,7 @@ export async function forcedPair<T>(
   label: string,
   kind: "select" | "update",
   start: (side: "A" | "B", hooks: Hooks) => Promise<T>,
+  match?: string,
 ): Promise<{ a: T; b: T; aPids: number[]; bPids: number[] }> {
   const aPids = new Set<number>();
   const bPids = new Set<number>();
@@ -151,6 +152,7 @@ export async function forcedPair<T>(
       pids: aPids,
       after: {
         kind,
+        match,
         run: async () => {
           held.open();
           await release.opened;
@@ -170,6 +172,7 @@ export async function forcedPair<T>(
       pids: bPids,
       after: {
         kind,
+        match,
         run: async () => {
           bPassed = true;
         },
