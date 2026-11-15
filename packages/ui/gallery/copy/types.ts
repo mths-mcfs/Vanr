@@ -118,6 +118,21 @@ export type Copy = {
   surfaceSamples: { digestName: string; digestCadence: string; runLogHeading: string; taskTitles: string[] };
   /** Empty state section. */
   emptyRoutines: { heading: string; explanation: string; createButton: string };
+  /** The parts the app frame is built from: lit sigil, failed view, banner, drawer, choice menu. */
+  frameParts: {
+    workingName: (agent: string) => string;
+    workingCaption: string;
+    failedHeading: string;
+    failedExplanation: string;
+    retryButton: string;
+    bannerText: string;
+    bannerButton: string;
+    drawerTrigger: string;
+    drawerName: string;
+    drawerLinks: string[];
+    themeTrigger: string;
+    themeChoices: { system: string; light: string; dark: string };
+  };
   /** Loading section. */
   loadingSample: { threadsLoading: string };
   /** States page. */

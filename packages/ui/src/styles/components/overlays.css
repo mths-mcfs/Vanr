@@ -32,6 +32,18 @@
     }
   }
 
+  @keyframes vr-drawer-in-left {
+    from {
+      translate: -100% 0;
+    }
+  }
+
+  @keyframes vr-drawer-in-right {
+    from {
+      translate: 100% 0;
+    }
+  }
+
   /* Floating panels: menu, select list. Separated from the page by a firm edge, not a shadow. */
 
   .vr-popover {
@@ -104,8 +116,18 @@
     color: var(--vr-fg-muted);
   }
 
-  .vr-select__item[data-state="checked"] .vr-menu-item__end {
+  .vr-select__item[data-state="checked"] .vr-menu-item__end,
+  .vr-menu-item--choice[data-state="checked"] .vr-menu-item__end {
     color: var(--vr-accent-fg);
+  }
+
+  /* An unchecked choice keeps the room of the check mark, so the labels of a group line up. */
+  .vr-menu-item--choice {
+    padding-inline-end: calc(var(--vr-space-2) + var(--vr-space-4) + 14px);
+  }
+
+  .vr-menu-item--choice[data-state="checked"] {
+    padding-inline-end: var(--vr-space-2);
   }
 
   .vr-menu-label {
@@ -152,6 +174,35 @@
 
   .vr-dialog--sm {
     --_width: 26rem;
+  }
+
+  /* Drawer: a panel from the edge, for navigation on a small screen. */
+
+  .vr-drawer {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    z-index: var(--vr-z-modal);
+    display: flex;
+    flex-direction: column;
+    width: min(20rem, calc(100vw - 3rem));
+    overflow-y: auto;
+    background-color: var(--vr-bg-sunken);
+    color: var(--vr-fg);
+  }
+
+  .vr-drawer[data-side="left"] {
+    left: 0;
+    border-right: var(--vr-border) solid var(--vr-line-control);
+  }
+
+  .vr-drawer[data-side="right"] {
+    right: 0;
+    border-left: var(--vr-border) solid var(--vr-line-control);
+  }
+
+  .vr-drawer:focus-visible {
+    outline: none;
   }
 
   .vr-dialog--lg {
@@ -345,6 +396,18 @@
     }
 
     .vr-dialog[data-state="closed"] {
+      animation: vr-fade-out var(--vr-duration-fast) var(--vr-ease);
+    }
+
+    .vr-drawer[data-side="left"][data-state="open"] {
+      animation: vr-drawer-in-left var(--vr-duration-slow) var(--vr-ease);
+    }
+
+    .vr-drawer[data-side="right"][data-state="open"] {
+      animation: vr-drawer-in-right var(--vr-duration-slow) var(--vr-ease);
+    }
+
+    .vr-drawer[data-state="closed"] {
       animation: vr-fade-out var(--vr-duration-fast) var(--vr-ease);
     }
 
