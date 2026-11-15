@@ -2,7 +2,7 @@
 // reindexes the page. The page belongs to the whole workspace, so the scope is `workspace` (per-page permission comes later).
 import type { ChunkInput } from "@vanr/engine/search";
 import { codeRanges } from "@vanr/engine/wiki/links";
-import type { WikiRow } from "./forward-types";
+import type { WikiRow } from "./wiki";
 
 const CHUNK = 1500;
 const MAX_CHUNKS = 400;
@@ -15,8 +15,28 @@ export function wikiChunks(
   row: Pick<WikiRow, "workspaceId" | "slug" | "title" | "body" | "updatedAt" | "updatedBy">,
 ) {
   const body = row.body;
-  const code = codeRanges(body).filter(([a, b]) => /^ {0,3}(```|~~~)/.test(body.slice(a, b)));
-  const inCode = (i: number) => code.some(([a, b]) => i > a && i < b);
+  const fenced = / {0,3}(```|~~~)/y;
+  const code = codeRanges(body).filter(([a]) => {
+    fenced.lastIndex = a;
+    return fenced.test(body);
+  });
+  // Strictly inside a code block, by binary search over the starts (with how far the blocks so far reach):
+  // a page full of blocks and blank lines stays linear.
+  const reach: number[] = [];
+  for (const [, b] of code) reach.push(Math.max(reach.at(-1) ?? 0, b));
+  const inCode = (i: number) => {
+    let lo = 0;
+    let hi = code.length - 1;
+    let last = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if ((code[mid] as [number, number])[0] < i) {
+        last = mid;
+        lo = mid + 1;
+      } else hi = mid - 1;
+    }
+    return last >= 0 && (reach[last] as number) > i;
+  };
   // Cut points: start of a heading or of a paragraph, outside code blocks.
   const cuts: { at: number; heading: string | null }[] = [
     { at: 0, heading: /^#{1,6}[ \t]+([^\n]*)/.exec(body)?.[1]?.trim() ?? null },

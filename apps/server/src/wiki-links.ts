@@ -13,13 +13,27 @@ import {
   stripMd,
 } from "@vanr/engine/wiki/links";
 import { and, asc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
-import type { WikiRow } from "./forward-types";
+import { HttpError } from "./http";
+import type { WikiRow } from "./wiki";
 
 const { knowledgePages, pageLinks } = schema;
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type Conn = Db | Tx;
 
 export type LinkTarget = Pick<WikiRow, "id" | "slug" | "title" | "folder" | "aliases">;
+
+/** The most [[links]] one page keeps: a body past it is rejected before anything is written. */
+export const MAX_LINKS = 5_000;
+/** Link rows per insert: ten parameters each, far under Postgres's 65535 per statement. */
+const LINK_BATCH = 1_000;
+
+/** Rejects a body with more [[links]] than a page keeps (400). */
+export function checkLinks(body: string): void {
+  if (parseWikiLinks(body).length > MAX_LINKS)
+    throw new HttpError(400, "wiki.too_many_links", `A page can have at most ${MAX_LINKS} links`, {
+      max: MAX_LINKS,
+    });
+}
 
 /** Ways of writing a page's target, in lowercase (without `.md`). */
 export function namesOf(p: Pick<WikiRow, "slug" | "title" | "folder" | "aliases">): string[] {
@@ -68,23 +82,26 @@ export async function missingTargets(db: Conn, workspaceId: string, md: string):
 /** Replaces the page's links with the ones of the current body. Runs inside the transaction that saves the version. */
 export async function syncLinks(db: Conn, page: Pick<WikiRow, "id" | "workspaceId" | "body">): Promise<void> {
   const refs = parseWikiLinks(page.body);
+  checkLinks(page.body);
   await db.delete(pageLinks).where(eq(pageLinks.sourceId, page.id));
   if (!refs.length) return;
-  const pages = await candidates(db, page.workspaceId, refs.map((r) => r.target).filter(Boolean));
-  await db.insert(pageLinks).values(
-    refs.map((r, ordinal) => ({
-      sourceId: page.id,
-      ordinal,
-      workspaceId: page.workspaceId,
-      // [[#Heading]] points to the page itself.
-      targetId: r.target ? (resolveTarget(r.target, pages)?.id ?? null) : page.id,
-      targetText: r.target,
-      targetSlug: r.target ? slugify(stripMd(r.target)) : "",
-      anchor: r.anchor,
-      linkText: r.linkText,
-      embed: r.embed,
-    })),
-  );
+  const pages = await candidates(db, page.workspaceId, [
+    ...new Set(refs.map((r) => r.target).filter(Boolean)),
+  ]);
+  const rows = refs.map((r, ordinal) => ({
+    sourceId: page.id,
+    ordinal,
+    workspaceId: page.workspaceId,
+    // [[#Heading]] points to the page itself.
+    targetId: r.target ? (resolveTarget(r.target, pages)?.id ?? null) : page.id,
+    targetText: r.target,
+    targetSlug: r.target ? slugify(stripMd(r.target)) : "",
+    anchor: r.anchor,
+    linkText: r.linkText,
+    embed: r.embed,
+  }));
+  for (let i = 0; i < rows.length; i += LINK_BATCH)
+    await db.insert(pageLinks).values(rows.slice(i, i + LINK_BATCH));
 }
 
 /**

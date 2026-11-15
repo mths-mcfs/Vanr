@@ -282,6 +282,11 @@ async function finishUpload(tx: Db, claim: UploadClaim | undefined, row: FileRow
 
 interface NewFile {
   upload?: UploadClaim;
+  /**
+   * Runs in the file's own transaction, before it commits: a check that throws rolls the file and its
+   * version back (and the bytes go), and a write here commits with the file or not at all.
+   */
+  inTx?: (tx: Parameters<Parameters<AppDeps["db"]["transaction"]>[0]>[0], row: FileRow) => Promise<void>;
   workspaceId: string;
   title: string;
   author: ActorRef;
@@ -333,6 +338,7 @@ export async function createFile(
         .returning();
       if (!row || !version) throw new Error("file insert failed");
       await finishUpload(tx, input.upload, row, version);
+      await input.inTx?.(tx, row);
       return { row, version };
     }),
   );

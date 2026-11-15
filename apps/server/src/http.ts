@@ -74,7 +74,13 @@ export async function readJson<S extends ZodType>(
   const empty = !req.body || req.headers.get("content-length") === "0";
   if (!empty && !isJsonType(c.req.header("content-type")))
     throw new HttpError(415, "unsupported_media_type", "Send JSON (application/json)");
-  const text = empty ? "" : await readBodyText(req, limit);
+  // A middleware that already read the body (the wiki's NUL check) left it in Hono's cache: the same cap applies.
+  const cached: unknown = c.req.bodyCache.text;
+  let text = "";
+  if (typeof cached === "string") {
+    if (Buffer.byteLength(cached) > limit) throw tooLarge(limit);
+    text = cached;
+  } else if (!empty) text = await readBodyText(req, limit);
   let raw: unknown = {};
   if (text.trim()) {
     try {
