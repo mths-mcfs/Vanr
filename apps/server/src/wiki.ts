@@ -396,14 +396,23 @@ export async function writeTx<T>(db: Db, fn: (tx: Tx) => Promise<T>): Promise<T>
 }
 
 /** A person's role in the workspace read inside the write's transaction (null: not a member any more). */
-async function roleIn(tx: Tx, workspaceId: string, userId: string) {
-  const [m] = await tx
-    .select({ role: members.role })
-    .from(members)
-    .where(and(eq(members.workspaceId, workspaceId), eq(members.userId, userId)))
-    .for("share");
-  return m?.role ?? null;
-}
+/**
+ * A person's membership read for a write: FOR SHARE, so a removal that comes after waits for the write to
+ * commit, and one that committed before leaves nothing to read. A mutable seam: the Postgres race test
+ * swaps it for a read without the lock (VANR_TEST_WIKI_MEMBER_UNLOCKED).
+ */
+export const memberLock = {
+  role: async (tx: Tx, workspaceId: string, userId: string) => {
+    const [m] = await tx
+      .select({ role: members.role })
+      .from(members)
+      .where(and(eq(members.workspaceId, workspaceId), eq(members.userId, userId)))
+      .for("share");
+    return m?.role ?? null;
+  },
+};
+
+const roleIn = (tx: Tx, workspaceId: string, userId: string) => memberLock.role(tx, workspaceId, userId);
 
 /** Whether `who` may write a locked page, decided with the role read in `tx`: only a person who is an admin. */
 export async function bypassesLock(tx: Tx, workspaceId: string, who: ActorRef): Promise<boolean> {

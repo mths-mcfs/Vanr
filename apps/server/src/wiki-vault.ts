@@ -21,6 +21,7 @@ import {
   normalizeFolder,
   propSchemaOf,
   rejectNul,
+  requireWriter,
   TITLE_BREAKS_LINK,
 } from "./wiki";
 import { checkLinks } from "./wiki-links";
@@ -290,7 +291,14 @@ export async function importVault(
   const liveAttachments = new Set(
     (await attachmentsOf(deps, input.workspaceId)).map((a) => a.path.toLowerCase()),
   );
+  // Each attachment commits with its file only while the author is still a member, read (and held) in the
+  // file's own transaction; past a removal, no attachment more is written and the answer says which.
+  let removed = false;
   for (const file of others) {
+    if (removed) {
+      result.failed.push({ path: file.path, error: "forbidden" });
+      continue;
+    }
     if (result.attachments >= VAULT_LIMITS.attachments) {
       result.failed.push({ path: file.path, error: "wiki.import.too_many_attachments" });
       continue;
@@ -303,29 +311,42 @@ export async function importVault(
       result.skipped++;
       continue;
     }
-    const { row } = await createFile(deps, {
-      workspaceId: input.workspaceId,
-      title: name.slice(0, 200),
-      author: input.author,
-      note: "wiki import",
-      file: { bytes: file.bytes, fileName: name.slice(0, 255), contentType: contentTypeOf(name) },
-    });
-    await deps.db
-      .insert(wikiAttachments)
-      .values({
+    try {
+      await createFile(deps, {
         workspaceId: input.workspaceId,
-        path,
-        pathKey: path.toLowerCase(),
-        fileId: row.id,
-        createdAt: deps.now(),
-      })
-      .onConflictDoUpdate({
-        target: [wikiAttachments.workspaceId, wikiAttachments.pathKey],
-        set: { path, fileId: row.id, createdAt: deps.now() },
+        title: name.slice(0, 200),
+        author: input.author,
+        note: "wiki import",
+        file: { bytes: file.bytes, fileName: name.slice(0, 255), contentType: contentTypeOf(name) },
+        inTx: async (tx, row) => {
+          await requireWriter(tx, input.workspaceId, input.author);
+          await tx
+            .insert(wikiAttachments)
+            .values({
+              workspaceId: input.workspaceId,
+              path,
+              pathKey: path.toLowerCase(),
+              fileId: row.id,
+              createdAt: deps.now(),
+            })
+            .onConflictDoUpdate({
+              target: [wikiAttachments.workspaceId, wikiAttachments.pathKey],
+              set: { path, fileId: row.id, createdAt: deps.now() },
+            });
+        },
       });
+    } catch (err) {
+      if (!(err instanceof HttpError && err.status === 403)) throw err;
+      removed = true;
+      result.failed.push({ path: file.path, error: "forbidden" });
+      continue;
+    }
     liveAttachments.add(path.toLowerCase());
     result.attachments++;
   }
+  // Nothing was written: the removed author gets the same answer as for notes.
+  if (removed && !result.created && !result.attachments)
+    throw new HttpError(403, "forbidden", "You are not a member of this workspace any more");
   return result;
 }
 
