@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { PropDef } from "../props";
+import { applyProps, type PropDef, parsePropText } from "../props";
 import { CsvError, inferColumns, matchHeader, parseCsv, protectCell, toCsv, uniqueNames } from "./csv";
 import { isPosition, keyBetween, keysBetween, PositionError } from "./position";
 import {
@@ -229,14 +229,14 @@ describe("filter (oracle)", () => {
       filter: { prop: "n", op: "gt", value: 1 },
       quickFilters: [{ prop: "s", value: "done" }, { prop: "m" }, { prop: "t", op: "empty" }],
     });
-    expect(effectiveFilter(cfg)).toEqual({
+    expect(effectiveFilter(cfg, DEFS)).toEqual({
       and: [
         { prop: "n", op: "gt", value: 1 },
         { prop: "s", op: "eq", value: "done" },
         { prop: "t", op: "empty" },
       ],
     });
-    expect(effectiveFilter({})).toBeNull();
+    expect(effectiveFilter({}, DEFS)).toBeNull();
   });
 
   test("view config rejects an unknown key", () => {
@@ -398,4 +398,15 @@ describe("CSV formula protection behind leading whitespace", () => {
     }
     expect({ checked, failures: failures.slice(0, 5) }).toEqual({ checked: 20_000, failures: [] });
   });
+});
+
+test("CSV inference only calls a column a date when its values can be applied", () => {
+  for (const value of ["2026-11-01 10:00", "2026-11-01T10:00", "2026-02-30", "2026-11-01T10:00:00Z"]) {
+    const col = inferColumns(["Title", "When"], [["A", value]], () => "o")[1];
+    expect(col?.type).toBe(value.endsWith("Z") ? "date" : "text");
+    const def: PropDef = { id: "d", name: "When", type: col?.type ?? "text" };
+    const parsed = parsePropText(def, value);
+    expect(applyProps([def], {}, { d: parsed }).ok).toBe(true);
+    if (def.type === "text") expect(parsed).toBe(value);
+  }
 });
