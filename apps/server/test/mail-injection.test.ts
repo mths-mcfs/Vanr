@@ -134,22 +134,22 @@ describe("public mail providers: the domain says nothing about the person", () =
     "zoho.com",
     "aol.com",
     "hey.com",
-  ])("%s is a public provider: a thread participant there doesn't make the domain known", (domain) => {
+  ])("%s is a public provider: a thread participant makes neither address nor domain known", (domain) => {
     expect(PUBLIC_MAIL_DOMAINS.has(domain)).toBe(true);
     const out = classifyRecipients([`other@${domain}`, `sender@${domain}`], {
       workspaceDomains: new Set(["mycorp.com"]),
       allowList: [],
       thread: [`sender@${domain}`],
     });
-    expect(out).toEqual({ known: [`sender@${domain}`], fresh: [`other@${domain}`] });
+    expect(out).toEqual({ known: [], fresh: [`other@${domain}`, `sender@${domain}`] });
   });
 
-  test("a company domain in the thread stays known (the rule of the thread's domains is unchanged)", () => {
-    const out = classifyRecipients(["ceo@client.test"], {
+  test("a company participant and a colleague at their domain both stay fresh", () => {
+    const out = classifyRecipients(["support@client.test", "ceo@client.test"], {
       workspaceDomains: new Set(),
       allowList: [],
       thread: ["support@client.test"],
     });
-    expect(out.known).toEqual(["ceo@client.test"]);
+    expect(out).toEqual({ known: [], fresh: ["support@client.test", "ceo@client.test"] });
   });
 });

@@ -216,7 +216,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     dataDir,
     authSecret: e.BETTER_AUTH_SECRET ?? DEV_SECRET,
     authRateLimit: e.AUTH_RATE_LIMIT ?? production,
-    signupOpen: e.SIGNUP_OPEN ?? true,
+    signupOpen: e.SIGNUP_OPEN ?? false,
     social: {
       github: pair(e.GITHUB_CLIENT_ID, e.GITHUB_CLIENT_SECRET),
       google: pair(e.GOOGLE_CLIENT_ID, e.GOOGLE_CLIENT_SECRET),

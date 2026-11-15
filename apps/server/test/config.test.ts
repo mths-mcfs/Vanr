@@ -17,6 +17,16 @@ describe("configuration", () => {
     expect(() => loadConfig(without("BETTER_AUTH_SECRET"))).toThrow("BETTER_AUTH_SECRET");
     expect(loadConfig(PROD).authSecret).toBe("x".repeat(32));
   });
+
+  test.each([undefined, "development", "test", "production"])(
+    "signup is closed unless explicitly opened (%s)",
+    (nodeEnv) => {
+      const env = { ...PROD, NODE_ENV: nodeEnv };
+      expect(loadConfig(env).signupOpen).toBe(false);
+      expect(loadConfig({ ...env, SIGNUP_OPEN: "true" }).signupOpen).toBe(true);
+      expect(loadConfig({ ...env, SIGNUP_OPEN: "false" }).signupOpen).toBe(false);
+    },
+  );
 });
 
 /** The minimum production needs to start. */
