@@ -2,7 +2,7 @@
 // `,` `;` or tab separator detected on the first line) and writing neutralizes formulas: a cell that starts
 // with = + - @ tab or CR gets an apostrophe in front, so Excel and Sheets do not run it (CSV injection,
 // OWASP). A negative number stays as it is. On the way back, the apostrophe is removed.
-import { isCheckboxWord, type PropDef, type PropOption } from "../props";
+import { isCalendarIso, isCheckboxWord, type PropDef, type PropOption } from "../props";
 
 export interface CsvLimits {
   maxBytes: number;
@@ -154,7 +154,6 @@ export function toCsv(rows: readonly (readonly string[])[]): string {
 
 // ---------- schema inference on import ----------
 
-const ISO_DAY = /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})?)?$/;
 const URL_RE = /^https?:\/\/\S+$/i;
 
 export interface InferredColumn {
@@ -180,7 +179,7 @@ export function inferColumns(
     if (!values.length) return { name, type: "text" };
     if (values.every((v) => NUMBER.test(v))) return { name, type: "number" };
     if (values.every(isCheckboxWord)) return { name, type: "checkbox" };
-    if (values.every((v) => ISO_DAY.test(v))) return { name, type: "date" };
+    if (values.every(isCalendarIso)) return { name, type: "date" };
     if (values.every((v) => URL_RE.test(v))) return { name, type: "url" };
     const distinct = [...new Set(values)];
     if (

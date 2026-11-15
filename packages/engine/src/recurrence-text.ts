@@ -262,7 +262,14 @@ export function parseRulePhrase(phrase: string, timezone: string): ParsedRule {
   if (
     /\b(dias uteis|dia util|de segunda a sexta|weekdays|every weekday|monday to friday|mon-fri)\b/.test(text)
   ) {
-    return withTimes({ freq: "daily", weekdays: [...WORKDAYS], timezone });
+    m = /\b(?:a cada|every) (\d+) ?(dias?|days?|semanas?|weeks?)\b/.exec(text);
+    if (!m && /\b(?:a cada|every) \d+\b/.test(text)) return { ok: false, code: "rule.not_understood" };
+    return withTimes({
+      freq: m && /^(semana|week)/.test(m[2] ?? "") ? "weekly" : "daily",
+      ...(m ? { interval: Number(m[1]) } : {}),
+      weekdays: [...WORKDAYS],
+      timezone,
+    });
   }
   m = /\b(?:a cada|every) (\d+) ?(semanas?|weeks?)\b/.exec(text);
   if (m)

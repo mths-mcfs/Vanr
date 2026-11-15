@@ -17,7 +17,7 @@ import type {
   SourceRef,
   Viewer,
 } from "./search";
-import { parseText, snippetFor, type TextQuery } from "./search-query";
+import { parseText, snippetFor, type TextQuery, words } from "./search-query";
 import { fold } from "./text";
 
 /** What the permission needs to know about the world, asked at query time. */
@@ -109,17 +109,23 @@ function tsQuery(q: TextQuery, prefix: string | undefined, match: "all" | "any")
   // The prefix is only letters and digits (parseText guarantees it): safe inside to_tsquery.
   if (prefix) parts.push(sql`to_tsquery('simple', ${`${prefix}:*`})`);
   if (!parts.length) return null;
-  const positive = sql`(${sql.join(parts, match === "any" ? sql` || ` : sql` && `)})`;
-  const excl = excluded(q);
-  return excl ? sql`${positive} && !! ${excl}` : positive;
+  return sql`(${sql.join(parts, match === "any" ? sql` || ` : sql` && `)})`;
 }
 
-/** What `-word` removes, as a tsquery (it applies to all three legs). */
+/** A/D hold one exact sequence; B/C hold stems and must not invent phrase adjacencies. */
+const phraseMatch = (phrase: string) =>
+  sql`(ts_filter(c.tsv, '{A,D}') @@ phraseto_tsquery('simple', ${phrase}))`;
+
+/** Exclusions apply to every leg; quoted phrases keep stop words and exact positions. */
 function excluded(q: TextQuery): SQL | null {
   if (!q.exclude.length) return null;
   return sql`(${sql.join(
-    q.exclude.map((e) => sql`phraseto_tsquery('portuguese', ${e}) || phraseto_tsquery('simple', ${e})`),
-    sql` || `,
+    q.exclude.map((e) =>
+      e.includes(" ")
+        ? phraseMatch(e)
+        : sql`(c.tsv @@ (plainto_tsquery('portuguese', ${e}) || plainto_tsquery('simple', ${e})))`,
+    ),
+    sql` or `,
   )})`;
 }
 
@@ -189,6 +195,10 @@ export class PgSearchIndex implements SearchIndex {
       }),
     );
     await this.db.transaction(async (tx) => {
+      // Coordinate complete replacements, even when the source has no rows yet.
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`${source.kind}:${source.id}`}, 0))`,
+      );
       // The vector of an unchanged chunk (same hash) stays: editing a page does not send it all again.
       const keep = new Map<string, string>();
       if (vector) {
@@ -204,7 +214,8 @@ export class PgSearchIndex implements SearchIndex {
       );
       for (const { c, hash, embed } of prepared) {
         const titleFold = fold(c.title);
-        const textFold = fold(c.text);
+        const titleWords = words(c.title).join(" ");
+        const textWords = words(c.text).join(" ");
         const kept = embed && vector ? keep.get(hash) : undefined;
         const state = !embed ? "none" : kept ? "done" : "pending";
         const created = new Date(c.createdAt ?? c.updatedAt);
@@ -213,8 +224,8 @@ export class PgSearchIndex implements SearchIndex {
             scope_kind, channel_id, principals, author_id, page, has, is_facets, mentions, untrusted, created_at, updated_at,
             embed_state, text_hash${vector ? sql`, embedding` : sql``})
           values (${c.workspaceId}, ${source.kind}, ${source.id}, ${c.ordinal}, ${c.title}, ${titleFold}, ${c.text},
-            setweight(to_tsvector('portuguese', ${titleFold}), 'A') || setweight(to_tsvector('simple', ${titleFold}), 'A')
-              || to_tsvector('portuguese', ${textFold}) || to_tsvector('simple', ${textFold}),
+            setweight(to_tsvector('simple', ${titleWords}), 'A') || to_tsvector('simple', ${textWords})
+              || setweight(to_tsvector('portuguese', ${titleWords}), 'B') || setweight(to_tsvector('portuguese', ${textWords}), 'C'),
             ${c.url}, ${c.scope.kind}, ${c.scope.kind === "channel" ? c.scope.channelId : null},
             ${textArray(c.scope.kind === "private" ? c.scope.principals : c.scope.kind === "channel" ? (c.scope.also ?? []) : [])}, ${c.authorId ?? null}, ${c.page ?? null},
             ${textArray(c.facets?.has ?? [])}, ${textArray(c.facets?.is ?? [])}, ${textArray(c.facets?.mentions ?? [])},
@@ -225,9 +236,14 @@ export class PgSearchIndex implements SearchIndex {
   }
 
   async remove(source: SourceRef): Promise<void> {
-    await this.db.execute(
-      sql`delete from search_chunks where source_kind = ${source.kind} and source_id = ${source.id}`,
-    );
+    await this.db.transaction(async (tx) => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`${source.kind}:${source.id}`}, 0))`,
+      );
+      await tx.execute(
+        sql`delete from search_chunks where source_kind = ${source.kind} and source_id = ${source.id}`,
+      );
+    });
   }
 
   /** Deletes everything of the workspace (workspace deleted). */
@@ -271,14 +287,43 @@ export class PgSearchIndex implements SearchIndex {
           select id from search_chunks
           where embed_state = 'pending' or (embed_state = 'working' and embed_claimed_at < ${stale})
           order by id limit ${batch} for update skip locked)
-        returning id, workspace_id, title, text, text_hash`),
+        returning id, workspace_id, scope_kind, channel_id`),
     );
     if (!picked.length) return 0;
     // One call per workspace: the cost goes to the ledger of whoever owns the text.
     const byWorkspace = new Map<string, Row[]>();
     for (const r of picked) byWorkspace.set(r.workspace_id, [...(byWorkspace.get(r.workspace_id) ?? []), r]);
     let n = 0;
-    for (const [workspaceId, rows] of byWorkspace) {
+    for (const [workspaceId, claims] of byWorkspace) {
+      // Another workspace's provider call may have waited while these chunks were removed or hidden.
+      const allowed = await Promise.all(
+        claims.map((r) =>
+          r.scope_kind === "workspace"
+            ? true
+            : r.scope_kind === "channel"
+              ? this.opts.access.isPublicChannel(r.channel_id)
+              : false,
+        ),
+      );
+      const eligible = claims.filter((_, i) => allowed[i]);
+      const discarded = claims.filter((_, i) => !allowed[i]);
+      if (discarded.length)
+        await this.db.execute(sql`
+        update search_chunks set embed_state = 'none', embed_claimed_at = null
+        where id in (${sql.join(
+          discarded.map((r) => sql`${r.id}`),
+          sql`, `,
+        )}) and embed_state = 'working'`);
+      if (!eligible.length) continue;
+      const rows = rowsOf(
+        await this.db.execute(sql`
+        select id, title, text, text_hash from search_chunks
+        where id in (${sql.join(
+          eligible.map((r) => sql`${r.id}`),
+          sql`, `,
+        )}) and embed_state = 'working'`),
+      );
+      if (!rows.length) continue;
       let result: Awaited<ReturnType<Embedder["embed"]>>;
       try {
         result = await embedder.embed(
@@ -355,13 +400,25 @@ export class PgSearchIndex implements SearchIndex {
   async search(viewer: Viewer, query: string, opts: SearchOptions = {}): Promise<SearchHit[]> {
     const q = parseText(query);
     const prefix = opts.mode === "typing" ? q.terms.pop() : undefined;
-    const tsq = tsQuery(q, prefix, opts.match ?? "all");
+    const match = opts.match ?? "all";
+    const tsq = tsQuery(q, prefix, match);
     if (!tsq) return [];
     const perm = await this.permission(viewer);
     if (!perm) return [];
+    const terms = tsQuery({ ...q, phrases: [] }, prefix, match);
+    const phrases = q.phrases.map(phraseMatch);
+    const join = match === "any" ? sql` or ` : sql` and `;
+    const lexicalMatch = sql`(${sql.join([...(terms ? [sql`c.tsv @@ ${terms}`] : []), ...phrases], join)})`;
+    // With `any`, a free term can match approximately. A phrase-only query still needs a real phrase.
+    const requirePhrases = phrases.length && (match === "all" || !terms);
     const excl = excluded(q);
     const where = sql.join(
-      [perm, ...this.filters(opts.kinds, opts.filters), ...(excl ? [sql`not (c.tsv @@ ${excl})`] : [])],
+      [
+        perm,
+        ...this.filters(opts.kinds, opts.filters),
+        ...(requirePhrases ? [sql`(${sql.join(phrases, join)})`] : []),
+        ...(excl ? [sql`not ${excl}`] : []),
+      ],
       sql` and `,
     );
     const limit = Math.max(1, Math.min(opts.limit ?? 20, 500));
@@ -371,7 +428,7 @@ export class PgSearchIndex implements SearchIndex {
     const lexical = rowsOf(
       await this.db.execute(sql`
         select c.id from search_chunks c, (select ${tsq} as q) tq
-        where ${where} and c.tsv @@ tq.q
+        where ${where} and c.tsv @@ tq.q and ${lexicalMatch}
         order by ts_rank_cd(c.tsv, tq.q, 32) desc, c.created_at desc
         limit ${legLimit}`),
     );
@@ -428,6 +485,8 @@ export class PgSearchIndex implements SearchIndex {
       });
     const top = [...score.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]).slice(0, limit);
     if (!top.length) return [];
+    const currentPerm = await this.permission(viewer);
+    if (!currentPerm) return [];
     const rows = rowsOf(
       await this.db.execute(sql`
         select c.id, c.source_kind, c.source_id, c.ordinal, c.title, c.text, c.url, c.channel_id, c.author_id,
@@ -436,7 +495,7 @@ export class PgSearchIndex implements SearchIndex {
         where c.id in (${sql.join(
           top.map(([id]) => sql`${id}`),
           sql`, `,
-        )}) and ${perm}`),
+        )}) and ${currentPerm}`),
     );
     const byId = new Map(rows.map((r) => [Number(r.id), r]));
     const hits: SearchHit[] = [];

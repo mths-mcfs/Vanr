@@ -28,7 +28,7 @@ describe("email destinations", () => {
     allowList: ["@partner.test", "owner@gmail.com"],
     thread: ["John@Customer.test", "mary@gmail.com"],
   };
-  test("workspace, thread, mailbox list; a public provider only counts the exact address", () => {
+  test("only workspace domains and the admin list make recipients known", () => {
     expect(
       classifyRecipients(
         [
@@ -44,15 +44,14 @@ describe("email destinations", () => {
         known,
       ),
     ).toEqual({
-      known: [
-        "ana@workshop.test",
+      known: ["ana@workshop.test", "x@partner.test", "owner@gmail.com"],
+      fresh: [
         "john@customer.test",
         "other@customer.test",
         "mary@gmail.com",
-        "x@partner.test",
-        "owner@gmail.com",
+        "jane@gmail.com",
+        "x@attacker.test",
       ],
-      fresh: ["jane@gmail.com", "x@attacker.test"],
     });
   });
   test("an empty mailbox list allows nobody", () => {

@@ -9,7 +9,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { strToU8, unzipSync, zipSync } from "fflate";
 import * as Y from "yjs";
 import type { RunningServer } from "../src/server";
-import { MAX_BODY, pageBySlug, pageLock, purgeWikiTrash, savePage } from "../src/wiki";
+import { MAX_BODY, memberLock, pageBySlug, pageLock, purgeWikiTrash, savePage } from "../src/wiki";
 import { MAX_LINKS } from "../src/wiki-links";
 import { wikiMarkdown } from "../src/wiki-md";
 import { exportVault, VAULT_LIMITS } from "../src/wiki-vault";
@@ -1079,6 +1079,52 @@ function holdNextTransaction(srv: RunningServer) {
   return { started, release };
 }
 
+const PNG = new Uint8Array(Buffer.from(VAULT_ATTACHMENTS[0]?.base64 ?? "", "base64"));
+
+/** Holds the first attachment's write once its bytes are stored, before its transaction begins. */
+function holdAttachmentWrite(srv: RunningServer) {
+  const { blobs } = srv.deps;
+  const put = blobs.put.bind(blobs);
+  let reached!: () => void;
+  let release!: () => void;
+  const reachedP = new Promise<void>((r) => {
+    reached = r;
+  });
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  blobs.put = (async (...args: Parameters<typeof put>) => {
+    blobs.put = put;
+    await put(...args);
+    reached();
+    await gate;
+  }) as typeof put;
+  return { reached: reachedP, release };
+}
+
+async function removeMember(srv: RunningServer, workspaceId: string, userId: string) {
+  await srv.deps.db
+    .delete(schema.members)
+    .where(and(eq(schema.members.workspaceId, workspaceId), eq(schema.members.userId, userId)));
+}
+
+/** The workspace's Drive files, their versions and the wiki's attachment mappings. */
+async function storedAttachments(srv: RunningServer, workspaceId: string) {
+  const { db } = srv.deps;
+  const fileRows = await db
+    .select({ id: schema.files.id })
+    .from(schema.files)
+    .where(eq(schema.files.workspaceId, workspaceId));
+  const versions = fileRows.length
+    ? (await db.select().from(schema.fileVersions)).filter((v) => fileRows.some((f) => f.id === v.fileId))
+        .length
+    : 0;
+  const mappings = (
+    await db.select().from(schema.wikiAttachments).where(eq(schema.wikiAttachments.workspaceId, workspaceId))
+  ).length;
+  return { files: fileRows.length, versions, mappings };
+}
+
 describe("limits at the border", () => {
   const status = async (p: Promise<unknown>) => {
     const e = await apiError(p);
@@ -1110,6 +1156,67 @@ describe("limits at the border", () => {
       ),
     ).toEqual([400, "wiki.too_many_links"]);
     expect((await ana.api.wiki.getWikiPage(workspaceId, page.slug)).version).toBe(1);
+  });
+
+  test("pages at the maximum size made of unmatched delimiters save at once and the server keeps answering (health)", async () => {
+    const { workspaceId, ana } = await team();
+    const worst = [
+      "`".repeat(MAX_BODY),
+      `${"[[a".repeat(MAX_BODY / 3 - 1)}[[`,
+      "![[".repeat(Math.floor(MAX_BODY / 3)),
+      "```\n```\n\n".repeat(Math.floor(MAX_BODY / 9)),
+    ];
+    const created = await ana.api.wiki.createWikiPage(workspaceId, { title: "Delimiters", body: "x" });
+    let version = 1;
+    for (const body of worst) {
+      const started = Date.now();
+      const [saved, health] = await Promise.all([
+        ana.api.wiki.replaceWikiPage(workspaceId, created.slug, { body, parentVersion: version }),
+        fetch(`${server.url}/api/v1/health`).then((r) => r.status),
+      ]);
+      expect([body.slice(0, 6), health, saved.body.length]).toEqual([body.slice(0, 6), 200, body.length]);
+      expect([body.slice(0, 6), Date.now() - started < 5_000]).toEqual([body.slice(0, 6), true]);
+      version = saved.version;
+    }
+    const imported = await ana.api.wiki.importWiki(workspaceId, {
+      files: [{ path: "Ticks.md", text: "`".repeat(MAX_BODY) }],
+    });
+    expect(imported.created).toBe(1);
+  });
+
+  test("an import of only attachments by someone removed meanwhile stores nothing and answers 403", async () => {
+    const { workspaceId, beto } = await team();
+    const hold = holdAttachmentWrite(server);
+    const importing = apiError(
+      beto.api.wiki.importWikiVault(workspaceId, {
+        file: new Blob([zipSync({ "photo.png": PNG })]),
+        fileName: "only.zip",
+      }),
+    );
+    await hold.reached;
+    await removeMember(server, workspaceId, beto.user.id);
+    hold.release();
+    expect([(await importing).status, (await importing).code]).toEqual([403, "forbidden"]);
+    expect(await storedAttachments(server, workspaceId)).toEqual({ files: 0, versions: 0, mappings: 0 });
+  });
+
+  test("removed between the notes and the attachments: the notes stay, no attachment is stored, the answer says so", async () => {
+    const { workspaceId, beto } = await team();
+    const hold = holdAttachmentWrite(server);
+    const importing = beto.api.wiki.importWikiVault(workspaceId, {
+      file: new Blob([zipSync({ "Note.md": strToU8("![[photo.png]]"), "photo.png": PNG, "other.png": PNG })]),
+      fileName: "both.zip",
+    });
+    await hold.reached;
+    await removeMember(server, workspaceId, beto.user.id);
+    hold.release();
+    const r = await importing;
+    expect([r.created, r.attachments]).toEqual([1, 0]);
+    expect(r.failed).toEqual([
+      { path: "photo.png", error: "forbidden" },
+      { path: "other.png", error: "forbidden" },
+    ]);
+    expect(await storedAttachments(server, workspaceId)).toEqual({ files: 0, versions: 0, mappings: 0 });
   });
 
   test("a NUL character is rejected with 400 on every way in: body, title, folder, properties, path, query, import", async () => {
@@ -1608,6 +1715,70 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki saves on Postgres"), () => 
       expect(panel.inboundLinks.map((l) => l.slug)).toEqual([b.slug]);
     } finally {
       pageLock.row = lock;
+      await pg.stop();
+    }
+  }, 60_000);
+});
+
+const MEMBER_UNLOCKED = process.env.VANR_TEST_WIKI_MEMBER_UNLOCKED === "1";
+
+describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki attachments on Postgres"), () => {
+  test("a removal that comes while an attachment is written waits for it: the attachment committed while a member", async () => {
+    const pg = await startTestServer({ env: { DATABASE_URL: await testDatabaseUrl("wikiattach") } });
+    const locked = memberLock.role;
+    try {
+      const ana = withApi(await signedIn(pg, "Ana", email("ana")));
+      const { workspaceId } = await seedWorkspace(pg, ana, "Postgres attachments");
+      const beto = withApi(await memberOf(pg, workspaceId, "Beto", email("beto")));
+      // VANR_TEST_WIKI_MEMBER_UNLOCKED=1: the membership read without its lock (the CI expects a failure).
+      const read: typeof locked = MEMBER_UNLOCKED
+        ? async (tx, ws, userId) => {
+            const [m] = await tx
+              .select({ role: schema.members.role })
+              .from(schema.members)
+              .where(and(eq(schema.members.workspaceId, ws), eq(schema.members.userId, userId)));
+            return m?.role ?? null;
+          }
+        : locked;
+      // The attachment's transaction is held right after it read the membership.
+      let reached!: () => void;
+      let release!: () => void;
+      const reachedP = new Promise<void>((r) => {
+        reached = r;
+      });
+      const gate = new Promise<void>((r) => {
+        release = r;
+      });
+      let held = false;
+      memberLock.role = async (tx, ws, userId) => {
+        const role = await read(tx, ws, userId);
+        if (!held) {
+          held = true;
+          reached();
+          await gate;
+        }
+        return role;
+      };
+      const importing = beto.api.wiki.importWikiVault(workspaceId, {
+        file: new Blob([zipSync({ "photo.png": PNG })]),
+        fileName: "p.zip",
+      });
+      await reachedP;
+      const removing = removeMember(pg, workspaceId, beto.user.id);
+      // With the lock the removal waits for the attachment's transaction; without it, it ends at once.
+      const first = await Promise.race([
+        removing.then(() => "the removal ended before the attachment"),
+        waitingForLock(pg, "the removal neither ended nor waited").then(
+          () => "the removal waited for the attachment",
+        ),
+      ]);
+      release();
+      const r = await importing;
+      await removing;
+      expect(first).toBe("the removal waited for the attachment");
+      expect(r.attachments).toBe(1);
+    } finally {
+      memberLock.role = locked;
       await pg.stop();
     }
   }, 60_000);

@@ -3,7 +3,7 @@
 // oracle of the same rule (the server test compares the two by fuzzing) and lets the front end update the
 // screen before the response arrives.
 import { z } from "zod";
-import { utcMs } from "../formula/values";
+import { parseIso, utcMs } from "../formula/values";
 import { isCalendarIso, type PropActor, type PropDef } from "../props";
 
 export const VIEW_TYPES = [
@@ -36,14 +36,16 @@ export const OPS_BY_KIND = {
   status: ["eq", "neq", "in", "not_in", "group", "empty", "not_empty"],
   multi: ["has", "has_not", "has_any", "has_all", "empty", "not_empty"],
   person: ["has", "has_not", "empty", "not_empty"],
-  date: ["eq", "before", "after", "on_or_before", "on_or_after", "between", "empty", "not_empty"],
+  date: ["eq", "before", "after", "on_or_before", "on_or_after", "between", "overlaps", "empty", "not_empty"],
   checkbox: ["eq"],
   file: ["empty", "not_empty"],
 } as const satisfies Record<FilterKind, readonly string[]>;
 
-/** Family of the property (formula: by its result type). */
+/** Family of the property (formula and rollup: by the result type; relation: a list of row ids). */
 export function filterKind(def: PropDef): FilterKind {
   switch (def.type) {
+    case "relation":
+      return "multi";
     case "number":
       return "number";
     case "select":
@@ -65,7 +67,8 @@ export function filterKind(def: PropDef): FilterKind {
     case "file":
       return "file";
     case "formula":
-      switch (def.formula?.resultType) {
+    case "rollup":
+      switch ((def.type === "formula" ? def.formula : def.rollup)?.resultType) {
         case "number":
           return "number";
         case "boolean":
@@ -74,6 +77,8 @@ export function filterKind(def: PropDef): FilterKind {
           return "date";
         case "list":
           return "file";
+        case "person":
+          return "person";
         default:
           return "text";
       }
@@ -224,6 +229,8 @@ const VALUES: { [K in FilterKind]: Partial<Record<(typeof OPS_BY_KIND)[K][number
     on_or_before: dateValue,
     on_or_after: dateValue,
     between: z.tuple([dateValue, dateValue]),
+    /** The date's span (start and end) touches [from, to]: the calendar and the timeline ask for the window. */
+    overlaps: z.tuple([dateValue, dateValue]),
   },
   checkbox: { eq: z.boolean() },
   file: {},
@@ -243,6 +250,11 @@ export function checkFilter(filter: Filter, defs: readonly PropDef[], depth = 1)
   if (!ops.includes(filter.op)) return [`bad_op:${filter.prop}:${filter.op}`];
   const value = (VALUES[kind] as Partial<Record<string, z.ZodType>>)[filter.op];
   if (value && !value.safeParse(filter.value).success) return [`bad_value:${filter.prop}:${filter.op}`];
+  if (value && (kind === "option" || kind === "status" || kind === "multi") && filter.op !== "group") {
+    const ids = Array.isArray(filter.value) ? filter.value : [filter.value];
+    if (ids.some((id) => !def.options?.some((o) => o.id === id)))
+      return [`bad_value:${filter.prop}:${filter.op}`];
+  }
   return [];
 }
 
@@ -266,14 +278,23 @@ export function countConditions(filter: Filter): number {
 }
 
 /** The view's effective filter: the saved one AND the quick filters that have a value. */
-export function effectiveFilter(config: ViewConfig, extra?: Filter | null): Filter | null {
+export function effectiveFilter(
+  config: ViewConfig,
+  defs: readonly PropDef[],
+  extra?: Filter | null,
+): Filter | null {
   const parts: Filter[] = [];
   if (config.filter) parts.push(config.filter);
   for (const q of config.quickFilters ?? []) {
     if (q.value === undefined && q.op !== "empty" && q.op !== "not_empty") continue;
     parts.push({
       prop: q.prop,
-      op: q.op ?? defaultOp(q.value),
+      op:
+        q.op ??
+        defaultOp(
+          defs.find((d) => d.id === q.prop),
+          q.value,
+        ),
       ...(q.value === undefined ? {} : { value: q.value }),
     });
   }
@@ -282,9 +303,11 @@ export function effectiveFilter(config: ViewConfig, extra?: Filter | null): Filt
   return parts.length === 1 ? (parts[0] as Filter) : { and: parts };
 }
 
-function defaultOp(value: unknown): string {
-  if (Array.isArray(value)) return "in";
-  if (typeof value === "object" && value !== null && "type" in value) return "has";
+function defaultOp(def: PropDef | undefined, value: unknown): string {
+  const kind = def && filterKind(def);
+  if (kind === "person") return "has";
+  if (kind === "multi") return Array.isArray(value) ? "has_any" : "has";
+  if (Array.isArray(value)) return kind === "date" ? "between" : "in";
   return "eq";
 }
 
@@ -359,7 +382,8 @@ export function cellOf(def: PropDef, row: RowView): unknown {
       return row.createdBy;
     case "editor":
       return row.editedBy;
-    case "formula": {
+    case "formula":
+    case "rollup": {
       const v = row.computed[def.id];
       return v && typeof v === "object" && !Array.isArray(v) && "err" in v ? undefined : v;
     }
@@ -372,13 +396,32 @@ function isEmpty(v: unknown): boolean {
   return v === undefined || v === null || v === "" || (Array.isArray(v) && v.length === 0);
 }
 
+/**
+ * The calendar day of a date's text: a day as written; a date with a time, the UTC day of its instant (so
+ * `2026-11-01T00:30+02:00` is October 31st, the same day as `2026-10-31T22:30Z`). An invalid time: null.
+ */
+export function dayOfText(text: string): string | null {
+  if (!text.includes("T")) return text.slice(0, 10);
+  const p = parseIso(text);
+  return p ? isoDay(p.ms) : null;
+}
+
 /** Day of a date cell: `start` (props, formula) or the recorded instant (created/edited at). */
 function dayOf(def: PropDef, v: unknown): string | null {
   if (v === undefined || v === null) return null;
-  if (def.type === "created_time" || def.type === "edited_time") return isoDay(Date.parse(String(v)));
-  if (typeof v === "object" && "start" in (v as object))
-    return String((v as { start: string }).start).slice(0, 10);
+  if (def.type === "created_time" || def.type === "edited_time") {
+    // A recorded instant that doesn't parse has no day (Date.parse would give NaN).
+    const parsed = parseIso(String(v));
+    return parsed ? isoDay(parsed.ms) : null;
+  }
+  if (typeof v === "object" && "start" in v && typeof v.start === "string") return dayOfText(v.start);
   return null;
+}
+
+/** End day of a date's span (`{start, end}`); without an end, null. */
+function endDayOf(v: unknown): string | null {
+  if (typeof v !== "object" || v === null || !("end" in v)) return null;
+  return typeof v.end === "string" && v.end ? dayOfText(v.end) : null;
 }
 
 const sameActor = (a: unknown, b: PropActor) =>
@@ -486,11 +529,14 @@ export function rowMatches(
     }
     case "date": {
       const d = dayOf(def, v);
-      if (filter.op === "between") {
+      if (filter.op === "between" || filter.op === "overlaps") {
         const [a, b] = Array.isArray(want) ? want : [];
         const from = resolveDay(a, ctx.now);
         const to = resolveDay(b, ctx.now);
-        return d !== null && from !== null && to !== null && d >= from && d <= to;
+        if (d === null || from === null || to === null) return false;
+        if (filter.op === "between") return d >= from && d <= to;
+        const end = endDayOf(v) ?? d;
+        return d <= to && (end > d ? end : d) >= from;
       }
       const w = resolveDay(want, ctx.now);
       if (d === null || w === null) return false;

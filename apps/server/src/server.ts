@@ -7,8 +7,9 @@ import { postgresConnector, type SqlConnector } from "@vanr/engine/sqlconn";
 import { count } from "drizzle-orm";
 import { createApp } from "./app";
 import { createAuth, type SignupDecision } from "./auth";
+import { resumeRecalcs, stopRecalcs } from "./bases/write";
 import type { Config } from "./config";
-import type { AppDeps, RuntimePort } from "./context";
+import { ABSENT, type AppDeps, type RuntimePort } from "./context";
 import { purgeTrash } from "./drive";
 import { extractPending } from "./drive-extract";
 import { errorBody, HttpError } from "./http";
@@ -19,16 +20,33 @@ import { log } from "./logger";
 import { createMailer, type Mailer } from "./mailer";
 import { testModelCheck } from "./models";
 import { loadVapid, webPushSender } from "./push";
-import { Hub } from "./realtime/hub";
+import {
+  browserClose,
+  browserMessage,
+  browserOpen,
+  checkBrowserUpgrade,
+  REVALIDATE_MS,
+  revalidateBrowsers,
+} from "./realtime/browser-socket";
+import { type BrowserSocket, type BrowserSocketData, Hub } from "./realtime/hub";
 import { isTransfer, TRANSFER_IDLE_SECONDS } from "./routes/drive";
 import { expireUploads } from "./routes/drive-upload";
-import { RunnerHub } from "./runners/hub";
+import { hasPendingInvite, INVITE_COOKIE } from "./routes/invitations";
+import { dropAllLiveViews } from "./runners/browser-live";
+import { RunnerHub, type RunnerSocketData } from "./runners/hub";
+import { revalidateInterventions } from "./runners/requests";
+import { runnerClose, runnerMessage, runnerOpen, runnerSocketData } from "./runners/socket";
 import { BackgroundWork } from "./runtime/background";
 import { backfillSearch, createSearchIndex, searchTick } from "./search-index";
 import { FirstUserPlace, SIGNUP_QUEUE_LIMITS, type SignupQueueLimits, signupDecision } from "./signup-queue";
 import { postgresLedger } from "./usage-ledger";
 import { purgeWikiTrash } from "./wiki";
-import { COLLAB_PATH, type CollabSocketData, createWikiCollab, MAX_FRAME } from "./wiki-collab";
+import {
+  COLLAB_PATH,
+  type CollabSocketData,
+  createWikiCollab,
+  MAX_FRAME as WIKI_MAX_FRAME,
+} from "./wiki-collab";
 import { wikiMarkdown } from "./wiki-md";
 
 interface StartOptions {
@@ -131,10 +149,14 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     new Response("starting", { status: 503 });
 
   const runnersHub = new RunnerHub();
+  // After the listener's stop in the undo (its close handlers queue the runners' last transitions) and before
+  // the database closes: those transitions run to the end.
+  undo.push(() => runnersHub.settled());
   // The wiki editor (Milkdown without a browser) comes up before accepting connections.
   await wikiMarkdown();
-  // Set once the deps exist: before that, an upgrade has nothing to check against.
+  // The sockets answer only once the deps exist; until then an upgrade gets the 503 of `handler`.
   let depsRef: AppDeps | null = null;
+  let origins: string[] = [];
   const collab = createWikiCollab(
     () => {
       if (!depsRef) throw new Error("server not started");
@@ -142,31 +164,81 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     },
     { idlePublishMs: opts.wikiIdlePublishMs, debounceMs: opts.wikiDebounceMs },
   );
+  type SocketData = BrowserSocketData | RunnerSocketData | CollabSocketData;
+  const isRunner = (ws: Bun.ServerWebSocket<SocketData>): ws is Bun.ServerWebSocket<RunnerSocketData> =>
+    ws.data.kind === "runner";
+  const isBrowser = (ws: Bun.ServerWebSocket<SocketData>): ws is BrowserSocket => ws.data.kind === "browser";
+  const isWiki = (ws: Bun.ServerWebSocket<SocketData>): ws is Bun.ServerWebSocket<CollabSocketData> =>
+    ws.data.kind === "wiki";
+  const upgradeRequired = () =>
+    Response.json(errorBody("upgrade_required", "Use WebSocket"), { status: 426 });
 
-  const server = Bun.serve<CollabSocketData>({
+  const server = Bun.serve<SocketData>({
     port: config.port,
     ...(opts.idleTimeoutSeconds !== undefined ? { idleTimeout: opts.idleTimeoutSeconds } : {}),
     async fetch(req, srv) {
       const path = new URL(req.url).pathname;
       // Large bodies (Drive downloads and uploads) get a longer inactivity limit than the rest.
       if (isTransfer(path)) srv.timeout(req, TRANSFER_IDLE_SECONDS);
-      // Slice S2 (realtime/browser-socket, runners/socket) adds here the WebSocket upgrades of
-      // /api/v1/realtime and /api/v1/runners/connect, and their handlers.
+      // The browser's real time: the session cookie and the origin are checked before the upgrade.
+      if (depsRef && path === "/api/v1/realtime") {
+        const check = await checkBrowserUpgrade(depsRef, req, origins);
+        if (!check.ok) return check.response;
+        if (srv.upgrade(req, { data: check.data })) return undefined;
+        return upgradeRequired();
+      }
+      // The paired runners: the authentication is the `hello` with the session, inside the socket.
+      if (depsRef && path === "/api/v1/runners/connect") {
+        if (srv.upgrade(req, { data: runnerSocketData() })) return undefined;
+        return upgradeRequired();
+      }
+      // The live wiki: the session cookie, the origin, the membership and the connection caps before the upgrade.
       if (depsRef && path === COLLAB_PATH) {
         const check = await collab.upgrade(req, origins);
         if (!check.ok) return check.response;
         if (srv.upgrade(req, { data: check.data })) return undefined;
-        return Response.json(errorBody("upgrade_required", "Use WebSocket"), { status: 426 });
+        return upgradeRequired();
       }
       return handler(req);
     },
     websocket: {
-      maxPayloadLength: MAX_FRAME,
-      open: (ws) => collab.socket.open(ws),
-      message: (ws, raw) => collab.socket.message(ws, raw),
-      close: (ws, code, reason) => collab.socket.close(ws, code, reason),
+      // The biggest frame any side may send (a runner's live view frame); each handler has its own limit.
+      maxPayloadLength: Math.max(8 * 1024 * 1024, WIKI_MAX_FRAME),
+      open(ws) {
+        if (isWiki(ws)) return collab.socket.open(ws);
+        if (!depsRef) return;
+        if (isRunner(ws)) runnerOpen(depsRef, ws);
+        else if (isBrowser(ws)) browserOpen(depsRef, ws);
+      },
+      async message(ws, raw) {
+        if (isWiki(ws)) {
+          // The wiki's own frame cap: a larger frame never reaches the live session.
+          if ((typeof raw === "string" ? Buffer.byteLength(raw) : raw.byteLength) > WIKI_MAX_FRAME)
+            return ws.close(1009, "frame too large");
+          return collab.socket.message(ws, raw);
+        }
+        if (!depsRef) return;
+        try {
+          if (isRunner(ws)) await runnerMessage(depsRef, ws, raw);
+          else if (isBrowser(ws)) await browserMessage(depsRef, ws, raw);
+        } catch (err) {
+          log.error("ws.message_failed", { err });
+          if (isBrowser(ws)) ws.send(JSON.stringify({ type: "error", code: "internal" }));
+        }
+      },
+      close(ws, code, reason) {
+        if (isWiki(ws)) return collab.socket.close(ws, code, reason);
+        if (!depsRef) return;
+        if (isRunner(ws)) {
+          const deps = depsRef;
+          void runnerClose(deps, ws).catch((err) => log.error("runner.close_failed", { err }));
+        } else if (isBrowser(ws)) browserClose(depsRef, ws);
+      },
     },
   });
+  // After the listener in the undo (it runs before the database closes): the browsers' close handlers ran in
+  // server.stop and left the live views' stop timers; they go away here.
+  undo.push(() => dropAllLiveViews());
   undo.push(() => server.stop(true));
   // Before the listener in the undo (as in stop): closes the runners' connections. Before the listener is
   // up there is no connection to close. Before that, the wiki closes its live sessions, saving the drafts it
@@ -184,6 +256,8 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   const blobs = routedBlobs(localBlobs, () => ({
     db,
     authSecret: effective.authSecret,
+    allowPrivateNetworks: effective.integrations.allowPrivateNetworks,
+    allowPlaintext: effective.integrations.allowPlaintext,
     track: (work, what) => deps.runtime.track(work, what),
     now,
   }));
@@ -196,7 +270,7 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     if (effective.signupOpen) return "allow";
     return signupDecision(firstUser, {
       users: async () => (await db.select({ n: count() }).from(schema.users))[0]?.n ?? 0,
-      invited: () => hasPendingInvite(email, headers),
+      invited: () => hasPendingInvite(deps, email, readInviteCookie(headers)),
     });
   };
   // An INSERT of the first user that the database never answers holds the place: the server doesn't make
@@ -212,14 +286,20 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
       });
   });
   undo.push(() => stopWatch());
-  const origins = [publicUrl, ...(opts.extraOrigins ?? [])];
+  origins = [publicUrl, ...(opts.extraOrigins ?? [])];
   const auth = createAuth({
     db,
     config: effective,
     mailer,
     trustedOrigins: origins,
     signupAllowed,
-    onSessionEnded: (sessionId) => collab.live.sessionEnded(sessionId),
+    // A signed-out or revoked session closes at once every socket it opened (the browser's real time and the
+    // live wiki) and the interventions it held. This is the one place Better Auth's session end reaches.
+    onSessionEnded: async (sessionId) => {
+      hub.dropSession(sessionId);
+      collab.live.sessionEnded(sessionId);
+      if (depsRef) await revalidateInterventions(depsRef, sessionId);
+    },
   });
   // Background work (the notification queue today); stopping waits for what is running. Slice S6
   // (runtime/runtime) creates the AgentRuntime here instead, which takes this work over.
@@ -239,7 +319,12 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     search: createSearchIndex({ db, config: effective, ledger, now }, opts.fetchExternal),
     sealer: createSealer(effective.authSecret, "credentials"),
     // Every integration fetch checks the destination (and each redirect) against the internal network.
-    fetchExternal: guardedFetch(opts.fetchExternal ?? fetch, effective.integrations.allowPrivateNetworks),
+    fetchExternal: guardedFetch(
+      opts.fetchExternal ?? fetch,
+      effective.integrations.allowPrivateNetworks,
+      undefined,
+      effective.integrations.allowPlaintext,
+    ),
     sql: opts.sql ?? postgresConnector,
     runners: runnersHub,
     // Push goes only to known push service hosts (push.ts), without redirects: it doesn't go through
@@ -250,10 +335,27 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     wikiLive: collab.live,
     // S5 (assignments/motor, assignments/verify) adds `assignmentEngine` and `assignmentVerifier`.
   };
-  depsRef = deps;
   // Here, in this order: the undo of stopRecalcs (S2, bases/write) and of the assignment engine's stop
   // (S5); the provider lookup (S6); runtime.start (S6), the engine's start (S5) and resumeRecalcs (S2),
   // all before the app takes requests.
+  await revalidateBrowsers(deps);
+  // A session that expires, or a membership or channel lost outside this server's routes, is caught here. It
+  // comes before the recalculations so that their halt is the first step of the stop, in the same tick.
+  let sweeping: Promise<void> | null = null;
+  const sweep = setInterval(() => {
+    sweeping ??= revalidateBrowsers(deps)
+      .catch((err) => log.warn("ws.revalidate_failed", { err }))
+      .finally(() => {
+        sweeping = null;
+      });
+  }, REVALIDATE_MS);
+  sweep.unref?.();
+  undo.push(async () => {
+    clearInterval(sweep);
+    // A sweep may be awaiting an RPC slot: cancel the hub before waiting, with the database still open.
+    runnersHub.closeAll();
+    await sweeping;
+  });
   // The vector leg only with an embedder and pgvector in the database; without them the search is lexical
   // and by name. It acquires nothing, so there is nothing to undo.
   if (effective.search.embedder.kind !== "off") await deps.search.ensureVector();
@@ -285,8 +387,13 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     clearTimeout(timer);
     await work;
   });
+  // The formula recalculations: halted before the database closes, then the ones a crash or a deploy left
+  // halfway resume in the background.
+  undo.push(() => stopRecalcs(deps));
+  await resumeRecalcs(deps);
   const app = createApp(deps, { firstUser, signupQueue: signupLimits });
   handler = (req) => app.fetch(req);
+  depsRef = deps;
   log.info("server.started", { url: publicUrl, db: opened.kind });
 
   // Every stop, at once or later, gets the same shutdown: it ends (or fails) once for all of them.
@@ -304,12 +411,28 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   };
 }
 
+/** An invitation token as the server makes them (base64url), with room to spare; anything else is not one. */
+const INVITE_TOKEN = /^[A-Za-z0-9_-]{1,128}$/;
+
 /**
- * Pending invite by email or by the cookie the invite page leaves. The invitations slice replaces this with
- * `hasPendingInvite` from routes/invitations; until then nobody has an invite.
+ * The invitation token the invite page leaves in a cookie, or null. The cookie comes from outside: a value
+ * that doesn't decode, is too long or isn't a token counts as absent (and is never logged).
  */
-async function hasPendingInvite(_email: string, _headers: Headers | null): Promise<boolean> {
-  return false;
+function readInviteCookie(headers: Headers | null): string | null {
+  const raw = headers?.get("cookie");
+  if (!raw) return null;
+  for (const part of raw.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq <= 0 || part.slice(0, eq).trim() !== INVITE_COOKIE) continue;
+    let value: string;
+    try {
+      value = decodeURIComponent(part.slice(eq + 1).trim());
+    } catch {
+      return null;
+    }
+    return INVITE_TOKEN.test(value) ? value : null;
+  }
+  return null;
 }
 
 /** A runtime method the server doesn't have yet (slice S6 brings the agent runtime). */
@@ -326,8 +449,12 @@ export class NotAvailable extends HttpError {
  * one of them; a later route that can is rejected at its entry, before any write.
  */
 function runtimePort(background: BackgroundWork): RuntimePort {
-  const absent = (method: keyof RuntimePort) => () => {
-    throw new NotAvailable(method);
+  const absent = (method: keyof RuntimePort) => {
+    const fail = () => {
+      throw new NotAvailable(method);
+    };
+    // The mark lets an entry reject before any write (requireRuntime in context.ts).
+    return Object.assign(fail, { [ABSENT]: fail });
   };
   return {
     track: (work, what) => background.track(work, what),

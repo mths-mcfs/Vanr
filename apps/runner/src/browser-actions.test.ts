@@ -256,8 +256,7 @@ test.skipIf(!chrome)(
       expect(leaks(keys, key)).toEqual([]);
       expect(keys.text).toContain("Copiar a chave de produção [secret:KEY]…");
       expect(keys.url).toEndWith("?q=[secret:PW]");
-      // A short value (a CVV) goes away from the field and the URL; from the page text, it does not (a short number
-      // shows up by chance and replacing each one would be a clue to the value).
+      // Short values are masked in page text as well as fields and URLs.
       secrets = [{ name: "CVV", target: "env", browser: binding(["site.test"]), value: "123" }];
       sites.page("site.test", "/cvv", () =>
         html(`<form><input id="c" name="cvv"><button>ir</button></form><p>Pedido 123</p>`),
@@ -266,7 +265,7 @@ test.skipIf(!chrome)(
       await act(a, { action: "type_secret", selector: "#c", name: "CVV" });
       const cvv = await act(a, { action: "read" });
       expect(cvv.text).toContain('"cvv" (secret)');
-      expect(cvv.text).toContain("Pedido 123");
+      expect(cvv.text).toContain("Pedido [secret:CVV]");
       await act(a, { action: "press", key: "Enter", selector: "#c" });
       expect((await act(a, { action: "tabs" })).url).toEndWith("?cvv=[secret:CVV]");
     } finally {
@@ -296,7 +295,7 @@ test.skipIf(!chrome)(
 );
 
 test.skipIf(!chrome)(
-  "an action that does not come back releases the browser in time, and the person who takes over navigates with their rule",
+  "an expired action keeps blocking effects while its work is still unwinding",
   async () => {
     const slow = new CdpBrowser({
       chrome: chrome ?? "",
@@ -319,9 +318,13 @@ test.skipIf(!chrome)(
       expect(stuck).toContain("timeout");
       await slow.handle("browser.policy", a, { policy: policy({ driver: "person" }) }, send);
       const bank = sites.https("www.itau.com.br", "/depois");
-      await slow.handle("live_view.input", a, { events: [{ type: "navigate", url: bank }] }, send);
-      await Bun.sleep(1500);
-      expect(sites.hits).toContain("www.itau.com.br/depois");
+      const signal = AbortSignal.timeout(50);
+      expect(
+        await failure(
+          slow.handle("live_view.input", a, { events: [{ type: "navigate", url: bank }] }, send, signal),
+        ),
+      ).toContain("canceled");
+      expect(sites.hits).not.toContain("www.itau.com.br/depois");
     } finally {
       await slow.close();
     }
@@ -394,6 +397,9 @@ test.skipIf(!chrome)(
     sites.page("site.test", "/truque", () =>
       html(`<form method="post" action="/comprar"><button id="buy">Comprar</button></form>
         <label><input type="checkbox" id="ok"> li</label>
+        <label style="position:absolute;left:100px;top:100px"><input type="checkbox" id="covered">Remember</label>
+        <form method="post" action="/comprar"><button style="position:absolute;left:100px;top:100px;width:200px;height:40px">Buy</button>
+        <button id="mutates" type="button" style="position:absolute;left:500px;top:500px" onmouseenter="this.type='submit';this.textContent='Buy'">More</button></form>
         <button id="ver" style="position:absolute;left:300px;top:300px;width:120px;height:40px">Ver mais</button>
         <form method="post" action="/comprar"><button id="trap" style="position:absolute;left:-999px;top:0;width:120px;height:40px">Comprar</button></form>
         <script>document.getElementById('ver').addEventListener('mousemove', () => {
@@ -413,6 +419,14 @@ test.skipIf(!chrome)(
     expect(await failure(act(a, { action: "click", selector: "#ver", expect: r.fingerprint }))).toStartWith(
       "page_changed:",
     );
+    const covered = await inspect(a, { action: "check", selector: "#covered" });
+    expect(
+      await failure(act(a, { action: "check", selector: "#covered", expect: covered.fingerprint })),
+    ).toStartWith("page_changed:");
+    const mutates = await inspect(a, { action: "click", selector: "#mutates" });
+    expect(
+      await failure(act(a, { action: "click", selector: "#mutates", expect: mutates.fingerprint })),
+    ).toStartWith("page_changed:");
     expect(bought).toBe(0);
   },
   60_000,
@@ -632,3 +646,32 @@ test.skipIf(!chrome)(
   },
   30_000,
 );
+
+test.skipIf(!chrome)("keyboard rejects frame focus inside open and closed shadow roots", async () => {
+  const a = agent();
+  sites.page("frame.test", "/focus", () => html('<input id="trap">'));
+  for (const mode of ["open", "closed"]) {
+    sites.page("site.test", "/shadow-focus", () =>
+      html(`<my-frame></my-frame><script>
+      document.querySelector('my-frame').attachShadow({mode:'${mode}'}).innerHTML = '<iframe src="${sites.https("frame.test", "/focus")}"></iframe>';
+    </script>`),
+    );
+    await open(a, sites.https("site.test", "/shadow-focus"));
+    const session = Reflect.get(browser, "sessions").get(a.id);
+    const frame = [...session.frames].find(([, f]) => f.kind === "iframe");
+    if (!frame) throw new Error("missing frame");
+    await session.cdp.send(
+      "Runtime.evaluate",
+      { expression: 'document.querySelector("#trap").focus()' },
+      frame[0],
+    );
+    for (const key of ["X", "Enter"])
+      expect(await failure(act(a, { action: "press", key }))).toStartWith("not_allowed:");
+    const value = await session.cdp.send(
+      "Runtime.evaluate",
+      { expression: 'document.querySelector("#trap").value', returnByValue: true },
+      frame[0],
+    );
+    expect(value.result.value).toBe("");
+  }
+});

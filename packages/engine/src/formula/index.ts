@@ -76,8 +76,32 @@ export function propFType(def: PropDef, formulaTypes?: ReadonlyMap<string, FType
       return T.person;
     case "formula":
       return formulaTypes?.get(def.id) ?? T.any;
+    case "relation":
+      return T.list(T.text);
+    case "rollup":
+      return typeOfResult(def.rollup?.resultType);
     default:
       return T.text;
+  }
+}
+
+/** The type saved in the schema (`resultType`) back as a formula type. */
+function typeOfResult(r: FormulaResultType | undefined): FType {
+  switch (r) {
+    case "number":
+      return T.number;
+    case "text":
+      return T.text;
+    case "boolean":
+      return T.boolean;
+    case "date":
+      return T.date;
+    case "person":
+      return T.person;
+    case "list":
+      return T.list(T.any);
+    default:
+      return T.any;
   }
 }
 
@@ -355,6 +379,11 @@ export interface RowData {
   createdBy: PropActor | null;
   editedAt: string;
   editedBy: PropActor | null;
+  /**
+   * What comes from other rows: the titles of the linked rows (relation) and the rollup's value, by the
+   * property id. Whoever runs the formula loads them first; without them a relation is an empty list.
+   */
+  extra?: Readonly<Record<string, FValue>>;
 }
 
 export interface EvalContext {
@@ -386,6 +415,10 @@ export function propValue(def: PropDef, row: RowData, names?: (a: PropActor) => 
       return row.createdBy ? actorValue(row.createdBy, names) : null;
     case "editor":
       return row.editedBy ? actorValue(row.editedBy, names) : null;
+    case "relation":
+      return row.extra?.[def.id] ?? [];
+    case "rollup":
+      return row.extra?.[def.id] ?? null;
     default:
       break;
   }
@@ -605,21 +638,22 @@ export function evaluateRow(
   defs: readonly PropDef[],
   row: RowData,
   ctx: EvalContext,
+  output = 0,
 ): RowResult {
   const values = new Map<string, FValue | FormulaRuntimeError>();
   const computed: Record<string, ComputedJson> = {};
   const budget = { steps: 0 };
   let steps = 0;
-  let output = 0;
   for (const [id, errs] of plan.errors) computed[id] = { err: errs[0]?.code ?? "invalid" };
   for (const f of plan.order) {
     const ev = new RowEvaluator(defs, row, ctx, values, budget);
     try {
       const v = ev.eval(f.ast, new Map());
-      output += v === null ? 0 : jsonSize(v, FORMULA_LIMITS.maxRowOutput - output);
-      if (output > FORMULA_LIMITS.maxRowOutput)
+      const size = v === null ? 0 : jsonSize(v, FORMULA_LIMITS.maxRowOutput - output);
+      if (output + size > FORMULA_LIMITS.maxRowOutput)
         throw new FormulaRuntimeError("too_large", f.ast.at, { max: FORMULA_LIMITS.maxRowOutput });
       const json = toJson(v);
+      output += size;
       values.set(f.propId, v);
       if (json !== undefined) computed[f.propId] = json;
     } catch (err) {

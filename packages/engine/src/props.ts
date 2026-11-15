@@ -2,7 +2,9 @@
 // definition (PropDef), the value stored in `props jsonb` keyed by the property id (so a rename does
 // not break anything), validation on write and formatting on read.
 //
-// Formulas are a property type here; their engine lives in `formula/`.
+// Formulas are a property type here; their engine lives in `formula/`. Relation and rollup only make sense
+// in a database (the wiki and the issues don't offer them): a relation keeps the ids of rows of another
+// source, and a rollup is computed from them, like a formula.
 import { z } from "zod";
 
 export const PROP_TYPES = [
@@ -21,6 +23,8 @@ export const PROP_TYPES = [
   "edited_time",
   "editor",
   "formula",
+  "relation",
+  "rollup",
 ] as const;
 export type PropType = (typeof PROP_TYPES)[number];
 
@@ -31,7 +35,38 @@ export const COMPUTED_TYPES: ReadonlySet<PropType> = new Set([
   "edited_time",
   "editor",
   "formula",
+  "rollup",
 ]);
+
+/** Linked rows per relation cell. */
+export const MAX_RELATED = 100;
+
+/** Rollup functions, over the value of a property of the linked rows. */
+export const ROLLUP_FNS = [
+  "show_original",
+  "show_unique",
+  "count",
+  "count_values",
+  "count_unique",
+  "count_empty",
+  "count_not_empty",
+  "percent_empty",
+  "percent_not_empty",
+  "sum",
+  "average",
+  "median",
+  "min",
+  "max",
+  "range",
+  "earliest",
+  "latest",
+  "date_range",
+  "checked",
+  "unchecked",
+  "percent_checked",
+  "percent_unchecked",
+] as const;
+export type RollupFn = (typeof ROLLUP_FNS)[number];
 
 export interface PropOption {
   id: string;
@@ -59,6 +94,13 @@ export interface PropDef {
    * lives in `computed`, not in `props` (engine in `formula/`).
    */
   formula?: { expression: string; resultType?: FormulaResultType };
+  /** relation: the source (`dbt_…`) of the linked rows; the value is the list of row ids (`dbr_…`). */
+  relation?: { tableId: string };
+  /**
+   * rollup: `fn` over the property `targetPropId` of the rows linked by the relation `relationPropId`.
+   * The value lives in `computed`, like a formula's; `resultType` is saved with the schema.
+   */
+  rollup?: { relationPropId: string; targetPropId: string; fn: RollupFn; resultType?: FormulaResultType };
 }
 
 /** Type of a formula result (the same as in `formula/index.ts`). */
@@ -127,16 +169,16 @@ export function isCalendarDay(year: number, month: number, day: number): boolean
   return d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day;
 }
 
-/** The `YYYY-MM-DD` at the start of an ISO text names a day that exists. */
+/** A calendar day, or an ISO instant with valid clock fields and an explicit offset. */
 export function isCalendarIso(text: string): boolean {
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(text);
+  const m =
+    /^(\d{4})-(\d{2})-(\d{2})(?:T([01]\d|2[0-3]):([0-5]\d)(?::([0-5]\d)(?:\.\d+)?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d))?$/.exec(
+      text,
+    );
   return !!m && isCalendarDay(Number(m[1]), Number(m[2]), Number(m[3]));
 }
 
-const isoDate = z
-  .string()
-  .regex(/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2}))?$/)
-  .refine(isCalendarIso);
+const isoDate = z.string().refine(isCalendarIso);
 const actor = z.object({ type: z.enum(["person", "agent"]), id: z.string().min(1).max(100) }).strict();
 
 function schemaFor(def: PropDef): z.ZodType<PropValue> {
@@ -161,6 +203,11 @@ function schemaFor(def: PropDef): z.ZodType<PropValue> {
     case "file":
       // ids of files in the Drive
       return z.array(z.string().min(1)).max(100);
+    case "relation":
+      return z
+        .array(z.string().regex(/^dbr_[a-z0-9]{1,64}$/))
+        .max(MAX_RELATED)
+        .refine((ids) => new Set(ids).size === ids.length);
     default:
       return z.never();
   }
@@ -224,7 +271,7 @@ export function propText(
     case "status":
       return option(String(value));
     case "multi_select":
-      return (value as string[]).map(option).join(", ");
+      return JSON.stringify((value as string[]).map(option));
     case "checkbox":
       return value ? "true" : "false";
     case "date": {
@@ -235,9 +282,11 @@ export function propText(
     case "creator":
     case "editor": {
       const list = Array.isArray(value) ? (value as PropActor[]) : [value as PropActor];
-      return list.map((a) => names?.(a) ?? `${a.type}:${a.id}`).join(", ");
+      return names ? list.map(names).join(", ") : JSON.stringify(list);
     }
     case "file":
+      return JSON.stringify(value);
+    case "relation":
       return (value as string[]).join(", ");
     default:
       return String(value);
@@ -246,11 +295,12 @@ export function propText(
 
 /** Reads text (CSV, front matter): the inverse of propText for the editable types. */
 export function parsePropText(def: PropDef, text: string): PropValue | undefined {
+  // Empty text is a value; an empty cell of another type means no value.
+  if (def.type === "text") return text;
   const t = text.trim();
   if (t === "") return undefined;
   const byName = (name: string) => def.options?.find((o) => o.name.toLowerCase() === name.toLowerCase())?.id;
   switch (def.type) {
-    case "text":
     case "url":
       return t;
     case "number": {
@@ -258,13 +308,31 @@ export function parsePropText(def: PropDef, text: string): PropValue | undefined
       return Number.isFinite(n) ? n : undefined;
     }
     case "checkbox":
-      return isChecked(t);
+      return isCheckboxWord(t) ? isChecked(t) : undefined;
     case "select":
     case "status":
       return byName(t);
     case "multi_select": {
-      const ids = t.split(",").map((s) => byName(s.trim()));
+      let names = t.split(",").map((s) => s.trim());
+      if (t.startsWith("[")) {
+        try {
+          const parsed: unknown = JSON.parse(t);
+          if (Array.isArray(parsed) && parsed.every((name) => typeof name === "string")) names = parsed;
+        } catch {
+          // A literal option name, such as [Review], need not be JSON.
+        }
+      }
+      const ids = names.map(byName);
       return ids.every((id) => id) ? (ids as string[]) : undefined;
+    }
+    case "person":
+    case "file": {
+      try {
+        const parsed = schemaFor(def).safeParse(JSON.parse(t));
+        return parsed.success ? parsed.data : undefined;
+      } catch {
+        return undefined;
+      }
     }
     case "date": {
       const [start, end] = t.split(/\s*→\s*/);
@@ -312,6 +380,19 @@ export const propDefSchema = z
       })
       .strict()
       .optional(),
+    relation: z
+      .object({ tableId: z.string().regex(/^[\w-]{1,64}$/) })
+      .strict()
+      .optional(),
+    rollup: z
+      .object({
+        relationPropId: z.string().regex(/^[\w-]{1,64}$/),
+        targetPropId: z.string().regex(/^[\w-]{1,64}$/),
+        fn: z.enum(ROLLUP_FNS),
+        resultType: z.enum(["number", "text", "boolean", "date", "person", "list", "any"]).optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -321,12 +402,15 @@ export type DefsError =
   | { code: "duplicate_option"; propId: string }
   | { code: "unknown_group_option"; propId: string }
   | { code: "missing_formula"; propId: string }
+  | { code: "missing_relation"; propId: string }
+  | { code: "bad_rollup"; propId: string }
   | { code: "too_many_props" };
 
 /**
  * Checks a whole schema: unique ids and names (names compared without case), unique options, status
- * groups only with options that exist, formulas with an expression. Formula types belong to the engine
- * (`formula/`).
+ * groups only with options that exist, formulas with an expression, a relation with its source and a rollup
+ * over a relation of the same schema. Formula types belong to the engine (`formula/`); whether the source
+ * and the rollup's target exist is checked by the server, which reads the other source.
  */
 export function checkDefs(defs: readonly PropDef[]): DefsError[] {
   const errors: DefsError[] = [];
@@ -352,6 +436,12 @@ export function checkDefs(defs: readonly PropDef[]): DefsError[] {
     }
     if (d.type === "formula" && !d.formula?.expression.trim())
       errors.push({ code: "missing_formula", propId: d.id });
+    if (d.type === "relation" && !d.relation?.tableId)
+      errors.push({ code: "missing_relation", propId: d.id });
+    if (d.type === "rollup") {
+      const rel = d.rollup && defs.find((x) => x.id === d.rollup?.relationPropId);
+      if (rel?.type !== "relation") errors.push({ code: "bad_rollup", propId: d.id });
+    }
   }
   return errors;
 }

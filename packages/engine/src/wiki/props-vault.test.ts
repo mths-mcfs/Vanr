@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { applyProps, type PropDef } from "../props";
+import { formatFrontmatter, splitFrontmatter } from "./frontmatter";
 import { frontmatterToProps, propsToFrontmatter, WIKI_PROP_LIMITS } from "./props-vault";
 
 describe("front matter ↔ properties", () => {
@@ -67,6 +68,42 @@ describe("front matter ↔ properties", () => {
     expect(again.write).toEqual(first.write);
     expect(again.created).toEqual([]);
   });
+});
+
+test("editable references, date ranges and literal text survive YAML export and import", () => {
+  const defs: PropDef[] = [
+    { id: "d", name: "Due", type: "date" },
+    { id: "p", name: "Owner", type: "person" },
+    { id: "f", name: "Attachments", type: "file" },
+    { id: "t", name: "Text", type: "text" },
+  ];
+  const props = {
+    d: { start: "2026-11-01", end: "2026-11-02" },
+    p: [
+      { type: "person" as const, id: "u1" },
+      { type: "agent" as const, id: "a1" },
+    ],
+    f: ["file_1", "file,2"],
+    t: "  Keep this\n\n",
+  };
+  expect(applyProps(defs, {}, props).ok).toBe(true);
+  const data = splitFrontmatter(formatFrontmatter(propsToFrontmatter(defs, props))).data;
+  const result = frontmatterToProps(defs, data);
+  expect(result.rejected).toEqual([]);
+  expect(result.write).toEqual(props);
+  expect(frontmatterToProps(defs, { Text: "" }).write).toEqual({ t: "" });
+});
+
+test("invalid imported fields are rejected separately from valid fields", () => {
+  const defs: PropDef[] = [
+    { id: "d", name: "Due", type: "date" },
+    { id: "u", name: "URL", type: "url" },
+    { id: "n", name: "Count", type: "number" },
+  ];
+  const result = frontmatterToProps(defs, { Due: "2026-02-30", URL: "https://", Count: 42 });
+  expect(result.rejected).toEqual(["Due", "URL"]);
+  expect(result.write).toEqual({ n: 42 });
+  expect(applyProps(defs, {}, result.write).ok).toBe(true);
 });
 
 describe("the property route's caps", () => {

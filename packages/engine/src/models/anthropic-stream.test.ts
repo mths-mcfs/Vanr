@@ -3,10 +3,10 @@
 // message starts, a repeated tool id, a delta for a block never opened) fail the turn with
 // invalid_response and are not retried; the valid sequences of the SDK's event types keep working.
 import { describe, expect, test } from "bun:test";
-import { costUsd } from "../usage";
+import { costUsd, usageLines } from "../usage";
 import { anthropicProvider, usageOf } from "./anthropic";
 import { PRICES } from "./prices";
-import type { ModelEvent } from "./types";
+import { addUsage, emptyUsage, ModelError, type ModelEvent } from "./types";
 
 type Sse = { event?: string; data: Record<string, unknown> };
 const top = {
@@ -42,14 +42,14 @@ const blockDelta = (index: number, d: Record<string, unknown>): Sse => ({
 });
 const blockStop = (index: number): Sse => ({ data: { type: "content_block_stop", index } });
 
-async function run(events: Sse[]) {
+async function run(events: Sse[] | ((request: number) => Sse[])) {
   let requests = 0;
   const output: ModelEvent[] = [];
-  const body = events
-    .map((e) => `event: ${e.event ?? e.data.type}\ndata: ${JSON.stringify(e.data)}\n\n`)
-    .join("");
   const fakeFetch = (async () => {
     requests++;
+    const body = (typeof events === "function" ? events(requests) : events)
+      .map((e) => `event: ${e.event ?? e.data.type}\ndata: ${JSON.stringify(e.data)}\n\n`)
+      .join("");
     return new Response(body, { headers: { "content-type": "text/event-stream" } });
   }) as unknown as typeof fetch;
   let error: unknown = null;
@@ -172,6 +172,71 @@ describe("invalid stream sequences", () => {
     ]);
     expect(r.error).toMatchObject({ code: "invalid_tool_input" });
     expect(r.requests).toBe(3);
+  });
+
+  test.each([false, true])(
+    "invalid JSON retries keep every paid attempt (all invalid: %s)",
+    async (allInvalid) => {
+      const r = await run((request) => [
+        start({
+          ...top,
+          output_tokens: 0,
+          speed: request === 1 ? "fast" : "standard",
+          inference_geo: request === 1 ? "us" : "global",
+        }),
+        blockStart(0, { type: "tool_use", id: "t1", name: "remember", input: {} }),
+        blockDelta(0, {
+          type: "input_json_delta",
+          partial_json: allInvalid || request === 1 ? '{"text":' : '{"text":"hi"}',
+        }),
+        blockStop(0),
+        blockStart(1, { type: "text", text: "", citations: null }),
+        blockDelta(1, { type: "text_delta", text: "after input" }),
+        blockStop(1),
+        delta({ output_tokens: 20 }, "tool_use"),
+        end,
+      ]);
+      expect(r.requests).toBe(allInvalid ? 3 : 2);
+      expect(r.output.filter((e) => e.type === "text")).toEqual(
+        allInvalid ? [] : [{ type: "text", text: "after input" }],
+      );
+      const paid = allInvalid && r.error instanceof ModelError ? r.error.usage : r.turn?.usage;
+      if (!paid) throw new Error("Missing paid usage");
+      if (allInvalid) expect(r.error).toMatchObject({ code: "invalid_tool_input" });
+      else expect(r.error).toBeNull();
+      const total = addUsage(emptyUsage(), paid);
+      expect(total).toMatchObject({ inputTokens: r.requests * 1000, outputTokens: r.requests * 20 });
+      expect(
+        costUsd(PRICES, { model: "claude-opus-5-5", at: new Date("2026-10-01T00:00:00Z"), usage: paid }),
+      ).toBeCloseTo((2.2 + r.requests - 1) * 0.0044, 10);
+    },
+  );
+
+  test("one-hour cache writes survive API iterations through ledger lines", () => {
+    const usage = usageOf({
+      ...top,
+      iterations: [
+        {
+          type: "message",
+          model: "claude-opus-5-5",
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_creation_input_tokens: 1_000_000,
+          cache_creation: { ephemeral_1h_input_tokens: 1_000_000, ephemeral_5m_input_tokens: 0 },
+        },
+      ],
+    });
+    const lines = usageLines(PRICES, {
+      workspaceId: "o",
+      agentId: null,
+      userId: null,
+      runId: null,
+      source: "chat",
+      model: "claude-opus-5-5",
+      usage,
+      at: new Date("2026-10-01T00:00:00Z"),
+    });
+    expect(lines[0]).toMatchObject({ cacheWrite1hTokens: 1_000_000, cacheWrite5mTokens: 0, costUsd: 8 });
   });
 
   test("an empty speed is unknown, kept, and charged as fast", () => {

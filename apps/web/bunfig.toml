@@ -1,0 +1,6 @@
+[install]
+exact = true
+
+[test]
+# Every web test runs with a DOM: the preload registers it before React and Radix load.
+preload = ["./test/setup.ts"]

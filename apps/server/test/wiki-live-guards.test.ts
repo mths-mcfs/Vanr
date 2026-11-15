@@ -208,6 +208,81 @@ describe("a connection doesn't outlive the right that opened it", () => {
       }
     });
 
+  test(
+    "a committed trash closes live editors before link maintenance, even when it fails",
+    async () => {
+      const now = new Date();
+      const srv = await startTestServer({ now: () => now, wikiDebounceMs: 600_000 });
+      const { db } = srv.deps;
+      const select = db.select.bind(db);
+      let release = () => {};
+      let a: ReturnType<typeof connect> | undefined;
+      let b: ReturnType<typeof connect> | undefined;
+      let trash: ReturnType<typeof apiError> | undefined;
+      try {
+        const { workspaceId, ana, beto } = await team(srv);
+        const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Trash live", body: BODY });
+        const name = docName(workspaceId, page.slug);
+        a = connect(srv, ana.browser, workspaceId, name);
+        b = connect(srv, beto.browser, workspaceId, name);
+        await Promise.all([a.synced, b.synced]);
+        await until(() => !a?.provider.hasUnsyncedChanges && !b?.provider.hasUnsyncedChanges);
+        await srv.deps.wikiLive.settled();
+
+        let begun!: () => void;
+        const started = new Promise<void>((r) => {
+          begun = r;
+        });
+        const gate = new Promise<void>((r) => {
+          release = r;
+        });
+        db.select = ((...args: Parameters<typeof select>) => {
+          const query = select(...args);
+          const from = query.from.bind(query);
+          query.from = ((table: unknown) => {
+            const built = from(table as never);
+            if (table === schema.pageLinks) {
+              db.select = select;
+              const then = built.then.bind(built);
+              // biome-ignore lint/suspicious/noThenProperty: hold the real link query, then inject a maintenance failure
+              built.then = ((ok: (v: unknown) => unknown, ko: (e: unknown) => unknown) =>
+                then(async () => {
+                  begun();
+                  await gate;
+                  throw new Error("injected link maintenance failure");
+                }).then(ok, ko)) as typeof built.then;
+            }
+            return built;
+          }) as typeof query.from;
+          return query;
+        }) as typeof db.select;
+
+        trash = apiError(ana.api.wiki.deleteWikiPage(workspaceId, page.slug));
+        await started;
+        expect((await ana.api.wiki.getWikiTrash(workspaceId)).map((p) => p.slug)).toContain(page.slug);
+        const acks = b.syncStatus.length;
+        await b.edit((md) => `${md}\nEDIT AFTER TRASH.\n`);
+        await until(() => (b?.closeCodes.length ?? 0) > 0 || (b?.syncStatus.length ?? 0) > acks);
+        expect(b.syncStatus.slice(acks)).not.toContain(true);
+        await until(() => (a?.closeCodes.length ?? 0) > 0 && (b?.closeCodes.length ?? 0) > 0);
+        expect(await a.md()).not.toContain("EDIT AFTER TRASH.");
+        release();
+        expect(await trash).toMatchObject({ status: 500, code: "internal" });
+      } finally {
+        release();
+        db.select = select;
+        a?.close();
+        b?.close();
+        try {
+          await trash;
+        } finally {
+          await srv.stop();
+        }
+      }
+    },
+    SERVER_TEST_MS * 2,
+  );
+
   test("signing out closes the connection at once (the session's delete hook), with no message in between", async () => {
     const { workspaceId, ana, beto } = await team();
     const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Sign out", body: BODY });

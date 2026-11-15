@@ -1,0 +1,39 @@
+{
+  "name": "@vanr/client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts",
+    "./react": "./src/react/index.ts",
+    "./testing": "./src/testing/index.ts"
+  },
+  "scripts": {
+    "schemas": "bun run scripts/gen-schemas.ts"
+  },
+  "dependencies": {
+    "@vanr/contract": "workspace:*"
+  },
+  "peerDependencies": {
+    "@tanstack/react-query": "^5.104.5",
+    "react": "^19.3.1"
+  },
+  "peerDependenciesMeta": {
+    "@tanstack/react-query": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@happy-dom/global-registrator": "21.0.4",
+    "@tanstack/react-query": "5.104.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  }
+}

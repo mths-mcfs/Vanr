@@ -1,7 +1,7 @@
 // What each agent may touch in this environment. A relative path stays in the agent's folder inside the
 // work folder; an absolute path only counts inside a folder allowed for it. A symlink is resolved before
 // deciding, and system folders can never be allowed.
-import { type Dirent, existsSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
+import { type Dirent, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { RunnerAccess } from "@vanr/contract";
@@ -88,9 +88,14 @@ const PROTECTED_GIT = ["hooks", "config", "config.worktree", "commondir", "modul
  */
 const GIT_ALWAYS = new Set<string>(["hooks", "config"]);
 
-/** Rejection reason if the path is an escalation one; `null` if it may be written. */
-export function protectedPath(path: string): string | null {
-  const parts = resolve(path).split(sep).filter(Boolean);
+/**
+ * Rejection reason if the path is an escalation one; `null` if it may be written. It is the same rule the
+ * sandbox applies (`protectedUnder`): the file ops and the commands reject the same paths. `wholeGit` are the
+ * folders the person allowed: there the whole `.git` of a repository is read-only, index and HEAD included.
+ */
+export function protectedPath(path: string, wholeGit: readonly string[] = []): string | null {
+  const full = resolve(path);
+  const parts = full.split(sep).filter(Boolean);
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i] as string;
     const last = i === parts.length - 1;
@@ -100,6 +105,7 @@ export function protectedPath(path: string): string | null {
     if ((PROTECTED_DIRS as readonly string[]).includes(part)) return part;
     if (part === ".git" && (PROTECTED_GIT as readonly string[]).includes(parts[i + 1] ?? ""))
       return `.git/${parts[i + 1]}`;
+    if (part === ".git" && wholeGit.some((w) => inside(full, w))) return ".git";
   }
   return null;
 }
@@ -192,7 +198,8 @@ export function rejectedFolder(path: string, ctx: { runnerHome: string; workDir:
     if (system) return system;
     const home = resolve(ctx.runnerHome);
     if (inside(p, home) || inside(home, p)) return "runner";
-    if (inside(resolve(ctx.workDir), p)) return "contains_work_dir";
+    // The work folder by its written and its real path too (a work folder that is a link is its target).
+    if (inside(resolve(ctx.workDir), p) || inside(real(ctx.workDir), p)) return "contains_work_dir";
   }
   return null;
 }
@@ -202,6 +209,8 @@ export function real(path: string): string {
   let cur = resolve(path);
   const rest: string[] = [];
   while (!existsSync(cur)) {
+    if (lstatSync(cur, { throwIfNoEntry: false })?.isSymbolicLink())
+      throw new RunnerError("not_allowed", "A broken symlink cannot be resolved");
     const parent = dirname(cur);
     if (parent === cur) break;
     rest.unshift(cur.slice(parent.length + (parent.endsWith(sep) ? 0 : 1)));
@@ -217,12 +226,28 @@ export class Access {
     return this.get().access;
   }
 
-  /** The agent's folder in the work folder (created the first time). */
-  agentRoot(agent: AgentRef | null): string {
-    const ws = resolve(this.get().workDir);
+  /**
+   * The agent's folder in the work folder (created the first time), by its real path: the one root every op
+   * starts from (the ops on files, the secret files, the sandbox's folders, the jobs). A work folder that is a
+   * link is the person's choice, and its target is the work folder; a link that leads nowhere fails here.
+   */
+  agentRoot(agent: AgentRef | null, workDir = this.get().workDir): string {
+    if (agent && [agent.handle, agent.id].some((v) => !/^[a-zA-Z0-9_-]+$/.test(v)))
+      throw new RunnerError("bad_request", "Invalid agent identity");
+    const ws = resolve(workDir);
     const root = agent ? join(ws, `${agent.handle}-${agent.id.slice(-8)}`) : ws;
-    mkdirSync(root, { recursive: true, mode: 0o700 });
-    return root;
+    if (!inside(real(root), real(ws)))
+      throw new RunnerError("outside_work_dir", "Agent folder leaves the work folder");
+    try {
+      mkdirSync(root, { recursive: true, mode: 0o700 });
+      const resolved = realpathSync(root);
+      if (!inside(resolved, realpathSync(ws)))
+        throw new RunnerError("outside_work_dir", "Agent folder leaves the work folder");
+      return resolved;
+    } catch (err) {
+      const code = err instanceof Error && "code" in err ? String(err.code) : "error";
+      throw new RunnerError("not_found", `The work folder is not there (${code})`);
+    }
   }
 
   /**

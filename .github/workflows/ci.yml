@@ -34,6 +34,8 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup
       - run: bun run typecheck
+      # The component gallery is the visual proof sheet for @vanr/ui; it must keep building.
+      - run: bun run --cwd packages/ui gallery:build
 
   test:
     runs-on: ubuntu-latest
@@ -53,6 +55,21 @@ jobs:
         env:
           SHARD: ${{ matrix.shard }}
           SHARDS: ${{ strategy.job-total }}
+
+  web:
+    # The web app: its tests run with a DOM, from its own folder (bunfig.toml there), and the
+    # production build must keep working. The root test job leaves apps/web out.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - run: bun test
+        working-directory: apps/web
+      - run: bun run build
+        working-directory: apps/web
 
   postgres:
     # The migration against a real Postgres (with pgvector, as in production); PGlite covers the rest.
@@ -77,7 +94,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
-      - run: bun test packages/engine/src/db/catalog.test.ts --test-name-pattern Postgres
+      - run: bun test packages/engine/src/db/catalog.test.ts packages/engine/src/sqlconn.test.ts --test-name-pattern Postgres
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
       # Search with the vector leg (pgvector), each index in a database of its own.
@@ -89,6 +106,68 @@ jobs:
       - run: bun test apps/server/test/production.test.ts apps/server/test/usage-ledger.test.ts
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # One pending invitation per email and every notice counted, with requests on several connections at once.
+      - run: bun test apps/server/test/concurrency-postgres.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # The same forced tests with the locks left out by the test's own double: both must fail on the outcome
+      # the lock is for (LOCK_OUTCOME_MISMATCH), or they would pass without the locks too and prove nothing.
+      # A failure for any other reason (the wait timed out, a connection closed, an error between tests)
+      # proves nothing either, so this step fails then.
+      - name: The forced lock tests fail without the locks
+        run: |
+          set +e
+          bun test apps/server/test/concurrency-postgres.test.ts --test-name-pattern forced > forced.log 2>&1
+          status=$?
+          cat forced.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the forced lock tests passed without the locks"
+            exit 1
+          fi
+          for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -qF "$broken" forced.log; then
+              echo "::error::the forced lock tests broke ($broken) instead of failing on their outcome"
+              exit 1
+            fi
+          done
+          for label in invite notice; do
+            if ! grep -qF "LOCK_OUTCOME_MISMATCH($label)" forced.log; then
+              echo "::error::the forced $label test did not fail on its outcome without the lock"
+              exit 1
+            fi
+          done
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_DROP_LOCKS: "1"
+      # One runner per pairing code, one open browser intervention per agent and one answer per secret request.
+      - run: bun test apps/server/test/runners-postgres.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      - name: The forced runner lock tests fail without the locks
+        run: |
+          set +e
+          bun test apps/server/test/runners-postgres.test.ts --test-name-pattern forced > forced-runners.log 2>&1
+          status=$?
+          cat forced-runners.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the forced runner lock tests passed without the locks"
+            exit 1
+          fi
+          for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -qF "$broken" forced-runners.log; then
+              echo "::error::the forced runner lock tests broke ($broken) instead of failing on their outcome"
+              exit 1
+            fi
+          done
+          for label in job-done job-tail intervention-start sandbox browser-policy; do
+            if ! grep -qF "LOCK_OUTCOME_MISMATCH($label)" forced-runners.log; then
+              echo "::error::the forced $label test did not fail on its outcome without the lock"
+              exit 1
+            fi
+          done
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_DROP_LOCKS: "1"
       # The server's search with the vector leg the boot turns on (ensureVector) and the embedding tick.
       - run: bun test apps/server/test/search-postgres.test.ts --test-name-pattern "on Postgres"
         env:
@@ -112,10 +191,83 @@ jobs:
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_STORAGE_UNLOCKED: "1"
+      # The bases' locks and the query against the oracle on Postgres (one database for the file).
+      - run: bun test apps/server/test/bases-postgres.test.ts --test-name-pattern "on Postgres"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # The same forced interleavings with the one lock order of the bases swapped for a double in the test
+      # (VANR_TEST_BASES_LOCKS): each write locks only its own database, and the two deletes must FAIL for the
+      # deadlock (one side answers base.busy); with no database lock at all, the three view writes must FAIL
+      # for the race (the cap passed, the last view taken, one place shared). Nothing else counts.
+      - name: The bases lock tests fail without the one order and without the view locks
+        run: |
+          set +e
+          own=$(VANR_TEST_BASES_LOCKS=own bun test apps/server/test/bases-postgres.test.ts --test-name-pattern "forced interleaving: deleting" 2>&1)
+          own_status=$?
+          none=$(VANR_TEST_BASES_LOCKS=none bun test apps/server/test/bases-postgres.test.ts --test-name-pattern "forced interleaving: views" 2>&1)
+          none_status=$?
+          set -e
+          echo "$own"
+          echo "$none"
+          if [ "$own_status" -eq 0 ] || [ "$none_status" -eq 0 ]; then
+            echo "::error::a bases lock test passed with its lock turned off"
+            exit 1
+          fi
+          # On a GitHub runner bun prints each failure twice (the plain line and the annotation), so the
+          # line is only looked for; " 2 fail" below is what says both tests failed.
+          grep -q 'Expected to not contain: "base.busy"' <<< "$own"
+          grep -q ' 2 fail' <<< "$own"
+          grep -q 'Expected: "base.too_many_views"' <<< "$none"
+          grep -q 'Expected: "base.last_view"' <<< "$none"
+          grep -q 'Expected: 4' <<< "$none"
+          grep -q ' 3 fail' <<< "$none"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # Relation and rollup on Postgres: the propagation between linked sources never waits for a lock.
+      - run: bun test apps/server/test/bases-relations-postgres.test.ts --test-name-pattern "on Postgres"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # The forced interleavings of the relations with one of the propagation's locks swapped for a double
+      # (VANR_TEST_BASES_LINKS): `late` takes the dependent rows before their source, `wait` waits for a held
+      # dependent row. Each run must FAIL, and only for its own interleaving: every "(fail)" line names that
+      # test, one distinct test fails, and the failure is the wait it proves (`Expected: false`).
+      - name: The bases links tests fail with the rows locked before the source and with a waiting row lock
+        run: |
+          check() {
+            mode="$1"; label="$2"
+            set +e
+            out=$(VANR_TEST_BASES_LINKS="$mode" bun test apps/server/test/bases-relations-postgres.test.ts --test-name-pattern "forced interleaving: links" 2>&1)
+            status=$?
+            set -e
+            echo "$out"
+            if [ "$status" -eq 0 ]; then
+              echo "::error::the bases links tests passed with VANR_TEST_BASES_LINKS=$mode"
+              exit 1
+            fi
+            fails=$(grep -a '^(fail)' <<< "$out" | sed 's/ \[[0-9.]*m\?s\]$//' | sort -u)
+            if [ -z "$fails" ] || grep -av "forced interleaving: links: $label" <<< "$fails" | grep -aq .; then
+              echo "::error::VANR_TEST_BASES_LINKS=$mode failed a test other than \"$label\": $fails"
+              exit 1
+            fi
+            if [ "$(wc -l <<< "$fails")" -ne 1 ]; then
+              echo "::error::VANR_TEST_BASES_LINKS=$mode: expected one failing test, got: $fails"
+              exit 1
+            fi
+            grep -aq 'Expected: false' <<< "$out"
+          }
+          check late "a source another write holds"
+          check wait "a dependent row another transaction holds"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # The identity check of the functions a connected database's query may call, each case in a database of its own.
+      - run: bun test apps/server/test/sql-guard-identity.test.ts --test-name-pattern Postgres
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
       # The wiki on a real Postgres: saves on the same parent version; a member's save, move or trash that
       # comes while a lock holds the page waits for the page's row lock and is rejected; two saves that link
       # to each other both commit. The next two runs swap the row lock in the test (no lock, then the old FOR
-      # UPDATE) and must fail by the result, so the first run can't pass without the lock it has.
+      # UPDATE) and must fail by the result, so the first run can't pass without the lock it has. The
+      # attachment test (in the first run too) is run again without the membership lock and must fail.
       - run: bun test apps/server/test/wiki.test.ts --test-name-pattern "on Postgres"
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
@@ -147,6 +299,19 @@ jobs:
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_WIKI_FOR_UPDATE: "1"
+      - name: The wiki attachment test lets a removal through without the membership lock
+        run: |
+          if out=$(bun test apps/server/test/wiki.test.ts --test-name-pattern "wiki attachments on Postgres" 2>&1); then
+            echo "$out"
+            echo "::error::the wiki attachment test passed without the membership lock"
+            exit 1
+          fi
+          echo "$out"
+          # It must fail for the race (the removal committed before the attachment), not for anything else.
+          grep -q '"the removal ended before the attachment"' <<< "$out"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_WIKI_MEMBER_UNLOCKED: "1"
       # The wiki's annotations and checks on a real Postgres: two decisions on the same change of a proposal
       # (the second waits for the first's row lock and is rejected), a decision while the page is saved,
       # comments at once at the ceiling and two checks of one workspace. The next run swaps the row locks for
@@ -215,7 +380,7 @@ jobs:
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
-      - run: bun test apps/runner/src/sandbox.test.ts --reporter=junit --reporter-outfile=sandbox-junit.xml
+      - run: bun test apps/runner/src/sandbox.test.ts apps/runner/src/cli-state.test.ts apps/runner/src/net-mode.test.ts --reporter=junit --reporter-outfile=sandbox-junit.xml
         env:
           # Makes the test fail if any real srt test would be skipped.
           VANR_SANDBOX_REQUIRED: "1"
@@ -300,7 +465,7 @@ jobs:
 
   ci-ok:
     if: always()
-    needs: [lint, typecheck, test, postgres, sandbox, workflows, secrets]
+    needs: [lint, typecheck, test, web, postgres, sandbox, workflows, secrets]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -308,6 +473,6 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
-      - run: bun scripts/ci/gate.ts lint typecheck test postgres sandbox workflows secrets
+      - run: bun scripts/ci/gate.ts lint typecheck test web postgres sandbox workflows secrets
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}

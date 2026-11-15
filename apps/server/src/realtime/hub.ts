@@ -13,6 +13,8 @@ export interface BrowserSocketData {
   kind: "browser";
   workspaceId: string;
   userId: string;
+  /** The Better Auth session that opened the socket: when it ends, the socket closes. */
+  sessionId: string;
   channels: Set<string>;
   lastTypingAt: Map<string, number>;
 }
@@ -66,12 +68,31 @@ export class Hub implements Publisher {
     return (this.byUser.get(`${workspaceId}:${userId}`)?.size ?? 0) > 0;
   }
 
-  /** Removes a channel from someone who lost access (left the private channel or the workspace). */
+  /** Every browser socket now (the revalidation sweep walks them). */
+  sockets(): BrowserSocket[] {
+    return [...this.byWorkspace.values()].flatMap((set) => [...set]);
+  }
+
+  /** The session ended (sign-out, revoked): its sockets close at once. */
+  dropSession(sessionId: string): void {
+    for (const ws of this.sockets()) if (ws.data.sessionId === sessionId) this.cut(ws, 4401, "session ended");
+  }
+
+  /**
+   * Removes a channel from someone who lost access (left the private channel), or every socket of a person who
+   * left the workspace. Whoever removes a member or changes a role (routes/workspaces) calls it in the same path.
+   */
   dropUser(workspaceId: string, userId: string, channelId?: string): void {
     for (const ws of [...(this.byUser.get(`${workspaceId}:${userId}`) ?? [])]) {
       if (channelId) this.unsubscribe(ws, channelId);
-      else ws.close(4003, "removed");
+      else this.cut(ws, 4003, "removed");
     }
+  }
+
+  /** Takes the socket out of every audience before closing it: nothing more goes to it from here. */
+  cut(ws: BrowserSocket, code: number, reason: string): void {
+    this.remove(ws);
+    ws.close(code, reason);
   }
 
   toChannel(channelId: string, event: RealtimeEvent, opts: { exceptUserId?: string } = {}): void {

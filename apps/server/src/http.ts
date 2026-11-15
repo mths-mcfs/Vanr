@@ -27,9 +27,60 @@ export function errorBody(code: string, message: string, params?: Record<string,
   return { error: params ? { code, message, params } : { code, message } };
 }
 
-/** Reads and validates the JSON body. An empty body becomes {} (the client sends {} on a POST without data). */
-export async function readJson<S extends ZodType>(c: Context, schema: S): Promise<z.infer<S>> {
-  const text = await c.req.text();
+/** Largest JSON body a regular route reads (uploads and imports have routes of their own). */
+export const JSON_BODY_LIMIT = 1024 * 1024;
+
+const tooLarge = (limit: number) =>
+  new HttpError(413, "payload_too_large", "The request body is too large", { limitBytes: limit });
+
+/**
+ * The body as text, up to `limit` bytes: a larger Content-Length is rejected before reading, and a body without
+ * one stops being read once it passes the limit (it never sits whole in memory).
+ */
+export async function readBodyText(req: Request, limit: number): Promise<string> {
+  const declared = Number(req.headers.get("content-length") ?? Number.NaN);
+  if (declared > limit) throw tooLarge(limit);
+  if (!req.body) return "";
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      size += next.value.byteLength;
+      if (size > limit) throw tooLarge(limit);
+      chunks.push(next.value);
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+  return Buffer.concat(chunks, size).toString("utf8");
+}
+
+const isJsonType = (type: string | undefined) => /^application\/json\s*(?:;|$)/i.test(type ?? "");
+
+/**
+ * Reads and validates the JSON body, of at most `limit` bytes (413 `payload_too_large` past it) and sent as
+ * application/json (415 `unsupported_media_type` otherwise). An empty body becomes {} (the client sends {} on
+ * a POST without data).
+ */
+export async function readJson<S extends ZodType>(
+  c: Context,
+  schema: S,
+  limit = JSON_BODY_LIMIT,
+): Promise<z.infer<S>> {
+  const req = c.req.raw;
+  const empty = !req.body || req.headers.get("content-length") === "0";
+  if (!empty && !isJsonType(c.req.header("content-type")))
+    throw new HttpError(415, "unsupported_media_type", "Send JSON (application/json)");
+  // A middleware that already read the body (the wiki's NUL check) left it in Hono's cache: the same cap applies.
+  const cached: unknown = c.req.bodyCache.text;
+  let text = "";
+  if (typeof cached === "string") {
+    if (Buffer.byteLength(cached) > limit) throw tooLarge(limit);
+    text = cached;
+  } else if (!empty) text = await readBodyText(req, limit);
   let raw: unknown = {};
   if (text.trim()) {
     try {

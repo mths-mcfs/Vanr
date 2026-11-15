@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type RunnerFrame, runnerFrame } from "@vanr/engine/runner-protocol";
 import { RunnerClient } from "./client";
+import { readConfig, writeConfig } from "./config";
 import { Jobs } from "./jobs";
 import { Flows } from "./outbound";
+import { pair } from "./pair";
 import { sandboxOff } from "./sandbox";
 import { seeded } from "./testing/random";
 
@@ -758,5 +760,91 @@ test("ready() resolves at the welcome of the connection with the real hello, not
     expect(order).toEqual(["first welcome handled", "ready"]);
   } finally {
     globalThis.WebSocket = real;
+  }
+});
+
+test("every line the runner logs is masked with the secrets it knows", () => {
+  const lines: string[] = [];
+  const { call } = fakeClient({
+    maskState: { kind: "known", byAgent: new Map([[agent.id, MASKS]]), all: MASKS },
+    opts: { log: (l: string) => lines.push(l) },
+  });
+  call("log", `could not open a session: declined for ${SECRET}`);
+  expect(lines).toEqual(["could not open a session: declined for [secret:S]"]);
+});
+
+test.each(["toString", "constructor", "__proto__"])(
+  "unknown inherited operation %s returns bad_request",
+  async (op) => {
+    const { call, sent } = fakeClient({});
+    await call("onRequest", { id: "unknown", op, args: {} });
+    expect(sent).toMatchObject([
+      { type: "result", id: "unknown", ok: false, error: { code: "bad_request" } },
+    ]);
+  },
+);
+
+test("updates reject admission before a new request starts", async () => {
+  const { c, call, sent } = fakeClient({ updating: true });
+  Reflect.set(c, "run", async () => ({ exitCode: 0 }));
+  await call("onRequest", { id: "busy", op: "exec", agent, args: { command: "false" } });
+  expect(sent).toMatchObject([{ type: "result", id: "busy", ok: false, error: { code: "internal" } }]);
+});
+
+test.each(["rotation", "repair"])("%s preserves explicit local restrictions", async (kind) => {
+  const home = mkdtempSync(join(tmpdir(), "runner-config-race-"));
+  const original = globalThis.fetch;
+  try {
+    writeFileSync(
+      join(home, "config.json"),
+      JSON.stringify({ server: "https://config.test", runnerId: "rnr_1", token: "old" }),
+    );
+    const config = readConfig(home);
+    if (!config) throw new Error("missing config");
+    config.access.tools = { claude: true, codex: true, commands: true, browser: true };
+    config.access.folders = [{ path: home, agents: [] }];
+    writeConfig(home, config);
+    const response = Promise.withResolvers<Response>();
+    globalThis.fetch = Object.assign(() => response.promise, { preconnect: original.preconnect });
+    const { call } = fakeClient({ config, opts: { home } });
+    if (kind === "rotation") {
+      const opening = call("openSession");
+      writeConfig(home, {
+        ...config,
+        paused: true,
+        access: { ...config.access, tools: { ...config.access.tools, commands: false } },
+      });
+      response.resolve(Response.json({ session: "session", credential: "new" }));
+      await opening;
+      expect(readConfig(home)).toMatchObject({
+        paused: true,
+        token: "new",
+        access: { tools: { commands: false } },
+      });
+    } else {
+      globalThis.fetch = (async (url) =>
+        String(url).endsWith("/token")
+          ? Response.json({
+              token: "new",
+              runnerId: "rnr_1",
+              name: "runner",
+              workspace: { id: "w", name: "test" },
+            })
+          : Response.json({
+              deviceCode: "code",
+              userCode: "ABCDEF",
+              verificationUrl: "https://config.test",
+              expiresIn: 60,
+              interval: 1,
+            })) as typeof fetch;
+      await pair({ home, server: config.server, exec: false, sleep: async () => {}, print: () => {} });
+      expect(readConfig(home)?.access).toEqual({
+        folders: config.access.folders,
+        tools: { claude: false, codex: false, commands: false, browser: false },
+      });
+    }
+  } finally {
+    globalThis.fetch = original;
+    rmSync(home, { recursive: true, force: true });
   }
 });

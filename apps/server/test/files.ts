@@ -48,7 +48,13 @@ export function makeDocx(paragraphs: { text: string; style?: string }[]): Uint8A
 }
 
 export function makePptx(slides: string[][]): Uint8Array {
-  const files: Record<string, string> = { "[Content_Types].xml": "<Types/>" };
+  // The presentation's manifest and its relationships, as every real .pptx has: they give the slide order.
+  const ids = slides.map((_, i) => i + 1);
+  const files: Record<string, string> = {
+    "[Content_Types].xml": "<Types/>",
+    "ppt/presentation.xml": `<p:presentation><p:sldIdLst>${ids.map((n) => `<p:sldId id="${255 + n}" r:id="rId${n}"/>`).join("")}</p:sldIdLst></p:presentation>`,
+    "ppt/_rels/presentation.xml.rels": `<Relationships>${ids.map((n) => `<Relationship Id="rId${n}" Target="slides/slide${n}.xml"/>`).join("")}</Relationships>`,
+  };
   for (const [i, lines] of slides.entries())
     files[`ppt/slides/slide${i + 1}.xml`] =
       `<p:sld><p:cSld><p:spTree>${lines.map((l) => `<a:p><a:r><a:t>${l}</a:t></a:r></a:p>`).join("")}</p:spTree></p:cSld></p:sld>`;
@@ -60,7 +66,9 @@ export function makeXlsx(sheets: { name: string; rows: (string | number)[][] }[]
   const shared: string[] = [];
   const files: Record<string, string> = {
     "[Content_Types].xml": "<Types/>",
-    "xl/workbook.xml": `<workbook><sheets>${sheets.map((s, i) => `<sheet name="${s.name}" sheetId="${i + 1}"/>`).join("")}</sheets></workbook>`,
+    "xl/workbook.xml": `<workbook><sheets>${sheets.map((s, i) => `<sheet name="${s.name}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join("")}</sheets></workbook>`,
+    // The workbook's relationships, as every real .xlsx has: they point each sheet at its part.
+    "xl/_rels/workbook.xml.rels": `<Relationships>${sheets.map((_, i) => `<Relationship Id="rId${i + 1}" Target="worksheets/sheet${i + 1}.xml"/>`).join("")}</Relationships>`,
   };
   for (const [i, s] of sheets.entries()) {
     const rows = s.rows

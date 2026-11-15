@@ -1,2 +1,6 @@
 [install]
 exact = true
+
+[test]
+# The web app tests need a DOM and run from apps/web (the `web` CI job), not from here.
+pathIgnorePatterns = ["apps/web/**"]

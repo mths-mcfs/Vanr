@@ -18,7 +18,8 @@ import {
   textFacets,
 } from "@vanr/engine/search-query";
 import { fold } from "@vanr/engine/text";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { type Names, namesOf, type RowRow, rowChunks, type TableRow } from "./bases/core";
 import type { Config } from "./config";
 import type { AppDeps } from "./context";
 import { contentOf } from "./drive";
@@ -38,13 +39,17 @@ const {
   issues,
   debates,
   debatePosts,
+  dbRows,
+  dbTables,
+  searchChunks,
 } = schema;
 
 /**
  * The sources the server indexes. Each one's producer comes in with its area: files with the Drive (here),
- * messages with the chat (S6), wiki pages with the wiki (S4), issues (S4) and debates (S3).
+ * messages with the chat (S6), wiki pages with the wiki (S4), issues (S4), debates (S3) and the rows of the
+ * bases (bases/write.ts).
  */
-export type IndexedKind = Extract<SourceKind, "message" | "wiki" | "file" | "issue" | "debate">;
+export type IndexedKind = Extract<SourceKind, "message" | "wiki" | "file" | "issue" | "debate" | "db_row">;
 
 export const actorKey = (a: ActorRef | { type: "person" | "agent"; id: string }) =>
   `${a.type === "person" ? "user" : "agent"}:${a.id}`;
@@ -441,6 +446,10 @@ async function build(tx: Tx, ref: { kind: IndexedKind; id: string }): Promise<Ch
         [{ text }],
       );
     }
+    case "db_row": {
+      const [row] = await tx.select().from(dbRows).where(eq(dbRows.id, ref.id)).for("share");
+      return row ? baseRowChunks(tx, row, new Map(), new Map()) : [];
+    }
   }
 }
 
@@ -459,12 +468,72 @@ export async function reindex(deps: Pick<AppDeps, "db" | "search">, ref: { kind:
   }
 }
 
+/** A base row's chunks; the source and the workspace's names are read once per batch. */
+async function baseRowChunks(
+  tx: Tx,
+  row: RowRow,
+  tables: Map<string, TableRow | null>,
+  names: Map<string, Names>,
+): Promise<ChunkInput[]> {
+  if (!tables.has(row.tableId)) {
+    const [table] = await tx.select().from(dbTables).where(eq(dbTables.id, row.tableId));
+    tables.set(row.tableId, table ?? null);
+  }
+  const table = tables.get(row.tableId);
+  if (!table) return [];
+  let n = names.get(row.workspaceId);
+  if (!n) {
+    n = await namesOf(tx, row.workspaceId);
+    names.set(row.workspaceId, n);
+  }
+  return rowChunks(table, row, n);
+}
+
+const ROW_BATCH = 200;
+
+/**
+ * Reindexes many rows of the bases (an import, a recalculation) the way `reindex` does one source: the rows
+ * locked and read back in the transaction that writes their chunks, one transaction per batch.
+ */
+export async function reindexRows(deps: Pick<AppDeps, "db" | "search">, rowIds: readonly string[]) {
+  for (let i = 0; i < rowIds.length; i += ROW_BATCH) {
+    const ids = rowIds.slice(i, i + ROW_BATCH);
+    try {
+      await deps.db.transaction(async (tx) => {
+        const rows = await tx.select().from(dbRows).where(inArray(dbRows.id, ids)).for("share");
+        const byId = new Map(rows.map((r) => [r.id, r]));
+        const tables = new Map<string, TableRow | null>();
+        const names = new Map<string, Names>();
+        const index = deps.search.withDb(tx);
+        for (const id of ids) {
+          const row = byId.get(id);
+          await index.upsert({ kind: "db_row", id }, row ? await baseRowChunks(tx, row, tables, names) : []);
+        }
+      });
+    } catch (err) {
+      log.error("search.reindex_failed", { kind: "db_row", id: ids[0], count: ids.length, err });
+    }
+  }
+}
+
+/** Takes many sources of one kind out of the search, inside the transaction that deletes them. */
+export async function unindexMany(tx: Db | Tx, kind: IndexedKind, ids: readonly string[]) {
+  for (let i = 0; i < ids.length; i += 5_000) {
+    await tx
+      .delete(searchChunks)
+      .where(and(eq(searchChunks.sourceKind, kind), inArray(searchChunks.sourceId, ids.slice(i, i + 5_000))));
+  }
+}
+
 /** Takes the source out of the search inside the transaction of whoever hides or deletes it (same commit). */
 export async function unindex(tx: Db, deps: Pick<AppDeps, "search">, ref: SourceRef) {
   await deps.search.withDb(tx).remove(ref);
 }
 
-/** Replays live files, including stale chunks left by failed version or extraction indexing. */
+/**
+ * Replays live files, including stale chunks left by failed version or extraction indexing, and recovers
+ * missing base rows.
+ */
 export async function backfillSearch(deps: Pick<AppDeps, "db" | "search">, batch = 500): Promise<number> {
   let after = "";
   let n = 0;
@@ -475,13 +544,30 @@ export async function backfillSearch(deps: Pick<AppDeps, "db" | "search">, batch
       .where(and(isNull(files.deletedAt), sql`${files.id} > ${after}`))
       .orderBy(files.id)
       .limit(batch);
-    if (!rows.length) return n;
+    if (!rows.length) break;
     for (const { id } of rows) {
       await reindex(deps, { kind: "file", id });
       after = id;
       n++;
     }
   }
+  const query = sql`select t.id from db_rows t
+    where not exists (select 1 from search_chunks c where c.source_kind = 'db_row' and c.source_id = t.id)
+    limit ${batch}`;
+  // A row that makes no chunk comes back as "missing": seen once, it stops.
+  const seen = new Set<string>();
+  for (;;) {
+    const ids = rowsOf(await deps.db.execute(query))
+      .map((r) => String(r.id))
+      .filter((id) => !seen.has(id));
+    if (!ids.length) break;
+    for (const id of ids) {
+      seen.add(id);
+      await reindex(deps, { kind: "db_row", id });
+    }
+    n += ids.length;
+  }
+  return n;
 }
 
 /** Tick: the vector queue. */

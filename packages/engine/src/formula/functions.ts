@@ -443,6 +443,7 @@ function lazyList(
   ret: (item: FType, body: FType, listType: FType) => FType,
   run: (args: Node[], e: Evaluator, scope: VScope, at: Span) => FValue,
   arity: [number, number] = [2, 2],
+  predicate = false,
 ): FnSpec {
   return {
     arity,
@@ -451,6 +452,8 @@ function lazyList(
       if (!fits(lt, L))
         c.error("type_mismatch", (args[0] as Node).at, { expected: "list", got: typeName(lt), arg: 1 });
       const body = args[1] ? lambdaInfer(args, c, scope, elem(lt)) : T.any;
+      if (predicate && !fits(body, B))
+        c.error("type_mismatch", (args[1] as Node).at, { expected: "boolean", got: typeName(body), arg: 2 });
       return ret(elem(lt), body, lt.k === "list" ? lt : L);
     },
     run,
@@ -573,6 +576,8 @@ const LAZY: Record<string, FnSpec> = {
       });
       return out;
     },
+    [2, 2],
+    true,
   ),
   find: lazyList(
     (item) => item,
@@ -587,6 +592,8 @@ const LAZY: Record<string, FnSpec> = {
       });
       return found;
     },
+    [2, 2],
+    true,
   ),
   findIndex: lazyList(
     () => N,
@@ -601,6 +608,8 @@ const LAZY: Record<string, FnSpec> = {
       });
       return found;
     },
+    [2, 2],
+    true,
   ),
   some: lazyList(
     () => B,
@@ -615,6 +624,8 @@ const LAZY: Record<string, FnSpec> = {
       });
       return hit;
     },
+    [2, 2],
+    true,
   ),
   every: lazyList(
     () => B,
@@ -629,6 +640,8 @@ const LAZY: Record<string, FnSpec> = {
       });
       return all;
     },
+    [2, 2],
+    true,
   ),
   sort: lazyList(
     (_item, _body, lt) => lt,
@@ -708,12 +721,12 @@ const EAGER: Record<string, FnSpec> = {
     const m = s.length >> 1;
     return s.length % 2 ? (s[m] as number) : ((s[m - 1] as number) + (s[m] as number)) / 2;
   }),
-  toNumber: eager([{ params: [A], ret: N }], ([v]) => {
+  toNumber: eager([{ params: [A], ret: N }], ([v], e, at) => {
     const x = v as FValue;
     if (x === null || typeof x === "number") return x;
     if (typeof x === "boolean") return x ? 1 : 0;
     if (typeof x === "string") {
-      const t = x.trim();
+      const t = str(x, e, at).trim();
       const n = t === "" ? Number.NaN : Number(t.replace(",", "."));
       return Number.isFinite(n) ? n : null;
     }
@@ -968,9 +981,8 @@ function dateShift(sign: 1 | -1): FnSpec {
     const amount = sign * num(n as FValue, e, at);
     const start = dateOk(shift(d.start, amount, unit), e, at);
     const end = d.end === undefined ? undefined : dateOk(shift(d.end, amount, unit), e, at);
-    return end === undefined
-      ? { kind: "date", start, time: d.time }
-      : { kind: "date", start, end, time: d.time };
+    const time = d.time || start % 86_400_000 !== 0 || (end !== undefined && end % 86_400_000 !== 0);
+    return end === undefined ? { kind: "date", start, time } : { kind: "date", start, end, time };
   });
   return {
     ...base,

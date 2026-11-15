@@ -17,8 +17,8 @@ import { PROP_TYPES, propText } from "@vanr/engine/props";
 import { diffText } from "@vanr/engine/wiki/diff";
 import { WIKI_PROP_LIMITS } from "@vanr/engine/wiki/props-vault";
 import { and, desc, eq, gte, ilike, isNotNull, isNull, or, sql } from "drizzle-orm";
-import type { Hono } from "hono";
-import { z } from "zod";
+import type { Context, Hono } from "hono";
+import { type ZodType, z } from "zod";
 import type { AppEnv, Ctx, WorkspaceMember } from "../context";
 import { type Form, readFormFile } from "../drive";
 import { badRequest, forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
@@ -79,6 +79,9 @@ const INT32_MAX = 2_147_483_647;
 const version = z.number().int().min(1).max(INT32_MAX);
 /** The largest JSON body a wiki route reads: room for an import of many notes at the page's cap. */
 export const WIKI_JSON_BYTES = 32 * 1024 * 1024;
+/** A wiki route's JSON body, within the wiki's own cap (a page's body passes the default 1 MB). */
+const readWikiJson = <S extends ZodType>(c: Context, schema: S): Promise<z.infer<S>> =>
+  readJson(c, schema, WIKI_JSON_BYTES);
 
 /** The request's body, read up to `max` bytes (413 past it, also when it comes without a length). */
 async function cappedText(req: Request, max: number): Promise<string> {
@@ -250,7 +253,7 @@ export function registerWiki(app: Hono<AppEnv>) {
   app.post(`${WORKSPACE}/wiki/pages`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
-    const input = await readJson(
+    const input = await readWikiJson(
       c,
       z
         .object({
@@ -288,7 +291,7 @@ export function registerWiki(app: Hono<AppEnv>) {
     const me = requireMember(c);
     const deps = c.get("deps");
     const row = await page(c, me);
-    const input = await readJson(
+    const input = await readWikiJson(
       c,
       z
         .object({
@@ -314,7 +317,7 @@ export function registerWiki(app: Hono<AppEnv>) {
     const me = requireMember(c);
     const deps = c.get("deps");
     const row = await page(c, me);
-    const input = await readJson(
+    const input = await readWikiJson(
       c,
       z
         .object({
@@ -354,7 +357,7 @@ export function registerWiki(app: Hono<AppEnv>) {
     const me = requireMember(c);
     const deps = c.get("deps");
     const row = await page(c, me);
-    const input = await readJson(c, z.object({ title }).strict());
+    const input = await readWikiJson(c, z.object({ title }).strict());
     if (input.title === row.title) return c.json(await pageView(c, me, row.slug));
     if (row.locked && !isAdmin(me)) throw new HttpError(403, "wiki.page_locked", "This page is locked");
     const linkers = (await linkingPages(deps.db, row.id)).filter((p) => p.id !== row.id);
@@ -438,7 +441,7 @@ export function registerWiki(app: Hono<AppEnv>) {
     const me = requireMember(c);
     const deps = c.get("deps");
     const row = await page(c, me);
-    const input = await readJson(c, z.object({ folder }).strict());
+    const input = await readWikiJson(c, z.object({ folder }).strict());
     if (row.locked && !isAdmin(me)) throw new HttpError(403, "wiki.page_locked", "This page is locked");
     const moved = await patchPage(
       deps,
@@ -462,7 +465,7 @@ export function registerWiki(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     if (!isAdmin(me)) throw forbidden("Only admins can lock pages");
     const row = await page(c, me);
-    const { locked } = await readJson(c, z.object({ locked: z.boolean() }).strict());
+    const { locked } = await readWikiJson(c, z.object({ locked: z.boolean() }).strict());
     const updated = await patchPage(deps, row, { locked }, adminOnly(me$(me)));
     return c.json(await pageView(c, me, updated.slug));
   });
@@ -471,7 +474,7 @@ export function registerWiki(app: Hono<AppEnv>) {
     const me = requireMember(c);
     const deps = c.get("deps");
     const row = await page(c, me);
-    const { pinned } = await readJson(c, z.object({ pinned: z.boolean() }).strict());
+    const { pinned } = await readWikiJson(c, z.object({ pinned: z.boolean() }).strict());
     const pinnedRow = await patchPage(deps, row, { pinned }, memberOnly(me$(me)));
     return c.json(await pageView(c, me, pinnedRow.slug));
   });
@@ -596,7 +599,7 @@ export function registerWiki(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const row = await page(c, me);
     const v = await versionRow(deps.db, row, Number(param(c, "versionId")));
-    const { parentVersion } = await readJson(c, z.object({ parentVersion: version }).strict());
+    const { parentVersion } = await readWikiJson(c, z.object({ parentVersion: version }).strict());
     const saved = await savePage(deps, {
       row,
       author: me$(me),
@@ -619,7 +622,7 @@ export function registerWiki(app: Hono<AppEnv>) {
     const me = requireMember(c);
     const deps = c.get("deps");
     const row = await page(c, me);
-    const { force } = await readJson(c, z.object({ force: z.boolean().optional() }).strict());
+    const { force } = await readWikiJson(c, z.object({ force: z.boolean().optional() }).strict());
     if (row.locked && !isAdmin(me)) throw new HttpError(403, "wiki.page_locked", "This page is locked");
     const saved = await deps.wikiLive.publish(row, me$(me), { force, canBypassLock: isAdmin(me) });
     return c.json(await pageView(c, me, saved.slug));
@@ -643,7 +646,7 @@ export function registerWiki(app: Hono<AppEnv>) {
   app.put(`${WORKSPACE}/wiki/props`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
-    const input = await readJson(
+    const input = await readWikiJson(
       c,
       z
         .object({
@@ -744,7 +747,7 @@ export function registerWiki(app: Hono<AppEnv>) {
   app.post(`${WORKSPACE}/wiki/import`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
-    const input = await readJson(
+    const input = await readWikiJson(
       c,
       z
         .object({
@@ -816,7 +819,7 @@ export function registerWiki(app: Hono<AppEnv>) {
     const me = requireMember(c);
     const deps = c.get("deps");
     const row = await page(c, me);
-    const { access } = await readJson(c, z.object({ access: accessInput }).strict());
+    const { access } = await readWikiJson(c, z.object({ access: accessInput }).strict());
     const next = await parseAccess(deps.db, me, access);
     // Restricting draws a new end for the slug: with the title's slug, someone else's new page with the same
     // title would become `-2` and confirm the restricted one exists.
@@ -848,7 +851,7 @@ export function registerWiki(app: Hono<AppEnv>) {
     const me = requireMember(c);
     const deps = c.get("deps");
     const row = await page(c, me);
-    const input = await readJson(
+    const input = await readWikiJson(
       c,
       z
         .object({
@@ -882,7 +885,7 @@ export function registerWiki(app: Hono<AppEnv>) {
   app.post(`${WORKSPACE}/wiki/annotations/:annotationId/decide`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
-    const input = await readJson(
+    const input = await readWikiJson(
       c,
       z
         .object({

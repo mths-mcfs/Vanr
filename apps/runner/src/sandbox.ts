@@ -13,11 +13,12 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { lookup } from "node:dns/promises";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, realpathSync, renameSync, rmSync, statSync } from "node:fs";
 import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import type { RunnerSandbox } from "@vanr/contract";
+import type { AgentRef } from "@vanr/engine/runner-protocol";
 import { PRODUCT } from "@vanr/product";
 import { inside, protectedUnder, RunnerError } from "./access";
 import { which } from "./jobs";
@@ -35,6 +36,8 @@ export interface WrapInput {
   fs: FsPolicy;
   /** The process's domains (already with the CLI's, for Claude Code or Codex). */
   domains: string[];
+  /** This process's network mode; it lives and ends with the process (`open` allows what is not denied). */
+  mode: NetworkMode;
   signal?: AbortSignal;
 }
 
@@ -51,8 +54,6 @@ export interface Wrapped {
 
 export interface CommandSandbox {
   status(): RunnerSandbox;
-  /** The workspace's network for the next processes (`open` allows whatever is not on the deny list). */
-  setMode(mode: NetworkMode): void;
   wrap(input: WrapInput): Promise<Wrapped>;
   close(): Promise<void>;
 }
@@ -132,6 +133,42 @@ export async function privateDestination(host: string): Promise<boolean> {
 /** Addresses not even the open network reaches: cloud metadata. */
 const DENIED_DOMAINS = ["169.254.169.254", "metadata.google.internal", "metadata.goog"];
 
+/**
+ * Private ranges a name may not resolve to, in any mode: RFC 1918, CGNAT and IPv6 ULA. The proxy checks the
+ * address it is about to dial (the same one, with no second lookup), so an allowed name whose DNS points at
+ * the person's network does not get there. Loopback, link-local, multicast and the host's own addresses are
+ * denied by the sandbox itself.
+ */
+export const DENIED_RESOLVED_ADDRESSES = [
+  "10.0.0.0/8",
+  "172.16.0.0/12",
+  "192.168.0.0/16",
+  "100.64.0.0/10",
+  "fc00::/7",
+];
+
+/**
+ * The network mode of each live process, by its sandbox id. The proxy asks about a host that no list allowed
+ * without saying which process the connection belongs to, so an unlisted host is allowed only while every
+ * live process is in `open` mode: a process in `allowlist` or `off` is never widened by an open one running
+ * next to it, and a mode ends with its process (nothing carries over to the next one).
+ */
+export class NetworkModes {
+  private readonly live = new Map<string, NetworkMode>();
+  add(id: string, mode: NetworkMode): void {
+    this.live.set(id, mode);
+  }
+  remove(id: string): void {
+    this.live.delete(id);
+  }
+  /** Whether a host that no list allowed may go through. */
+  unlistedAllowed(): boolean {
+    if (this.live.size === 0) return false;
+    for (const mode of this.live.values()) if (mode !== "open") return false;
+    return true;
+  }
+}
+
 /** Domains the CLI itself uses to think (the plan login and the API). */
 export const CLI_DOMAINS: Record<"claude_code" | "codex", string[]> = {
   claude_code: [
@@ -183,14 +220,22 @@ export interface PolicyContext {
   uid: number;
   /** The runner's PATH (its folders inside the home come back for reading, minus the sensitive ones). */
   path: string;
+  /** The person's CLI folders when they moved them (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`); else under the home. */
+  cliDirs?: Partial<Record<"claude_code" | "codex", string>>;
 }
 
-export const defaultPolicyContext = (runnerHome: string): PolicyContext => ({
-  home: homedir(),
-  runnerHome,
-  uid: typeof process.getuid === "function" ? process.getuid() : 0,
-  path: process.env.PATH ?? "",
-});
+export const defaultPolicyContext = (runnerHome: string): PolicyContext => {
+  const cliDirs: Partial<Record<"claude_code" | "codex", string>> = {};
+  if (process.env.CLAUDE_CONFIG_DIR) cliDirs.claude_code = resolve(process.env.CLAUDE_CONFIG_DIR);
+  if (process.env.CODEX_HOME) cliDirs.codex = resolve(process.env.CODEX_HOME);
+  return {
+    home: homedir(),
+    runnerHome,
+    uid: typeof process.getuid === "function" ? process.getuid() : 0,
+    path: process.env.PATH ?? "",
+    cliDirs,
+  };
+};
 
 const existing = (paths: string[]) => [...new Set(paths.map((p) => resolve(p)))].filter((p) => existsSync(p));
 
@@ -290,6 +335,159 @@ export function cliPaths(
 }
 
 /**
+ * Where each CLI keeps the person's login, and the variable that moves its whole state (sessions, history,
+ * memories, state databases, configuration) to another folder: Claude Code's `CLAUDE_CONFIG_DIR` and Codex's
+ * `CODEX_HOME` (`codex exec --help`: "auth still uses CODEX_HOME").
+ */
+const CLI_STATE = {
+  claude_code: {
+    name: "Claude Code",
+    dir: ".claude",
+    login: ".credentials.json",
+    env: "CLAUDE_CONFIG_DIR",
+    folder: "claude",
+  },
+  codex: { name: "Codex", dir: ".codex", login: "auth.json", env: "CODEX_HOME", folder: "codex" },
+} as const;
+
+/** Why an agent session does not start when the CLI's login is not a file the sandbox can open read-only. */
+export const noLoginFile = (executor: "claude_code" | "codex") =>
+  `On this computer ${CLI_STATE[executor].name} keeps its login outside a file (the system keychain), or nobody has signed in to it yet; agent sessions cannot use that login yet.`;
+
+/** The person's own folder of a CLI. */
+export const personalCliDir = (executor: "claude_code" | "codex", ctx: PolicyContext) =>
+  ctx.cliDirs?.[executor] ?? join(ctx.home, CLI_STATE[executor].dir);
+
+/**
+ * The agent's own state of a CLI, in the runner folder: one per agent and CLI, so one agent neither reads
+ * nor resumes another's sessions, and none of them sees the person's.
+ */
+export function agentCliStateDir(ctx: PolicyContext, agent: AgentRef, executor: "claude_code" | "codex") {
+  if ([agent.handle, agent.id].some((v) => !/^[a-zA-Z0-9_-]+$/.test(v)))
+    throw new RunnerError("bad_request", "Invalid agent identity");
+  return join(
+    resolve(ctx.runnerHome),
+    "cli",
+    `${agent.handle}-${agent.id.slice(-8)}`,
+    CLI_STATE[executor].folder,
+  );
+}
+
+/** Live sessions per login link: the link goes away with the last one. */
+const loginUsers = new Map<string, number>();
+
+/**
+ * Puts the person's login file at `dest` as a hard link (the same file, not a copy), replacing what was there
+ * by rename. The sandbox mounts that name read-only: the session reads the login and can neither write,
+ * replace nor remove it, and the person's own file never opens to it.
+ */
+function linkLogin(source: string, dest: string): void {
+  const tmp = `${dest}.${randomBytes(6).toString("hex")}.tmp`;
+  try {
+    linkSync(source, tmp);
+    renameSync(tmp, dest);
+  } catch (err) {
+    rmSync(tmp, { force: true });
+    const code = err instanceof Error && "code" in err ? String(err.code) : "error";
+    throw new RunnerError(
+      "not_logged_in",
+      code === "EXDEV"
+        ? "The CLI login and the runner folder are on different disks, so agent sessions cannot read the login"
+        : `The CLI login could not be opened for agent sessions (${code})`,
+    );
+  }
+  loginUsers.set(dest, (loginUsers.get(dest) ?? 0) + 1);
+}
+
+function unlinkLogin(dest: string): void {
+  const left = (loginUsers.get(dest) ?? 1) - 1;
+  if (left > 0) {
+    loginUsers.set(dest, left);
+    return;
+  }
+  loginUsers.delete(dest);
+  rmSync(dest, { force: true });
+}
+
+export interface AgentCli {
+  /**
+   * `own`: the agent's state in the runner folder, with the person's login read-only (the sandbox is on).
+   * `personal`: the person turned the sandbox off, so the CLI runs as before, in their folder (`cliPaths`).
+   */
+  kind: "own" | "personal";
+  read: string[];
+  write: string[];
+  denyRead: string[];
+  denyWrite: string[];
+  ensure: string[];
+  /** Folders inside the runner folder the process writes (the agent's CLI state). */
+  innerWrite: string[];
+  /** Variables that point the CLI at its state. */
+  env: Record<string, string>;
+  /** Call it when the process ends (or never starts). */
+  release(): void;
+}
+
+/**
+ * What a CLI run by an agent opens in the sandbox. Its sessions, history, memories, state databases and
+ * configuration live in the agent's own state (`agentCliStateDir`), where a session is also resumed from; the
+ * person's CLI folder is not mounted at all, not even for reading. The person's login enters that state alone
+ * and read-only, at the name the CLI looks for: a session never writes nor removes it, and if the CLI needs to
+ * renew it the session ends asking the person to sign in again on this computer. Where the login is not a file
+ * (the macOS keychain, a system keyring) or there is none yet, the session does not start: `not_logged_in`,
+ * before any process, and the person's folder never opens. Only with the sandbox turned off by the person do
+ * the previous rules stay (`cliPaths`).
+ */
+export function agentCli(
+  executor: "claude_code" | "codex",
+  ctx: PolicyContext,
+  bin: string | null,
+  agent: AgentRef,
+  ownCwd: string | null,
+  /** Without the sandbox (turned off by the person) the CLI runs as before, in the person's folder. */
+  sandboxOn: boolean,
+): AgentCli {
+  const spec = CLI_STATE[executor];
+  if (!sandboxOn)
+    return {
+      kind: "personal",
+      ...cliPaths(executor, ctx, bin, ownCwd),
+      innerWrite: [],
+      env: {},
+      release: () => {},
+    };
+  let source: string | null = null;
+  try {
+    const real = realpathSync(join(personalCliDir(executor, ctx), spec.login));
+    if (statSync(real).isFile()) source = real;
+  } catch {
+    source = null;
+  }
+  if (!source) throw new RunnerError("not_logged_in", noLoginFile(executor));
+  const binDir = bin ? dirname(realOrSelf(bin)) : null;
+  const state = agentCliStateDir(ctx, agent, executor);
+  mkdirSync(state, { recursive: true, mode: 0o700 });
+  const login = join(state, spec.login);
+  linkLogin(source, login);
+  let released = false;
+  return {
+    kind: "own",
+    read: binDir && !inside(binDir, ctx.runnerHome) ? [binDir] : [],
+    write: [],
+    denyRead: [],
+    denyWrite: [login],
+    ensure: [],
+    innerWrite: [state],
+    env: { [spec.env]: state },
+    release: () => {
+      if (released) return;
+      released = true;
+      unlinkLogin(login);
+    },
+  };
+}
+
+/**
  * File policy of an agent process. `readable` and `writable` are the agent's folders (and the
  * process's extra ones); everything under the home and the runner folder become unreadable, the session sockets
  * too, and the escalation paths become unwritable.
@@ -322,8 +520,17 @@ export function fsPolicy(
   const writable = [...input.writable.filter(keepOut), ...innerWrite];
   const readable = [...input.readable.filter(keepOut), ...innerRead, ...writable, ...pathDirsInHome(ctx)];
   const scan = protectedUnder(input.writable.filter(keepOut), input.liberated ?? []);
+  const personal = [personalCliDir("claude_code", ctx), personalCliDir("codex", ctx)];
   return {
-    denyRead: existing([...HOME_ROOTS, ctx.home, runner, ...SOCKET_DIRS(ctx.uid), ...(input.denyRead ?? [])]),
+    denyRead: existing([
+      ...HOME_ROOTS,
+      ctx.home,
+      runner,
+      ...personal,
+      ...personal.map(realOrSelf),
+      ...SOCKET_DIRS(ctx.uid),
+      ...(input.denyRead ?? []),
+    ]),
     allowRead: [...new Set(readable.map((p) => resolve(p)))],
     allowWrite: [...new Set(writable.map((p) => resolve(p)))],
     denyWrite: [...new Set([...scan.paths, ...(input.denyWrite ?? []), ...secretsOfRunner])],
@@ -357,13 +564,10 @@ export interface SandboxOptions {
 
 /** `srt` is one per process: every runner of this process (several, in the tests) uses the same one. */
 let shared: Promise<SrtSandbox> | null = null;
-/** The workspace's network mode (the proxy callback does not know which process the connection belongs to). */
-let currentMode: NetworkMode = "allowlist";
 
 /** Sandbox turned off by the person: runs as before, without isolation. */
 export const sandboxOff = (): CommandSandbox => ({
   status: () => ({ state: "off", engine: null, reason: "Turned off in this environment" }),
-  setMode: () => {},
   wrap: async () => {
     throw new RunnerError("sandbox_not_ready", "The sandbox is turned off");
   },
@@ -385,6 +589,9 @@ class SrtSandbox implements CommandSandbox {
     /** What the sandbox itself runs inside (the socat of the proxy bridge), if it is in the home. */
     private readonly ownRead: string[] = [],
   ) {}
+
+  /** The mode of each live process (the proxy callback reads it). */
+  readonly modes = new NetworkModes();
 
   static async create(opts: SandboxOptions): Promise<SrtSandbox> {
     const off = (state: "off" | "unavailable", reason: string) =>
@@ -416,6 +623,7 @@ class SrtSandbox implements CommandSandbox {
           network: {
             allowedDomains: [],
             deniedDomains: DENIED_DOMAINS,
+            deniedResolvedAddresses: DENIED_RESOLVED_ADDRESSES,
             // The harness talks to the runner over a Unix socket (MCP) and the option applies to the whole process:
             // the seccomp socket filter stays off and the session sockets leave by path.
             allowAllUnixSockets: true,
@@ -427,7 +635,8 @@ class SrtSandbox implements CommandSandbox {
         // No list decided: the workspace's open network allows it, except the person's own network; the rest
         // is denied and recorded.
         async ({ host }) => {
-          if (currentMode !== "open") return { allow: false, reason: "host is not on the allow list" };
+          if (!sandbox.modes.unlistedAllowed())
+            return { allow: false, reason: "host is not on the allow list" };
           if (await privateDestination(host)) return { allow: false, reason: "private or loopback address" };
           return true;
         },
@@ -447,6 +656,7 @@ class SrtSandbox implements CommandSandbox {
       command: "true",
       fs: { denyRead: [], allowRead: [], allowWrite: [], denyWrite: [] },
       domains: [],
+      mode: "off",
     });
     try {
       const r = await new Promise<{ code: number | null; err: string }>((done) => {
@@ -474,10 +684,6 @@ class SrtSandbox implements CommandSandbox {
     return this.state;
   }
 
-  setMode(mode: NetworkMode): void {
-    currentMode = mode;
-  }
-
   async wrap(input: WrapInput): Promise<Wrapped> {
     const srt = this.srt;
     if (!srt)
@@ -485,6 +691,7 @@ class SrtSandbox implements CommandSandbox {
     const id = randomBytes(16).toString("base64url");
     const manager = srt.SandboxManager;
     manager.registerCommandNetworkLists(id, { allowedDomains: input.domains });
+    this.modes.add(id, input.mode);
     let command: string;
     try {
       command = await manager.wrapWithSandbox(
@@ -496,6 +703,7 @@ class SrtSandbox implements CommandSandbox {
       );
     } catch (err) {
       manager.unregisterCommandNetworkLists(id);
+      this.modes.remove(id);
       throw new RunnerError("sandbox_not_ready", err instanceof Error ? err.message : String(err));
     }
     let released = false;
@@ -514,6 +722,7 @@ class SrtSandbox implements CommandSandbox {
         if (released) return;
         released = true;
         manager.unregisterCommandNetworkLists(id);
+        this.modes.remove(id);
         manager.cleanupAfterCommand();
       },
     };

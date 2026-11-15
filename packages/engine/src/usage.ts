@@ -66,7 +66,7 @@ export interface UsageLine extends Omit<ModelCall, "usage"> {
   priceVersion: string | null;
 }
 
-/** A cap scope. `month`: spend counts from the first day of the month (UTC) of `at`. */
+/** A cap scope. `month`: spend counts in the calendar month (UTC) of `at`. */
 export interface BudgetScope {
   kind: "agent" | "channel" | "assignment" | "routine_run" | "debate";
   id: string;
@@ -198,10 +198,11 @@ function multiplier(price: Price, call: Pick<ModelCall, "usage" | "batch">): num
  */
 export function usageLines(book: PriceBook, call: ModelCall): UsageLine[] {
   const { usage, ...rest } = call;
-  const parts: (Tokens & { type: string; model: string })[] = usage.iterations?.length
+  const parts: (UsageIteration & { model: string })[] = usage.iterations?.length
     ? usage.iterations.map((it) => ({ ...it, model: it.model ?? call.model }))
     : [{ ...usage, type: "message", model: call.model }];
   return parts.map((part, seq) => {
+    const detail = { ...usage, ...part };
     const price = book.at(part.model, call.at);
     const free = call.keySource === "plan";
     return {
@@ -216,10 +217,11 @@ export function usageLines(book: PriceBook, call: ModelCall): UsageLine[] {
         part.cacheWriteTokens - Math.min(part.cacheWrite1hTokens ?? 0, part.cacheWriteTokens),
       cacheWrite1hTokens: Math.min(part.cacheWrite1hTokens ?? 0, part.cacheWriteTokens),
       outputTokens: part.outputTokens,
-      speed: usage.speed ?? "standard",
-      inferenceGeo: usage.inferenceGeo ?? null,
-      serviceTier: usage.serviceTier ?? null,
-      costUsd: !price || free ? 0 : tokenCost(price, part, multiplier(price, call)),
+      speed: detail.speed ?? "standard",
+      inferenceGeo: detail.inferenceGeo ?? null,
+      serviceTier: detail.serviceTier ?? null,
+      costUsd:
+        !price || free ? 0 : tokenCost(price, part, multiplier(price, { usage: detail, batch: call.batch })),
       priceVersion: price?.version ?? null,
     };
   });
@@ -302,18 +304,20 @@ export function memoryLedger(book: PriceBook): UsageLedger & { lines: UsageLine[
   let seq = 0;
 
   const spentIn = (scope: BudgetScope, at: Date) => {
-    const from = periodStart(scope, at);
     return lines
-      .filter((l) => l.scopes.some((s) => scopeKey(s) === scopeKey(scope)) && (!from || l.at >= from))
+      .filter(
+        (l) =>
+          l.scopes.some((s) => scopeKey(s) === scopeKey(scope)) &&
+          periodKey(scope, l.at) === periodKey(scope, at),
+      )
       .reduce((sum, l) => sum + l.costUsd, 0);
   };
   const reservedIn = (scope: BudgetScope, at: Date) => {
-    const from = periodStart(scope, at);
     let sum = 0;
     for (const r of open.values())
       if (
         r.scopes.some((s) => scopeKey(s) === scopeKey(scope)) &&
-        (!from || r.at >= from) &&
+        periodKey(scope, r.at) === periodKey(scope, at) &&
         r.expiresAt > at
       )
         sum += r.estimateUsd;

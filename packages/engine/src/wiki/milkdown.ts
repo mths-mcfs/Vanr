@@ -7,7 +7,13 @@
 import { remarkStringifyOptionsCtx } from "@milkdown/kit/core";
 import type { Ctx, MilkdownPlugin } from "@milkdown/kit/ctx";
 import { commonmark, syncHeadingIdPlugin } from "@milkdown/kit/preset/commonmark";
-import { gfm, tableCellSchema, tableHeaderSchema } from "@milkdown/kit/preset/gfm";
+import {
+  extendListItemSchemaForTask,
+  gfm,
+  tableCellSchema,
+  tableHeaderSchema,
+} from "@milkdown/kit/preset/gfm";
+import type { RemarkPluginRaw } from "@milkdown/kit/transformer";
 import { $nodeSchema, $remark, type GetNodeSchema } from "@milkdown/kit/utils";
 import { parseLinkInner } from "./links";
 
@@ -75,10 +81,63 @@ const atom = (raw: string): MdNode =>
  * A remark plugin that runs before commonmark: replaces the syntax Milkdown does not know (or would
  * rewrite) with `wikiLink`/`wikiRaw` nodes holding the original text, using the position in the source.
  */
-export function remarkWikiSyntax() {
+export function remarkWikiSyntax(this: ThisParameterType<RemarkPluginRaw<unknown>>) {
+  // Consume raw source as an HTML token, before CommonMark decodes escapes or parses marks.
+  const inline = new RegExp(`^(?:${INLINE_RAW.source})$`, "mu");
+  const data = this.data();
+  data.micromarkExtensions ??= [];
+  type State = (code: number | null) => State | undefined;
+  const construct: NonNullable<(typeof data.micromarkExtensions)[number]["text"]>[number] = {
+    name: "wikiRaw",
+    tokenize(effects, ok, nok) {
+      let raw = "";
+      let suffix = "";
+      let prefix = "";
+      let close = "";
+      return start;
+      function start(code: number | null): State | undefined {
+        const c = String.fromCharCode(code ?? 0);
+        prefix = c === "!" ? "![[" : c === "\\" ? "\\[[" : c === "[" ? "[[" : c === "$" ? "$" : c + c;
+        close = prefix.endsWith("[[") ? "]]" : prefix;
+        effects.enter("htmlText");
+        return read(code);
+      }
+      function read(code: number | null): State | undefined {
+        const c = code === -2 ? "\t" : String.fromCharCode(code ?? 0);
+        if (raw.length >= prefix.length + close.length && suffix === close) {
+          if (close === "$" && /\d/.test(c)) return nok(code);
+          if (raw.startsWith("\\[[") || inline.test(raw)) {
+            effects.exit("htmlText");
+            return ok(code);
+          }
+          return nok(code);
+        }
+        if (code === null || code < -2) return nok(code);
+        if (code === -1) {
+          effects.consume(code);
+          return read;
+        }
+        if (raw === "[" && c === "!") {
+          prefix = "[!";
+          close = "]";
+        }
+        if (raw.length < prefix.length) {
+          if (c !== prefix[raw.length]) return nok(code);
+        } else if (close === "]" && c !== "]" && !/[A-Za-z-]/.test(c)) return nok(code);
+        else if (c === "[" && close === "]]" && raw.length > prefix.length && suffix.endsWith("["))
+          return nok(code);
+        raw += c;
+        suffix = (suffix + c).slice(-close.length);
+        effects.consume(code);
+        return read;
+      }
+    },
+  };
+  data.micromarkExtensions.push({
+    text: { 33: construct, 36: construct, 37: construct, 61: construct, 91: construct, 92: construct },
+  });
   return (tree: unknown, file: unknown) => {
     const src = String(file);
-    const inline = new RegExp(INLINE_RAW.source, "gmu");
     const walk = (node: MdNode) => {
       if (!node.children) return;
       const flow = node.type === "root" || node.type === "blockquote" || node.type === "listItem";
@@ -88,8 +147,27 @@ export function remarkWikiSyntax() {
         const b = child.position?.end.offset;
         const slice = a !== undefined && b !== undefined ? src.slice(a, b) : null;
         if (slice !== null) {
-          if (child.type === "paragraph" && isBlockRaw(slice)) {
-            out.push({ type: "paragraph", children: [{ type: "wikiRaw", value: slice.trimEnd() }] });
+          if (child.type === "paragraph") {
+            const prefix = a === undefined ? "" : src.slice(src.lastIndexOf("\n", a - 1) + 1, a);
+            const quotes = prefix.match(/>/g)?.length ?? 0;
+            const indent = prefix
+              .replace(/[-+*]|\d+[.)]/g, (m) => " ".repeat(m.length))
+              .replace(/[ \t]*>[ \t]?/g, "").length;
+            const logical = slice
+              .split("\n")
+              .map((line, i) => {
+                if (!i) return line;
+                for (let q = 0; q < quotes; q++) line = line.replace(/^[ \t]*>[ \t]?/, "");
+                return line.slice(indent);
+              })
+              .join("\n");
+            if (isBlockRaw(logical)) {
+              out.push({ type: "paragraph", children: [{ type: "wikiRaw", value: logical.trimEnd() }] });
+              continue;
+            }
+          }
+          if (child.type === "html" && (slice.startsWith("\\[[") || inline.test(slice))) {
+            out.push(slice.startsWith("\\[[") ? { type: "wikiRaw", value: slice } : atom(slice));
             continue;
           }
           // Reference and definition: Milkdown turns them into inline links (remark-inline-links).
@@ -109,7 +187,10 @@ export function remarkWikiSyntax() {
         }
         if (child.type === "text" && child.value) {
           let last = 0;
-          for (const m of child.value.matchAll(inline)) {
+          // Tags and block ids cannot contain CommonMark inline markup or escapes.
+          for (const m of child.value.matchAll(
+            /(?<=^|\s)#[\p{L}\p{N}_/-]*\p{L}[\p{L}\p{N}_/-]*|(?<=\s)\^[A-Za-z0-9-]+(?=\s*$)/gmu,
+          )) {
             const at = m.index ?? 0;
             if (at > last) out.push({ type: "text", value: child.value.slice(last, at) });
             out.push(atom(m[0]));
@@ -257,10 +338,27 @@ export const wikiMarkdownPlugins: MilkdownPlugin[] = [
   gfm,
   tableCellSchema.extendSchema(alignNull),
   tableHeaderSchema.extendSchema(alignNull),
+  extendListItemSchemaForTask.extendSchema((prev) => (ctx) => {
+    const spec = prev(ctx);
+    return {
+      ...spec,
+      toMarkdown: {
+        ...spec.toMarkdown,
+        runner: (state, node) => {
+          const first = node.firstChild;
+          if (first?.type.name === "paragraph" && first.content.size === 0) {
+            state.openNode("listItem", undefined, {
+              label: node.attrs.label,
+              listType: node.attrs.listType,
+              spread: node.attrs.spread,
+              checked: node.attrs.checked,
+            });
+            state.addNode("paragraph", []);
+            state.next(node.content.cut(first.nodeSize));
+            state.closeNode();
+          } else spec.toMarkdown.runner(state, node);
+        },
+      },
+    };
+  }),
 ].flat();
-
-/** Finishing touches on the text the serializer returns. */
-export function finishMarkdown(md: string): string {
-  // An empty list item: Milkdown writes `<br />` to keep the empty paragraph.
-  return md.replace(/^(\s*(?:[-*+]|\d+[.)])(?: \[[ xX]\])?) <br \/>$/gm, "$1");
-}

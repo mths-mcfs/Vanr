@@ -384,7 +384,7 @@ export async function decideProposal(
     // The author is the proposal's: who decides is checked as the writer (inTx) and for the lock.
     attributionOnly: true,
     canBypassLock: can(me.role, "configure"),
-    lockBypassBy: [person],
+    lockBypassBy: person,
     inTx: memberOnly(person),
     note: `proposal ${row.id}`,
     bodyFor: async (tx, current) => {

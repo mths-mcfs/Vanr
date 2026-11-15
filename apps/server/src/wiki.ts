@@ -83,11 +83,34 @@ function normalizeAltTitles(aliases: string[] | undefined, title: string): strin
   return out;
 }
 
-function excerptOf(body: string): string {
-  const plain = body
-    .replace(/```[\s\S]*?```/g, " ")
-    .replace(/%%[\s\S]*?%%/g, " ")
-    .replace(/!?\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]/g, "$1")
+/**
+ * `[[target#…|…]]` (or `![[…]]`) → `target`, as `/!?\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]/g` would replace it,
+ * in one pass: the inner text runs to the first `]`. That expression rescanned the rest of the text from
+ * every `[[` with no closing.
+ */
+function linkTargets(text: string): string {
+  const stop = new Int32Array(text.length + 1).fill(text.length);
+  for (let i = text.length - 1; i >= 0; i--) stop[i] = text[i] === "]" ? i : (stop[i + 1] as number);
+  let out = "";
+  let last = 0;
+  for (let i = 0; i < text.length; i++) {
+    const bang = text[i] === "!" && text.startsWith("[[", i + 1);
+    if (!bang && !text.startsWith("[[", i)) continue;
+    const from = i + (bang ? 3 : 2);
+    const k = stop[from] as number;
+    const first = text[from];
+    if (k === from || first === "|" || first === "#" || text[k + 1] !== "]") continue;
+    const inner = text.slice(from, k);
+    const cut = inner.search(/[|#]/);
+    out += text.slice(last, i) + (cut < 0 ? inner : inner.slice(0, cut));
+    last = k + 2;
+    i = k + 1;
+  }
+  return out + text.slice(last);
+}
+
+export function excerptOf(body: string): string {
+  const plain = linkTargets(body.replace(/```[\s\S]*?```/g, " ").replace(/%%[\s\S]*?%%/g, " "))
     .replace(/[#>*_`~[\]()!-]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -410,26 +433,29 @@ export async function writeTx<T>(db: Db, fn: (tx: Tx) => Promise<T>): Promise<T>
 }
 
 /** A person's role in the workspace read inside the write's transaction (null: not a member any more). */
-async function roleIn(tx: Tx, workspaceId: string, userId: string) {
-  const [m] = await tx
-    .select({ role: members.role })
-    .from(members)
-    .where(and(eq(members.workspaceId, workspaceId), eq(members.userId, userId)))
-    .for("share");
-  return m?.role ?? null;
-}
+/**
+ * A person's membership read for a write: FOR SHARE, so a removal that comes after waits for the write to
+ * commit, and one that committed before leaves nothing to read. A mutable seam: the Postgres race test
+ * swaps it for a read without the lock (VANR_TEST_WIKI_MEMBER_UNLOCKED).
+ */
+export const memberLock = {
+  role: async (tx: Tx, workspaceId: string, userId: string) => {
+    const [m] = await tx
+      .select({ role: members.role })
+      .from(members)
+      .where(and(eq(members.workspaceId, workspaceId), eq(members.userId, userId)))
+      .for("share");
+    return m?.role ?? null;
+  },
+};
+
+const roleIn = (tx: Tx, workspaceId: string, userId: string) => memberLock.role(tx, workspaceId, userId);
 
 /** Whether `who` may write a locked page, decided with the role read in `tx`: only a person who is an admin. */
 export async function bypassesLock(tx: Tx, workspaceId: string, who: ActorRef): Promise<boolean> {
   if (who.type !== "person") return false;
   const role = await roleIn(tx, workspaceId, who.id);
   return !!role && can(role, "configure");
-}
-
-/** Whether any of `who` may write a locked page now (the live draft's editors decide its automatic publish). */
-export async function anyBypasses(tx: Tx, workspaceId: string, who: readonly ActorRef[]): Promise<boolean> {
-  for (const w of who) if (await bypassesLock(tx, workspaceId, w)) return true;
-  return false;
 }
 
 /** A person who writes must still be a member when the write commits; an agent's access is its run's. */
@@ -497,10 +523,10 @@ export async function savePage(
     note?: string | null;
     origin?: SaveOrigin;
     inTx?: (tx: Tx, page: WikiRow) => Promise<void>;
-    /** The author is only the credit (the live draft's last editor): not checked as the one who writes. */
+    /** Automatic publication may credit a former member for edits accepted before they left. */
     attributionOnly?: boolean;
-    /** Whose role decides the lock (default: the author). */
-    lockBypassBy?: readonly ActorRef[];
+    /** Whose role decides the lock when the author is only the credit (a proposal's decider). */
+    lockBypassBy?: ActorRef;
     /**
      * The body computed on the locked row, after `inTx` (a proposal's accepted changes land on the text
      * as it is now, so there is no parent version to check). Null: nothing to save; the transaction
@@ -519,8 +545,8 @@ export async function savePage(
       await requireWriter(tx, row.workspaceId, input.author);
       await requireReader(tx, row, input.author);
     }
-    const deciders = input.lockBypassBy ?? [input.author];
-    if (row.locked && !(input.canBypassLock && (await anyBypasses(tx, row.workspaceId, deciders))))
+    const decider = input.lockBypassBy ?? input.author;
+    if (row.locked && !(input.canBypassLock && (await bypassesLock(tx, row.workspaceId, decider))))
       throw pageLocked();
     // Without a parent version the caller saves over the version it read.
     const expected = input.parentVersion ?? input.row.version;
@@ -746,9 +772,9 @@ export async function trashPage(deps: AppDeps, row: WikiRow, me: WorkspaceMember
     await logChange(tx, { page: r, action: "trash", author: { type: "person", id: me.userId }, at });
     return r;
   });
+  deps.wikiLive.pageClosed(trashed);
   // A link with the same name moves to another page outside the trash, if there is one.
   await reresolveLinks(deps.db, trashed.workspaceId, namesOf(trashed));
-  deps.wikiLive.pageClosed(trashed);
   return trashed;
 }
 

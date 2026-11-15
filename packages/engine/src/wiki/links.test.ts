@@ -123,3 +123,72 @@ describe("blocks, headings and tags", () => {
     expect(bodyTags(md).sort()).toEqual(["between", "project", "team/product"]);
   });
 });
+
+test("table aliases resolve and keep their escaped delimiter when renamed", () => {
+  const md = "| [[Page\\|Label]] | Keep |";
+  const page = { slug: "page-2", title: "Page", folder: "" };
+  expect(resolveTarget(parseWikiLinks(md)[0]?.target ?? "", [page])).toEqual(page);
+  expect(rewriteLinks(md, () => ({ target: "New" }))).toEqual({ md: "| [[New\\|Label]] | Keep |", count: 1 });
+});
+
+test("fences in list and quote containers end before outside links", () => {
+  for (const [open, body, close] of [
+    ["- ```md", "  ", "  ```"],
+    ["> ```md", "> ", "> ```"],
+    ["- ~~~", "  ", "  ~~~"],
+    ["```md", "> ", "```"],
+    ["> ```md", "> > ", "> ```"],
+  ]) {
+    const md = `${open}\n${body}[[Old]]\n${body}\n${body}# Not a heading\n${body}\n${close}\n\n[[Old]]\n`;
+    expect(rewriteLinks(md, () => ({ target: "New" }))).toEqual({
+      md: `${md.slice(0, md.lastIndexOf("[[Old]]"))}[[New]]\n`,
+      count: 1,
+    });
+    expect(headings(md)).toEqual([]);
+  }
+});
+
+test("long unmatched delimiter runs stay literal and preserve following links", () => {
+  for (const source of [`x ${"`".repeat(40000)}x`, `${"[".repeat(40000)}x`]) {
+    expect(parseWikiLinks(`${source}\n\n[[Outside]]`).map((l) => l.target)).toEqual(["Outside"]);
+  }
+  expect(parseWikiLinks("`` unmatched `[[Hidden]]` [[Visible]]").map((l) => l.target)).toEqual(["Visible"]);
+});
+
+test("CRLF headings and literal underscores keep their anchor text", () => {
+  expect(headings("# Main\r\n\r\nSub\r\n---\r\n")).toEqual([
+    { level: 1, text: "Main", line: 0 },
+    { level: 2, text: "Sub", line: 2 },
+  ]);
+  expect(headings("## API_key and `a_b` with **bold** and _italic_")[0]?.text).toBe(
+    "API_key and a_b with bold and italic",
+  );
+});
+
+test("comments can surround fences without exposing links, headings or tags", () => {
+  for (const fence of ["```md", "~~~md"]) {
+    const comment = `%%\n## Hidden [[Old]] #hidden\n${fence}\nexample\n${fence.slice(0, 3)}\n## Hidden [[Old]] #hidden\n%%\n\n`;
+    const source = `${comment}## Visible\n[[Old]] #visible\n`;
+    expect(parseWikiLinks(source).map((link) => link.start)).toEqual([source.lastIndexOf("[[Old]]")]);
+    expect(rewriteLinks(source, () => ({ target: "New" }))).toEqual({
+      md: `${comment}## Visible\n[[New]] #visible\n`,
+      count: 1,
+    });
+    expect(headings(source).map((heading) => heading.text)).toEqual(["Visible"]);
+    expect(bodyTags(source)).toEqual(["visible"]);
+  }
+});
+
+test.each([
+  ["***Important***", "Important"],
+  ["___Important___", "Important"],
+  ["**bold *italic***", "bold italic"],
+  ["__bold _italic___", "bold italic"],
+  ["*italic **bold***", "italic bold"],
+  ["_italic __bold___", "italic bold"],
+  ["API_key and `***a_b***` with **_nested_**", "API_key and ***a_b*** with nested"],
+  ["Literal \\*stars\\* and under_score", "Literal *stars* and under_score"],
+])("nested emphasis is omitted from heading anchors: %s", (markup, text) => {
+  expect(headings(`## ${markup}`)[0]?.text).toBe(text);
+  expect(headings(`${markup}\n---\n`)[0]?.text).toBe(text);
+});
