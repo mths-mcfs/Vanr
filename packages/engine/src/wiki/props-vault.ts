@@ -3,18 +3,19 @@
 // definition by name (without case) or creates one, with the type inferred from the value, as Obsidian does.
 import { newId } from "../ids";
 import {
+  applyProps,
   COMPUTED_TYPES,
+  isCalendarIso,
+  isCheckboxWord,
   isChecked,
   type PropDef,
   type PropOption,
   type Props,
   type PropValue,
+  parsePropText,
   propText,
 } from "../props";
 import type { FrontmatterData } from "./frontmatter";
-
-// The same format the typed properties accept: a date, or a date and time with an offset.
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2}))?$/;
 
 /** Property value → YAML value. Computed types are left out. */
 export function propsToFrontmatter(defs: readonly PropDef[], props: Props): FrontmatterData {
@@ -53,7 +54,7 @@ function inferType(value: unknown): PropDef["type"] {
   if (typeof value === "boolean") return "checkbox";
   if (typeof value === "number") return "number";
   if (Array.isArray(value)) return "multi_select";
-  if (typeof value === "string" && ISO_DATE.test(value.trim())) return "date";
+  if (typeof value === "string" && isCalendarIso(value.trim())) return "date";
   if (typeof value === "string" && /^https?:\/\/\S+$/i.test(value.trim())) return "url";
   return "text";
 }
@@ -75,8 +76,9 @@ export function frontmatterToProps(
   const created: string[] = [];
   const rejected: string[] = [];
   for (const [key, raw] of Object.entries(data)) {
-    if (raw === null || raw === undefined || raw === "") continue;
+    if (raw === null || raw === undefined) continue;
     let found = next.find((d) => d.name.toLowerCase() === key.toLowerCase());
+    if (raw === "" && found?.type !== "text") continue;
     if (!found) {
       found = { id: newId("prop"), name: key.slice(0, 80), type: inferType(raw) };
       if (found.type === "multi_select") found.options = [];
@@ -95,7 +97,12 @@ export function frontmatterToProps(
     let value: PropValue | undefined;
     switch (def.type) {
       case "text":
-        value = Array.isArray(raw) ? raw.map(scalar).filter(Boolean).join(", ") : (scalar(raw) ?? undefined);
+        value =
+          typeof raw === "string"
+            ? raw
+            : Array.isArray(raw)
+              ? raw.map(scalar).filter(Boolean).join(", ")
+              : (scalar(raw) ?? undefined);
         break;
       case "url": {
         const s = scalar(raw);
@@ -108,11 +115,12 @@ export function frontmatterToProps(
         break;
       }
       case "checkbox":
-        value = typeof raw === "boolean" ? raw : isChecked(String(raw));
+        value =
+          typeof raw === "boolean" ? raw : isCheckboxWord(String(raw)) ? isChecked(String(raw)) : undefined;
         break;
       case "date": {
         const s = scalar(raw);
-        value = s && ISO_DATE.test(s) ? { start: s } : undefined;
+        value = s ? parsePropText(def, s) : undefined;
         break;
       }
       case "select":
@@ -128,10 +136,14 @@ export function frontmatterToProps(
         value = list.slice(0, 100).map(option);
         break;
       }
+      case "person":
+      case "file":
+        value = typeof raw === "string" ? parsePropText(def, raw) : undefined;
+        break;
       default:
         value = undefined;
     }
-    if (value === undefined) rejected.push(key);
+    if (value === undefined || !applyProps([def], {}, { [def.id]: value }).ok) rejected.push(key);
     else write[def.id] = value;
   }
   return { defs: next, write, created, rejected };

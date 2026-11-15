@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { applyProps, isStorable, type PropDef, parsePropText, propText, storableText } from "./props";
+import {
+  applyProps,
+  isStorable,
+  normalizeProps,
+  type PropDef,
+  type PropValue,
+  parsePropText,
+  propText,
+  storableText,
+} from "./props";
 
 const DEFS: PropDef[] = [
   { id: "p_title", name: "Title", type: "text" },
@@ -103,4 +112,69 @@ describe("text round trip (CSV, front matter)", () => {
     expect(parsePropText(DEFS[1] as PropDef, "2,5")).toBe(2.5);
     expect(parsePropText(status, "other")).toBeUndefined();
   });
+});
+
+test("editable text and lists round trip without losing characters", () => {
+  const cases: [PropDef, PropValue][] = [
+    [{ id: "p", name: "P", type: "text" }, "  café\n\n"],
+    [{ id: "p", name: "P", type: "text" }, ""],
+    [
+      { id: "p", name: "P", type: "multi_select", options: [{ id: "design", name: 'Design, "UX"' }] },
+      ["design"],
+    ],
+    [
+      { id: "p", name: "P", type: "person" },
+      [
+        { type: "person", id: "u,1" },
+        { type: "agent", id: "a1" },
+      ],
+    ],
+    [{ id: "p", name: "P", type: "file" }, ["file_1", "file,2"]],
+  ];
+  for (const [def, value] of cases) {
+    expect(applyProps([def], {}, { p: parsePropText(def, propText(def, value)) })).toEqual({
+      ok: true,
+      props: { p: value },
+    });
+  }
+});
+
+test("unknown checkbox words are not silently converted to false", () => {
+  const def: PropDef = { id: "c", name: "Check", type: "checkbox" };
+  expect(parsePropText(def, "maybe")).toBeUndefined();
+  expect(normalizeProps([def], { c: "maybe" })).toEqual({});
+});
+
+test("multi-select names beginning with a bracket remain importable and convertible", () => {
+  const def: PropDef = {
+    id: "m",
+    name: "M",
+    type: "multi_select",
+    options: [
+      { id: "review", name: "[Review]" },
+      { id: "number", name: "[1]" },
+      { id: "design", name: 'Design, "UX"' },
+    ],
+  };
+  for (const { name, id } of [
+    { name: "[Review]", id: "review" },
+    { name: "[1]", id: "number" },
+  ]) {
+    expect(parsePropText(def, name)).toEqual([id]);
+    expect(normalizeProps([def], { m: name })).toEqual({ m: [id] });
+  }
+  const selected = ["review", "design"];
+  expect(parsePropText(def, propText(def, selected))).toEqual(selected);
+  expect(parsePropText(def, "[Review], [1]")).toEqual(["review", "number"]);
+  expect(parsePropText(def, '["Unknown"]')).toBeUndefined();
+});
+
+test("date writes reject invalid clocks and offsets on either endpoint", () => {
+  const def: PropDef = { id: "d", name: "D", type: "date" };
+  for (const time of ["99:30:00Z", "12:00:00+99:00"]) {
+    const invalid = `2026-11-14T${time}`;
+    for (const value of [{ start: invalid }, { start: "2026-11-14", end: invalid }])
+      expect(applyProps([def], {}, { d: value }).ok).toBe(false);
+  }
+  expect(applyProps([def], {}, { d: { start: "2026-11-14T23:59:59.123-03:00" } }).ok).toBe(true);
 });
