@@ -10,8 +10,9 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { AUTH_RATE_LIMITS, createAuth } from "../src/auth";
 import { loadConfig } from "../src/config";
-import { errorBody, HttpError, JSON_BODY_LIMIT, readJson } from "../src/http";
+import { errorBody, HttpError, handOverBody, JSON_BODY_LIMIT, readJson } from "../src/http";
 import { log } from "../src/logger";
+import { createMailer } from "../src/mailer";
 import { createProviderLookup } from "../src/models";
 import { installScript } from "../src/runners/install";
 import { LEDGER_LIMITS, postgresLedger } from "../src/usage-ledger";
@@ -31,9 +32,6 @@ describe("model credentials", () => {
       {
         config: loadConfig({ ANTHROPIC_API_KEY: "sk-ant-platform" }),
         db,
-        now: () => new Date(),
-        hub: { toChannel() {}, toWorkspace() {} },
-        ledger: postgresLedger(db, CONTRACT_PRICES),
         sealer,
       },
       {},
@@ -127,6 +125,33 @@ describe("readJson", () => {
     expect(await codeOf(await post('{"a":"x"}', {}))).toEqual([415, "unsupported_media_type"]);
   });
 
+  test("only a body handed over by a border middleware is reused; any other cached text is ignored", async () => {
+    const routes = new Hono();
+    routes.onError((err, c) =>
+      err instanceof HttpError ? c.json(errorBody(err.code, err.message), err.status) : c.json({}, 500),
+    );
+    // Text left in Hono's cache by anything else: the route still reads the real body, under the 1 MiB cap.
+    routes.use("/plain", async (c, next) => {
+      c.req.bodyCache.text = JSON.stringify({ a: "from the cache" });
+      await next();
+    });
+    routes.post("/plain", async (c) => c.json(await readJson(c, z.object({ a: z.string() }))));
+    // The wiki's way: the middleware reads the body and hands it over; the route's cap still applies.
+    routes.use("/handed", async (c, next) => {
+      handOverBody(c.req.raw, await c.req.raw.text());
+      await next();
+    });
+    routes.post("/handed", async (c) => c.json(await readJson(c, z.object({ a: z.string() }))));
+    const send = (path: string, body: string) =>
+      routes.request(path, { method: "POST", headers: { "content-type": "application/json" }, body });
+
+    expect(await (await send("/plain", JSON.stringify({ a: "sent" }))).json()).toEqual({ a: "sent" });
+    const big = JSON.stringify({ a: "x".repeat(JSON_BODY_LIMIT) });
+    expect(await codeOf(await send("/plain", big))).toEqual([413, "payload_too_large"]);
+    expect(await (await send("/handed", JSON.stringify({ a: "sent" }))).json()).toEqual({ a: "sent" });
+    expect(await codeOf(await send("/handed", big))).toEqual([413, "payload_too_large"]);
+  });
+
   test("JSON within the limit still works, and an empty body is {}", async () => {
     const ok = await post(JSON.stringify({ a: "x".repeat(1000) }), {
       "content-type": "application/json; charset=utf-8",
@@ -218,9 +243,9 @@ describe("auth rate limits", () => {
     return createAuth({
       db,
       config: cfg,
-      mailer: { async send() {} },
+      mailer: createMailer(cfg.mail, true),
       trustedOrigins: cfg.trustedOrigins,
-      signupAllowed: async () => true,
+      signupAllowed: async () => "allow",
     });
   };
   const signIn = (a: ReturnType<typeof auth>, ip: string) =>

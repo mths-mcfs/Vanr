@@ -2,7 +2,9 @@
 // and the latest activity. No dependency on the engine (the UI imports it without starting DBOS).
 import { schema } from "@vanr/engine/db";
 import { eq, max, or } from "drizzle-orm";
-import type { AppDeps, AssignmentRow, PlanItemRow } from "../forward-types";
+import type { AppDeps } from "../context";
+import type { AssignmentRow } from "../forward-types";
+import type { PlanItemRow } from "./plan";
 
 const { assignmentEvents, messages, runnerJobs } = schema;
 

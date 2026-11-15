@@ -58,6 +58,17 @@ export async function readBodyText(req: Request, limit: number): Promise<string>
   return Buffer.concat(chunks, size).toString("utf8");
 }
 
+/**
+ * Bodies a border middleware already read and checked (the wiki's NUL check), by request. Only what was handed
+ * over here is reused by `readJson`; any other text in Hono's body cache is ignored and the body is read again.
+ */
+const preRead = new WeakMap<Request, string>();
+
+/** A middleware that read the request's body hands it to the route's `readJson`, which still applies its cap. */
+export function handOverBody(req: Request, text: string): void {
+  preRead.set(req, text);
+}
+
 const isJsonType = (type: string | undefined) => /^application\/json\s*(?:;|$)/i.test(type ?? "");
 
 /**
@@ -74,7 +85,13 @@ export async function readJson<S extends ZodType>(
   const empty = !req.body || req.headers.get("content-length") === "0";
   if (!empty && !isJsonType(c.req.header("content-type")))
     throw new HttpError(415, "unsupported_media_type", "Send JSON (application/json)");
-  const text = empty ? "" : await readBodyText(req, limit);
+  // A body a border middleware handed over (handOverBody) is reused under the same cap; otherwise it is read.
+  const handed = preRead.get(req);
+  let text = "";
+  if (handed !== undefined) {
+    if (Buffer.byteLength(handed) > limit) throw tooLarge(limit);
+    text = handed;
+  } else if (!empty) text = await readBodyText(req, limit);
   let raw: unknown = {};
   if (text.trim()) {
     try {

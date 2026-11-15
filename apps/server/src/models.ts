@@ -6,11 +6,16 @@ import { anthropicProvider } from "@vanr/engine/models/anthropic";
 import { fakeProvider } from "@vanr/engine/models/fake";
 import type { ModelProvider } from "@vanr/engine/models/types";
 import { and, eq, isNull } from "drizzle-orm";
-import type { AgentRow, AppDeps, ProviderLookup } from "./forward-types";
+import type { AgentRow } from "./agents";
+import type { AppDeps } from "./context";
+import type { ProviderLookup } from "./forward-types";
 
 const { credentials, workspaces } = schema;
 
-export function createProviderLookup(deps: AppDeps, opts: { forceFake?: boolean }): ProviderLookup {
+export function createProviderLookup(
+  deps: Pick<AppDeps, "config" | "db" | "sealer">,
+  opts: { forceFake?: boolean },
+): ProviderLookup {
   const { config } = deps;
   const fake = fakeProvider({ chunkDelayMs: config.model.provider === "fake" ? config.model.delayMs : 0 });
   const platform = config.model.provider === "anthropic" ? anthropicProvider(config.model.apiKey) : null;

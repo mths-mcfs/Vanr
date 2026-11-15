@@ -5,7 +5,7 @@ import type { AssignmentUsage } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import type { BudgetScope } from "@vanr/engine/usage";
 import { and, count, eq, inArray, sql } from "drizzle-orm";
-import type { AppDeps } from "../forward-types";
+import type { AppDeps } from "../context";
 
 const { assignments, assignmentWork, runnerJobs } = schema;
 type AssignmentLimits = schema.AssignmentLimits;
@@ -54,7 +54,7 @@ export async function assignmentOfRun(
 
 /** Usage so far: USD in the ledger, minutes of the jobs on the runner and steps the engine sent. */
 export async function assignmentUsage(
-  deps: AppDeps,
+  deps: Pick<AppDeps, "db" | "ledger" | "now">,
   row: { id: string; limits: AssignmentLimits },
 ): Promise<AssignmentUsage> {
   const now = deps.now();

@@ -7,8 +7,8 @@ import type { NetworkRequest } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { DOMAIN_RE, type NetworkPolicyFrame } from "@vanr/engine/runner-protocol";
-import { and, desc, eq, inArray } from "drizzle-orm";
-import type { AppDeps } from "../forward-types";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import type { AppDeps } from "../context";
 
 const { sandboxPolicies, networkRequests, messages } = schema;
 
@@ -144,14 +144,12 @@ export async function publishNetwork(
   type: "network.requested" | "network.updated",
 ): Promise<void> {
   const networkRequest = toNetworkRequest(row);
-  if (row.messageId) {
-    const [msg] = await deps.db.select().from(messages).where(eq(messages.id, row.messageId));
-    if (msg)
-      await deps.db
-        .update(messages)
-        .set({ meta: { ...msg.meta, networkRequest } })
-        .where(eq(messages.id, msg.id));
-  }
+  // One statement merges the request into the card's meta: what else the meta holds stays.
+  if (row.messageId)
+    await deps.db
+      .update(messages)
+      .set({ meta: sql`${messages.meta} || ${JSON.stringify({ networkRequest })}::jsonb` })
+      .where(eq(messages.id, row.messageId));
   if (row.channelId) deps.hub.toChannel(row.channelId, { type, networkRequest, messageId: row.messageId });
   deps.hub.toWorkspace(row.workspaceId, { type: "network.changed", agentId: row.agentId });
 }

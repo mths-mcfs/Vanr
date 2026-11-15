@@ -10,6 +10,7 @@ import { guardedFetch, type NetPolicy, resolveHost } from "../src/integrations/n
 import { s3Blobs } from "../src/integrations/s3";
 import { smtpSend } from "../src/integrations/smtp";
 import { startFakeS3 } from "./fake-s3";
+import { SERVER_TEST_MS, startTestServer } from "./harness";
 
 /** The code of the HttpError a call ends in, or the message of any other error. */
 const failureOf = async (run: Promise<unknown>) => {
@@ -138,6 +139,68 @@ describe("guardedFetch", () => {
       [null, null, "kept"],
     ]);
   });
+});
+
+describe("the server's integration network policy", () => {
+  test(
+    "requires TLS even with private networks allowed, including on redirects",
+    async () => {
+      const sent: string[] = [];
+      const server = await startTestServer({
+        env: { ALLOW_PRIVATE_NETWORKS: "true", ALLOW_PLAINTEXT_INTEGRATIONS: "false" },
+        fetchExternal: Object.assign(
+          async (input: string | URL | Request) => {
+            const url = input instanceof Request ? input.url : String(input);
+            sent.push(url);
+            return url.endsWith("/redirect")
+              ? new Response(null, { status: 302, headers: { location: `http://${PUBLIC_IP}/rpc` } })
+              : new Response("ok");
+          },
+          { preconnect() {} },
+        ),
+      });
+      try {
+        expect(await (await server.deps.fetchExternal("https://127.0.0.1/rpc")).text()).toBe("ok");
+        await expect(server.deps.fetchExternal(`https://${PUBLIC_IP}/redirect`)).rejects.toMatchObject({
+          code: "invalid_url",
+        });
+        await expect(server.deps.fetchExternal(`http://${PUBLIC_IP}/rpc`)).rejects.toMatchObject({
+          code: "invalid_url",
+        });
+        expect(sent).toEqual(["https://127.0.0.1/rpc", `https://${PUBLIC_IP}/redirect`]);
+      } finally {
+        await server.stop();
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "allows plaintext while still blocking private networks",
+    async () => {
+      const sent: string[] = [];
+      const server = await startTestServer({
+        env: { ALLOW_PRIVATE_NETWORKS: "false", ALLOW_PLAINTEXT_INTEGRATIONS: "true" },
+        fetchExternal: Object.assign(
+          async (input: string | URL | Request) => {
+            sent.push(input instanceof Request ? input.url : String(input));
+            return new Response("ok");
+          },
+          { preconnect() {} },
+        ),
+      });
+      try {
+        expect(await (await server.deps.fetchExternal(`http://${PUBLIC_IP}/rpc`)).text()).toBe("ok");
+        await expect(server.deps.fetchExternal("http://127.0.0.1/rpc")).rejects.toMatchObject({
+          code: "blocked_host",
+        });
+        expect(sent).toEqual([`http://${PUBLIC_IP}/rpc`]);
+      } finally {
+        await server.stop();
+      }
+    },
+    SERVER_TEST_MS,
+  );
 });
 
 /** A TCP server that counts connections and answers each with `onSocket`. */
@@ -354,12 +417,12 @@ describe("S3", () => {
       );
     expect(await put(CLOSED, { endpoint: s3.endpoint.replace("http:", "https:") })).toBe("blocked_host");
     expect(await put({ ...LOCAL, allowPlaintext: false })).toBe("invalid_url");
-    // Virtual-hosted style: the bucket is part of the host, and that name resolves on its own.
+    // Virtual-hosted style: the endpoint already carries the bucket in its host, and that name resolves on its own.
     const dns = async (host: string) => (host.startsWith("evil.") ? ["169.254.169.254"] : [PUBLIC_IP]);
     expect(
       await put(
         { ...CLOSED, resolve: dns },
-        { endpoint: "https://s3.example.test", bucket: "evil", pathAddressing: false },
+        { endpoint: "https://evil.s3.example.test", bucket: "evil", pathAddressing: false },
       ),
     ).toBe("blocked_host");
     expect(s3.objects.size).toBe(0);

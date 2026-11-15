@@ -306,8 +306,36 @@ class Emitter {
       }
       return this.emitObject(n);
     }
+    if (n.name === "Exclude" && a && b) {
+      // Only over literal unions: what is left of the first after taking out the second.
+      const from = this.literalsOf(a);
+      const out = this.literalsOf(b);
+      if (!from || !out)
+        throw new Error(`Exclude over non-literal types: ${JSON.stringify(n).slice(0, 200)}`);
+      const left = from.filter((v) => !out.includes(v));
+      return `s.literal(${left.map((v) => JSON.stringify(v)).join(", ")})`;
+    }
     if (!this.byName.has(n.name)) throw new Error(`unknown type ${n.name}`);
     return `s.lazy(() => ${n.name})`;
+  }
+
+  /** The values of a literal union (through named aliases), or null when it isn't one. */
+  literalsOf(n: Node): (string | number | boolean)[] | null {
+    if (n.k === "lit") return [n.value];
+    if (n.k === "union") {
+      const all: (string | number | boolean)[] = [];
+      for (const m of n.members) {
+        const vs = this.literalsOf(m);
+        if (!vs) return null;
+        all.push(...vs);
+      }
+      return all;
+    }
+    if (n.k === "ref" && n.args.length === 0) {
+      const d = this.byName.get(n.name);
+      return d && d.bases.length === 0 ? this.literalsOf(d.node) : null;
+    }
+    return null;
   }
 
   declaration(d: Decl): string {
