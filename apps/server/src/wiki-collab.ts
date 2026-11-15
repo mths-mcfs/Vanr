@@ -24,7 +24,6 @@ import { errorBody, HttpError, notFound } from "./http";
 import { log } from "./logger";
 import {
   type Author,
-  anyBypasses,
   bypassesLock,
   MAX_BODY,
   pageBySlug,
@@ -720,9 +719,9 @@ export function createWikiCollab(
 
   /**
    * Publishes the document as a version. The save's transaction reads the page locked (savePage): it must
-   * exist outside the trash and, if locked, someone who decides the lock must be an admin there. The button's
-   * publisher is the person who asked; the automatic publish credits whoever edited last, and its lock is
-   * decided by the session's editors (an admin among them, by the role read in the transaction).
+   * exist outside the trash and, if locked, the publisher must still be an admin there. The button's
+   * publisher is the person who asked; the automatic publisher is whoever edited last. Their current role
+   * is read in the transaction.
    */
   async function publishSession(
     name: string,
@@ -742,7 +741,6 @@ export function createWikiCollab(
       throw new HttpError(409, "wiki.stale_draft", "Someone saved a newer version", {
         currentVersion: page.version,
       });
-    const deciders: ActorRef[] = opts.automatic ? s.editors : [by];
     if (text === page.body) {
       // Nothing to publish, but the draft is saved clean: by someone who may write the page, checked in the
       // save's transaction; only once it committed does the session take the new state.
@@ -754,7 +752,7 @@ export function createWikiCollab(
         conflictVersion: null,
       };
       await persist({ ...s, ...clean }, doc, async (tx, locked) => {
-        if (locked.locked && !(opts.canBypassLock && (await anyBypasses(tx, locked.workspaceId, deciders))))
+        if (locked.locked && !(opts.canBypassLock && (await bypassesLock(tx, locked.workspaceId, by))))
           throw new HttpError(403, "wiki.page_locked", "This page is locked");
       });
       // Clean only if nothing changed since the snapshot saved (the change counter); otherwise the draft
@@ -772,7 +770,6 @@ export function createWikiCollab(
       note,
       origin: "live",
       attributionOnly: opts.automatic === true,
-      lockBypassBy: deciders,
     });
     s.parentVersion = saved.version;
     s.baseBody = saved.body;

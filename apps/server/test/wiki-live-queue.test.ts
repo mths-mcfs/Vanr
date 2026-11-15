@@ -545,35 +545,119 @@ describe("a write changes the shared document only after its transaction committ
     a.close();
   });
 
-  test("an idle publish the lock rejects leaves the draft to publish: the admin's publish does", async () => {
-    const { workspaceId, ana, beto } = await team();
-    const page = await ana.api.wiki.createWikiPage(workspaceId, {
-      title: "Idle reject",
-      body: "Original.\n",
-    });
-    const name = docName(workspaceId, page.slug);
-    const timers = captureTimers([IDLE_MS]);
-    try {
-      const a = connect(server, ana.browser, workspaceId, name);
-      const b = connect(server, beto.browser, workspaceId, name);
-      await Promise.all([a.synced, b.synced]);
-      // Only the member edits: the idle publish's lock is decided by him.
-      await b.edit(() => "By the member.\n");
-      await until(() => !b.provider.hasUnsyncedChanges);
-      await until(() => timers.caught.some((t) => t.ms === IDLE_MS));
-      await ana.api.wiki.lockWikiPage(workspaceId, page.slug, true);
-      timers.fire(IDLE_MS);
-      await server.deps.wikiLive.settled();
-      expect((await ana.api.wiki.getWikiPage(workspaceId, page.slug)).version).toBe(1);
-      expect(await ana.api.wiki.publishWikiPageDraft(workspaceId, page.slug)).toMatchObject({
-        version: 2,
-        body: "By the member.\n",
-      });
-      a.close();
-      b.close();
-      await unloaded(server);
-    } finally {
-      timers.restore();
-    }
-  });
+  test.each([
+    ["different", "member"],
+    ["identical", "member"],
+    ["different", "admin"],
+    ["identical", "admin"],
+    ["different", "demoted"],
+    ["identical", "demoted"],
+    ["different", "removed"],
+    ["identical", "removed"],
+  ] as const)(
+    "a locked automatic publish uses only the last editor's current role (%s text, %s)",
+    async (text, last) => {
+      const quick = await startTestServer({ wikiDebounceMs: 20, wikiIdlePublishMs: IDLE_MS });
+      const timers = captureTimers([IDLE_MS]);
+      try {
+        const { workspaceId, ana, beto } = await team(quick);
+        const { db } = quick.deps;
+        const membership = and(
+          eq(schema.members.workspaceId, workspaceId),
+          eq(schema.members.userId, beto.user.id),
+        );
+        if (last !== "member") await db.update(schema.members).set({ role: "admin" }).where(membership);
+        const page = await ana.api.wiki.createWikiPage(workspaceId, {
+          title: "Last editor",
+          body: "Original.\n",
+        });
+        const name = docName(workspaceId, page.slug);
+        const a = connect(quick, ana.browser, workspaceId, name);
+        const b = connect(quick, beto.browser, workspaceId, name);
+        try {
+          await Promise.all([a.synced, b.synced]);
+          await a.edit(() => "By the earlier admin.\n");
+          await until(async () => (await b.md()) === "By the earlier admin.\n");
+          const target = text === "identical" ? "Original.\n" : "By the last editor.\n";
+          await b.edit(() => target);
+          await until(() => !b.provider.hasUnsyncedChanges);
+          await until(async () => {
+            const draft = await storedDraft(quick, workspaceId, page.slug);
+            return draft?.dirty === true && draft.text === target;
+          });
+          await quick.deps.wikiLive.settled();
+          const editors = [
+            { type: "person", id: ana.user.id },
+            { type: "person", id: beto.user.id },
+          ];
+          expect(await storedDraft(quick, workspaceId, page.slug)).toMatchObject({ dirty: true, editors });
+          await ana.api.wiki.lockWikiPage(workspaceId, page.slug, true);
+          await quick.deps.wikiLive.settled();
+
+          if (last === "demoted" || last === "removed") {
+            // Change the last editor's role after publishing starts, before its write transaction reads it.
+            const hold = holdNextTransaction(quick, "before");
+            try {
+              timers.fire(IDLE_MS);
+              await hold.started;
+              if (last === "demoted")
+                await db.update(schema.members).set({ role: "member" }).where(membership);
+              else await db.delete(schema.members).where(membership);
+            } finally {
+              hold.release();
+              hold.restore();
+            }
+          } else timers.fire(IDLE_MS);
+          await quick.deps.wikiLive.settled();
+
+          const allowed = last === "admin";
+          const version = allowed && text === "different" ? 2 : 1;
+          const published = await ana.api.wiki.getWikiPage(workspaceId, page.slug);
+          expect(published).toMatchObject({ version, body: allowed ? target : "Original.\n" });
+          expect(await storedDraft(quick, workspaceId, page.slug)).toMatchObject({
+            dirty: !allowed,
+            parentVersion: version,
+            text: target,
+            editors: allowed ? [] : editors,
+          });
+          if (allowed && text === "different")
+            expect(published.history[0]?.author).toEqual({ type: "person", id: beto.user.id });
+          a.close();
+          b.close();
+          await unloaded(quick);
+          if (!allowed) {
+            // Session end and a later session without edits must keep the same saved draft and last editor.
+            const again = connect(quick, ana.browser, workspaceId, name);
+            try {
+              await again.synced;
+              expect(await again.md()).toBe(target);
+            } finally {
+              again.close();
+            }
+            await unloaded(quick);
+            expect((await ana.api.wiki.getWikiPage(workspaceId, page.slug)).version).toBe(1);
+            expect(await storedDraft(quick, workspaceId, page.slug)).toMatchObject({
+              dirty: true,
+              parentVersion: 1,
+              text: target,
+              editors,
+            });
+            // The explicit publisher's role still decides an explicit publication.
+            expect(await ana.api.wiki.publishWikiPageDraft(workspaceId, page.slug)).toMatchObject({
+              version: text === "different" ? 2 : 1,
+              body: target,
+              draft: { dirty: false, editors: [] },
+            });
+          }
+        } finally {
+          a.close();
+          b.close();
+        }
+      } finally {
+        timers.restore();
+        await quick.stop();
+      }
+    },
+    SERVER_TEST_MS * 2,
+  );
 });
