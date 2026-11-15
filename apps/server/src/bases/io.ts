@@ -3,7 +3,7 @@ import type { ActorRef } from "@vanr/contract";
 import { CsvError, inferColumns, matchHeader, parseCsv, toCsv, uniqueNames } from "@vanr/engine/bases/csv";
 import { effectiveFilter, type ViewConfig } from "@vanr/engine/bases/view";
 import { schema } from "@vanr/engine/db";
-import { applyProps, type PropDef, type Props, parsePropText } from "@vanr/engine/props";
+import { applyProps, multiNames, type PropDef, type Props, parsePropText } from "@vanr/engine/props";
 import { and, eq, isNull } from "drizzle-orm";
 import { channelInWorkspace } from "../channels";
 import type { AppDeps } from "../context";
@@ -41,7 +41,7 @@ function addMissingOptions(defs: PropDef[], cols: (PropDef | null)[], rows: stri
     for (const r of rows) {
       const cell = (r[i] ?? "").trim();
       if (!cell) continue;
-      const names = def.type === "multi_select" ? cell.split(",").map((s) => s.trim()) : [cell];
+      const names = def.type === "multi_select" ? multiNames(cell) : [cell];
       for (const n of names) {
         if (!n || known.has(n.toLowerCase())) continue;
         const set = extra.get(def.id) ?? new Set<string>();

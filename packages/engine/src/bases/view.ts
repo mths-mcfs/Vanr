@@ -250,7 +250,12 @@ export function checkFilter(filter: Filter, defs: readonly PropDef[], depth = 1)
   if (!ops.includes(filter.op)) return [`bad_op:${filter.prop}:${filter.op}`];
   const value = (VALUES[kind] as Partial<Record<string, z.ZodType>>)[filter.op];
   if (value && !value.safeParse(filter.value).success) return [`bad_value:${filter.prop}:${filter.op}`];
-  if (value && (kind === "option" || kind === "status" || kind === "multi") && filter.op !== "group") {
+  if (
+    value &&
+    def.type !== "relation" &&
+    (kind === "option" || kind === "status" || kind === "multi") &&
+    filter.op !== "group"
+  ) {
     const ids = Array.isArray(filter.value) ? filter.value : [filter.value];
     if (ids.some((id) => !def.options?.some((o) => o.id === id)))
       return [`bad_value:${filter.prop}:${filter.op}`];

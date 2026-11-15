@@ -173,33 +173,46 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   const upgradeRequired = () =>
     Response.json(errorBody("upgrade_required", "Use WebSocket"), { status: 426 });
 
+  // The stop admits no new request or upgrade, and waits for the handlers already admitted before the wiki,
+  // the background work and the database close under them.
+  let closing = false;
+  const admitted = new Set<Promise<unknown>>();
+  async function serve(req: Request, srv: Bun.Server<SocketData>): Promise<Response | undefined> {
+    const path = new URL(req.url).pathname;
+    // Large bodies (Drive downloads and uploads) get a longer inactivity limit than the rest.
+    if (isTransfer(path)) srv.timeout(req, TRANSFER_IDLE_SECONDS);
+    // The browser's real time: the session cookie and the origin are checked before the upgrade.
+    if (depsRef && path === "/api/v1/realtime") {
+      const check = await checkBrowserUpgrade(depsRef, req, origins);
+      if (!check.ok) return check.response;
+      if (srv.upgrade(req, { data: check.data })) return undefined;
+      return upgradeRequired();
+    }
+    // The paired runners: the authentication is the `hello` with the session, inside the socket.
+    if (depsRef && path === "/api/v1/runners/connect") {
+      if (srv.upgrade(req, { data: runnerSocketData() })) return undefined;
+      return upgradeRequired();
+    }
+    // The live wiki: the session cookie, the origin, the membership and the connection caps before the upgrade.
+    if (depsRef && path === COLLAB_PATH) {
+      const check = await collab.upgrade(req, origins);
+      if (!check.ok) return check.response;
+      if (srv.upgrade(req, { data: check.data })) return undefined;
+      return upgradeRequired();
+    }
+    return handler(req);
+  }
+
   const server = Bun.serve<SocketData>({
     port: config.port,
     ...(opts.idleTimeoutSeconds !== undefined ? { idleTimeout: opts.idleTimeoutSeconds } : {}),
-    async fetch(req, srv) {
-      const path = new URL(req.url).pathname;
-      // Large bodies (Drive downloads and uploads) get a longer inactivity limit than the rest.
-      if (isTransfer(path)) srv.timeout(req, TRANSFER_IDLE_SECONDS);
-      // The browser's real time: the session cookie and the origin are checked before the upgrade.
-      if (depsRef && path === "/api/v1/realtime") {
-        const check = await checkBrowserUpgrade(depsRef, req, origins);
-        if (!check.ok) return check.response;
-        if (srv.upgrade(req, { data: check.data })) return undefined;
-        return upgradeRequired();
-      }
-      // The paired runners: the authentication is the `hello` with the session, inside the socket.
-      if (depsRef && path === "/api/v1/runners/connect") {
-        if (srv.upgrade(req, { data: runnerSocketData() })) return undefined;
-        return upgradeRequired();
-      }
-      // The live wiki: the session cookie, the origin, the membership and the connection caps before the upgrade.
-      if (depsRef && path === COLLAB_PATH) {
-        const check = await collab.upgrade(req, origins);
-        if (!check.ok) return check.response;
-        if (srv.upgrade(req, { data: check.data })) return undefined;
-        return upgradeRequired();
-      }
-      return handler(req);
+    fetch(req, srv) {
+      if (closing) return Response.json(errorBody("unavailable", "The server is stopping"), { status: 503 });
+      const answer = serve(req, srv);
+      const done = () => admitted.delete(answer);
+      admitted.add(answer);
+      answer.then(done, done);
+      return answer;
     },
     websocket: {
       // The biggest frame any side may send (a runner's live view frame); each handler has its own limit.
@@ -396,6 +409,12 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   depsRef = deps;
   log.info("server.started", { url: publicUrl, db: opened.kind });
 
+  // The first step of the stop: no new request, then the admitted ones end (a runner call they await fails).
+  undo.push(async () => {
+    closing = true;
+    runnersHub.closeAll();
+    while (admitted.size > 0) await Promise.allSettled([...admitted]);
+  });
   // Every stop, at once or later, gets the same shutdown: it ends (or fails) once for all of them.
   let stopping: Promise<void> | null = null;
   return {

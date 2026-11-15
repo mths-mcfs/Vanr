@@ -1532,6 +1532,51 @@ describe("bases: adversarial review (each reproduced attack becomes a test)", ()
   );
 
   test(
+    "an exported multi-select imports back with the same option names, with or without them in the table",
+    async () => {
+      const { workspaceId, ana } = await team();
+      const tagged = (opts: { id: string; name: string }[]) => ({
+        id: "tags",
+        name: "Tags",
+        type: "multi_select" as const,
+        options: opts,
+      });
+      const source = await ana.api.create(workspaceId, { title: "Tagged" });
+      let st = source.tables[0];
+      if (!st) throw new Error("no table");
+      const names = [
+        { id: "tag_a", name: "Alpha" },
+        { id: "tag_b", name: "Beta, gamma" },
+      ];
+      st = await ana.api.saveSchema(workspaceId, source.id, st.id, {
+        parentVersion: st.schemaVersion,
+        defs: [...st.defs, tagged(names)],
+      });
+      await ana.api.createRow(workspaceId, source.id, st.id, {
+        props: { [st.titlePropId]: "R1", tags: ["tag_a", "tag_b"] },
+      });
+      const { csv } = await ana.api.exportCsv(workspaceId, source.id, st.id);
+      const again = await ana.api.importCsv(workspaceId, source.id, st.id, { csv });
+      expect(again.skipped).toBe(0);
+      expect(again.table.defs.find((d) => d.id === "tags")?.options).toEqual(names);
+      const fresh = await ana.api.create(workspaceId, { title: "Destination" });
+      let ft = fresh.tables[0];
+      if (!ft) throw new Error("no table");
+      ft = await ana.api.saveSchema(workspaceId, fresh.id, ft.id, {
+        parentVersion: ft.schemaVersion,
+        defs: [...ft.defs, tagged([])],
+      });
+      const imported = await ana.api.importCsv(workspaceId, fresh.id, ft.id, { csv });
+      expect([imported.created, imported.skipped]).toEqual([1, 0]);
+      const options = imported.table.defs.find((d) => d.id === "tags")?.options ?? [];
+      expect(options.map((o) => o.name)).toEqual(["Alpha", "Beta, gamma"]);
+      const [row] = (await ana.api.query(workspaceId, fresh.id, ft.id)).rows;
+      expect(row?.props.tags).toEqual(options.map((o) => o.id));
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "importing a CSV into a base that would pass the cap leaves no new column behind",
     async () => {
       const { workspaceId, ana } = await team();
