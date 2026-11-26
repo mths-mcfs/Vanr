@@ -106,7 +106,8 @@ function pinned(url: URL, ip: string, init: RequestInit): [string, RequestInit] 
  * fetch for outside servers. Every address goes through the `checkServerUrl` rule: the request and also each
  * redirect, followed here by hand. Without this, a remote server points ours at the internal network through
  * what it returns (OAuth metadata, client registration, `Location`). `Authorization` and `Cookie` don't follow
- * to another origin. Without the local network allowed, every hop connects to the checked IP.
+ * to another origin. Without the local network allowed, every hop connects to the checked IP. A caller that
+ * asks for `redirect: "manual"` gets the first answer, redirect included, and nothing is followed.
  *
  * Guarding a guarded fetch wraps the fetch underneath with the new rule: two layers would pin the first hop
  * to its IP, and the inner one would then see a redirect back to the name as another origin and drop the
@@ -131,21 +132,13 @@ export function guardedFetch(
       const [target, sent] = pinned(checked, ip, { ...req, redirect: "manual" });
       const res = await raw(target, sent);
       const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
-      if (!location) return res;
+      if (!location || init.redirect === "manual") return res;
       const next = new URL(location, checked);
       const method = (req.method ?? "GET").toUpperCase();
       // As fetch does: 303, and 301/302 coming from a POST, become a GET without a body.
       if (res.status === 303 || ((res.status === 301 || res.status === 302) && method === "POST"))
         req = { ...req, method: "GET", body: undefined };
       if (next.origin !== checked.origin) {
-        // A 307 or 308 resends the body as it is: a token request's code, verifier and secrets stay with the
-        // origin they were meant for.
-        if (req.body !== undefined && req.body !== null)
-          throw new HttpError(
-            400,
-            "unreachable",
-            "The server redirected a request with a body to another origin",
-          );
         const headers = new Headers(req.headers);
         headers.delete("authorization");
         headers.delete("cookie");

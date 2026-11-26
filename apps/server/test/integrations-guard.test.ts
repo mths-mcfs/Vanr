@@ -8,6 +8,7 @@ import { connectCustom } from "../src/integrations/connectors";
 import { ImapClient } from "../src/integrations/imap";
 import { McpClient, McpError } from "../src/integrations/mcp";
 import { guardedFetch, type NetPolicy, resolveHost } from "../src/integrations/net";
+import { exchangeCode } from "../src/integrations/oauth";
 import { s3Blobs } from "../src/integrations/s3";
 import { smtpSend } from "../src/integrations/smtp";
 import { startFakeMcp } from "./fake-mcp";
@@ -143,19 +144,24 @@ describe("guardedFetch", () => {
     ]);
   });
 
-  test("a redirect that would resend a body to another origin stops before it goes out", async () => {
-    const dns = async (host: string) => (host === "other.test" ? ["93.184.216.35"] : [PUBLIC_IP]);
+  test("a token request that is redirected fails without sending its form on", async () => {
+    const dns = async () => [PUBLIC_IP];
     const { sent, fetchFn } = recorder([
       new Response(null, { status: 307, headers: { location: "https://other.test/token" } }),
     ]);
-    const got = await failureOf(
-      guardedFetch(
-        fetchFn,
-        false,
-        dns,
-      )("https://auth.test/token", { method: "POST", body: "code=c&code_verifier=v" }),
+    const exchange = exchangeCode(
+      guardedFetch(fetchFn, false, dns),
+      {
+        tokenEndpoint: "https://auth.test/token",
+        code: "c",
+        verifier: "v",
+        redirectUri: "https://vanr.test/back",
+        clientId: "client",
+        clientSecret: "secret",
+      },
+      new Date(),
     );
-    expect(got).toBe("unreachable");
+    await expect(exchange).rejects.toThrow("Token exchange failed");
     expect(sent.map((s) => s.url)).toEqual([`https://${PUBLIC_IP}/token`]);
   });
 

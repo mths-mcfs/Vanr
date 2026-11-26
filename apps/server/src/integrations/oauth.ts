@@ -286,6 +286,9 @@ async function tokenRequest(
       client_id: client.clientId,
       ...(client.clientSecret ? { client_secret: client.clientSecret } : {}),
     }),
+    // The form holds the code, the verifier and the secrets: a redirect would carry it elsewhere (a 307 or
+    // 308 resends the body), so a redirect is a failed exchange.
+    redirect: "manual",
     signal: AbortSignal.timeout(10_000),
   }).catch(() => null);
   if (!res?.ok) throw new OAuthError("Token exchange failed");
