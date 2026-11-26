@@ -1,6 +1,8 @@
 // Public surface of @vanr/contract: the API contract types shared by the server, the engine, the runner
 // and clients, plus the secret box used to hand secrets to an agent's environment.
 
+export type { AgentBody, AgentExtra, AgentMouth } from "./agent-appearance.ts";
+export { AGENT_BODIES, AGENT_EXTRAS, AGENT_MOUTHS } from "./agent-appearance.ts";
 export type {
   AgentDraft,
   AgentEval,
