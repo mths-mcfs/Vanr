@@ -3,7 +3,7 @@
 import { schema } from "@vanr/engine/db";
 import { eq, max, or } from "drizzle-orm";
 import type { AppDeps } from "../context";
-import type { AssignmentRow } from "../forward-types";
+import type { AssignmentRow } from "./core";
 import type { PlanItemRow } from "./plan";
 
 const { assignmentEvents, messages, runnerJobs } = schema;

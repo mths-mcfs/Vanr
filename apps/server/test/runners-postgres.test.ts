@@ -354,7 +354,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("forced: runner locks on Postgres
             `/agents/${agentId}/browser/interventions/start`,
             {},
           ),
-        'from "browser_interventions"',
+        { match: 'from "browser_interventions"' },
       );
       const open = await server.deps.db
         .select()

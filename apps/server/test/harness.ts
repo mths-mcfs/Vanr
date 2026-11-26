@@ -20,11 +20,11 @@ export interface TestServerOptions {
   sql?: SqlConnector;
   /** No forcing of the fake provider: the production rule of the lookup applies (production tests). */
   realModels?: boolean;
+  /** The inactivity limit of every request, in seconds (Bun's default is 10). */
+  idleTimeoutSeconds?: number;
   /** The live wiki: the quiet before the draft publishes itself and the autosave debounce. */
   wikiIdlePublishMs?: number;
   wikiDebounceMs?: number;
-  /** The inactivity limit of every request, in seconds (Bun's default is 10). */
-  idleTimeoutSeconds?: number;
 }
 
 /**
@@ -58,9 +58,9 @@ export async function startTestServer(opts: TestServerOptions = {}): Promise<Run
     forceFakeModels: opts.realModels !== true,
     steps: opts.steps,
     signupQueue: opts.signupQueue,
+    idleTimeoutSeconds: opts.idleTimeoutSeconds,
     wikiIdlePublishMs: opts.wikiIdlePublishMs,
     wikiDebounceMs: opts.wikiDebounceMs,
-    idleTimeoutSeconds: opts.idleTimeoutSeconds,
     // The file services' cycle runs only where a test asks for it: the production period (60 s of real time)
     // would fire in the middle of a long file, over whatever rows the earlier tests left.
     fileServicesMs: opts.fileServicesMs ?? FILE_SERVICES_OFF_MS,
