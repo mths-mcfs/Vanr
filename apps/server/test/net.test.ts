@@ -174,7 +174,10 @@ describe("SSRF attacks (cloud edition)", () => {
           }),
       });
       await expect(
-        discoverAuthServer(guardedFetch(raw, false), "https://93.184.216.34/mcp", null, false),
+        discoverAuthServer(guardedFetch(raw, false), "https://93.184.216.34/mcp", null, {
+          allowPrivate: false,
+          allowPlaintext: false,
+        }),
       ).rejects.toThrow("unsafe OAuth address");
     }
   });

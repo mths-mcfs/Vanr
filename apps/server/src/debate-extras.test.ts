@@ -8,7 +8,7 @@ import { PRICES } from "@vanr/engine/models/prices";
 import { estimateUsd, utf8Bytes } from "@vanr/engine/usage";
 import { eq } from "drizzle-orm";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "../test/harness";
-import { memberOf, type Person, seedWorkspace } from "../test/seed";
+import { memberOf, type Person, seedChannel, seedWorkspace } from "../test/seed";
 import type { AgentRow } from "./agents";
 import { arithmeticItems, report, runAccuracyBenchmark, simulatedPanel } from "./debate-benchmark";
 import {
@@ -140,6 +140,36 @@ describe("a debate's run", () => {
       await expect(readableRun("ws_other", bob.user.id, runId, server.deps.db)).rejects.toMatchObject({
         status: 404,
       });
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("a run in a channel the person can't read", () => {
+  test(
+    "answers as a missing run, the same as one that doesn't exist",
+    async () => {
+      const hidden = await seedChannel(server, workspaceId, {
+        name: "hidden",
+        visibility: "private",
+        members: [ana],
+      });
+      const missing = await readableRun(workspaceId, bob.user.id, newId("run"), server.deps.db).catch(
+        (e) => e,
+      );
+      for (const column of ["channelId", "sourceChannelId"] as const) {
+        const runId = newId("run");
+        await server.deps.db.insert(schema.runs).values({
+          id: runId,
+          workspaceId,
+          agentId: agent.id,
+          model: agent.model,
+          status: "done",
+          [column]: hidden,
+        });
+        const got = await readableRun(workspaceId, bob.user.id, runId, server.deps.db).catch((e) => e);
+        expect([column, got.status, got.message]).toEqual([column, missing.status, missing.message]);
+      }
     },
     SERVER_TEST_MS,
   );

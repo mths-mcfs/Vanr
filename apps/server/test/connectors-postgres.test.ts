@@ -136,7 +136,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("the connection's row lock on Pos
               )
             : disconnect(deps, pending).then(() => "revoked");
         },
-        "update",
+        { bKind: "update" },
       );
       const after = await row(start.serverId);
       outcome(

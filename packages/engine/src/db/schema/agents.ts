@@ -1,3 +1,4 @@
+import type { AgentAppearance } from "@vanr/contract";
 import { sql } from "drizzle-orm";
 import {
   boolean,
@@ -34,7 +35,7 @@ export const agents = pgTable(
       .notNull()
       .default("everyone"),
     audienceUserIds: jsonb("audience_user_ids").$type<string[]>().notNull().default([]),
-    appearance: jsonb("appearance").$type<{ color: string; eyes: string; adornment: string }>().notNull(),
+    appearance: jsonb("appearance").$type<AgentAppearance>().notNull(),
     harnessKind: text("harness_kind", { enum: ["model", "claude_code", "codex"] })
       .notNull()
       .default("model"),

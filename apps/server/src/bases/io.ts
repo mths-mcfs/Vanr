@@ -3,16 +3,24 @@ import type { ActorRef } from "@vanr/contract";
 import { CsvError, inferColumns, matchHeader, parseCsv, toCsv, uniqueNames } from "@vanr/engine/bases/csv";
 import { effectiveFilter, type ViewConfig } from "@vanr/engine/bases/view";
 import { schema } from "@vanr/engine/db";
-import { applyProps, type PropDef, type Props, parsePropText } from "@vanr/engine/props";
+import { applyProps, multiNames, type PropDef, type Props, parsePropText } from "@vanr/engine/props";
 import { and, eq, isNull } from "drizzle-orm";
 import { channelInWorkspace } from "../channels";
 import type { AppDeps } from "../context";
 import { isUniqueViolation } from "../db-errors";
 import { canSeeFile, contentOf, versionOf } from "../drive";
 import { forbidden, HttpError, notFound } from "../http";
-import { cellText, type DatabaseRow, databaseById, namesOf, type TableRow, type ViewRow } from "./core";
+import {
+  cellText,
+  type DatabaseRow,
+  databaseById,
+  linkedTitles,
+  namesOf,
+  type TableRow,
+  type ViewRow,
+} from "./core";
 import { queryRows } from "./query";
-import { createDatabase, importRows, newOptionId, newPropId } from "./write";
+import { createDatabase, importRows, newOptionId, newPropId, refreshVolatile, scheduleRecalc } from "./write";
 
 const { dbDatabases, files } = schema;
 
@@ -33,7 +41,7 @@ function addMissingOptions(defs: PropDef[], cols: (PropDef | null)[], rows: stri
     for (const r of rows) {
       const cell = (r[i] ?? "").trim();
       if (!cell) continue;
-      const names = def.type === "multi_select" ? cell.split(",").map((s) => s.trim()) : [cell];
+      const names = def.type === "multi_select" ? multiNames(cell) : [cell];
       for (const n of names) {
         if (!n || known.has(n.toLowerCase())) continue;
         const set = extra.get(def.id) ?? new Set<string>();
@@ -173,6 +181,8 @@ async function createWithRows(
 
 /** The source's CSV: in the order, the filter and the columns of the view, if there is one. */
 export async function exportCsv(deps: AppDeps, table: TableRow, view: ViewRow | null, me: ActorRef) {
+  table = await refreshVolatile(deps, table);
+  if (table.calcDoneVersion < table.calcVersion) await scheduleRecalc(deps, table.id);
   const cfg: ViewConfig = view?.config ?? {};
   const hidden = new Set((cfg.columns ?? []).filter((c) => c.hidden).map((c) => c.prop));
   const ordered = (cfg.columns ?? []).map((c) => c.prop);
@@ -184,7 +194,7 @@ export async function exportCsv(deps: AppDeps, table: TableRow, view: ViewRow | 
   const cols = title ? [title, ...defs.filter((d) => d !== title)] : defs;
   const names = await namesOf(deps.db, table.workspaceId);
   const lines: string[][] = [cols.map((d) => d.name)];
-  const filter = effectiveFilter(cfg);
+  const filter = effectiveFilter(cfg, table.defs);
   let cursor: string | null = null;
   do {
     const page = await queryRows(
@@ -193,7 +203,9 @@ export async function exportCsv(deps: AppDeps, table: TableRow, view: ViewRow | 
       { filter, sorts: cfg.sorts, limit: 500, cursor },
       { now: deps.now().getTime(), me },
     );
-    for (const r of page.rows) lines.push(cols.map((d) => cellText(d, r, names)));
+    // a relation goes out as the titles of the linked rows (an id says nothing in a spreadsheet)
+    const linked = await linkedTitles(deps.db, table, page.rows);
+    for (const r of page.rows) lines.push(cols.map((d) => cellText(d, r, names, linked)));
     cursor = page.nextCursor;
   } while (cursor);
   const [db] = await deps.db

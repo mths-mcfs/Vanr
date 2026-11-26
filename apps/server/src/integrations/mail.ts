@@ -21,7 +21,7 @@ import { log } from "../logger";
 import { backTo, type Starter, saveState, takeState, type Viewer } from "./connectors";
 import { ImapClient, ImapError, type ImapFolder } from "./imap";
 import { defaultPolicy, isAddress, MAIL_ACTIONS, normalizePolicy, policyInput } from "./mail-rules";
-import { assertReachableHost, resolveHost } from "./net";
+import { assertReachableHost, type NetPolicy, netPolicy } from "./net";
 import { outsideText } from "./outside-text";
 import { SmtpError, type SmtpOptions, smtpSend } from "./smtp";
 
@@ -176,19 +176,14 @@ export async function mailAccountById(db: Db, workspaceId: string, id: string): 
 }
 
 /**
- * How to talk to the server. Loopback with the local network allowed (test server, local bridge) goes without
- * TLS; the rest uses TLS on IMAP and, on SMTP, direct TLS on 465 and STARTTLS on the others.
+ * How to talk to the server. Loopback with the local network and plain text both allowed (test server, local
+ * bridge) goes without TLS; the rest uses TLS on IMAP and, on SMTP, direct TLS on 465 and STARTTLS on the others.
  */
-async function transport(
-  host: string,
-  imapPort: number,
-  smtpHost: string,
-  smtpPort: number,
-  allowPrivate: boolean,
-) {
-  await assertReachableHost(host, allowPrivate, "mail.blocked_host");
-  await assertReachableHost(smtpHost, allowPrivate, "mail.blocked_host");
-  const loop = (h: string) => allowPrivate && (h === "localhost" || h === "::1" || /^127\./.test(h));
+async function transport(host: string, imapPort: number, smtpHost: string, smtpPort: number, net: NetPolicy) {
+  await assertReachableHost(host, net.allowPrivate, "mail.blocked_host");
+  await assertReachableHost(smtpHost, net.allowPrivate, "mail.blocked_host");
+  const loop = (h: string) =>
+    net.allowPrivate && net.allowPlaintext && (h === "localhost" || h === "::1" || /^127\./.test(h));
   const security: SmtpOptions["security"] = loop(smtpHost) ? "none" : smtpPort === 465 ? "tls" : "starttls";
   return {
     imap: { host, port: imapPort, secure: !loop(host) },
@@ -203,9 +198,22 @@ function mailSecrets(secret: Pick<ImapSecret, "username" | "password">): string[
   return [p, p.replace(/\\/g, "\\\\").replace(/"/g, '\\"'), `\0${u}\0${p}`, `${u}\0${p}`, `${u}:${p}`];
 }
 
-/** The mail server couldn't be used: its own words, without the password we sent it. */
+/** The network rule refused the mail server (internal host, no TLS): `socketAddress` in integrations/net.ts. */
+const netRefusal = (err: unknown): err is HttpError =>
+  err instanceof HttpError && (err.code === "blocked_host" || err.code === "tls_required");
+
+/**
+ * The mail server couldn't be used: the network rule's refusal with its reason under the mail code, or the
+ * server's own words without the password we sent it.
+ */
 const mailUnreachable = (err: unknown, secret: Pick<ImapSecret, "username" | "password">) =>
-  new HttpError(400, "mail.unreachable", outsideText(err, mailSecrets(secret)) || "Mail server unreachable");
+  netRefusal(err)
+    ? new HttpError(400, `mail.${err.code}`, err.message)
+    : new HttpError(
+        400,
+        "mail.unreachable",
+        outsideText(err, mailSecrets(secret)) || "Mail server unreachable",
+      );
 
 /** Opens the account's IMAP session; a rejected login marks the account to reconnect. */
 export async function withImap<T>(
@@ -219,7 +227,7 @@ export async function withImap<T>(
   let imap: ImapClient | null = null;
   try {
     imap = await ImapClient.open({
-      ...(await pinnedImap(deps, secret)),
+      ...imapOf(deps, secret),
       user: secret.username,
       password: secret.password,
     });
@@ -233,7 +241,8 @@ export async function withImap<T>(
         .where(eq(mailConnections.id, row.id));
       throw new HttpError(400, "mail.auth", "The mail server rejected the password");
     }
-    if (err instanceof ImapError || err instanceof SmtpError) throw mailUnreachable(err, secret);
+    if (err instanceof ImapError || err instanceof SmtpError || netRefusal(err))
+      throw mailUnreachable(err, secret);
     throw err;
   } finally {
     await imap?.close();
@@ -244,16 +253,17 @@ export async function withImap<T>(
  * The kept server is checked again on every connection (the name can start pointing at the internal network
  * after it was connected) and the connection goes to the checked IP.
  */
-async function pinnedImap(deps: AppDeps, secret: ImapSecret) {
-  const allow = deps.config.integrations.allowPrivateNetworks;
-  return { ...secret.imap, address: await resolveHost(secret.imap.host, allow, "mail.blocked_host") };
-}
+const imapOf = (deps: AppDeps, secret: ImapSecret) => ({
+  ...secret.imap,
+  policy: netPolicy(deps.config.integrations),
+});
 
-async function smtpOf(deps: AppDeps, secret: ImapSecret): Promise<SmtpOptions> {
-  const allow = deps.config.integrations.allowPrivateNetworks;
-  const address = await resolveHost(secret.smtp.host, allow, "mail.blocked_host");
-  return { ...secret.smtp, address, user: secret.username, password: secret.password };
-}
+const smtpOf = (deps: AppDeps, secret: ImapSecret): SmtpOptions => ({
+  ...secret.smtp,
+  policy: netPolicy(deps.config.integrations),
+  user: secret.username,
+  password: secret.password,
+});
 
 export async function folderByRole(imap: ImapClient, role: "sent" | "drafts" | "trash", fallback: string) {
   const folders = await imap.folders();
@@ -276,7 +286,7 @@ export async function transmitMail(
   let sentOut = false;
   try {
     await withImap(deps, account, async (imap, secret) => {
-      await smtpSend(await smtpOf(deps, secret), envelope, raw);
+      await smtpSend(smtpOf(deps, secret), envelope, raw);
       sentOut = true;
       if (account.provider !== "gmail") {
         const sent = await folderByRole(imap, "sent", "Sent");
@@ -310,7 +320,7 @@ export async function connectImap(
     preset?.imap.port ?? input.imapPort ?? 993,
     preset?.smtp.host ?? input.smtpHost ?? "",
     preset?.smtp.port ?? input.smtpPort ?? 587,
-    deps.config.integrations.allowPrivateNetworks,
+    netPolicy(deps.config.integrations),
   );
   const secret: ImapSecret = {
     via: "imap",
@@ -322,7 +332,7 @@ export async function connectImap(
   let imap: ImapClient | null = null;
   try {
     imap = await ImapClient.open({
-      ...(await pinnedImap(deps, secret)),
+      ...imapOf(deps, secret),
       user: secret.username,
       password: secret.password,
     });
@@ -524,7 +534,7 @@ export async function updateMailAccount(
     let imap: ImapClient | null = null;
     try {
       imap = await ImapClient.open({
-        ...(await pinnedImap(deps, next)),
+        ...imapOf(deps, next),
         user: next.username,
         password: next.password,
       });

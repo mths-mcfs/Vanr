@@ -21,7 +21,7 @@ import { log } from "../logger";
 import type { ConnectionRow } from "./access";
 import { catalogEntry, SENSITIVE_TOOL } from "./catalog";
 import { McpAuthRequired, McpClient, McpError, type McpTool } from "./mcp";
-import { checkServerUrl } from "./net";
+import { checkServerUrl, netPolicy } from "./net";
 import {
   type AuthServer,
   checkIssuer,
@@ -211,6 +211,12 @@ export async function takeState(
   return { ok: true, row: st, payload };
 }
 
+/** A server address under the installation's network rule (the local network and plain text switches). */
+const serverUrlOf = (deps: AppDeps, raw: string) => {
+  const { allowPrivate, allowPlaintext } = netPolicy(deps.config.integrations);
+  return checkServerUrl(raw, allowPrivate, undefined, allowPlaintext);
+};
+
 /** The app path of a state with the result in its query. */
 export const backTo = (st: StateRow, params: string) =>
   `${st.nextPath}${st.nextPath.includes("?") ? "&" : "?"}${params}`;
@@ -318,7 +324,12 @@ async function liveSecret(deps: AppDeps, row: ConnectionRow): Promise<ConnSecret
 export async function mcpFor(deps: AppDeps, row: ConnectionRow): Promise<McpClient> {
   if (!row.serverUrl) throw new McpError("Connection has no server address");
   const secret = await liveSecret(deps, row);
-  return new McpClient({ url: row.serverUrl, fetch: deps.fetchExternal, headers: headersFor(secret) });
+  return new McpClient({
+    url: row.serverUrl,
+    fetch: deps.fetchExternal,
+    policy: netPolicy(deps.config.integrations),
+    headers: headersFor(secret),
+  });
 }
 
 /** The service rejected the kept credential: the connection shows as "Reconnect". */
@@ -357,7 +368,12 @@ export async function connectionById(deps: AppDeps, workspaceId: string, id: str
 }
 
 async function probe(deps: AppDeps, url: string, secret: ConnSecret): Promise<McpTool[]> {
-  const client = new McpClient({ url, fetch: deps.fetchExternal, headers: headersFor(secret) });
+  const client = new McpClient({
+    url,
+    fetch: deps.fetchExternal,
+    policy: netPolicy(deps.config.integrations),
+    headers: headersFor(secret),
+  });
   return client.listTools();
 }
 
@@ -375,9 +391,7 @@ export async function connectWithKey(
   if (!entry) throw new HttpError(400, "connector.unknown", "Unknown connector");
   if (!entry.auth.includes("api_key"))
     throw new HttpError(400, "connector.key_unsupported", "This connector connects with OAuth");
-  const url = (
-    await checkServerUrl(entry.serverUrl, deps.config.integrations.allowPrivateNetworks)
-  ).toString();
+  const url = (await serverUrlOf(deps, entry.serverUrl)).toString();
   const secret: ConnSecret = { kind: "api_key", apiKey: input.apiKey };
   let tools: McpTool[];
   try {
@@ -442,7 +456,7 @@ async function beginOAuth(
     deps.fetchExternal,
     url,
     challenge.resourceMetadata,
-    deps.config.integrations.allowPrivateNetworks,
+    netPolicy(deps.config.integrations),
     challenge.scope,
   ).catch(() => null);
   if (!server)
@@ -529,9 +543,7 @@ export async function startCatalogOAuth(
   if (!entry) throw new HttpError(400, "connector.unknown", "Unknown connector");
   if (!entry.auth.includes("oauth"))
     throw new HttpError(400, "connector.oauth_unavailable", "This connector connects with a key");
-  const url = (
-    await checkServerUrl(entry.serverUrl, deps.config.integrations.allowPrivateNetworks)
-  ).toString();
+  const url = (await serverUrlOf(deps, entry.serverUrl)).toString();
   const row = await pendingConnection(deps, me, {
     connector: entry.id,
     custom: false,
@@ -552,9 +564,7 @@ export async function connectCustom(
   me: Starter,
   input: { serverUrl: string; apiKey?: string; label?: string; nextPath: string },
 ): Promise<CustomConnectStart> {
-  const url = (
-    await checkServerUrl(input.serverUrl, deps.config.integrations.allowPrivateNetworks)
-  ).toString();
+  const url = (await serverUrlOf(deps, input.serverUrl)).toString();
   const label = input.label?.trim() || new URL(url).hostname;
   const secret: ConnSecret = input.apiKey ? { kind: "api_key", apiKey: input.apiKey } : { kind: "none" };
   let tools: McpTool[];
@@ -627,9 +637,14 @@ export async function finishOAuth(
     .from(connections)
     .where(and(eq(connections.id, st.targetId ?? ""), eq(connections.workspaceId, st.workspaceId)));
   if (!row || row.revokedAt) return back("connector_error=state");
-  const dropPending = async () => {
-    if (row.status === "pending") await deps.db.delete(connections).where(eq(connections.id, row.id));
-  };
+  // Only a connection that is still pending and unrevoked in the database goes: this callback may have made
+  // it active and a revoke may have ended it since `row` was read, and the revoked row stays as the record.
+  const dropPending = () =>
+    deps.db
+      .delete(connections)
+      .where(
+        and(eq(connections.id, row.id), eq(connections.status, "pending"), isNull(connections.revokedAt)),
+      );
   if (s.issuer !== undefined) {
     try {
       checkIssuer({ iss: query.iss, expected: s.issuer, supported: s.issParameterSupported === true });

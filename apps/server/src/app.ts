@@ -48,6 +48,7 @@ export function createApp(
   app.use("*", async (c, next) => {
     c.set("deps", deps);
     c.set("user", null);
+    c.set("sessionId", null);
     c.set("member", null);
     await next();
   });
@@ -103,6 +104,7 @@ export function createApp(
   app.use("/api/v1/*", async (c, next) => {
     const session = await deps.auth.api.getSession({ headers: c.req.raw.headers });
     if (session) {
+      c.set("sessionId", session.session.id);
       const u = session.user;
       c.set("user", { id: u.id, name: u.name, email: u.email, image: u.image ?? null });
     }
@@ -113,10 +115,10 @@ export function createApp(
   registerWaitlist(app);
   registerAccount(app);
   // The remaining registrars enter here, in this order, each with the slice that ports it (S2 to S6 of the
-  // server port): workspaces S4, chat S6, then the threads below; agents S5, agent lab S5, skills S4, memories S3,
-  // control S5, then invitations, notifications and push below, then the Drive, the wiki and the bases below;
-  // issues S4, debates S4, routines S4, calendar S4, then the search below; connectors S6, integrations S5,
-  // then the runners and their requests below; assignments S5.
+  // server port): workspaces S4, chat S6, then the threads and memories below; agents S5, agent lab S5,
+  // skills S4, control S5, then invitations, notifications and push below, then the Drive, the wiki and the
+  // bases below; issues S4, debates S4, routines S4, calendar S4, then the search below; connectors S6,
+  // integrations S5, then the runners and their requests below; assignments S5.
   registerThreads(app);
   registerMemories(app);
   registerControl(app);

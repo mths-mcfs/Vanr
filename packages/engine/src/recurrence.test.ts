@@ -7,6 +7,58 @@ const SP = "America/Sao_Paulo";
 const iso = (d: Date[]) => d.map((x) => x.toISOString());
 
 describe("occurrences", () => {
+  test.each(["daily", "weekly", "monthly", "yearly"] as const)(
+    "%s intersects weekdays, month and positive/negative month days",
+    (freq) => {
+      const rule: RecurrenceRule = {
+        freq,
+        timezone: "UTC",
+        start: "2026-01-01T09:00:00Z",
+        byMonth: [4],
+        byMonthDay: [15, -1],
+        weekdays: ["MO", "TU", "WE", "TH", "FR"],
+      };
+      expect(validateRule(rule)).toBeNull();
+      expect(iso(nextRuns(rule, new Date("2026-01-01T00:00:00Z"), 2))).toEqual([
+        "2026-04-15T09:00:00.000Z",
+        "2026-04-30T09:00:00.000Z",
+      ]);
+    },
+  );
+
+  test.each(["monthly", "yearly"] as const)("%s applies set positions after all calendar filters", (freq) => {
+    for (const weekdays of [undefined, ["MO", "TU", "WE", "TH", "FR"] satisfies RecurrenceRule["weekdays"]]) {
+      const rule: RecurrenceRule = {
+        freq,
+        timezone: "UTC",
+        start: "2026-01-01T09:00:00Z",
+        byMonth: [4],
+        byMonthDay: [1, 15, -2],
+        bySetPos: [-1],
+        weekdays,
+      };
+      expect(iso(nextRuns(rule, new Date("2026-01-01T00:00:00Z"), 1))).toEqual(["2026-04-29T09:00:00.000Z"]);
+    }
+  });
+
+  test("a weekly month-day filter keeps the anchor weekday when weekdays is absent", () => {
+    expect(
+      iso(
+        nextRuns(
+          {
+            freq: "weekly",
+            timezone: "UTC",
+            start: "2026-01-01T09:00:00Z",
+            byMonth: [4],
+            byMonthDay: [1, -1],
+          },
+          new Date("2026-01-01T00:00:00Z"),
+          1,
+        ),
+      ),
+    ).toEqual(["2026-04-30T09:00:00.000Z"]);
+  });
+
   test("every day at 9:00 in the São Paulo time zone (UTC-3)", () => {
     const rule: RecurrenceRule = { freq: "daily", times: ["09:00"], timezone: SP };
     const got = nextRuns(rule, new Date("2026-10-20T13:00:00Z"), 3);
@@ -115,6 +167,23 @@ describe("phrases", () => {
     const { timezone: _tz, ...rest } = r.rule;
     return rest;
   };
+
+  test("workday phrases preserve explicit daily and weekly intervals", () => {
+    for (const phrase of ["a cada 2 semanas de segunda a sexta às 9h", "every 2 weeks on weekdays at 9am"])
+      expect(rule(phrase)).toEqual({
+        freq: "weekly",
+        interval: 2,
+        weekdays: ["MO", "TU", "WE", "TH", "FR"],
+        times: ["09:00"],
+      });
+    expect(rule("every 2 days on weekdays at 9am")).toEqual({
+      freq: "daily",
+      interval: 2,
+      weekdays: ["MO", "TU", "WE", "TH", "FR"],
+      times: ["09:00"],
+    });
+    expect(parseRulePhrase("every 2 months on weekdays at 9am", "UTC").ok).toBe(false);
+  });
 
   test("Portuguese", () => {
     expect(rule("todo dia às 9h")).toEqual({ freq: "daily", times: ["09:00"] });

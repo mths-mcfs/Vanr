@@ -16,7 +16,7 @@ import {
 import { eq } from "drizzle-orm";
 import type { AppDeps } from "../context";
 import { log } from "../logger";
-import { onLiveViewFrame, onLiveViewStreamEnded } from "./browser-live";
+import { onLiveViewFrame, onLiveViewStreamEnded, resetLiveViewsOf, updateRunnerAccess } from "./browser-live";
 import { CONNECTION_MAX_MS, consumeSession } from "./credentials";
 import type { RunnerSocket, RunnerSocketData } from "./hub";
 import { applyJobEvent, finishJob } from "./jobs";
@@ -130,11 +130,7 @@ export async function runnerMessage(deps: AppDeps, ws: RunnerSocket, raw: string
       return;
     }
     case "access.changed": {
-      await deps.db
-        .update(runners)
-        .set({ access: frame.access, updatedAt: deps.now() })
-        .where(eq(runners.id, runnerId));
-      deps.hub.toWorkspace(workspaceId, { type: "runner.access", runnerId, access: frame.access });
+      await updateRunnerAccess(deps, runnerId, frame.access);
       return;
     }
     case "live_view.frame":
@@ -169,6 +165,7 @@ async function hello(deps: AppDeps, ws: RunnerSocket, frame: HelloFrame) {
     if (gone()) return;
     ws.data.runnerId = row.id;
     ws.data.workspaceId = row.workspaceId;
+    resetLiveViewsOf(row.id);
     const previous = deps.runners.register(row.id, ws);
     if (previous) reject(previous, "replaced", "This runner connected again from another process");
     // A revocation between the session and the registration: it already closed the connections that existed.
@@ -259,6 +256,7 @@ async function hello(deps: AppDeps, ws: RunnerSocket, frame: HelloFrame) {
 }
 
 export async function runnerClose(deps: AppDeps, ws: RunnerSocket) {
+  if (deps.runners.isCurrent(ws) && ws.data.runnerId) resetLiveViewsOf(ws.data.runnerId);
   ws.data.closed = true;
   if (ws.data.helloTimer) clearTimeout(ws.data.helloTimer);
   if (ws.data.pingTimer) clearInterval(ws.data.pingTimer);
@@ -271,6 +269,7 @@ export async function runnerClose(deps: AppDeps, ws: RunnerSocket) {
     // In its turn: only the close of the runner's current connection writes the disconnection and says so; a
     // replaced connection's close does nothing.
     if (!deps.runners.unregister(ws)) return;
+    resetLiveViewsOf(runnerId);
     const now = deps.now();
     await deps.db
       .update(runners)

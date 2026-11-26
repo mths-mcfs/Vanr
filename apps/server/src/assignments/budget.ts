@@ -22,10 +22,14 @@ export const WARN_AT = 0.8;
 export type LimitKind = keyof AssignmentLimits;
 export const LIMIT_KINDS: readonly LimitKind[] = ["dollars", "minutes", "steps"];
 
-/** Ledger scope of the assignment (no USD cap, no scope: only the agent's month applies). */
-export function assignmentScope(row: { id: string; limits: AssignmentLimits }): BudgetScope | null {
-  if (row.limits.dollars === null) return null;
-  return { kind: "assignment", id: row.id, limitUsd: row.limits.dollars, period: "total" };
+/** Keep accounting when the USD cap is disabled, so enabling it includes all spending. */
+export function assignmentScope(row: { id: string; limits: AssignmentLimits }): BudgetScope {
+  return {
+    kind: "assignment",
+    id: row.id,
+    limitUsd: row.limits.dollars ?? Number.MAX_SAFE_INTEGER,
+    period: "total",
+  };
 }
 
 /** Scope and id of a run's assignment, when the conversation is the thread of an open assignment of the agent. */
@@ -33,7 +37,7 @@ export async function assignmentOfRun(
   deps: Pick<AppDeps, "db">,
   agentId: string,
   threadId: string | null,
-): Promise<{ assignmentId: string; scope: BudgetScope | null } | null> {
+): Promise<{ assignmentId: string; scope: BudgetScope } | null> {
   if (!threadId) return null;
   const [row] = await deps.db
     .select({
@@ -50,7 +54,7 @@ export async function assignmentOfRun(
 
 /** Usage so far: USD in the ledger, minutes of the jobs on the runner and steps the engine sent. */
 export async function assignmentUsage(
-  deps: AppDeps,
+  deps: Pick<AppDeps, "db" | "ledger" | "now">,
   row: { id: string; limits: AssignmentLimits },
 ): Promise<AssignmentUsage> {
   const now = deps.now();
@@ -60,7 +64,7 @@ export async function assignmentUsage(
   );
   const [t] = await deps.db
     .select({
-      seconds: sql<number>`coalesce(sum(extract(epoch from (coalesce(${runnerJobs.endedAt}, ${now.toISOString()}::timestamptz) - coalesce(${runnerJobs.startedAt}, ${runnerJobs.createdAt})))), 0)::float`,
+      seconds: sql<number>`coalesce(sum(extract(epoch from (coalesce(${runnerJobs.endedAt}, ${now.toISOString()}::timestamptz) - ${runnerJobs.startedAt}))), 0)::float`,
       tokens: sql<number>`coalesce(sum(((${runnerJobs.usage} ->> 'inputTokens')::bigint) + ((${runnerJobs.usage} ->> 'outputTokens')::bigint)), 0)::float`,
       unmeasured: sql<number>`count(*) filter (where ${runnerJobs.usage} is null and ${runnerJobs.status} in ('done','failed','interrupted','canceled'))::int`,
     })

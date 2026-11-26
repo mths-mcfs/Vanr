@@ -71,17 +71,22 @@ const FAMILIES: ((p: Pick) => string)[] = [
 function* texts(seed: number, count: number) {
   let s = seed;
   const next = (n: number) => {
-    s = (s * 1103515245 + 12345) & 0x7fffffff;
-    return s % n;
+    s = (Math.imul(s, 1103515245) + 12345) & 0x7fffffff;
+    return Math.floor((s / 0x80000000) * n);
   };
   const pick: Pick = (list) => list[next(list.length)] as (typeof list)[number];
-  for (let k = 0; k < count; k++) yield pick(FAMILIES)(pick);
+  for (let k = 0; k < count; k++) {
+    const family = next(FAMILIES.length);
+    yield { family, sql: FAMILIES[family]?.(pick) ?? "" };
+  }
 }
 
 test("an accepted text is one command that changes nothing, whatever standard_conforming_strings says", async () => {
   let accepted = 0;
+  const families = new Set<number>();
   const contradicted: { sql: string; mode: string; commands: number; rows: unknown }[] = [];
-  for (const sql of texts(20261114, 700)) {
+  for (const { family, sql } of texts(20261114, 700)) {
+    families.add(family);
     const outcome = guardStatement(sql);
     if (!("statement" in outcome)) continue;
     accepted++;
@@ -100,6 +105,7 @@ test("an accepted text is one command that changes nothing, whatever standard_co
     }
   }
   await pg.exec("set standard_conforming_strings = on");
+  expect(families.size).toBe(FAMILIES.length);
   expect(contradicted).toEqual([]);
   expect(accepted).toBeGreaterThan(100);
 });

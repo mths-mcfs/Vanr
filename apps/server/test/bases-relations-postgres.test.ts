@@ -1,0 +1,359 @@
+// Relation and rollup on a real Postgres (the CI `postgres` job): what PGlite can't prove, since it runs one
+// transaction at a time. The propagation between linked sources never waits for a lock: a dependent row or
+// source another write holds is skipped and its notice stays for the next round, so two writes that cross
+// (A rolls up B and B rolls up A) never end in a deadlock or a 500.
+//
+// VANR_TEST_BASES_LINKS swaps one of the propagation's locks for a double, and the CI runs the forced
+// interleavings that way too and expects exactly one of them to FAIL each time:
+// - `late`: `linkLocks.claimSource` doesn't take the dependent source before its rows, and the propagation
+//   then waits for the held source ("forced interleaving: links: a source ...");
+// - `wait`: `linkLocks.lockRows` waits for a held dependent row instead of skipping it, and the write then
+//   waits for the other transaction ("forced interleaving: links: a dependent row ...").
+// Here, without VANR_TEST_POSTGRES_URL, the file skips with the reason in the name.
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import type { BasePropDef } from "@vanr/contract";
+import { schema } from "@vanr/engine/db";
+import { eq, sql } from "drizzle-orm";
+import { z } from "zod";
+import { linkLocks } from "../src/bases/links";
+import { runRecalc } from "../src/bases/write";
+import type { RunningServer } from "../src/server";
+import { type BasesApi, basesApi } from "./bases-api";
+import { SERVER_TEST_MS, settle, signedIn, startTestServer } from "./harness";
+import { NO_POSTGRES, TEST_POSTGRES_URL, testDatabaseUrl } from "./postgres";
+import { seedWorkspace } from "./seed";
+
+const onPostgres = (name: string) => (TEST_POSTGRES_URL ? name : `${name} (skipped: ${NO_POSTGRES})`);
+const LINKS = process.env.VANR_TEST_BASES_LINKS;
+
+describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("bases relations on Postgres"), () => {
+  let pg: RunningServer;
+  let n = 0;
+  const original = linkLocks.claimSource;
+  const originalRows = linkLocks.lockRows;
+  beforeAll(async () => {
+    pg = await startTestServer({ env: { DATABASE_URL: await testDatabaseUrl("baselinks") } });
+    // the double: says the source is taken without locking it, so the marking locks the rows first
+    if (LINKS === "late") linkLocks.claimSource = async () => true;
+    // the other double: the dependent rows taken with a plain FOR UPDATE, which waits for a held one
+    if (LINKS === "wait")
+      linkLocks.lockRows = (tx, where) =>
+        tx.select({ id: schema.dbRows.id }).from(schema.dbRows).where(where).for("update");
+  }, SERVER_TEST_MS);
+  afterAll(async () => {
+    linkLocks.claimSource = original;
+    linkLocks.lockRows = originalRows;
+    await pg?.stop();
+  }, SERVER_TEST_MS);
+
+  async function owner(name: string) {
+    const who = await signedIn(pg, "Ana", `link${++n}@bases-pg.test`);
+    const { workspaceId } = await seedWorkspace(pg, who, name);
+    return { ws: workspaceId, api: basesApi(who.browser) };
+  }
+
+  async function base(api: BasesApi, ws: string, title: string, extra: BasePropDef[]) {
+    const b = await api.create(ws, { title });
+    const t = b.tables[0];
+    if (!t) throw new Error("no table");
+    await api.saveSchema(ws, b.id, t.id, { parentVersion: t.schemaVersion, defs: [...t.defs, ...extra] });
+    return { id: b.id, tableId: t.id, titleId: t.titlePropId };
+  }
+
+  /** Tasks with hours, and projects that sum them. */
+  async function projectsAndTasks(api: BasesApi, ws: string) {
+    const tasks = await base(api, ws, "Tasks", [{ id: "hours", name: "Hours", type: "number" }]);
+    const projects = await base(api, ws, "Projects", [
+      { id: "rel", name: "Tasks", type: "relation", relation: { tableId: tasks.tableId } },
+      {
+        id: "sum",
+        name: "Hours",
+        type: "rollup",
+        rollup: { relationPropId: "rel", targetPropId: "hours", fn: "sum" },
+      },
+    ]);
+    return { tasks, projects };
+  }
+
+  const notices = () => pg.deps.db.select().from(schema.dbCalcDirty);
+  /** The rows of a raw statement (postgres.js answers an array). */
+  const rowsOf = (result: unknown): unknown[] => (Array.isArray(result) ? result : []);
+  /** The backend pid in the answer of `select pg_backend_pid() as pid`. */
+  const pidIn = (rows: unknown[]) =>
+    z
+      .array(z.object({ pid: z.coerce.number() }))
+      .min(1)
+      .parse([...rows])[0]?.pid ?? 0;
+  /** Resolves when some backend waits for a lock `pid` holds. */
+  async function blockedBy(pid: number, signal: { stop: boolean }) {
+    while (!signal.stop) {
+      const rows = await pg.deps.db.execute(
+        sql`select 1 from pg_stat_activity where ${pid} = any(pg_blocking_pids(pid))`,
+      );
+      if (rowsOf(rows).length) return true;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    return false;
+  }
+
+  test(
+    "forced interleaving: links: a dependent row another transaction holds isn't waited for; the notice comes back and gets it right",
+    async () => {
+      const { ws, api } = await owner("Held");
+      const { tasks, projects } = await projectsAndTasks(api, ws);
+      const t1 = await api.createRow(ws, tasks.id, tasks.tableId, {
+        props: { [tasks.titleId]: "Wash", hours: 2 },
+      });
+      const p = await api.createRow(ws, projects.id, projects.tableId, {
+        props: { [projects.titleId]: "Home", rel: [t1.id] },
+      });
+      let release = () => {};
+      const held = new Promise<void>((r) => {
+        release = r;
+      });
+      let reached!: (pid: number) => void;
+      const holding = new Promise<number>((r) => {
+        reached = r;
+      });
+      const holder = pg.deps.db.transaction(async (tx) => {
+        await tx.select().from(schema.dbRows).where(eq(schema.dbRows.id, p.id)).for("update");
+        reached(pidIn(rowsOf(await tx.execute(sql`select pg_backend_pid() as pid`))));
+        await held;
+      });
+      const pid = await holding;
+      // the task's write isn't stuck on the project's lock: it answers before anyone waits for the holder
+      const signal = { stop: false };
+      const write = api.updateRow(ws, tasks.id, t1.id, { props: { hours: 5 } }).then(() => false);
+      const blocked = await Promise.race([write, blockedBy(pid, signal)]);
+      signal.stop = true;
+      const [dirty] = blocked ? [] : await notices();
+      release();
+      await holder;
+      await write;
+      expect(blocked).toBe(false);
+      expect(dirty?.rowIds).toEqual([t1.id]);
+      await settle(pg);
+      expect((await api.getRow(ws, projects.id, p.id)).computed).toMatchObject({ sum: 5 });
+      expect(await notices()).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a source edit during a stale row recalculation keeps its notice until that row unlocks",
+    async () => {
+      const { ws, api } = await owner("Recalc race");
+      const { tasks, projects } = await projectsAndTasks(api, ws);
+      const t = await api.createRow(ws, tasks.id, tasks.tableId, { props: { hours: 2 } });
+      const p = await api.createRow(ws, projects.id, projects.tableId, { props: { rel: [t.id] } });
+      const db = pg.deps.db;
+      await db.execute(sql`update db_rows set calc_version = calc_version - 1 where id = ${p.id}`);
+      await db.execute(
+        sql`update db_tables set calc_done_version = calc_version - 1 where id = ${projects.tableId}`,
+      );
+      await db.execute(
+        sql.raw(
+          `create function hold_recalc() returns trigger language plpgsql as $$begin if new.id = '${p.id}' then perform pg_advisory_xact_lock(53929); end if; return new; end$$`,
+        ),
+      );
+      await db.execute(
+        sql`create trigger hold_recalc before update on db_rows for each row execute function hold_recalc()`,
+      );
+      const gate = Promise.withResolvers<void>();
+      const ready = Promise.withResolvers<number>();
+      const holder = db.transaction(async (tx) => {
+        await tx.execute(sql`select pg_advisory_xact_lock(53929)`);
+        ready.resolve(pidIn(rowsOf(await tx.execute(sql`select pg_backend_pid() as pid`))));
+        await gate.promise;
+      });
+      const pid = await ready.promise;
+      const signal = { stop: false };
+      const recalc = runRecalc(pg.deps, projects.tableId);
+      try {
+        expect(await blockedBy(pid, signal)).toBe(true);
+        await api.updateRow(ws, tasks.id, t.id, { props: { hours: 9 } });
+        expect((await notices()).some((n) => n.tableId === tasks.tableId)).toBe(true);
+      } finally {
+        signal.stop = true;
+        gate.resolve();
+        await holder;
+        await recalc;
+        await db.execute(sql`drop trigger hold_recalc on db_rows`);
+        await db.execute(sql`drop function hold_recalc()`);
+      }
+      await settle(pg);
+      expect((await api.getRow(ws, projects.id, p.id)).computed.sum).toBe(9);
+      expect(await notices()).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "the first rollup created before a source write commits sees that write after propagation",
+    async () => {
+      const { ws, api } = await owner("New dependent");
+      const tasks = await base(api, ws, "Tasks", [{ id: "hours", name: "Hours", type: "number" }]);
+      const projects = await base(api, ws, "Projects", [
+        { id: "rel", name: "R", type: "relation", relation: { tableId: tasks.tableId } },
+      ]);
+      const t = await api.createRow(ws, tasks.id, tasks.tableId, { props: { hours: 2 } });
+      const p = await api.createRow(ws, projects.id, projects.tableId, { props: { rel: [t.id] } });
+      await settle(pg);
+      const originalTx = pg.deps.db.transaction.bind(pg.deps.db);
+      const gate = Promise.withResolvers<void>();
+      const ready = Promise.withResolvers<void>();
+      let armed = true;
+      pg.deps.db.transaction = (fn, config) =>
+        originalTx(async (tx) => {
+          const result = await fn(tx);
+          if (armed && result && typeof result === "object" && "before" in result) {
+            armed = false;
+            ready.resolve();
+            await gate.promise;
+          }
+          return result;
+        }, config);
+      const write = api.updateRow(ws, tasks.id, t.id, { props: { hours: 7 } });
+      try {
+        await ready.promise;
+        const table = (await api.get(ws, projects.id)).tables[0];
+        if (!table) throw new Error("no table");
+        await api.saveSchema(ws, projects.id, projects.tableId, {
+          parentVersion: table.schemaVersion,
+          defs: [
+            ...table.defs,
+            {
+              id: "sum",
+              name: "Sum",
+              type: "rollup",
+              rollup: { relationPropId: "rel", targetPropId: "hours", fn: "sum" },
+            },
+          ],
+        });
+        expect((await api.getRow(ws, projects.id, p.id)).computed.sum).toBe(2);
+      } finally {
+        gate.resolve();
+        await write;
+        pg.deps.db.transaction = originalTx;
+      }
+      await settle(pg);
+      expect((await api.getRow(ws, projects.id, p.id)).computed.sum).toBe(7);
+      expect(await notices()).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "writes that cross at the same time (A rolls up B, B rolls up A): all answer, none is a deadlock or a 500",
+    async () => {
+      const { ws, api } = await owner("Cross");
+      const a = await base(api, ws, "A", [{ id: "x", name: "X", type: "number" }]);
+      const b = await base(api, ws, "B", [
+        { id: "y", name: "Y", type: "number" },
+        { id: "toA", name: "To A", type: "relation", relation: { tableId: a.tableId } },
+        {
+          id: "sumX",
+          name: "Sum X",
+          type: "rollup",
+          rollup: { relationPropId: "toA", targetPropId: "x", fn: "sum" },
+        },
+      ]);
+      const at = (await api.get(ws, a.id)).tables[0];
+      if (!at) throw new Error("no table");
+      await api.saveSchema(ws, a.id, a.tableId, {
+        parentVersion: at.schemaVersion,
+        defs: [
+          ...at.defs,
+          { id: "toB", name: "To B", type: "relation", relation: { tableId: b.tableId } },
+          {
+            id: "sumY",
+            name: "Sum Y",
+            type: "rollup",
+            rollup: { relationPropId: "toB", targetPropId: "y", fn: "sum" },
+          },
+        ],
+      });
+      const as = await Promise.all(
+        [1, 2, 3].map((i) => api.createRow(ws, a.id, a.tableId, { props: { x: i } })),
+      );
+      const bs = await Promise.all(
+        [1, 2, 3].map((i) =>
+          api.createRow(ws, b.id, b.tableId, { props: { y: i * 10, toA: as.map((r) => r.id) } }),
+        ),
+      );
+      for (const r of as) await api.updateRow(ws, a.id, r.id, { props: { toB: bs.map((x) => x.id) } });
+      // 30 writes at once, each side over the rows the other one rolls up
+      const writes = Array.from({ length: 30 }, (_, i) =>
+        i % 2
+          ? api.updateRow(ws, a.id, String(as[i % 3]?.id), { props: { x: 100 + i } })
+          : api.updateRow(ws, b.id, String(bs[i % 3]?.id), { props: { y: 1000 + i } }),
+      );
+      const ends = await Promise.allSettled(writes);
+      expect(
+        ends.filter((e): e is PromiseRejectedResult => e.status === "rejected").map((e) => String(e.reason)),
+      ).toEqual([]);
+      await settle(pg);
+      const xs = await Promise.all(as.map(async (r) => (await api.getRow(ws, a.id, r.id)).props.x));
+      const ys = await Promise.all(bs.map(async (r) => (await api.getRow(ws, b.id, r.id)).props.y));
+      const sum = (v: unknown[]) => v.reduce((s: number, x) => s + Number(x), 0);
+      for (const r of as) expect((await api.getRow(ws, a.id, r.id)).computed.sumY).toBe(sum(ys));
+      for (const r of bs) expect((await api.getRow(ws, b.id, r.id)).computed.sumX).toBe(sum(xs));
+      expect(await notices()).toEqual([]);
+    },
+    SERVER_TEST_MS * 2,
+  );
+
+  test(
+    "forced interleaving: links: a source another write holds isn't waited for, so its row lock after that can't close a deadlock",
+    async () => {
+      const { ws, api } = await owner("Order");
+      const { tasks, projects } = await projectsAndTasks(api, ws);
+      const t1 = await api.createRow(ws, tasks.id, tasks.tableId, {
+        props: { [tasks.titleId]: "Wash", hours: 2 },
+      });
+      const p = await api.createRow(ws, projects.id, projects.tableId, {
+        props: { [projects.titleId]: "Home", rel: [t1.id] },
+      });
+      // a write of the projects in the middle of its transaction: the source shared (as a row edit takes it)
+      let reached!: (pid: number) => void;
+      const holding = new Promise<number>((r) => {
+        reached = r;
+      });
+      let release!: () => void;
+      const gate = new Promise<void>((r) => {
+        release = r;
+      });
+      const holder = pg.deps.db
+        .transaction(async (tx) => {
+          await tx
+            .select()
+            .from(schema.dbTables)
+            .where(eq(schema.dbTables.id, projects.tableId))
+            .for("share");
+          reached(pidIn(rowsOf(await tx.execute(sql`select pg_backend_pid() as pid`))));
+          await gate;
+          // and then the row it edits: free, unless the propagation took it before waiting for the source
+          await tx.select().from(schema.dbRows).where(eq(schema.dbRows.id, p.id)).for("update");
+        })
+        .then(
+          () => "done",
+          (err: { code?: string }) => err.code ?? "error",
+        );
+      const pid = await holding;
+      const signal = { stop: false };
+      const write = api.updateRow(ws, tasks.id, t1.id, { props: { hours: 7 } }).then(() => false);
+      const blocked = await Promise.race([write, blockedBy(pid, signal)]);
+      signal.stop = true;
+      release();
+      const holderEnd = await holder;
+      await write;
+      // the propagation never waited for the held source, and the holder's row lock went through
+      expect(blocked).toBe(false);
+      expect(holderEnd).toBe("done");
+      await settle(pg);
+      expect((await api.getRow(ws, projects.id, p.id)).computed).toMatchObject({ sum: 7 });
+      expect(await notices()).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+});

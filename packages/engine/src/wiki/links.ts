@@ -1,6 +1,8 @@
 // Wiki links in markdown, in the Obsidian format: [[target]], [[target|text]], [[target#Heading]],
 // [[target#^block]], ![[embed]] and block ids `^id` at the end of a line. Code (fenced blocks and inline
 // code spans) and %% %% comments do not count. Pure functions: the server and the front end use the same ones.
+import { remarkCtx } from "@milkdown/kit/core";
+import type { Root } from "@milkdown/kit/transformer";
 
 export interface WikiLinkRef {
   /** The whole text as it is in the markdown, with `!`, brackets, heading and link text. */
@@ -22,38 +24,86 @@ export interface Heading {
   line: number;
 }
 
-const LINK = /(!?)\[\[([^\]\n]+?)\]\]/g;
-
-/**
- * Ranges of the markdown that are not running text: fenced code blocks (``` and ~~~, up to 3 spaces
- * of indentation), inline code spans and %%…%% comments. Returns sorted [start, end) pairs.
- */
+/** Fenced code in containers, code spans and comments, in original source offsets. */
 export function codeRanges(md: string): [number, number][] {
   const ranges: [number, number][] = [];
-  const fence = /^ {0,3}(`{3,}|~{3,})[^\n]*$/gm;
-  let open: { char: string; len: number; start: number } | null = null;
-  for (const m of md.matchAll(fence)) {
-    const mark = m[1] ?? "";
-    const at = m.index ?? 0;
-    if (!open) {
-      if (mark[0] === "`" && /`/.test(m[0].slice(m[0].indexOf(mark) + mark.length))) continue;
-      open = { char: mark[0] ?? "`", len: mark.length, start: at };
-    } else if (mark[0] === open.char && mark.length >= open.len && m[0].trim() === mark) {
-      ranges.push([open.start, at + m[0].length]);
+  let open: { char: string; len: number; start: number; quote: number; indent: number } | null = null;
+  let at = 0;
+  for (const line of md.split("\n")) {
+    let content = line.replace(/\r$/, "");
+    let quote = 0;
+    let marker = /^ {0,3}>[ \t]?/.exec(content);
+    while (marker && (!open || quote < open.quote)) {
+      quote++;
+      content = content.slice(marker[0].length);
+      marker = /^ {0,3}>[ \t]?/.exec(content);
+    }
+    if (open && (quote !== open.quote || (content.trim() && content.search(/\S/) < open.indent))) {
+      ranges.push([open.start, at]);
       open = null;
     }
+    let indent = 0;
+    if (open) content = content.slice(open.indent);
+    else {
+      let list = /^(?: {0,3})(?:[-+*]|\d+[.)])[ \t]+/.exec(content);
+      while (list) {
+        indent += list[0].length;
+        content = content.slice(list[0].length);
+        list = /^(?: {0,3})(?:[-+*]|\d+[.)])[ \t]+/.exec(content);
+      }
+    }
+    const fence = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(content);
+    const mark = fence?.[1] ?? "";
+    if (fence && open) {
+      if (mark[0] === open.char && mark.length >= open.len && !fence[2]?.trim()) {
+        ranges.push([open.start, at + line.length]);
+        open = null;
+      }
+    } else if (fence && !(mark[0] === "`" && fence[2]?.includes("`"))) {
+      open = { char: mark[0] ?? "`", len: mark.length, start: at, quote, indent };
+    }
+    at += line.length + 1;
   }
   if (open) ranges.push([open.start, md.length]);
-  const inFence = (i: number) => ranges.some(([a, b]) => i >= a && i < b);
-  const extra: [number, number][] = [];
-  for (const m of md.matchAll(/(`+)(?!`)[\s\S]*?[^`]\1(?!`)|%%[\s\S]*?%%/g)) {
-    const at = m.index ?? 0;
-    if (inFence(at)) continue;
-    // An inline code span does not cross a paragraph (blank line).
-    if (m[0].startsWith("`") && /\n\s*\n/.test(m[0])) continue;
-    extra.push([at, at + m[0].length]);
+
+  // Index each delimiter run once. Failed openers never search the same suffix again.
+  const marks: { at: number; end: number; key: string; next: number; section: number }[] = [];
+  let fenceIndex = 0;
+  for (const m of md.matchAll(/`+|%%|\r?\n[ \t]*\r?\n/g)) {
+    const at = m.index;
+    while (ranges[fenceIndex] && at >= (ranges[fenceIndex]?.[1] ?? 0)) fenceIndex++;
+    if (ranges[fenceIndex] && at >= (ranges[fenceIndex]?.[0] ?? 0)) continue;
+    marks.push({
+      at,
+      end: at + m[0].length,
+      key: m[0][0] === "`" ? String(m[0].length) : m[0] === "%%" ? "comment" : "break",
+      next: -1,
+      section: fenceIndex,
+    });
   }
-  return [...ranges, ...extra].sort((a, b) => a[0] - b[0]);
+  const next = new Map<string, number>();
+  for (let i = marks.length - 1; i >= 0; i--) {
+    const mark = marks[i];
+    if (!mark) continue;
+    if (mark.key === "break") {
+      const comment = next.get("comment");
+      next.clear();
+      if (comment !== undefined) next.set("comment", comment);
+    } else {
+      mark.next = next.get(mark.key) ?? -1;
+      next.set(mark.key, i);
+    }
+  }
+  for (let i = 0; i < marks.length; i++) {
+    const mark = marks[i];
+    const end = mark && marks[mark.next];
+    if (!mark || !end) continue;
+    // A span must stay outside fenced code, even if its delimiters have the same length.
+    if (mark.key !== "comment" && mark.section !== end.section) continue;
+    ranges.push([mark.at, end.end]);
+    i = mark.next;
+  }
+  return ranges.sort((a, b) => a[0] - b[0]);
 }
 
 function inside(ranges: [number, number][], at: number): boolean {
@@ -66,7 +116,7 @@ function inside(ranges: [number, number][], at: number): boolean {
 
 export function parseLinkInner(inner: string): Pick<WikiLinkRef, "target" | "anchor" | "linkText"> {
   const bar = inner.indexOf("|");
-  const head = bar >= 0 ? inner.slice(0, bar) : inner;
+  const head = bar >= 0 ? inner.slice(0, bar).replace(/\\$/, "") : inner;
   const linkText = bar >= 0 ? inner.slice(bar + 1).trim() || null : null;
   const hash = head.indexOf("#");
   const target = (hash >= 0 ? head.slice(0, hash) : head).trim();
@@ -78,15 +128,28 @@ export function parseLinkInner(inner: string): Pick<WikiLinkRef, "target" | "anc
 export function parseWikiLinks(md: string): WikiLinkRef[] {
   const skip = codeRanges(md);
   const out: WikiLinkRef[] = [];
-  for (const m of md.matchAll(LINK)) {
-    const start = m.index ?? 0;
-    if (inside(skip, start)) continue;
-    // An escaped `\[[` is not a link.
-    if (start > 0 && md[start - 1] === "\\") continue;
-    const parsed = parseLinkInner(m[2] ?? "");
-    // [[#Heading]] points at the page itself: empty target.
+  let range = 0;
+  for (let i = 0; i < md.length; ) {
+    while (skip[range] && i >= (skip[range]?.[1] ?? 0)) range++;
+    if (skip[range] && i >= (skip[range]?.[0] ?? 0)) {
+      i = skip[range]?.[1] ?? md.length;
+      continue;
+    }
+    const embed = md.startsWith("![[", i);
+    if ((!embed && !md.startsWith("[[", i)) || md[i - 1] === "\\") {
+      i++;
+      continue;
+    }
+    const start = i;
+    const body = i + (embed ? 3 : 2);
+    i = body;
+    while (i < md.length && md[i] !== "]" && md[i] !== "\n") i++;
+    if (i === body || !md.startsWith("]]", i)) continue;
+    const end = i + 2;
+    const parsed = parseLinkInner(md.slice(body, i));
+    i = end;
     if (!parsed.target && !parsed.anchor) continue;
-    out.push({ raw: m[0], embed: m[1] === "!", start, end: start + m[0].length, ...parsed });
+    out.push({ raw: md.slice(start, end), embed, start, end, ...parsed });
   }
   return out;
 }
@@ -109,16 +172,17 @@ export function headings(md: string): Heading[] {
   const out: Heading[] = [];
   let offset = 0;
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i] ?? "";
+    const source = lines[i] ?? "";
+    const line = source.replace(/\r$/, "");
     const here = offset;
-    offset += line.length + 1;
+    offset += source.length + 1;
     if (inside(skip, here)) continue;
     const atx = /^ {0,3}(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$/.exec(line);
     if (atx) {
       out.push({ level: (atx[1] ?? "#").length, text: cleanHeading(atx[2] ?? ""), line: i });
       continue;
     }
-    const next = lines[i + 1] ?? "";
+    const next = (lines[i + 1] ?? "").replace(/\r$/, "");
     if (line.trim() && !/^\s*([-*+>|]|\d+[.)])\s/.test(line) && /^ {0,3}(=+|-+)[ \t]*$/.test(next)) {
       out.push({ level: next.trim().startsWith("=") ? 1 : 2, text: cleanHeading(line.trim()), line: i });
     }
@@ -126,12 +190,30 @@ export function headings(md: string): Heading[] {
   return out;
 }
 
+const headingMarkdown = remarkCtx.create(new Map()).get()();
+
 /** Heading text as Obsidian uses it in the anchor: no emphasis or code markup, links by their text. */
 export function cleanHeading(text: string): string {
-  return text
+  text = text
     .replace(/!?\[\[([^\]|]+?)(?:\|([^\]]+))?\]\]/g, (_, t: string, a?: string) => a ?? t)
-    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/[*_~`=]/g, "")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");
+  const plain = (s: string) => s.replace(/(~~|==)(?=\S)(.+?)\1/g, "$2");
+  let out = "";
+  let pending = "";
+  const walk = (nodes: Extract<Root["children"][number], { type: "paragraph" }>["children"]) => {
+    for (const node of nodes) {
+      if ("children" in node) walk(node.children);
+      else if (node.type === "inlineCode") {
+        out += plain(pending) + node.value;
+        pending = "";
+      } else if ("value" in node) pending += node.value;
+    }
+  };
+  // Keep literal block markers in heading content inside a paragraph.
+  const paragraph = headingMarkdown.parse(`x ${text}`).children[0];
+  if (paragraph?.type === "paragraph") walk(paragraph.children);
+  return (out + plain(pending))
+    .slice(2)
     .replace(/\s+\^[A-Za-z0-9-]+$/, "")
     .trim();
 }
@@ -169,7 +251,8 @@ export function rewriteLinks(
     if (!to) continue;
     const anchor = l.anchor ? `#${l.anchor}` : "";
     const linkText = to.linkText !== undefined ? to.linkText : l.linkText;
-    out += `${md.slice(last, l.start)}${l.embed ? "!" : ""}[[${to.target}${anchor}${linkText ? `|${linkText}` : ""}]]`;
+    const separator = l.raw.includes("\\|") ? "\\|" : "|";
+    out += `${md.slice(last, l.start)}${l.embed ? "!" : ""}[[${to.target}${anchor}${linkText ? `${separator}${linkText}` : ""}]]`;
     last = l.end;
     count++;
   }

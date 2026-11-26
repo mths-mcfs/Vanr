@@ -14,7 +14,7 @@
 //
 // The effect class, the gate reason and the risk reason (why a flag went up, shown on the approval card and in
 // the run log; `source` is the tool and target, e.g. `browser_read https://example.com`) are contract types.
-import type { EffectClass, GateReason, RiskReason } from "@vanr/contract";
+import type { EffectClass, EffectPreview, GateReason, RiskReason } from "@vanr/contract";
 
 export const EFFECT_CLASSES = ["K0", "K1", "K2", "K3"] as const satisfies readonly EffectClass[];
 
@@ -36,17 +36,7 @@ export type Destination =
   | { kind: "external"; allowed: boolean; target: string };
 
 /** What the approver sees: the exact effect, not the intent. */
-export interface Preview {
-  title: string;
-  /** The whole text that goes out (uncut). */
-  body?: string;
-  /** Final recipients, already resolved. */
-  recipients?: string[];
-  /** Resolved links. */
-  links?: string[];
-  /** Diff in the wiki, Drive or instructions. */
-  diff?: string;
-}
+export type Preview = EffectPreview;
 
 export interface GateCall {
   tool: string;
@@ -118,11 +108,11 @@ export function gate(run: RunRisk, call: GateCall): GateDecision {
   if (dest.kind === "external" && !dest.allowed)
     return untrusted ? deny("untrusted_to_external") : ask("destination_not_allowed");
   if (call.effect === "K3") return ask("irreversible");
+  if (call.policy === "ask") return ask("policy");
   if (flags.has("A") && flags.has("B") && flags.has("C")) return ask("rule_of_two");
   if (untrusted && dest.kind === "internal" && dest.public && call.effect !== "K0")
     return ask("untrusted_public");
   if (untrusted && dest.kind === "external" && call.effect === "K1") return ask("untrusted_public");
-  if (call.policy === "ask") return ask("policy");
   return { kind: "allow", effect: call.effect, flags: list };
 }
 

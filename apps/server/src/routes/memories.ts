@@ -175,7 +175,8 @@ export function registerMemories(app: Hono<AppEnv>) {
       .where(storeWhere({ scope: "person", workspaceId: me.workspaceId, userId: me.userId }))
       .orderBy(desc(memories.updatedAt))
       .limit(STORE_LIST_LIMIT);
-    return c.json(memoryList(rows));
+    // One person's store: no browser or proxy keeps a copy for whoever signs in next.
+    return c.json(memoryList(rows), 200, { "cache-control": "no-store" });
   });
 
   // The workspace's store: every member reads it (the agents too); only who manages agents writes.

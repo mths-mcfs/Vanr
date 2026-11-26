@@ -1,0 +1,13 @@
+/* @vanr/ui styles. Import once at the app root: import "@vanr/ui/styles.css"; */
+@layer vanr.reset, vanr.tokens, vanr.base, vanr.components;
+
+@import "@fontsource-variable/schibsted-grotesk/wght.css";
+@import "@fontsource/commit-mono/400.css";
+@import "@fontsource/commit-mono/600.css";
+@import "@fontsource/young-serif/400.css";
+
+@import "./tokens.css";
+@import "./base.css";
+@import "./components/controls.css";
+@import "./components/overlays.css";
+@import "./components/display.css";

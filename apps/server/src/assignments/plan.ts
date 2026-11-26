@@ -128,7 +128,7 @@ export async function writePlan(
   assignmentId: string,
   input: {
     author: AssignmentActor;
-    mode: "person" | "agent" | "append";
+    mode: "person" | "agent" | "append" | "import";
     items: PlanInput[];
     parentVersion?: number;
     note?: string;
@@ -217,8 +217,8 @@ export async function writePlan(
           id = raw.id;
           used.add(id);
         } else id = nextId();
-        const status: PlanItemStatusRow =
-          input.mode === "person" ? "todo" : raw.status && raw.status !== "dropped" ? raw.status : "todo";
+        let status: PlanItemStatusRow = raw.status ?? "todo";
+        if (input.mode !== "import" && (input.mode === "person" || status === "dropped")) status = "todo";
         added.push(id);
         drafts.push({
           row: null,
@@ -398,7 +398,7 @@ export async function importLegacyPlan(
   if ((await planOf(deps, row.id)).length > 0) return false;
   await writePlan(deps, row.id, {
     author: { type: "agent", id: row.agentId },
-    mode: "agent",
+    mode: "import",
     items: row.plan.items.map((i) => ({ id: i.id, title: i.title, status: i.status, criteria: i.note })),
     note: "imported",
   });

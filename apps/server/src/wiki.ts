@@ -12,7 +12,7 @@ import type { AppDeps, WorkspaceMember } from "./context";
 import { pgCode } from "./db-errors";
 import { forbidden, HttpError, notFound } from "./http";
 import { reindex, unindex } from "./search-index";
-import { namesOf, reresolveLinks, syncLinks } from "./wiki-links";
+import { checkLinks, namesOf, reresolveLinks, syncLinks } from "./wiki-links";
 
 const { knowledgePages, pageRevisions, wikiPageViews, pageLinks, wikiPageDocs, wikiPropSchemas, members } =
   schema;
@@ -22,6 +22,22 @@ export type Author = ActorRef & { actingFor?: string };
 export const MAX_BODY = 500_000;
 /** Characters that break a [[link]] by title (Obsidian rejects them too; the vault import strips them). */
 export const TITLE_BREAKS_LINK = /[[\]|#^]/;
+
+/**
+ * Text with a NUL character anywhere (Postgres text can't hold it): rejected at the border with 400, in a
+ * value or a key, however deep.
+ */
+export function rejectNul(value: unknown): void {
+  const has = (v: unknown): boolean =>
+    typeof v === "string"
+      ? v.includes("\0")
+      : Array.isArray(v)
+        ? v.some(has)
+        : v !== null && typeof v === "object"
+          ? Object.entries(v).some(([k, x]) => k.includes("\0") || has(x))
+          : false;
+  if (has(value)) throw new HttpError(400, "wiki.invalid_text", "Text can't contain a NUL character");
+}
 
 function checkTitle(title: string) {
   if (TITLE_BREAKS_LINK.test(title))
@@ -66,11 +82,34 @@ function normalizeAltTitles(aliases: string[] | undefined, title: string): strin
   return out;
 }
 
-function excerptOf(body: string): string {
-  const plain = body
-    .replace(/```[\s\S]*?```/g, " ")
-    .replace(/%%[\s\S]*?%%/g, " ")
-    .replace(/!?\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]/g, "$1")
+/**
+ * `[[target#…|…]]` (or `![[…]]`) → `target`, as `/!?\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]/g` would replace it,
+ * in one pass: the inner text runs to the first `]`. That expression rescanned the rest of the text from
+ * every `[[` with no closing.
+ */
+function linkTargets(text: string): string {
+  const stop = new Int32Array(text.length + 1).fill(text.length);
+  for (let i = text.length - 1; i >= 0; i--) stop[i] = text[i] === "]" ? i : (stop[i + 1] as number);
+  let out = "";
+  let last = 0;
+  for (let i = 0; i < text.length; i++) {
+    const bang = text[i] === "!" && text.startsWith("[[", i + 1);
+    if (!bang && !text.startsWith("[[", i)) continue;
+    const from = i + (bang ? 3 : 2);
+    const k = stop[from] as number;
+    const first = text[from];
+    if (k === from || first === "|" || first === "#" || text[k + 1] !== "]") continue;
+    const inner = text.slice(from, k);
+    const cut = inner.search(/[|#]/);
+    out += text.slice(last, i) + (cut < 0 ? inner : inner.slice(0, cut));
+    last = k + 2;
+    i = k + 1;
+  }
+  return out + text.slice(last);
+}
+
+export function excerptOf(body: string): string {
+  const plain = linkTargets(body.replace(/```[\s\S]*?```/g, " ").replace(/%%[\s\S]*?%%/g, " "))
     .replace(/[#>*_`~[\]()!-]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -197,7 +236,7 @@ export async function toPage(db: Db, row: WikiRow, me: WorkspaceMember | null): 
   };
 }
 
-async function freeSlug(db: Db, workspaceId: string, title: string): Promise<string> {
+async function freeSlug(db: Db | Tx, workspaceId: string, title: string): Promise<string> {
   const base = slugify(title);
   const taken = new Set(
     (
@@ -222,63 +261,95 @@ async function afterWrite(deps: AppDeps, row: WikiRow, origin: SaveOrigin) {
 /** Where the write came from: the live session doesn't get back what it published itself. */
 export type SaveOrigin = "api" | "live";
 
+/** A new page's fields. */
+export interface NewPage {
+  workspaceId: string;
+  title: string;
+  folder?: string;
+  body?: string;
+  tags?: string[];
+  aliases?: string[];
+  props?: Props;
+  author: Author;
+  sourceType?: "obsidian";
+  note?: string | null;
+}
+
 export async function createPage(
   deps: AppDeps,
-  input: {
-    workspaceId: string;
-    title: string;
-    folder?: string;
-    body?: string;
-    tags?: string[];
-    aliases?: string[];
-    props?: Props;
-    author: Author;
-    sourceType?: "obsidian";
-    note?: string | null;
-  },
+  input: NewPage & { propSchema?: { defs: PropDef[]; version: number } },
 ): Promise<WikiRow> {
-  checkTitle(input.title);
+  const [row] = await createPages(deps, input.workspaceId, input.author, [input], input.propSchema);
+  if (!row) throw new Error("wiki insert failed");
+  return row;
+}
+
+/**
+ * New pages (and the property schema they need) in one transaction: all of them or none. Each one is
+ * checked (title, text, links) before anything is written.
+ */
+export async function createPages(
+  deps: AppDeps,
+  workspaceId: string,
+  author: Author,
+  inputs: readonly NewPage[],
+  propSchema?: { defs: PropDef[]; version: number },
+): Promise<WikiRow[]> {
+  for (const input of inputs) {
+    checkTitle(input.title);
+    rejectNul(input);
+    checkLinks(input.body ?? "");
+  }
+  if (propSchema) rejectNul(propSchema.defs);
   const at = deps.now();
-  const slug = await freeSlug(deps.db, input.workspaceId, input.title);
+  const rows = await writeTx(deps.db, async (tx) => {
+    await requireWriter(tx, workspaceId, author);
+    if (propSchema) await writePropSchema(tx, workspaceId, propSchema.defs, propSchema.version, at);
+    const out: WikiRow[] = [];
+    for (const input of inputs) out.push(await insertPage(tx, { ...input, workspaceId }, at));
+    return out;
+  });
+  for (const row of rows) await afterWrite(deps, row, "api");
+  return rows;
+}
+
+async function insertPage(tx: Tx, input: NewPage, at: Date): Promise<WikiRow> {
+  const slug = await freeSlug(tx, input.workspaceId, input.title);
   const id = newId("wiki");
   const body = input.body ?? "";
-  const row = await writeTx(deps.db, async (tx) => {
-    const [created] = await tx
-      .insert(knowledgePages)
-      .values({
-        id,
-        workspaceId: input.workspaceId,
-        slug,
-        title: input.title,
-        folder: normalizeFolder(input.folder),
-        tags: normalizeTags(input.tags),
-        aliases: normalizeAltTitles(input.aliases, input.title),
-        props: input.props ?? {},
-        body,
-        version: 1,
-        sourceType: input.sourceType ?? null,
-        updatedBy: input.author,
-        createdAt: at,
-        updatedAt: at,
-      })
-      .returning();
-    if (!created) throw new Error("wiki insert failed");
-    await tx.insert(pageRevisions).values({
-      pageId: id,
-      version: 1,
+  const [created] = await tx
+    .insert(knowledgePages)
+    .values({
+      id,
+      workspaceId: input.workspaceId,
+      slug,
       title: input.title,
+      folder: normalizeFolder(input.folder),
+      tags: normalizeTags(input.tags),
+      aliases: normalizeAltTitles(input.aliases, input.title),
+      props: input.props ?? {},
       body,
-      props: created.props,
-      author: input.author,
-      note: input.note ?? null,
+      version: 1,
+      sourceType: input.sourceType ?? null,
+      updatedBy: input.author,
       createdAt: at,
-    });
-    await syncLinks(tx, created);
-    await reresolveLinks(tx, created.workspaceId, namesOf(created));
-    return created;
+      updatedAt: at,
+    })
+    .returning();
+  if (!created) throw new Error("wiki insert failed");
+  await tx.insert(pageRevisions).values({
+    pageId: id,
+    version: 1,
+    title: input.title,
+    body,
+    props: created.props,
+    author: input.author,
+    note: input.note ?? null,
+    createdAt: at,
   });
-  await afterWrite(deps, row, "api");
-  return row;
+  await syncLinks(tx, created);
+  await reresolveLinks(tx, created.workspaceId, namesOf(created));
+  return created;
 }
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -325,14 +396,23 @@ export async function writeTx<T>(db: Db, fn: (tx: Tx) => Promise<T>): Promise<T>
 }
 
 /** A person's role in the workspace read inside the write's transaction (null: not a member any more). */
-async function roleIn(tx: Tx, workspaceId: string, userId: string) {
-  const [m] = await tx
-    .select({ role: members.role })
-    .from(members)
-    .where(and(eq(members.workspaceId, workspaceId), eq(members.userId, userId)))
-    .for("share");
-  return m?.role ?? null;
-}
+/**
+ * A person's membership read for a write: FOR SHARE, so a removal that comes after waits for the write to
+ * commit, and one that committed before leaves nothing to read. A mutable seam: the Postgres race test
+ * swaps it for a read without the lock (VANR_TEST_WIKI_MEMBER_UNLOCKED).
+ */
+export const memberLock = {
+  role: async (tx: Tx, workspaceId: string, userId: string) => {
+    const [m] = await tx
+      .select({ role: members.role })
+      .from(members)
+      .where(and(eq(members.workspaceId, workspaceId), eq(members.userId, userId)))
+      .for("share");
+    return m?.role ?? null;
+  },
+};
+
+const roleIn = (tx: Tx, workspaceId: string, userId: string) => memberLock.role(tx, workspaceId, userId);
 
 /** Whether `who` may write a locked page, decided with the role read in `tx`: only a person who is an admin. */
 export async function bypassesLock(tx: Tx, workspaceId: string, who: ActorRef): Promise<boolean> {
@@ -341,14 +421,8 @@ export async function bypassesLock(tx: Tx, workspaceId: string, who: ActorRef): 
   return !!role && can(role, "configure");
 }
 
-/** Whether any of `who` may write a locked page now (the live draft's editors decide its automatic publish). */
-export async function anyBypasses(tx: Tx, workspaceId: string, who: readonly ActorRef[]): Promise<boolean> {
-  for (const w of who) if (await bypassesLock(tx, workspaceId, w)) return true;
-  return false;
-}
-
 /** A person who writes must still be a member when the write commits; an agent's access is its run's. */
-async function requireWriter(tx: Tx, workspaceId: string, who: ActorRef) {
+export async function requireWriter(tx: Tx, workspaceId: string, who: ActorRef) {
   if (who.type === "person" && !(await roleIn(tx, workspaceId, who.id)))
     throw forbidden("You are not a member of this workspace any more");
 }
@@ -385,19 +459,18 @@ export async function savePage(
     note?: string | null;
     origin?: SaveOrigin;
     inTx?: (tx: Tx, page: WikiRow) => Promise<void>;
-    /** The author is only the credit (the live draft's last editor): not checked as the one who writes. */
+    /** Automatic publication may credit a former member for edits accepted before they left. */
     attributionOnly?: boolean;
-    /** Whose role decides the lock (default: the author). */
-    lockBypassBy?: readonly ActorRef[];
   },
 ): Promise<WikiRow> {
   if (input.title !== undefined && input.title !== input.row.title) checkTitle(input.title);
+  rejectNul([input.body, input.title, input.folder, input.tags, input.aliases, input.props, input.note]);
+  if (input.body !== undefined) checkLinks(input.body);
   const at = deps.now();
   const result = await writeTx(deps.db, async (tx) => {
     const row = await livePage(tx, input.row.id);
     if (!input.attributionOnly) await requireWriter(tx, row.workspaceId, input.author);
-    const deciders = input.lockBypassBy ?? [input.author];
-    if (row.locked && !(input.canBypassLock && (await anyBypasses(tx, row.workspaceId, deciders))))
+    if (row.locked && !(input.canBypassLock && (await bypassesLock(tx, row.workspaceId, input.author))))
       throw pageLocked();
     // Without a parent version the caller saves over the version it read.
     const expected = input.parentVersion ?? input.row.version;
@@ -458,6 +531,7 @@ export async function patchPage(
   set: Partial<typeof knowledgePages.$inferInsert>,
   guard?: (tx: Tx, page: WikiRow) => Promise<void>,
 ) {
+  rejectNul(set);
   const at = deps.now();
   const updated = await writeTx(deps.db, async (tx) => {
     const page = await livePage(tx, row.id);
@@ -472,6 +546,7 @@ export async function patchPage(
       await reresolveLinks(tx, changed.workspaceId, [...namesOf(page), ...namesOf(changed)]);
     return changed;
   });
+  if (set.locked !== undefined || set.folder !== undefined) await deps.wikiLive.recheckPage(updated);
   await reindex(deps, { kind: "wiki", id: updated.id });
   return updated;
 }
@@ -561,9 +636,9 @@ export async function trashPage(deps: AppDeps, row: WikiRow, me: WorkspaceMember
     await unindex(tx, deps, { kind: "wiki", id: r.id });
     return r;
   });
+  deps.wikiLive.pageClosed(trashed);
   // A link with the same name moves to another page outside the trash, if there is one.
   await reresolveLinks(deps.db, trashed.workspaceId, namesOf(trashed));
-  deps.wikiLive.pageClosed(trashed);
   return trashed;
 }
 
@@ -625,7 +700,7 @@ export async function purgeWikiTrash(deps: AppDeps): Promise<number> {
 
 /** Property definitions of the workspace's pages (seam 4). */
 export async function propSchemaOf(
-  db: Db,
+  db: Db | Tx,
   workspaceId: string,
 ): Promise<{ defs: PropDef[]; version: number }> {
   const [row] = await db.select().from(wikiPropSchemas).where(eq(wikiPropSchemas.workspaceId, workspaceId));
@@ -638,24 +713,37 @@ export async function savePropSchema(
   workspaceId: string,
   defs: PropDef[],
   parentVersion: number,
+  author: Author,
 ): Promise<{ defs: PropDef[]; version: number }> {
-  const at = deps.now();
+  return writeTx(deps.db, async (tx) => {
+    await requireWriter(tx, workspaceId, author);
+    return writePropSchema(tx, workspaceId, defs, parentVersion, deps.now());
+  });
+}
+
+async function writePropSchema(
+  tx: Tx,
+  workspaceId: string,
+  defs: PropDef[],
+  parentVersion: number,
+  at: Date,
+): Promise<{ defs: PropDef[]; version: number }> {
   if (parentVersion === 0) {
-    const inserted = await deps.db
+    const inserted = await tx
       .insert(wikiPropSchemas)
       .values({ workspaceId, defs, version: 1, updatedAt: at })
       .onConflictDoNothing()
       .returning();
     if (inserted[0]) return { defs, version: 1 };
   } else {
-    const [row] = await deps.db
+    const [row] = await tx
       .update(wikiPropSchemas)
       .set({ defs, version: parentVersion + 1, updatedAt: at })
       .where(and(eq(wikiPropSchemas.workspaceId, workspaceId), eq(wikiPropSchemas.version, parentVersion)))
       .returning();
     if (row) return { defs, version: row.version };
   }
-  const current = await propSchemaOf(deps.db, workspaceId);
+  const current = await propSchemaOf(tx, workspaceId);
   throw new HttpError(409, "wiki.stale_draft", "Someone changed the properties", {
     currentVersion: current.version,
   });

@@ -157,6 +157,132 @@ describe("a connection doesn't outlive the right that opened it", () => {
     b.close();
   });
 
+  for (const race of ["slow index", "stale lock request"] as const)
+    test(`a committed lock invalidates live writes before indexing (${race})`, async () => {
+      const { workspaceId, ana, beto } = await team();
+      const page = await ana.api.wiki.createWikiPage(workspaceId, { title: race, body: BODY });
+      const { db } = server.deps;
+      const transaction = db.transaction.bind(db);
+      let release = () => {};
+      let locking: Promise<unknown> | undefined;
+      if (race === "stale lock request") {
+        await ana.api.wiki.lockWikiPage(workspaceId, page.slug, true);
+        let begun!: () => void;
+        const started = new Promise<void>((r) => {
+          begun = r;
+        });
+        const gate = new Promise<void>((r) => {
+          release = r;
+        });
+        db.transaction = (async (...args: Parameters<typeof transaction>) => {
+          db.transaction = transaction;
+          begun();
+          await gate;
+          return transaction(...args);
+        }) as typeof transaction;
+        locking = ana.api.wiki.lockWikiPage(workspaceId, page.slug, true);
+        await started;
+        await ana.api.wiki.lockWikiPage(workspaceId, page.slug, false);
+      }
+      const a = connect(server, ana.browser, workspaceId, docName(workspaceId, page.slug));
+      const b = connect(server, beto.browser, workspaceId, docName(workspaceId, page.slug));
+      await Promise.all([a.synced, b.synced]);
+      await until(() => !a.provider.hasUnsyncedChanges && !b.provider.hasUnsyncedChanges);
+      const hold = holdNextIndexWrite(server);
+      try {
+        if (!locking) locking = ana.api.wiki.lockWikiPage(workspaceId, page.slug, true);
+        release();
+        await hold.begun;
+        const acks = b.syncStatus.length;
+        await b.edit((md) => `${md}\nUNAUTHORIZED AFTER LOCK.\n`);
+        await until(() => b.closeCodes.length > 0 || b.syncStatus.length > acks);
+        expect(b.syncStatus.slice(acks)).not.toContain(true);
+        expect(await a.md()).not.toContain("UNAUTHORIZED AFTER LOCK.");
+      } finally {
+        release();
+        hold.release();
+        db.transaction = transaction;
+        await locking;
+        a.close();
+        b.close();
+      }
+    });
+
+  test(
+    "a committed trash closes live editors before link maintenance, even when it fails",
+    async () => {
+      const now = new Date();
+      const srv = await startTestServer({ now: () => now, wikiDebounceMs: 600_000 });
+      const { db } = srv.deps;
+      const select = db.select.bind(db);
+      let release = () => {};
+      let a: ReturnType<typeof connect> | undefined;
+      let b: ReturnType<typeof connect> | undefined;
+      let trash: ReturnType<typeof apiError> | undefined;
+      try {
+        const { workspaceId, ana, beto } = await team(srv);
+        const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Trash live", body: BODY });
+        const name = docName(workspaceId, page.slug);
+        a = connect(srv, ana.browser, workspaceId, name);
+        b = connect(srv, beto.browser, workspaceId, name);
+        await Promise.all([a.synced, b.synced]);
+        await until(() => !a?.provider.hasUnsyncedChanges && !b?.provider.hasUnsyncedChanges);
+        await srv.deps.wikiLive.settled();
+
+        let begun!: () => void;
+        const started = new Promise<void>((r) => {
+          begun = r;
+        });
+        const gate = new Promise<void>((r) => {
+          release = r;
+        });
+        db.select = ((...args: Parameters<typeof select>) => {
+          const query = select(...args);
+          const from = query.from.bind(query);
+          query.from = ((table: unknown) => {
+            const built = from(table as never);
+            if (table === schema.pageLinks) {
+              db.select = select;
+              const then = built.then.bind(built);
+              // biome-ignore lint/suspicious/noThenProperty: hold the real link query, then inject a maintenance failure
+              built.then = ((ok: (v: unknown) => unknown, ko: (e: unknown) => unknown) =>
+                then(async () => {
+                  begun();
+                  await gate;
+                  throw new Error("injected link maintenance failure");
+                }).then(ok, ko)) as typeof built.then;
+            }
+            return built;
+          }) as typeof query.from;
+          return query;
+        }) as typeof db.select;
+
+        trash = apiError(ana.api.wiki.deleteWikiPage(workspaceId, page.slug));
+        await started;
+        expect((await ana.api.wiki.getWikiTrash(workspaceId)).map((p) => p.slug)).toContain(page.slug);
+        const acks = b.syncStatus.length;
+        await b.edit((md) => `${md}\nEDIT AFTER TRASH.\n`);
+        await until(() => (b?.closeCodes.length ?? 0) > 0 || (b?.syncStatus.length ?? 0) > acks);
+        expect(b.syncStatus.slice(acks)).not.toContain(true);
+        await until(() => (a?.closeCodes.length ?? 0) > 0 && (b?.closeCodes.length ?? 0) > 0);
+        expect(await a.md()).not.toContain("EDIT AFTER TRASH.");
+        release();
+        expect(await trash).toMatchObject({ status: 500, code: "internal" });
+      } finally {
+        release();
+        db.select = select;
+        a?.close();
+        b?.close();
+        try {
+          await trash;
+        } finally {
+          await srv.stop();
+        }
+      }
+    },
+    SERVER_TEST_MS * 2,
+  );
+
   test("signing out closes the connection at once (the session's delete hook), with no message in between", async () => {
     const { workspaceId, ana, beto } = await team();
     const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Sign out", body: BODY });
@@ -639,9 +765,14 @@ describe("an operation changes the shared document only after its transaction au
 });
 
 describe("stopping the server", () => {
-  test(
-    "a right read in flight when the stop begins: the stop waits for it and nothing reads the database after",
-    async () => {
+  test.each([
+    ["right", schema.sessions, 1],
+    ["authenticate", schema.members, 2],
+    ["load", schema.knowledgePages, 2],
+    ["upgrade", schema.members, 1],
+  ] as const)(
+    "a %s read in flight: stop waits and no later database read starts",
+    async (phase, tableToHold, occurrence) => {
       const srv = await startTestServer();
       const { db } = srv.deps;
       const select = db.select.bind(db);
@@ -651,8 +782,8 @@ describe("stopping the server", () => {
       try {
         const { workspaceId, ana } = await team(srv);
         const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Stop read", body: BODY });
-        // A bare socket with no page open: only its right read can hold the stop.
-        const raw = await rawSocket(srv, ana.browser, workspaceId);
+        const raw = phase === "upgrade" ? null : await rawSocket(srv, ana.browser, workspaceId);
+        let reads = 0;
         let begun!: () => void;
         const started = new Promise<void>((r) => {
           begun = r;
@@ -660,14 +791,13 @@ describe("stopping the server", () => {
         const gate = new Promise<void>((r) => {
           release = r;
         });
-        // The next read of a session row is held after it ran, before its rows come back.
         db.select = ((...args: Parameters<typeof select>) => {
           if (stopped) afterStop++;
           const query = select(...args);
           const from = query.from.bind(query);
           query.from = ((table: unknown) => {
             const built = from(table as never);
-            if (table === schema.sessions) {
+            if (table === tableToHold && ++reads === occurrence) {
               const where = built.where.bind(built);
               built.where = ((...params: Parameters<typeof where>) => {
                 const result = where(...params);
@@ -686,8 +816,9 @@ describe("stopping the server", () => {
           }) as typeof query.from;
           return query;
         }) as typeof db.select;
-        // Its first message reads the right.
-        raw.ws.send(authMessage(docName(workspaceId, page.slug)));
+        raw?.ws.send(authMessage(docName(workspaceId, page.slug)));
+        const upgrading =
+          phase === "upgrade" ? ana.browser.fetch(`/api/v1/wiki/collab?workspaceId=${workspaceId}`) : null;
         await started;
         let returned = false;
         const stopping = srv.stop().then(() => {
@@ -700,8 +831,10 @@ describe("stopping the server", () => {
         release();
         await stopping;
         stopped = true;
+        if (upgrading) expect((await upgrading).status).toBe(503);
+        await Bun.sleep(20);
         expect(afterStop).toBe(0);
-        raw.ws.close();
+        raw?.ws.close();
       } finally {
         release();
         db.select = select;

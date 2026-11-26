@@ -2,10 +2,12 @@
 // secrets) and returns the protocol result; an error becomes a RunnerError with the code.
 import { spawn } from "node:child_process";
 import {
-  appendFileSync,
+  closeSync,
+  constants,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   statSync,
@@ -83,10 +85,27 @@ class Capture {
   }
 }
 
-function blockedSecretFile(ctx: OpContext, path: string) {
+function blockedSecretFile(ctx: Pick<OpContext, "access" | "secrets" | "agent">, path: string) {
   if (!ctx.agent) return;
   const files = ctx.secrets.secretFiles(ctx.agent, ctx.access.agentRoot(ctx.agent));
   if (files.includes(path)) throw new RunnerError("bad_request", "Secret files are not readable by agents");
+}
+
+/**
+ * The one check before any file leaves the agent's folders (read_file, the browser's upload): the path is
+ * resolved to its real path (a symlink counts by its target) inside the agent's folder or one allowed for it,
+ * is not one of the agent's secret files and is a file. Returns the real path to read.
+ */
+export function readableFile(
+  ctx: Pick<OpContext, "access" | "secrets" | "agent">,
+  requested: string,
+): { path: string; size: number } {
+  const path = ctx.access.resolve(ctx.agent, requested);
+  blockedSecretFile(ctx, path);
+  if (!existsSync(path)) throw new RunnerError("not_found", `${requested} does not exist`);
+  const st = statSync(path);
+  if (!st.isFile()) throw new RunnerError("bad_request", `${requested} is not a file`);
+  return { path, size: st.size };
 }
 
 /** Without a policy from the server, no network. */
@@ -118,12 +137,12 @@ export async function sandboxed(
   if (status.state === "off") return null;
   if (!isolated(status))
     throw new RunnerError("sandbox_not_ready", status.reason ?? "No sandbox in this environment");
-  ctx.sandbox.setMode(input.network.mode);
   const { unchecked, ...fs } = fsPolicy(ctx.policy, input);
   const wrapped = await ctx.sandbox.wrap({
     command: input.command,
     fs,
     domains: input.domains,
+    mode: input.network.mode,
     ...(input.signal ? { signal: input.signal } : {}),
   });
   return unchecked.length ? { ...wrapped, unchecked } : wrapped;
@@ -294,11 +313,7 @@ const masksOf = (ctx: OpContext) => (ctx.agent ? ctx.secrets.masks(ctx.agent) : 
 
 export async function readOp(ctx: OpContext, args: { path: string; maxBytes?: number }): Promise<ReadResult> {
   ctx.access.requireActive();
-  const path = ctx.access.resolve(ctx.agent, args.path);
-  blockedSecretFile(ctx, path);
-  if (!existsSync(path)) throw new RunnerError("not_found", `${args.path} does not exist`);
-  const st = statSync(path);
-  if (!st.isFile()) throw new RunnerError("bad_request", `${args.path} is not a file`);
+  const { path, size } = readableFile(ctx, args.path);
   const max = Math.min(args.maxBytes ?? READ_MAX, READ_MAX);
   const all = readFileSync(path);
   // Masked before the cut, in every byte form of a secret (UTF-8 and its escaped forms, UTF-16, Latin-1):
@@ -310,7 +325,7 @@ export async function readOp(ctx: OpContext, args: { path: string; maxBytes?: nu
     path: args.path,
     content: binary ? buf.toString("base64") : buf.toString("utf8"),
     encoding: binary ? "base64" : "utf8",
-    size: st.size,
+    size,
     truncated,
   };
 }
@@ -325,7 +340,7 @@ export function writeOp(
   if (path === ctx.access.agentRoot(ctx.agent))
     throw new RunnerError("bad_request", "Cannot write the folder itself");
   // The same rule as the sandbox: git hook, shell rc, config of a tool that runs outside it.
-  const escalation = protectedPath(path);
+  const escalation = protectedPath(path, ctx.access.foldersFor(ctx.agent));
   if (escalation)
     throw new RunnerError("not_allowed", `${args.path} is protected (${escalation}); agents cannot write it`);
   if (existsSync(path) && statSync(path).isDirectory())
@@ -334,10 +349,28 @@ export function writeOp(
     args.encoding === "base64" ? Buffer.from(args.content, "base64") : Buffer.from(args.content, "utf8");
   if (data.byteLength > READ_MAX) throw new RunnerError("too_large", "File is larger than 5 MB");
   mkdirSync(dirname(path), { recursive: true });
-  // Aborted: nothing is written. The write goes into the file itself (its mode, its owner, a link stay).
+  // Aborted: nothing is written. The resolved file keeps its mode and owner.
   if (ctx.signal.aborted) throw new RunnerError("canceled", "Canceled");
-  if (args.append) appendFileSync(path, data);
-  else writeFileSync(path, data);
+  // Node writes the whole buffer or throws (a size limit, a full disk, a quota): a short write is an error,
+  // never a success, and the error says the file may be cut.
+  try {
+    const fd = openSync(
+      path,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_NOFOLLOW |
+        (args.append ? constants.O_APPEND : constants.O_TRUNC),
+    );
+    try {
+      writeFileSync(fd, data);
+    } finally {
+      closeSync(fd);
+    }
+  } catch (err) {
+    const code = err instanceof Error && "code" in err ? String(err.code) : "error";
+    if (code === "EACCES" || code === "EPERM") throw err;
+    throw new RunnerError("internal", `${args.path} could not be written whole (${code}); it may be cut`);
+  }
   return { path: args.path, bytes: data.byteLength };
 }
 

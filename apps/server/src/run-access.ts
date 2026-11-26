@@ -3,7 +3,7 @@ import { type Db, schema } from "@vanr/engine/db";
 import { and, eq, inArray } from "drizzle-orm";
 import { readableChannel } from "./channels";
 import { revealedDebateIds } from "./debates";
-import { notFound } from "./http";
+import { HttpError, notFound } from "./http";
 
 const { runs } = schema;
 
@@ -17,9 +17,14 @@ export async function readableRun(workspaceId: string, userId: string, runId: st
     .from(runs)
     .where(and(eq(runs.id, runId), eq(runs.workspaceId, workspaceId)));
   if (!row) throw notFound("Run not found");
-  if (row.channelId) await readableChannel(db, { workspaceId, userId, channelId: row.channelId });
+  // A channel the person can't read answers as a missing run: the two must not tell apart.
+  const readable = (channelId: string) =>
+    readableChannel(db, { workspaceId, userId, channelId }).catch((err: unknown) => {
+      throw err instanceof HttpError && err.status === 404 ? notFound("Run not found") : err;
+    });
+  if (row.channelId) await readable(row.channelId);
   // A delegation shows the question in the detail: only to whoever reads the channel it came from.
-  if (row.sourceChannelId) await readableChannel(db, { workspaceId, userId, channelId: row.sourceChannelId });
+  if (row.sourceChannelId) await readable(row.sourceChannelId);
   if (row.debateId) {
     const [ok] = await db
       .select({ id: schema.debates.id })

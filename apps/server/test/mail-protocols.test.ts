@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { createServer, type Socket } from "node:net";
 import { ImapClient, ImapError, imapDate, parseList } from "../src/integrations/imap";
 import { buildMail, parseMail } from "../src/integrations/mime";
 import { dotStuff, type SmtpError, smtpSend } from "../src/integrations/smtp";
@@ -10,10 +11,14 @@ beforeAll(async () => {
 });
 afterAll(() => mail.stop());
 
+/** The fake servers listen on localhost without TLS: the installation allows both. */
+const LOCAL = { allowPrivate: true, allowPlaintext: true };
+
 const imapOpts = () => ({
   host: mail.host,
   port: mail.imapPort,
   secure: false,
+  policy: LOCAL,
   user: mail.user,
   password: mail.password,
 });
@@ -92,6 +97,7 @@ test("SMTP: authenticates, sends with a dot at the start of a line and rejects a
     host: mail.host,
     port: mail.smtpPort,
     security: "none" as const,
+    policy: LOCAL,
     user: mail.user,
     password: mail.password,
   };
@@ -136,4 +142,57 @@ test("MIME: multipart prefers text; HTML becomes text; attachments show by name"
   expect(parsed.text).toBe("Hello & até");
   expect(parsed.attachments).toEqual(["invoice.pdf"]);
   expect(parseList('* LIST (\\Noselect) "/" "[Gmail]"')).toBeNull();
+});
+
+test.each([true, false])("IMAP fallback preserves other deleted messages (UIDPLUS=%s)", async (uidPlus) => {
+  const local = await startFakeMail({ move: false, uidPlus });
+  const client = await ImapClient.open({ ...imapOpts(), port: local.imapPort });
+  try {
+    local.deliver("INBOX", "one");
+    local.deliver("INBOX", "two");
+    await client.login();
+    await client.open("INBOX", false);
+    await client.addFlags(2, "\\Deleted");
+    if (uidPlus) await client.move(1, "Archive");
+    else await expect(client.move(1, "Archive")).rejects.toBeInstanceOf(ImapError);
+    expect(local.folders.get("INBOX")?.messages.map((m) => m.uid)).toEqual(uidPlus ? [2] : [1, 2]);
+    expect(local.folders.get("Archive")?.messages.length).toBe(uidPlus ? 1 : 0);
+  } finally {
+    await client.close();
+    local.stop();
+  }
+});
+
+test.each([true, false])("mail response timeout closes the socket (IMAP=%s)", async (imap) => {
+  let peer: Socket | undefined;
+  let forced = false;
+  const server = createServer((socket) => {
+    peer = socket;
+    socket.resume();
+    if (imap) socket.write("* OK ready\r\n");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const addr = server.address();
+  if (!addr || typeof addr === "string") throw new Error("no address");
+  const opts = { host: "127.0.0.1", port: addr.port, user: "u", password: "p", timeoutMs: 20, policy: LOCAL };
+  const timer = setTimeout(() => {
+    forced = true;
+    peer?.destroy();
+  }, 500);
+  try {
+    if (imap) {
+      const client = await ImapClient.open({ ...opts, secure: false });
+      await expect(client.login()).rejects.toThrow();
+      await client.close();
+    } else
+      await expect(
+        smtpSend({ ...opts, security: "none" }, { from: "a@b.c", to: ["d@e.f"] }, "x"),
+      ).rejects.toThrow();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    expect(forced).toBe(false);
+  } finally {
+    clearTimeout(timer);
+    peer?.destroy();
+    server.close();
+  }
 });

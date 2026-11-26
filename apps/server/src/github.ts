@@ -112,23 +112,6 @@ interface ImportedSkill {
   files: { path: string; status: "ok" | "skipped"; mime: string; text?: string }[];
 }
 
-/** Reads the simple frontmatter (name, description) of a SKILL.md. */
-function parseSkillMarkdown(text: string, fallbackName: string): Omit<ImportedSkill, "files"> {
-  const m = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(text);
-  const head = m?.[1] ?? "";
-  const body = (m ? m[2] : text) ?? "";
-  const field = (key: string) =>
-    new RegExp(`^${key}:\\s*(.+)$`, "m")
-      .exec(head)?.[1]
-      ?.trim()
-      .replace(/^["']|["']$/g, "");
-  return {
-    name: (field("name") ?? fallbackName).slice(0, 120),
-    description: (field("description") ?? "").slice(0, 1000),
-    body: body.trim(),
-  };
-}
-
 /** A skill folder on GitHub: the SKILL.md and the text files next to it. */
 export async function importSkill(fetcher: typeof fetch, url: string): Promise<ImportedSkill> {
   const ref = parseGithubUrl(url);
@@ -140,9 +123,11 @@ export async function importSkill(fetcher: typeof fetch, url: string): Promise<I
   const dirName = dir.split("/").at(-1) || undefined;
   const strict = parseSkillMd(md);
   const problems = strict.ok ? validateSkillFrontmatter(strict.frontmatter, dirName) : strict.problems;
-  if (problems.length)
+  if (!strict.ok || problems.length)
     throw new HttpError(400, "skill.invalid", `Invalid SKILL.md: ${problems.join("; ")}`, { problems });
-  const parsed = parseSkillMarkdown(md, dirName || ref.repo);
+  const { name, description } = z
+    .object({ name: z.string(), description: z.string() })
+    .parse(strict.frontmatter);
 
   const api = `https://api.github.com/repos/${enc(ref.owner)}/${enc(ref.repo)}/contents/${enc(dir)}${
     ref.ref ? `?ref=${encodeURIComponent(ref.ref)}` : ""
@@ -170,5 +155,5 @@ export async function importSkill(fetcher: typeof fetch, url: string): Promise<I
       text === null ? { path: rel, status: "skipped", mime } : { path: rel, status: "ok", mime, text },
     );
   }
-  return { ...parsed, files };
+  return { name, description, body: strict.body, files };
 }

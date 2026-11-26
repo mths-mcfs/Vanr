@@ -441,6 +441,41 @@ describe("a canceled turn", () => {
     runner.close();
   });
 
+  test("access revoked while the network policy is read cancels the turn before it goes out", async () => {
+    const runner = await pairedRunner();
+    // The policy read is the turn's first query: the agent's access on the runner ends during it.
+    let revoked = false;
+    const db = new Proxy(server.deps.db, {
+      get(target, prop) {
+        if (prop === "select" && !revoked) {
+          revoked = true;
+          hub.cancelPending(runner.row.id, agentId);
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const revokedTurn = remoteProvider(
+      { ...server.deps, db, runners: hub },
+      {
+        runId: "run_r1",
+        agent: { id: agentId, handle: "lia" },
+        harness: harnessOf(runner.row),
+        invoke: async () => ({ content: "", isError: false }),
+      },
+    );
+    const { events, error } = await drain(revokedTurn.stream(request([say("user", "Hi")])));
+    expect(events).toEqual([]);
+    expect(error).toMatchObject({ code: "canceled" });
+    // The next request the runner sees is a later turn's: the revoked one never went out.
+    const later = drain(provider(runner, "run_r2").stream(request([say("user", "Again")])));
+    const turn = await runner.next();
+    expect(turn.args.runId).toBe("run_r2");
+    answer(runner, turn.id, "ok");
+    expect((await later).error).toBeNull();
+    runner.close();
+  });
+
   test("an abort while the runner works tells it to stop, ends at once and drops the late answer", async () => {
     const runner = await pairedRunner();
     const abort = new AbortController();

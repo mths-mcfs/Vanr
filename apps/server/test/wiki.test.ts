@@ -9,13 +9,15 @@ import { and, eq, sql } from "drizzle-orm";
 import { strToU8, unzipSync, zipSync } from "fflate";
 import * as Y from "yjs";
 import type { RunningServer } from "../src/server";
-import { MAX_BODY, pageLock, purgeWikiTrash, savePage } from "../src/wiki";
+import { MAX_BODY, memberLock, pageBySlug, pageLock, purgeWikiTrash, savePage } from "../src/wiki";
+import { MAX_LINKS } from "../src/wiki-links";
 import { wikiMarkdown } from "../src/wiki-md";
-import { VAULT_LIMITS } from "../src/wiki-vault";
+import { exportVault, VAULT_LIMITS } from "../src/wiki-vault";
 import { Browser, holdNextIndexWrite, SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
 import { NO_POSTGRES, TEST_POSTGRES_URL, testDatabaseUrl } from "./postgres";
 import { memberOf, type Person, seedWorkspace } from "./seed";
 import { apiError, wikiApi } from "./wiki-api";
+import { until } from "./wiki-live";
 
 /** The real search index (T8, Postgres), with the permission in the WHERE. */
 const search = { search: (viewer: Viewer, q: string) => server.deps.search.search(viewer, q) };
@@ -46,6 +48,28 @@ function vaultZip(extra: Record<string, Uint8Array> = {}) {
   files["Handbook/.obsidian/workspace.json"] = strToU8("{}");
   return zipSync({ ...files, ...extra });
 }
+
+test(
+  "the running server purges expired wiki trash after 30 days",
+  async () => {
+    let now = new Date();
+    const running = await startTestServer({ fileServicesMs: 20, now: () => now });
+    try {
+      const ana = await signedIn(running, "Ana", email("cleanup"));
+      const { workspaceId } = await seedWorkspace(running, ana, "Wiki cleanup");
+      const wiki = wikiApi(ana.browser);
+      const page = await wiki.createWikiPage(workspaceId, { title: "Expired wiki page", body: "Old text" });
+      await wiki.deleteWikiPage(workspaceId, page.slug);
+      expect(await wiki.getWikiTrash(workspaceId)).toHaveLength(1);
+      now = new Date(now.getTime() + 31 * DAY);
+      await until(async () => (await running.deps.db.select().from(schema.knowledgePages)).length === 0);
+      expect(await running.deps.db.select().from(schema.pageRevisions)).toHaveLength(0);
+    } finally {
+      await running.stop();
+    }
+  },
+  SERVER_TEST_MS,
+);
 
 describe("links and rename (P0-05)", () => {
   test("[[a|b]], [[a#heading]], [[a#^block]], embed; a target created later starts to count", async () => {
@@ -616,10 +640,10 @@ describe("zip vault (P0-10)", () => {
       new Uint8Array(await (await ana.api.wiki.exportWiki(workspaceId)).arrayBuffer()),
     );
     expect(Object.keys(exported).filter((k) => k.endsWith(".md")).length).toBe(VAULT_NOTES.length);
-    expect(Object.keys(exported)).toContain("attachments/diagram.png");
-    const startMd = new TextDecoder().decode(exported["Start.md"]);
+    expect(Object.keys(exported)).toContain("wiki/attachments/diagram.png");
+    const startMd = new TextDecoder().decode(exported["wiki/Start.md"]);
     expect(startMd.startsWith("---\naliases:\n  - Home\n  - Front page\ntags:\n")).toBe(true);
-    expect(startMd).toContain("status: active\n---\n# Welcome to the team handbook");
+    expect(startMd).toContain("status: active\ntitle: Start\n---\n# Welcome to the team handbook");
 
     // Reimporting the export in another workspace gives the same pages, bodies and properties.
     const other = await team();
@@ -641,6 +665,61 @@ describe("zip vault (P0-10)", () => {
         (await ana.api.wiki.getWikiPage(workspaceId, p.slug)).body,
       );
     }
+  });
+
+  test("successive imports persist new options of existing properties", async () => {
+    const { workspaceId, ana } = await team();
+    await ana.api.wiki.setWikiProps(
+      workspaceId,
+      [{ id: "prop_status", name: "status", type: "select", options: [{ id: "opt_open", name: "Open" }] }],
+      0,
+    );
+    for (const status of ["Done", "Later"]) {
+      await ana.api.wiki.importWiki(workspaceId, {
+        files: [{ path: `${status}.md`, text: `---\nstatus: ${status}\n---\nbody` }],
+      });
+      const { defs } = await ana.api.wiki.listWikiProps(workspaceId);
+      const option = defs[0]?.options?.find((o) => o.name === status);
+      expect(option).toBeDefined();
+      expect((await ana.api.wiki.getWikiPage(workspaceId, status.toLowerCase())).props).toEqual({
+        prop_status: option?.id,
+      });
+    }
+  });
+
+  test("a schema conflict leaves no orphan note and a fresh import recovers", async () => {
+    const { workspaceId, ana } = await team();
+    const hold = holdNextTransaction(server);
+    const input = { files: [{ path: "Race.md", text: "---\nscore: 10\n---\nbody" }] };
+    const importing = apiError(ana.api.wiki.importWiki(workspaceId, input));
+    await hold.started;
+    await ana.api.wiki.setWikiProps(workspaceId, [{ id: "prop_owner", name: "owner", type: "text" }], 0);
+    hold.release();
+    expect((await importing).status).toBe(409);
+    expect(await ana.api.wiki.listWikiPages(workspaceId)).toEqual([]);
+    expect((await ana.api.wiki.importWiki(workspaceId, input)).created).toBe(1);
+    const { defs } = await ana.api.wiki.listWikiProps(workspaceId);
+    expect((await ana.api.wiki.getWikiPage(workspaceId, "race")).props).toEqual({
+      [defs.find((d) => d.name === "score")?.id ?? ""]: 10,
+    });
+  });
+
+  test("export preserves original titles and a common real folder, even with file collisions and a title property", async () => {
+    const { workspaceId, ana } = await team();
+    await ana.api.wiki.setWikiProps(workspaceId, [{ id: "prop_title", name: "TITLE", type: "text" }], 0);
+    for (const title of ["Q3/Plan", "Q3-Plan", "Q3:Plan"]) {
+      await ana.api.wiki.createWikiPage(workspaceId, {
+        title,
+        folder: "Processes",
+        props: { prop_title: "Wrong title" },
+      });
+    }
+    const other = await team();
+    const zip = await (await ana.api.wiki.exportWiki(workspaceId)).blob();
+    await other.ana.api.wiki.importWikiVault(other.workspaceId, { file: zip, fileName: "export.zip" });
+    expect(
+      (await other.ana.api.wiki.listWikiPages(other.workspaceId)).map((p) => [p.title, p.folder]).sort(),
+    ).toEqual(["Q3/Plan", "Q3-Plan", "Q3:Plan"].map((t) => [t, "Processes"]).sort());
   });
 
   test("attachments that only differ in the path's case become a single file in the Drive", async () => {
@@ -846,6 +925,7 @@ describe("guards without a test in the origin", () => {
       ["GET", "/wiki/graph"],
       ["GET", "/wiki/reads"],
       ["POST", "/wiki/import"],
+      ["POST", "/wiki/import/vault"],
       ["GET", "/wiki/export"],
       ["GET", "/wiki/attachments"],
     ];
@@ -999,6 +1079,310 @@ function holdNextTransaction(srv: RunningServer) {
   return { started, release };
 }
 
+const PNG = new Uint8Array(Buffer.from(VAULT_ATTACHMENTS[0]?.base64 ?? "", "base64"));
+
+/** Holds the first attachment's write once its bytes are stored, before its transaction begins. */
+function holdAttachmentWrite(srv: RunningServer) {
+  const { blobs } = srv.deps;
+  const put = blobs.put.bind(blobs);
+  let reached!: () => void;
+  let release!: () => void;
+  const reachedP = new Promise<void>((r) => {
+    reached = r;
+  });
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  blobs.put = (async (...args: Parameters<typeof put>) => {
+    blobs.put = put;
+    await put(...args);
+    reached();
+    await gate;
+  }) as typeof put;
+  return { reached: reachedP, release };
+}
+
+async function removeMember(srv: RunningServer, workspaceId: string, userId: string) {
+  await srv.deps.db
+    .delete(schema.members)
+    .where(and(eq(schema.members.workspaceId, workspaceId), eq(schema.members.userId, userId)));
+}
+
+/** The workspace's Drive files, their versions and the wiki's attachment mappings. */
+async function storedAttachments(srv: RunningServer, workspaceId: string) {
+  const { db } = srv.deps;
+  const fileRows = await db
+    .select({ id: schema.files.id })
+    .from(schema.files)
+    .where(eq(schema.files.workspaceId, workspaceId));
+  const versions = fileRows.length
+    ? (await db.select().from(schema.fileVersions)).filter((v) => fileRows.some((f) => f.id === v.fileId))
+        .length
+    : 0;
+  const mappings = (
+    await db.select().from(schema.wikiAttachments).where(eq(schema.wikiAttachments.workspaceId, workspaceId))
+  ).length;
+  return { files: fileRows.length, versions, mappings };
+}
+
+describe("limits at the border", () => {
+  const status = async (p: Promise<unknown>) => {
+    const e = await apiError(p);
+    return [e.status, e.code];
+  };
+  const links = (count: number) => Array.from({ length: count }, (_, i) => `[[Target ${i}]]`).join(" ");
+
+  test("a page past MAX_LINKS links is rejected with 400 before anything is written; one at the cap saves", async () => {
+    const { workspaceId, ana } = await team();
+    expect(
+      await status(
+        ana.api.wiki.createWikiPage(workspaceId, { title: "Too linked", body: links(MAX_LINKS + 1) }),
+      ),
+    ).toEqual([400, "wiki.too_many_links"]);
+    expect(await ana.api.wiki.listWikiPages(workspaceId)).toHaveLength(0);
+    const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Linked", body: links(MAX_LINKS) });
+    const row = await pageBySlug(server.deps.db, workspaceId, page.slug);
+    const [{ count }] = (await server.deps.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(schema.pageLinks)
+      .where(eq(schema.pageLinks.sourceId, row.id))) as [{ count: number }];
+    expect(count).toBe(MAX_LINKS);
+    expect(
+      await status(
+        ana.api.wiki.replaceWikiPage(workspaceId, page.slug, {
+          body: links(MAX_LINKS + 1),
+          parentVersion: 1,
+        }),
+      ),
+    ).toEqual([400, "wiki.too_many_links"]);
+    expect((await ana.api.wiki.getWikiPage(workspaceId, page.slug)).version).toBe(1);
+  });
+
+  test("pages at the maximum size made of unmatched delimiters save at once and the server keeps answering (health)", async () => {
+    const { workspaceId, ana } = await team();
+    const worst = [
+      "`".repeat(MAX_BODY),
+      `${"[[a".repeat(MAX_BODY / 3 - 1)}[[`,
+      "![[".repeat(Math.floor(MAX_BODY / 3)),
+      "```\n```\n\n".repeat(Math.floor(MAX_BODY / 9)),
+    ];
+    const created = await ana.api.wiki.createWikiPage(workspaceId, { title: "Delimiters", body: "x" });
+    let version = 1;
+    for (const body of worst) {
+      const started = Date.now();
+      const [saved, health] = await Promise.all([
+        ana.api.wiki.replaceWikiPage(workspaceId, created.slug, { body, parentVersion: version }),
+        fetch(`${server.url}/api/v1/health`).then((r) => r.status),
+      ]);
+      expect([body.slice(0, 6), health, saved.body.length]).toEqual([body.slice(0, 6), 200, body.length]);
+      expect([body.slice(0, 6), Date.now() - started < 5_000]).toEqual([body.slice(0, 6), true]);
+      version = saved.version;
+    }
+    const imported = await ana.api.wiki.importWiki(workspaceId, {
+      files: [{ path: "Ticks.md", text: "`".repeat(MAX_BODY) }],
+    });
+    expect(imported.created).toBe(1);
+  });
+
+  test("an import of only attachments by someone removed meanwhile stores nothing and answers 403", async () => {
+    const { workspaceId, beto } = await team();
+    const hold = holdAttachmentWrite(server);
+    const importing = apiError(
+      beto.api.wiki.importWikiVault(workspaceId, {
+        file: new Blob([zipSync({ "photo.png": PNG })]),
+        fileName: "only.zip",
+      }),
+    );
+    await hold.reached;
+    await removeMember(server, workspaceId, beto.user.id);
+    hold.release();
+    expect([(await importing).status, (await importing).code]).toEqual([403, "forbidden"]);
+    expect(await storedAttachments(server, workspaceId)).toEqual({ files: 0, versions: 0, mappings: 0 });
+  });
+
+  test("removed between the notes and the attachments: the notes stay, no attachment is stored, the answer says so", async () => {
+    const { workspaceId, beto } = await team();
+    const hold = holdAttachmentWrite(server);
+    const importing = beto.api.wiki.importWikiVault(workspaceId, {
+      file: new Blob([zipSync({ "Note.md": strToU8("![[photo.png]]"), "photo.png": PNG, "other.png": PNG })]),
+      fileName: "both.zip",
+    });
+    await hold.reached;
+    await removeMember(server, workspaceId, beto.user.id);
+    hold.release();
+    const r = await importing;
+    expect([r.created, r.attachments]).toEqual([1, 0]);
+    expect(r.failed).toEqual([
+      { path: "photo.png", error: "forbidden" },
+      { path: "other.png", error: "forbidden" },
+    ]);
+    expect(await storedAttachments(server, workspaceId)).toEqual({ files: 0, versions: 0, mappings: 0 });
+  });
+
+  test("a NUL character is rejected with 400 on every way in: body, title, folder, properties, path, query, import", async () => {
+    const { workspaceId, ana } = await team();
+    const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Clean", body: "x" });
+    const NUL = "a\u0000b";
+    const rejected = [
+      () => ana.api.wiki.createWikiPage(workspaceId, { title: NUL }),
+      () => ana.api.wiki.createWikiPage(workspaceId, { title: "T", body: NUL }),
+      () => ana.api.wiki.createWikiPage(workspaceId, { title: "T", folder: NUL }),
+      () => ana.api.wiki.createWikiPage(workspaceId, { title: "T", tags: [NUL] }),
+      () => ana.api.wiki.replaceWikiPage(workspaceId, page.slug, { body: NUL, parentVersion: 1 }),
+      () => ana.api.wiki.updateWikiPageMeta(workspaceId, page.slug, { parentVersion: 1, altTitles: [NUL] }),
+      () => ana.api.wiki.renameWikiPage(workspaceId, page.slug, NUL),
+      () => ana.api.wiki.moveWikiPage(workspaceId, page.slug, NUL),
+      () => ana.api.wiki.setWikiProps(workspaceId, [{ id: "prop_a", name: NUL, type: "text" }], 0),
+      () => ana.api.wiki.importWiki(workspaceId, { files: [{ path: "Note.md", text: NUL }] }),
+      () => ana.api.wiki.importWiki(workspaceId, { files: [{ path: `${NUL}.md`, text: "x" }] }),
+      () => ana.api.wiki.getWikiPage(workspaceId, NUL),
+      () => ana.api.wiki.getWikiSearch(workspaceId, NUL),
+      () =>
+        ana.api.wiki.importWikiVault(workspaceId, {
+          file: new Blob([zipSync({ "Note.md": strToU8(NUL) })]),
+          fileName: "n.zip",
+        }),
+      () =>
+        ana.api.wiki.importWikiVault(workspaceId, {
+          file: new Blob([zipSync({ "Note.md": strToU8("x") })]),
+          fileName: "f.zip",
+          folder: NUL,
+        }),
+    ];
+    for (const r of rejected) expect(await status(r())).toEqual([400, "wiki.invalid_text"]);
+    expect((await ana.api.wiki.listWikiPages(workspaceId)).map((p) => p.title)).toEqual(["Clean"]);
+    expect((await ana.api.wiki.getWikiPage(workspaceId, page.slug)).version).toBe(1);
+  });
+
+  test("a vault file whose name has a NUL is rejected with 400 for the whole vault", async () => {
+    const { workspaceId, ana } = await team();
+    const zip = zipSync({ "Good.md": strToU8("good"), "evil\u0000.png": new Uint8Array([1, 2, 3]) });
+    expect(
+      await status(ana.api.wiki.importWikiVault(workspaceId, { file: new Blob([zip]), fileName: "z.zip" })),
+    ).toEqual([400, "wiki.invalid_text"]);
+    expect(await ana.api.wiki.listWikiPages(workspaceId)).toHaveLength(0);
+  });
+
+  test("an import is all or nothing: a note rejected after good ones leaves none of them", async () => {
+    const { workspaceId, ana } = await team();
+    const files = [
+      { path: "Good.md", text: "# Good" },
+      { path: "Also good.md", text: "fine" },
+      { path: "Bad.md", text: "hello\u0000world" },
+    ];
+    expect(await status(ana.api.wiki.importWiki(workspaceId, { files }))).toEqual([400, "wiki.invalid_text"]);
+    const linked = [...files.slice(0, 2), { path: "Linked.md", text: links(MAX_LINKS + 1) }];
+    expect(await status(ana.api.wiki.importWiki(workspaceId, { files: linked }))).toEqual([
+      400,
+      "wiki.too_many_links",
+    ]);
+    expect(await ana.api.wiki.listWikiPages(workspaceId)).toHaveLength(0);
+    expect((await ana.api.wiki.importWiki(workspaceId, { files: files.slice(0, 2) })).created).toBe(2);
+  });
+
+  test("an import that fails while writing its third note leaves none of them", async () => {
+    const { workspaceId, ana } = await team();
+    const { db } = server.deps;
+    const original = db.transaction.bind(db);
+    let pages = 0;
+    db.transaction = ((fn: Parameters<typeof original>[0], ...rest: unknown[]) =>
+      original(
+        async (tx) => {
+          const insert = tx.insert.bind(tx);
+          tx.insert = ((table: Parameters<typeof insert>[0]) => {
+            if (table === schema.knowledgePages && ++pages === 3) throw new Error("injected failure");
+            return insert(table);
+          }) as typeof insert;
+          return fn(tx);
+        },
+        ...(rest as []),
+      )) as typeof original;
+    try {
+      const files = ["One", "Two", "Three"].map((t) => ({ path: `${t}.md`, text: t }));
+      expect((await apiError(ana.api.wiki.importWiki(workspaceId, { files }))).status).toBe(500);
+    } finally {
+      db.transaction = original;
+    }
+    expect(await ana.api.wiki.listWikiPages(workspaceId)).toHaveLength(0);
+  });
+
+  test("an import respects the property route's caps across the whole folder; the excess is reported", async () => {
+    const { workspaceId, ana } = await team();
+    const note = (from: number) => {
+      const keys = Array.from({ length: 200 }, (_, i) => `p${from + i}: x`).join("\n");
+      return `---\n${keys}\n---\nbody`;
+    };
+    const r = await ana.api.wiki.importWiki(workspaceId, {
+      files: [
+        { path: "One.md", text: note(0) },
+        { path: "Two.md", text: note(1000) },
+      ],
+    });
+    expect(r.created).toBe(2);
+    expect(r.failed).toEqual([
+      { path: "One.md", error: "wiki.import.too_many_props" },
+      { path: "Two.md", error: "wiki.import.too_many_props" },
+    ]);
+    expect((await ana.api.wiki.listWikiProps(workspaceId)).defs).toHaveLength(100);
+  });
+
+  test("numbers past 32 bits are rejected with 400 at the border: version, diff range, parent version", async () => {
+    const { workspaceId, ana } = await team();
+    const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Numbers", body: "x" });
+    const big = 2 ** 31;
+    const url = `/api/v1/workspaces/${workspaceId}/wiki/pages/${page.slug}`;
+    expect((await ana.browser.json(`${url}/versions/${big}`, "GET")).status).toBe(400);
+    expect((await ana.browser.json(`${url}/diff?from=${big}`, "GET")).status).toBe(400);
+    expect((await ana.browser.json(url, "PUT", { body: "y", parentVersion: big })).status).toBe(400);
+    expect((await ana.browser.json(`${url}/versions/1/restore`, "POST", { parentVersion: big })).status).toBe(
+      400,
+    );
+    expect(
+      (
+        await ana.browser.json(`/api/v1/workspaces/${workspaceId}/wiki/props`, "PUT", {
+          defs: [],
+          parentVersion: big,
+        })
+      ).status,
+    ).toBe(400);
+  });
+
+  test("a JSON body past the wiki's cap is rejected with 413 before it is parsed", async () => {
+    const { workspaceId, ana } = await team();
+    const text = "x".repeat(400_000);
+    const files = Array.from({ length: 90 }, (_, i) => ({ path: `N${i}.md`, text }));
+    expect(await status(ana.api.wiki.importWiki(workspaceId, { files }))).toEqual([413, "payload_too_large"]);
+    expect(await ana.api.wiki.listWikiPages(workspaceId)).toHaveLength(0);
+  });
+
+  test("the export streams: an attachment is read only when the reader gets to it", async () => {
+    const { workspaceId, ana } = await team();
+    const png = new Uint8Array(Buffer.from(VAULT_ATTACHMENTS[0]?.base64 ?? "", "base64"));
+    await ana.api.wiki.importWikiVault(workspaceId, {
+      file: new Blob([zipSync({ "Streamed.md": strToU8("![[photo.png]]"), "photo.png": png })]),
+      fileName: "s.zip",
+    });
+    const { blobs } = server.deps;
+    const get = blobs.get.bind(blobs);
+    let reads = 0;
+    blobs.get = ((...args: Parameters<typeof get>) => {
+      reads++;
+      return get(...args);
+    }) as typeof get;
+    try {
+      const stream = await exportVault(server.deps, workspaceId);
+      expect(reads).toBe(0);
+      const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+      expect(reads).toBe(1);
+      const files = unzipSync(bytes);
+      expect(new TextDecoder().decode(files["wiki/Streamed.md"])).toContain("photo.png");
+      expect(files["wiki/photo.png"]).toEqual(png);
+    } finally {
+      blobs.get = get;
+    }
+  });
+});
+
 describe("a write decides on the page it reads locked in its own transaction", () => {
   test("every member write that read the page before a lock and commits after it is rejected with wiki.page_locked", async () => {
     const { workspaceId, ana, beto } = await team();
@@ -1055,6 +1439,33 @@ describe("a write decides on the page it reads locked in its own transaction", (
     }
     expect(outcomes).toEqual(writes.map(([what]) => `${what}: 403 wiki.page_locked`));
   });
+
+  for (const operation of ["create", "import", "properties"] as const)
+    test(`a removed member cannot commit ${operation} after passing the request guard`, async () => {
+      const { workspaceId, ana, beto } = await team();
+      const hold = holdNextTransaction(server);
+      const pending = apiError(
+        operation === "create"
+          ? beto.api.wiki.createWikiPage(workspaceId, { title: "After removal" })
+          : operation === "import"
+            ? beto.api.wiki.importWiki(workspaceId, {
+                files: [{ path: "After removal.md", text: "---\nscore: 10\n---\nbody" }],
+              })
+            : beto.api.wiki.setWikiProps(
+                workspaceId,
+                [{ id: "prop_score", name: "score", type: "number" }],
+                0,
+              ),
+      );
+      await hold.started;
+      await server.deps.db
+        .delete(schema.members)
+        .where(and(eq(schema.members.workspaceId, workspaceId), eq(schema.members.userId, beto.user.id)));
+      hold.release();
+      expect((await pending).status).toBe(403);
+      expect(await ana.api.wiki.listWikiPages(workspaceId)).toEqual([]);
+      expect((await ana.api.wiki.listWikiProps(workspaceId)).defs).toEqual([]);
+    });
 
   test("restoring from the trash while an admin deletes for good: the restore finds nothing and the page stays gone", async () => {
     const { workspaceId, ana, beto } = await team();
@@ -1301,6 +1712,70 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki saves on Postgres"), () => 
       expect(panel.inboundLinks.map((l) => l.slug)).toEqual([b.slug]);
     } finally {
       pageLock.row = lock;
+      await pg.stop();
+    }
+  }, 60_000);
+});
+
+const MEMBER_UNLOCKED = process.env.VANR_TEST_WIKI_MEMBER_UNLOCKED === "1";
+
+describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki attachments on Postgres"), () => {
+  test("a removal that comes while an attachment is written waits for it: the attachment committed while a member", async () => {
+    const pg = await startTestServer({ env: { DATABASE_URL: await testDatabaseUrl("wikiattach") } });
+    const locked = memberLock.role;
+    try {
+      const ana = withApi(await signedIn(pg, "Ana", email("ana")));
+      const { workspaceId } = await seedWorkspace(pg, ana, "Postgres attachments");
+      const beto = withApi(await memberOf(pg, workspaceId, "Beto", email("beto")));
+      // VANR_TEST_WIKI_MEMBER_UNLOCKED=1: the membership read without its lock (the CI expects a failure).
+      const read: typeof locked = MEMBER_UNLOCKED
+        ? async (tx, ws, userId) => {
+            const [m] = await tx
+              .select({ role: schema.members.role })
+              .from(schema.members)
+              .where(and(eq(schema.members.workspaceId, ws), eq(schema.members.userId, userId)));
+            return m?.role ?? null;
+          }
+        : locked;
+      // The attachment's transaction is held right after it read the membership.
+      let reached!: () => void;
+      let release!: () => void;
+      const reachedP = new Promise<void>((r) => {
+        reached = r;
+      });
+      const gate = new Promise<void>((r) => {
+        release = r;
+      });
+      let held = false;
+      memberLock.role = async (tx, ws, userId) => {
+        const role = await read(tx, ws, userId);
+        if (!held) {
+          held = true;
+          reached();
+          await gate;
+        }
+        return role;
+      };
+      const importing = beto.api.wiki.importWikiVault(workspaceId, {
+        file: new Blob([zipSync({ "photo.png": PNG })]),
+        fileName: "p.zip",
+      });
+      await reachedP;
+      const removing = removeMember(pg, workspaceId, beto.user.id);
+      // With the lock the removal waits for the attachment's transaction; without it, it ends at once.
+      const first = await Promise.race([
+        removing.then(() => "the removal ended before the attachment"),
+        waitingForLock(pg, "the removal neither ended nor waited").then(
+          () => "the removal waited for the attachment",
+        ),
+      ]);
+      release();
+      const r = await importing;
+      await removing;
+      expect(first).toBe("the removal waited for the attachment");
+      expect(r.attachments).toBe(1);
+    } finally {
+      memberLock.role = locked;
       await pg.stop();
     }
   }, 60_000);
