@@ -15,7 +15,7 @@ export const AgentEval: Schema<C.AgentEval> = s.object({ id: s.string, agentId: 
 export const AgentDraft: Schema<C.AgentDraft> = s.object({ handle: s.string, instructions: s.string, model: s.string, name: s.string, role: s.lazy(() => AgentRole), skillIds: s.array(s.string), testModel: s.boolean, why: s.string });
 export const BuilderResult: Schema<C.BuilderResult> = s.object({ draft: s.lazy(() => AgentDraft), proposal: s.nullable(s.lazy(() => Proposal)) });
 export const AgentRole: Schema<C.AgentRole> = s.literal("assistant", "content", "custom", "data", "dev", "finance", "marketing", "ops", "people", "pm", "qa", "research", "sales", "support");
-export const AgentAppearance: Schema<C.AgentAppearance> = s.object({ adornment: s.string, body: s.optional(s.lazy(() => AgentBody)), color: s.string, extra: s.optional(s.lazy(() => AgentExtra)), eyes: s.string, mouth: s.optional(s.lazy(() => AgentMouth)) });
+export const AgentAppearance: Schema<C.AgentAppearance> = s.object({ adornment: s.string, body: s.lenient(s.lazy(() => AgentBody)), color: s.string, extra: s.lenient(s.lazy(() => AgentExtra)), eyes: s.string, mouth: s.lenient(s.lazy(() => AgentMouth)) });
 export const AgentAudience: Schema<C.AgentAudience> = s.object({ mode: s.literal("everyone", "owner", "people"), userIds: s.array(s.string) });
 export const HarnessKind: Schema<C.HarnessKind> = s.literal("claude_code", "codex", "model");
 export const AgentHarnessRef: Schema<C.AgentHarnessRef> = s.object({ environment: s.nullable(s.string), kind: s.lazy(() => HarnessKind), model: s.string });

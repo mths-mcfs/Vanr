@@ -83,6 +83,23 @@ export function optional<T>(inner: Schema<T>): OptionalSchema<T> {
   };
 }
 
+/**
+ * An optional field that reads a value it doesn't accept as absent instead of failing the whole answer:
+ * for closed lists that a newer server may extend (an agent's body, mouth, extra).
+ */
+export function lenient<T>(inner: Schema<T>): OptionalSchema<T> {
+  return {
+    get expected() {
+      return `${inner.expected} | undefined`;
+    },
+    optional: true,
+    check: (v, path) => {
+      const r = v === undefined ? undefined : inner.check(v, path);
+      return r?.ok ? r : ok(undefined);
+    },
+  };
+}
+
 export function array<T>(item: Schema<T>): Schema<T[]> {
   return {
     get expected() {
