@@ -1,0 +1,489 @@
+// Issues and memory consolidations at the same time on a real Postgres. The server's pool runs transactions on
+// several connections, so what keeps the workspace's issue numbers one after another is the workspace's lock
+// (pg_advisory_xact_lock), what keeps each change of an issue compared with the one before is the issue's row
+// lock, and what keeps a consolidation applied once is its row lock.
+//
+// The "forced" tests don't count on the scheduler: the database double of lock-double.ts holds the first
+// transaction at the point where the lock matters until the second one is seen waiting on a lock or done. With
+// VANR_TEST_DROP_LOCKS=1 the same double leaves the locks out: the CI postgres job runs that mode too and expects
+// these tests to fail on their outcome (LOCK_OUTCOME_MISMATCH), which proves they catch a missing lock.
+// These run only in the CI postgres job.
+import { describe, expect, test } from "bun:test";
+import { type Db, schema } from "@vanr/engine/db";
+import { newId } from "@vanr/engine/ids";
+import { contentSha256 } from "@vanr/engine/memory";
+import { and, asc, eq, sql } from "drizzle-orm";
+import postgres from "postgres";
+import { changeMemory, createMemory, memoryVersionsOf, restoreMemory } from "../src/agent-memory";
+import type { AppDeps } from "../src/context";
+import { isUniqueViolation } from "../src/db-errors";
+import { HttpError } from "../src/http";
+import { columnsOf, createIssue, updateIssue } from "../src/issues";
+import { applyConsolidation, normalizeItems } from "../src/memory-consolidation";
+import { approveReview, queueMemoryReview } from "../src/memory-reviews";
+import type { RunningServer } from "../src/server";
+import { signedIn, startTestServer } from "./harness";
+import { forcedPair, gate, instrumented, outcome, sqlText, WAIT_MS } from "./lock-double";
+import { NO_POSTGRES, TEST_POSTGRES_URL, testDatabaseUrl } from "./postgres";
+import { seedWorkspace } from "./seed";
+
+const onPostgres = (name: string) => (TEST_POSTGRES_URL ? name : `${name} (skipped: ${NO_POSTGRES})`);
+const N = 20;
+
+async function withServer(
+  prefix: string,
+  run: (
+    server: RunningServer,
+    admin: postgres.Sql,
+    ctx: { workspaceId: string; userId: string },
+  ) => Promise<void>,
+) {
+  const url = await testDatabaseUrl(prefix);
+  const server = await startTestServer({ env: { DATABASE_URL: url } });
+  const admin = postgres(url, { max: 1, onnotice: () => {} });
+  try {
+    const ana = await signedIn(server, "Ana", `ana@${prefix.replaceAll("_", "-")}.test`);
+    const { workspaceId } = await seedWorkspace(server, ana, "Board");
+    // The board's columns exist before the race: only the transaction under test runs inside it.
+    await columnsOf(server.deps.db, workspaceId);
+    await run(server, admin, { workspaceId, userId: ana.user.id });
+  } finally {
+    await server.stop();
+    await admin.end({ timeout: 5 });
+  }
+}
+
+const withDb = (deps: AppDeps, hooks: Parameters<typeof instrumented>[1]): AppDeps => ({
+  ...deps,
+  db: instrumented(deps.db, hooks),
+});
+
+describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("issues and consolidations at once on Postgres"), () => {
+  test("a merge and a create review replacing its source finish without deadlock", async () => {
+    await withServer("mcn_replace", async (server, admin, { workspaceId, userId }) => {
+      const { db } = server.deps;
+      const [agent] = await db
+        .insert(schema.agents)
+        .values({
+          id: newId("agt"),
+          workspaceId,
+          name: "Lia",
+          handle: "lia",
+          model: "claude-haiku-5-5",
+          ownerUserId: userId,
+          appearance: { color: "blue", eyes: "dot", adornment: "none" },
+        })
+        .returning();
+      if (!agent) throw new Error("no agent");
+      const author = { type: "person" as const, id: userId };
+      const origin = { by: author, name: null, channel: null, at: server.deps.now().toISOString() };
+      const remember = (text: string) =>
+        createMemory(
+          db,
+          server.deps.now(),
+          { workspaceId, agentId: agent.id, scope: "agent", text, origin },
+          {
+            author,
+          },
+        );
+      const a = await remember("Opens at 9");
+      const b = await remember("opens at 9");
+      const [row] = await db
+        .insert(schema.memoryConsolidations)
+        .values({
+          id: newId("mcn"),
+          workspaceId,
+          agentId: agent.id,
+          status: "ready",
+          items: normalizeItems([{ action: "merge", sources: [a.id, b.id], text: "Opens at 9." }], [a, b]),
+          bases: { [a.id]: contentSha256(a.text), [b.id]: contentSha256(b.text) },
+          covered: 2,
+          total: 2,
+        })
+        .returning();
+      if (!row) throw new Error("no consolidation");
+      const review = await queueMemoryReview(server.deps, {
+        workspaceId,
+        agentId: agent.id,
+        scope: "agent",
+        op: "create",
+        text: "Now opens at 10",
+        replaces: a.id,
+        origin,
+        tool: "memory",
+        reasons: [{ flag: "A", source: "mail_read inbox/1" }],
+      });
+      const me = { workspaceId, userId, role: "owner" as const, handle: "ana" };
+      const held = gate();
+      const release = gate();
+      let paused = false;
+      // Pause before the first store lock, including one requested inside createMemory's savepoint.
+      // With the old order the merge already holds its sources, so the approval waits on a source while
+      // holding the store lock. Releasing the merge then produces the deadlock.
+      const pauseAtStore = (source: Db): Db =>
+        new Proxy(source, {
+          get(target, prop) {
+            if (prop === "transaction")
+              return (fn: (tx: Db) => Promise<unknown>) => target.transaction((tx) => fn(pauseAtStore(tx)));
+            if (prop === "execute")
+              return async (query: Parameters<Db["execute"]>[0]) => {
+                if (!paused && sqlText(query).includes("pg_advisory_xact_lock")) {
+                  paused = true;
+                  await target.execute(sql`set local deadlock_timeout = '50ms'`);
+                  held.open();
+                  await release.opened;
+                }
+                return target.execute(query);
+              };
+            const value = Reflect.get(target, prop, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      const pending: Promise<unknown>[] = [];
+      try {
+        const applying = applyConsolidation({ ...server.deps, db: pauseAtStore(db) }, me, agent, row.id).then(
+          (r) => r.status,
+          (err: unknown) => {
+            if (err instanceof HttpError) return err.code;
+            throw err;
+          },
+        );
+        pending.push(applying);
+        expect(
+          await Promise.race([
+            held.opened.then(() => true),
+            applying.then(
+              () => false,
+              () => false,
+            ),
+          ]),
+        ).toBe(true);
+        const pids = new Set<number>();
+        let finished = false;
+        const approving = approveReview(withDb(server.deps, { pids }), me, review.id).finally(() => {
+          finished = true;
+        });
+        pending.push(approving);
+        approving.catch(() => undefined);
+        const deadline = Date.now() + WAIT_MS;
+        while (!finished) {
+          const [pid] = pids;
+          const [activity] =
+            await admin`select wait_event_type from pg_stat_activity where pid = ${pid ?? 0}`;
+          if (activity?.wait_event_type === "Lock") break;
+          if (Date.now() > deadline)
+            throw new Error("Replacement approval neither finished nor waited on a lock");
+          await Bun.sleep(25);
+        }
+        release.open();
+        const [applied, approved] = await Promise.all([applying, approving]);
+        expect(approved.status).toBe("approved");
+        expect(applied).toBe("memory_consolidation.changed");
+        const [after] = await db
+          .select()
+          .from(schema.memoryConsolidations)
+          .where(eq(schema.memoryConsolidations.id, row.id));
+        expect(after).toMatchObject({ status: "failed", error: "changed" });
+      } finally {
+        release.open();
+        await Promise.allSettled(pending);
+      }
+    });
+  }, 60_000);
+
+  test("a merge and restoration of an archived source finish without deadlock", async () => {
+    await withServer("mcn_restore", async (server, admin, { workspaceId, userId }) => {
+      const { db } = server.deps;
+      const [agent] = await db
+        .insert(schema.agents)
+        .values({
+          id: newId("agt"),
+          workspaceId,
+          name: "Lia",
+          handle: "lia",
+          model: "claude-haiku-5-5",
+          ownerUserId: userId,
+          appearance: { color: "blue", eyes: "dot", adornment: "none" },
+        })
+        .returning();
+      if (!agent) throw new Error("no agent");
+      const author = { type: "person" as const, id: userId };
+      const origin = { by: author, name: null, channel: null, at: server.deps.now().toISOString() };
+      const remember = (text: string) =>
+        createMemory(
+          db,
+          server.deps.now(),
+          { workspaceId, agentId: agent.id, scope: "agent", text, origin },
+          { author },
+        );
+      const a = await remember("Opens at 9");
+      const b = await remember("opens at 9");
+      const [row] = await db
+        .insert(schema.memoryConsolidations)
+        .values({
+          id: newId("mcn"),
+          workspaceId,
+          agentId: agent.id,
+          status: "ready",
+          items: normalizeItems([{ action: "merge", sources: [a.id, b.id], text: "Opens at 9." }], [a, b]),
+          bases: { [a.id]: contentSha256(a.text), [b.id]: contentSha256(b.text) },
+          covered: 2,
+          total: 2,
+        })
+        .returning();
+      if (!row) throw new Error("no consolidation");
+      const [initial] = await memoryVersionsOf(db, a.id);
+      if (!initial) throw new Error("no memory version");
+      await changeMemory(db, server.deps.now(), a.id, { archived: true }, { author, op: "archive" });
+      const me = { workspaceId, userId, role: "owner" as const, handle: "ana" };
+      const held = gate();
+      const release = gate();
+      const pending: Promise<unknown>[] = [];
+      try {
+        // Restore holds the archived source before requesting the store. Applying must skip that source,
+        // which already invalidates the proposal, rather than wait for it while holding the store.
+        const restoring = restoreMemory(
+          instrumented(db, {
+            pids: new Set(),
+            after: {
+              kind: "select",
+              run: async () => {
+                held.open();
+                await release.opened;
+              },
+            },
+          }),
+          server.deps.now(),
+          a.id,
+          initial.id,
+          author,
+          "restore",
+        );
+        pending.push(restoring);
+        expect(
+          await Promise.race([
+            held.opened.then(() => true),
+            restoring.then(
+              () => false,
+              () => false,
+            ),
+          ]),
+        ).toBe(true);
+        const pids = new Set<number>();
+        let finished = false;
+        const applying = applyConsolidation(withDb(server.deps, { pids }), me, agent, row.id)
+          .catch((err: unknown) => {
+            if (err instanceof HttpError) return err.code;
+            throw err;
+          })
+          .finally(() => {
+            finished = true;
+          });
+        pending.push(applying);
+        applying.catch(() => undefined);
+        const deadline = Date.now() + WAIT_MS;
+        while (!finished) {
+          const [pid] = pids;
+          const [activity] =
+            await admin`select wait_event_type from pg_stat_activity where pid = ${pid ?? 0}`;
+          if (activity?.wait_event_type === "Lock") break;
+          if (Date.now() > deadline) throw new Error("Consolidation neither finished nor waited on a lock");
+          await Bun.sleep(25);
+        }
+        release.open();
+        const [restored, applied] = await Promise.all([restoring, applying]);
+        expect(restored).toMatchObject({ id: a.id, archived: false, text: a.text });
+        expect(applied).toBe("memory_consolidation.changed");
+        const [after] = await db
+          .select()
+          .from(schema.memoryConsolidations)
+          .where(eq(schema.memoryConsolidations.id, row.id));
+        expect(after).toMatchObject({ status: "failed", error: "changed" });
+      } finally {
+        release.open();
+        await Promise.allSettled(pending);
+      }
+    });
+  }, 60_000);
+
+  test("N issues created at once get the numbers 1 to N", async () => {
+    await withServer("iss_n", async (server, _admin, { workspaceId, userId }) => {
+      const rows = await Promise.all(
+        Array.from({ length: N }, (_, i) =>
+          createIssue(server.deps, {
+            workspaceId,
+            title: `Issue ${i}`,
+            author: { type: "person", id: userId },
+          }),
+        ),
+      );
+      expect(rows.map((r) => r.number).sort((a, b) => a - b)).toEqual(
+        Array.from({ length: N }, (_, i) => i + 1),
+      );
+      expect(new Set(rows.map((r) => r.boardPosition)).size).toBe(N);
+    });
+  }, 60_000);
+
+  test("forced: the second creation waits on the workspace's number lock, so the numbers follow each other", async () => {
+    await withServer("iss_num", async (server, admin, { workspaceId, userId }) => {
+      // A holds right after reading the highest number. With the lock B waits for A; without it, B reads the
+      // same number, inserts first, and A's insert hits the unique index.
+      const run = await forcedPair(admin, "issue-number", "select", (side, hooks) =>
+        createIssue(withDb(server.deps, hooks), {
+          workspaceId,
+          title: side,
+          author: { type: "person", id: userId },
+        }).then(
+          (row) => `${side}:${row.number}`,
+          (err: unknown) => {
+            if (isUniqueViolation(err)) return `${side}:duplicate`;
+            throw err;
+          },
+        ),
+      );
+      expect(run.aPids[0]).not.toBe(run.bPids[0]);
+      outcome("issue-number", [run.a, run.b], ["A:1", "B:2"]);
+      expect([run.a, run.b]).toEqual(["A:1", "B:2"]);
+    });
+  }, 60_000);
+
+  test("forced: the second change of one issue waits on its row lock, so each move starts where the other ended", async () => {
+    await withServer("iss_move", async (server, admin, { workspaceId, userId }) => {
+      const cols = await columnsOf(server.deps.db, workspaceId);
+      const stage = (s: string) => cols.find((c) => c.stage === s)?.id ?? "";
+      const by = { type: "person" as const, id: userId };
+      const row = await createIssue(server.deps, { workspaceId, title: "Moved twice", author: by });
+      // A holds right after reading the issue under its lock. With the lock B reads it after A's move; without
+      // it, B reads it still in "todo" and logs a move from there.
+      const run = await forcedPair(admin, "issue-move", "select", (side, hooks) =>
+        updateIssue(
+          withDb(server.deps, hooks),
+          row,
+          { columnId: stage(side === "A" ? "in_progress" : "done") },
+          by,
+        ),
+      );
+      expect(run.aPids[0]).not.toBe(run.bPids[0]);
+      const moves = await server.deps.db
+        .select()
+        .from(schema.issueTimeline)
+        .where(and(eq(schema.issueTimeline.issueId, row.id), eq(schema.issueTimeline.event, "status")))
+        .orderBy(asc(schema.issueTimeline.seq));
+      // Postgres keeps jsonb keys in its own order: the moves are compared as text.
+      const got = moves.map((m) => `${m.textVars?.from}->${m.textVars?.to}`);
+      const want = ["todo->in_progress", "in_progress->done"];
+      outcome("issue-move", got, want);
+      expect(got).toEqual(want);
+    });
+  }, 60_000);
+
+  test("forced: two issues moved to the top of one column at once wait on the board's lock and get different positions", async () => {
+    await withServer("iss_place", async (server, admin, { workspaceId, userId }) => {
+      const cols = await columnsOf(server.deps.db, workspaceId);
+      const done = cols.find((c) => c.stage === "done")?.id ?? "";
+      const by = { type: "person" as const, id: userId };
+      await createIssue(server.deps, { workspaceId, title: "Already there", columnId: done, author: by });
+      const p = await createIssue(server.deps, { workspaceId, title: "P", author: by });
+      const q = await createIssue(server.deps, { workspaceId, title: "Q", author: by });
+      // A holds right after writing its issue's new position. With the lock B waits for A and goes above it;
+      // without it, B reads the column without A's card and takes the same position.
+      const run = await forcedPair(admin, "issue-place", "update", (side, hooks) =>
+        updateIssue(withDb(server.deps, hooks), side === "A" ? p : q, { columnId: done }, by),
+      );
+      expect(run.aPids[0]).not.toBe(run.bPids[0]);
+      const rows = await server.deps.db
+        .select({ title: schema.issues.title, position: schema.issues.boardPosition })
+        .from(schema.issues)
+        .where(eq(schema.issues.columnId, done))
+        .orderBy(asc(schema.issues.boardPosition));
+      const got = { distinct: new Set(rows.map((r) => r.position)).size, order: rows.map((r) => r.title) };
+      const want = { distinct: 3, order: ["Q", "P", "Already there"] };
+      outcome("issue-place", got, want);
+      expect(got).toEqual(want);
+    });
+  }, 60_000);
+
+  test("forced: the second apply of one consolidation waits on its lock and finds it applied", async () => {
+    await withServer("mcn_apply", async (server, admin, { workspaceId, userId }) => {
+      const { db } = server.deps;
+      const [agent] = await db
+        .insert(schema.agents)
+        .values({
+          id: newId("agt"),
+          workspaceId,
+          name: "Lia",
+          handle: "lia",
+          role: "support",
+          instructions: "",
+          model: "claude-haiku-5-5",
+          ownerUserId: userId,
+          appearance: { color: "blue", eyes: "dot", adornment: "none" },
+        })
+        .returning();
+      if (!agent) throw new Error("no agent");
+      const author = { type: "person" as const, id: userId };
+      const remember = (text: string) =>
+        createMemory(
+          db,
+          server.deps.now(),
+          {
+            workspaceId,
+            agentId: agent.id,
+            scope: "agent",
+            text,
+            kind: "fact",
+            source: "manual",
+            origin: { by: author, name: null, channel: null, at: server.deps.now().toISOString() },
+          },
+          { author },
+        );
+      const a = await remember("Opens at 9");
+      const b = await remember("opens at 9");
+      const [row] = await db
+        .insert(schema.memoryConsolidations)
+        .values({
+          id: newId("mcn"),
+          workspaceId,
+          agentId: agent.id,
+          status: "ready",
+          items: [
+            {
+              action: "merge",
+              sources: [a.id, b.id],
+              path: null,
+              text: "Opens at 9.",
+              reason: "",
+              untrustedSource: false,
+            },
+          ],
+          bases: { [a.id]: contentSha256(a.text), [b.id]: contentSha256(b.text) },
+          covered: 2,
+          total: 2,
+        })
+        .returning();
+      if (!row) throw new Error("no consolidation");
+      const me = { workspaceId, userId, role: "owner" as const, handle: "ana" };
+      // A holds right after its first update (the items it read are archived and the merged one is written).
+      // With the lock B waits for the consolidation and finds it applied; without it, B reads it still ready,
+      // waits only on the items' row locks and merges them a second time.
+      const run = await forcedPair(admin, "consolidation-apply", "update", (_side, hooks) =>
+        applyConsolidation(withDb(server.deps, hooks), me, agent, row.id).then(
+          (r) => r.status,
+          (err: unknown) => {
+            if (err instanceof HttpError) return err.code;
+            throw err;
+          },
+        ),
+      );
+      expect(run.aPids[0]).not.toBe(run.bPids[0]);
+      const merged = await db
+        .select()
+        .from(schema.memories)
+        .where(and(eq(schema.memories.agentId, agent.id), eq(schema.memories.source, "consolidation")));
+      const got = { a: run.a, b: run.b, merged: merged.length };
+      const want = { a: "applied", b: "memory_consolidation.closed", merged: 1 };
+      outcome("consolidation-apply", got, want);
+      expect(got).toEqual(want);
+    });
+  }, 60_000);
+});

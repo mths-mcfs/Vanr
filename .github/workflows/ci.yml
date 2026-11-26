@@ -139,6 +139,55 @@ jobs:
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_DROP_LOCKS: "1"
+      # One message per resend, every thread reply counted and one winner per thread state action, with
+      # requests on several connections at once. Each guard is one statement (no lock to take out); the PGlite
+      # run of threads.test.ts fails on the same race without the conditional UPDATE.
+      - run: bun test apps/server/test/messages-postgres.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # Each queued send goes out once and is canceled or sent, never both, with passes on several connections at
+      # once. Each guard is one conditional UPDATE (no lock to take out).
+      - run: bun test apps/server/test/outbox-postgres.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # The forced claim test with the claim's condition left out by the test's own double: it must fail on the
+      # outcome the condition is for (LOCK_OUTCOME_MISMATCH), only in tests named "forced", one per label; any other
+      # failure (a timeout, a closed connection, an error between tests) proves nothing and fails this step.
+      - name: The forced outbox claim test fails without the condition
+        run: |
+          set +e
+          bun test apps/server/test/outbox-postgres.test.ts --test-name-pattern forced > forced-outbox.log 2>&1
+          status=$?
+          cat forced-outbox.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the forced outbox claim test passed without the condition"
+            exit 1
+          fi
+          for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -aqF "$broken" forced-outbox.log; then
+              echo "::error::the forced outbox claim test broke ($broken) instead of failing on its outcome"
+              exit 1
+            fi
+          done
+          if grep -a '^(fail)' forced-outbox.log | grep -avqF 'forced'; then
+            echo "::error::a test that isn't a forced one failed"
+            exit 1
+          fi
+          labels="outbox"
+          failed=$(grep -a '^(fail)' forced-outbox.log | sort -u | wc -l)
+          if [ "$failed" -ne "$(echo $labels | wc -w)" ]; then
+            echo "::error::$failed forced tests failed, expected one per label ($labels)"
+            exit 1
+          fi
+          for label in $labels; do
+            if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" forced-outbox.log; then
+              echo "::error::the forced $label test did not fail on its outcome without the condition"
+              exit 1
+            fi
+          done
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_DROP_LOCKS: "1"
       # One runner per pairing code, one open browser intervention per agent and one answer per secret request.
       - run: bun test apps/server/test/runners-postgres.test.ts
         env:
@@ -165,6 +214,133 @@ jobs:
               exit 1
             fi
           done
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_DROP_LOCKS: "1"
+      # Issue numbers one after another, each change of an issue compared with the one before, one consolidation applied once.
+      - run: bun test apps/server/test/issues-postgres.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      - name: The forced issue lock tests fail without the locks
+        run: |
+          set +e
+          bun test apps/server/test/issues-postgres.test.ts --test-name-pattern forced > forced-issues.log 2>&1
+          status=$?
+          cat forced-issues.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the forced issue lock tests passed without the locks"
+            exit 1
+          fi
+          for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -aqF "$broken" forced-issues.log; then
+              echo "::error::the forced issue lock tests broke ($broken) instead of failing on their outcome"
+              exit 1
+            fi
+          done
+          set -- issue-number issue-move issue-place consolidation-apply
+          for label in "$@"; do
+            if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" forced-issues.log; then
+              echo "::error::the forced $label test did not fail on its outcome without the lock"
+              exit 1
+            fi
+          done
+          # Every failure is a forced test, and as many distinct tests failed as there are labels (bun prints
+          # each failure twice on the GitHub runner, so names are counted, not lines).
+          failed=$(grep -a '^(fail) ' forced-issues.log | sed -E 's/^\(fail\) //; s/ \[[0-9.]+m?s\]$//' | sort -u)
+          if printf '%s\n' "$failed" | grep -qv forced; then
+            echo "::error::a test outside the forced ones failed without the locks: $failed"
+            exit 1
+          fi
+          count=$(printf '%s\n' "$failed" | grep -c .)
+          if [ "$count" -ne "$#" ]; then
+            echo "::error::$count distinct forced tests failed without the locks, expected $#"
+            exit 1
+          fi
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_DROP_LOCKS: "1"
+      # Every answer of a round kept once and an answer that meets the stop finds the queue closed (the debate's row
+      # lock); one routine execution per fire, scheduled time and queued run, with callers on several connections.
+      - run: bun test apps/server/test/debates-postgres.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      - name: The forced debate lock tests fail without the locks
+        run: |
+          set +e
+          bun test apps/server/test/debates-postgres.test.ts --test-name-pattern forced > forced-debates.log 2>&1
+          status=$?
+          cat forced-debates.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the forced debate lock tests passed without the locks"
+            exit 1
+          fi
+          for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -aqF "$broken" forced-debates.log; then
+              echo "::error::the forced debate lock tests broke ($broken) instead of failing on their outcome"
+              exit 1
+            fi
+          done
+          set -- debate-answer debate-stop
+          for label in "$@"; do
+            if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" forced-debates.log; then
+              echo "::error::the forced $label test did not fail on its outcome without the lock"
+              exit 1
+            fi
+          done
+          # Every failure is a forced test, and as many distinct tests failed as there are labels (bun prints
+          # each failure twice on the GitHub runner, so names are counted, not lines).
+          failed=$(grep -a '^(fail) ' forced-debates.log | sed -E 's/^\(fail\) //; s/ \[[0-9.]+m?s\]$//' | sort -u)
+          if printf '%s\n' "$failed" | grep -qv forced; then
+            echo "::error::a test outside the forced ones failed without the locks: $failed"
+            exit 1
+          fi
+          count=$(printf '%s\n' "$failed" | grep -c .)
+          if [ "$count" -ne "$#" ]; then
+            echo "::error::$count distinct forced tests failed without the locks, expected $#"
+            exit 1
+          fi
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_DROP_LOCKS: "1"
+      # One refresh exchange per expiring OAuth token, one step-up card per scope set and no secret written onto a
+      # connection revoked during the OAuth callback, from two connections.
+      - run: bun test apps/server/test/connectors-postgres.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      - name: The forced connection lock tests fail without the row lock
+        run: |
+          set +e
+          bun test apps/server/test/connectors-postgres.test.ts --test-name-pattern forced > forced-connectors.log 2>&1
+          status=$?
+          cat forced-connectors.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the forced connection lock tests passed without the row lock"
+            exit 1
+          fi
+          for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -qF "$broken" forced-connectors.log; then
+              echo "::error::the forced connection lock tests broke ($broken) instead of failing on their outcome"
+              exit 1
+            fi
+          done
+          labels="refresh step-up revoke"
+          for label in $labels; do
+            if ! grep -qF "LOCK_OUTCOME_MISMATCH($label)" forced-connectors.log; then
+              echo "::error::the forced $label test did not fail on its outcome without the lock"
+              exit 1
+            fi
+          done
+          # Only the forced tests may fail, one per label: count distinct test names (bun prints each failure
+          # twice on the runner), and every failed test must be a forced one.
+          failed=$(grep -aE '^\(fail\) ' forced-connectors.log | sed -E 's/ \[[0-9.]+m?s\]$//' | sort -u)
+          if grep -v 'forced' <<< "$failed" | grep -q .; then
+            echo "::error::a test that is not a forced lock test failed without the lock"
+            exit 1
+          fi
+          if [ "$(grep -c . <<< "$failed")" -ne "$(wc -w <<< "$labels")" ]; then
+            echo "::error::expected one failed test per label, got: $failed"
+            exit 1
+          fi
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_DROP_LOCKS: "1"
