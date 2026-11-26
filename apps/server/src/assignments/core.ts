@@ -300,8 +300,7 @@ export async function toAssignment(
     waitReason: (row.waitReason as Assignment["waitReason"]) ?? null,
     limits: row.limits,
     usage: await assignmentUsage(deps, row),
-    // The contract names the dollar cap `usd`; the column keeps `dollars`, like the limits.
-    ceiling: row.ceiling === "dollars" ? "usd" : row.ceiling,
+    ceiling: row.ceiling,
     unseen: unseen?.n ?? 0,
     runningJobs: (await runningJobsOf(db, row.id)).length,
     pending,

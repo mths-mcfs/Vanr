@@ -21,7 +21,7 @@ import { log } from "../logger";
 import type { ConnectionRow } from "./access";
 import { catalogEntry, SENSITIVE_TOOL } from "./catalog";
 import { McpAuthRequired, McpClient, McpError, type McpTool } from "./mcp";
-import { checkServerUrl } from "./net";
+import { checkServerUrl, netPolicy } from "./net";
 import {
   type AuthServer,
   checkIssuer,
@@ -318,7 +318,12 @@ async function liveSecret(deps: AppDeps, row: ConnectionRow): Promise<ConnSecret
 export async function mcpFor(deps: AppDeps, row: ConnectionRow): Promise<McpClient> {
   if (!row.serverUrl) throw new McpError("Connection has no server address");
   const secret = await liveSecret(deps, row);
-  return new McpClient({ url: row.serverUrl, fetch: deps.fetchExternal, headers: headersFor(secret) });
+  return new McpClient({
+    url: row.serverUrl,
+    fetch: deps.fetchExternal,
+    policy: netPolicy(deps.config.integrations),
+    headers: headersFor(secret),
+  });
 }
 
 /** The service rejected the kept credential: the connection shows as "Reconnect". */
@@ -357,7 +362,12 @@ export async function connectionById(deps: AppDeps, workspaceId: string, id: str
 }
 
 async function probe(deps: AppDeps, url: string, secret: ConnSecret): Promise<McpTool[]> {
-  const client = new McpClient({ url, fetch: deps.fetchExternal, headers: headersFor(secret) });
+  const client = new McpClient({
+    url,
+    fetch: deps.fetchExternal,
+    policy: netPolicy(deps.config.integrations),
+    headers: headersFor(secret),
+  });
   return client.listTools();
 }
 

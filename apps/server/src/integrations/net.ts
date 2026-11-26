@@ -153,6 +153,15 @@ export interface NetPolicy {
   resolve?: Resolver;
 }
 
+/** The installation's network rule for the integrations (config `integrations`). */
+export const netPolicy = (integrations: {
+  allowPrivateNetworks: boolean;
+  allowPlaintext: boolean;
+}): NetPolicy => ({
+  allowPrivate: integrations.allowPrivateNetworks,
+  allowPlaintext: integrations.allowPlaintext,
+});
+
 /** 400 `tls_required` for a connection without TLS that the installation doesn't allow. */
 export function assertTls(secure: boolean, policy: NetPolicy) {
   if (!secure && !policy.allowPlaintext)

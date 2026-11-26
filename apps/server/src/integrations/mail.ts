@@ -21,7 +21,7 @@ import { log } from "../logger";
 import { backTo, type Starter, saveState, takeState, type Viewer } from "./connectors";
 import { ImapClient, ImapError, type ImapFolder } from "./imap";
 import { defaultPolicy, isAddress, MAIL_ACTIONS, normalizePolicy, policyInput } from "./mail-rules";
-import { assertReachableHost, resolveHost } from "./net";
+import { assertReachableHost, netPolicy } from "./net";
 import { outsideText } from "./outside-text";
 import { SmtpError, type SmtpOptions, smtpSend } from "./smtp";
 
@@ -219,7 +219,7 @@ export async function withImap<T>(
   let imap: ImapClient | null = null;
   try {
     imap = await ImapClient.open({
-      ...(await pinnedImap(deps, secret)),
+      ...imapOf(deps, secret),
       user: secret.username,
       password: secret.password,
     });
@@ -244,16 +244,18 @@ export async function withImap<T>(
  * The kept server is checked again on every connection (the name can start pointing at the internal network
  * after it was connected) and the connection goes to the checked IP.
  */
-async function pinnedImap(deps: AppDeps, secret: ImapSecret) {
-  const allow = deps.config.integrations.allowPrivateNetworks;
-  return { ...secret.imap, address: await resolveHost(secret.imap.host, allow, "mail.blocked_host") };
-}
+// The clients resolve the host once, check it and the TLS rule, and connect to the IP they checked.
+const imapOf = (deps: AppDeps, secret: ImapSecret) => ({
+  ...secret.imap,
+  policy: netPolicy(deps.config.integrations),
+});
 
-async function smtpOf(deps: AppDeps, secret: ImapSecret): Promise<SmtpOptions> {
-  const allow = deps.config.integrations.allowPrivateNetworks;
-  const address = await resolveHost(secret.smtp.host, allow, "mail.blocked_host");
-  return { ...secret.smtp, address, user: secret.username, password: secret.password };
-}
+const smtpOf = (deps: AppDeps, secret: ImapSecret): SmtpOptions => ({
+  ...secret.smtp,
+  policy: netPolicy(deps.config.integrations),
+  user: secret.username,
+  password: secret.password,
+});
 
 export async function folderByRole(imap: ImapClient, role: "sent" | "drafts" | "trash", fallback: string) {
   const folders = await imap.folders();
@@ -276,7 +278,7 @@ export async function transmitMail(
   let sentOut = false;
   try {
     await withImap(deps, account, async (imap, secret) => {
-      await smtpSend(await smtpOf(deps, secret), envelope, raw);
+      await smtpSend(smtpOf(deps, secret), envelope, raw);
       sentOut = true;
       if (account.provider !== "gmail") {
         const sent = await folderByRole(imap, "sent", "Sent");
@@ -322,7 +324,7 @@ export async function connectImap(
   let imap: ImapClient | null = null;
   try {
     imap = await ImapClient.open({
-      ...(await pinnedImap(deps, secret)),
+      ...imapOf(deps, secret),
       user: secret.username,
       password: secret.password,
     });
@@ -524,7 +526,7 @@ export async function updateMailAccount(
     let imap: ImapClient | null = null;
     try {
       imap = await ImapClient.open({
-        ...(await pinnedImap(deps, next)),
+        ...imapOf(deps, next),
         user: next.username,
         password: next.password,
       });

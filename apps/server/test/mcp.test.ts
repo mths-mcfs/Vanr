@@ -9,11 +9,19 @@ import {
 } from "../src/integrations/oauth";
 import { startFakeMcp } from "./fake-mcp";
 
+/** The fake MCP server listens on loopback over plain HTTP. */
+const LOCAL = { allowPrivate: true, allowPlaintext: true };
+
 const mcp = startFakeMcp();
 afterAll(() => mcp.stop());
 
 test("lists tools in SSE, keeps the session and calls a tool", async () => {
-  const client = new McpClient({ url: mcp.url, fetch, headers: { authorization: `Bearer ${mcp.apiKey}` } });
+  const client = new McpClient({
+    url: mcp.url,
+    fetch,
+    policy: LOCAL,
+    headers: { authorization: `Bearer ${mcp.apiKey}` },
+  });
   const tools = await client.listTools();
   expect(tools.map((t) => [t.name, t.annotations?.readOnlyHint ?? false])).toEqual([
     ["list_items", true],
@@ -34,7 +42,7 @@ test("lists tools in SSE, keeps the session and calls a tool", async () => {
 });
 
 test("without a credential the server asks for authorization and says where the metadata is", async () => {
-  const client = new McpClient({ url: mcp.url, fetch });
+  const client = new McpClient({ url: mcp.url, fetch, policy: LOCAL });
   const err = await client.listTools().catch((e: unknown) => e);
   expect(err).toBeInstanceOf(McpAuthRequired);
   expect((err as McpAuthRequired).resourceMetadata).toBe(
@@ -77,6 +85,7 @@ test("OAuth with discovery, dynamic registration and PKCE gives a token the serv
   const authed = new McpClient({
     url: mcp.url,
     fetch,
+    policy: LOCAL,
     headers: { authorization: `Bearer ${tokens.accessToken}` },
   });
   expect((await authed.callTool("list_items", {})).text).toBe("bolt, nut");
