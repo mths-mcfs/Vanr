@@ -705,8 +705,16 @@ describe("anchored comments", () => {
         last,
       ],
       ["two identical contexts, the comment on the second", twins, "2 days", last, twins, last],
-      // 501 identical whole contexts on a page under MAX_BODY, the comment on the last: past the 500 scored.
-      ["501 identical contexts, the comment on the last", many, "2 days", last, many, last],
+      // 501 identical whole contexts on a page under MAX_BODY, the comment on the last, and one character added
+      // at the start: the stored position is stale by one, so every occurrence is scanned, past the 500th.
+      [
+        "501 identical contexts, the comment on the last, its position stale",
+        many,
+        "2 days",
+        last,
+        `x${many}`,
+        last,
+      ],
       // The best occurrence keeps 38 of 64 (59%, no whole side); a worse one keeps one whole side (32): the
       // best one decides, and it isn't enough.
       [
