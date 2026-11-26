@@ -406,6 +406,78 @@ describe("calendar", () => {
   );
 
   test(
+    '"this and the following" reaches the parts split off later; a split on a daylight saving day keeps the times',
+    async () => {
+      const { workspaceId, ana } = await team();
+      const listed = async (from: string, to: string) =>
+        (await range(ana, workspaceId, from, to)).events.map((x) => [x.start, x.title]);
+      const five = await create(ana, workspaceId, {
+        title: "Original",
+        start: "2027-04-01T12:00:00Z",
+        end: "2027-04-01T13:00:00Z",
+        timezone: "UTC",
+        rule: { freq: "daily", count: 5, timezone: "UTC" },
+      });
+      await update(ana, workspaceId, five.id, {
+        scope: "following",
+        instanceStart: "2027-04-04T12:00:00Z",
+        title: "First edit",
+      });
+      await update(ana, workspaceId, five.id, {
+        scope: "following",
+        instanceStart: "2027-04-02T12:00:00Z",
+        title: "Second edit",
+      });
+      expect(await listed("2027-04-01T00:00:00Z", "2027-04-10T00:00:00Z")).toEqual([
+        ["2027-04-01T12:00:00.000Z", "Original"],
+        ["2027-04-02T12:00:00.000Z", "Second edit"],
+        ["2027-04-03T12:00:00.000Z", "Second edit"],
+        ["2027-04-04T12:00:00.000Z", "Second edit"],
+        ["2027-04-05T12:00:00.000Z", "Second edit"],
+      ]);
+      await remove(ana, workspaceId, five.id, { scope: "all" });
+
+      // 02:30 in New York: on 2027-03-14 that time doesn't exist and the occurrence moves to 03:00 EDT.
+      // Splitting there keeps 02:30 for the days after. The rule's own `times` from a client are ignored.
+      const tz = "America/New_York";
+      const dst = await create(ana, workspaceId, {
+        title: "Early",
+        start: "2027-03-13T07:30:00Z",
+        end: "2027-03-13T08:30:00Z",
+        timezone: tz,
+        rule: { freq: "daily", count: 4, timezone: tz, times: ["23:00"] },
+      });
+      const starts = async () =>
+        (await range(ana, workspaceId, "2027-03-12T00:00:00Z", "2027-03-18T00:00:00Z")).events.map(
+          (x) => x.start,
+        );
+      const before = await starts();
+      expect(before).toEqual([
+        "2027-03-13T07:30:00.000Z",
+        "2027-03-14T07:00:00.000Z",
+        "2027-03-15T06:30:00.000Z",
+        "2027-03-16T06:30:00.000Z",
+      ]);
+      const part = await update(ana, workspaceId, dst.id, {
+        scope: "following",
+        instanceStart: "2027-03-14T07:00:00Z",
+        title: "Early, later",
+      });
+      expect(await starts()).toEqual(before);
+      // A new start for the part gives it its own time again.
+      await update(ana, workspaceId, part.id, { scope: "all", start: "2027-03-14T13:00:00Z" });
+      expect(await starts()).toEqual([
+        "2027-03-13T07:30:00.000Z",
+        "2027-03-14T13:00:00.000Z",
+        "2027-03-15T13:00:00.000Z",
+        "2027-03-16T13:00:00.000Z",
+      ]);
+      await remove(ana, workspaceId, dst.id, { scope: "all" });
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "the agents' proposals, the routines' times and the issues' due dates in the range",
     async () => {
       const { workspaceId, general, ana, beto } = await team();
@@ -655,6 +727,61 @@ describe("who may call", () => {
         ).title,
       ).toBe("Ok");
       await ok(call(ana, workspaceId, "POST", `/calendar/proposals/${prop}/dismiss`), 204);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    'a participant of one part of a split series changes only that part: "all" and "following" check every part',
+    async () => {
+      const { workspaceId, ana, caio } = await team();
+      const listed = async () =>
+        (await range(ana, workspaceId, "2026-11-14T00:00:00Z", "2026-11-21T00:00:00Z")).events.map((x) => [
+          x.start,
+          x.title,
+        ]);
+      const daily = await create(ana, workspaceId, {
+        title: "Stand-up",
+        start: "2026-11-15T10:00:00Z",
+        end: "2026-11-15T11:00:00Z",
+        timezone: "UTC",
+        rule: { freq: "daily", interval: 1, timezone: "UTC", count: 5 },
+      });
+      // Caio is in the later part only.
+      const part = await update(ana, workspaceId, daily.id, {
+        scope: "following",
+        instanceStart: "2026-11-17T10:00:00Z",
+        participants: [{ type: "person", id: caio.user.id }],
+      });
+      const before = await listed();
+      const all = await call(caio, workspaceId, "PATCH", `/calendar/events/${part.id}`, {
+        scope: "all",
+        title: "Taken",
+      });
+      expect([all.status, all.json.error.code]).toEqual([403, "forbidden"]);
+      expect((await call(caio, workspaceId, "DELETE", `/calendar/events/${part.id}?scope=all`)).status).toBe(
+        403,
+      );
+      // A later part made by Ana without Caio: "following" from Caio's part would delete it too.
+      await update(ana, workspaceId, part.id, {
+        scope: "following",
+        instanceStart: "2026-11-19T10:00:00Z",
+        participants: [],
+      });
+      const following = new URLSearchParams({ scope: "following", instanceStart: "2026-11-18T10:00:00Z" });
+      expect(
+        (await call(caio, workspaceId, "DELETE", `/calendar/events/${part.id}?${following}`)).status,
+      ).toBe(403);
+      expect(await listed()).toEqual(before);
+      // His own part he still changes on its own.
+      await ok(
+        call(caio, workspaceId, "PATCH", `/calendar/events/${part.id}`, {
+          scope: "this",
+          instanceStart: "2026-11-17T10:00:00Z",
+          title: "Mine",
+        }),
+      );
+      await remove(ana, workspaceId, daily.id, { scope: "all" });
     },
     SERVER_TEST_MS,
   );

@@ -108,27 +108,6 @@ async function fetchText(
   return capped(res, max);
 }
 
-const INSTRUCTION_FILES = [
-  "AGENTS.md",
-  "CLAUDE.md",
-  ".github/copilot-instructions.md",
-  ".cursorrules",
-  "README.md",
-];
-
-/** Instruction files of a repository (the ones that exist; one past MAX_FILE is left out). */
-export async function importInstructions(fetcher: typeof fetch, url: string, token: string | null) {
-  const ref = parseGithubUrl(url);
-  const base = ref.kind === "blob" ? null : ref.path;
-  const candidates = base === null ? [ref.path] : INSTRUCTION_FILES.map((f) => (base ? `${base}/${f}` : f));
-  const files: { path: string; text: string }[] = [];
-  for (const path of candidates) {
-    const read = await fetchText(fetcher, rawUrl(ref, path), token);
-    if (read.kind === "ok") files.push({ path, text: read.text });
-  }
-  return files;
-}
-
 const Listing = z.array(
   z.object({
     name: z.string(),
@@ -208,11 +187,11 @@ export async function importSkill(
   for (const e of others) {
     const rel = dir ? e.path.slice(dir.length + 1) : e.path;
     const mime = mimeOf(e.path);
+    if (e.size > MAX_FILE) throw tooLarge(rel);
     if (!TEXT_EXT.test(e.path)) {
       files.push({ path: rel, status: "skipped", mime });
       continue;
     }
-    if (e.size > MAX_FILE) throw tooLarge(rel);
     const text = await fetchText(fetcher, rawUrl(ref, e.path), token);
     if (text.kind === "too_large") throw tooLarge(rel);
     files.push(

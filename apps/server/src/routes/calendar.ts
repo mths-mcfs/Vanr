@@ -12,10 +12,11 @@ import { can } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { isTimezone, occurrences } from "@vanr/engine/recurrence";
-import { and, eq, gte, inArray, isNull, lte, ne, notInArray, or } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, lte, ne, notInArray, or, type SQL } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
 import {
+  clockTime,
   type EventRow,
   eventFor,
   seriesRule as eventRule,
@@ -27,6 +28,7 @@ import {
   ruleOf,
   toEvent,
   toProposal,
+  wallTimes,
 } from "../calendar";
 import type { AppDeps, AppEnv, WorkspaceMember } from "../context";
 import { forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
@@ -52,6 +54,8 @@ export const MAX_RANGE_DAYS = 400;
 /** Times of one routine listed in a range at most. */
 export const ROUTINE_TIMES_MAX = 200;
 
+/** The time of day comes from the event: a rule from the client never carries `times` (see `seriesRule`). */
+const clientRule = ruleSchema.transform(({ times: _t, ...rule }): RecurrenceRule => rule);
 const actor = z.object({ type: z.enum(["person", "agent"]), id: z.string().min(1).max(64) }).strict();
 const eventFields = {
   title: z.string().trim().min(1).max(200),
@@ -59,7 +63,7 @@ const eventFields = {
   end: z.iso.datetime({ offset: true }),
   allDay: z.boolean().optional(),
   timezone: z.string().max(64).optional(),
-  rule: ruleSchema.nullable().optional(),
+  rule: clientRule.nullable().optional(),
   participants: z.array(actor).max(50).optional(),
   location: z.string().trim().max(300).nullable().optional(),
   description: z.string().max(10_000).nullable().optional(),
@@ -117,6 +121,17 @@ function requireEditor(row: EventRow, me: WorkspaceMember) {
   if (mine || isPersonIn(row.participants, me.userId) || can(me.role, "configure")) return;
   throw forbidden("Only who created the event, its participants or an admin can change it");
 }
+
+/**
+ * Locks the other parts of the family that `where` selects and requires the right on each: a participant of one
+ * part is not an editor of the parts they are not in.
+ */
+async function requireEditorOfParts(tx: Tx, where: SQL | undefined, me: WorkspaceMember) {
+  const parts = await tx.select().from(calendarEntries).where(where).for("update");
+  for (const part of parts) requireEditor(part, me);
+}
+
+const withoutTimes = ({ times: _t, ...rule }: RecurrenceRule): RecurrenceRule => rule;
 
 /** Is the occurrence in the series (and not taken out of it)? */
 function checkOccurrence(row: EventRow, instanceStart: string | undefined): Date {
@@ -313,10 +328,36 @@ export function registerCalendar(app: Hono<AppEnv>) {
         };
       };
       const series = ruleOf(row);
+      // A new start or time zone gives the series its time of day again: a kept local time no longer applies.
+      const retimed = patch.start !== undefined || patch.timezone !== undefined;
+      const ruleChange =
+        patch.rule !== undefined
+          ? { rule: patch.rule }
+          : series?.times && retimed
+            ? { rule: withoutTimes(series) }
+            : {};
+      // What is the same across the family follows an edit of "all" or "this and the following" to the other
+      // parts it reaches; the times stay with each part.
+      const shared = {
+        ...(patch.title !== undefined ? { title: patch.title } : {}),
+        ...(patch.participants !== undefined ? { participants: patch.participants } : {}),
+        ...(patch.location !== undefined ? { location: patch.location } : {}),
+        ...(patch.description !== undefined ? { description: patch.description } : {}),
+      };
+      const root = row.seriesId ?? row.id;
+      const shareWith = async (parts: SQL | undefined) => {
+        if (Object.keys(shared).length === 0) return [];
+        await requireEditorOfParts(tx, parts, me);
+        return tx
+          .update(calendarEntries)
+          .set({ ...shared, updatedAt: at })
+          .where(parts)
+          .returning();
+      };
       const whole = async () => {
         const [updated] = await tx
           .update(calendarEntries)
-          .set({ ...fields(row), ...(patch.rule !== undefined ? { rule: patch.rule } : {}) })
+          .set({ ...fields(row), ...ruleChange })
           .where(eq(calendarEntries.id, row.id))
           .returning();
         if (!updated) throw notFound("Event not found");
@@ -325,27 +366,15 @@ export function registerCalendar(app: Hono<AppEnv>) {
       if (!series) return whole();
       if (scope === "all") {
         // "All" is the whole family: the parts "this and the following" made and the occurrences edited on their
-        // own point to the root. What is the same across the family follows the edit; the times stay with each part.
+        // own point to the root.
+        const others = await shareWith(
+          and(
+            eq(calendarEntries.workspaceId, row.workspaceId),
+            or(eq(calendarEntries.seriesId, root), eq(calendarEntries.id, root)),
+            ne(calendarEntries.id, row.id),
+          ),
+        );
         const edited = await whole();
-        const shared = {
-          ...(patch.title !== undefined ? { title: patch.title } : {}),
-          ...(patch.participants !== undefined ? { participants: patch.participants } : {}),
-          ...(patch.location !== undefined ? { location: patch.location } : {}),
-          ...(patch.description !== undefined ? { description: patch.description } : {}),
-        };
-        if (Object.keys(shared).length === 0) return edited;
-        const root = row.seriesId ?? row.id;
-        const others = await tx
-          .update(calendarEntries)
-          .set({ ...shared, updatedAt: at })
-          .where(
-            and(
-              eq(calendarEntries.workspaceId, row.workspaceId),
-              or(eq(calendarEntries.seriesId, root), eq(calendarEntries.id, root)),
-              ne(calendarEntries.id, row.id),
-            ),
-          )
-          .returning();
         return { saved: [...edited.saved, ...others], reply: edited.reply };
       }
 
@@ -375,8 +404,20 @@ export function registerCalendar(app: Hono<AppEnv>) {
         return { saved: [trimmed, single], reply: single };
       }
 
-      // "This and the following": the old series ends before the occurrence and another starts from it.
-      if (occ.getTime() === row.start.getTime()) return whole();
+      // "This and the following": the old series ends before the occurrence and another starts from it. The
+      // parts already split off after it are in the following too.
+      const later = await shareWith(
+        and(
+          eq(calendarEntries.workspaceId, row.workspaceId),
+          eq(calendarEntries.seriesId, root),
+          gte(calendarEntries.start, occ),
+          ne(calendarEntries.id, row.id),
+        ),
+      );
+      if (occ.getTime() === row.start.getTime()) {
+        const edited = await whole();
+        return { saved: [...edited.saved, ...later], reply: edited.reply };
+      }
       const [ended] = await tx
         .update(calendarEntries)
         .set({
@@ -391,12 +432,20 @@ export function registerCalendar(app: Hono<AppEnv>) {
       const before = series.count
         ? occurrences(eventRule(row) ?? series, { from: row.start, to: occ, limit: series.count }).length
         : 0;
+      // The continuation starts at the occurrence; when that one fell in a daylight saving gap (its clock time
+      // differs from the series'), the rule keeps the series' local time so the later ones don't move.
+      const times = wallTimes(row);
+      const kept = retimed
+        ? withoutTimes(series)
+        : times.length === 1 && times[0] === clockTime(occ, series.timezone || row.timezone)
+          ? series
+          : { ...series, times };
       const nextRule =
         patch.rule !== undefined
           ? patch.rule
           : series.count
-            ? { ...series, count: series.count - before }
-            : series;
+            ? { ...kept, count: series.count - before }
+            : kept;
       const [following] = await tx
         .insert(calendarEntries)
         .values({
@@ -411,7 +460,7 @@ export function registerCalendar(app: Hono<AppEnv>) {
         })
         .returning();
       if (!ended || !following) throw notFound("Event not found");
-      return { saved: [ended, following], reply: following };
+      return { saved: [ended, following, ...later], reply: following };
     });
     for (const row of saved) publishEvent(deps, row);
     return c.json(toEvent(reply));
@@ -436,14 +485,12 @@ export function registerCalendar(app: Hono<AppEnv>) {
         return { row, scope: "all", occurrence: null };
       }
       if (scope === "all") {
-        await tx
-          .delete(calendarEntries)
-          .where(
-            and(
-              eq(calendarEntries.workspaceId, row.workspaceId),
-              or(eq(calendarEntries.seriesId, root), eq(calendarEntries.id, root)),
-            ),
-          );
+        const family = and(
+          eq(calendarEntries.workspaceId, row.workspaceId),
+          or(eq(calendarEntries.seriesId, root), eq(calendarEntries.id, root)),
+        );
+        await requireEditorOfParts(tx, family, me);
+        await tx.delete(calendarEntries).where(family);
         return { row, scope: "all", occurrence: null };
       }
       const occ = checkOccurrence(row, instanceStart);
@@ -452,6 +499,7 @@ export function registerCalendar(app: Hono<AppEnv>) {
         eq(calendarEntries.seriesId, root),
         gte(calendarEntries.start, occ),
       );
+      if (scope === "following") await requireEditorOfParts(tx, later, me);
       if (scope === "this") {
         await tx
           .update(calendarEntries)

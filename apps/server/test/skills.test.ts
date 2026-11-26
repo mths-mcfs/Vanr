@@ -505,6 +505,10 @@ describe("the GitHub import", () => {
       files.set(`${RAW}/acme/limits/main/big/SKILL.md`, SKILL("big", "Big"));
       listing("big", [{ name: "data.md", size: MAX_FILE + 1 }]);
       expect((await importOf("big")).json.error.code).toBe("skill.too_large");
+      // A file that is not text and would be skipped still rejects the folder past the limit.
+      files.set(`${RAW}/acme/limits/main/picture/SKILL.md`, SKILL("picture", "Picture"));
+      listing("picture", [{ name: "diagram.png", size: MAX_FILE + 1 }]);
+      expect((await importOf("picture")).json.error.code).toBe("skill.too_large");
       files.set(`${RAW}/acme/limits/main/liar/SKILL.md`, SKILL("liar", "Liar"));
       listing("liar", [{ name: "data.md", size: 10 }]);
       files.set(`${RAW}/acme/limits/main/liar/data.md`, "y".repeat(MAX_FILE + 1));

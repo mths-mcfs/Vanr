@@ -20,12 +20,27 @@ const localDate = (at: Date, tz: string) => {
 
 export const ruleOf = (row: EventRow) => (row.rule as RecurrenceRule | null) ?? null;
 
-/** The series rule anchored at the event's start (the time comes from the event itself). */
+/**
+ * The series rule anchored at the event's start. The time of day comes from the event itself, unless the rule
+ * keeps one: only the server writes `times`, on a part split off a series, to keep the series' local time when
+ * the part's first occurrence fell in a daylight saving gap.
+ */
 export function seriesRule(row: EventRow): RecurrenceRule | null {
   const rule = ruleOf(row);
   if (!rule) return null;
-  const { times: _t, ...rest } = rule;
-  return { ...rest, timezone: rule.timezone || row.timezone, start: row.start.toISOString() };
+  return { ...rule, timezone: rule.timezone || row.timezone, start: row.start.toISOString() };
+}
+
+/** The local clock time of an instant, as `times` holds it ("HH:MM"). */
+export function clockTime(at: Date, tz: string): string {
+  const p = localParts(at, tz);
+  return `${String(p.hh).padStart(2, "0")}:${String(p.mm).padStart(2, "0")}`;
+}
+
+/** The local time of day of the series' occurrences. */
+export function wallTimes(row: EventRow): string[] {
+  const rule = seriesRule(row);
+  return rule?.times?.length ? rule.times : [clockTime(row.start, rule?.timezone ?? row.timezone)];
 }
 
 const daySpan = (row: EventRow) =>
