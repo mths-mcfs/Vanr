@@ -350,6 +350,29 @@ describe("the callback and the kept credential", () => {
   );
 
   test(
+    "a connection revoked after the callback saved its token keeps its revoked row when the tool save fails",
+    async () => {
+      const back = await begin();
+      const pending = await connection(back.serverId);
+      const result = await during(
+        "tools/list",
+        (deps) =>
+          finishOAuth(deps, me, {
+            code: back.code,
+            state: back.state,
+            iss: back.iss ?? undefined,
+          }),
+        () => disconnect(server.deps, pending),
+      );
+      expect(result).toBe("/back?connector_error=token");
+      const after = await connection(back.serverId);
+      expect(after.revokedAt).not.toBeNull();
+      expect(after.secret).toBeNull();
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "a kept credential in an old or broken shape is never sent: the connection asks to reconnect",
     async () => {
       const back = await begin();

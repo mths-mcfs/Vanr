@@ -637,9 +637,14 @@ export async function finishOAuth(
     .from(connections)
     .where(and(eq(connections.id, st.targetId ?? ""), eq(connections.workspaceId, st.workspaceId)));
   if (!row || row.revokedAt) return back("connector_error=state");
-  const dropPending = async () => {
-    if (row.status === "pending") await deps.db.delete(connections).where(eq(connections.id, row.id));
-  };
+  // Only a connection that is still pending and unrevoked in the database goes: this callback may have made
+  // it active and a revoke may have ended it since `row` was read, and the revoked row stays as the record.
+  const dropPending = () =>
+    deps.db
+      .delete(connections)
+      .where(
+        and(eq(connections.id, row.id), eq(connections.status, "pending"), isNull(connections.revokedAt)),
+      );
   if (s.issuer !== undefined) {
     try {
       checkIssuer({ iss: query.iss, expected: s.issuer, supported: s.issParameterSupported === true });
