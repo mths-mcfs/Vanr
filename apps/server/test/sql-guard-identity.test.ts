@@ -3,7 +3,8 @@
 // an operator, is rejected before the query is planned. Each customer function here raises when it runs, so a
 // rejection that comes back without that error proves it never ran, not even while planning.
 // On PGlite always; on a real Postgres too in the CI `postgres` job (VANR_TEST_POSTGRES_URL), each case in a
-// database of its own.
+// database of its own. The databases are left in place, as with every other Postgres test: a `drop database`
+// forces an immediate checkpoint, which would flush, inside the test, every buffer the earlier CI steps dirtied.
 import { expect, test } from "bun:test";
 import { memoryPostgres } from "@vanr/engine/sqlconn";
 import postgres from "postgres";
@@ -13,8 +14,8 @@ import {
   pgliteGuardedSession,
   postgresGuardedSession,
 } from "../src/integrations/sql-identity";
+import { TEST_POSTGRES_URL, testDatabaseUrl } from "./postgres";
 
-const url = process.env.VANR_TEST_POSTGRES_URL;
 const policy = { tables: ["customers", "orders"], maskedColumns: ["customers.ssn"] };
 
 const FIXTURES = `
@@ -53,13 +54,7 @@ async function withDatabase(kind: "PGlite" | "Postgres", setup: string, fn: (run
     }
     return;
   }
-  if (!url) throw new Error("VANR_TEST_POSTGRES_URL is required");
-  const name = `vanr_identity_${Math.random().toString(36).slice(2, 10)}`;
-  const admin = postgres(url, { max: 1, onnotice: () => {} });
-  await admin.unsafe(`create database ${name}`);
-  const target = new URL(url);
-  target.pathname = `/${name}`;
-  const db = postgres(target.toString(), { max: 1, onnotice: () => {}, prepare: false });
+  const db = postgres(await testDatabaseUrl("vanr_identity"), { max: 1, onnotice: () => {}, prepare: false });
   try {
     await db.unsafe(FIXTURES + setup);
     await fn(async (sql, p = policy, raw) => {
@@ -73,16 +68,11 @@ async function withDatabase(kind: "PGlite" | "Postgres", setup: string, fn: (run
     });
   } finally {
     await db.end({ timeout: 2 });
-    try {
-      await admin.unsafe(`drop database ${name}`);
-    } finally {
-      await admin.end({ timeout: 2 });
-    }
   }
 }
 
 for (const kind of ["PGlite", "Postgres"] as const) {
-  const run = test.skipIf(kind === "Postgres" && !url);
+  const run = test.skipIf(kind === "Postgres" && !TEST_POSTGRES_URL);
 
   run(`${kind}: native functions still pass and run, with the masked column still masked`, async () => {
     await withDatabase(kind, "", async (q) => {

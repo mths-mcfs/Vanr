@@ -293,6 +293,19 @@ export function propText(
   }
 }
 
+/** The option names of a multi-select's text: a JSON list of strings, or the older form separated by commas. */
+export function multiNames(t: string): string[] {
+  if (t.startsWith("[")) {
+    try {
+      const parsed: unknown = JSON.parse(t);
+      if (Array.isArray(parsed) && parsed.every((name) => typeof name === "string")) return parsed;
+    } catch {
+      // A literal option name, such as [Review], need not be JSON.
+    }
+  }
+  return t.split(",").map((s) => s.trim());
+}
+
 /** Reads text (CSV, front matter): the inverse of propText for the editable types. */
 export function parsePropText(def: PropDef, text: string): PropValue | undefined {
   // Empty text is a value; an empty cell of another type means no value.
@@ -313,16 +326,7 @@ export function parsePropText(def: PropDef, text: string): PropValue | undefined
     case "status":
       return byName(t);
     case "multi_select": {
-      let names = t.split(",").map((s) => s.trim());
-      if (t.startsWith("[")) {
-        try {
-          const parsed: unknown = JSON.parse(t);
-          if (Array.isArray(parsed) && parsed.every((name) => typeof name === "string")) names = parsed;
-        } catch {
-          // A literal option name, such as [Review], need not be JSON.
-        }
-      }
-      const ids = names.map(byName);
+      const ids = multiNames(t).map(byName);
       return ids.every((id) => id) ? (ids as string[]) : undefined;
     }
     case "person":

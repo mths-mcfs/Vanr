@@ -205,6 +205,20 @@ describe("filter (oracle)", () => {
     expect(checkFilter({ prop: "t", op: "empty", value: 3 } as Filter, DEFS)).toEqual([]);
   });
 
+  test("a relation filter takes row ids, which are not options; a missing option is still rejected", () => {
+    const rel: PropDef = { id: "r", name: "Tasks", type: "relation", relation: { tableId: "dbt_x" } };
+    for (const op of ["has", "has_not"])
+      expect(checkFilter({ prop: "r", op, value: "dbr_1" }, [rel])).toEqual([]);
+    for (const op of ["has_any", "has_all"])
+      expect(checkFilter({ prop: "r", op, value: ["dbr_1"] }, [rel])).toEqual([]);
+    expect(pruneFilter({ prop: "r", op: "has", value: "dbr_1" }, [rel])).toEqual({
+      prop: "r",
+      op: "has",
+      value: "dbr_1",
+    });
+    expect(checkFilter({ prop: "m", op: "has", value: "zz" }, DEFS)).toEqual(["bad_value:m:has"]);
+  });
+
   test("pruneFilter removes only the conditions the current schema rejects", () => {
     const f: Filter = {
       and: [
