@@ -92,7 +92,42 @@ test("resource metadata must identify the exact resource before its issuer is us
       { preconnect() {} },
     );
     await expect(
-      discoverAuthServer(fetcher, "https://resource.test/mcp", "https://resource.test/meta", false),
+      discoverAuthServer(fetcher, "https://resource.test/mcp", "https://resource.test/meta", {
+        allowPrivate: false,
+        allowPlaintext: false,
+      }),
     ).rejects.toThrow();
   }
+});
+
+test("with the local network allowed and plain text off, a plain http OAuth endpoint is refused", async () => {
+  const meta = (authorize: string) =>
+    Object.assign(
+      async (input: string | URL | Request) => {
+        const url = String(input instanceof Request ? input.url : input);
+        if (url === "https://resource.test/meta")
+          return Response.json({
+            resource: "https://resource.test/mcp",
+            authorization_servers: ["https://issuer.test"],
+          });
+        return Response.json({
+          issuer: "https://issuer.test",
+          authorization_endpoint: authorize,
+          token_endpoint: "https://issuer.test/token",
+        });
+      },
+      { preconnect() {} },
+    );
+  const discover = (authorize: string, allowPlaintext: boolean) =>
+    discoverAuthServer(meta(authorize), "https://resource.test/mcp", "https://resource.test/meta", {
+      allowPrivate: true,
+      allowPlaintext,
+    });
+  await expect(discover("http://issuer.test/auth", false)).rejects.toThrow("unsafe OAuth address");
+  expect((await discover("http://issuer.test/auth", true)).authorization_endpoint).toBe(
+    "http://issuer.test/auth",
+  );
+  expect((await discover("https://issuer.test/auth", false)).authorization_endpoint).toBe(
+    "https://issuer.test/auth",
+  );
 });

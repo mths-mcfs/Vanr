@@ -2,7 +2,7 @@
 // (RFC 9728 + RFC 8414), dynamic client registration (RFC 7591) and the exchange of the code for the token.
 import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
-import { parseServerUrl } from "./net";
+import { type NetPolicy, parseServerUrl } from "./net";
 
 class OAuthError extends Error {}
 
@@ -123,12 +123,12 @@ export async function discoverAuthServer(
   fetchFn: typeof fetch,
   resourceUrl: string,
   resourceMetadataUrl: string | null,
-  allowPrivate: boolean,
+  net: NetPolicy,
   challengeScope: string | null = null,
 ): Promise<AuthServer> {
   let prm: z.infer<typeof protectedResource> | null = null;
   for (const url of resourceMetadataUrls(resourceUrl, resourceMetadataUrl)) {
-    const document = await getJson(fetchFn, safeUrl(url, allowPrivate));
+    const document = await getJson(fetchFn, safeUrl(url, net));
     if (document === null) continue;
     const parsed = protectedResource.safeParse(document);
     const expected = resourceMetadataUrl
@@ -141,12 +141,12 @@ export async function discoverAuthServer(
   }
   // Old servers don't publish the resource: the domain itself plays the authorization server.
   const issuer = prm?.authorization_servers[0] ?? new URL(resourceUrl).origin;
-  safeUrl(issuer, allowPrivate);
+  safeUrl(issuer, net);
   for (const url of authServerMetadataUrls(issuer)) {
     const meta = serverMetadata.safeParse(await getJson(fetchFn, url));
     if (!meta.success) continue;
     if (meta.data.issuer !== issuer) throw new OAuthError("The authorization server issuer does not match");
-    const safe = safeEndpoints(meta.data, allowPrivate);
+    const safe = safeEndpoints(meta.data, net);
     const supported = prm?.scopes_supported?.length ? prm.scopes_supported.join(" ") : null;
     return {
       ...safe,
@@ -158,9 +158,9 @@ export async function discoverAuthServer(
   throw new OAuthError("The server does not publish OAuth metadata");
 }
 
-function safeUrl(raw: string, allowPrivate: boolean): string {
+function safeUrl(raw: string, net: NetPolicy): string {
   try {
-    return parseServerUrl(raw, allowPrivate).toString();
+    return parseServerUrl(raw, net.allowPrivate, net.allowPlaintext).toString();
   } catch {
     throw new OAuthError("The server published an unsafe OAuth address");
   }
@@ -199,10 +199,10 @@ export function widens(union: string | null, current: string | null): boolean {
  * called by our server. A scheme that isn't http(s) (`javascript:`, `file:`), http outside the allowed local
  * network or a user and password in the URL bring the whole discovery down.
  */
-function safeEndpoints(meta: AuthServerMetadata, allowPrivate: boolean): AuthServerMetadata {
+function safeEndpoints(meta: AuthServerMetadata, net: NetPolicy): AuthServerMetadata {
   const urls = [meta.authorization_endpoint, meta.token_endpoint, meta.registration_endpoint];
   try {
-    for (const u of urls) if (u !== undefined) parseServerUrl(u, allowPrivate);
+    for (const u of urls) if (u !== undefined) parseServerUrl(u, net.allowPrivate, net.allowPlaintext);
   } catch {
     throw new OAuthError("The server published an unsafe OAuth address");
   }

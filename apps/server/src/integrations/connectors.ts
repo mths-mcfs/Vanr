@@ -211,6 +211,12 @@ export async function takeState(
   return { ok: true, row: st, payload };
 }
 
+/** A server address under the installation's network rule (the local network and plain text switches). */
+const serverUrlOf = (deps: AppDeps, raw: string) => {
+  const { allowPrivate, allowPlaintext } = netPolicy(deps.config.integrations);
+  return checkServerUrl(raw, allowPrivate, undefined, allowPlaintext);
+};
+
 /** The app path of a state with the result in its query. */
 export const backTo = (st: StateRow, params: string) =>
   `${st.nextPath}${st.nextPath.includes("?") ? "&" : "?"}${params}`;
@@ -385,9 +391,7 @@ export async function connectWithKey(
   if (!entry) throw new HttpError(400, "connector.unknown", "Unknown connector");
   if (!entry.auth.includes("api_key"))
     throw new HttpError(400, "connector.key_unsupported", "This connector connects with OAuth");
-  const url = (
-    await checkServerUrl(entry.serverUrl, deps.config.integrations.allowPrivateNetworks)
-  ).toString();
+  const url = (await serverUrlOf(deps, entry.serverUrl)).toString();
   const secret: ConnSecret = { kind: "api_key", apiKey: input.apiKey };
   let tools: McpTool[];
   try {
@@ -452,7 +456,7 @@ async function beginOAuth(
     deps.fetchExternal,
     url,
     challenge.resourceMetadata,
-    deps.config.integrations.allowPrivateNetworks,
+    netPolicy(deps.config.integrations),
     challenge.scope,
   ).catch(() => null);
   if (!server)
@@ -539,9 +543,7 @@ export async function startCatalogOAuth(
   if (!entry) throw new HttpError(400, "connector.unknown", "Unknown connector");
   if (!entry.auth.includes("oauth"))
     throw new HttpError(400, "connector.oauth_unavailable", "This connector connects with a key");
-  const url = (
-    await checkServerUrl(entry.serverUrl, deps.config.integrations.allowPrivateNetworks)
-  ).toString();
+  const url = (await serverUrlOf(deps, entry.serverUrl)).toString();
   const row = await pendingConnection(deps, me, {
     connector: entry.id,
     custom: false,
@@ -562,9 +564,7 @@ export async function connectCustom(
   me: Starter,
   input: { serverUrl: string; apiKey?: string; label?: string; nextPath: string },
 ): Promise<CustomConnectStart> {
-  const url = (
-    await checkServerUrl(input.serverUrl, deps.config.integrations.allowPrivateNetworks)
-  ).toString();
+  const url = (await serverUrlOf(deps, input.serverUrl)).toString();
   const label = input.label?.trim() || new URL(url).hostname;
   const secret: ConnSecret = input.apiKey ? { kind: "api_key", apiKey: input.apiKey } : { kind: "none" };
   let tools: McpTool[];

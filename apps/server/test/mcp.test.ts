@@ -51,7 +51,7 @@ test("without a credential the server asks for authorization and says where the 
 });
 
 test("OAuth with discovery, dynamic registration and PKCE gives a token the server accepts", async () => {
-  const server = await discoverAuthServer(fetch, mcp.url, null, true);
+  const server = await discoverAuthServer(fetch, mcp.url, null, LOCAL);
   expect(server.token_endpoint).toBe(`${mcp.origin}/token`);
   const redirectUri = "http://localhost:9/api/v1/connectors/oauth/callback";
   const client = await registerClient(fetch, server.registration_endpoint ?? "", redirectUri, "test");

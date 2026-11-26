@@ -87,6 +87,9 @@ export async function checkServerUrl(
 
 const MAX_REDIRECTS = 5;
 
+/** The fetch a guard wraps, kept on the guard so that guarding it again replaces the guard. */
+const UNGUARDED = Symbol("unguarded");
+
 /** The request goes to the IP already checked; `Host` and the TLS SNI keep the name. */
 function pinned(url: URL, ip: string, init: RequestInit): [string, RequestInit] {
   const bare = url.hostname.replace(/^\[|\]$/g, "");
@@ -104,6 +107,10 @@ function pinned(url: URL, ip: string, init: RequestInit): [string, RequestInit] 
  * redirect, followed here by hand. Without this, a remote server points ours at the internal network through
  * what it returns (OAuth metadata, client registration, `Location`). `Authorization` and `Cookie` don't follow
  * to another origin. Without the local network allowed, every hop connects to the checked IP.
+ *
+ * Guarding a guarded fetch wraps the fetch underneath with the new rule: two layers would pin the first hop
+ * to its IP, and the inner one would then see a redirect back to the name as another origin and drop the
+ * credentials.
  */
 export function guardedFetch(
   fetchFn: typeof fetch,
@@ -111,6 +118,7 @@ export function guardedFetch(
   resolve: Resolver = systemResolver,
   allowPlaintext = allowPrivate,
 ): typeof fetch {
+  const raw: typeof fetch = (fetchFn as { [UNGUARDED]?: typeof fetch })[UNGUARDED] ?? fetchFn;
   const guarded = async (input: string | URL | Request, init: RequestInit = {}): Promise<Response> => {
     let url = input instanceof Request ? input.url : String(input);
     let req: RequestInit =
@@ -121,7 +129,7 @@ export function guardedFetch(
       const checked = parseServerUrl(url, allowPrivate, allowPlaintext);
       const ip = await resolveHost(checked.hostname, allowPrivate, "blocked_host", resolve);
       const [target, sent] = pinned(checked, ip, { ...req, redirect: "manual" });
-      const res = await fetchFn(target, sent);
+      const res = await raw(target, sent);
       const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
       if (!location) return res;
       const next = new URL(location, checked);
@@ -139,7 +147,7 @@ export function guardedFetch(
     }
     throw new HttpError(400, "unreachable", "Too many redirects");
   };
-  return Object.assign(guarded, { preconnect: () => {} }) as typeof fetch;
+  return Object.assign(guarded, { preconnect: () => {}, [UNGUARDED]: raw }) as typeof fetch;
 }
 
 /**

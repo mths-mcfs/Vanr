@@ -4,13 +4,16 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createServer, type Server, type Socket } from "node:net";
 import { HttpError } from "../src/http";
+import { connectCustom } from "../src/integrations/connectors";
 import { ImapClient } from "../src/integrations/imap";
 import { McpClient, McpError } from "../src/integrations/mcp";
 import { guardedFetch, type NetPolicy, resolveHost } from "../src/integrations/net";
 import { s3Blobs } from "../src/integrations/s3";
 import { smtpSend } from "../src/integrations/smtp";
+import { startFakeMcp } from "./fake-mcp";
 import { startFakeS3 } from "./fake-s3";
-import { SERVER_TEST_MS, startTestServer } from "./harness";
+import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
+import { seedWorkspace } from "./seed";
 
 /** The code of the HttpError a call ends in, or the message of any other error. */
 const failureOf = async (run: Promise<unknown>) => {
@@ -139,6 +142,21 @@ describe("guardedFetch", () => {
       [null, null, "kept"],
     ]);
   });
+
+  test("a guard wrapped again is one guard: the credentials follow a redirect back to the same name", async () => {
+    const dns = async () => [PUBLIC_IP];
+    const { sent, fetchFn } = recorder([
+      new Response(null, { status: 307, headers: { location: "https://mcp.example.test/end" } }),
+      new Response("ok"),
+    ]);
+    const twice = guardedFetch(guardedFetch(fetchFn, false, dns), false, dns);
+    const res = await twice("https://mcp.example.test/start", { headers: { authorization: "Bearer k" } });
+    expect(await res.text()).toBe("ok");
+    expect(sent.map((s) => [s.url, new Headers(s.init.headers).get("authorization")])).toEqual([
+      [`https://${PUBLIC_IP}/start`, "Bearer k"],
+      [`https://${PUBLIC_IP}/end`, "Bearer k"],
+    ]);
+  });
 });
 
 describe("the server's integration network policy", () => {
@@ -197,6 +215,48 @@ describe("the server's integration network policy", () => {
         expect(sent).toEqual([`http://${PUBLIC_IP}/rpc`]);
       } finally {
         await server.stop();
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a connector on a public plain http address connects when plain text is allowed",
+    async () => {
+      const mcp = startFakeMcp({ keyOnly: true });
+      const sent: string[] = [];
+      const server = await startTestServer({
+        env: { ALLOW_PRIVATE_NETWORKS: "false", ALLOW_PLAINTEXT_INTEGRATIONS: "true" },
+        // The public address answers as the fake MCP server on loopback.
+        fetchExternal: Object.assign(
+          async (input: string | URL | Request, init?: RequestInit) => {
+            sent.push(input instanceof Request ? input.url : String(input));
+            return fetch(mcp.url, init);
+          },
+          { preconnect() {} },
+        ),
+      });
+      try {
+        const ana = await signedIn(server, "Ana", "ana@plaintext.test");
+        const { workspaceId } = await seedWorkspace(server, ana);
+        const me = {
+          workspaceId,
+          userId: ana.user.id,
+          role: "owner" as const,
+          handle: "ana",
+          sessionId: "s",
+        };
+        const connected = await connectCustom(server.deps, me, {
+          serverUrl: `http://${PUBLIC_IP}/mcp`,
+          apiKey: mcp.apiKey,
+          nextPath: "/",
+        });
+        expect(connected.status).toBe("server");
+        expect(sent.length).toBeGreaterThan(0);
+        expect(sent.every((url) => url === `http://${PUBLIC_IP}/mcp`)).toBe(true);
+      } finally {
+        await server.stop();
+        mcp.stop();
       }
     },
     SERVER_TEST_MS,
