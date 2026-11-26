@@ -638,6 +638,9 @@ describe("anchored comments", () => {
     const block = "abcdefghijklmnopqrstuvwxyz123456" + "2 days" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
     const twins = `Finance\n${block}\n\nSupport\n${block}`;
     const reordered = "New intro.\n\nSupport takes (2 days)!\n\nFinance: 2 days.";
+    const many = `${"A".repeat(32)}2 days${"B".repeat(32)}${".".repeat(30)}`.repeat(501);
+    const ranked = `${"a".repeat(32)}2 days${"b".repeat(32)}`;
+    const rankedNow = `${"x".repeat(12)}${"a".repeat(20)}2 days${"b".repeat(18)}${"y".repeat(14)}\n${"a".repeat(32)}2 days${"z".repeat(32)}`;
     const first = (t: string, q: string) => t.indexOf(q);
     const last = (t: string, q: string) => t.lastIndexOf(q);
     // [case, text the comment was made on, quote, which occurrence, the text now, where it must be (null: orphan)]
@@ -702,6 +705,18 @@ describe("anchored comments", () => {
         last,
       ],
       ["two identical contexts, the comment on the second", twins, "2 days", last, twins, last],
+      // 501 identical whole contexts on a page under MAX_BODY, the comment on the last: past the 500 scored.
+      ["501 identical contexts, the comment on the last", many, "2 days", last, many, last],
+      // The best occurrence keeps 38 of 64 (59%, no whole side); a worse one keeps one whole side (32): the
+      // best one decides, and it isn't enough.
+      [
+        "the best candidate is short of the floor, a worse one has a whole side",
+        ranked,
+        "2 days",
+        first,
+        rankedNow,
+        null,
+      ],
     ];
     test.each(cases)("locating a passage: %s", (_case, before, quote, which, now, expected) => {
       const anchor = anchorAt(before, which(before, quote), quote.length);

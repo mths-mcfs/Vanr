@@ -137,7 +137,12 @@ export type WikiAccessInput =
 
 /** A quoted passage (TextQuoteSelector): the text and a little of what comes before and after. */
 export interface WikiAnchor {
-  /** Where the quote started in the text the comment was made on: it picks among passages with the same context. */
+  /**
+   * Where the quote started in the text the comment was made on. On every read the passage is looked for there
+   * first; it also picks among passages with the same context. If the whole context is gone, the occurrence
+   * that keeps the most of it holds the comment only if it keeps 60% of it or one whole side of at least 8
+   * characters; otherwise the comment is an orphan.
+   */
   position?: number;
   prefix: string;
   quote: string;

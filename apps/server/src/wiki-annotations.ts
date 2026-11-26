@@ -48,9 +48,10 @@ export const MAX_COMMENTS = 500;
 /** Occurrences of the quote checked one by one when the whole context doesn't appear. */
 export const LOCATE_CANDIDATES = 500;
 /**
- * When the whole context isn't in the text, an occurrence takes the comment only if it keeps this share of
- * the context the anchor stored (before and after, added), or one whole side of it at least `MIN_SIDE` long.
- * The same words elsewhere, among other text, are not the passage: in doubt the comment is an orphan.
+ * When the whole context isn't in the text, the occurrence that keeps the most of it is the candidate, and it
+ * takes the comment only if it keeps this share of the context the anchor stored (before and after, added),
+ * or one whole side of it at least `MIN_SIDE` long. Otherwise the comment is an orphan: the same words
+ * elsewhere, among other text, are not the passage, and in doubt the comment is not moved.
  */
 export const MIN_CONTEXT_SHARE = 0.6;
 export const MIN_SIDE = 8;
@@ -78,17 +79,18 @@ const headMatch = (text: string, start: number, suffix: string) => {
 };
 
 /**
- * Where the anchor is in the text. First the whole context (before + quote + after), in one search; if the
- * text around it changed, the occurrence of the quote that keeps the most context, looking at most at
+ * Where the anchor is in the text. First the whole context (before + quote + after): at the stored `position`
+ * if it's still there, else the occurrence nearest it (the first without a position), over every occurrence.
+ * If the text around it changed, the occurrence of the quote that keeps the most context, looking at most at
  * `LOCATE_CANDIDATES` of them (a short quote in a long page repeats thousands of times, and this runs on
- * every read of the comments), if it keeps enough of it (`MIN_CONTEXT_SHARE`, `MIN_SIDE`). Equal candidates
- * go to the one nearest where the passage was (`position`). Otherwise, or without the quote in the text,
- * `null` (an orphan comment). The search is literal (`indexOf`): the quote's characters are never a pattern.
+ * every read of the comments), nearest the position on a tie, and only if it keeps enough of it
+ * (`MIN_CONTEXT_SHARE`, `MIN_SIDE`). Otherwise, or without the quote in the text, `null` (an orphan comment).
+ * The search is literal (`indexOf`): the quote's characters are never a pattern.
  */
 export function locate(
   text: string,
   anchor: Anchor,
-  /** Occurrences checked (the test proves the ceiling by the count, not by the clock). */
+  /** Occurrences scored (the test proves the ceiling by the count, not by the clock). */
   stats?: { checked: number },
 ): number | null {
   const { quote, prefix, suffix, position } = anchor;
@@ -96,32 +98,33 @@ export function locate(
   const nearer = (a: number, b: number) =>
     position !== undefined && Math.abs(a - position) < Math.abs(b - position);
   const whole = prefix + quote + suffix;
+  if (position !== undefined && position >= prefix.length && text.startsWith(whole, position - prefix.length))
+    return position;
   let found = text.indexOf(whole);
   if (found !== -1) {
-    for (let at = text.indexOf(whole, found + 1), seen = 1; at !== -1 && seen < LOCATE_CANDIDATES; seen++) {
-      if (position === undefined) break;
-      if (nearer(at + prefix.length, found + prefix.length)) found = at;
-      at = text.indexOf(whole, at + 1);
-    }
+    // One linear pass over the page (at most MAX_BODY): no ceiling, so the passage is never cut off.
+    if (position !== undefined)
+      for (let at = text.indexOf(whole, found + 1); at !== -1; at = text.indexOf(whole, at + 1))
+        if (nearer(at + prefix.length, found + prefix.length)) found = at;
     return found + prefix.length;
   }
-  const total = prefix.length + suffix.length;
-  let best: { at: number; score: number } | null = null;
+  let best: { at: number; before: number; after: number } | null = null;
   let seen = 0;
   for (let at = text.indexOf(quote); at !== -1 && seen < LOCATE_CANDIDATES; seen++) {
     if (stats) stats.checked++;
     const before = tailMatch(text, at, prefix);
     const after = headMatch(text, at + quote.length, suffix);
     const score = before + after;
-    const kept =
-      score >= MIN_CONTEXT_SHARE * total ||
-      (before === prefix.length && before >= MIN_SIDE) ||
-      (after === suffix.length && after >= MIN_SIDE);
-    if (kept && (!best || score > best.score || (score === best.score && nearer(at, best.at))))
-      best = { at, score };
+    const top = best ? best.before + best.after : -1;
+    if (score > top || (best && score === top && nearer(at, best.at))) best = { at, before, after };
     at = text.indexOf(quote, at + 1);
   }
-  return best?.at ?? null;
+  if (!best) return null;
+  const kept =
+    best.before + best.after >= MIN_CONTEXT_SHARE * (prefix.length + suffix.length) ||
+    (best.before === prefix.length && best.before >= MIN_SIDE) ||
+    (best.after === suffix.length && best.after >= MIN_SIDE);
+  return kept ? best.at : null;
 }
 
 function toComment(row: AnnotationRow, body: string): WikiComment {
