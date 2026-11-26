@@ -87,6 +87,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki annotations on Postgres"), 
   test("forced: two decisions on the same change, interleaved: the second waits for the first's lock and is rejected; the change lands once", async () => {
     const pg = await startTestServer({ env: { DATABASE_URL: await testDatabaseUrl("wikidecide") } });
     const [page0, ann0] = [pageLock.row, annotationLock.row];
+    let free = () => {};
     try {
       const ana = withApi(await signedIn(pg, "Ana", email("ana")));
       const { workspaceId } = await seedWorkspace(pg, ana, "Decisions");
@@ -105,6 +106,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki annotations on Postgres"), 
       // VANR_TEST_WIKI_ANNOTATIONS_UNLOCKED=1: both reads without their row lock (the CI expects a failure).
       if (UNLOCKED) pageLock.row = unlockedPage;
       const hold = holdFirst(UNLOCKED ? unlockedAnnotation : ann0);
+      free = hold.release;
       annotationLock.row = hold.read;
       const decide = () =>
         ana.api.wiki.decideWikiAnnotation(workspaceId, row.id, [{ hunkId: "h1", accept: true }]);
@@ -119,6 +121,8 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki annotations on Postgres"), 
       const final = await ana.api.wiki.getWikiPage(workspaceId, created.slug);
       expect([final.body, final.version]).toEqual(["Value: 1. Value: 1.\n", 2]);
     } finally {
+      // A paused read is let go before the server stops, also when the test failed before releasing it.
+      free();
       pageLock.row = page0;
       annotationLock.row = ann0;
       await pg.stop();
@@ -128,6 +132,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki annotations on Postgres"), 
   test("a decision that lands while the page is saved decides on the text that save left (both changes stay)", async () => {
     const pg = await startTestServer({ env: { DATABASE_URL: await testDatabaseUrl("wikidecidesave") } });
     const page0 = pageLock.row;
+    let free = () => {};
     try {
       const ana = withApi(await signedIn(pg, "Ana", email("ana")));
       const { workspaceId } = await seedWorkspace(pg, ana, "Save race");
@@ -144,6 +149,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki annotations on Postgres"), 
         note: "",
       });
       const hold = holdFirst(page0);
+      free = hold.release;
       pageLock.row = hold.read;
       const saving = outcome(
         ana.api.wiki.replaceWikiPage(workspaceId, created.slug, {
@@ -161,6 +167,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki annotations on Postgres"), 
       const final = await ana.api.wiki.getWikiPage(workspaceId, created.slug);
       expect([final.body, final.version]).toEqual(["Alpha, saved.\n\nBeta, proposed.\n", 3]);
     } finally {
+      free();
       pageLock.row = page0;
       await pg.stop();
     }
@@ -240,6 +247,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki reads across a restriction 
     test(`forced: a ${what} read held after its access check answers what was there before`, async () => {
       const pg = await startTestServer({ env: { DATABASE_URL: await testDatabaseUrl(`wikiread${what}`) } });
       const original = { ...wikiRead };
+      let free = () => {};
       try {
         const ana = withApi(await signedIn(pg, "Ana", email("ana")));
         const { workspaceId } = await seedWorkspace(pg, ana, "Reads");
@@ -255,6 +263,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki reads across a restriction 
         const gate = new Promise<void>((r) => {
           release = r;
         });
+        free = release;
         let held = false;
         wikiRead.checked = async () => {
           if (held) return;
@@ -263,7 +272,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki reads across a restriction 
           await gate;
         };
         const answer = read(beto.api.wiki, workspaceId, created.slug).then(
-          (v) => JSON.stringify(v),
+          (v) => `200 ${JSON.stringify(v)}`,
           (e: { status?: number; message?: string }) => `${e.status} ${e.message ?? ""}`,
         );
         await checked;
@@ -293,7 +302,10 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki reads across a restriction 
             leaked: "no",
           },
         );
+        // Only what was there before or a 404: an error that hides the read isn't a pass.
+        expect(text.slice(0, 4)).toMatch(/^(200|404) $/);
       } finally {
+        free();
         Object.assign(wikiRead, original);
         await pg.stop();
       }

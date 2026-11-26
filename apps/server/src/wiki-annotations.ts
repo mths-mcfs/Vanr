@@ -48,11 +48,12 @@ export const MAX_COMMENTS = 500;
 /** Occurrences of the quote checked one by one when the whole context doesn't appear. */
 export const LOCATE_CANDIDATES = 500;
 /**
- * Characters of the context around an occurrence (before and after, added) that it must share with the
- * anchor to take the comment when the whole context isn't in the text. The same words elsewhere, among other
- * text, are not the passage: with less, the comment is an orphan.
+ * When the whole context isn't in the text, an occurrence takes the comment only if it keeps this share of
+ * the context the anchor stored (before and after, added), or one whole side of it at least `MIN_SIDE` long.
+ * The same words elsewhere, among other text, are not the passage: in doubt the comment is an orphan.
  */
-export const MIN_CONTEXT = 8;
+export const MIN_CONTEXT_SHARE = 0.6;
+export const MIN_SIDE = 8;
 
 /** The anchor of a passage that starts at `at` in the text. */
 export function anchorAt(text: string, at: number, length: number): Anchor {
@@ -60,6 +61,7 @@ export function anchorAt(text: string, at: number, length: number): Anchor {
     quote: text.slice(at, at + length),
     prefix: text.slice(Math.max(0, at - CONTEXT), at),
     suffix: text.slice(at + length, at + length + CONTEXT),
+    position: at,
   };
 }
 
@@ -77,11 +79,11 @@ const headMatch = (text: string, start: number, suffix: string) => {
 
 /**
  * Where the anchor is in the text. First the whole context (before + quote + after), in one search; if the
- * text around it changed, the occurrence of the quote whose before and after match best, looking at most at
+ * text around it changed, the occurrence of the quote that keeps the most context, looking at most at
  * `LOCATE_CANDIDATES` of them (a short quote in a long page repeats thousands of times, and this runs on
- * every read of the comments), if it shares at least `MIN_CONTEXT` characters of context. Otherwise, or
- * without the quote in the text, `null` (an orphan comment). The search is
- * literal (`indexOf`): the quote's characters are never a pattern.
+ * every read of the comments), if it keeps enough of it (`MIN_CONTEXT_SHARE`, `MIN_SIDE`). Equal candidates
+ * go to the one nearest where the passage was (`position`). Otherwise, or without the quote in the text,
+ * `null` (an orphan comment). The search is literal (`indexOf`): the quote's characters are never a pattern.
  */
 export function locate(
   text: string,
@@ -89,20 +91,37 @@ export function locate(
   /** Occurrences checked (the test proves the ceiling by the count, not by the clock). */
   stats?: { checked: number },
 ): number | null {
-  if (!anchor.quote) return null;
-  const whole = text.indexOf(anchor.prefix + anchor.quote + anchor.suffix);
-  if (whole !== -1) return whole + anchor.prefix.length;
+  const { quote, prefix, suffix, position } = anchor;
+  if (!quote) return null;
+  const nearer = (a: number, b: number) =>
+    position !== undefined && Math.abs(a - position) < Math.abs(b - position);
+  const whole = prefix + quote + suffix;
+  let found = text.indexOf(whole);
+  if (found !== -1) {
+    for (let at = text.indexOf(whole, found + 1), seen = 1; at !== -1 && seen < LOCATE_CANDIDATES; seen++) {
+      if (position === undefined) break;
+      if (nearer(at + prefix.length, found + prefix.length)) found = at;
+      at = text.indexOf(whole, at + 1);
+    }
+    return found + prefix.length;
+  }
+  const total = prefix.length + suffix.length;
   let best: { at: number; score: number } | null = null;
   let seen = 0;
-  for (let at = text.indexOf(anchor.quote); at !== -1 && seen < LOCATE_CANDIDATES; seen++) {
-    const score =
-      tailMatch(text, at, anchor.prefix) + headMatch(text, at + anchor.quote.length, anchor.suffix);
-    if (!best || score > best.score) best = { at, score };
+  for (let at = text.indexOf(quote); at !== -1 && seen < LOCATE_CANDIDATES; seen++) {
     if (stats) stats.checked++;
-    at = text.indexOf(anchor.quote, at + 1);
+    const before = tailMatch(text, at, prefix);
+    const after = headMatch(text, at + quote.length, suffix);
+    const score = before + after;
+    const kept =
+      score >= MIN_CONTEXT_SHARE * total ||
+      (before === prefix.length && before >= MIN_SIDE) ||
+      (after === suffix.length && after >= MIN_SIDE);
+    if (kept && (!best || score > best.score || (score === best.score && nearer(at, best.at))))
+      best = { at, score };
+    at = text.indexOf(quote, at + 1);
   }
-  const need = Math.min(MIN_CONTEXT, anchor.prefix.length + anchor.suffix.length);
-  return best && best.score >= need ? best.at : null;
+  return best?.at ?? null;
 }
 
 function toComment(row: AnnotationRow, body: string): WikiComment {
@@ -224,14 +243,9 @@ export async function createComment(
       .from(pageAnnotations)
       .where(and(eq(pageAnnotations.pageId, page.id), eq(pageAnnotations.kind, "comment")));
     if ((n?.n ?? 0) >= MAX_COMMENTS)
-      throw new HttpError(
-        409,
-        "wiki.comment.too_many",
-        "This page has too many comments; resolve or delete some",
-        {
-          max: MAX_COMMENTS,
-        },
-      );
+      throw new HttpError(409, "wiki.comment.too_many", "This page has too many comments; delete some", {
+        max: MAX_COMMENTS,
+      });
     const [created] = await tx
       .insert(pageAnnotations)
       .values({
@@ -242,7 +256,7 @@ export async function createComment(
         parentId: root?.id ?? null,
         author,
         body: input.body,
-        anchor: root ? null : (input.anchor ?? null),
+        anchor: root || !input.anchor ? null : anchorOn(locked.body, input.anchor),
         status: "open",
         createdAt: at,
         updatedAt: at,
@@ -259,6 +273,18 @@ export async function createComment(
     return { created, body: locked.body };
   });
   return toComment(row.created, row.body);
+}
+
+/**
+ * The anchor as stored: where the passage starts in the published text the comment was made on. The client's
+ * position counts only when the quote is there (it tells apart passages with the same context).
+ */
+function anchorOn(body: string, anchor: Anchor): Anchor {
+  const { quote, prefix, suffix } = anchor;
+  const given = anchor.position;
+  const at =
+    given !== undefined && body.startsWith(quote, given) ? given : locate(body, { quote, prefix, suffix });
+  return at === null ? { quote, prefix, suffix } : { quote, prefix, suffix, position: at };
 }
 
 /** The comment's page, locked in `tx`, outside the trash and still read by `me` (404 otherwise). */

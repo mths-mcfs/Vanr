@@ -30,6 +30,8 @@ export interface WikiAnchor {
   quote: string;
   prefix: string;
   suffix: string;
+  /** Where the quote started in the text the comment was made on (picks among identical contexts). */
+  position?: number;
 }
 
 /** One change of a proposal, accepted or rejected on its own. */
@@ -316,7 +318,7 @@ export const pageAnnotations = pgTable(
     body: text("body").notNull().default(""),
     anchor: jsonb("anchor").$type<WikiAnchor>(),
     hunks: jsonb("hunks").$type<WikiHunk[]>().notNull().default([]),
-    /** The page version the proposal read. */
+    /** The page version the proposal's changes were checked against (the latest when it was made). */
     parentVersion: integer("parent_version"),
     /** A comment: `open` or `resolved`. A proposal: `pending` until no change is pending, then `done`. */
     status: text("status", { enum: ["open", "resolved", "pending", "done"] }).notNull(),

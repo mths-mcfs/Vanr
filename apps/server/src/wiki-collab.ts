@@ -897,6 +897,10 @@ export function createWikiCollab(
         throw new Error("too_many_connections");
       }
       context.peer.docs.set(documentName, { slug, readOnly: connectionConfig.readOnly });
+      // A read cached before the page was registered missed any recheck in between: the next one goes to the
+      // database, and a read still in flight from before doesn't store its answer.
+      context.peer.rightGeneration++;
+      context.peer.rightReadAt = null;
     }),
     onLoadDocument: track(async ({ document, documentName }) => {
       const [, workspaceId = "", slug = ""] = documentName.split("/");

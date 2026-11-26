@@ -137,6 +137,8 @@ export type WikiAccessInput =
 
 /** A quoted passage (TextQuoteSelector): the text and a little of what comes before and after. */
 export interface WikiAnchor {
+  /** Where the quote started in the text the comment was made on: it picks among passages with the same context. */
+  position?: number;
   prefix: string;
   quote: string;
   suffix: string;
@@ -176,7 +178,7 @@ export interface WikiProposal {
   hunks: WikiHunk[];
   id: string;
   note: string;
-  /** The page version the proposal read. */
+  /** The page version the proposal's changes were checked against (the latest when it was made). */
   parentVersion: number;
   status: "done" | "pending";
 }
@@ -188,7 +190,10 @@ export interface WikiAnnotations {
 
 /** The body of `createWikiPageComment`. */
 export interface WikiCommentInput {
-  /** "Act on this comment": the agent gets the request in the commenter's DM with it. */
+  /**
+   * "Act on this comment": the agent gets the request in the commenter's DM with it. Reserved: until the chat
+   * and runtime slices land the route answers 503 `not_available` and writes nothing, so leave it out.
+   */
   agentId?: string;
   anchor?: WikiAnchor;
   body: string;

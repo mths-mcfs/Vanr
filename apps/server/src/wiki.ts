@@ -546,6 +546,9 @@ export async function savePage(
       await requireReader(tx, row, input.author);
     }
     const decider = input.lockBypassBy ?? input.author;
+    // Who decides for someone else's text must still read the page: a 404 before the lock's 403, which
+    // would tell them the page is locked.
+    if (input.lockBypassBy) await requireReader(tx, row, input.lockBypassBy);
     if (row.locked && !(input.canBypassLock && (await bypassesLock(tx, row.workspaceId, decider))))
       throw pageLocked();
     // Without a parent version the caller saves over the version it read.

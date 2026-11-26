@@ -65,6 +65,9 @@ function holdNextTransaction() {
   return { begun, release, restore: () => (conn.transaction = original) };
 }
 
+/** A value for a mismatch's message: a key only one side has shows as missing. */
+const shown = (v: unknown) => (v === undefined ? "(missing)" : JSON.stringify(v).slice(0, 160));
+
 const status = (p: Promise<unknown>) =>
   p.then(
     () => 200,
@@ -135,9 +138,15 @@ describe("a request across the restriction", () => {
           hold.release();
           outcomes.push(`${what} ${await pending}`);
         } finally {
+          // A transaction still paused (the fixture failed first) is let go: releasing twice changes nothing.
+          hold.release();
           hold.restore();
         }
         const after = await rowOf(workspaceId, page.slug);
+        const annotations = await db()
+          .select({ id: schema.pageAnnotations.id, status: schema.pageAnnotations.status })
+          .from(schema.pageAnnotations)
+          .where(eq(schema.pageAnnotations.pageId, row.id));
         const [kept] = await db()
           .select({ status: schema.pageAnnotations.status })
           .from(schema.pageAnnotations)
@@ -150,12 +159,17 @@ describe("a request across the restriction", () => {
           pinned: after.pinned,
           folder: after.folder,
           gone: !!after.deletedAt,
+          agentEdits: after.agentEdits,
+          // Only the proposal and Beto's comment from before: no new comment, the proposal still pending.
+          annotations: annotations.map((a) => a.status).sort(),
         }).toEqual({
           what,
           body: "SECRET AFTER",
           pinned: false,
           folder: "",
           gone: false,
+          agentEdits: row.agentEdits,
+          annotations: ["open", "pending"],
         });
       }
       expect(outcomes).toEqual(calls.map(([what]) => `${what} 404`));
@@ -410,9 +424,7 @@ describe("a page the reader can't read changes nothing they see", () => {
           const [a, b] = answers as Record<string, unknown>[];
           for (const k of new Set([...Object.keys(a ?? {}), ...Object.keys(b ?? {})]))
             if (JSON.stringify(a?.[k]) !== JSON.stringify(b?.[k]))
-              mismatches.push(
-                `seed ${seed} ${k}: ${JSON.stringify(a?.[k]).slice(0, 160)} != ${JSON.stringify(b?.[k]).slice(0, 160)}`,
-              );
+              mismatches.push(`seed ${seed} ${k}: ${shown(a?.[k])} != ${shown(b?.[k])}`);
         }
       }
       expect(mismatches).toEqual([]);

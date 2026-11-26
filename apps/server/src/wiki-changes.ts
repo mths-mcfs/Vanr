@@ -120,6 +120,9 @@ export async function readIndex(db: Db, viewer: WikiViewer): Promise<WikiIndex> 
     )
     .orderBy(asc(knowledgePages.folder), asc(knowledgePages.title));
   const lines = ["# Index", ""];
+  // A title two listed pages share links by slug (`[[slug|Title]]`), so each line opens its own page.
+  const titles = new Map<string, number>();
+  for (const p of pages) titles.set(p.title.toLowerCase(), (titles.get(p.title.toLowerCase()) ?? 0) + 1);
   let folder: string | null = null;
   for (const p of pages) {
     if (p.folder !== folder) {
@@ -127,7 +130,8 @@ export async function readIndex(db: Db, viewer: WikiViewer): Promise<WikiIndex> 
       lines.push(`## ${folder || "/"}`, "");
     }
     const summary = summaryLine(p.body);
-    lines.push(`- [[${p.title}]]${summary ? ` — ${summary}` : ""}`);
+    const link = (titles.get(p.title.toLowerCase()) ?? 0) > 1 ? `${p.slug}|${p.title}` : p.title;
+    lines.push(`- [[${link}]]${summary ? ` — ${summary}` : ""}`);
   }
   if (pages.length === 0) lines.push("(no pages yet)");
   return {

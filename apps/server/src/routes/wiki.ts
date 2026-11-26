@@ -187,6 +187,7 @@ const anchorInput = z
     quote: z.string().min(1).max(MAX_QUOTE),
     prefix: z.string().max(64),
     suffix: z.string().max(64),
+    position: z.number().int().min(0).max(MAX_BODY).optional(),
   })
   .strict();
 
@@ -338,25 +339,27 @@ export function registerWiki(app: Hono<AppEnv>) {
         })
         .strict(),
     );
-    // How an agent changes the page is not a version: whoever may edit the page picks it.
     let current = row;
-    if (input.agentEdits && input.agentEdits !== row.agentEdits)
-      current = await patchPage(deps, row, { agentEdits: input.agentEdits }, unlockedFor(me$(me)));
-    if (!input.props && !input.altTitles && !input.tags) return c.json(await pageView(c, me, current.slug));
-    const props = input.props
-      ? writeProps((await propSchemaOf(deps.db, me.workspaceId)).defs, row.props, input.props)
-      : undefined;
-    const saved = await savePage(deps, {
-      row: current,
-      author: me$(me),
-      canBypassLock: isAdmin(me),
-      parentVersion: input.parentVersion,
-      props,
-      aliases: input.altTitles,
-      tags: input.tags,
-      note: "meta",
-    });
-    return c.json(await pageView(c, me, saved.slug));
+    if (input.props || input.altTitles || input.tags) {
+      const props = input.props
+        ? writeProps((await propSchemaOf(deps.db, me.workspaceId)).defs, row.props, input.props)
+        : undefined;
+      current = await savePage(deps, {
+        row: current,
+        author: me$(me),
+        canBypassLock: isAdmin(me),
+        parentVersion: input.parentVersion,
+        props,
+        aliases: input.altTitles,
+        tags: input.tags,
+        note: "meta",
+      });
+    }
+    // How an agent changes the page is not a version: whoever may edit the page picks it. It goes after the
+    // versioned fields, so a stale `parentVersion` (409) leaves the mode as it was.
+    if (input.agentEdits && input.agentEdits !== current.agentEdits)
+      current = await patchPage(deps, current, { agentEdits: input.agentEdits }, unlockedFor(me$(me)));
+    return c.json(await pageView(c, me, current.slug));
   });
 
   // The slug stays: addresses keep working. The [[links]] by the old title are rewritten in the pages that
@@ -408,6 +411,16 @@ export function registerWiki(app: Hono<AppEnv>) {
           parentVersion: p.version,
           body: plan.md,
           note: `link: "${row.title}" → "${input.title}"`,
+          // The audience is checked again on the locked linker against this page's access now: either may
+          // have changed since the plan, and a change of access is not a version.
+          inTx: async (tx, linker) => {
+            const [now] = await tx
+              .select({ access: knowledgePages.access })
+              .from(knowledgePages)
+              .where(eq(knowledgePages.id, row.id));
+            if (!now || !audienceWithin(linker.access, now.access))
+              throw new HttpError(409, "wiki.relink.audience", "The linking page's audience changed");
+          },
         });
         rewritten.push({ slug: p.slug, title: p.title });
       } catch (err) {

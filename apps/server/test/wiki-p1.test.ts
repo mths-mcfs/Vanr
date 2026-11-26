@@ -634,17 +634,100 @@ describe("anchored comments", () => {
     expect(locate("Nothing like it here.", anchor)).toBeNull();
   });
 
-  test("attack: the same words elsewhere, with none of the passage's context, don't take the comment", () => {
-    const initial = "Finance: 2 days.\n\nSupport takes (2 days)!";
-    const anchor = anchorAt(initial, initial.indexOf("2 days"), "2 days".length);
-    // Finance's line is deleted: Support's "(2 days)!" shares nothing around it, so the comment is an orphan.
-    expect(locate("New intro.\n\nSupport takes (2 days)!", anchor)).toBeNull();
-    // The passage moved down with its context: still found.
-    const moved = `New intro.\n\nSupport takes (2 days)!\n\n${"Finance: 2 days."}`;
-    expect(locate(moved, anchor)).toBe(moved.indexOf("Finance: 2 days") + "Finance: ".length);
-    // Only the text before it changed: what follows still places it.
-    const edited = "Accounting: 2 days.\n\nSupport takes (2 days)!";
-    expect(locate(edited, anchor)).toBe(edited.indexOf("2 days"));
+  {
+    const block = "abcdefghijklmnopqrstuvwxyz123456" + "2 days" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
+    const twins = `Finance\n${block}\n\nSupport\n${block}`;
+    const reordered = "New intro.\n\nSupport takes (2 days)!\n\nFinance: 2 days.";
+    const first = (t: string, q: string) => t.indexOf(q);
+    const last = (t: string, q: string) => t.lastIndexOf(q);
+    // [case, text the comment was made on, quote, which occurrence, the text now, where it must be (null: orphan)]
+    const cases: [string, string, string, typeof first, string, typeof first | null][] = [
+      [
+        "deleted; the words stay elsewhere with no context",
+        "Finance: 2 days.\n\nSupport takes (2 days)!",
+        "2 days",
+        first,
+        "New intro.\n\nSupport takes (2 days)!",
+        null,
+      ],
+      [
+        "deleted; the other one shares some wording",
+        "Finance deadline: 2 days.\n\nSupport deadline: 2 days!",
+        "2 days",
+        first,
+        "Support deadline: 2 days!",
+        null,
+      ],
+      ["moved, its short context partly edited", "A: OK!", "OK", first, "Intro.\n\nB: OK!\n\nEnd.", first],
+      ["moved with its short context", "A: OK!", "OK", first, "Intro.\n\nA: OK!\n\nEnd.", first],
+      [
+        "moved from the page's start",
+        "2 days for finance approvals.",
+        "2 days",
+        first,
+        "Intro.\n\n2 days for finance approvals.",
+        first,
+      ],
+      [
+        "moved from the page's end",
+        "Finance approvals take 2 days",
+        "2 days",
+        first,
+        "Intro.\n\nFinance approvals take 2 days\n\nEnd.",
+        first,
+      ],
+      ["a page that is only the quote", "OK", "OK", first, "Intro.\n\nOK", first],
+      [
+        "the quote itself edited, context intact",
+        "Finance approvals take 2 days in every region.",
+        "2 days",
+        first,
+        "Finance approvals take 3 days in every region.",
+        null,
+      ],
+      [
+        "only the text before it changed",
+        "Finance: 2 days.\n\nSupport takes (2 days)!",
+        "2 days",
+        first,
+        "Accounting: 2 days.\n\nSupport takes (2 days)!",
+        first,
+      ],
+      [
+        "blocks reordered, its context before it kept",
+        "Finance: 2 days.\n\nSupport takes (2 days)!",
+        "2 days",
+        first,
+        reordered,
+        last,
+      ],
+      ["two identical contexts, the comment on the second", twins, "2 days", last, twins, last],
+    ];
+    test.each(cases)("locating a passage: %s", (_case, before, quote, which, now, expected) => {
+      const anchor = anchorAt(before, which(before, quote), quote.length);
+      expect(locate(now, anchor)).toBe(expected ? expected(now, quote) : null);
+    });
+  }
+
+  test("a comment keeps where its passage was: the client's position when the quote is there, else the found one", async () => {
+    const { workspaceId, ana } = await team();
+    const block = "abcdefghijklmnopqrstuvwxyz123456" + "2 days" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
+    const body = `Finance\n${block}\n\nSupport\n${block}`;
+    const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Twins", body });
+    const second = body.lastIndexOf("2 days");
+    const { position: _, ...context } = anchorAt(body, second, "2 days".length);
+    const onSecond = await ana.api.wiki.createWikiPageComment(workspaceId, page.slug, {
+      body: "the second one",
+      anchor: { ...context, position: second },
+    });
+    const wrong = await ana.api.wiki.createWikiPageComment(workspaceId, page.slug, {
+      body: "a position that isn't the quote",
+      anchor: { ...context, position: 3 },
+    });
+    const { comments } = await ana.api.wiki.listWikiPageAnnotations(workspaceId, page.slug);
+    const positions = Object.fromEntries(comments.map((c) => [c.id, [c.anchor?.position, c.anchorState]]));
+    expect(positions[onSecond.id]).toEqual([second, "ok"]);
+    expect(positions[wrong.id]).toEqual([body.indexOf("2 days"), "ok"]);
   });
 
   test("attack: a short quote in a long page doesn't stall the read; special characters, MiBs and blocks", () => {
@@ -1066,6 +1149,34 @@ describe("index.md and the change log", () => {
     );
     expect(index.pages).toBe(2);
     expect(summaryLine("a".repeat(300))).toHaveLength(140);
+    // Two pages with one title: each line links by slug, so each opens its own page.
+    const twin = await ana.api.wiki.createWikiPage(workspaceId, {
+      title: "Database",
+      folder: "Old",
+      body: "x",
+    });
+    const lines = (await ana.api.wiki.getWikiIndex(workspaceId)).markdown
+      .split("\n")
+      .filter((l) => l.includes("Database"));
+    expect(lines).toEqual([
+      "- [[database|Database]] — Postgres with Drizzle and queues.",
+      `- [[${twin.slug}|Database]] — x`,
+    ]);
+  });
+
+  test("a meta change refused for a stale version leaves the agents' mode as it was", async () => {
+    const { workspaceId, ana } = await team();
+    const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Mode", body: "x" });
+    await ana.api.wiki.replaceWikiPage(workspaceId, page.slug, { body: "y", parentVersion: 1 });
+    const err = await apiError(
+      ana.api.wiki.updateWikiPageMeta(workspaceId, page.slug, {
+        parentVersion: 1,
+        tags: ["t"],
+        agentEdits: "propose",
+      }),
+    );
+    expect(err.status).toBe(409);
+    expect((await rowOf(workspaceId, page.slug)).agentEdits).toBe(page.agentEdits);
   });
 });
 
@@ -1226,9 +1337,13 @@ describe("the wiki check", () => {
       });
       // The stop waits for the check (the server's background work): the database is still open while the
       // check is held, and the check's write lands (a write after the close would reject the check).
-      const [stillOpen] = await own.deps.db.select({ n: count() }).from(schema.knowledgePages);
-      expect([stillOpen?.n, stopped]).toEqual([2, false]);
-      open();
+      try {
+        const [stillOpen] = await own.deps.db.select({ n: count() }).from(schema.knowledgePages);
+        expect([stillOpen?.n, stopped]).toEqual([2, false]);
+      } finally {
+        // The held check is let go even when the assertion failed, so the stop can end.
+        open();
+      }
       expect(await checking).toBe(true);
       await stopping;
       expect(stopped).toBe(true);
