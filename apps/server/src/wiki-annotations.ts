@@ -25,6 +25,7 @@ import {
   memberOnly,
   pageLock,
   rejectNul,
+  requireReader,
   savePage,
   type WikiRow,
   writeTx,
@@ -46,6 +47,12 @@ export const MAX_HUNKS = 20;
 export const MAX_COMMENTS = 500;
 /** Occurrences of the quote checked one by one when the whole context doesn't appear. */
 export const LOCATE_CANDIDATES = 500;
+/**
+ * Characters of the context around an occurrence (before and after, added) that it must share with the
+ * anchor to take the comment when the whole context isn't in the text. The same words elsewhere, among other
+ * text, are not the passage: with less, the comment is an orphan.
+ */
+export const MIN_CONTEXT = 8;
 
 /** The anchor of a passage that starts at `at` in the text. */
 export function anchorAt(text: string, at: number, length: number): Anchor {
@@ -72,7 +79,8 @@ const headMatch = (text: string, start: number, suffix: string) => {
  * Where the anchor is in the text. First the whole context (before + quote + after), in one search; if the
  * text around it changed, the occurrence of the quote whose before and after match best, looking at most at
  * `LOCATE_CANDIDATES` of them (a short quote in a long page repeats thousands of times, and this runs on
- * every read of the comments). Without the quote in the text, `null` (an orphan comment). The search is
+ * every read of the comments), if it shares at least `MIN_CONTEXT` characters of context. Otherwise, or
+ * without the quote in the text, `null` (an orphan comment). The search is
  * literal (`indexOf`): the quote's characters are never a pattern.
  */
 export function locate(
@@ -93,7 +101,8 @@ export function locate(
     if (stats) stats.checked++;
     at = text.indexOf(anchor.quote, at + 1);
   }
-  return best?.at ?? null;
+  const need = Math.min(MIN_CONTEXT, anchor.prefix.length + anchor.suffix.length);
+  return best && best.score >= need ? best.at : null;
 }
 
 function toComment(row: AnnotationRow, body: string): WikiComment {
@@ -247,9 +256,17 @@ export async function createComment(
         .set({ status: "open", handledBy: null, handledAt: null, updatedAt: at })
         .where(eq(pageAnnotations.id, root.id));
     await logChange(tx, { page: locked, action: "comment", author, at });
-    return created;
+    return { created, body: locked.body };
   });
-  return toComment(row, page.body);
+  return toComment(row.created, row.body);
+}
+
+/** The comment's page, locked in `tx`, outside the trash and still read by `me` (404 otherwise). */
+async function readableLocked(tx: Tx, page: WikiRow, me: WorkspaceMember): Promise<WikiRow> {
+  const locked = await pageLock.row(tx, page.id);
+  if (!locked || locked.deletedAt) throw notFound("Page not found");
+  await requireReader(tx, locked, { type: "person", id: me.userId });
+  return locked;
 }
 
 /** Resolves (or opens again) a thread: who started it or who can edit the page. */
@@ -264,26 +281,32 @@ export async function resolveComment(
   const mine = row.author.type === "person" && row.author.id === me.userId;
   if (!mine && !canEditPage(page, me)) throw forbidden("Only who commented or an editor can resolve");
   const at = deps.now();
-  const [saved] = await deps.db
-    .update(pageAnnotations)
-    .set(
-      resolved
-        ? { status: "resolved", handledBy: { type: "person", id: me.userId }, handledAt: at, updatedAt: at }
-        : { status: "open", handledBy: null, handledAt: null, updatedAt: at },
-    )
-    .where(eq(pageAnnotations.id, row.id))
-    .returning();
+  // The read is checked again on the locked page: a restriction that landed after the check above wins.
+  const { saved, body } = await writeTx(deps.db, async (tx) => {
+    const locked = await readableLocked(tx, page, me);
+    const [saved] = await tx
+      .update(pageAnnotations)
+      .set(
+        resolved
+          ? { status: "resolved", handledBy: { type: "person", id: me.userId }, handledAt: at, updatedAt: at }
+          : { status: "open", handledBy: null, handledAt: null, updatedAt: at },
+      )
+      .where(eq(pageAnnotations.id, row.id))
+      .returning();
+    return { saved, body: locked.body };
+  });
   if (!saved) throw notFound("Comment not found");
-  return toComment(saved, page.body);
+  return toComment(saved, body);
 }
 
 /** Deletes a comment: who wrote it or an admin. Deleting the thread's first comment takes its replies along. */
 export async function deleteComment(deps: AppDeps, me: WorkspaceMember, id: string): Promise<void> {
-  const { row } = await annotationFor(deps.db, { workspaceId: me.workspaceId, userId: me.userId }, id);
+  const { row, page } = await annotationFor(deps.db, { workspaceId: me.workspaceId, userId: me.userId }, id);
   if (row.kind !== "comment") throw notFound("Comment not found");
   const mine = row.author.type === "person" && row.author.id === me.userId;
   if (!mine && !can(me.role, "configure")) throw forbidden("Only who wrote it or an admin can delete it");
-  await deps.db.transaction(async (tx) => {
+  await writeTx(deps.db, async (tx) => {
+    await readableLocked(tx, page, me);
     await tx.delete(pageAnnotations).where(eq(pageAnnotations.parentId, row.id));
     await tx.delete(pageAnnotations).where(eq(pageAnnotations.id, row.id));
   });

@@ -28,6 +28,7 @@ import {
   MAX_BODY,
   pageBySlug,
   pageLock,
+  requireReader,
   requireWriter,
   type SaveOrigin,
   savePage,
@@ -1264,6 +1265,7 @@ export function createWikiCollab(
               const reset = { ...s, dirty: false, editors: [], conflictVersion: null };
               await persist(reset, copy, async (tx, page) => {
                 await requireWriter(tx, page.workspaceId, by);
+                await requireReader(tx, page, by);
                 if (page.locked && !(canBypassLock && (await bypassesLock(tx, page.workspaceId, by))))
                   throw new HttpError(403, "wiki.page_locked", "This page is locked");
                 m.replaceYContent(copy, page.body, "wiki-server");

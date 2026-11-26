@@ -19,6 +19,7 @@ import { MAX_LINKS } from "../src/wiki-links";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
 import { memberOf, type Person, seedChannel, seedWorkspace } from "./seed";
 import { apiError, wikiApi } from "./wiki-api";
+import { connect, until } from "./wiki-live";
 
 let server: RunningServer;
 beforeAll(async () => {
@@ -75,7 +76,10 @@ describe("a request across the restriction", () => {
     "a write or read whose check passed before the restriction answers 404, and nothing written after leaks",
     async () => {
       const { workspaceId, ana, beto } = await team();
-      const calls: [string, (slug: string, proposalId: string) => Promise<unknown>][] = [
+      const calls: [
+        string,
+        (slug: string, ids: { proposal: string; comment: string }) => Promise<unknown>,
+      ][] = [
         ["pin", (slug) => beto.api.wiki.pinWikiPage(workspaceId, slug, true)],
         [
           "edit",
@@ -90,9 +94,12 @@ describe("a request across the restriction", () => {
         ["comment", (slug) => beto.api.wiki.createWikiPageComment(workspaceId, slug, { body: "hi" })],
         [
           "decide",
-          (_slug, id) =>
-            beto.api.wiki.decideWikiAnnotation(workspaceId, id, [{ hunkId: "h1", accept: true }]),
+          (_slug, ids) =>
+            beto.api.wiki.decideWikiAnnotation(workspaceId, ids.proposal, [{ hunkId: "h1", accept: true }]),
         ],
+        ["resolve", (_slug, ids) => beto.api.wiki.setWikiAnnotationResolution(workspaceId, ids.comment)],
+        ["uncomment", (_slug, ids) => beto.api.wiki.deleteWikiAnnotation(workspaceId, ids.comment)],
+        ["discard draft", (slug) => beto.api.wiki.deleteWikiPageDraft(workspaceId, slug)],
         ["trash", (slug) => beto.api.wiki.deleteWikiPage(workspaceId, slug)],
         ["read", (slug) => beto.api.wiki.getWikiPage(workspaceId, slug)],
         ["version", (slug) => beto.api.wiki.getWikiPageDiff(workspaceId, slug)],
@@ -114,9 +121,10 @@ describe("a request across the restriction", () => {
           edits: [{ oldStr: "public", newStr: "public, proposed" }],
           note: "",
         });
+        const comment = await beto.api.wiki.createWikiPageComment(workspaceId, page.slug, { body: "mine" });
         const hold = holdNextTransaction();
         try {
-          const pending = status(call(page.slug, proposal.id));
+          const pending = status(call(page.slug, { proposal: proposal.id, comment: comment.id }));
           const first = await Promise.race([hold.begun.then(() => "held"), pending.then(() => "answered")]);
           expect({ what, first }).toEqual({ what, first: "held" });
           // Meanwhile an admin restricts it and writes a secret.
@@ -130,6 +138,11 @@ describe("a request across the restriction", () => {
           hold.restore();
         }
         const after = await rowOf(workspaceId, page.slug);
+        const [kept] = await db()
+          .select({ status: schema.pageAnnotations.status })
+          .from(schema.pageAnnotations)
+          .where(eq(schema.pageAnnotations.id, comment.id));
+        expect({ what, comment: kept?.status }).toEqual({ what, comment: "open" });
         // Beto's write never landed on the page he lost.
         expect({
           what,
@@ -148,6 +161,40 @@ describe("a request across the restriction", () => {
       expect(outcomes).toEqual(calls.map(([what]) => `${what} 404`));
     },
     SERVER_TEST_MS * 2,
+  );
+
+  test(
+    "discarding the live draft checks the read in its own transaction, past the route's check",
+    async () => {
+      const { workspaceId, ana, beto } = await team();
+      const page = await ana.api.wiki.createWikiPage(workspaceId, {
+        title: "Race discard",
+        body: "Original.\n",
+      });
+      const a = connect(server, ana.browser, workspaceId, `wiki/${workspaceId}/${page.slug}`);
+      try {
+        await a.synced;
+        await a.edit(() => "Original.\n\nAna's unsaved draft.\n");
+        await until(() => !a.provider.hasUnsyncedChanges);
+        // The route read the page before the restriction; the discard runs after it.
+        const row = await rowOf(workspaceId, page.slug);
+        await db()
+          .update(schema.knowledgePages)
+          .set({ access: { kind: "private", principals: [`user:${ana.user.id}`] } })
+          .where(eq(schema.knowledgePages.id, row.id));
+        const status = await server.deps.wikiLive
+          .discard(row, { type: "person", id: beto.user.id }, false)
+          .then(
+            () => 200,
+            (e: { status?: number }) => e.status ?? 0,
+          );
+        expect(status).toBe(404);
+        expect(await a.md()).toContain("Ana's unsaved draft.");
+      } finally {
+        a.close();
+      }
+    },
+    SERVER_TEST_MS,
   );
 });
 

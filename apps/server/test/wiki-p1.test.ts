@@ -634,6 +634,19 @@ describe("anchored comments", () => {
     expect(locate("Nothing like it here.", anchor)).toBeNull();
   });
 
+  test("attack: the same words elsewhere, with none of the passage's context, don't take the comment", () => {
+    const initial = "Finance: 2 days.\n\nSupport takes (2 days)!";
+    const anchor = anchorAt(initial, initial.indexOf("2 days"), "2 days".length);
+    // Finance's line is deleted: Support's "(2 days)!" shares nothing around it, so the comment is an orphan.
+    expect(locate("New intro.\n\nSupport takes (2 days)!", anchor)).toBeNull();
+    // The passage moved down with its context: still found.
+    const moved = `New intro.\n\nSupport takes (2 days)!\n\n${"Finance: 2 days."}`;
+    expect(locate(moved, anchor)).toBe(moved.indexOf("Finance: 2 days") + "Finance: ".length);
+    // Only the text before it changed: what follows still places it.
+    const edited = "Accounting: 2 days.\n\nSupport takes (2 days)!";
+    expect(locate(edited, anchor)).toBe(edited.indexOf("2 days"));
+  });
+
   test("attack: a short quote in a long page doesn't stall the read; special characters, MiBs and blocks", () => {
     const text = "e ".repeat(100_000);
     const hostile = { quote: "e", prefix: `x${" e".repeat(31)} `, suffix: ` ${"e ".repeat(31)}y` };
