@@ -45,6 +45,7 @@ import { pgCode } from "../db-errors";
 import { conflict, HttpError, notFound } from "../http";
 import { log } from "../logger";
 import { reindexRows, unindexMany } from "../search-index";
+import { readablePagesSql, viewerOfActor } from "../wiki-access";
 import {
   type DatabaseRow,
   MAX_BODY,
@@ -221,12 +222,13 @@ export async function createDatabase(deps: AppDeps, input: CreateDatabaseInput) 
     const [page] = await db
       .select({ id: knowledgePages.id })
       .from(knowledgePages)
-      // A page in the trash gets no new base: it leaves the lists as if it didn't exist.
+      // A page in the trash, or restricted to others, gets no new base: it answers as if it didn't exist.
       .where(
         and(
           eq(knowledgePages.slug, input.pageSlug),
           eq(knowledgePages.workspaceId, input.workspaceId),
           isNull(knowledgePages.deletedAt),
+          readablePagesSql(viewerOfActor(input.workspaceId, input.actor)),
         ),
       );
     if (!page) throw notFound("Page not found");

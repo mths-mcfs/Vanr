@@ -4,7 +4,7 @@
 // answers 404, like one that doesn't exist.
 //
 // An agent reading for a person (a run, a DM): both must read it (the intersection), as in the search.
-import type { WikiAccessInput, WikiAccess as WikiAccessView } from "@vanr/contract";
+import type { ActorRef, WikiAccessInput, WikiAccess as WikiAccessView } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import type { ChunkScope } from "@vanr/engine/search";
 import { and, eq, inArray, isNull, type SQL, sql } from "drizzle-orm";
@@ -28,6 +28,10 @@ export interface WikiViewer {
   userId?: string;
   agentId?: string;
 }
+
+/** The viewer a write's actor reads as: the person, or the agent alone. */
+export const viewerOfActor = (workspaceId: string, actor: ActorRef): WikiViewer =>
+  actor.type === "person" ? { workspaceId, userId: actor.id } : { workspaceId, agentId: actor.id };
 
 export const userKey = (id: string) => `user:${id}`;
 export const agentKey = (id: string) => `agent:${id}`;

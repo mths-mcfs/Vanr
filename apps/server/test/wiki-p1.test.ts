@@ -29,6 +29,7 @@ import {
 } from "../src/wiki-annotations";
 import { summaryLine } from "../src/wiki-changes";
 import { CHECK_NOW_GAP_MS, checkWorkspace, parseCheck } from "../src/wiki-checks";
+import { apiError as baseError, basesApi } from "./bases-api";
 import { Browser, SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
 import { memberOf, type Person, seedChannel, seedDm, seedWorkspace } from "./seed";
 import { apiError, wikiApi } from "./wiki-api";
@@ -172,6 +173,35 @@ describe("per-page access", () => {
         slug,
       ]);
       expect((await hits(beto)).length).toBeGreaterThan(0);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "attack: a database on a restricted page doesn't show Beto the page, nor lets him put one there",
+    async () => {
+      const { workspaceId, ana, beto } = await team();
+      const secret = await ana.api.wiki.createWikiPage(workspaceId, { title: "Acquisition", body: "x" });
+      const anaBases = basesApi(ana.browser);
+      const betoBases = basesApi(beto.browser);
+      const inline = await anaBases.create(workspaceId, { title: "Targets", pageSlug: secret.slug });
+      const { slug } = await ana.api.wiki.setWikiPageAccess(workspaceId, secret.slug, restrictPrivate);
+
+      // The database stays the workspace's; only the page it sits on is hidden, like a page that doesn't exist.
+      const pageOf = async (api: typeof anaBases) =>
+        (await api.list(workspaceId)).bases.find((b) => b.id === inline.id)?.page;
+      expect(await pageOf(betoBases)).toBeNull();
+      expect((await betoBases.get(workspaceId, inline.id)).page).toBeNull();
+      expect(await pageOf(anaBases)).toEqual({ slug, title: "Acquisition" });
+      expect((await anaBases.get(workspaceId, inline.id)).page).toEqual({ slug, title: "Acquisition" });
+
+      // Attaching a database by the restricted slug answers like a missing page, and writes nothing.
+      const before = (await betoBases.list(workspaceId)).bases.length;
+      expect(
+        (await baseError(betoBases.create(workspaceId, { title: "Probe", pageSlug: slug }))).status,
+      ).toBe(404);
+      expect((await betoBases.list(workspaceId)).bases.length).toBe(before);
+      expect((await anaBases.create(workspaceId, { title: "Mine", pageSlug: slug })).page?.slug).toBe(slug);
     },
     SERVER_TEST_MS,
   );
