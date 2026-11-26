@@ -361,16 +361,17 @@ export async function shrinkGroup(
   deps: AppDeps,
   workspaceId: string,
   groupKey: string,
-  remaining: { count: number; actors: Actor[] },
+  remaining: { count: number; actors: Actor[]; emojis: string[] },
 ) {
   const at = deps.now();
   const rows = await deps.db
     .update(notifications)
-    .set(
-      remaining.count === 0
+    .set({
+      latest: sql`jsonb_set(${notifications.latest}, '{emojis}', ${JSON.stringify(remaining.emojis)}::jsonb)`,
+      ...(remaining.count === 0
         ? { actors: [], count: 0, doneAt: at, waiting: false, updatedAt: at }
-        : { actors: remaining.actors.slice(0, MAX_ACTORS), count: remaining.count, updatedAt: at },
-    )
+        : { actors: remaining.actors.slice(0, MAX_ACTORS), count: remaining.count, updatedAt: at }),
+    })
     .where(
       and(
         eq(notifications.workspaceId, workspaceId),

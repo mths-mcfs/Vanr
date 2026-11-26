@@ -1,0 +1,347 @@
+{
+  "extensions": [],
+  "tables": ["db_calc_dirty", "db_cell_jobs"],
+  "columns": [
+    {
+      "table": "db_calc_dirty",
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "notNull": true,
+      "default": "now()",
+      "collation": null
+    },
+    {
+      "table": "db_calc_dirty",
+      "name": "id",
+      "type": "text",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "db_calc_dirty",
+      "name": "row_ids",
+      "type": "jsonb",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "db_calc_dirty",
+      "name": "table_id",
+      "type": "text",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "db_calc_dirty",
+      "name": "workspace_id",
+      "type": "text",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "agent_id",
+      "type": "text",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "attempts",
+      "type": "integer",
+      "notNull": true,
+      "default": "0",
+      "collation": null
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "cost_micros",
+      "type": "integer",
+      "notNull": true,
+      "default": "0",
+      "collation": null
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "created_at",
+      "type": "timestamp with time zone",
+      "notNull": true,
+      "default": "now()",
+      "collation": null
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "error",
+      "type": "text",
+      "notNull": false,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "id",
+      "type": "text",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "prop_id",
+      "type": "text",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "requester",
+      "type": "jsonb",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "result",
+      "type": "jsonb",
+      "notNull": false,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "row_id",
+      "type": "text",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "row_version",
+      "type": "integer",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "status",
+      "type": "text",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "table_id",
+      "type": "text",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "updated_at",
+      "type": "timestamp with time zone",
+      "notNull": true,
+      "default": "now()",
+      "collation": null
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "workspace_id",
+      "type": "text",
+      "notNull": true,
+      "default": null,
+      "collation": null
+    }
+  ],
+  "constraints": [
+    {
+      "table": "db_calc_dirty",
+      "name": "db_calc_dirty_created_at_not_null",
+      "type": "n",
+      "definition": "NOT NULL created_at"
+    },
+    {
+      "table": "db_calc_dirty",
+      "name": "db_calc_dirty_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL id"
+    },
+    {
+      "table": "db_calc_dirty",
+      "name": "db_calc_dirty_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "table": "db_calc_dirty",
+      "name": "db_calc_dirty_row_ids_not_null",
+      "type": "n",
+      "definition": "NOT NULL row_ids"
+    },
+    {
+      "table": "db_calc_dirty",
+      "name": "db_calc_dirty_table_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL table_id"
+    },
+    {
+      "table": "db_calc_dirty",
+      "name": "db_calc_dirty_workspace_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL workspace_id"
+    },
+    {
+      "table": "db_calc_dirty",
+      "name": "db_calc_dirty_workspace_id_workspaces_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "db_cell_jobs_agent_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL agent_id"
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "db_cell_jobs_attempts_not_null",
+      "type": "n",
+      "definition": "NOT NULL attempts"
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "db_cell_jobs_cost_micros_not_null",
+      "type": "n",
+      "definition": "NOT NULL cost_micros"
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "db_cell_jobs_created_at_not_null",
+      "type": "n",
+      "definition": "NOT NULL created_at"
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "db_cell_jobs_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL id"
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "db_cell_jobs_pkey",
+      "type": "p",
+      "definition": "PRIMARY KEY (id)"
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "db_cell_jobs_prop_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL prop_id"
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "db_cell_jobs_requester_not_null",
+      "type": "n",
+      "definition": "NOT NULL requester"
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "db_cell_jobs_row_id_db_rows_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (row_id) REFERENCES db_rows(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "db_cell_jobs_row_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL row_id"
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "db_cell_jobs_row_version_not_null",
+      "type": "n",
+      "definition": "NOT NULL row_version"
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "db_cell_jobs_status_not_null",
+      "type": "n",
+      "definition": "NOT NULL status"
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "db_cell_jobs_table_id_db_tables_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (table_id) REFERENCES db_tables(id) ON DELETE CASCADE"
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "db_cell_jobs_table_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL table_id"
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "db_cell_jobs_updated_at_not_null",
+      "type": "n",
+      "definition": "NOT NULL updated_at"
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "db_cell_jobs_workspace_id_not_null",
+      "type": "n",
+      "definition": "NOT NULL workspace_id"
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "db_cell_jobs_workspace_id_workspaces_id_fk",
+      "type": "f",
+      "definition": "FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"
+    }
+  ],
+  "indexes": [
+    {
+      "table": "db_calc_dirty",
+      "name": "db_calc_dirty_pkey",
+      "definition": "CREATE UNIQUE INDEX db_calc_dirty_pkey ON public.db_calc_dirty USING btree (id)"
+    },
+    {
+      "table": "db_calc_dirty",
+      "name": "db_calc_dirty_table_idx",
+      "definition": "CREATE INDEX db_calc_dirty_table_idx ON public.db_calc_dirty USING btree (table_id, created_at)"
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "db_cell_jobs_live_uq",
+      "definition": "CREATE UNIQUE INDEX db_cell_jobs_live_uq ON public.db_cell_jobs USING btree (row_id, prop_id) WHERE (status = ANY (ARRAY['queued'::text, 'running'::text, 'review'::text]))"
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "db_cell_jobs_pkey",
+      "definition": "CREATE UNIQUE INDEX db_cell_jobs_pkey ON public.db_cell_jobs USING btree (id)"
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "db_cell_jobs_queue_idx",
+      "definition": "CREATE INDEX db_cell_jobs_queue_idx ON public.db_cell_jobs USING btree (status, created_at)"
+    },
+    {
+      "table": "db_cell_jobs",
+      "name": "db_cell_jobs_table_idx",
+      "definition": "CREATE INDEX db_cell_jobs_table_idx ON public.db_cell_jobs USING btree (table_id, prop_id, created_at)"
+    }
+  ],
+  "sequences": [],
+  "triggers": [],
+  "functions": []
+}

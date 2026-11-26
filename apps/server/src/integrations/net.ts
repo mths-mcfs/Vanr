@@ -55,17 +55,17 @@ export async function assertReachableHost(host: string, allowPrivate: boolean, c
 
 /**
  * URL that comes from outside (from the user or from a remote server: OAuth metadata, client registration,
- * `Location`): http(s) only, https required without the local network allowed, no user and password.
- * Doesn't resolve the name (see `checkServerUrl`).
+ * `Location`): http(s) only, https required unless plain text is allowed (by default, with the local network
+ * allowed), no user and password. Doesn't resolve the name (see `checkServerUrl`).
  */
-export function parseServerUrl(raw: string, allowPrivate: boolean): URL {
+export function parseServerUrl(raw: string, allowPrivate: boolean, allowPlaintext = allowPrivate): URL {
   let url: URL;
   try {
     url = new URL(raw.trim());
   } catch {
     throw new HttpError(400, "invalid_url", "That is not a valid address");
   }
-  if (url.protocol !== "https:" && !(allowPrivate && url.protocol === "http:"))
+  if (url.protocol !== "https:" && !(allowPlaintext && url.protocol === "http:"))
     throw new HttpError(400, "invalid_url", "Use an https:// address");
   if (url.username || url.password)
     throw new HttpError(400, "invalid_url", "Remove the credentials from the address");
@@ -78,13 +78,17 @@ export async function checkServerUrl(
   raw: string,
   allowPrivate: boolean,
   resolve: Resolver = systemResolver,
+  allowPlaintext = allowPrivate,
 ): Promise<URL> {
-  const url = parseServerUrl(raw, allowPrivate);
+  const url = parseServerUrl(raw, allowPrivate, allowPlaintext);
   await resolveHost(url.hostname, allowPrivate, "blocked_host", resolve);
   return url;
 }
 
 const MAX_REDIRECTS = 5;
+
+/** The fetch a guard wraps, kept on the guard so that guarding it again replaces the guard. */
+const UNGUARDED = Symbol("unguarded");
 
 /** The request goes to the IP already checked; `Host` and the TLS SNI keep the name. */
 function pinned(url: URL, ip: string, init: RequestInit): [string, RequestInit] {
@@ -101,14 +105,21 @@ function pinned(url: URL, ip: string, init: RequestInit): [string, RequestInit] 
 /**
  * fetch for outside servers. Every address goes through the `checkServerUrl` rule: the request and also each
  * redirect, followed here by hand. Without this, a remote server points ours at the internal network through
- * what it returns (OAuth metadata, client registration, `Location`). The `Authorization` doesn't follow to
- * another origin. Without the local network allowed, every hop connects to the checked IP.
+ * what it returns (OAuth metadata, client registration, `Location`). `Authorization` and `Cookie` don't follow
+ * to another origin. Without the local network allowed, every hop connects to the checked IP. A caller that
+ * asks for `redirect: "manual"` gets the first answer, redirect included, and nothing is followed.
+ *
+ * Guarding a guarded fetch wraps the fetch underneath with the new rule: two layers would pin the first hop
+ * to its IP, and the inner one would then see a redirect back to the name as another origin and drop the
+ * credentials.
  */
 export function guardedFetch(
   fetchFn: typeof fetch,
   allowPrivate: boolean,
   resolve: Resolver = systemResolver,
+  allowPlaintext = allowPrivate,
 ): typeof fetch {
+  const raw: typeof fetch = (fetchFn as { [UNGUARDED]?: typeof fetch })[UNGUARDED] ?? fetchFn;
   const guarded = async (input: string | URL | Request, init: RequestInit = {}): Promise<Response> => {
     let url = input instanceof Request ? input.url : String(input);
     let req: RequestInit =
@@ -116,12 +127,12 @@ export function guardedFetch(
         ? { method: input.method, headers: input.headers, body: input.body, ...init }
         : init;
     for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-      const checked = parseServerUrl(url, allowPrivate);
+      const checked = parseServerUrl(url, allowPrivate, allowPlaintext);
       const ip = await resolveHost(checked.hostname, allowPrivate, "blocked_host", resolve);
       const [target, sent] = pinned(checked, ip, { ...req, redirect: "manual" });
-      const res = await fetchFn(target, sent);
+      const res = await raw(target, sent);
       const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
-      if (!location) return res;
+      if (!location || init.redirect === "manual") return res;
       const next = new URL(location, checked);
       const method = (req.method ?? "GET").toUpperCase();
       // As fetch does: 303, and 301/302 coming from a POST, become a GET without a body.
@@ -130,11 +141,47 @@ export function guardedFetch(
       if (next.origin !== checked.origin) {
         const headers = new Headers(req.headers);
         headers.delete("authorization");
+        headers.delete("cookie");
         req = { ...req, headers };
       }
       url = next.toString();
     }
     throw new HttpError(400, "unreachable", "Too many redirects");
   };
-  return Object.assign(guarded, { preconnect: () => {} }) as typeof fetch;
+  return Object.assign(guarded, { preconnect: () => {}, [UNGUARDED]: raw }) as typeof fetch;
+}
+
+/**
+ * Where an integration may connect: the installation's two switches. `allowPrivate`: the local network
+ * (`ALLOW_PRIVATE_NETWORKS`); `allowPlaintext`: a connection without TLS (`ALLOW_PLAINTEXT_INTEGRATIONS`, off
+ * by default in production). `resolve` replaces DNS in the tests.
+ */
+export interface NetPolicy {
+  allowPrivate: boolean;
+  allowPlaintext: boolean;
+  resolve?: Resolver;
+}
+
+/** The installation's network rule for the integrations (config `integrations`). */
+export const netPolicy = (integrations: {
+  allowPrivateNetworks: boolean;
+  allowPlaintext: boolean;
+}): NetPolicy => ({
+  allowPrivate: integrations.allowPrivateNetworks,
+  allowPlaintext: integrations.allowPlaintext,
+});
+
+/** 400 `tls_required` for a connection without TLS that the installation doesn't allow. */
+export function assertTls(secure: boolean, policy: NetPolicy) {
+  if (!secure && !policy.allowPlaintext)
+    throw new HttpError(400, "tls_required", "This installation only connects to servers over TLS");
+}
+
+/**
+ * The address a socket integration (IMAP, SMTP) connects to: the TLS rule, then `resolveHost` (the name is
+ * resolved once and the socket goes to that IP; `host` stays the TLS name).
+ */
+export async function socketAddress(host: string, secure: boolean, policy: NetPolicy): Promise<string> {
+  assertTls(secure, policy);
+  return resolveHost(host, policy.allowPrivate, "blocked_host", policy.resolve ?? systemResolver);
 }

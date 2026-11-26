@@ -99,6 +99,83 @@ const chunk = (over: Partial<ChunkInput> & Pick<ChunkInput, "text">): ChunkInput
 });
 
 describe("search in SQL: beyond the contract", () => {
+  test.each(["channel", "workspace"])(
+    "revoking %s access during a search hides its content",
+    async (kind) => {
+      const db = await pglite();
+      const changing = {
+        publicChannels: new Set(["pub"]),
+        members: new Map([["pub", new Set<string>()]]),
+        workspaceMembers: new Set(["user:u2"]),
+      } satisfies AccessWorld;
+      const access = worldAccess(changing);
+      const captured = Promise.withResolvers<void>();
+      const resume = Promise.withResolvers<void>();
+      let reads = 0;
+      const index = new PgSearchIndex(db, {
+        access: {
+          ...access,
+          async readable(workspaceId, principal) {
+            const channels = await access.readable(workspaceId, principal);
+            if (++reads === 1) {
+              captured.resolve();
+              await resume.promise;
+            }
+            return channels;
+          },
+        },
+      });
+      await index.upsert({ kind: "wiki", id: "secret" }, [chunk({ text: "orçamento confidencial" })]);
+      const pending = index.search({ workspaceId: "o", userId: "u2" }, "orcamento", { withText: true });
+      await captured.promise;
+      if (kind === "channel") {
+        changing.publicChannels.delete("pub");
+        await index.channelVisibility("pub", false);
+      } else changing.workspaceMembers.delete("user:u2");
+      resume.resolve();
+      expect(await pending).toEqual([]);
+    },
+  );
+
+  test.each(["support@example.com", "https://example.com/path", "version 1.2.3"])(
+    "the body is searchable with the same tokenization as the query: %s",
+    async (text) => {
+      const index = new PgSearchIndex(await pglite(), { access: worldAccess(world) });
+      await index.upsert({ kind: "wiki", id: "tokens" }, [chunk({ text })]);
+      const viewer = { workspaceId: "o", userId: "u1" };
+      expect((await index.search(viewer, text)).map((h) => h.source.id)).toEqual(["tokens"]);
+    },
+  );
+
+  test("phrases do not join dictionary copies, including exclusions", async () => {
+    const index = new PgSearchIndex(await pglite(), { access: worldAccess(world) });
+    const source: SourceRef = { kind: "wiki", id: "positions" };
+    await index.upsert(source, [chunk({ text: "hotel eco" })]);
+    const viewer = { workspaceId: "o", userId: "u1" };
+    const ids = async (query: string) => (await index.search(viewer, query)).map((h) => h.source.id);
+    expect(await ids('"hotel eco"')).toEqual(["positions"]);
+    expect(await ids('"eco hotel"')).toEqual([]);
+    expect(await ids('hotel -"eco hotel"')).toEqual(["positions"]);
+  });
+
+  test("excluding a phrase keeps its stop words", async () => {
+    const index = new PgSearchIndex(await pglite(), { access: worldAccess(world) });
+    await index.upsert({ kind: "wiki", id: "stopwords" }, [chunk({ text: "março aprovado" })]);
+    const viewer = { workspaceId: "o", userId: "u1" };
+    expect((await index.search(viewer, 'aprovado -"de marco"')).map((h) => h.source.id)).toEqual([
+      "stopwords",
+    ]);
+    expect(await index.search(viewer, 'aprovado -"marco aprovado"')).toEqual([]);
+  });
+
+  test("a similar title cannot supply a reversed phrase", async () => {
+    const index = new PgSearchIndex(await pglite(), { access: worldAccess(world) });
+    await index.upsert({ kind: "wiki", id: "title" }, [chunk({ title: "Orçamento aprovado", text: "Alfa" })]);
+    const viewer = { workspaceId: "o", userId: "u1" };
+    expect((await index.search(viewer, '"orcamento aprovado"')).map((h) => h.source.id)).toEqual(["title"]);
+    expect(await index.search(viewer, '"aprovado orcamento"')).toEqual([]);
+  });
+
   test("Portuguese stemming, accents, quotes and exclusion", async () => {
     const index = new PgSearchIndex(await pglite(), { access: worldAccess(world) });
     await index.upsert({ kind: "wiki", id: "w1" }, [
@@ -221,6 +298,111 @@ describe("search in SQL: beyond the contract", () => {
 });
 
 describe.skipIf(!url)("search on a real Postgres", () => {
+  test("concurrent replacements of an existing source stay complete", async () => {
+    const db = await realPostgres();
+    const index = new PgSearchIndex(db, { access: worldAccess(world) });
+    const source: SourceRef = { kind: "wiki", id: "concurrent" };
+    const viewer = { workspaceId: "o", userId: "u1" };
+    const version = (text: string) => [chunk({ text }), chunk({ text, ordinal: 1 })];
+    await index.upsert(source, version("versao inicial"));
+    // Warm both connections so startup does not serialize the replacements.
+    await Promise.all([db.execute(sql`select 1`), db.execute(sql`select 1`)]);
+    const results = await Promise.allSettled([
+      index.upsert(source, version("versao alfa")),
+      index.upsert(source, version("versao beta")),
+    ]);
+    expect(results.map((r) => r.status)).toEqual(["fulfilled", "fulfilled"]);
+    const hits = await index.search(viewer, "versao", { withText: true });
+    expect(hits.map((h) => h.ordinal).sort()).toEqual([0, 1]);
+    expect(new Set(hits.map((h) => h.text)).size).toBe(1);
+  });
+
+  test("the vector leg honors explicit phrases with all and any matching", async () => {
+    const index = new PgSearchIndex(await realPostgres(), {
+      access: worldAccess(world),
+      embedder: fakeEmbedder(),
+    });
+    await index.upsert({ kind: "wiki", id: "vector-phrase" }, [chunk({ text: "arquivo de receitas" })]);
+    expect(await index.embedPending()).toBe(1);
+    const viewer = { workspaceId: "o", userId: "u1" };
+    expect(await index.search(viewer, '"frasenula frasenula"')).toEqual([]);
+    expect(
+      (await index.search(viewer, 'arquivo "frasenula frasenula"', { match: "any" })).map((h) => h.source.id),
+    ).toEqual(["vector-phrase"]);
+  });
+
+  test.each([false, true])(
+    "the queue revalidates privacy between workspace calls (stale upsert: %s)",
+    async (staleUpsert) => {
+      const db = await realPostgres();
+      const channels = new Set(["first", "second"]);
+      const access = worldAccess({
+        publicChannels: channels,
+        members: new Map(),
+        workspaceMembers: new Set(),
+      });
+      const started = Promise.withResolvers<void>();
+      const resume = Promise.withResolvers<void>();
+      const checked = Promise.withResolvers<void>();
+      const resumeUpsert = Promise.withResolvers<void>();
+      let holdEligibility = false;
+      const deliveries: string[][] = [];
+      const fake = fakeEmbedder();
+      const index = new PgSearchIndex(db, {
+        access: {
+          ...access,
+          async isPublicChannel(channelId) {
+            const answer = await access.isPublicChannel(channelId);
+            if (holdEligibility) {
+              holdEligibility = false;
+              checked.resolve();
+              await resumeUpsert.promise;
+            }
+            return answer;
+          },
+        },
+        embedder: {
+          model: fake.model,
+          async embed(texts, kind) {
+            deliveries.push([...texts]);
+            if (deliveries.length === 1) {
+              started.resolve();
+              await resume.promise;
+            }
+            return fake.embed(texts, kind);
+          },
+        },
+      });
+      const second: SourceRef = { kind: "wiki", id: "second" };
+      const confidential = chunk({
+        workspaceId: "w2",
+        text: "CONFIDENTIAL DOCUMENT",
+        scope: { kind: "channel", channelId: "second" },
+      });
+      await index.upsert({ kind: "wiki", id: "first" }, [
+        chunk({ workspaceId: "w1", text: "public document", scope: { kind: "channel", channelId: "first" } }),
+      ]);
+      await index.upsert(second, [confidential]);
+      const pending = index.embedPending();
+      await started.promise;
+      let saving: Promise<void> | undefined;
+      if (staleUpsert) {
+        holdEligibility = true;
+        saving = index.upsert(second, [confidential]);
+        await checked.promise;
+      }
+      channels.delete("second");
+      await index.channelVisibility("second", false);
+      resumeUpsert.resolve();
+      await saving;
+      resume.resolve();
+      await pending;
+      // A stale upsert may have queued a new row outside the original batch.
+      await index.embedPending();
+      expect(deliveries).toEqual([["Nota\npublic document"]]);
+    },
+  );
+
   test("vector: finds by similar shape, leaves the index when the channel turns private and never enters if private", async () => {
     const access = worldAccess(world);
     const embedder = fakeEmbedder();

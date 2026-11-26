@@ -1,7 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { MODELS } from "./models/catalog";
 import { PRICE_TABLE, PRICES } from "./models/prices";
-import { costUsd, datedPriceBook, estimateUsd, memoryLedger, usageLines, utf8Bytes } from "./usage";
+import {
+  type BudgetScope,
+  costUsd,
+  datedPriceBook,
+  estimateUsd,
+  memoryLedger,
+  usageLines,
+  utf8Bytes,
+} from "./usage";
 import { CONTRACT_PRICES, ledgerContract } from "./usage-contract";
 
 ledgerContract("memory", () => memoryLedger(CONTRACT_PRICES));
@@ -12,6 +20,30 @@ const usage = (input: number, output = 1000) => ({
   outputTokens: output,
   cachedTokens: 0,
   cacheWriteTokens: 0,
+});
+
+test("monthly spend and reservations exclude later months when querying history", async () => {
+  const ledger = memoryLedger(CONTRACT_PRICES);
+  const scope: BudgetScope = { kind: "agent", id: "a", period: "month", limitUsd: 3 };
+  const november = new Date("2026-11-05T12:00:00Z");
+  await ledger.record(
+    {
+      workspaceId: "o",
+      agentId: "a",
+      userId: null,
+      runId: null,
+      source: "chat",
+      model: "m",
+      at: november,
+      usage: usage(2_000_000, 0),
+    },
+    [scope],
+  );
+  expect(await ledger.spent(scope, at)).toBe(0);
+  expect((await ledger.reserve({ workspaceId: "o", scopes: [scope], estimateUsd: 1, at: november })).ok).toBe(
+    true,
+  );
+  expect((await ledger.reserve({ workspaceId: "o", scopes: [scope], estimateUsd: 3, at })).ok).toBe(true);
 });
 
 describe("price per call", () => {

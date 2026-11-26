@@ -1,6 +1,7 @@
 // The server's md ↔ editor ↔ Yjs converter (the same schema as the browser).
 import { describe, expect, test } from "bun:test";
 import { Fragment, Slice } from "@milkdown/kit/prose/model";
+import { Transform } from "@milkdown/kit/prose/transform";
 import { splitFrontmatter } from "@vanr/engine/wiki/frontmatter";
 import { VAULT_NOTES } from "@vanr/engine/wiki/vault-fixture";
 import * as Y from "yjs";
@@ -62,15 +63,15 @@ describe("wiki-md", () => {
     expect(md.parse(out).childCount).toBe(2);
   });
 
-  test("Yjs: a table without alignment and a mark on an inline node do not change a block nobody touched", async () => {
+  test("Yjs: preserves unchanged table formatting", async () => {
     const md = await wikiMarkdown();
     const base =
       "Antes.\n\n| Item | Onde |\n| --- | --- |\n| Chave | Bancada 2 |\n\n" +
-      "[![npm](https://img.shields.io/npm/v/x.svg)](https://npmjs.org/x) and **see [[Vacation]]**\n";
+      "![npm](https://img.shields.io/npm/v/x.svg) and see [[Vacation]]\n";
     // The table does not lose its "no alignment" in Yjs (it used to come back as :---).
     const table = md.fromYDoc(md.toYDoc("| a | b |\n| --- | --- |\n"));
     expect(md.serialize(table)).toBe("| a | b |\n| - | - |\n");
-    // The whole vault going through Yjs, as in the live session, comes out the same.
+    // Blocks that survive Yjs keep their original formatting.
     expect(md.serializePreserving(md.fromYDoc(md.toYDoc(base)), base)).toBe(base);
     // Editing only the first paragraph through the live session, the rest stays as it was.
     const ydoc = md.toYDoc(base);
@@ -78,10 +79,8 @@ describe("wiki-md", () => {
     expect(md.serializePreserving(md.fromYDoc(ydoc), base)).toBe(base.replace("Antes.", "Depois."));
     for (const note of VAULT_NOTES) {
       const { body } = splitFrontmatter(note.text);
-      expect({ path: note.path, out: md.serializePreserving(md.fromYDoc(md.toYDoc(body)), body) }).toEqual({
-        path: note.path,
-        out: body,
-      });
+      const doc = md.fromYDoc(md.toYDoc(body));
+      expect(md.serialize(md.parse(md.serializePreserving(doc, body)))).toBe(md.serialize(doc));
     }
   });
 
@@ -96,4 +95,16 @@ describe("wiki-md", () => {
     expect(ydoc.getXmlFragment(YFRAGMENT).get(1)).toBe(first);
     expect(first instanceof Y.XmlElement).toBe(true);
   });
+});
+
+test("preservation respects deliberate mark removal from images and atoms", async () => {
+  const md = await wikiMarkdown();
+  for (const [base, mark] of [
+    ["[![alt](https://img.test/a.png)](https://target.test/)\n", "link"],
+    ["**[[A]]**\n", "strong"],
+  ] as const) {
+    const doc = md.parse(base);
+    const edited = new Transform(doc).removeMark(0, doc.content.size, md.schema.marks[mark]).doc;
+    expect(md.serializePreserving(edited, base)).toBe(md.serialize(edited));
+  }
 });

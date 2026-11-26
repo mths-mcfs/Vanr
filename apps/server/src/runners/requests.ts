@@ -2,12 +2,14 @@
 // goes sealed from the person's browser straight to the runner; the server keeps only the request and the
 // name. A browser intervention waits for the person to take over, do it and hand the control back.
 import type { BrowserIntervention, SecretRequest } from "@vanr/contract";
-import { schema } from "@vanr/engine/db";
-import { and, eq, inArray, lte, sql } from "drizzle-orm";
+import { type Db, schema } from "@vanr/engine/db";
+import { and, eq, gt, inArray, lte, sql } from "drizzle-orm";
 import type { AppDeps } from "../context";
 import { closeNotifications, notify } from "../notifications";
+import { canTalkTo } from "../runtime/route";
 import { pushPolicy } from "./browser-guard";
 import { refreshStream } from "./browser-live";
+import { withPlanOwner } from "./plans";
 
 const { secretPrompts, browserInterventions, messages } = schema;
 
@@ -105,6 +107,94 @@ export function toIntervention(row: InterventionRow): BrowserIntervention {
  */
 const interventionWaiters = new Map<string, Set<(row: InterventionRow) => void>>();
 
+// Control belongs to the granting session in this server process. Unbound controls after a restart are released.
+const controlSessions = new WeakMap<AppDeps, Map<string, string>>();
+export function interventionSession(deps: AppDeps, id: string, sessionId?: string) {
+  let sessions = controlSessions.get(deps);
+  if (!sessions) {
+    sessions = new Map();
+    controlSessions.set(deps, sessions);
+  }
+  if (sessionId) sessions.set(id, sessionId);
+  return sessions.get(id);
+}
+
+export async function revalidateInterventions(deps: AppDeps, endedSessionId?: string) {
+  const { browserInterventions: h, sessions, members, agents } = schema;
+  const active = await deps.db.select().from(h).where(eq(h.status, "active"));
+  for (const row of active) {
+    const sessionId = interventionSession(deps, row.id);
+    if (endedSessionId && sessionId !== endedSessionId) continue;
+    const [right] =
+      sessionId && !endedSessionId
+        ? await deps.db
+            .select({ id: sessions.id })
+            .from(sessions)
+            .innerJoin(
+              members,
+              and(eq(members.userId, sessions.userId), eq(members.workspaceId, row.workspaceId)),
+            )
+            .where(
+              and(
+                eq(sessions.id, sessionId),
+                eq(sessions.userId, row.controllingUserId ?? ""),
+                gt(sessions.expiresAt, deps.now()),
+              ),
+            )
+        : [];
+    const [agent] = await deps.db.select().from(agents).where(eq(agents.id, row.agentId));
+    if (
+      right &&
+      agent &&
+      agent.environmentId === row.runnerId &&
+      canTalkTo(await withPlanOwner(deps.db, agent), row.controllingUserId ?? "")
+    )
+      continue;
+    await moveIntervention(
+      deps,
+      row.id,
+      ["active"],
+      { status: "canceled", handledAt: deps.now() },
+      { controller: row.controllingUserId ?? "" },
+    );
+  }
+}
+
+/** Closes only open requests of the old binding; delivered secret metadata stays available. */
+export async function cancelRunnerRequests(db: Db, now: Date, runnerId: string, agentIds?: string[]) {
+  const secrets = await db
+    .update(secretPrompts)
+    .set({ status: "canceled" })
+    .where(
+      and(
+        eq(secretPrompts.runnerId, runnerId),
+        eq(secretPrompts.status, "pending"),
+        agentIds ? inArray(secretPrompts.agentId, agentIds) : undefined,
+      ),
+    )
+    .returning();
+  const interventions = await db
+    .update(browserInterventions)
+    .set({ status: "canceled", handledAt: now })
+    .where(
+      and(
+        eq(browserInterventions.runnerId, runnerId),
+        inArray(browserInterventions.status, ["pending", "active"]),
+        agentIds ? inArray(browserInterventions.agentId, agentIds) : undefined,
+      ),
+    )
+    .returning();
+  return { secrets, interventions };
+}
+
+export async function publishRunnerRequests(
+  deps: AppDeps,
+  closed: Awaited<ReturnType<typeof cancelRunnerRequests>>,
+) {
+  for (const row of closed.secrets) await publishSecret(deps, row, "secret_request.updated");
+  for (const row of closed.interventions) await publishIntervention(deps, row);
+}
+
 const isOpen = (status: InterventionRow["status"]) => status === "pending" || status === "active";
 
 /**
@@ -151,6 +241,7 @@ export async function publishIntervention(deps: AppDeps, row: InterventionRow) {
   // Who drives changed (took over, handed back, expired): the open Chrome follows the new rule.
   await pushPolicy(deps, row.agentId);
   if (!open) {
+    controlSessions.get(deps)?.delete(row.id);
     for (const finish of [...(interventionWaiters.get(row.id) ?? [])]) finish(row);
     await closeNotifications(deps, row.workspaceId, groupKey);
   } else if (row.status === "active") {
@@ -183,23 +274,55 @@ export async function moveIntervention(
   id: string,
   from: InterventionRow["status"][],
   set: Partial<Pick<InterventionRow, "status" | "controllingUserId" | "note" | "handledAt">>,
+  auth: { controller?: string; sessionId?: string } = {},
 ): Promise<InterventionRow | null> {
-  const [row] = await deps.db
-    .update(browserInterventions)
-    .set(set)
-    .where(and(eq(browserInterventions.id, id), inArray(browserInterventions.status, from)))
-    .returning();
+  const change = async (db: Db) => {
+    if (auth.sessionId) {
+      const [session] = await db
+        .select({ id: schema.sessions.id })
+        .from(schema.sessions)
+        .where(and(eq(schema.sessions.id, auth.sessionId), gt(schema.sessions.expiresAt, deps.now())))
+        .for("share");
+      if (!session) return null;
+    }
+    const [row] = await db
+      .update(browserInterventions)
+      .set(set)
+      .where(
+        and(
+          eq(browserInterventions.id, id),
+          inArray(browserInterventions.status, from),
+          auth.controller === undefined
+            ? undefined
+            : eq(browserInterventions.controllingUserId, auth.controller),
+          set.status === "active" ? gt(browserInterventions.expiresAt, deps.now()) : undefined,
+          set.status === "active"
+            ? sql`exists (select 1 from ${schema.agents} where ${schema.agents.id} = ${browserInterventions.agentId} and ${schema.agents.environmentId} = ${browserInterventions.runnerId})`
+            : undefined,
+        ),
+      )
+      .returning();
+    if (row && auth.sessionId) interventionSession(deps, row.id, auth.sessionId);
+    return row ?? null;
+  };
+  const row = auth.sessionId ? await deps.db.transaction(change) : await change(deps.db);
   if (row) await publishIntervention(deps, row);
   return row ?? null;
 }
 
 /** The tick's sweep: expired secret requests and browser interventions. */
-export async function expireRunnerRequests(deps: AppDeps) {
+export async function expireRunnerRequests(deps: AppDeps, agentId?: string) {
   const now = deps.now();
   const secrets = await deps.db
     .update(secretPrompts)
     .set({ status: "expired" })
-    .where(and(eq(secretPrompts.status, "pending"), lte(secretPrompts.expiresAt, now)))
+    .where(
+      and(
+        eq(secretPrompts.status, "pending"),
+        lte(secretPrompts.expiresAt, now),
+        agentId ? eq(secretPrompts.agentId, agentId) : undefined,
+      ),
+    )
     .returning();
   for (const row of secrets) await publishSecret(deps, row, "secret_request.updated");
   const interventions = await deps.db
@@ -209,6 +332,7 @@ export async function expireRunnerRequests(deps: AppDeps) {
       and(
         inArray(browserInterventions.status, ["pending", "active"]),
         lte(browserInterventions.expiresAt, now),
+        agentId ? eq(browserInterventions.agentId, agentId) : undefined,
       ),
     )
     .returning();

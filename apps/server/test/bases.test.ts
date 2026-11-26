@@ -28,6 +28,7 @@ import {
 } from "../src/bases/write";
 import type { AppDeps } from "../src/context";
 import { HttpError } from "../src/http";
+import { CSV_BODY_LIMIT } from "../src/routes/bases";
 import { backfillSearch } from "../src/search-index";
 import type { RunningServer } from "../src/server";
 import { apiError, type BasesApi, basesApi, baseWithTypes, fuzzAgainstOracle } from "./bases-api";
@@ -307,6 +308,21 @@ describe("bases: API", () => {
       const p2 = await ana.api.query(workspaceId, base.id, table.id, { limit: 3, cursor: p1.nextCursor });
       expect([...p1.rows, ...p2.rows].map((r) => r.props[t])).toEqual(["0", "c", "a", "b"]);
       expect((await ana.api.query(workspaceId, base.id, table.id, { search: "B" })).rows.length).toBe(1);
+      await ana.api.updateRow(workspaceId, base.id, a.id, { props: { [t]: "" } });
+      await ana.api.updateRow(workspaceId, base.id, c.id, { props: { [t]: null } });
+      const empty = await ana.api.query(workspaceId, base.id, table.id, { filter: { prop: t, op: "empty" } });
+      expect(empty.rows.map((r) => r.id).sort()).toEqual([a.id, c.id].sort());
+      const grouped = await ana.api.query(workspaceId, base.id, table.id, { groupBy: { prop: t } });
+      expect(grouped.groups).toEqual([
+        { key: null, count: 2 },
+        { key: "0", count: 1 },
+        { key: "b", count: 1 },
+      ]);
+      const visible = await ana.api.query(workspaceId, base.id, table.id, {
+        groupBy: { prop: t, hideEmpty: true },
+      });
+      expect(visible.groups?.map((g) => g.key)).toEqual(["0", "b"]);
+      expect(visible.rows.map((r) => r.props[t])).toEqual(["0", "b"]);
     },
     SERVER_TEST_MS,
   );
@@ -693,16 +709,16 @@ describe("bases: SQL query = oracle", () => {
               ["eq", 7],
             ];
           case "g_sel":
-            // ids that aren't options, made of the nasty characters, are plain values: they match nothing
+            // only the property's own option ids: any other id is rejected at the edge (checked below)
             return [
-              ["eq", pick([...options.map((o) => o.id), word()])],
-              ["in", [pick(options).id, word()]],
-              ["not_in", [word()]],
+              ["eq", pick(options).id],
+              ["in", [pick(options).id, pick(options).id]],
+              ["not_in", [pick(options).id]],
             ];
           case "g_multi":
             return [
-              ["has", pick([...options.map((o) => o.id), word()])],
-              ["has_any", [word(), pick(options).id]],
+              ["has", pick(options).id],
+              ["has_any", [pick(options).id, pick(options).id]],
               ["has_all", [pick(options).id]],
             ];
           case "g_date":
@@ -752,6 +768,17 @@ describe("bases: SQL query = oracle", () => {
         );
       }
       expect(checked).toBeGreaterThan(50);
+      // an option id that isn't one of the property's, made of those characters, never reaches the SQL
+      for (const [prop, op, v] of [
+        ["g_sel", "eq", word()],
+        ["g_sel", "in", [pick(options).id, word()]],
+        ["g_multi", "has_any", [word()]],
+      ] as const) {
+        const err = await apiError(
+          ana.api.query(workspaceId, base.id, saved.id, { filter: { prop, op, value: v } as Filter }),
+        );
+        expect([err.status, err.code]).toEqual([400, "base.bad_filter"]);
+      }
       // a property id that isn't in the schema, made of those characters, never reaches the SQL
       for (const prop of ["g_num'; drop table db_rows; --", "$1", 'a"b', "\\"]) {
         const err = await apiError(
@@ -891,18 +918,17 @@ describe("bases: formulas and recalculation", () => {
     SERVER_TEST_MS,
   );
 
-  test(
-    "today() recalculates on the first access of the next day",
-    async () => {
+  test.each([0, 1, 2001])(
+    "today() recalculates before query or CSV filters and cells on the next day (%i rows)",
+    async (count) => {
       const { workspaceId, ana } = await team();
-      const base = await ana.api.create(workspaceId, { title: "Due" });
+      const base = await ana.api.createFromCsv(workspaceId, { title: "Due", csv: "Name,Due\nx,2026-10-30" });
       const table = base.tables[0];
       if (!table) throw new Error("no table");
       const saved = await ana.api.saveSchema(workspaceId, base.id, table.id, {
         parentVersion: table.schemaVersion,
         defs: [
           ...table.defs,
-          { id: "p_due", name: "Due", type: "date" },
           {
             id: "p_left",
             name: "Left",
@@ -911,16 +937,41 @@ describe("bases: formulas and recalculation", () => {
           },
         ],
       });
-      const row = await ana.api.createRow(workspaceId, base.id, saved.id, {
-        props: { [saved.titlePropId]: "x", p_due: { start: "2026-10-30" } },
+      const [stored] = await server.deps.db
+        .select()
+        .from(schema.dbTables)
+        .where(eq(schema.dbTables.id, table.id));
+      if (!stored) throw new Error("no table");
+      const due = saved.defs.find((d) => d.name === "Due");
+      if (!due) throw new Error("no Due");
+      if (count > 1)
+        await addRows(
+          server.deps,
+          stored,
+          Array.from({ length: count - 1 }, () => ({
+            props: { [table.titlePropId]: "x", [due.id]: { start: "2026-10-30" } },
+          })),
+          { type: "person", id: ana.user.id },
+        );
+      const view = await ana.api.createView(workspaceId, base.id, {
+        tableId: table.id,
+        name: "Seven days",
+        type: "table",
+        config: { filter: { prop: "p_left", op: "eq", value: 7 } },
       });
-      expect(row.computed.p_left).toBe(8);
-      clock += 24 * 3600_000;
+      expect((await ana.api.query(workspaceId, base.id, table.id)).rows[0]?.computed.p_left).toBe(8);
+      clock += 86400000;
       try {
-        const next = await ana.api.query(workspaceId, base.id, saved.id);
-        expect(next.rows[0]?.computed.p_left).toBe(7);
+        if (count === 0)
+          expect((await ana.api.query(workspaceId, base.id, table.id)).rows[0]?.computed.p_left).toBe(7);
+        const filtered = await ana.api.exportCsv(workspaceId, base.id, table.id, { viewId: view.id });
+        expect(filtered.csv.trim().split("\n")).toHaveLength(Math.max(1, count) + 1);
+        const all = await ana.api.exportCsv(workspaceId, base.id, table.id);
+        const cells = all.csv.trim().split("\n").slice(1);
+        expect(cells.map((line) => line.trim())).toEqual(Array(Math.max(1, count)).fill("x,2026-10-30,7"));
+        expect((await ana.api.get(workspaceId, base.id)).tables[0]?.recalc.pending).toBe(false);
       } finally {
-        clock -= 24 * 3600_000;
+        clock -= 86400000;
       }
     },
     SERVER_TEST_MS,
@@ -1078,6 +1129,11 @@ describe("bases: CSV and Drive", () => {
         ana.api.importCsv(workspaceId, base.id, table.id, { csv: "x".repeat(10_000_001) }),
       );
       expect(tooBig.status).toBe(400);
+      // A CSV body past the default JSON limit still reaches the CSV rule; past the CSV body limit, the reader stops it.
+      const pastBody = await apiError(
+        ana.api.importCsv(workspaceId, base.id, table.id, { csv: "x".repeat(CSV_BODY_LIMIT) }),
+      );
+      expect([pastBody.status, pastBody.code]).toEqual([413, "payload_too_large"]);
       expect((await apiError(ana.api.createFromCsv(workspaceId, { title: "Wide", csv: wide }))).code).toBe(
         "base.csv_too_many_columns",
       );
@@ -1186,6 +1242,11 @@ describe("bases: search", () => {
       const { workspaceId, ana, beto } = await team();
       const other = await team();
       const { base, table } = await baseWithTypes(ana.api, workspaceId, "Suppliers");
+      // Exclude unused status groups so their JSON key order cannot trigger an unrelated recalculation.
+      const searchable = await ana.api.saveSchema(workspaceId, base.id, table.id, {
+        parentVersion: table.schemaVersion,
+        defs: table.defs.filter((d) => d.id !== "p_status"),
+      });
       const row = await ana.api.createRow(workspaceId, base.id, table.id, {
         props: { [table.titlePropId]: "Zebrasupplier", p_num: 4 },
       });
@@ -1204,6 +1265,14 @@ describe("bases: search", () => {
         },
       ]);
       expect(await search(other.ana, other.workspaceId, "Zebrasupplier")).toEqual([]);
+      expect(await search(beto, workspaceId, "Amount")).toHaveLength(1);
+      await ana.api.saveSchema(workspaceId, base.id, table.id, {
+        parentVersion: searchable.schemaVersion,
+        defs: searchable.defs.map((d) => (d.id === "p_num" ? { ...d, name: "Newlabelunique" } : d)),
+      });
+      expect(await search(beto, workspaceId, "Newlabelunique")).toMatchObject([{ sourceId: row.id }]);
+      expect(await search(beto, workspaceId, "Amount")).toEqual([]);
+      expect((await ana.api.getRow(workspaceId, base.id, row.id)).version).toBe(row.version);
       await ana.api.updateRow(workspaceId, base.id, row.id, {
         props: { [table.titlePropId]: "Quaggasupplier" },
       });
@@ -1458,6 +1527,51 @@ describe("bases: adversarial review (each reproduced attack becomes a test)", ()
       }
       const after = await ana.api.get(workspaceId, own.id);
       expect(after.views.map((v) => [v.tableId, v.type])).toEqual([[ownTable.id, "table"]]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "an exported multi-select imports back with the same option names, with or without them in the table",
+    async () => {
+      const { workspaceId, ana } = await team();
+      const tagged = (opts: { id: string; name: string }[]) => ({
+        id: "tags",
+        name: "Tags",
+        type: "multi_select" as const,
+        options: opts,
+      });
+      const source = await ana.api.create(workspaceId, { title: "Tagged" });
+      let st = source.tables[0];
+      if (!st) throw new Error("no table");
+      const names = [
+        { id: "tag_a", name: "Alpha" },
+        { id: "tag_b", name: "Beta, gamma" },
+      ];
+      st = await ana.api.saveSchema(workspaceId, source.id, st.id, {
+        parentVersion: st.schemaVersion,
+        defs: [...st.defs, tagged(names)],
+      });
+      await ana.api.createRow(workspaceId, source.id, st.id, {
+        props: { [st.titlePropId]: "R1", tags: ["tag_a", "tag_b"] },
+      });
+      const { csv } = await ana.api.exportCsv(workspaceId, source.id, st.id);
+      const again = await ana.api.importCsv(workspaceId, source.id, st.id, { csv });
+      expect(again.skipped).toBe(0);
+      expect(again.table.defs.find((d) => d.id === "tags")?.options).toEqual(names);
+      const fresh = await ana.api.create(workspaceId, { title: "Destination" });
+      let ft = fresh.tables[0];
+      if (!ft) throw new Error("no table");
+      ft = await ana.api.saveSchema(workspaceId, fresh.id, ft.id, {
+        parentVersion: ft.schemaVersion,
+        defs: [...ft.defs, tagged([])],
+      });
+      const imported = await ana.api.importCsv(workspaceId, fresh.id, ft.id, { csv });
+      expect([imported.created, imported.skipped]).toEqual([1, 0]);
+      const options = imported.table.defs.find((d) => d.id === "tags")?.options ?? [];
+      expect(options.map((o) => o.name)).toEqual(["Alpha", "Beta, gamma"]);
+      const [row] = (await ana.api.query(workspaceId, fresh.id, ft.id)).rows;
+      expect(row?.props.tags).toEqual(options.map((o) => o.id));
     },
     SERVER_TEST_MS,
   );
@@ -2292,11 +2406,16 @@ describe("bases: a write that starts over, and a deadlock answered as busy", () 
         if (late) return;
         late = (await linkTo(workspaceId, table.id, actor, "Late")).id;
       });
+      let deleteAttempts = 0;
+      const off = server.deps.hub.onPublish((_, event) => {
+        if (event.type === "base.deleted" && event.baseId === base.id)
+          deleteAttempts = held.seen.transactions;
+      });
       const socket = workspaceEvents(workspaceId);
       try {
         await deleteDatabase(held.deps, databaseRow);
-        // the first transaction found the grown set after its locks and started over: two in all
-        expect(held.seen.transactions).toBe(2);
+        // Two delete attempts before the commit event; propagation can open more transactions afterward.
+        expect(deleteAttempts).toBe(2);
         expect(late).not.toBeNull();
         // the late linked base showed only the deleted source: it went with it, in the same delete
         const left = await server.deps.db
@@ -2308,6 +2427,7 @@ describe("bases: a write that starts over, and a deadlock answered as busy", () 
           new Set([base.id, late]),
         );
       } finally {
+        off();
         socket.close();
       }
     },
@@ -2553,6 +2673,185 @@ describe("bases: undo and redo of an agent's write", () => {
       await ana.api.remove(workspaceId, mine.id);
       const err2 = await apiError(undoer.redo(server.deps, await gone(), beto.user.id));
       expect(err2.code).toBe("action.gone");
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("bases: review regressions", () => {
+  test(
+    "option type conversion preserves choices in recalculated and concurrently edited rows",
+    async () => {
+      const { workspaceId, ana } = await team();
+      const { base, table } = await baseWithTypes(ana.api, workspaceId);
+      let current = table;
+      const rows = await Promise.all(
+        [1, 2].map(() =>
+          ana.api.createRow(workspaceId, base.id, table.id, { props: { p_sel: "o_a", p_multi: ["t_x"] } }),
+        ),
+      );
+      for (const type of ["multi_select", "status", "select"] as const) {
+        const original = server.deps.db.transaction.bind(server.deps.db);
+        const ready = Promise.withResolvers<void>(),
+          gate = Promise.withResolvers<void>();
+        let committed = false;
+        server.deps.db.transaction = async (fn, config) => {
+          if (committed) {
+            committed = false;
+            ready.resolve();
+            await gate.promise;
+          }
+          const result = await original(fn, config);
+          if (result && typeof result === "object" && "table" in result) committed = true;
+          return result;
+        };
+        const changing = ana.api.saveSchema(workspaceId, base.id, table.id, {
+          parentVersion: current.schemaVersion,
+          defs: current.defs.map((d) => (d.id === "p_sel" ? { id: d.id, name: d.name, type } : d)),
+        });
+        try {
+          await ready.promise;
+          const first = rows[0];
+          if (!first) throw new Error("no row");
+          const row = await ana.api.getRow(workspaceId, base.id, first.id);
+          const edited = await ana.api.updateRow(workspaceId, base.id, row.id, {
+            parentVersion: row.version,
+            props: { [table.titlePropId]: "edited" },
+          });
+          gate.resolve();
+          current = await changing;
+          const option = current.defs.find((d) => d.id === "p_sel")?.options?.find((o) => o.name === "Alpha");
+          expect(option?.id).toBe("o_a");
+          const choice = type === "multi_select" ? ["o_a"] : "o_a";
+          expect(edited.props.p_sel).toEqual(choice);
+          expect(edited.props.p_multi).toEqual(["t_x"]);
+          for (const row of rows)
+            expect((await ana.api.getRow(workspaceId, base.id, row.id)).props.p_sel).toEqual(choice);
+          expect(current.recalc.pending).toBe(false);
+        } finally {
+          gate.resolve();
+          await changing;
+          server.deps.db.transaction = original;
+        }
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test.each([false, true])(
+    "option collection includes accepted edits before the lock (import: %s)",
+    async (importing) => {
+      const { workspaceId, ana } = await team();
+      const { base, table } = await baseWithTypes(ana.api, workspaceId, "Options race");
+      const saved = await ana.api.saveSchema(workspaceId, base.id, table.id, {
+        parentVersion: table.schemaVersion,
+        defs: [...table.defs, { id: "p_stage", name: "Race stage", type: "text" }],
+      });
+      const row = await ana.api.createRow(workspaceId, base.id, table.id, { props: { p_stage: "Alpha" } });
+      const original = server.deps.db.transaction.bind(server.deps.db);
+      const ready = Promise.withResolvers<void>(),
+        gate = Promise.withResolvers<void>();
+      let armed = true;
+      server.deps.db.transaction = async (fn, config) => {
+        if (armed) {
+          armed = false;
+          ready.resolve();
+          await gate.promise;
+        }
+        return original(fn, config);
+      };
+      const defs = saved.defs.map((d) => (d.id === "p_stage" ? { ...d, type: "select" as const } : d));
+      const [stored] = await server.deps.db
+        .select()
+        .from(schema.dbTables)
+        .where(eq(schema.dbTables.id, table.id));
+      if (!stored) throw new Error("no table");
+      const changing = importing
+        ? importRows(server.deps, stored, {
+            defs,
+            rows: () => [],
+            actor: { type: "person", id: ana.user.id },
+          })
+        : ana.api.saveSchema(workspaceId, base.id, table.id, { parentVersion: saved.schemaVersion, defs });
+      try {
+        await ready.promise;
+        const accepted = await ana.api.updateRow(workspaceId, base.id, row.id, {
+          parentVersion: row.version,
+          props: { p_stage: "Beta" },
+        });
+        expect(accepted.props.p_stage).toBe("Beta");
+        gate.resolve();
+        await changing;
+        const latest = (await ana.api.get(workspaceId, base.id)).tables[0];
+        if (!latest) throw new Error("no table");
+        const option = latest.defs.find((d) => d.id === "p_stage")?.options?.find((o) => o.name === "Beta");
+        expect(option).toBeDefined();
+        expect((await ana.api.getRow(workspaceId, base.id, row.id)).props.p_stage).toBe(option?.id);
+        expect(latest.recalc.pending).toBe(false);
+      } finally {
+        gate.resolve();
+        await changing;
+        server.deps.db.transaction = original;
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a schema committed after the last recalculation batch still gets calculated",
+    async () => {
+      const { workspaceId, ana } = await team();
+      const { base, table } = await baseWithTypes(ana.api, workspaceId);
+      const row = await ana.api.createRow(workspaceId, base.id, table.id, { props: { p_num: 5 } });
+      const [stored] = await server.deps.db
+        .select()
+        .from(schema.dbTables)
+        .where(eq(schema.dbTables.id, table.id));
+      if (!stored) throw new Error("no table");
+      await addRows(
+        server.deps,
+        stored,
+        Array.from({ length: 2000 }, () => ({ props: { p_num: 5 } })),
+        { type: "person", id: ana.user.id },
+      );
+      const original = server.deps.db.transaction.bind(server.deps.db);
+      const ready = Promise.withResolvers<void>(),
+        gate = Promise.withResolvers<void>();
+      let armed = true;
+      server.deps.db.transaction = async (fn, config) => {
+        const result = await original(fn, config);
+        if (armed && result && typeof result === "object" && "done" in result && result.done === true) {
+          armed = false;
+          ready.resolve();
+          await gate.promise;
+        }
+        return result;
+      };
+      const defs = (factor: number) =>
+        table.defs.map((d) =>
+          d.id === "p_f" ? { ...d, formula: { expression: `prop("p_num") * ${factor}` } } : d,
+        );
+      try {
+        await ana.api.saveSchema(workspaceId, base.id, table.id, {
+          parentVersion: table.schemaVersion,
+          defs: defs(3),
+        });
+        await ready.promise;
+        // Above the inline limit, this response proves the second request scheduled its work.
+        const second = await ana.api.saveSchema(workspaceId, base.id, table.id, {
+          parentVersion: table.schemaVersion + 1,
+          defs: defs(4),
+        });
+        expect(second.recalc.pending).toBe(true);
+        gate.resolve();
+        await settle(server);
+        expect((await ana.api.getRow(workspaceId, base.id, row.id)).computed.p_f).toBe(20);
+        expect((await ana.api.get(workspaceId, base.id)).tables[0]?.recalc.pending).toBe(false);
+      } finally {
+        gate.resolve();
+        await settle(server);
+        server.deps.db.transaction = original;
+      }
     },
     SERVER_TEST_MS,
   );

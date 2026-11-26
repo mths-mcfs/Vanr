@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RunnerAccess } from "@vanr/contract";
@@ -10,6 +10,7 @@ import { classifyHarnessError, Harnesses, type HarnessTurnArgs } from "./harness
 import { McpBridge } from "./mcp";
 import { defaultPolicyContext, sandboxOff } from "./sandbox";
 import { type FakeCliConfig, fakeCliBin, fakeCliLog, testMcpCommand } from "./testing/fake-cli";
+import { signedInPolicy } from "./testing/sandbox";
 
 // The harness in the environment with fake `claude` and `codex` (never the real ones): the CLI starts the runner's
 // MCP server, calls the agent's tool, which comes back here, and the answer arrives bit by bit. An
@@ -155,6 +156,7 @@ test("Codex: only with the ChatGPT login, no shell, the tool over MCP", async ()
     expect(argv).toContain(`features.${off}=false`);
   expect(argv).toContain('web_search="disabled"');
   expect(argv).toContain("--ignore-user-config");
+  expect(argv).not.toContain("--ignore-rules");
   expect(argv[argv.indexOf("--sandbox") + 1]).toBe("read-only");
   expect(argv.some((a) => a.startsWith("developer_instructions="))).toBe(true);
 });
@@ -203,7 +205,6 @@ test("a turn aborted while its sandbox opens does not start the CLI", async () =
   // The sandbox the turn opens: the request is aborted while it opens (the connection dropped).
   const sandbox = {
     status: () => ({ state: "on" as const, engine: "bubblewrap" as const, reason: null }),
-    setMode: () => {},
     wrap: async (input: { command: string }) => {
       controller.abort();
       return { command: input.command, blocked: () => [], release: () => {} };
@@ -218,11 +219,51 @@ test("a turn aborted while its sandbox opens does not start the CLI", async () =
     bridge,
     mcpCommand: testMcpCommand(),
     sandbox,
-    policy: defaultPolicyContext(join(dir, "home")),
+    policy: signedInPolicy(join(dir, "home"), join(dir, "person")),
   });
   const err = await harnesses
     .turn(agent, args("claude_code", "hi"), { ...io(), signal: controller.signal })
     .catch((e) => e);
   expect(err instanceof RunnerError && err.code).toBe("canceled");
   expect(existsSync(log)).toBe(false);
+});
+
+test("duplicate turns own separate MCP files and canceled preparation preserves old files", async () => {
+  const { harnesses } = setup("claude");
+  const opts = Reflect.get(harnesses, "opts");
+  let tokens = 0;
+  opts.bridge = { path: "/unused", open: async () => ({ token: `token-${++tokens}`, close() {} }) };
+  const gates = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+  const reached = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+  let call = 0;
+  Reflect.set(harnesses, "spawnTurn", async (input: { argv: string[] }) => {
+    const index = call++;
+    reached[index]?.resolve();
+    await gates[index]?.promise;
+    return { text: readFileSync(input.argv[input.argv.indexOf("--mcp-config") + 1] ?? "", "utf8") };
+  });
+  const turn = args("claude_code", "hi");
+  const previous = join(opts.home, "harness", "turns", turn.runId, "keep");
+  mkdirSync(join(opts.home, "harness", "turns", turn.runId), { recursive: true });
+  writeFileSync(previous, "owned earlier");
+  const first = harnesses.turn(agent, turn, io());
+  await reached[0]?.promise;
+  const second = harnesses.turn(agent, turn, io());
+  await reached[1]?.promise;
+  gates[0]?.resolve();
+  const firstResult = await first;
+  gates[1]?.resolve();
+  const secondResult = await second;
+  expect(firstResult.text).toContain("token-1");
+  expect(secondResult.text).toContain("token-2");
+  const controller = new AbortController();
+  opts.bridge.open = async () => {
+    controller.abort();
+    return { token: "cancel", close() {} };
+  };
+  Reflect.deleteProperty(harnesses, "spawnTurn");
+  await expect(harnesses.turn(agent, turn, { ...io(), signal: controller.signal })).rejects.toMatchObject({
+    code: "canceled",
+  });
+  expect(readFileSync(previous, "utf8")).toBe("owned earlier");
 });

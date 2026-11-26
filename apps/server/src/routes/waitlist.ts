@@ -14,16 +14,28 @@ const JoinBody = z.object({
 const ConfirmBody = z.object({ token: z.string().min(10).max(200) });
 
 export function registerWaitlist(app: Hono<AppEnv>) {
-  // Joining twice is not an error: it sends the email again with the same token.
+  const resendAt = new Map<string, number>();
+  let windowEnds = 0;
+  let sent = 0;
+  // Joining twice is not an error. Resends keep the persisted token and wait 15 minutes.
   app.post("/api/v1/waitlist", async (c) => {
-    const { db, mailer, config } = c.get("deps");
+    const { db, mailer, config, now } = c.get("deps");
     const body = await readJson(c, JoinBody);
+    await db
+      .insert(schema.waitlist)
+      .values({ email: body.email, token: newToken(), locale: body.locale ?? null })
+      .onConflictDoNothing({ target: schema.waitlist.email });
     const [existing] = await db.select().from(schema.waitlist).where(eq(schema.waitlist.email, body.email));
-    const token = existing?.token ?? newToken();
-    if (!existing)
-      await db.insert(schema.waitlist).values({ email: body.email, token, locale: body.locale ?? null });
-    if (!existing?.confirmedAt) {
-      const link = `${config.publicUrl}/?confirm=${encodeURIComponent(token)}`;
+    const at = now().getTime();
+    for (const [email, until] of resendAt) if (until <= at) resendAt.delete(email);
+    if (at >= windowEnds) {
+      windowEnds = at + 60_000;
+      sent = 0;
+    }
+    if (existing && !existing.confirmedAt && !resendAt.has(body.email) && sent < 20) {
+      resendAt.set(body.email, at + 15 * 60_000);
+      sent++;
+      const link = `${config.publicUrl}/?confirm=${encodeURIComponent(existing.token)}`;
       await mailer.send({
         to: body.email,
         kind: "waitlist",

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sealSecret } from "@vanr/contract";
@@ -26,7 +26,7 @@ import { createWorkspace, joinWorkspace } from "../src/members";
 import { RunnerCallError } from "../src/runners/hub";
 import { installScript } from "../src/runners/install";
 import type { RunningServer } from "../src/server";
-import { type Browser, SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
+import { type Browser, SERVER_TEST_MS, signedIn, startTestServer, TestSocket } from "./harness";
 
 // Runners end to end: the real runner pairs by code, connects to the runners' WebSocket and serves the server's
 // requests. It includes the two problems of the original this step fixes: secrets written in the clear on disk
@@ -174,6 +174,65 @@ const runnersOf = async (t: Team, who = t.ana) =>
 
 describe("runners", () => {
   test(
+    "CLI grants and equivalent access keep an operation running; a reduction cancels it",
+    async () => {
+      const t = await team();
+      const home = mkdtempSync(join(tmpdir(), "runner-access-"));
+      const { config } = await pairRunner(t, home);
+      const folder = { path: join(home, "shared"), agents: [t.lia.id] };
+      config.access.folders = [folder];
+      config.access.tools.claude = false;
+      writeConfig(home, config);
+      const runner = await connect(home);
+      const socket = await TestSocket.open(t.ana.browser, t.workspaceId);
+      const root = runner.access.agentRoot(t.lia);
+      let finished = false;
+      const ready = Promise.withResolvers<void>();
+      const running = server.deps.runners
+        .call(
+          config.runnerId,
+          "exec",
+          { command: "echo ready; while [ ! -f release ]; do sleep 0.02; done", timeoutSeconds: 15 },
+          { agent: t.lia, onOutput: () => ready.resolve() },
+        )
+        .catch((err) => err.code)
+        .finally(() => {
+          finished = true;
+        });
+      try {
+        await ready.promise;
+        // Tool, folder and audience grants arrive through the real runner's config poller.
+        const extra = { path: join(home, "extra"), agents: [] };
+        const granted = {
+          ...config.access,
+          tools: { ...config.access.tools, claude: true },
+          folders: [{ ...folder, agents: [] }, extra],
+        };
+        for (const access of [granted, { ...granted, folders: [...granted.folders].reverse() }]) {
+          const current = readConfig(home);
+          if (!current) throw new Error("config missing");
+          writeConfig(home, { ...current, access });
+          await socket.event("runner.access");
+          expect(finished).toBe(false);
+        }
+        // Commands and this agent's folder access remain allowed; narrowing the audience cancels old work.
+        const current = readConfig(home);
+        if (!current) throw new Error("config missing");
+        writeConfig(home, { ...current, access: { ...granted, folders: [folder, extra] } });
+        await socket.event("runner.access");
+        expect(await running).toBe("canceled");
+      } finally {
+        writeFileSync(join(root, "release"), "");
+        await runner.stop();
+        await running;
+        socket.close();
+        await socket.closed;
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "pair by code, connect, lend to the agent, run a command, work with files and remove",
     async () => {
       const t = await team();
@@ -259,6 +318,7 @@ describe("runners", () => {
       const reduced = await api(t.ana.browser, "POST", `${t.ws}/runners/${config.runnerId}/access/reduce`, {
         disableTool: "commands",
       });
+      expect(reduced.status).toBe(200);
       expect(reduced.body.access.tools.commands).toBe(false);
       expect(JSON.parse(readFileSync(join(home, "config.json"), "utf8")).access.tools.commands).toBe(false);
       expect((await callError(call(config.runnerId, "exec", { command: "echo hi" }, agent))).code).toBe(

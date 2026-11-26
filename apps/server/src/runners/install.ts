@@ -33,17 +33,48 @@ export function runnerBundle(): Promise<RunnerBundle> {
 
 const shellQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
+/**
+ * The server address the script pairs with: an http(s) URL, without credentials and without control
+ * characters (a line break would start a new command in the script). Returned as the URL normalizes it.
+ */
+export function installServerUrl(raw: string): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: the check is for control characters
+  if (/[\u0000-\u001f\u007f]/.test(raw)) throw new Error("The server URL has a control character");
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("The server URL is not a valid URL");
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:")
+    throw new Error("The server URL must be http(s)");
+  if (url.username || url.password) throw new Error("The server URL must not carry credentials");
+  if (url.search || url.hash) throw new Error("The server URL must not have a query or a fragment");
+  return url.toString().replace(/\/$/, "");
+}
+
+/** Names the script uses outside quotes or inside double quotes: letters, digits, dot, dash and underscore. */
+const safeName = (name: string) => {
+  if (!/^[A-Za-z0-9._-]+$/.test(name)) throw new Error(`Unsafe name in the install script: ${name}`);
+  return name;
+};
+
 export function installScript(input: { server: string; sha256: string }): string {
-  const homeVar = `${PRODUCT.slug.toUpperCase()}_RUNNER_HOME`;
+  const server = installServerUrl(input.server);
+  if (!/^[0-9a-f]{64}$/.test(input.sha256)) throw new Error("The bundle sha256 must be 64 hex characters");
+  const homeVar = safeName(`${PRODUCT.slug.toUpperCase()}_RUNNER_HOME`);
+  const runnerDir = safeName(PRODUCT.runnerDir);
+  const quotedServer = shellQuote(server);
+  const quotedInstall = shellQuote(`${server}/api/v1/runners/install.sh`);
   return `#!/bin/sh
-# Installs ${PRODUCT.runnerName} on this computer and pairs it with ${input.server}.
-# Usage: curl -fsSL ${input.server}/api/v1/runners/install.sh | sh -s -- [--name NAME] [--dir FOLDER] [--no-exec] [--no-service] [--no-pair]
+# Installs ${safeName(PRODUCT.runnerName)} on this computer and pairs it with ${quotedServer}.
+# Usage: curl -fsSL ${quotedInstall} | sh -s -- [--name NAME] [--dir FOLDER] [--no-exec] [--no-service] [--no-pair]
 set -eu
 
-SERVER=${shellQuote(input.server)}
+SERVER=${quotedServer}
 BUNDLE_SHA256=${shellQuote(input.sha256)}
 NAME=${shellQuote(PRODUCT.runnerName)}
-RUNNER_HOME="\${${homeVar}:-$HOME/${PRODUCT.runnerDir}}"
+RUNNER_HOME="\${${homeVar}:-$HOME/${runnerDir}}"
 BUNDLE="$RUNNER_HOME/$NAME.mjs"
 BIN_DIR="$RUNNER_HOME/bin"
 

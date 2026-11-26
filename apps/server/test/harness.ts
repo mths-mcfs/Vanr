@@ -11,6 +11,7 @@ import type { SignupQueueLimits } from "../src/signup-queue";
 export interface TestServerOptions {
   /** Shorter limits for the closed sign-up queue. */
   signupQueue?: Partial<SignupQueueLimits>;
+  fileServicesMs?: number;
   /** Replaces a boot step that touches the outside (see `BootSteps`). */
   steps?: Partial<BootSteps>;
   env?: Record<string, string>;
@@ -31,6 +32,8 @@ export interface TestServerOptions {
  * busy CI host), more than bun's 5 s default allows.
  */
 export const SERVER_TEST_MS = 30_000;
+/** The longest timer delay: the file services never come round during a test that didn't ask for them. */
+const FILE_SERVICES_OFF_MS = 2 ** 31 - 1;
 
 /** Starts the real server on a free port, with an in-memory PGlite and in-memory email. */
 export async function startTestServer(opts: TestServerOptions = {}): Promise<RunningServer> {
@@ -41,6 +44,9 @@ export async function startTestServer(opts: TestServerOptions = {}): Promise<Run
     FAKE_MODEL_DELAY_MS: "0",
     // No undo window: email and posts go out at once (the window's test passes another value).
     UNDO_SEND_SECONDS: "0",
+    // Sign-up is closed by default in the product (config.ts); the tests open it, and a closed-sign-up test
+    // passes SIGNUP_OPEN: "false".
+    SIGNUP_OPEN: "true",
     ...opts.env,
   });
   return startServer({
@@ -55,6 +61,9 @@ export async function startTestServer(opts: TestServerOptions = {}): Promise<Run
     idleTimeoutSeconds: opts.idleTimeoutSeconds,
     wikiIdlePublishMs: opts.wikiIdlePublishMs,
     wikiDebounceMs: opts.wikiDebounceMs,
+    // The file services' cycle runs only where a test asks for it: the production period (60 s of real time)
+    // would fire in the middle of a long file, over whatever rows the earlier tests left.
+    fileServicesMs: opts.fileServicesMs ?? FILE_SERVICES_OFF_MS,
   });
 }
 
@@ -248,3 +257,16 @@ export class TestSocket {
 
 const isFrame = (v: unknown): v is RealtimeFrame =>
   typeof v === "object" && v !== null && "type" in v && typeof v.type === "string";
+
+/** An event in the same envelope the browser client validates. */
+export const isEvent = (f: RealtimeFrame, type: string): f is RealtimeFrame & { event: RealtimeFrame } =>
+  f.type === "event" && isFrame(f.event) && f.event.type === type;
+
+/** Waits for an observable effect of the server's periodic work. */
+export async function waitFor(check: () => Promise<boolean>): Promise<void> {
+  const end = Date.now() + 5000;
+  while (!(await check())) {
+    if (Date.now() >= end) throw new Error("server work did not finish");
+    await Bun.sleep(20);
+  }
+}

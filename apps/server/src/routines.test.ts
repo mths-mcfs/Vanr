@@ -39,7 +39,7 @@ import {
 } from "./routines";
 import type { RunningServer } from "./server";
 
-const { routines, routineExecutions, debates, notifications } = schema;
+const { routines, routineExecutions, debates, notifications, searchChunks } = schema;
 type Execution = typeof routineExecutions.$inferSelect;
 
 let server: RunningServer;
@@ -431,6 +431,51 @@ describe("executing", () => {
 });
 
 describe("a fall in the middle", () => {
+  test(
+    "a retry resumes a debate whose insert response was lost",
+    async () => {
+      const at = new Date();
+      const archivedId = newId("agt");
+      await server.deps.db
+        .insert(schema.agents)
+        .values({ ...agent, id: archivedId, handle: archivedId, archivedAt: at });
+      const routine = await newRoutine({
+        target: { kind: "debate", agentIds: [archivedId], roundLimit: 1 },
+      });
+      try {
+        const watch = observed(at);
+        const reg = await registerFire(watch.deps, routine.id, { trigger: "webhook", key: "lost-insert" });
+        if (reg.duplicate) throw new Error("duplicate");
+        let hit = 0;
+        const db = interceptWrites(server.deps.db, async (table) => {
+          if (table === debates) {
+            hit++;
+            throw new Error("INSERT_RESPONSE_LOST");
+          }
+        });
+        expect(await startRoutineRun({ ...watch.deps, db }, reg.run)).toMatchObject({ status: "failed" });
+        await watch.failures();
+        expect(hit).toBe(1);
+        const [opened] = await debatesOf(routine.id);
+        expect(opened).toMatchObject({ status: "open", phase: "debating" });
+        const retry = observed(new Date(at.getTime() + 2 * MIN));
+        await drainQueues(retry.deps);
+        expect(await retry.failures()).toEqual([]);
+        expect((await executionsOf(routine.id)).map((r) => r.status)).toEqual(["failed", "ok"]);
+        expect(await debatesOf(routine.id)).toMatchObject([{ id: opened?.id, status: "done" }]);
+        const chunks = await server.deps.db
+          .select()
+          .from(searchChunks)
+          .where(and(eq(searchChunks.sourceKind, "debate"), eq(searchChunks.sourceId, opened?.id ?? "")));
+        expect(chunks.length).toBeGreaterThan(0);
+      } finally {
+        await drop(routine);
+        await server.deps.db.delete(schema.agents).where(eq(schema.agents.id, archivedId));
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
   test(
     "a retry reuses the debate created before the result write, without another event or notice",
     async () => {

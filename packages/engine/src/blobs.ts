@@ -48,6 +48,7 @@ export function diskBlobs(root: string): BlobStore {
   const base = normalize(root).replace(/[/\\]+$/, "");
   const dataRoot = join(base, "data");
   const metaRoot = join(base, "meta");
+  const writes = new Map<string, Promise<void>>();
   // With a trailing separator: "data-x/..." cannot pass as inside "data".
   const pathsOf = (key: string) => {
     const data = normalize(join(dataRoot, key));
@@ -61,10 +62,20 @@ export function diskBlobs(root: string): BlobStore {
   return {
     async put(key, data, contentType) {
       const p = pathsOf(key);
-      await mkdir(dirname(p.data), { recursive: true });
-      await mkdir(dirname(p.meta), { recursive: true });
-      await Bun.write(p.data, data);
-      await writeFile(p.meta, contentType);
+      const write = (writes.get(p.data) ?? Promise.resolve())
+        .catch(() => {})
+        .then(async () => {
+          await mkdir(dirname(p.data), { recursive: true });
+          await mkdir(dirname(p.meta), { recursive: true });
+          await Bun.write(p.data, data);
+          await writeFile(p.meta, contentType);
+        });
+      writes.set(p.data, write);
+      try {
+        await write;
+      } finally {
+        if (writes.get(p.data) === write) writes.delete(p.data);
+      }
     },
     async open(key) {
       const p = pathsOf(key);

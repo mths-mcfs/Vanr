@@ -10,7 +10,7 @@ import { z } from "zod";
 import { agentInWorkspace, requireAgentEditor } from "../agents";
 import { type AppDeps, type AppEnv, requireUser } from "../context";
 import { conflict, forbidden, HttpError, notFound, param, readJson } from "../http";
-import { endLiveView, endLiveViewsOf } from "../runners/browser-live";
+import { endLiveView, endLiveViewsOf, updateRunnerAccess } from "../runners/browser-live";
 import { mintSession, revokeRunner } from "../runners/credentials";
 import { RunnerCallError } from "../runners/hub";
 import { installScript, runnerBundle } from "../runners/install";
@@ -24,6 +24,7 @@ import {
   pollPairing,
   startPairing,
 } from "../runners/pairing";
+import { cancelRunnerRequests, publishRunnerRequests } from "../runners/requests";
 import {
   canManageRunner,
   canUseRunner,
@@ -52,10 +53,29 @@ export function runnerError(err: unknown): never {
 
 const MAX_TIMEOUT_S = 3600;
 
-/** The agent no longer uses this runner: what it had pending there stops and its live view from there ends. */
-function agentLeftRunner(deps: AppDeps, runnerId: string, agentId: string) {
-  deps.runners.cancelPending(runnerId, agentId);
-  endLiveView(deps, agentId);
+/** Changing the binding and closing its requests commit together, before any new send can claim them. */
+async function setAgentRunner(deps: AppDeps, agentId: string, runnerId: string | null) {
+  const { previous, closed } = await deps.db.transaction(async (tx) => {
+    const [agent] = await tx.select().from(agents).where(eq(agents.id, agentId)).for("update");
+    const previous = agent?.environmentId ?? null;
+    await tx
+      .update(agents)
+      .set({ environmentId: runnerId, updatedAt: deps.now() })
+      .where(eq(agents.id, agentId));
+    const closed = await cancelRunnerRequests(
+      tx,
+      deps.now(),
+      previous ?? "",
+      previous && previous !== runnerId ? [agentId] : [],
+    );
+    return { previous, closed };
+  });
+  if (previous && previous !== runnerId) {
+    deps.runners.cancelPending(previous, agentId);
+    endLiveView(deps, agentId);
+  }
+  await publishRunnerRequests(deps, closed);
+  return previous;
 }
 
 async function sandboxOf(deps: AppDeps, workspaceId: string): Promise<SandboxSettings> {
@@ -239,18 +259,23 @@ export function registerRunners(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const row = await runnerInWorkspace(deps.db, me.workspaceId, param(c, "runnerId"));
     if (!canManageRunner(me, row)) throw forbidden();
-    await deps.db.update(runners).set({ removedAt: deps.now() }).where(eq(runners.id, row.id));
-    const moved = await deps.db
-      .update(agents)
-      .set({ environmentId: null, updatedAt: deps.now() })
-      .where(eq(agents.environmentId, row.id))
-      .returning({ id: agents.id });
+    const { moved, closed } = await deps.db.transaction(async (tx) => {
+      await tx.update(runners).set({ removedAt: deps.now() }).where(eq(runners.id, row.id));
+      const moved = await tx
+        .update(agents)
+        .set({ environmentId: null, updatedAt: deps.now() })
+        .where(eq(agents.environmentId, row.id))
+        .returning({ id: agents.id });
+      const closed = await cancelRunnerRequests(tx, deps.now(), row.id);
+      return { moved, closed };
+    });
     deps.runners.close(row.id, {
       type: "rejected",
       reason: "revoked",
       message: "Removed from the workspace",
     });
     endLiveViewsOf(deps, row.id);
+    await publishRunnerRequests(deps, closed);
     deps.hub.toWorkspace(me.workspaceId, { type: "runner.deleted", runnerId: row.id });
     for (const a of moved) await emitEnvironment(deps, me.workspaceId, a.id);
     return c.body(null, 204);
@@ -289,14 +314,7 @@ export function registerRunners(app: Hono<AppEnv>) {
         timeoutMs: 15_000,
       })
       .catch(runnerError);
-    await deps.db
-      .update(runners)
-      .set({ access: res.access, updatedAt: deps.now() })
-      .where(eq(runners.id, row.id));
-    deps.hub.toWorkspace(me.workspaceId, { type: "runner.access", runnerId: row.id, access: res.access });
-    // What was running started under the wider access: it stops, and so does a live view without the browser.
-    deps.runners.cancelPending(row.id);
-    if (!res.access.tools.browser) endLiveViewsOf(deps, row.id);
+    await updateRunnerAccess(deps, row.id, res.access);
     return c.json({ access: res.access });
   });
 
@@ -319,15 +337,25 @@ export function registerRunners(app: Hono<AppEnv>) {
     const wanted = input.agentIds ? new Set(input.agentIds) : null;
     const picked = candidates.filter((a) => !wanted || wanted.has(a.id)).map((a) => a.id);
     // Moved only while still on this runner: an agent another change took elsewhere meanwhile stays there.
-    const moved = picked.length
-      ? (
-          await deps.db
-            .update(agents)
-            .set({ environmentId: to.id, updatedAt: deps.now() })
-            .where(and(inArray(agents.id, picked), eq(agents.environmentId, from.id)))
-            .returning({ id: agents.id })
-        ).map((a) => a.id)
-      : [];
+    const { moved, closed } = await deps.db.transaction(async (tx) => {
+      const moved = picked.length
+        ? (
+            await tx
+              .update(agents)
+              .set({ environmentId: to.id, updatedAt: deps.now() })
+              .where(and(inArray(agents.id, picked), eq(agents.environmentId, from.id)))
+              .returning({ id: agents.id })
+          ).map((a) => a.id)
+        : [];
+      const closed = await cancelRunnerRequests(tx, deps.now(), from.id, to.id !== from.id ? moved : []);
+      return { moved, closed };
+    });
+    if (to.id !== from.id)
+      for (const id of moved) {
+        deps.runners.cancelPending(from.id, id);
+        endLiveView(deps, id);
+      }
+    await publishRunnerRequests(deps, closed);
     const skipped = [...(wanted ?? [])].filter((id) => !moved.includes(id));
     const queued = (
       await deps.db
@@ -342,7 +370,6 @@ export function registerRunners(app: Hono<AppEnv>) {
       agentIds: moved,
     });
     for (const id of moved) {
-      if (to.id !== from.id) agentLeftRunner(deps, from.id, id);
       await emitEnvironment(deps, me.workspaceId, id);
     }
     await pushAgents(deps, to.id);
@@ -421,14 +448,9 @@ export function registerRunners(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const agent = await agentInWorkspace(deps.db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, agent);
-    const previous = agent.environmentId;
-    await deps.db
-      .update(agents)
-      .set({ environmentId: null, updatedAt: deps.now() })
-      .where(eq(agents.id, agent.id));
+    const previous = await setAgentRunner(deps, agent.id, null);
     await setStatus(deps, me.workspaceId, agent.id, "none");
     if (previous) {
-      agentLeftRunner(deps, previous, agent.id);
       await pushAgents(deps, previous);
     }
     return c.body(null, 204);
@@ -444,11 +466,7 @@ export function registerRunners(app: Hono<AppEnv>) {
       const runner = await runnerInWorkspace(deps.db, me.workspaceId, runnerId);
       if (!canUseRunner(me, runner)) throw forbidden("Only who paired this runner can lend it to agents");
     }
-    const previous = agent.environmentId;
-    await deps.db
-      .update(agents)
-      .set({ environmentId: runnerId, updatedAt: deps.now() })
-      .where(eq(agents.id, agent.id));
+    const previous = await setAgentRunner(deps, agent.id, runnerId);
     if (runnerId)
       await deps.db
         .insert(agentEnvironments)
@@ -457,7 +475,6 @@ export function registerRunners(app: Hono<AppEnv>) {
           target: agentEnvironments.agentId,
           set: { status: "running", updatedAt: deps.now() },
         });
-    if (previous && previous !== runnerId) agentLeftRunner(deps, previous, agent.id);
     const target = await targetOf(deps, runnerId);
     // The same shape as every `environment.updated`: the agent's page updates the card without fetching.
     await emitEnvironment(deps, me.workspaceId, agent.id);

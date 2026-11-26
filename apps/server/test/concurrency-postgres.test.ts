@@ -11,17 +11,18 @@
 import { describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { sha256Hex } from "@vanr/engine/ids";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
 import postgres from "postgres";
 import type { AppDeps, AppEnv } from "../src/context";
+import { pgCode } from "../src/db-errors";
 import { errorBody, HttpError } from "../src/http";
 import { createWorkspace, joinWorkspace } from "../src/members";
 import { notify } from "../src/notifications";
 import { registerInvitations } from "../src/routes/invitations";
 import type { RunningServer } from "../src/server";
 import { Browser, body, signedIn, startTestServer } from "./harness";
-import { forcedPair, instrumented, outcome } from "./lock-double";
+import { forcedPair, gate, instrumented, outcome } from "./lock-double";
 import { NO_POSTGRES, TEST_POSTGRES_URL, testDatabaseUrl } from "./postgres";
 
 const onPostgres = (name: string) => (TEST_POSTGRES_URL ? name : `${name} (skipped: ${NO_POSTGRES})`);
@@ -85,6 +86,107 @@ describe.skipIf(!TEST_POSTGRES_URL)(
         }
         expect(alive.length).toBe(1);
         expect(sha256Hex(alive[0] ?? "")).toBe(pending[0]?.tokenHash ?? "");
+      });
+    }, 60_000);
+
+    test("email accepts recover a real handle collision and commit both claims and memberships", async () => {
+      await withServer("handles", async (server) => {
+        const ana = await signedIn(server, "Ana", "ana@handles.test");
+        const { workspaceId, defaultChannelId } = await createWorkspace(server.deps.db, {
+          name: "Handles",
+          context: "",
+          user: ana.user,
+        });
+        const people = await server.deps.db
+          .insert(schema.users)
+          .values(
+            ["a", "b"].map((side) => ({ id: `sam_${side}`, name: "Sam", email: `sam_${side}@handles.test` })),
+          )
+          .returning();
+        const tokens: string[] = [];
+        for (const user of people) {
+          const res = await ana.browser.json(`/api/v1/workspaces/${workspaceId}/invitations`, "POST", {
+            email: user.email,
+            role: "member",
+          });
+          expect(res.status).toBe(201);
+          tokens.push((await body(res)).url.split("/invite/")[1]);
+        }
+        const ready = gate();
+        const pids = new Set<number>();
+        const errors: (string | null)[] = [];
+        let arrivals = 0;
+        // Hold both accepts after takenHandles' final read, before either can insert "sam".
+        let timedOut = false;
+        const timeout = setTimeout(() => {
+          timedOut = true;
+          ready.open();
+        }, 5_000);
+        try {
+          const results = await Promise.all(
+            people.map((user, i) => {
+              const app = new Hono<AppEnv>();
+              app.onError((err, c) => {
+                errors.push(pgCode(err));
+                return c.json({}, 500);
+              });
+              app.use("*", async (c, next) => {
+                c.set("user", user);
+                c.set("deps", {
+                  ...server.deps,
+                  db: instrumented(server.deps.db, {
+                    pids,
+                    after: {
+                      kind: "select",
+                      match: 'from "agents"',
+                      run: async () => {
+                        if (++arrivals === 2) ready.open();
+                        await ready.opened;
+                      },
+                    },
+                  }),
+                });
+                await next();
+              });
+              registerInvitations(app);
+              return app.request(`/api/v1/invitations/${tokens[i]}/accept`, { method: "POST" });
+            }),
+          );
+          expect(timedOut).toBe(false);
+          expect(arrivals).toBeGreaterThanOrEqual(2);
+          expect(pids.size).toBeGreaterThanOrEqual(2);
+          outcome(
+            "handle-accept",
+            { statuses: results.map((r) => r.status), errors },
+            { statuses: [200, 200], errors: [] },
+          );
+        } finally {
+          ready.open();
+          clearTimeout(timeout);
+        }
+        const userIds = people.map((u) => u.id);
+        const joined = await server.deps.db
+          .select()
+          .from(schema.members)
+          .where(and(eq(schema.members.workspaceId, workspaceId), inArray(schema.members.userId, userIds)));
+        expect(joined.map((r) => r.handle).sort()).toEqual(["sam", "sam-2"]);
+        const general = await server.deps.db
+          .select()
+          .from(schema.channelMemberships)
+          .where(
+            and(
+              eq(schema.channelMemberships.channelId, defaultChannelId),
+              inArray(schema.channelMemberships.memberId, userIds),
+            ),
+          );
+        expect(general.length).toBe(2);
+        const claims = await server.deps.db
+          .select()
+          .from(schema.invitations)
+          .where(eq(schema.invitations.workspaceId, workspaceId));
+        expect(claims.map((r) => [r.status, r.endorsedBy]).sort()).toEqual(
+          userIds.map((id) => ["accepted", id]).sort(),
+        );
       });
     }, 60_000);
 
@@ -180,8 +282,10 @@ describe.skipIf(!TEST_POSTGRES_URL)(
             side === "A" ? "from ana" : "from caio",
           ),
         );
-        expect(run.aPids.length).toBe(1);
-        expect(run.bPids.length).toBe(1);
+        // Each side runs the notice's transaction and then its deliveries' own (notify-delivery.ts): the first
+        // one, which takes the group's row lock, ran on a connection of its own on each side.
+        expect(run.aPids.length).toBeGreaterThanOrEqual(1);
+        expect(run.bPids.length).toBeGreaterThanOrEqual(1);
         expect(run.aPids[0]).not.toBe(run.bPids[0]);
         await server.deps.runtime.settle();
         const [row, ...rest] = await server.deps.db

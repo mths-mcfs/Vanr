@@ -1,6 +1,8 @@
 // The live view of the agent's browser. Who watches gets 1 frame per second; who took the control through an
 // active intervention gets 15 and sends mouse and keyboard. The runner only streams while someone watches; the
 // last one to leave ends the stream a moment later.
+
+import type { RunnerAccess } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import { and, eq } from "drizzle-orm";
 import type { AppDeps } from "../context";
@@ -9,6 +11,7 @@ import type { BrowserSocket } from "../realtime/hub";
 import { canTalkTo } from "../runtime/route";
 import { openIntervention, policyFor } from "./browser-guard";
 import { withPlanOwner } from "./plans";
+import { interventionSession } from "./requests";
 
 const { agents, runners } = schema;
 const WATCH_FPS = 1;
@@ -19,7 +22,8 @@ interface Stream {
   runnerId: string;
   workspaceId: string;
   watchers: Set<BrowserSocket>;
-  fps: number;
+  /** null: an active stream lost its runner connection; zero: not streaming. */
+  fps: number | null;
   seq: number;
   stopTimer: ReturnType<typeof setTimeout> | null;
   /**
@@ -33,20 +37,22 @@ const streams = new Map<string, Stream>();
 
 const send = (ws: BrowserSocket, frame: Record<string, unknown>) => {
   try {
-    ws.send(JSON.stringify(frame));
+    ws.send(
+      JSON.stringify(String(frame.type).startsWith("live_view.") ? { type: "event", event: frame } : frame),
+    );
   } catch {
     // the socket is closing
   }
 };
 
 /** Who has the control now: the person of the active intervention. */
-async function controllerOf(db: Db, agentId: string): Promise<string | null> {
-  const h = await openIntervention(db, agentId);
+async function controllerOf(db: Db, agentId: string, now: Date): Promise<string | null> {
+  const h = await openIntervention(db, agentId, now);
   return h?.status === "active" ? h.controllingUserId : null;
 }
 
 async function status(deps: AppDeps, agentId: string) {
-  const h = await openIntervention(deps.db, agentId);
+  const h = await openIntervention(deps.db, agentId, deps.now());
   return {
     type: "live_view.status",
     agentId,
@@ -118,7 +124,7 @@ export function liveViewDetach(deps: AppDeps, ws: BrowserSocket) {
 export async function refreshStream(deps: AppDeps, agentId: string) {
   const s = streams.get(agentId);
   if (!s || s.watchers.size === 0) return;
-  const fps = (await controllerOf(deps.db, agentId)) ? CONTROL_FPS : WATCH_FPS;
+  const fps = (await controllerOf(deps.db, agentId, deps.now())) ? CONTROL_FPS : WATCH_FPS;
   const st = await status(deps, agentId);
   for (const w of s.watchers) send(w, st);
   if (fps === s.fps) return;
@@ -133,7 +139,7 @@ export async function refreshStream(deps: AppDeps, agentId: string) {
       { agent: { id: agentId, handle: agent?.handle ?? "" }, timeoutMs: 20_000 },
     );
   } catch (err) {
-    s.fps = 0;
+    if (s.fps === fps) s.fps = 0;
     for (const w of s.watchers) send(w, { type: "live_view.unavailable", agentId, reason: "unavailable" });
     log.warn("live_view.stream_failed", { err, agentId });
   }
@@ -147,7 +153,12 @@ export async function liveViewInput(
 ) {
   const s = streams.get(agentId);
   if (!s?.watchers.has(ws)) return send(ws, { type: "error", code: "not_watching", agentId });
-  if ((await controllerOf(deps.db, agentId)) !== ws.data.userId)
+  const intervention = await openIntervention(deps.db, agentId, deps.now());
+  if (
+    intervention?.status !== "active" ||
+    intervention.controllingUserId !== ws.data.userId ||
+    interventionSession(deps, intervention.id) !== ws.data.sessionId
+  )
     return send(ws, { type: "error", code: "not_in_control", agentId });
   // Only who has the control gets here. The runner already has the rule with the person driving, from the
   // driver notice (`pushPolicy`); input that reaches it after they hand back doesn't count.
@@ -220,6 +231,41 @@ export function endLiveViewsOf(deps: AppDeps, runnerId: string) {
   for (const [agentId, s] of [...streams]) if (s.runnerId === runnerId) endLiveView(deps, agentId);
 }
 
+/** Only an active screencast needs resuming when its connection ends or is replaced. */
+export function resetLiveViewsOf(runnerId: string) {
+  for (const s of streams.values())
+    if (s.runnerId === runnerId) {
+      if (s.fps !== 0) s.fps = null;
+      s.lastFrame = null;
+    }
+}
+
+/** Both the notification and the management result report the same change; apply each reduction once. */
+export async function updateRunnerAccess(deps: AppDeps, runnerId: string, access: RunnerAccess) {
+  const workspaceId = await deps.db.transaction(async (tx) => {
+    const [runner] = await tx.select().from(runners).where(eq(runners.id, runnerId)).for("update");
+    if (!runner) return null;
+    const toolsReduced = (["browser", "claude", "codex", "commands"] as const).some(
+      (tool) => runner.access.tools[tool] && !access.tools[tool],
+    );
+    const foldersReduced = runner.access.folders.some((folder) => {
+      const grants = access.folders.filter((grant) => grant.path === folder.path);
+      if (folder.agents.length === 0) return !grants.some((grant) => grant.agents.length === 0);
+      return folder.agents.some(
+        (id) => !grants.some((grant) => grant.agents.length === 0 || grant.agents.includes(id)),
+      );
+    });
+    await tx.update(runners).set({ access, updatedAt: deps.now() }).where(eq(runners.id, runnerId));
+    if (toolsReduced || foldersReduced) {
+      // The runner announces the change before answering the access.reduce that made it.
+      deps.runners.cancelPending(runnerId, undefined, "access.reduce");
+      if (!access.tools.browser) endLiveViewsOf(deps, runnerId);
+    }
+    return runner.workspaceId;
+  });
+  if (workspaceId) deps.hub.toWorkspace(workspaceId, { type: "runner.access", runnerId, access });
+}
+
 /**
  * Checks each stream against the database now: a stream whose agent is gone or moved to another runner ends, and
  * a watcher who may no longer see the agent (left its audience, another workspace) stops watching. `only`
@@ -233,6 +279,11 @@ export async function recheckLiveViews(deps: AppDeps, only?: BrowserSocket) {
       endLiveView(deps, agentId);
       continue;
     }
+    const [runner] = await deps.db.select().from(runners).where(eq(runners.id, s.runnerId));
+    if (!runner || runner.removedAt || runner.revokedAt || !runner.browser || !runner.access.tools.browser) {
+      endLiveView(deps, agentId);
+      continue;
+    }
     const talker = await withPlanOwner(deps.db, agent);
     for (const w of [...s.watchers]) {
       if (only && w !== only) continue;
@@ -240,5 +291,6 @@ export async function recheckLiveViews(deps: AppDeps, only?: BrowserSocket) {
       liveViewUnsubscribe(deps, w, agentId);
       send(w, { type: "live_view.unavailable", agentId, reason: "forbidden" });
     }
+    if (s.fps === null && deps.runners.isOnline(s.runnerId)) await refreshStream(deps, agentId);
   }
 }

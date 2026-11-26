@@ -107,7 +107,6 @@ export async function notifyReaction(
   const groupKey = `reaction:${message.id}`;
   // An author who lost access to the channel (left the private one) gets no notice with the message's excerpt.
   if (
-    input.added &&
     !(await canReadChannel(deps.db, {
       workspaceId: message.workspaceId,
       userId: message.authorId,
@@ -118,13 +117,18 @@ export async function notifyReaction(
   if (!input.added) {
     // The notice now counts what is left on the message (without the author's own reactions).
     const rows = await deps.db
-      .select({ type: emojiReactions.actorType, id: emojiReactions.actorId })
+      .select({
+        type: emojiReactions.actorType,
+        id: emojiReactions.actorId,
+        reaction: emojiReactions.reaction,
+      })
       .from(emojiReactions)
       .where(eq(emojiReactions.messageId, message.id))
       .orderBy(desc(emojiReactions.createdAt));
     const others = rows.filter((r) => !(r.type === "person" && r.id === message.authorId));
-    const actors = [...new Map(others.map((r) => [`${r.type}:${r.id}`, r])).values()];
-    await shrinkGroup(deps, message.workspaceId, groupKey, { count: others.length, actors });
+    const actors = [...new Map(others.map(({ type, id }) => [`${type}:${id}`, { type, id }])).values()];
+    const emojis = [...new Set(others.map((r) => r.reaction))];
+    await shrinkGroup(deps, message.workspaceId, groupKey, { count: others.length, actors, emojis });
     return;
   }
   await notify(deps, {

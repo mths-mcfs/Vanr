@@ -10,7 +10,9 @@ import { createAuth, type SignupDecision } from "./auth";
 import { resumeRecalcs, stopRecalcs } from "./bases/write";
 import type { Config } from "./config";
 import { ABSENT, type AppDeps, type RuntimePort } from "./context";
-import { HttpError } from "./http";
+import { purgeTrash } from "./drive";
+import { extractPending } from "./drive-extract";
+import { errorBody, HttpError } from "./http";
 import { holdInstanceLock } from "./instance-lock";
 import { guardedFetch } from "./integrations/net";
 import { routedBlobs } from "./integrations/storage";
@@ -28,18 +30,20 @@ import {
 } from "./realtime/browser-socket";
 import { type BrowserSocket, type BrowserSocketData, Hub } from "./realtime/hub";
 import { isTransfer, TRANSFER_IDLE_SECONDS } from "./routes/drive";
+import { expireUploads } from "./routes/drive-upload";
 import { hasPendingInvite, INVITE_COOKIE } from "./routes/invitations";
 import { dropAllLiveViews } from "./runners/browser-live";
 import { RunnerHub, type RunnerSocketData } from "./runners/hub";
+import { revalidateInterventions } from "./runners/requests";
 import { runnerClose, runnerMessage, runnerOpen, runnerSocketData } from "./runners/socket";
 import { BackgroundWork } from "./runtime/background";
-import { createSearchIndex } from "./search-index";
+import { backfillSearch, createSearchIndex, searchTick } from "./search-index";
 import { FirstUserPlace, SIGNUP_QUEUE_LIMITS, type SignupQueueLimits, signupDecision } from "./signup-queue";
 import { postgresLedger } from "./usage-ledger";
+import { purgeWikiTrash } from "./wiki";
 import {
   COLLAB_PATH,
   type CollabSocketData,
-  checkCollabUpgrade,
   createWikiCollab,
   MAX_FRAME as WIKI_MAX_FRAME,
 } from "./wiki-collab";
@@ -65,6 +69,8 @@ interface StartOptions {
   idleTimeoutSeconds?: number;
   /** Tests: replaces a step of the boot that touches the outside, to break it or hold it. */
   steps?: Partial<BootSteps>;
+  /** Tests: shorten the interval between file service cycles. */
+  fileServicesMs?: number;
   /** The live wiki: the quiet before the draft publishes itself (default 5 min) and the autosave debounce. */
   wikiIdlePublishMs?: number;
   wikiDebounceMs?: number;
@@ -165,35 +171,54 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   const isWiki = (ws: Bun.ServerWebSocket<SocketData>): ws is Bun.ServerWebSocket<CollabSocketData> =>
     ws.data.kind === "wiki";
   const upgradeRequired = () =>
-    Response.json({ error: { code: "upgrade_required", message: "Use WebSocket" } }, { status: 426 });
+    Response.json(errorBody("upgrade_required", "Use WebSocket"), { status: 426 });
+
+  // The stop admits no new request or upgrade, and waits for the handlers already admitted before the wiki,
+  // the background work and the database close under them.
+  let closing = false;
+  // The answer to what the stop doesn't admit, also after a check awaited at an upgrade (the stop may begin
+  // during it).
+  const stoppingResponse = () =>
+    Response.json(errorBody("unavailable", "The server is stopping"), { status: 503 });
+  const admitted = new Set<Promise<unknown>>();
+  async function serve(req: Request, srv: Bun.Server<SocketData>): Promise<Response | undefined> {
+    const path = new URL(req.url).pathname;
+    // Large bodies (Drive downloads and uploads) get a longer inactivity limit than the rest.
+    if (isTransfer(path)) srv.timeout(req, TRANSFER_IDLE_SECONDS);
+    // The browser's real time: the session cookie and the origin are checked before the upgrade.
+    if (depsRef && path === "/api/v1/realtime") {
+      const check = await checkBrowserUpgrade(depsRef, req, origins);
+      if (!check.ok) return check.response;
+      if (closing) return stoppingResponse();
+      if (srv.upgrade(req, { data: check.data })) return undefined;
+      return upgradeRequired();
+    }
+    // The paired runners: the authentication is the `hello` with the session, inside the socket.
+    if (depsRef && path === "/api/v1/runners/connect") {
+      if (srv.upgrade(req, { data: runnerSocketData() })) return undefined;
+      return upgradeRequired();
+    }
+    // The live wiki: the session cookie, the origin, the membership and the connection caps before the upgrade.
+    if (depsRef && path === COLLAB_PATH) {
+      const check = await collab.upgrade(req, origins);
+      if (!check.ok) return check.response;
+      if (closing) return stoppingResponse();
+      if (srv.upgrade(req, { data: check.data })) return undefined;
+      return upgradeRequired();
+    }
+    return handler(req);
+  }
 
   const server = Bun.serve<SocketData>({
     port: config.port,
     ...(opts.idleTimeoutSeconds !== undefined ? { idleTimeout: opts.idleTimeoutSeconds } : {}),
-    async fetch(req, srv) {
-      const path = new URL(req.url).pathname;
-      // Large bodies (Drive downloads and uploads) get a longer inactivity limit than the rest.
-      if (isTransfer(path)) srv.timeout(req, TRANSFER_IDLE_SECONDS);
-      // The browser's real time: the session cookie and the origin are checked before the upgrade.
-      if (depsRef && path === "/api/v1/realtime") {
-        const check = await checkBrowserUpgrade(depsRef, req, origins);
-        if (!check.ok) return check.response;
-        if (srv.upgrade(req, { data: check.data })) return undefined;
-        return upgradeRequired();
-      }
-      // The paired runners: the authentication is the `hello` with the session, inside the socket.
-      if (depsRef && path === "/api/v1/runners/connect") {
-        if (srv.upgrade(req, { data: runnerSocketData() })) return undefined;
-        return upgradeRequired();
-      }
-      // The live wiki: the session cookie, the origin and the page's right are checked before the upgrade.
-      if (depsRef && path === COLLAB_PATH) {
-        const check = await checkCollabUpgrade(depsRef, req, origins);
-        if (!check.ok) return check.response;
-        if (srv.upgrade(req, { data: check.data })) return undefined;
-        return upgradeRequired();
-      }
-      return handler(req);
+    fetch(req, srv) {
+      if (closing) return stoppingResponse();
+      const answer = serve(req, srv);
+      const done = () => admitted.delete(answer);
+      admitted.add(answer);
+      answer.then(done, done);
+      return answer;
     },
     websocket: {
       // The biggest frame any side may send (a runner's live view frame); each handler has its own limit.
@@ -250,6 +275,8 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   const blobs = routedBlobs(localBlobs, () => ({
     db,
     authSecret: effective.authSecret,
+    allowPrivateNetworks: effective.integrations.allowPrivateNetworks,
+    allowPlaintext: effective.integrations.allowPlaintext,
     track: (work, what) => deps.runtime.track(work, what),
     now,
   }));
@@ -285,11 +312,12 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     mailer,
     trustedOrigins: origins,
     signupAllowed,
-    // A signed-out or revoked session closes at once every socket it opened: the browser's real time and
-    // the live wiki. This is the one place Better Auth's session end reaches.
-    onSessionEnded: (sessionId) => {
+    // A signed-out or revoked session closes at once every socket it opened (the browser's real time and the
+    // live wiki) and the interventions it held. This is the one place Better Auth's session end reaches.
+    onSessionEnded: async (sessionId) => {
       hub.dropSession(sessionId);
       collab.live.sessionEnded(sessionId);
+      if (depsRef) await revalidateInterventions(depsRef, sessionId);
     },
   });
   // Background work (the notification queue today); stopping waits for what is running. Slice S6
@@ -310,7 +338,12 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     search: createSearchIndex({ db, config: effective, ledger, now }, opts.fetchExternal),
     sealer: createSealer(effective.authSecret, "credentials"),
     // Every integration fetch checks the destination (and each redirect) against the internal network.
-    fetchExternal: guardedFetch(opts.fetchExternal ?? fetch, effective.integrations.allowPrivateNetworks),
+    fetchExternal: guardedFetch(
+      opts.fetchExternal ?? fetch,
+      effective.integrations.allowPrivateNetworks,
+      undefined,
+      effective.integrations.allowPlaintext,
+    ),
     sql: opts.sql ?? postgresConnector,
     runners: runnersHub,
     // Push goes only to known push service hosts (push.ts), without redirects: it doesn't go through
@@ -321,19 +354,58 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     wikiLive: collab.live,
     // S5 (assignments/motor, assignments/verify) adds `assignmentEngine` and `assignmentVerifier`.
   };
-  // A session that expires, or a membership or channel lost outside this server's routes, is caught here. It
-  // comes before the recalculations so that their halt is the first step of the stop, in the same tick.
-  const sweep = setInterval(() => {
-    void revalidateBrowsers(deps).catch((err) => log.warn("ws.revalidate_failed", { err }));
-  }, REVALIDATE_MS);
-  sweep.unref?.();
-  undo.push(() => clearInterval(sweep));
   // Here, in this order: the undo of stopRecalcs (S2, bases/write) and of the assignment engine's stop
   // (S5); the provider lookup (S6); runtime.start (S6), the engine's start (S5) and resumeRecalcs (S2),
   // all before the app takes requests.
+  await revalidateBrowsers(deps);
+  // A session that expires, or a membership or channel lost outside this server's routes, is caught here. It
+  // comes before the recalculations so that their halt is the first step of the stop, in the same tick.
+  let sweeping: Promise<void> | null = null;
+  const sweep = setInterval(() => {
+    sweeping ??= revalidateBrowsers(deps)
+      .catch((err) => log.warn("ws.revalidate_failed", { err }))
+      .finally(() => {
+        sweeping = null;
+      });
+  }, REVALIDATE_MS);
+  sweep.unref?.();
+  undo.push(async () => {
+    clearInterval(sweep);
+    // A sweep may be awaiting an RPC slot: cancel the hub before waiting, with the database still open.
+    runnersHub.closeAll();
+    await sweeping;
+  });
   // The vector leg only with an embedder and pgvector in the database; without them the search is lexical
   // and by name. It acquires nothing, so there is nothing to undo.
   if (effective.search.embedder.kind !== "off") await deps.search.ensureVector();
+  await backfillSearch(deps);
+  let stopped = false;
+  let work = Promise.resolve();
+  let timer = setTimeout(cycle, opts.fileServicesMs ?? 60_000);
+  function cycle() {
+    work = (async () => {
+      for (const run of [
+        expireUploads,
+        purgeTrash,
+        purgeWikiTrash,
+        extractPending,
+        backfillSearch,
+        searchTick,
+      ]) {
+        try {
+          await run(deps);
+        } catch (err) {
+          log.error("server.file_service_failed", { service: run.name, err });
+        }
+      }
+      if (!stopped) timer = setTimeout(cycle, opts.fileServicesMs ?? 60_000);
+    })();
+  }
+  undo.push(async () => {
+    stopped = true;
+    clearTimeout(timer);
+    await work;
+  });
   // The formula recalculations: halted before the database closes, then the ones a crash or a deploy left
   // halfway resume in the background.
   undo.push(() => stopRecalcs(deps));
@@ -343,6 +415,15 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   depsRef = deps;
   log.info("server.started", { url: publicUrl, db: opened.kind });
 
+  // The first step of the stop, in the tick it starts: no new request or upgrade, and the recalculations halt
+  // before their next batch. Then the admitted handlers end (a runner call they await fails).
+  undo.push(async () => {
+    closing = true;
+    const halting = stopRecalcs(deps);
+    runnersHub.closeAll();
+    while (admitted.size > 0) await Promise.allSettled([...admitted]);
+    await halting;
+  });
   // Every stop, at once or later, gets the same shutdown: it ends (or fails) once for all of them.
   let stopping: Promise<void> | null = null;
   return {

@@ -11,7 +11,8 @@ import { type OpenDb, openDb } from "@vanr/engine/db";
 import { sql } from "drizzle-orm";
 import type { RunnerSocketData } from "../src/runners/hub";
 import type { BootSteps } from "../src/server";
-import { body as read, SERVER_TEST_MS, startTestServer } from "./harness";
+import { holdNextIndexWrite, body as read, SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
+import { seedWorkspace } from "./seed";
 
 const dirs: string[] = [];
 afterAll(async () => {
@@ -313,6 +314,32 @@ describe("stop", () => {
       await second;
       await expectClosed(seen.opened);
       expect(server.stop()).toBe(first);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "waits for an admitted request before closing the wiki and the database, and admits no new one",
+    async () => {
+      const server = await startTestServer();
+      const ana = await signedIn(server, "Ana", "in-flight@boot.test");
+      const { workspaceId } = await seedWorkspace(server, ana);
+      const held = holdNextIndexWrite(server);
+      const pages = `/api/v1/workspaces/${workspaceId}/wiki/pages`;
+      const created = ana.browser.json(pages, "POST", { title: "In flight", body: "Pending index" });
+      await held.begun;
+      let stopped = false;
+      const stopping = server.stop().then(() => {
+        stopped = true;
+      });
+      expect((await ana.browser.fetch(pages)).status).toBe(503);
+      await Bun.sleep(100);
+      expect(stopped).toBe(false);
+      held.release();
+      const res = await created;
+      expect(res.status).toBe(201);
+      expect((await read(res)).title).toBe("In flight");
+      await stopping;
     },
     SERVER_TEST_MS,
   );

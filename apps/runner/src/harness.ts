@@ -5,7 +5,7 @@
 // run on the server with the usual permissions and approvals. Before starting the CLI, the runner checks
 // that the login is a subscription; on Claude Code it checks again at `init` (`apiKeySource`).
 import { spawn } from "node:child_process";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { AgentRef, HarnessEvent, HarnessTurnResult, opArgs } from "@vanr/engine/runner-protocol";
 import { z } from "zod";
@@ -16,9 +16,11 @@ import { maybe, parseLine } from "./lines";
 import { MCP_SERVER_NAME, MCP_SOCKET_ENV, MCP_TOKEN_ENV, type McpBridge, type ToolOutcome } from "./mcp";
 import { sandboxed } from "./ops";
 import {
+  type AgentCli,
+  agentCli,
   CLI_DOMAINS,
   type CommandSandbox,
-  cliPaths,
+  isolated,
   type PolicyContext,
   SESSION_ENV,
   shellLine,
@@ -92,6 +94,7 @@ const CODEX_FEATURES_OFF = [
 ];
 
 function codexHarnessArgs(input: {
+  cliKind: AgentCli["kind"];
   cwd: string;
   model?: string;
   system: string | null;
@@ -124,6 +127,7 @@ function codexHarnessArgs(input: {
     "--ephemeral",
     // Without the person's config.toml (their MCP servers, another model provider).
     "--ignore-user-config",
+    ...(input.cliKind === "own" ? ["--ignore-rules"] : []),
     "-C",
     input.cwd,
     "--sandbox",
@@ -197,6 +201,10 @@ const codexEvent = z.object({
   message: maybe.text,
 });
 
+/** What the person reads when an agent session cannot use their CLI login. */
+export const SIGN_IN_AGAIN =
+  "Sign in to the CLI again on this computer: agent sessions only read your login and cannot renew it.";
+
 /** A CLI error: plan limit, login, or something else. */
 export function classifyHarnessError(message: string, authFailed = false): RunnerError {
   const text = message.trim().slice(-2000) || "The CLI stopped without an answer";
@@ -204,11 +212,16 @@ export function classifyHarnessError(message: string, authFailed = false): Runne
     /usage limit|limit reached|rate.?limit|hit your limit|resets? (at|in)|out of (extra )?usage/i.test(text)
   )
     return new RunnerError("plan_limit", text);
+  // The session reads the person's login read-only: a CLI that tried to renew it hits a read-only file.
+  const renewBlocked =
+    /read-only file system|EROFS|EBUSY|resource busy/i.test(text) &&
+    /credential|auth\.json|token|login/i.test(text);
   if (
     authFailed ||
+    renewBlocked ||
     /not logged in|\/login|log ?in again|invalid api key|authenticat|unauthori[sz]ed|oauth/i.test(text)
   )
-    return new RunnerError("not_logged_in", text);
+    return new RunnerError("not_logged_in", `${SIGN_IN_AGAIN} ${text}`);
   return new RunnerError("harness_failed", text);
 }
 
@@ -357,18 +370,21 @@ export class Harnesses {
         "This environment is already thinking for other agents; try again soon",
       );
     this.running++;
-    const dir = join(this.opts.home, "harness", "turns", args.runId);
-    const cwd = join(this.opts.home, "harness", "work", `${agent.handle}-${agent.id.slice(-8)}`);
+    let dir: string | undefined;
     const timeoutSeconds = Math.min(args.timeoutSeconds ?? DEFAULT_TIMEOUT_S, 86_400);
     let bridge: { token: string; close: () => void } | null = null;
+    let cli: AgentCli | null = null;
     try {
-      ensureDir(dir);
-      ensureDir(cwd);
+      const turns = join(this.opts.home, "harness", "turns");
+      ensureDir(turns);
+      dir = mkdtempSync(join(turns, `${args.runId}-`));
+      const cwd = this.opts.access.agentRoot(agent, join(this.opts.home, "harness", "work"));
       bridge = await this.opts.bridge.open(args.tools, io.callTool);
       const link = { [MCP_TOKEN_ENV]: bridge.token, [MCP_SOCKET_ENV]: this.opts.bridge.path };
       // In the sandbox: the CLI login, the turn folder and the work folder, the MCP; network only the CLI's.
       const bin = args.executor === "codex" ? this.opts.bins.codex : this.opts.bins.claude;
-      const cli = cliPaths(args.executor, this.opts.policy, bin, cwd);
+      // The agent's own CLI state (sessions, memories, configuration), with the person's login read-only.
+      cli = agentCli(args.executor, this.opts.policy, bin, agent, cwd, isolated(this.opts.sandbox.status()));
       for (const d of cli.ensure) ensureDir(d);
       const mcp = this.mcpReadable();
       const box = {
@@ -376,7 +392,7 @@ export class Harnesses {
         writable: cli.write,
         denyRead: cli.denyRead,
         denyWrite: cli.denyWrite,
-        runnerInner: { read: [dir, ...mcp.inner], write: [cwd] },
+        runnerInner: { read: [dir, ...mcp.inner], write: [cwd, ...cli.innerWrite] },
         domains: CLI_DOMAINS[args.executor],
         network: args.network ?? { mode: "off" as const, domains: [] },
       };
@@ -395,7 +411,7 @@ export class Harnesses {
           executor: "claude_code",
           cmd: this.opts.bins.claude,
           argv: claudeHarnessArgs({ model: args.model, systemFile, mcpFile }),
-          env: harnessEnv(cwd, { MCP_TOOL_TIMEOUT: String(timeoutSeconds * 1000) }),
+          env: harnessEnv(cwd, { MCP_TOOL_TIMEOUT: String(timeoutSeconds * 1000), ...cli.env }),
           box,
           cwd,
           stdin: args.prompt,
@@ -408,13 +424,14 @@ export class Harnesses {
         executor: "codex",
         cmd: this.opts.bins.codex,
         argv: codexHarnessArgs({
+          cliKind: cli.kind,
           cwd,
           model: args.model,
           system: inArgv ? args.system : null,
           mcpCommand: this.opts.mcpCommand,
           timeoutSeconds,
         }),
-        env: harnessEnv(cwd, link),
+        env: harnessEnv(cwd, { ...link, ...cli.env }),
         box,
         cwd,
         stdin: inArgv ? args.prompt : `${args.system}\n\n${args.prompt}`,
@@ -423,8 +440,9 @@ export class Harnesses {
       });
     } finally {
       bridge?.close();
+      cli?.release();
       this.running--;
-      rmSync(dir, { recursive: true, force: true });
+      if (dir) rmSync(dir, { recursive: true, force: true });
     }
   }
 

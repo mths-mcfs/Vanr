@@ -1,5 +1,6 @@
 // Agents: profile, harness, models, credentials, teams, actions, inbox and reminders.
 
+import type { AgentBody, AgentExtra, AgentMouth } from "./agent-appearance.ts";
 import type { ActorRef } from "./common.ts";
 import type { RunStatus } from "./runs.ts";
 
@@ -21,8 +22,12 @@ export type AgentRole =
 
 export interface AgentAppearance {
   adornment: string;
+  /** Optional: an agent saved before bodies existed has none. */
+  body?: AgentBody;
   color: string;
+  extra?: AgentExtra;
   eyes: string;
+  mouth?: AgentMouth;
 }
 
 export interface AgentAudience {

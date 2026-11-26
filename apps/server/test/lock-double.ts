@@ -10,8 +10,8 @@ import type postgres from "postgres";
 export const DROP_LOCKS = process.env.VANR_TEST_DROP_LOCKS === "1";
 
 export interface Hooks {
-  /** Runs once, after the first query of `kind` of the transaction resolved (the point where it holds). */
-  after?: { kind: "select" | "update"; run: () => Promise<void> };
+  /** Runs once after a query of `kind` resolves, optionally matching its SQL (the hold point). */
+  after?: { kind: "select" | "update"; match?: string; run: () => Promise<void> };
   /** Runs before the first query of `kind` is sent (the second transaction says it is about to read). */
   before?: { kind: "select"; run: () => void };
   pids: Set<number>;
@@ -21,7 +21,7 @@ export interface Hooks {
 type Any = any;
 
 /** A query builder whose await runs the hooks; in DROP_LOCKS mode `.for("update")` is left out. */
-export function wrapQuery(q: Any, done: () => Promise<void>): Any {
+export function wrapQuery(q: Any, done: (query: Any) => Promise<void>): Any {
   return new Proxy(q, {
     get(target, prop) {
       if (prop === "for" && DROP_LOCKS) return () => wrapQuery(target, done);
@@ -29,7 +29,7 @@ export function wrapQuery(q: Any, done: () => Promise<void>): Any {
         return (ok: (v: unknown) => unknown, fail: (e: unknown) => unknown) =>
           target
             .then(async (v: unknown) => {
-              await done();
+              await done(target);
               return v;
             })
             .then(ok, fail);
@@ -65,8 +65,12 @@ export function instrumented(db: Db, hooks: Hooks): Db {
               fired.add(`before:${kind}`);
               hooks.before.run();
             }
-            return wrapQuery(q, async () => {
-              if (hooks.after?.kind === kind && !fired.has(`after:${kind}`)) {
+            return wrapQuery(q, async (query) => {
+              if (
+                hooks.after?.kind === kind &&
+                !fired.has(`after:${kind}`) &&
+                (!hooks.after.match || query.toSQL().sql.includes(hooks.after.match))
+              ) {
                 fired.add(`after:${kind}`);
                 await hooks.after.run();
               }
@@ -124,8 +128,8 @@ export async function diagnose(admin: postgres.Sql, label: string, a: number[], 
 export const WAIT_MS = 5_000;
 
 /**
- * Forces the interleaving. A runs until the end of its first `kind` query (where it holds the lock under test)
- * and holds there; then B starts. B either passes its own first `kind` query (no lock to wait for) or its
+ * Forces the interleaving. A runs until the end of its first matching `kind` query (where it holds the lock)
+ * and holds there; then B starts. B either passes its own matching query (no lock to wait for) or its
  * backend waits on a lock, seen in pg_stat_activity as `wait_event_type = 'Lock'` (the same for the advisory
  * lock and for a row lock). Then A goes on. Past WAIT_MS it fails with LOCK_WAIT_TIMEOUT and the state of both
  * backends. A is always released and both are always awaited, so nothing is left running on the pool.
@@ -135,8 +139,11 @@ export async function forcedPair<T>(
   label: string,
   kind: "select" | "update",
   start: (side: "A" | "B", hooks: Hooks) => Promise<T>,
-  /** The first query of B that counts as "passed" (B can be another operation than A); default `kind`. */
-  bKind: "select" | "update" = kind,
+  /**
+   * `match`: the SQL text the hold query must contain. `bKind`: the first query of B that counts as "passed"
+   * (B can be another operation than A); default `kind`.
+   */
+  { match, bKind = kind }: { match?: string; bKind?: "select" | "update" } = {},
 ): Promise<{ a: T; b: T; aPids: number[]; bPids: number[] }> {
   const aPids = new Set<number>();
   const bPids = new Set<number>();
@@ -149,6 +156,7 @@ export async function forcedPair<T>(
       pids: aPids,
       after: {
         kind,
+        match,
         run: async () => {
           held.open();
           await release.opened;
@@ -168,6 +176,7 @@ export async function forcedPair<T>(
       pids: bPids,
       after: {
         kind: bKind,
+        match,
         run: async () => {
           bPassed = true;
         },

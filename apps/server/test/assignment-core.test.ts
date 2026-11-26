@@ -202,7 +202,7 @@ describe("who sees and acts on an assignment", () => {
         owner: boolean;
         decider: boolean;
       }[] = [
-        { assignment: { status: "paused", ceiling: "dollars" }, owner: true, decider: false },
+        { assignment: { status: "paused", ceiling: "usd" }, owner: true, decider: false },
         { join: true, owner: true, decider: false },
         { item: { status: "blocked_on_you" }, owner: true, decider: true },
         { item: { turns: 4 }, owner: true, decider: true },
@@ -295,7 +295,7 @@ describe("who sees and acts on an assignment", () => {
 
       await server.deps.db
         .update(schema.assignments)
-        .set({ status: "paused", ceiling: "dollars" })
+        .set({ status: "paused", ceiling: "usd" })
         .where(eq(schema.assignments.id, t.row.id));
       const paused = await toAssignment(server.deps, await reload(t.row), t.member(t.ana));
       expect(paused).toMatchObject({ ceiling: "usd", state: "blocked_on_you" });

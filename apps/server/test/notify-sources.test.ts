@@ -226,12 +226,57 @@ describe("notices of a reaction", () => {
 
     await unreact(caio, "👍");
     [row] = await noticesOf(workspaceId, ana.id);
-    expect(row).toMatchObject({ count: 1, doneAt: null });
+    expect(row).toMatchObject({ count: 1, doneAt: null, latest: { quote: "my message", emojis: ["🎉"] } });
     expect(row?.actors.map((a) => a.id)).toEqual([beto.id]);
     await unreact(beto, "🎉");
     [row] = await noticesOf(workspaceId, ana.id);
-    expect(row).toMatchObject({ count: 0, actors: [] });
+    expect(row).toMatchObject({ count: 0, actors: [], latest: { quote: "my message", emojis: [] } });
     expect(row?.doneAt).not.toBeNull();
+  });
+
+  test("removing a reaction after the author leaves a private channel reveals no new activity", async () => {
+    const { workspaceId, ana, beto, caio, channel } = await setup();
+    const db = server.deps.db;
+    const room = await channel("channel", "private", [ana.id, beto.id, caio.id]);
+    const msg = await post(room, { type: "person", id: ana.id }, "private message");
+    const react = async (id: string, added: boolean) => {
+      if (added) {
+        await db
+          .insert(schema.emojiReactions)
+          .values({ messageId: msg.id, actorType: "person", actorId: id, reaction: "👍" });
+      } else {
+        await db
+          .delete(schema.emojiReactions)
+          .where(and(eq(schema.emojiReactions.messageId, msg.id), eq(schema.emojiReactions.actorId, id)));
+      }
+      await notifyReaction(server.deps, {
+        message: msg,
+        actor: { type: "person", id },
+        reaction: "👍",
+        added,
+      });
+      await server.deps.runtime.settle();
+    };
+    await react(beto.id, true);
+    const before = await noticesOf(workspaceId, ana.id);
+    expect(before[0]).toMatchObject({ count: 1, actors: [{ type: "person", id: beto.id }] });
+    await db
+      .delete(schema.channelMemberships)
+      .where(
+        and(eq(schema.channelMemberships.channelId, room.id), eq(schema.channelMemberships.memberId, ana.id)),
+      );
+    const events: string[] = [];
+    const stop = server.deps.hub.onPublish((target, event) => {
+      if (target === `user:${workspaceId}:${ana.id}`) events.push(event.type);
+    });
+    try {
+      await react(caio.id, true);
+      await react(beto.id, false);
+      expect(await noticesOf(workspaceId, ana.id)).toEqual(before);
+      expect(events).toEqual([]);
+    } finally {
+      stop();
+    }
   });
 
   test("a reaction to an agent's message, or by an author who can no longer read the channel, tells nobody", async () => {

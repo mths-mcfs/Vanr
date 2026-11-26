@@ -14,6 +14,7 @@ import {
   liveViewUnsubscribe,
   recheckLiveViews,
 } from "../runners/browser-live";
+import { expireRunnerRequests, revalidateInterventions } from "../runners/requests";
 import type { BrowserSocket, BrowserSocketData } from "./hub";
 
 /** A typing notice goes away on its own after this; the client sends one at most every 3 s. */
@@ -105,11 +106,14 @@ async function stillAllowed(deps: AppDeps, ws: BrowserSocket): Promise<boolean> 
     );
   if (row) return true;
   deps.hub.cut(ws, 4401, "access ended");
+  await revalidateInterventions(deps);
   return false;
 }
 
 /** The sweep (every REVALIDATE_MS): every socket's right, the private channels it follows, the agents it watches. */
 export async function revalidateBrowsers(deps: AppDeps): Promise<void> {
+  await expireRunnerRequests(deps);
+  await revalidateInterventions(deps);
   for (const ws of deps.hub.sockets()) {
     if (!(await stillAllowed(deps, ws))) continue;
     const { workspaceId, userId } = ws.data;
@@ -207,6 +211,8 @@ async function handle(deps: AppDeps, ws: BrowserSocket, frame: ClientFrame) {
       return liveViewUnsubscribe(deps, ws, frame.agentId);
     case "live_view.input":
       // Still allowed to see that agent (its audience may have changed since the watch began).
+      await expireRunnerRequests(deps);
+      await revalidateInterventions(deps);
       await recheckLiveViews(deps, ws);
       return liveViewInput(deps, ws, frame.agentId, frame.events);
     default: {
