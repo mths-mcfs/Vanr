@@ -143,6 +143,22 @@ describe("guardedFetch", () => {
     ]);
   });
 
+  test("a redirect that would resend a body to another origin stops before it goes out", async () => {
+    const dns = async (host: string) => (host === "other.test" ? ["93.184.216.35"] : [PUBLIC_IP]);
+    const { sent, fetchFn } = recorder([
+      new Response(null, { status: 307, headers: { location: "https://other.test/token" } }),
+    ]);
+    const got = await failureOf(
+      guardedFetch(
+        fetchFn,
+        false,
+        dns,
+      )("https://auth.test/token", { method: "POST", body: "code=c&code_verifier=v" }),
+    );
+    expect(got).toBe("unreachable");
+    expect(sent.map((s) => s.url)).toEqual([`https://${PUBLIC_IP}/token`]);
+  });
+
   test("a guard wrapped again is one guard: the credentials follow a redirect back to the same name", async () => {
     const dns = async () => [PUBLIC_IP];
     const { sent, fetchFn } = recorder([

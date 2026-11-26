@@ -138,6 +138,14 @@ export function guardedFetch(
       if (res.status === 303 || ((res.status === 301 || res.status === 302) && method === "POST"))
         req = { ...req, method: "GET", body: undefined };
       if (next.origin !== checked.origin) {
+        // A 307 or 308 resends the body as it is: a token request's code, verifier and secrets stay with the
+        // origin they were meant for.
+        if (req.body !== undefined && req.body !== null)
+          throw new HttpError(
+            400,
+            "unreachable",
+            "The server redirected a request with a body to another origin",
+          );
         const headers = new Headers(req.headers);
         headers.delete("authorization");
         headers.delete("cookie");
