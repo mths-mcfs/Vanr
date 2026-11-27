@@ -495,6 +495,10 @@ describe("calendar", () => {
         title: "Early, later",
       });
       expect(await starts()).toEqual(before);
+      // The client sends the part's rule back as it read it with another title: the kept local time stays.
+      expect(part.rule?.times).toEqual(["02:30"]);
+      await update(ana, workspaceId, part.id, { scope: "all", title: "Early, again", rule: part.rule });
+      expect(await starts()).toEqual(before);
       // A new start for the part gives it its own time again.
       await update(ana, workspaceId, part.id, { scope: "all", start: "2027-03-14T13:00:00Z" });
       expect(await starts()).toEqual([
@@ -874,6 +878,38 @@ describe("who may call", () => {
         ).title,
       ).toBe("Ok");
       await ok(call(ana, workspaceId, "POST", `/calendar/proposals/${prop}/dismiss`), 204);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "deleting a whole series tells the people of every part it removes",
+    async () => {
+      const { workspaceId, ana, beto, caio } = await team();
+      const daily = await create(ana, workspaceId, {
+        title: "Review",
+        start: "2026-11-15T10:00:00Z",
+        end: "2026-11-15T11:00:00Z",
+        timezone: "UTC",
+        participants: [{ type: "person", id: beto.user.id }],
+        rule: { freq: "daily", count: 4, timezone: "UTC" },
+      });
+      // Caio is in the later part only.
+      await update(ana, workspaceId, daily.id, {
+        scope: "following",
+        instanceStart: "2026-11-17T10:00:00Z",
+        participants: [{ type: "person", id: caio.user.id }],
+      });
+      const ws = await TestSocket.open(caio.browser, workspaceId);
+      try {
+        await remove(ana, workspaceId, daily.id, { scope: "all" });
+        expect((await ws.event("calendar_event.removed")).event).toMatchObject({
+          eventId: daily.id,
+          scope: "all",
+        });
+      } finally {
+        ws.close();
+      }
     },
     SERVER_TEST_MS,
   );

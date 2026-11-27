@@ -176,11 +176,18 @@ export function publishEvent(deps: AppDeps, row: EventRow) {
   else for (const u of users) deps.hub.toUser(row.workspaceId, u, event);
 }
 
-export function publishDeleted(deps: AppDeps, row: EventRow, scope: string, instanceStart: string | null) {
+/** The removal goes to everyone who saw `row` or one of the other parts it took with it (`gone`). */
+export function publishDeleted(
+  deps: AppDeps,
+  row: EventRow,
+  scope: string,
+  instanceStart: string | null,
+  gone: EventRow[] = [],
+) {
   const event = { type: "calendar_event.removed", eventId: row.id, scope, instanceStart };
-  const users = audience(row);
-  if (!users) deps.hub.toWorkspace(row.workspaceId, event);
-  else for (const u of users) deps.hub.toUser(row.workspaceId, u, event);
+  const lists = [row, ...gone].map(audience);
+  if (lists.some((l) => l === null)) deps.hub.toWorkspace(row.workspaceId, event);
+  else for (const u of new Set(lists.flatMap((l) => l ?? []))) deps.hub.toUser(row.workspaceId, u, event);
 }
 
 export const isPersonIn = (list: ActorRef[], userId: string) =>

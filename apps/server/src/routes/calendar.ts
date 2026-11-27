@@ -145,6 +145,17 @@ async function requireEditorOfParts(tx: Tx, where: SQL | undefined, me: Workspac
 
 const withoutTimes = ({ times: _t, ...rule }: RecurrenceRule): RecurrenceRule => rule;
 
+/** The same rule, whatever the order of its keys and with absent and undefined fields alike. */
+const sameKeys = (a: RecurrenceRule, b: RecurrenceRule) => {
+  const flat = (r: RecurrenceRule) =>
+    JSON.stringify(
+      Object.entries(r)
+        .filter(([, v]) => v !== undefined)
+        .sort(([x], [y]) => x.localeCompare(y)),
+    );
+  return flat(a) === flat(b);
+};
+
 /** Is the occurrence in the series (and not taken out of it)? */
 function checkOccurrence(row: EventRow, instanceStart: string | undefined): Date {
   if (!instanceStart) throw new HttpError(400, "calendar.occurrence_required", "Say which occurrence");
@@ -272,9 +283,16 @@ export async function editEvent(
       ...withoutTimes(rule),
       ...(patch.timezone !== undefined ? { timezone: patch.timezone } : {}),
     });
+    // A client sends a rule back as it read it, without the local time the server keeps (`clientRule` drops
+    // it): the same rule, with no new start or time zone, keeps it.
+    const keptTimes = series?.times;
+    const resent =
+      patch.rule && keptTimes && !retimed && sameKeys(patch.rule, withoutTimes({ ...series, start: undefined }))
+        ? { ...patch.rule, times: keptTimes }
+        : patch.rule;
     const ruleChange =
-      patch.rule !== undefined
-        ? { rule: patch.rule }
+      resent !== undefined
+        ? { rule: resent }
         : series && (patch.timezone !== undefined || (series.times && retimed))
           ? { rule: retime(series) }
           : {};
@@ -408,7 +426,7 @@ export async function deleteEvent(
   me: WorkspaceMember,
   visible: EventRow,
   { scope = "all", instanceStart }: { scope?: "this" | "following" | "all"; instanceStart?: string },
-): Promise<{ row: EventRow; scope: string; occurrence: string | null }> {
+): Promise<{ row: EventRow; scope: string; occurrence: string | null; gone: EventRow[] }> {
   const at = deps.now();
   return deps.db.transaction(async (tx) => {
     await lockFamily(tx, visible);
@@ -422,7 +440,7 @@ export async function deleteEvent(
     // Without a rule it is a single event or an occurrence edited on its own: only it goes.
     if (!series) {
       await tx.delete(calendarEntries).where(eq(calendarEntries.id, row.id));
-      return { row, scope: "all", occurrence: null };
+      return { row, scope: "all", occurrence: null, gone: [] };
     }
     if (scope === "all") {
       const family = and(
@@ -430,8 +448,8 @@ export async function deleteEvent(
         or(eq(calendarEntries.seriesId, root), eq(calendarEntries.id, root)),
       );
       await requireEditorOfParts(tx, family, me);
-      await tx.delete(calendarEntries).where(family);
-      return { row, scope: "all", occurrence: null };
+      const gone = await tx.delete(calendarEntries).where(family).returning();
+      return { row, scope: "all", occurrence: null, gone };
     }
     const occ = checkOccurrence(row, instanceStart);
     // The rest of the family from the occurrence on, by time: the root too, when a part moved before it.
@@ -442,6 +460,7 @@ export async function deleteEvent(
       ne(calendarEntries.id, row.id),
     );
     if (scope === "following") await requireEditorOfParts(tx, later, me);
+    let gone: EventRow[] = [];
     if (scope === "this") {
       await tx
         .update(calendarEntries)
@@ -449,15 +468,15 @@ export async function deleteEvent(
         .where(eq(calendarEntries.id, row.id));
     } else if (occ.getTime() === row.start.getTime()) {
       await tx.delete(calendarEntries).where(eq(calendarEntries.id, row.id));
-      await tx.delete(calendarEntries).where(later);
+      gone = await tx.delete(calendarEntries).where(later).returning();
     } else {
       await tx
         .update(calendarEntries)
         .set({ rule: { ...series, until: new Date(occ.getTime() - 1).toISOString() }, updatedAt: at })
         .where(eq(calendarEntries.id, row.id));
-      await tx.delete(calendarEntries).where(later);
+      gone = await tx.delete(calendarEntries).where(later).returning();
     }
-    return { row, scope, occurrence: occ.toISOString() };
+    return { row, scope, occurrence: occ.toISOString(), gone };
   });
 }
 
@@ -584,7 +603,7 @@ export function registerCalendar(app: Hono<AppEnv>) {
     const visible = await eventFor(deps.db, me, param(c, "eventId"));
     requireEditor(visible, me);
     const removed = await deleteEvent(deps, me, visible, readQuery(c, z.object(scopeFields)));
-    publishDeleted(deps, removed.row, removed.scope, removed.occurrence);
+    publishDeleted(deps, removed.row, removed.scope, removed.occurrence, removed.gone);
     return c.body(null, 204);
   });
 
