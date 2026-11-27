@@ -291,9 +291,18 @@ describe("a live wiki page", () => {
       { type: "paragraph", text: "Cover the press." },
     ]);
     try {
-      await renderApp({ path: `${WIKI}/press-checklist?at=After`, signedInAs: "usr_ana", wikiSocket: live });
+      const app = await renderApp({
+        path: `${WIKI}/press-checklist?at=After`,
+        signedInAs: "usr_ana",
+        wikiSocket: live,
+      });
       await waitFor(() => expect(status()).toBe("Version 2 published"));
       await waitFor(() => expect(scrolled).toContain("live:After"));
+      // Only the address's heading changes (back, forward, a link): the open editor goes there too.
+      await act(async () => {
+        await app.runtime.router.navigate({ to: `${WIKI}/press-checklist`, search: { at: "Before a run" } });
+      });
+      await waitFor(() => expect(scrolled).toContain("live:Before a run"));
     } finally {
       FakeCollabSocket.seed = null;
       HTMLElement.prototype.scrollIntoView = original;
