@@ -30,8 +30,8 @@ setDefaultTimeout(30_000);
 
 let server: RunningServer;
 beforeAll(async () => {
-  // No undo window: post_message posts at once (the window needs the runtime's timer).
-  server = await startTestServer({ env: { UNDO_SEND_SECONDS: "0" } });
+  // The harness turns the undo window off, so post_message posts at once (the window needs the runtime's timer).
+  server = await startTestServer();
 });
 afterAll(() => server.stop());
 
