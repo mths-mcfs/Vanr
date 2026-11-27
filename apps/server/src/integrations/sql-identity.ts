@@ -90,10 +90,12 @@ export function fixedSearchPath(policy: Pick<QueryPolicy, "tables">): string {
 /**
  * `rel(oid)`: the policy's relations, found by exact schema ($1) and name ($2), compared byte for byte as the plan
  * check compares them (no folding: "Sales View" never stands for "sales view", `Étage` is not `étage`), plus every
- * relation the rules of those views reach, views under views included. `only` narrows the policy's relations the
- * walk starts from (a condition on `c`, the relation).
+ * relation the rules of those views reach, views under views included. With `throughPolicies`, also every relation
+ * the row security policies of those relations read: a policy's `exists (select … from t2)` applies t2's own rules
+ * and policies, so their code counts. `only` narrows the policy's relations the walk starts from (a condition on
+ * `c`, the relation).
  */
-const allowedClosure = (only = "") => `with recursive rel(oid) as (
+const allowedClosure = (only = "", throughPolicies = true) => `with recursive rel(oid) as (
          select c.oid
            from rows from (pg_catalog.unnest($1::pg_catalog.text[]), pg_catalog.unnest($2::pg_catalog.text[]))
                   as allowed(schema, name)
@@ -106,12 +108,16 @@ const allowedClosure = (only = "") => `with recursive rel(oid) as (
          union
          select d.refobjid
            from rel
-           join pg_catalog.pg_rewrite r on r.ev_class operator(pg_catalog.=) rel.oid
            join pg_catalog.pg_depend d
-             on d.classid operator(pg_catalog.=) 'pg_catalog.pg_rewrite'::pg_catalog.regclass::pg_catalog.oid
-            and d.objid operator(pg_catalog.=) r.oid
-            and d.refclassid operator(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass::pg_catalog.oid
-          where d.refobjid operator(pg_catalog.<>) rel.oid
+             on d.refclassid operator(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass::pg_catalog.oid
+            and d.refobjid operator(pg_catalog.<>) rel.oid
+            and ((d.classid operator(pg_catalog.=) 'pg_catalog.pg_rewrite'::pg_catalog.regclass::pg_catalog.oid
+                  and d.objid operator(pg_catalog.=) any (array(
+                    select r.oid from pg_catalog.pg_rewrite r where r.ev_class operator(pg_catalog.=) rel.oid)))
+              or (${throughPolicies}
+                  and d.classid operator(pg_catalog.=) 'pg_catalog.pg_policy'::pg_catalog.regclass::pg_catalog.oid
+                  and d.objid operator(pg_catalog.=) any (array(
+                    select p.oid from pg_catalog.pg_policy p where p.polrelid operator(pg_catalog.=) rel.oid))))
        )`;
 
 /**
@@ -124,7 +130,7 @@ const LOCKED_HERE = `and exists (select from pg_catalog.pg_locks l
               and l.relation operator(pg_catalog.=) c.oid)`;
 
 /** A policy relation named like a word of the query ($3): one the query can reach without a view in between. */
-const NAMED_BY_A_WORD = `and (c.relname::pg_catalog.text collate pg_catalog."C") operator(pg_catalog.=) any ($3::pg_catalog.text[])`;
+const NAMED_BY_A_WORD = `and c.relname operator(pg_catalog.=) any ($3::pg_catalog.name[])`;
 
 /**
  * The first relation the query reaches that the policy doesn't allow, as `schema.name`, or null. Runs before any
@@ -132,6 +138,7 @@ const NAMED_BY_A_WORD = `and (c.relname::pg_catalog.text collate pg_catalog."C")
  * list is refused here, because the plan shows only the tables under it, and planning would already have run the
  * IMMUTABLE calls in it. A CTE or a function in FROM locks nothing; a view under an allowed view the query uses is
  * allowed, since its rules are checked with that view's (step 4 of `customCode`), but named on its own it is not.
+ * A relation a row security policy reads gets no pass here: one the agent may read is in its policy.
  * The system schemas are left to the plan check.
  */
 async function outsideRelation(
@@ -148,7 +155,7 @@ async function outsideRelation(
     // A savepoint, so a failed read (a timeout, a cancel) still leaves the transaction able to deallocate.
     await session.rows("savepoint vanr_guard_locks", []);
     [outside] = await session.rows(
-      `${allowedClosure(LOCKED_HERE)}
+      `${allowedClosure(LOCKED_HERE, false)}
        select n.nspname as schema, c.relname as name
          from pg_catalog.pg_locks l
          join pg_catalog.pg_class c on c.oid operator(pg_catalog.=) l.relation
@@ -158,7 +165,7 @@ async function outsideRelation(
           and n.nspname operator(pg_catalog.<>) all ($3::pg_catalog.text[])
           and not exists (select from rel where rel.oid operator(pg_catalog.=) c.oid)
         -- One the query wrote, before one under it.
-        order by (c.relname::pg_catalog.text collate pg_catalog."C") operator(pg_catalog.=) any ($4::pg_catalog.text[]) desc,
+        order by c.relname operator(pg_catalog.=) any ($4::pg_catalog.name[]) desc,
                  1, 2
         limit 1`,
       [relations.map((r) => r.schema), relations.map((r) => r.name), NATIVE_SCHEMAS, [...new Set(words)]],
@@ -197,7 +204,7 @@ async function customCode(
     `select n.nspname as schema, p.proname as name, pg_catalog.pg_get_function_identity_arguments(p.oid) as args
        from pg_catalog.pg_proc p
        join pg_catalog.pg_namespace n on n.oid operator(pg_catalog.=) p.pronamespace
-      where p.proname operator(pg_catalog.=) any ($1::pg_catalog.text[])
+      where p.proname operator(pg_catalog.=) any ($1::pg_catalog.name[])
         and n.nspname operator(pg_catalog.<>) all ($2::pg_catalog.text[])
       order by 1, 2, 3
       limit 1`,
@@ -212,7 +219,7 @@ async function customCode(
        join pg_catalog.pg_namespace n on n.oid operator(pg_catalog.=) o.oprnamespace
        join pg_catalog.pg_proc f on f.oid operator(pg_catalog.=) o.oprcode::pg_catalog.oid
        join pg_catalog.pg_language l on l.oid operator(pg_catalog.=) f.prolang
-      where o.oprname operator(pg_catalog.=) any ($1::pg_catalog.text[])
+      where o.oprname operator(pg_catalog.=) any ($1::pg_catalog.name[])
         and n.nspname operator(pg_catalog.<>) all ($2::pg_catalog.text[])
         and l.lanname operator(pg_catalog.<>) all (array['c', 'internal'])
       order by 1, 2
@@ -270,25 +277,30 @@ async function customCode(
   //    I/O functions outside C. A literal cast ('(x)'::comp, '{x}'::dom[]), a column cast (name::dom) or a
   //    record filled from JSON runs them, while parsing or while running, and nothing checks what they read.
   //    Reached: every type named like a word of the query (a table's name is also its row type), the types and
-  //    relations the allowed views' rules use, and from each, an array's element, a domain's base, a composite's
-  //    columns and a range's subtype. A table with such a domain column rejects every query that names it.
+  //    relations the rules of the allowed views it names use, and the row security policies of those relations
+  //    and the ones under them; from each, an array's element, a domain's base, a composite's columns and a
+  //    range's subtype. A table with such a domain column rejects every query that names it.
   const [typed] = await session.rows(
     `${allowedClosure(NAMED_BY_A_WORD)},
-       rules(oid) as (
-         select r.oid from pg_catalog.pg_rewrite r join rel on r.ev_class operator(pg_catalog.=) rel.oid
+       code_of(classid, objid) as (
+         select 'pg_catalog.pg_rewrite'::pg_catalog.regclass::pg_catalog.oid, r.oid
+           from pg_catalog.pg_rewrite r join rel on r.ev_class operator(pg_catalog.=) rel.oid
+         union all
+         select 'pg_catalog.pg_policy'::pg_catalog.regclass::pg_catalog.oid, p.oid
+           from pg_catalog.pg_policy p join rel on p.polrelid operator(pg_catalog.=) rel.oid
        ),
        reached(oid) as (
          select t.oid from pg_catalog.pg_type t
-          where (t.typname::pg_catalog.text collate pg_catalog."C") operator(pg_catalog.=) any ($3::pg_catalog.text[])
+          where t.typname operator(pg_catalog.=) any ($3::pg_catalog.name[])
          union
          select case when c.oid is null then d.refobjid else c.reltype end
            from pg_catalog.pg_depend d
-           join rules on d.objid operator(pg_catalog.=) rules.oid
+           join code_of on d.classid operator(pg_catalog.=) code_of.classid
+                       and d.objid operator(pg_catalog.=) code_of.objid
            left join pg_catalog.pg_class c
              on d.refclassid operator(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass::pg_catalog.oid
             and c.oid operator(pg_catalog.=) d.refobjid
-          where d.classid operator(pg_catalog.=) 'pg_catalog.pg_rewrite'::pg_catalog.regclass::pg_catalog.oid
-            and d.refclassid operator(pg_catalog.=) any (array[
+          where d.refclassid operator(pg_catalog.=) any (array[
                   'pg_catalog.pg_type'::pg_catalog.regclass::pg_catalog.oid,
                   'pg_catalog.pg_class'::pg_catalog.regclass::pg_catalog.oid])
          union
