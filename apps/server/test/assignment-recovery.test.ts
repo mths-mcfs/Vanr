@@ -11,8 +11,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { and, eq } from "drizzle-orm";
-import { type AssignmentRow, moveAssignment } from "../src/assignments/core";
-import { createAssignment } from "../src/assignments/engine";
+import { type AssignmentRow, agentSays, moveAssignment } from "../src/assignments/core";
+import { createAssignment, createSubmission } from "../src/assignments/engine";
 import { workIdOf } from "../src/assignments/keys";
 import { tellIfPossible } from "../src/assignments/lifecycle";
 import { act, decide, snapshotOf, stepNext } from "../src/assignments/motor";
@@ -25,7 +25,7 @@ import type { RunningServer } from "../src/server";
 import { passing, seedAgent } from "./assignment-kit";
 import { SERVER_TEST_MS, signedIn, startTestServer, waitFor } from "./harness";
 import { DROP_LOCKS, outcome } from "./lock-double";
-import { type Person, seedChannel, seedWorkspace } from "./seed";
+import { memberOf, type Person, seedChannel, seedWorkspace } from "./seed";
 
 const {
   assignments,
@@ -165,6 +165,63 @@ describe("a card that never went out", () => {
   );
 });
 
+describe("a submission's card, in order", () => {
+  test(
+    "a crash after the card but before its mark tells the owner on the repost; a pause isn't undone by a submission",
+    async () => {
+      const { row } = await active("Wrap", ["Write"]);
+      const id = newId("asub");
+      await server.deps.db
+        .insert(assignmentSubmissions)
+        .values({ id, assignmentId: row.id, note: "Ready", checklist: [], createdAt: ago(3 * MIN) });
+      // The crash: moved and the card posted, the owner not told and the card not marked.
+      const moved = await moveAssignment(
+        server.deps,
+        row,
+        ["active"],
+        { status: "wrapping_up" },
+        "submission",
+      );
+      if (!moved) throw new Error("not moved");
+      await agentSays(
+        server.deps,
+        moved,
+        "Ready",
+        { assignmentSubmission: { assignmentId: row.id, submissionId: id } },
+        `card:${id}`,
+      );
+      expect(await stepNext(server.deps, row.id)).toEqual({ type: "announce" });
+      await act(server.deps, row.id, { type: "announce" });
+      const [sub] = await server.deps.db
+        .select()
+        .from(assignmentSubmissions)
+        .where(eq(assignmentSubmissions.id, id));
+      const told = await server.deps.db
+        .select()
+        .from(schema.notifications)
+        .where(eq(schema.notifications.groupKey, `assignment:${row.id}:assignment_finished`));
+      expect([sub?.messageId !== null, told.length, (await reload(row.id)).status]).toEqual([
+        true,
+        1,
+        "wrapping_up",
+      ]);
+      await close(row.id);
+
+      // A submission that lands after a pause posts its card but leaves the assignment paused.
+      const { row: other } = await active("Wrap paused", ["Write"]);
+      await server.deps.db.update(assignments).set({ status: "paused" }).where(eq(assignments.id, other.id));
+      await createSubmission(server.deps, await reload(other.id), {
+        note: "Late",
+        checklist: [],
+        auto: false,
+      });
+      expect((await reload(other.id)).status).toBe("paused");
+      await close(other.id);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
 describe("a stop that didn't finish", () => {
   test(
     "paused with the agent's run still on the air (the cancel failed halfway): the engine stops the run",
@@ -190,6 +247,13 @@ describe("a stop that didn't finish", () => {
       await server.deps.db.update(assignments).set({ status: "paused" }).where(eq(assignments.id, row.id));
       expect((await snapshotOf(server.deps, await reload(row.id))).stray).toBe(true);
       expect(await stepNext(server.deps, row.id)).toEqual({ type: "halt" });
+      // Resumed between the decision and the act: the halt stops nothing of the resumed assignment.
+      await server.deps.db.update(assignments).set({ status: "active" }).where(eq(assignments.id, row.id));
+      await act(server.deps, row.id, { type: "halt" });
+      // A cancel takes the run off the air a moment later; the run's text is still streaming well past this.
+      await Bun.sleep(100);
+      expect(server.deps.runtime.liveRun(started.runId)).not.toBeNull();
+      await server.deps.db.update(assignments).set({ status: "paused" }).where(eq(assignments.id, row.id));
       await act(server.deps, row.id, { type: "halt" });
       await started.done;
       const [run] = await server.deps.db.select().from(runs).where(eq(runs.id, started.runId));
@@ -387,6 +451,18 @@ describe("two attempts of one item", () => {
       expect(server.deps.runtime.liveRun(first.runId)).not.toBeNull();
       expect(server.deps.runtime.cancel(first.runId, null, { key, token: 3 })).toBe(true);
       await first.done;
+      // Two attempts in the same tick: the older one is past the first check when the newer one comes in, and
+      // the check after the await turns it away before it reaches a run.
+      const [four, five] = [await say("four"), await say("five")];
+      const [older, newer] = await Promise.all([
+        server.deps.runtime.runFor({ agent, channel, trigger: four, fence: { key, token: 4 } }),
+        server.deps.runtime.runFor({ agent, channel, trigger: five, fence: { key, token: 5 } }),
+      ]);
+      expect([older.ok, older.ok ? "" : older.code, newer.ok]).toEqual([false, "fenced", true]);
+      if (newer.ok) {
+        server.deps.runtime.cancel(newer.runId, null);
+        await newer.done;
+      }
       // A message of another channel is never run here: its thread would pick another channel's tools.
       const side = await channelInWorkspace(
         server.deps.db,
@@ -397,6 +473,67 @@ describe("two attempts of one item", () => {
       await expect(
         server.deps.runtime.runFor({ agent, channel: side, trigger: await say("elsewhere") }),
       ).rejects.toThrow("is not of channel");
+      await close(row.id);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a fenced attempt isn't put off into the next run: the run it gets back is the one that answers it",
+    async () => {
+      const { row, agentId } = await active("Fence put off", ["x"]);
+      const channel = await channelInWorkspace(server.deps.db, workspaceId, general);
+      const [agent] = await server.deps.db.select().from(schema.agents).where(eq(schema.agents.id, agentId));
+      if (!channel || !agent) throw new Error("setup");
+      const beto = await memberOf(server, workspaceId, "Beto", `beto${Date.now()}@recovery.test`);
+      await server.deps.db
+        .insert(schema.agentGrants)
+        .values({ agentId, workspaceId, connectionId: "", scope: "tool:memory" });
+      const say = async (who: Person, body: string) => {
+        const { message } = await postMessage(server.deps, {
+          workspaceId,
+          channel,
+          author: { type: "person", id: who.user.id },
+          body,
+          clientId: newId("c"),
+          threadId: row.threadId,
+        });
+        const [m] = await server.deps.db.select().from(messages).where(eq(messages.id, message.id));
+        if (!m) throw new Error("no message");
+        return m;
+      };
+      // Beto's run reads his own notes: it is pinned to him, and a message from Ana waits for the next run.
+      const his = await server.deps.runtime.runFor({
+        agent,
+        channel,
+        trigger: await say(
+          beto,
+          '[[tool:memory {"command":"view","path":"/memories/you"}]] [[slow:300]] mine',
+        ),
+      });
+      if (!his.ok) throw new Error(his.code);
+      await waitFor(async () => {
+        const steps = await server.deps.db
+          .select()
+          .from(schema.runEvents)
+          .where(eq(schema.runEvents.runId, his.runId));
+        return steps.some((e) => e.kind === "tool_result");
+      });
+      const trigger = await say(ana, "the item");
+      const turn = await server.deps.runtime.runFor({
+        agent,
+        channel,
+        trigger,
+        fence: { key: `${row.id}:p1`, token: 1 },
+      });
+      if (!turn.ok) throw new Error(turn.code);
+      expect(turn.runId).not.toBe(his.runId);
+      expect(server.deps.runtime.liveRun(his.runId)).toBeNull();
+      const [run] = await server.deps.db.select().from(runs).where(eq(runs.id, turn.runId));
+      expect(run?.sourceMessageId).toBe(trigger.id);
+      // And its fenced stop reaches it.
+      expect(server.deps.runtime.cancel(turn.runId, null, { key: `${row.id}:p1`, token: 1 })).toBe(true);
+      await turn.done;
       await close(row.id);
     },
     SERVER_TEST_MS,
@@ -418,8 +555,21 @@ describe("what the next turn hears", () => {
         kind: "run",
         status: "ended",
         outcome: "done",
+        refId: "run_turn1",
         startedAt: t0,
         endedAt: new Date(t0.getTime() + 10 * MIN),
+      });
+      // Attempt 2 was refused before it went out (it never got a run): it isn't a turn the agent heard.
+      await server.deps.db.insert(assignmentWork).values({
+        id: workIdOf(row.id, "p1", 2),
+        assignmentId: row.id,
+        itemId: "p1",
+        n: 2,
+        kind: "run",
+        status: "ended",
+        outcome: "failed",
+        startedAt: new Date(t0.getTime() + 12 * MIN),
+        endedAt: new Date(t0.getTime() + 12 * MIN),
       });
       await server.deps.db.insert(runnerJobs).values({
         id: newId("aj"),
@@ -436,11 +586,11 @@ describe("what the next turn hears", () => {
         endedAt: new Date(t0.getTime() + 5 * MIN),
         settledAt: new Date(t0.getTime() + 5 * MIN),
       });
-      await act(server.deps, row.id, { type: "work", itemId: "p1", n: 2 });
+      await act(server.deps, row.id, { type: "work", itemId: "p1", n: 3 });
       const [turn] = await server.deps.db
         .select()
         .from(messages)
-        .where(eq(messages.clientId, workIdOf(row.id, "p1", 2)));
+        .where(eq(messages.clientId, workIdOf(row.id, "p1", 3)));
       expect(turn?.body).toContain("RESULT-ALL-GREEN");
       await close(row.id);
     },

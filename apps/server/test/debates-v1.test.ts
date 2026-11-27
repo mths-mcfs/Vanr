@@ -193,26 +193,30 @@ describe("debates v1: attacks on the anonymity and the visibility", () => {
         await held;
         return position(who.toLowerCase());
       };
-      const t = (
-        await call(ana, "POST", base, { title: "Outside", goal: "x", agentIds: [a.id, b.id], rounds: 1 })
-      ).body;
-      await waitFor(async () => calls.length - before >= 2);
-      // Beto isn't at the table: asking for a round is rejected; commenting stays free.
-      const asked = await call(beto, "POST", `${base}/${t.id}/posts`, {
-        body: "one more!",
-        wantsExtraRound: true,
-      });
-      expect([asked.status, asked.body.error.code]).toEqual([409, "debate.out_of_turn"]);
-      const comment = (await call(beto, "POST", `${base}/${t.id}/posts`, { body: "just a comment" })).body;
-      expect(comment).toMatchObject({ kind: "comment", author: { type: "person", id: beto.user.id } });
-      const row = await debateById(server.deps.db, workspaceId, t.id);
-      // The comment brings Beto into the debate (he follows it) without changing the queue or the limit.
-      expect(row.userIds).toContain(beto.user.id);
-      expect(row.roundLimit).toBe(1);
-      expect(row.pendingSpeakers.map((s) => s.id).sort()).toEqual([a.id, b.id].sort());
-      release();
-      await settle();
-      script = (who) => position(who.toLowerCase());
+      try {
+        const t = (
+          await call(ana, "POST", base, { title: "Outside", goal: "x", agentIds: [a.id, b.id], rounds: 1 })
+        ).body;
+        await waitFor(async () => calls.length - before >= 2);
+        // Beto isn't at the table: asking for a round is rejected; commenting stays free.
+        const asked = await call(beto, "POST", `${base}/${t.id}/posts`, {
+          body: "one more!",
+          wantsExtraRound: true,
+        });
+        expect([asked.status, asked.body.error.code]).toEqual([409, "debate.out_of_turn"]);
+        const comment = (await call(beto, "POST", `${base}/${t.id}/posts`, { body: "just a comment" })).body;
+        expect(comment).toMatchObject({ kind: "comment", author: { type: "person", id: beto.user.id } });
+        const row = await debateById(server.deps.db, workspaceId, t.id);
+        // The comment brings Beto into the debate (he follows it) without changing the queue or the limit.
+        expect(row.userIds).toContain(beto.user.id);
+        expect(row.roundLimit).toBe(1);
+        expect(row.pendingSpeakers.map((s) => s.id).sort()).toEqual([a.id, b.id].sort());
+      } finally {
+        // A failed expectation still lets the held turns go, so the server can stop.
+        release();
+        await settle();
+        script = (who) => position(who.toLowerCase());
+      }
     },
     SERVER_TEST_MS,
   );

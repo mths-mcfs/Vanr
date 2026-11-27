@@ -49,6 +49,7 @@ const base: Snapshot = {
   lastActivity: null,
   emitted: [],
   unannounced: false,
+  announceAt: null,
   unsettled: [],
   stray: false,
 };
@@ -67,6 +68,17 @@ const item = (id: string, over: Partial<Snapshot["items"][number]> = {}): Snapsh
 
 describe("decide (pure)", () => {
   const now = new Date("2026-10-22T12:00:00Z");
+  test("a card still within its creator's grace: the wait wakes when the grace runs out", () => {
+    const at = new Date(now.getTime() + 60_000);
+    const working = { ...base, items: [item("p1")], busy: true, announceAt: at };
+    expect(decide(working, now)).toMatchObject({ type: "wait", reason: "working", until: at.toISOString() });
+    expect(decide({ ...base, status: "paused", announceAt: at }, now)).toEqual({
+      type: "wait",
+      reason: "paused",
+      until: at.toISOString(),
+    });
+  });
+
   test("closed ends; proposed and paused wait; dead work is reaped before anything else", () => {
     expect(decide({ ...base, status: "done" }, now)).toEqual({ type: "end" });
     expect(decide({ ...base, status: "proposed" }, now)).toMatchObject({ type: "wait", reason: "proposed" });
@@ -473,6 +485,12 @@ describe("the engine on its loop", () => {
       await act(server.deps, row.id, { type: "work", itemId: "p1", n: 1 });
       expect(runtime.turns.length).toBe(turnsBefore + 1);
       const run = runtime.turns.at(-1)?.runId ?? "";
+      // The run's end wakes the assignment's loop: a timer far off keeps it waiting, so only the steps called
+      // here send anything.
+      await server.deps.db
+        .update(assignments)
+        .set({ wakeAt: new Date(Date.now() + 3600_000) })
+        .where(eq(assignments.id, row.id));
       runtime.finish(run);
       await server.deps.runtime.settle();
       await act(server.deps, row.id, { type: "work", itemId: "p1", n: 1 });
@@ -874,6 +892,13 @@ describe("the engine on its loop", () => {
       });
       await jobEnded(server.deps, job);
       expect((await itemOf(row, "p1"))?.status).toBe("dropped");
+      // Nor does its history say the job did it.
+      const events = await server.deps.db
+        .select({ kind: schema.assignmentEvents.kind })
+        .from(schema.assignmentEvents)
+        .where(eq(schema.assignmentEvents.assignmentId, row.id));
+      expect(events.map((e) => e.kind)).toContain("job_done");
+      expect(events.map((e) => e.kind)).not.toContain("item_done");
       await server.deps.db.update(assignments).set({ status: "canceled" }).where(eq(assignments.id, row.id));
     },
     SERVER_TEST_MS,
@@ -911,6 +936,7 @@ describe("the engine on its loop", () => {
       const row = await idleOnRunner("Reaped while starting", ["Build"]);
       const workId = workIdOf(row.id, "p1", 1);
       const jobId = jobIdOf(workId);
+      const otherId = newId("aj");
       const hub = server.deps.runners;
       let reaped = false;
       // Another loop reaps the attempt while this one writes the assignment files to the runner.
@@ -921,6 +947,20 @@ describe("the engine on its loop", () => {
             if (!reaped && args[1] === "write") {
               reaped = true;
               await act(server.deps, row.id, { type: "reap", workId });
+              // Another job of the assignment, on another runner: the cleanup is only this attempt's job.
+              await server.deps.db.insert(runnerJobs).values({
+                id: otherId,
+                workspaceId,
+                runnerId: "rnr_gone",
+                agentId: row.agentId,
+                assignmentId: row.id,
+                threadId: row.threadId,
+                channelId: row.channelId,
+                title: "A person's job",
+                executor: "claude_code",
+                prompt: "other",
+                status: "running",
+              });
             }
             return hub.call(...args);
           },
@@ -935,6 +975,9 @@ describe("the engine on its loop", () => {
       );
       const [w] = await server.deps.db.select().from(assignmentWork).where(eq(assignmentWork.id, workId));
       expect([w?.status, w?.outcome, w?.refId]).toEqual(["ended", "interrupted", null]);
+      const [other] = await server.deps.db.select().from(runnerJobs).where(eq(runnerJobs.id, otherId));
+      expect(other?.status).toBe("running");
+      await server.deps.db.update(runnerJobs).set({ status: "canceled" }).where(eq(runnerJobs.id, otherId));
       await server.deps.db.update(assignments).set({ status: "canceled" }).where(eq(assignments.id, row.id));
     },
     SERVER_TEST_MS,

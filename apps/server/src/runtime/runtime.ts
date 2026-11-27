@@ -206,11 +206,6 @@ class TimeLimit extends Error {
 }
 
 /**
- * The hard caps of a run nobody follows (a routine's execution): spend caps beyond the agent's month, model
- * turns and time. Past any of them the run stops with `budget_exhausted` (`routine_budget` when it was the
- * execution's cap), `step_limit` or `time_limit`.
- */
-/**
  * A fencing token for `runFor`: one key per piece of work (an assignment's item) and a token that grows with each
  * attempt. A late attempt with a lower token than one already seen gets `fenced`, and `cancel` with the fence only
  * stops the run while that attempt is still the last one that went into it.
@@ -220,6 +215,11 @@ export interface RunFence {
   token: number;
 }
 
+/**
+ * The hard caps of a run nobody follows (a routine's execution): spend caps beyond the agent's month, model
+ * turns and time. Past any of them the run stops with `budget_exhausted` (`routine_budget` when it was the
+ * execution's cap), `step_limit` or `time_limit`.
+ */
 export interface RunLimits {
   scopes: readonly BudgetScope[];
   maxTurns: number;
@@ -365,9 +365,8 @@ export class AgentRuntime implements RuntimePort {
     await failInterruptedAgentJobs(this.deps.db);
     const every = this.opts.tickEveryMs ?? 15_000;
     if (every > 0) {
-      this.timer = setInterval(() => {
-        void this.tick().catch((err) => log.error("runtime.tick_failed", { err }));
-      }, every);
+      // Tracked, so stop() waits for a sweep already under way before the database closes.
+      this.timer = setInterval(() => this.track(this.tick(), "tick"), every);
     }
   }
 
@@ -492,24 +491,27 @@ export class AgentRuntime implements RuntimePort {
       return { ok: false, code: "budget", scope, error: `${agent.name} hit the ${scope} budget cap` };
     }
     const reservation = held.reservation;
-    const provider = await this.opts.providerFor(agent);
+    // From here every way out settles or releases the reservation.
+    const provider = await this.releasing(reservation, () => this.opts.providerFor(agent));
     if ("error" in provider) {
       await this.deps.ledger.release(reservation);
       return { ok: false, code: "failed", error: provider.error };
     }
     const runId = newId("run");
-    await db.insert(runs).values({
-      id: runId,
-      workspaceId: agent.workspaceId,
-      agentId: agent.id,
-      sourceChannelId: input.sourceChannelId ?? null,
-      debateId: input.debateId ?? null,
-      status: "running",
-      what: whatOf(input.what),
-      model,
-      createdAt: at,
-      startedAt: at,
-    });
+    await this.releasing(reservation, () =>
+      db.insert(runs).values({
+        id: runId,
+        workspaceId: agent.workspaceId,
+        agentId: agent.id,
+        sourceChannelId: input.sourceChannelId ?? null,
+        debateId: input.debateId ?? null,
+        status: "running",
+        what: whatOf(input.what),
+        model,
+        createdAt: at,
+        startedAt: at,
+      }),
+    );
     let usage = emptyUsage();
     try {
       let text = "";
@@ -550,8 +552,7 @@ export class AgentRuntime implements RuntimePort {
           costUsd: cost,
         })
         .where(eq(runs.id, runId));
-      await this.budgetCheck(agent);
-      if (channelId) await this.channelBudgetCheck(channelId, input.initiatedBy);
+      await this.budgetNotices(agent, channelId, input.initiatedBy);
       return { ok: true, text: text.trim(), runId };
     } catch (err) {
       await this.deps.ledger.release(reservation);
@@ -647,8 +648,9 @@ export class AgentRuntime implements RuntimePort {
       .where(and(eq(questions.id, questionId), eq(questions.status, "open")))
       .returning();
     if (!row) return null;
-    await publishQuestion(this.deps, row, "question.closed");
+    // The run wakes on the saved answer, before the notice: a notice that fails doesn't hold the run.
     this.questionWaiters.get(questionId)?.({ answer, actorUserId });
+    await publishQuestion(this.deps, row, "question.closed");
     return row;
   }
 
@@ -759,8 +761,8 @@ export class AgentRuntime implements RuntimePort {
       .where(and(eq(questions.status, "open"), lte(questions.createdAt, old)))
       .returning();
     for (const row of stale) {
-      await publishQuestion(this.deps, row, "question.closed");
       this.questionWaiters.get(row.id)?.(null);
+      await publishQuestion(this.deps, row, "question.closed");
     }
   }
 
@@ -871,21 +873,31 @@ export class AgentRuntime implements RuntimePort {
       throw new Error(`runFor: message ${trigger.id} is not of channel ${channel.id}`);
     // Checked and raised before any await: of two attempts, the older one that arrives late is turned away.
     const { fence } = input;
+    // A later attempt went meanwhile: checked again after each await, up to the run taking the message.
+    const stale = () => fence !== undefined && fence.token < (this.fences.get(fence.key) ?? fence.token);
     if (fence) {
-      if (fence.token < (this.fences.get(fence.key) ?? Number.NEGATIVE_INFINITY))
-        return { ok: false, code: "fenced" };
+      if (stale()) return { ok: false, code: "fenced" };
       this.fences.set(fence.key, fence.token);
     }
     // Without routing, the personal plan's lock is here: only whoever paired triggers the agent (not even into a live run).
     const planOwner = (await withPlanOwner(this.deps.db, agent)).planOwnerUserId;
     if (planOwner !== null && planOwner !== personOf(trigger)) return { ok: false, code: "personal_plan" };
+    if (stale()) return { ok: false, code: "fenced" };
     const threadId = trigger.threadId ?? (trigger.meta.spawnsThread ? trigger.id : null);
     const key = `${agent.id}:${channel.id}:${threadId ?? "-"}`;
-    const runningId = this.byKey.get(key);
-    const running = runningId ? this.live.get(runningId) : undefined;
-    if (running) {
+    for (;;) {
+      const runningId = this.byKey.get(key);
+      const running = runningId ? this.live.get(runningId) : undefined;
+      if (!running) break;
       // The live run doesn't have this request's caps: instead of joining it, the caller tries later.
       if (input.limits) return { ok: false, code: "busy" };
+      if (fence && this.defers(running, trigger)) {
+        // A fenced attempt goes into the run that answers it: a run that would put it off to the next one is
+        // waited out first, so the run returned (and the one its fence stops) is that one.
+        await running.done;
+        if (stale()) return { ok: false, code: "fenced" };
+        continue;
+      }
       if (fence) running.fence = fence;
       await this.steer(running, trigger);
       return { ok: true, runId: running.runId, done: running.done };
@@ -903,7 +915,7 @@ export class AgentRuntime implements RuntimePort {
     });
     const runId = this.byKey.get(key) ?? "";
     const started = this.live.get(runId);
-    if (started && fence) started.fence = fence;
+    if (started && fence && !stale()) started.fence = fence;
     return { ok: true, runId, done: started?.done ?? Promise.resolve() };
   }
 
@@ -943,27 +955,27 @@ export class AgentRuntime implements RuntimePort {
     });
   }
 
+  /**
+   * Whether the live run puts this message off to the next run instead of taking it: the run is ending, it runs
+   * on the plan of whoever paired (not even someone else's "stop" touches it), or it is pinned to another person.
+   */
+  private defers(live: Live, row: MessageRow): boolean {
+    if (live.closing) return true;
+    if (live.plan && !canUsePlan(personOf(row), live.plan)) return true;
+    const who = personOf(row);
+    return who !== null && who !== live.person.id && live.person.pinned;
+  }
+
   private async steer(live: Live, row: MessageRow) {
     const { db, hub } = this.deps;
     const stop = isStopRequest(row.body);
-    if (live.closing) {
+    if (this.defers(live, row)) {
       // "stop" for a run that is already ending changes nothing; anything else becomes the next run.
-      if (!stop) live.after.push(row);
-      return;
-    }
-    // Not even someone else's "stop" touches a run on the plan of whoever paired.
-    if (live.plan && !canUsePlan(personOf(row), live.plan)) {
-      live.after.push(row);
+      if (!(live.closing && stop)) live.after.push(row);
       return;
     }
     const who = personOf(row);
-    if (who !== null && who !== live.person.id) {
-      if (live.person.pinned) {
-        live.after.push(row);
-        return;
-      }
-      live.person.id = null;
-    }
+    if (who !== null && who !== live.person.id) live.person.id = null;
     await db
       .insert(messageDispatches)
       .values({ messageId: row.id, agentId: live.agent.id, state: "claimed", runId: live.runId })
@@ -1659,7 +1671,9 @@ export class AgentRuntime implements RuntimePort {
           const fresh = new Set(live.inbox.map((m) => m.id));
           const answered = live.handles.filter((id) => !fresh.has(id));
           if (text) await post(text);
-          live.handles = live.handles.filter((id) => fresh.has(id));
+          // Only what this text answered leaves: a message steered in during the post stays to be answered.
+          const done = new Set(answered);
+          live.handles = live.handles.filter((id) => !done.has(id));
           await this.markHandled(live, answered, text ? "answered" : "silent");
           await settleIssueWork(this.deps.db, live.workspaceId, answered, {
             state: "idle",
@@ -1679,11 +1693,12 @@ export class AgentRuntime implements RuntimePort {
 
       clearInterval(beat);
       if (deadline) clearTimeout(deadline);
+      // The time cap (or a stop) that landed after the model's last answer still counts: not posted as done.
+      live.controller.signal.throwIfAborted();
       const message = finalText ? await post(finalText) : null;
       const status = message || posted > 0 ? "answered" : "silent";
       await this.finish(live, { status: "done", handled: status, messageId: message?.id ?? null });
-      await this.budgetCheck(live.agent);
-      await this.channelBudgetCheck(live.channel.id, personOf(live.trigger));
+      await this.budgetNotices(live.agent, live.channel.id, personOf(live.trigger));
     } catch (caught) {
       live.closing = true;
       clearInterval(beat);
@@ -1894,6 +1909,26 @@ export class AgentRuntime implements RuntimePort {
     return out;
   }
 
+  /** Runs `work` and releases the reservation if it throws (the call never went out). */
+  private async releasing<T>(reservation: Reservation, work: () => Promise<T>): Promise<T> {
+    try {
+      return await work();
+    } catch (err) {
+      await this.deps.ledger.release(reservation);
+      throw err;
+    }
+  }
+
+  /** The budget notices after a finished call: one that fails is logged, the call's result stands. */
+  private async budgetNotices(agent: AgentRow, channelId: string | null, initiatedBy: string | null) {
+    try {
+      await this.budgetCheck(agent);
+      if (channelId) await this.channelBudgetCheck(channelId, initiatedBy);
+    } catch (err) {
+      log.error("runtime.budget_notice_failed", { agentId: agent.id, err });
+    }
+  }
+
   private async systemPrompt(live: Live): Promise<string> {
     const { db } = this.deps;
     const { agent, channel } = live;
@@ -1983,7 +2018,7 @@ export class AgentRuntime implements RuntimePort {
     const held = await this.reserveCall({
       agent: target,
       channelId: live.channel.id,
-      scopes: live.limits?.scopes,
+      scopes: [...(live.limits?.scopes ?? []), ...(live.assignment?.scope ? [live.assignment.scope] : [])],
       promptBytes: utf8Bytes(system) + utf8Bytes(question),
       maxTokens: CONSULT_MAX_TOKENS,
     });
@@ -1995,28 +2030,32 @@ export class AgentRuntime implements RuntimePort {
       }
       if (held.scope.kind === "routine_run")
         return `@${target.handle} can't take a delegation: this routine run's spending cap doesn't fit the question.`;
+      if (held.scope.kind === "assignment")
+        return `@${target.handle} can't take a delegation: this assignment's spending cap doesn't fit the question.`;
       await this.budgetCheck(target, true);
       return `@${target.handle} is out of budget this month and can't take a delegation.`;
     }
     const reserved = held.reservation;
-    const provider = await this.opts.providerFor(target);
+    const provider = await this.releasing(reserved, () => this.opts.providerFor(target));
     if ("error" in provider) {
       await this.deps.ledger.release(reserved);
       await finish("failed", null);
       return `@${target.handle} could not be reached.`;
     }
     const runId = newId("run");
-    await db.insert(runs).values({
-      id: runId,
-      workspaceId: live.workspaceId,
-      agentId: target.id,
-      // The run isn't a channel's, but the question came from this one: whoever doesn't read the channel doesn't see it.
-      sourceChannelId: live.channel.id,
-      status: "running",
-      what: whatOf(`@${live.agent.handle}: ${question}`),
-      model: target.model,
-      startedAt: at,
-    });
+    await this.releasing(reserved, () =>
+      db.insert(runs).values({
+        id: runId,
+        workspaceId: live.workspaceId,
+        agentId: target.id,
+        // The run isn't a channel's, but the question came from this one: whoever doesn't read the channel doesn't see it.
+        sourceChannelId: live.channel.id,
+        status: "running",
+        what: whatOf(`@${live.agent.handle}: ${question}`),
+        model: target.model,
+        startedAt: at,
+      }),
+    );
     const timeout = AbortSignal.timeout(CONSULT_TIMEOUT_MS);
     const signal = AbortSignal.any([live.controller.signal, timeout]);
     let usage = emptyUsage();
@@ -2045,6 +2084,7 @@ export class AgentRuntime implements RuntimePort {
         channelId: live.channel.id,
         source: "delegation",
         usage,
+        assignmentId: live.assignment?.assignmentId ?? null,
       });
       await db
         .update(runs)
@@ -2058,8 +2098,7 @@ export class AgentRuntime implements RuntimePort {
         })
         .where(eq(runs.id, runId));
       await finish("answered", answer);
-      await this.budgetCheck(target);
-      await this.channelBudgetCheck(live.channel.id, personOf(live.trigger));
+      await this.budgetNotices(target, live.channel.id, personOf(live.trigger));
       return answer || "(no answer)";
     } catch (err) {
       await this.deps.ledger.release(reserved);
@@ -2377,7 +2416,7 @@ export class AgentRuntime implements RuntimePort {
 
   /** Posts the reminders that came due. Each one is claimed first (status sent), so two ticks don't duplicate. */
   async tick(): Promise<number> {
-    if (this.ticking) return 0;
+    if (this.ticking || this.stopped) return 0;
     this.ticking = true;
     try {
       const { db } = this.deps;

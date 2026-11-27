@@ -25,6 +25,7 @@ import {
   assignmentOfThread,
   type CommandRow,
   isClosed,
+  moveAssignment,
   publishAssignment,
   runnerOfAssignment,
   runningJobsOf,
@@ -177,6 +178,7 @@ export async function askCommand(
 /**
  * Posts a pending command's card, tells the owner and marks the card on the row. The card's client id is the
  * command's: after a crash between the row and its card, the engine posts it again and gets the same message.
+ * The owner is told before the mark, so a crash in between tells again (the notice's count grows) instead of never.
  */
 export async function announceCommand(
   deps: AppDeps,
@@ -198,12 +200,11 @@ export async function announceCommand(
     },
     `card:${cmd.id}`,
   );
-  const [marked] = await deps.db
+  await notifyOwner(deps, row, "approval", `$ ${cmd.command}`, card.id);
+  await deps.db
     .update(assignmentCommands)
     .set({ messageId: card.id })
-    .where(and(eq(assignmentCommands.id, cmd.id), isNull(assignmentCommands.messageId)))
-    .returning();
-  if (marked) await notifyOwner(deps, row, "approval", `$ ${cmd.command}`, card.id);
+    .where(and(eq(assignmentCommands.id, cmd.id), isNull(assignmentCommands.messageId)));
   publishAssignment(deps, row, "command");
   return { ...cmd, messageId: card.id };
 }
@@ -386,12 +387,13 @@ async function startAssignmentJobNow(
 }
 
 /** Cancels the assignment's jobs that still run (after a start in progress). Returns how many. */
-export function cancelJobs(deps: AppDeps, row: AssignmentRow): Promise<number> {
-  return withAssignmentJobs(row.id, () => cancelJobsNow(deps, row));
+export function cancelJobs(deps: AppDeps, row: AssignmentRow, only?: string): Promise<number> {
+  return withAssignmentJobs(row.id, () => cancelJobsNow(deps, row, only));
 }
 
-async function cancelJobsNow(deps: AppDeps, row: AssignmentRow): Promise<number> {
-  const running = await runningJobsOf(deps.db, row.id);
+/** Cancels the assignment's running jobs, or only the job `only` among them. */
+async function cancelJobsNow(deps: AppDeps, row: AssignmentRow, only?: string): Promise<number> {
+  const running = (await runningJobsOf(deps.db, row.id)).filter((j) => only === undefined || j.id === only);
   const agent = await agentOf(deps.db, row);
   for (const j of running) {
     await deps.runners
@@ -449,9 +451,9 @@ export async function createSubmission(
 }
 
 /**
- * Posts a pending submission's card, moves the assignment to wrapping up and tells the owner. The card's client id
- * is the submission's: after a crash between the row and its card, the engine posts it again and gets the same
- * message, so the pending row never blocks the assignment without a card.
+ * Moves the assignment to wrapping up, posts a pending submission's card, tells the owner and marks the card on the
+ * row, in that order: the mark is last, so a crash anywhere before it leaves a submission without a card, which
+ * the engine announces again. The card's client id is the submission's, so the repost gets the same message.
  */
 export async function announceSubmission(
   deps: AppDeps,
@@ -460,6 +462,16 @@ export async function announceSubmission(
   /** Move the assignment to wrapping up (a new submission does; reposting a lost card only from active). */
   move: boolean,
 ) {
+  // Only from active (or wrapping up, a submission replacing another): a paused or closed assignment stays so.
+  const next = move
+    ? ((await moveAssignment(
+        deps,
+        row,
+        ["active", "wrapping_up"],
+        { status: "wrapping_up" },
+        "submission",
+      )) ?? row)
+    : row;
   const card = await agentSays(
     deps,
     row,
@@ -467,13 +479,11 @@ export async function announceSubmission(
     { assignmentSubmission: { assignmentId: row.id, submissionId: submission.id } },
     `card:${submission.id}`,
   );
-  const [marked] = await deps.db
+  await notifyOwner(deps, next, "assignment_finished", submission.note, card.id);
+  await deps.db
     .update(assignmentSubmissions)
     .set({ messageId: card.id })
-    .where(and(eq(assignmentSubmissions.id, submission.id), isNull(assignmentSubmissions.messageId)))
-    .returning();
-  const next = move ? await updateAssignment(deps, row, { status: "wrapping_up" }, "submission") : row;
-  if (marked) await notifyOwner(deps, next, "assignment_finished", submission.note, card.id);
+    .where(and(eq(assignmentSubmissions.id, submission.id), isNull(assignmentSubmissions.messageId)));
   return { submission: { ...submission, messageId: card.id }, assignment: next };
 }
 
@@ -641,7 +651,7 @@ async function processJobEnd(deps: AppDeps, jobId: string): Promise<void> {
     // The runner as executor: ended well and with no blocked command, the item is done; otherwise it goes back.
     const done = job.status === "done" && denied.length === 0;
     // Only an item still being worked on: one the person dropped (or marked done) meanwhile stays as it is.
-    await touchItem(
+    const moved = await touchItem(
       deps,
       row.id,
       job.planItemId,
@@ -652,7 +662,7 @@ async function processJobEnd(deps: AppDeps, jobId: string): Promise<void> {
       },
       ["todo", "doing"],
     );
-    if (done)
+    if (done && moved)
       await assignmentEvent(deps, row, {
         kind: "item_done",
         actor: agent,

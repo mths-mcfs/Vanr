@@ -16,7 +16,7 @@
 import { DBOS } from "@dbos-inc/dbos-sdk";
 import type { AssignmentLimitKind, AssignmentUsage, AssignmentWaitReason } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
-import { and, eq, gt, inArray, isNull, lt, max, ne, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNotNull, isNull, lt, max, ne, sql } from "drizzle-orm";
 import { channelInWorkspace } from "../channels";
 import type { AppDeps } from "../context";
 import { launchDurable } from "../durable";
@@ -131,6 +131,8 @@ export interface Snapshot {
   emitted: string[];
   /** A pending command or submission with no card past the claim grace. */
   unannounced: boolean;
+  /** When the grace of the first card-less one still within it runs out. */
+  announceAt: Date | null;
   /** Jobs whose end nobody processed past the grace, or that never reached the runner. */
   unsettled: string[];
   /** A run in the thread or a job on the runner still going on. */
@@ -164,6 +166,7 @@ export function decide(s: Snapshot, now: Date): EngineAction {
   // The next time something comes due on its own (the due date, the assignment going quiet): the wait wakes then.
   const soon = (base: number | null): string | null => {
     const marks = [base ?? t + MAX_WAIT_MS];
+    if (s.announceAt && s.announceAt > now) marks.push(s.announceAt.getTime());
     if (s.dueAt && s.dueAt > now && !s.emitted.includes(overdueKey(s.dueAt))) marks.push(s.dueAt.getTime());
     if (s.status === "active" && s.lastActivity) {
       const staleAt = s.lastActivity.getTime() + STALE_MS + 1000;
@@ -185,7 +188,12 @@ export function decide(s: Snapshot, now: Date): EngineAction {
   if (s.unannounced) return { type: "announce" };
   const unsettled = s.unsettled[0];
   if (unsettled) return { type: "settle", jobId: unsettled };
-  if (s.status === "paused") return { type: "wait", reason: s.ceiling ? "ceiling" : "paused", until: null };
+  if (s.status === "paused")
+    return {
+      type: "wait",
+      reason: s.ceiling ? "ceiling" : "paused",
+      until: s.announceAt?.toISOString() ?? null,
+    };
   const dead = s.open.find((w) => !w.live);
   if (dead) return { type: "reap", workId: dead.id };
   if (s.ceiling) return { type: "ceiling", which: limitOf(s.ceiling) };
@@ -291,36 +299,32 @@ export async function snapshotOf(deps: AppDeps, row: AssignmentRow): Promise<Sna
   const runOnAir = deps.runtime.activeRun(row.agentId, row.channelId, row.threadId) !== null;
   const busy = runOnAir || jobs.some((j) => live(j));
   const stray = runOnAir || jobs.some((j) => (j.status === "queued" && !lost(j)) || j.status === "running");
-  const graceAgo = new Date(now - CLAIM_GRACE_MS);
-  const unannounced =
-    (
-      await db
-        .select({ id: assignmentCommands.id })
-        .from(assignmentCommands)
-        .where(
-          and(
-            eq(assignmentCommands.assignmentId, row.id),
-            eq(assignmentCommands.state, "pending"),
-            isNull(assignmentCommands.messageId),
-            lt(assignmentCommands.createdAt, graceAgo),
-          ),
-        )
-        .limit(1)
-    ).length > 0 ||
-    (
-      await db
-        .select({ id: assignmentSubmissions.id })
-        .from(assignmentSubmissions)
-        .where(
-          and(
-            eq(assignmentSubmissions.assignmentId, row.id),
-            eq(assignmentSubmissions.status, "pending"),
-            isNull(assignmentSubmissions.messageId),
-            lt(assignmentSubmissions.createdAt, graceAgo),
-          ),
-        )
-        .limit(1)
-    ).length > 0;
+  // A pending command or submission without its card: past the grace its creator died before posting it; before,
+  // the creator is still posting, and the engine looks again when the grace runs out.
+  const cardless = [
+    ...(await db
+      .select({ createdAt: assignmentCommands.createdAt })
+      .from(assignmentCommands)
+      .where(
+        and(
+          eq(assignmentCommands.assignmentId, row.id),
+          eq(assignmentCommands.state, "pending"),
+          isNull(assignmentCommands.messageId),
+        ),
+      )),
+    ...(await db
+      .select({ createdAt: assignmentSubmissions.createdAt })
+      .from(assignmentSubmissions)
+      .where(
+        and(
+          eq(assignmentSubmissions.assignmentId, row.id),
+          eq(assignmentSubmissions.status, "pending"),
+          isNull(assignmentSubmissions.messageId),
+        ),
+      )),
+  ].map((r) => r.createdAt.getTime() + CLAIM_GRACE_MS);
+  const unannounced = cardless.some((at) => at <= now);
+  const announceAt = cardless.length && !unannounced ? new Date(Math.min(...cardless)) : null;
   const decisions = await db
     .select({ id: assignmentDecisions.id, deadlineAt: assignmentDecisions.deadlineAt })
     .from(assignmentDecisions)
@@ -392,6 +396,7 @@ export async function snapshotOf(deps: AppDeps, row: AssignmentRow): Promise<Sna
     lastActivity: await lastActivityOf(deps, row, jobs),
     emitted,
     unannounced,
+    announceAt,
     unsettled,
     stray,
   };
@@ -545,6 +550,8 @@ export async function act(deps: AppDeps, assignmentId: string, a: EngineAction):
       return null;
 
     case "halt": {
+      // Resumed since the decision: the run and the jobs are the resumed assignment's.
+      if (row.status !== "paused" && !isClosed(row)) return null;
       const run = deps.runtime.activeRun(row.agentId, row.channelId, row.threadId);
       if (run) deps.runtime.cancel(run, null);
       await cancelJobs(deps, row);
@@ -849,7 +856,7 @@ async function dispatch(
         .where(and(eq(assignmentWork.id, id), ne(assignmentWork.status, "ended")))
         .returning();
       // Reaped while the job was being started: the job doesn't go on for an attempt that no longer counts.
-      if (!bound) await cancelJobs(deps, row);
+      if (!bound) await cancelJobs(deps, row, job.id);
       return null;
     } catch (err) {
       if (!(err instanceof HttpError)) throw err;
@@ -949,12 +956,19 @@ async function itemBrief(
   items: PlanItemRow[],
   startedAt: Date,
 ): Promise<string> {
-  // "Since your last turn": after the start of the previous work (a decision taken, a job that ended). From its
-  // start, not its end: a job the agent started in that turn can end before the turn does.
+  // "Since your last turn": after the start of the previous work that went out (a decision taken, a job that
+  // ended). From its start, not its end: a job the agent started in that turn can end before the turn does. An
+  // attempt refused before the send (no run or job behind it) isn't a turn the agent heard.
   const [prev] = await deps.db
     .select({ at: max(assignmentWork.startedAt) })
     .from(assignmentWork)
-    .where(and(eq(assignmentWork.assignmentId, row.id), eq(assignmentWork.status, "ended")));
+    .where(
+      and(
+        eq(assignmentWork.assignmentId, row.id),
+        eq(assignmentWork.status, "ended"),
+        isNotNull(assignmentWork.refId),
+      ),
+    );
   const since = prev?.at ?? row.startedAt ?? startedAt;
   const decided = await deps.db
     .select()
