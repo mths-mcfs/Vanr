@@ -127,6 +127,52 @@ const undoing = (deps: AppDeps, me: WorkspaceMember, row: ActionRow) =>
     },
   );
 
+/** A post queued until `sendAt`, with the receipt that undoes it (it still points at the queued item). */
+async function queuedPost(server: RunningServer, ctx: Ctx, text: string, sendAt: Date) {
+  const id = newId("out");
+  await server.deps.db.insert(outbox).values({
+    id,
+    workspaceId: ctx.workspaceId,
+    agentId: ctx.agentId,
+    runId: null,
+    kind: "post",
+    payload: { channelId: ctx.general, text, clientId: newId("c") },
+    sendAt,
+  });
+  const action = await seedAction(server, ctx, "message_posted", { type: "outbox", id }, { outboxId: id });
+  return { id, text, action };
+}
+
+/**
+ * How an undo that raced the send of its post ended: the undo's answer, the queued item, whether each copy of the
+ * post shows retracted, and whether the action is marked undone. An "ok" leaves nothing showing: canceled before
+ * it went out, or retracted once the receipt points at the message. Between the send and that move the undo
+ * answers too late, and the post stays.
+ */
+const SEND_UNDO_ENDS: Record<string, unknown[]> = {
+  canceled: ["ok", "canceled", [], true],
+  late: ["action.changed_since", "sent", [false], false],
+};
+
+async function undoAgainstSend(
+  server: RunningServer,
+  item: Awaited<ReturnType<typeof queuedPost>>,
+  result: string | undefined,
+) {
+  const { db } = server.deps;
+  const [row] = await db.select().from(outbox).where(eq(outbox.id, item.id));
+  const posted = await db.select().from(messages).where(eq(messages.body, item.text));
+  const [action] = await db.select().from(reversibleActions).where(eq(reversibleActions.id, item.action.id));
+  const end = [
+    result,
+    row?.status,
+    posted.map((m) => m.meta.retracted !== undefined),
+    action?.revertedAt != null,
+  ];
+  expect(Object.values(SEND_UNDO_ENDS)).toContainEqual(end);
+  return Object.entries(SEND_UNDO_ENDS).find(([, want]) => Bun.deepEquals(want, end))?.[0];
+}
+
 /** An issue the agent renamed, with the receipt that undoes it. */
 async function renamed(server: RunningServer, ctx: Ctx, i: number) {
   const agent = { type: "agent" as const, id: ctx.agentId };
@@ -177,58 +223,31 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("undo at the same time on Postgre
     });
   }, 60_000);
 
-  test("undo against the send at the deadline, N times: each post is canceled or sent, never both", async () => {
+  test("undo against the send at the deadline, N times: each post is canceled, retracted or late, never left out", async () => {
     await withServer("undo_send", async (server, _admin, ctx) => {
       const sendAt = new Date(Date.now() + 60_000);
-      const items: { id: string; action: ActionRow }[] = [];
-      for (let i = 0; i < N; i++) {
-        const id = newId("out");
-        await server.deps.db.insert(outbox).values({
-          id,
-          workspaceId: ctx.workspaceId,
-          agentId: ctx.agentId,
-          runId: null,
-          kind: "post",
-          payload: { channelId: ctx.general, text: `post ${i}`, clientId: `c-${i}` },
-          sendAt,
-        });
-        const action = await seedAction(
-          server,
-          ctx,
-          "message_posted",
-          { type: "outbox", id },
-          { outboxId: id },
-        );
-        items.push({ id, action });
-      }
+      const items = [];
+      for (let i = 0; i < N; i++) items.push(await queuedPost(server, ctx, `post ${i}`, sendAt));
       // The sweep sees the deadline passed; the undos are still inside their window.
       const sweep = { ...server.deps, now: () => sendAt };
-      const results = await Promise.all([
-        ...items.map((it) => undoing(server.deps, ctx.carla, it.action)),
+      const [results] = await Promise.all([
+        Promise.all(items.map((it) => undoing(server.deps, ctx.carla, it.action))),
         deliverDue(sweep),
         deliverDue(sweep),
       ]);
-      for (const [i, it] of items.entries()) {
-        const [row] = await server.deps.db.select().from(outbox).where(eq(outbox.id, it.id));
-        const posted = await server.deps.db
-          .select()
-          .from(messages)
-          .where(eq(messages.body, `post ${i}`));
-        const [action] = await server.deps.db
-          .select()
-          .from(reversibleActions)
-          .where(eq(reversibleActions.id, it.action.id));
-        if (results[i] === "ok") {
-          expect(row?.status).toBe("canceled");
-          expect(posted).toEqual([]);
-          expect(action?.revertedAt).not.toBeNull();
-        } else {
-          expect(results[i]).toBe("action.changed_since");
-          expect(row?.status).toBe("sent");
-          expect(posted.length).toBe(1);
-          expect(action?.revertedAt).toBeNull();
-        }
-      }
+      for (const [i, it] of items.entries()) await undoAgainstSend(server, it, results[i]);
+    });
+  }, 60_000);
+
+  test("undo once the sweep posted and moved the receipt to the message: ok, and the post is retracted", async () => {
+    await withServer("undo_after_send", async (server, _admin, ctx) => {
+      const sendAt = new Date(Date.now() + 60_000);
+      const item = await queuedPost(server, ctx, "Too late to cancel", sendAt);
+      // The whole pass runs before the undo locks the action, as when the undo waits for a pool connection: the
+      // post goes out and the receipt points at the message, so the undo retracts it instead of canceling.
+      expect(await deliverDue({ ...server.deps, now: () => sendAt })).toBe(1);
+      const result = await undoing(server.deps, ctx.carla, item.action);
+      expect(await undoAgainstSend(server, item, result)).toBe("retracted");
     });
   }, 60_000);
 
@@ -274,23 +293,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("undo at the same time on Postgre
   test("forced: the send at the deadline waits on the undo's lock of the queued item and finds it canceled", async () => {
     await withServer("undo_vs_send", async (server, admin, ctx) => {
       const sendAt = new Date(Date.now() + 60_000);
-      const id = newId("out");
-      await server.deps.db.insert(outbox).values({
-        id,
-        workspaceId: ctx.workspaceId,
-        agentId: ctx.agentId,
-        runId: null,
-        kind: "post",
-        payload: { channelId: ctx.general, text: "Flash sale", clientId: "c-forced" },
-        sendAt,
-      });
-      const action = await seedAction(
-        server,
-        ctx,
-        "message_posted",
-        { type: "outbox", id },
-        { outboxId: id },
-      );
+      const { id, action } = await queuedPost(server, ctx, "Flash sale", sendAt);
       // A is the undo, held right after locking the queued item (its `select "id" ... for update`, not the access check's read of the payload). With the
       // lock the sweep's claim waits, then finds it canceled; without it, the sweep claims and posts it, and the
       // undo that got there first finds it gone out.
