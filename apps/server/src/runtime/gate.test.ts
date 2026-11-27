@@ -127,6 +127,63 @@ describe("runTool: runs only the approved effect", () => {
     expect(settled[0]).toMatchObject({ ok: false });
   });
 
+  test("an approval covers the class and scope it was granted for: the same payload planned as K3 doesn't run", async () => {
+    // A move the person approved as K1 that, by the time the approval arrives, plans as a delete (K3).
+    const state = { effect: "K1" as "K1" | "K3", ran: 0 };
+    const tool = define({
+      name: "move_note",
+      description: "",
+      effect: "K1",
+      input: z.object({ to: z.string() }),
+      async plan() {
+        return state.effect === "K1"
+          ? { policy: "ask" as const }
+          : { effect: "K3" as const, policy: "ask" as const, card: { scope: "notes:delete" } };
+      },
+      async run() {
+        state.ran++;
+        return "moved";
+      },
+    }) as ToolDef<unknown>;
+    const { ctx, asked, settled } = fakeCtx((req) => {
+      state.effect = "K3";
+      return approved(req);
+    });
+    const out = await runTool(ctx, [tool], "move_note", { to: "bin" });
+    // The same input gives the same hash under both classes: only the class tells them apart.
+    expect(asked.map((a) => a.effect)).toEqual(["K1"]);
+    expect(out.isError).toBe(true);
+    expect(out.content).toContain("no longer what was approved");
+    expect(state.ran).toBe(0);
+    expect(settled[0]).toMatchObject({ ok: false });
+  });
+
+  test("an approval covers the scope it was granted for: the same class under another scope doesn't run", async () => {
+    const state = { scope: "notes:archive", ran: 0 };
+    const tool = define({
+      name: "file_note",
+      description: "",
+      effect: "K2",
+      input: z.object({ id: z.string() }),
+      async plan() {
+        return { policy: "ask" as const, card: { scope: state.scope } };
+      },
+      async run() {
+        state.ran++;
+        return "filed";
+      },
+    }) as ToolDef<unknown>;
+    const { ctx } = fakeCtx((req) => {
+      state.scope = "notes:delete";
+      return approved(req);
+    });
+    const out = await runTool(ctx, [tool], "file_note", { id: "n1" });
+    expect([out.isError, state.ran]).toEqual([true, 0]);
+    // Unchanged, it runs.
+    const again = fakeCtx((req) => approved(req));
+    expect((await runTool(again.ctx, [tool], "file_note", { id: "n1" })).content).toBe("filed");
+  });
+
   test("an approval of another payload (an old hash) doesn't serve this one", async () => {
     const { state, tool } = sender();
     const other = payloadHash("send_note", { to: "ana@ws.test", text: "other text" });

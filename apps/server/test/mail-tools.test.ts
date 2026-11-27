@@ -826,6 +826,42 @@ describe("which folder is a trash", () => {
   );
 
   test(
+    "a plain move approved while the folder became a trash doesn't run: the approval was for a move, not a delete",
+    async () => {
+      clear();
+      const { lia, ana, url, connect, runOf } = await team();
+      const account = (await connect()).body.account;
+      // Organizing asks a person on this account, and the agent may delete: only the approval's class holds it.
+      await call(ana, "PATCH", url(`/mail/accounts/${account.id}`), { confirmActions: ["organize"] });
+      await call(ana, "PUT", url(`/agents/${lia.id}/mail/${account.id}`), {
+        level: "read_write",
+        deletable: true,
+      });
+      const uid = mail.deliver("INBOX", incoming("joao@client.test", "Keep", "Keep me"));
+      const box = mail.folders.get("Archive");
+      const before = box?.special ?? null;
+      try {
+        const r = await runOf({
+          decide: () => {
+            // While the person decides on a plain move, the server marks Archive as a trash.
+            if (box) box.special = "\\Trash";
+            return "approved";
+          },
+        });
+        const out = await r.ask("mail_organize", { account: mail.user, uid, moveTo: "Archive" });
+        expect(r.approvals.map((a) => [a.tool, a.effect])).toEqual([["mail_organize", "K1"]]);
+        expect(out.isError).toBe(true);
+        expect(out.content).toContain("no longer what was approved");
+        expect(mail.folders.get("INBOX")?.messages.map((m) => m.uid)).toEqual([uid]);
+        expect(mail.folders.get("Archive")?.messages ?? []).toEqual([]);
+      } finally {
+        if (box) box.special = before;
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "a folder that becomes a trash between the plan and the run is not moved to: the agent is told to try again",
     async () => {
       clear();

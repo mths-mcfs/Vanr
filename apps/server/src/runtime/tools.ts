@@ -1064,6 +1064,9 @@ export async function runTool(
   } else if (decision.kind === "ask") {
     const known = (r: RiskReason) => ctx.risk.reasons.some((x) => x.flag === r.flag && x.source === r.source);
     const reasons = [...ctx.risk.reasons, ...plan.raises.filter((r) => !known(r))];
+    // What each version the person may approve was granted as: the class and scope the card showed, by the hash
+    // the approval pins (the first plan's, then each edit's). The hash covers the payload, not the class.
+    const granted = new Map<string, Granted>([[decision.payloadHash, grantOf(plan)]]);
     const outcome = await ctx.requestApproval({
       tool: tool.name,
       input,
@@ -1078,7 +1081,7 @@ export async function runTool(
       credential: plan.credential ?? null,
       rule: rememberable(decision) ? (plan.rule ?? null) : null,
       reviewed: shortcut?.kind === "ask",
-      revise: (edits) => revise(ctx, tool, input, plan.editable, edits),
+      revise: (edits) => revise(ctx, tool, input, plan.editable, edits, granted),
     });
     if (outcome.decision !== "approved") return { content: notApproved(outcome), isError: true };
     approvalId = outcome.id;
@@ -1098,9 +1101,17 @@ export async function runTool(
       await ctx.settleApproval(approvalId, { ok: false, text: err.message });
       return { content: err.message, isError: true };
     }
-    if (hashOf(tool.name, again, input) !== approvedHash) {
+    // An approval covers the effect it was granted for: the same payload, and the same class and scope. A plain
+    // move that became a delete while the person decided is not what they approved.
+    const grantedAs = granted.get(approvedHash);
+    const now = grantOf(again);
+    if (
+      hashOf(tool.name, again, input) !== approvedHash ||
+      grantedAs?.effect !== now.effect ||
+      grantedAs.scope !== now.scope
+    ) {
       const text =
-        "Not done: what would run is no longer what was approved (the payload changed after approval). Nothing was done; ask again if it is still needed.";
+        "Not done: what would run is no longer what was approved (the payload or its effect changed after approval). Nothing was done; ask again if it is still needed.";
       await ctx.settleApproval(approvalId, { ok: false, text });
       return { content: text, isError: true };
     }
@@ -1229,13 +1240,25 @@ async function shortcutOf(
   return null;
 }
 
-/** The person's edit on the card: only in the editable fields, validated by the schema and planned again. */
+/** The effect an approval was granted for: its class and the card's permission scope. */
+interface Granted {
+  effect: EffectClass;
+  scope: string | undefined;
+}
+
+const grantOf = (plan: Planned): Granted => ({ effect: plan.effect, scope: plan.card.scope });
+
+/**
+ * The person's edit on the card: only in the editable fields, validated by the schema and planned again. The
+ * revised version's class and scope go into `granted`, under its hash.
+ */
 async function revise(
   ctx: ToolContext,
   tool: ToolDef<unknown>,
   input: unknown,
   editable: string[],
   edits: Record<string, unknown>,
+  granted: Map<string, Granted>,
 ): Promise<RevisedApproval | { error: string }> {
   const keys = Object.keys(edits);
   if (keys.length === 0) return { error: "Nothing to change" };
@@ -1248,9 +1271,11 @@ async function revise(
     const plan = await planOf(ctx, tool, parsed.data);
     // The edit can change what the rule would cover: the gate decides again whether it can be remembered.
     const again = gate(ctx.risk, gateCallOf(tool.name, plan, parsed.data));
+    const hash = hashOf(tool.name, plan, parsed.data);
+    granted.set(hash, grantOf(plan));
     return {
       input: parsed.data,
-      payloadHash: hashOf(tool.name, plan, parsed.data),
+      payloadHash: hash,
       preview: plan.preview,
       effect: plan.effect,
       rule: rememberable(again) ? (plan.rule ?? null) : null,
