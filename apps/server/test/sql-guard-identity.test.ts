@@ -441,6 +441,22 @@ for (const kind of ["PGlite", "Postgres"] as const) {
         seen = { error, left };
       }).catch(() => {});
       expect(seen).toEqual({ error: expect.stringContaining("division by zero"), left: { n: 0 } });
+
+      // The cleanup failing too (the connection gone) still reports the read's own error.
+      const lost = (session: GuardedSession): GuardedSession => ({
+        ...failing(session),
+        rows: async (text, params) => {
+          if (text.startsWith("rollback to savepoint")) throw new Error("connection lost");
+          return failing(session).rows(text, params);
+        },
+      });
+      let reported: unknown;
+      await q("select 1", policy, async (s) => {
+        reported = await guardedQuery(lost(s), "select name from customers", policy).catch(
+          (e: Error) => e.message,
+        );
+      }).catch(() => {});
+      expect(reported).toEqual(expect.stringContaining("division by zero"));
     });
   });
 

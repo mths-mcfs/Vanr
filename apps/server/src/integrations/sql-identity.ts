@@ -164,12 +164,16 @@ async function outsideRelation(
       [relations.map((r) => r.schema), relations.map((r) => r.name), NATIVE_SCHEMAS, [...new Set(words)]],
     );
   } catch (err) {
-    await session.rows("rollback to savepoint vanr_guard_locks", []);
+    // Back to before the read, then deallocate. If that fails too, the connection is gone and took the statement
+    // along; the error the caller sees stays the read's.
+    await session
+      .rows("rollback to savepoint vanr_guard_locks", [])
+      .then(() => session.rows(`deallocate ${name}`, []))
+      .catch(() => {});
     throw err;
-  } finally {
-    // A prepared statement outlives the transaction: deallocated whatever happened (its name is unique per call).
-    await session.rows(`deallocate ${name}`, []);
   }
+  // A prepared statement outlives the transaction: deallocated once read (its name is unique per call).
+  await session.rows(`deallocate ${name}`, []);
   return outside ? relationText({ schema: String(outside.schema), name: String(outside.name) }) : null;
 }
 
