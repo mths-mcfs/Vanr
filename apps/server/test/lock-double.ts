@@ -139,7 +139,11 @@ export async function forcedPair<T>(
   label: string,
   kind: "select" | "update",
   start: (side: "A" | "B", hooks: Hooks) => Promise<T>,
-  match?: string,
+  /**
+   * `match`: the SQL text the hold query must contain. `bKind`: the first query of B that counts as "passed"
+   * (B can be another operation than A); default `kind`.
+   */
+  { match, bKind = kind }: { match?: string; bKind?: "select" | "update" } = {},
 ): Promise<{ a: T; b: T; aPids: number[]; bPids: number[] }> {
   const aPids = new Set<number>();
   const bPids = new Set<number>();
@@ -171,7 +175,7 @@ export async function forcedPair<T>(
     const b = start("B", {
       pids: bPids,
       after: {
-        kind,
+        kind: bKind,
         match,
         run: async () => {
           bPassed = true;

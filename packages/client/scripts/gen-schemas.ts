@@ -35,6 +35,11 @@ interface Decl {
 }
 
 const SKIP = new Set(["index.ts", "permissions.ts"]);
+/**
+ * Optional fields of these types read an unknown value as absent (`s.lenient`): the server may store or
+ * send a value a client release doesn't know yet, and one agent's look must not break a whole list.
+ */
+const LENIENT = new Set(["AgentBody", "AgentExtra", "AgentMouth"]);
 
 function stripComments(src: string): string {
   let out = "";
@@ -287,7 +292,7 @@ class Emitter {
     const body = f.fields
       .map((x) => {
         const v = this.emit(x.type);
-        return `${/^[A-Za-z_$][\w$]*$/.test(x.name) ? x.name : JSON.stringify(x.name)}: ${x.optional ? `s.optional(${v})` : v}`;
+        return `${/^[A-Za-z_$][\w$]*$/.test(x.name) ? x.name : JSON.stringify(x.name)}: ${!x.optional ? v : x.type.k === "ref" && LENIENT.has(x.type.name) ? `s.lenient(${v})` : `s.optional(${v})`}`;
       })
       .join(", ");
     return f.rest ? `s.object({ ${body} }, ${this.emit(f.rest)})` : `s.object({ ${body} })`;
