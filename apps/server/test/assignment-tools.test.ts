@@ -527,7 +527,7 @@ describe("commands on the agent's runner", () => {
         expect(out.isError).toBe(true);
       }
 
-      // The assignment's runner is the other workspace's (creating one like that is refused, so the row is
+      // The assignment's runner is the other workspace's (creating one like that fails, so the row is
       // written as an older one could be): the job doesn't start there.
       await server.deps.db
         .update(agents)
