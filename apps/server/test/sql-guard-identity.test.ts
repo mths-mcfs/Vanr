@@ -442,7 +442,21 @@ for (const kind of ["PGlite", "Postgres"] as const) {
       alter table t_under enable row level security;
       alter table t_under force row level security;
       create policy p on t_under using ((name::dom) is not null);
-      create view v_over as select id from t_under;
+  create view v_over as select id from t_under;
+  create table t2d (id int, name text);
+  alter table t2d enable row level security;
+  alter table t2d force row level security;
+  create policy p on t2d using ((name::dom) is not null);
+  create table tad (id int);
+  alter table tad enable row level security;
+  alter table tad force row level security;
+  create policy p on tad using (exists (select 1 from t2d));
+  create table base3 (id int, name text);
+  create view v3 as select id from base3 where (name::dom) is not null;
+  create table tv3 (id int);
+  alter table tv3 enable row level security;
+  alter table tv3 force row level security;
+  create policy p on tv3 using (exists (select 1 from v3));
       create role ${role};
       grant usage on schema public to ${role};
       grant select on all tables in schema public to ${role};
@@ -454,6 +468,13 @@ for (const kind of ["PGlite", "Postgres"] as const) {
       expect(await q("select * from t_rls", allowed, undefined, asRole)).toEqual(by);
       // A table under an allowed view: its policy applies when the view expands.
       expect(await q("select id from v_over", allowed, undefined, asRole)).toEqual(by);
+      // Through another allowed relation a policy reads: its policy, or the rules of the view it reads, apply too.
+      expect(await q("select * from tad", { ...policy, tables: ["tad", "t2d"] }, undefined, asRole)).toEqual(
+        by,
+      );
+      expect(
+        await q("select * from tv3", { ...policy, tables: ["tv3", "v3", "base3"] }, undefined, asRole),
+      ).toEqual(by);
       // The rest of the policy still reads.
       expect(await q("select name from customers", allowed, undefined, asRole)).toEqual({
         result: { fields: ["name"], rows: [{ name: "Alice" }] },

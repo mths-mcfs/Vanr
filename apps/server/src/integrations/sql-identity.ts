@@ -90,8 +90,9 @@ export function fixedSearchPath(policy: Pick<QueryPolicy, "tables">): string {
 /**
  * `rel(oid)`: the policy's relations, found by exact schema ($1) and name ($2), compared byte for byte as the plan
  * check compares them (no folding: "Sales View" never stands for "sales view", `Étage` is not `étage`), plus every
- * relation the rules of those views reach, views under views included. `only` narrows the policy's relations the
- * walk starts from (a condition on `c`, the relation).
+ * relation the rules of those views and the row security policies of those relations read, views under views and
+ * tables under policies included: a policy's `exists (select … from t2)` applies t2's own rules and policies too.
+ * `only` narrows the policy's relations the walk starts from (a condition on `c`, the relation).
  */
 const allowedClosure = (only = "") => `with recursive rel(oid) as (
          select c.oid
@@ -106,12 +107,15 @@ const allowedClosure = (only = "") => `with recursive rel(oid) as (
          union
          select d.refobjid
            from rel
-           join pg_catalog.pg_rewrite r on r.ev_class operator(pg_catalog.=) rel.oid
            join pg_catalog.pg_depend d
-             on d.classid operator(pg_catalog.=) 'pg_catalog.pg_rewrite'::pg_catalog.regclass::pg_catalog.oid
-            and d.objid operator(pg_catalog.=) r.oid
-            and d.refclassid operator(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass::pg_catalog.oid
-          where d.refobjid operator(pg_catalog.<>) rel.oid
+             on d.refclassid operator(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass::pg_catalog.oid
+            and d.refobjid operator(pg_catalog.<>) rel.oid
+            and ((d.classid operator(pg_catalog.=) 'pg_catalog.pg_rewrite'::pg_catalog.regclass::pg_catalog.oid
+                  and d.objid operator(pg_catalog.=) any (array(
+                    select r.oid from pg_catalog.pg_rewrite r where r.ev_class operator(pg_catalog.=) rel.oid)))
+              or (d.classid operator(pg_catalog.=) 'pg_catalog.pg_policy'::pg_catalog.regclass::pg_catalog.oid
+                  and d.objid operator(pg_catalog.=) any (array(
+                    select p.oid from pg_catalog.pg_policy p where p.polrelid operator(pg_catalog.=) rel.oid))))
        )`;
 
 /**
