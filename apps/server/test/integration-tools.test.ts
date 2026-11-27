@@ -260,28 +260,57 @@ describe("a connector call while the run goes on", () => {
   );
 
   test(
-    "a write whose answer never came keeps its effect key: a retry doesn't send it blindly",
+    "a write whose answer never came keeps its effect key; a server that never opened the session releases it",
     async () => {
       const { workspaceId, channel, agent, connectionId } = await setup();
       await replaceGrants(server.deps.db, workspaceId, agent.id, [{ connectionId: "", scope: "*" }]);
       const tools = await toolsFor(server.deps, agent, { channel, threadId: null });
-      // The server goes away after the plan: the call may or may not have reached it.
+      const keys = async (effectKey: string) =>
+        server.deps.db
+          .select()
+          .from(schema.effectKeys)
+          .where(like(schema.effectKeys.key, `${effectKey}:%`));
+      const pointAt = (url: string) =>
+        server.deps.db.update(connections).set({ serverUrl: url }).where(eq(connections.id, connectionId));
+
+      // The session opens, then the call's answer is lost: the write may have happened.
+      const lossy = Bun.serve({
+        port: 0,
+        async fetch(req) {
+          const msg = (await req.json()) as { id?: number; method: string };
+          if (msg.method === "initialize")
+            return Response.json({
+              jsonrpc: "2.0",
+              id: msg.id,
+              result: {
+                protocolVersion: "2025-06-18",
+                capabilities: { tools: {} },
+                serverInfo: { name: "lossy" },
+              },
+            });
+          if (msg.method === "tools/call") return new Response("upstream reset", { status: 502 });
+          return new Response(null, { status: 202 });
+        },
+      });
+      try {
+        await pointAt(`http://localhost:${lossy.port}/mcp`);
+        const run = toolRun(server.deps, agent, channel, { effectKey: `lost_${connectionId}` });
+        await expect(run.run(tools, "mcp_stock__create_item", { name: "bolt" })).rejects.toThrow(
+          "Stock failed",
+        );
+        expect(await keys(`lost_${connectionId}`)).toHaveLength(1);
+      } finally {
+        lossy.stop(true);
+      }
+
+      // Nobody answers the session: nothing was sent, the key goes and a retry may do it.
       const gone = startFakeMcp({ keyOnly: true });
-      const unreachable = gone.url;
+      await pointAt(gone.url);
       gone.stop();
-      await server.deps.db
-        .update(connections)
-        .set({ serverUrl: unreachable })
-        .where(eq(connections.id, connectionId));
-      const run = toolRun(server.deps, agent, channel, { effectKey: `exec_${connectionId}` });
-      await expect(run.run(tools, "mcp_stock__create_item", { name: "bolt" })).rejects.toThrow(
-        "Stock failed",
-      );
-      const keys = await server.deps.db
-        .select()
-        .from(schema.effectKeys)
-        .where(like(schema.effectKeys.key, `exec_${connectionId}:%`));
-      expect(keys).toHaveLength(1);
+      const run = toolRun(server.deps, agent, channel, { effectKey: `closed_${connectionId}` });
+      const out = await run.run(tools, "mcp_stock__create_item", { name: "bolt" });
+      expect([out.isError, out.content.startsWith("Stock failed")]).toEqual([true, true]);
+      expect(await keys(`closed_${connectionId}`)).toEqual([]);
     },
     SERVER_TEST_MS,
   );

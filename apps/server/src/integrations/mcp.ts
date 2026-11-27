@@ -232,7 +232,8 @@ export class McpClient {
     throw new McpError(`MCP server did not answer ${method}`);
   }
 
-  private init(): Promise<void> {
+  /** Opens the session once (`initialize`); a caller can await it to tell a failure before any tool call. */
+  init(): Promise<void> {
     this.ready ??= (async () => {
       await this.request("initialize", {
         protocolVersion: MCP_PROTOCOL,

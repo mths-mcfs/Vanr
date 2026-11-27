@@ -225,7 +225,10 @@ export function connectionTools(
           let client: McpClient;
           try {
             client = await sessionFor(deps, clients, now.row);
+            // The session opens before the call: a failure here sent nothing, so the effect key is released.
+            await client.init();
           } catch (err) {
+            clients.delete(conn.id);
             throw new ToolInputError(
               `${conn.label} failed: ${err instanceof Error ? err.message : "no client"}`,
             );

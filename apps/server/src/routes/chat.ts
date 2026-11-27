@@ -257,6 +257,14 @@ async function agentWouldAnswer(
   return routed.targets.length > 0;
 }
 
+/** The person joins the channel (nothing when they already are a member). */
+async function joinChannel(db: Db, channelId: string, userId: string) {
+  await db
+    .insert(channelMemberships)
+    .values({ channelId, memberType: "person", memberId: userId })
+    .onConflictDoNothing();
+}
+
 /**
  * A message the person can read (its channel must be readable). A missing message and one of a channel they don't
  * read answer the same 404, text included.
@@ -572,7 +580,11 @@ export function registerChat(app: Hono<AppEnv>) {
     });
     // A resend of a post already accepted answers it as it is, whatever changed in the channel since.
     const resent = await byClientId(deps.db, channel.id, me.userId, input.clientId);
-    if (resent) return c.json(await hydrateOne(deps.db, resent), 200);
+    if (resent) {
+      // The first request may have failed after the post was written: the resend finishes joining.
+      if (!isMember) await joinChannel(deps.db, channel.id, me.userId);
+      return c.json(await hydrateOne(deps.db, resent), 200);
+    }
     const assignment = await assignmentPostMeta(deps, me, input.threadId, body);
     // Without the agent runtime (slice S6) a post an agent would answer is rejected before it is written: it would
     // stay unanswered with no sign why. A post no agent answers goes out as usual.
@@ -609,11 +621,7 @@ export function registerChat(app: Hono<AppEnv>) {
         ...assignment,
       },
     });
-    if (!isMember)
-      await deps.db
-        .insert(channelMemberships)
-        .values({ channelId: channel.id, memberType: "person", memberId: me.userId })
-        .onConflictDoNothing();
+    if (!isMember) await joinChannel(deps.db, channel.id, me.userId);
     // A resend of the same clientId doesn't route again. A routing failure doesn't fail the post.
     if (created && routes) {
       await deps.runtime

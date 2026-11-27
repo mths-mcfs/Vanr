@@ -475,6 +475,17 @@ describe("without the agent runtime", () => {
         clientId: "r-1",
       });
       expect([again.status, again.body.id]).toEqual([200, accepted.body.id]);
+      // A first request that failed after the post was written left Beto outside: the resend has him join.
+      await bare.deps.db
+        .delete(schema.channelMemberships)
+        .where(eq(schema.channelMemberships.memberId, beto.user.id));
+      const resent = await call(beto, "POST", `${w}/channels/${open}/messages`, {
+        body: "hi all",
+        clientId: "r-1",
+      });
+      expect(resent.status).toBe(200);
+      const joined = (await call(ana, "GET", `${w}/channels/${open}/members`)).body.members;
+      expect(joined.map((m: { id: string }) => m.id)).toContain(beto.user.id);
 
       const other = await seedChannel(bare, workspaceId, { name: "other", members: [ana] });
       const caio = await memberOf(bare, workspaceId, "Caio", email("caio"));
