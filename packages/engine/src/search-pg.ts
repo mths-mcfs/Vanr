@@ -79,6 +79,9 @@ function rowsOf(result: unknown): Row[] {
   return ((result as { rows?: Row[] }).rows ?? []) as Row[];
 }
 
+/** A chunk's identity across reindexes: `search_chunks_source_uq`. */
+const chunkKey = (r: Row) => `${r.source_kind}:${r.ordinal}:${r.source_id}`;
+
 const hashText = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 32);
 
 /** Postgres text cannot hold NUL: a stored value never has one, so text loses it before it is stored. */
@@ -424,27 +427,30 @@ export class PgSearchIndex implements SearchIndex {
     const limit = Math.max(1, Math.min(opts.limit ?? 20, 500));
     const legLimit = Math.max(LEG_LIMIT, limit);
 
-    const legs: number[][] = [];
+    // A leg names a chunk by its source and ordinal, not by `id`: a reindex between two statements (the
+    // backfill replays every live file each tick) deletes and inserts the rows, so the ids a leg read are
+    // gone by the final read while the source still has the chunk.
+    const legs: Row[][] = [];
     const lexical = rowsOf(
       await this.db.execute(sql`
-        select c.id from search_chunks c, (select ${tsq} as q) tq
+        select c.id, c.source_kind, c.source_id, c.ordinal from search_chunks c, (select ${tsq} as q) tq
         where ${where} and c.tsv @@ tq.q and ${lexicalMatch}
         order by ts_rank_cd(c.tsv, tq.q, 32) desc, c.created_at desc
         limit ${legLimit}`),
     );
-    legs.push(lexical.map((r) => Number(r.id)));
+    legs.push(lexical);
 
     // Name: a title close to the whole query (a typo, a file name).
     const name = [...q.terms, ...q.phrases, ...(prefix ? [prefix] : [])].join(" ");
     if (name.length >= 3) {
       const byName = rowsOf(
         await this.db.execute(sql`
-          select c.id from search_chunks c
+          select c.id, c.source_kind, c.source_id, c.ordinal from search_chunks c
           where ${where} and ${name} <% c.title_fold and c.ordinal = 0
           order by word_similarity(${name}, c.title_fold) desc
           limit ${Math.min(legLimit, 50)}`),
       );
-      legs.push(byName.map((r) => Number(r.id)));
+      legs.push(byName);
     }
 
     if (opts.mode !== "typing" && (await this.vectorOn()) && this.opts.embedder) {
@@ -466,24 +472,28 @@ export class PgSearchIndex implements SearchIndex {
             await tx.execute(sql`set local hnsw.ef_search = 100`);
             return rowsOf(
               await tx.execute(sql`
-                select c.id from search_chunks c
+                select c.id, c.source_kind, c.source_id, c.ordinal from search_chunks c
                 where ${where} and c.embedding is not null
                 order by c.embedding <=> ${vectorLiteral(v)}::halfvec
                 limit ${Math.min(legLimit, 100)}`),
             );
           });
-          legs.push(byVector.map((r) => Number(r.id)));
+          legs.push(byVector);
         }
       }
     }
 
-    // RRF: each leg votes 1/(60 + position); whoever shows up in more than one rises.
-    const score = new Map<number, number>();
+    // RRF: each leg votes 1/(60 + position); whoever shows up in more than one rises. A tie goes to the
+    // smaller id, the older chunk.
+    const fused = new Map<string, { row: Row; id: number; score: number }>();
     for (const leg of legs)
-      leg.forEach((id, i) => {
-        score.set(id, (score.get(id) ?? 0) + 1 / (RRF_K + i + 1));
+      leg.forEach((row, i) => {
+        const vote = 1 / (RRF_K + i + 1);
+        const seen = fused.get(chunkKey(row));
+        if (seen) seen.score += vote;
+        else fused.set(chunkKey(row), { row, id: Number(row.id), score: vote });
       });
-    const top = [...score.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]).slice(0, limit);
+    const top = [...fused.values()].sort((a, b) => b.score - a.score || a.id - b.id).slice(0, limit);
     if (!top.length) return [];
     const currentPerm = await this.permission(viewer);
     if (!currentPerm) return [];
@@ -492,15 +502,17 @@ export class PgSearchIndex implements SearchIndex {
         select c.id, c.source_kind, c.source_id, c.ordinal, c.title, c.text, c.url, c.channel_id, c.author_id,
           c.created_at, c.page, c.untrusted
         from search_chunks c
-        where c.id in (${sql.join(
-          top.map(([id]) => sql`${id}`),
+        where (c.source_kind, c.source_id, c.ordinal) in (${sql.join(
+          top.map(
+            ({ row }) => sql`(${row.source_kind}::text, ${row.source_id}::text, ${row.ordinal}::integer)`,
+          ),
           sql`, `,
         )}) and ${currentPerm}`),
     );
-    const byId = new Map(rows.map((r) => [Number(r.id), r]));
+    const byKey = new Map(rows.map((r) => [chunkKey(r), r]));
     const hits: SearchHit[] = [];
-    for (const [id, s] of top) {
-      const r = byId.get(id);
+    for (const { row, score: s } of top) {
+      const r = byKey.get(chunkKey(row));
       if (!r) continue;
       hits.push({
         source: { kind: r.source_kind as SourceKind, id: r.source_id },

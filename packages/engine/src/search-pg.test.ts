@@ -137,6 +137,34 @@ describe("search in SQL: beyond the contract", () => {
     },
   );
 
+  test.each(url ? ["PGlite", "real Postgres"] : ["PGlite"])(
+    "a reindex of the source during a search still returns it (%s)",
+    async (backend) => {
+      const real = backend === "real Postgres";
+      const access = worldAccess(world);
+      const src: SourceRef = { kind: "file", id: "harbor" };
+      const version = [chunk({ text: "harbor expansion roadmap", scope: { kind: "workspace" } })];
+      let reads = 0;
+      const db = real ? await realPostgres() : await pglite();
+      const index: PgSearchIndex = new PgSearchIndex(db, {
+        ...(real ? { embedder: fakeEmbedder() } : {}),
+        access: {
+          ...access,
+          // The second read is the permission check after the legs: the backfill replays the file right then.
+          async readable(workspaceId, principal) {
+            if (++reads === 2) await index.upsert(src, version);
+            return access.readable(workspaceId, principal);
+          },
+        },
+      });
+      await index.upsert(src, version);
+      if (real) expect(await index.embedPending()).toBe(1);
+      const hits = await index.search({ workspaceId: "o", userId: "u1" }, "harbor");
+      expect(reads).toBe(2);
+      expect(hits.map((h) => h.source.id)).toEqual(["harbor"]);
+    },
+  );
+
   test.each(["support@example.com", "https://example.com/path", "version 1.2.3"])(
     "the body is searchable with the same tokenization as the query: %s",
     async (text) => {
