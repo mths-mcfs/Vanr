@@ -133,7 +133,9 @@ describe(`a real Postgres as the customer's database (${TEST_POSTGRES_URL ? "pos
         level: "read",
         policy: { tables: ["customers"], maskedColumns: [] },
       });
-      expect(await ask(kai, 'select * from "Customers"')).toContain('public."Customers" is not available');
+      expect(await ask(kai, 'select * from "Customers"')).toContain(
+        `public."Customers" is not in this agent's policy`,
+      );
       expect(await ask(kai, "select id from customers order by id")).toBe("2 row(s)\nid\n1\n2");
     },
     SERVER_TEST_MS,

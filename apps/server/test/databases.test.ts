@@ -229,7 +229,7 @@ describe("databases", () => {
         "company",
       );
       expect(await ask("db_describe_table", { database: "Store", table: "Suppliers" })).toContain(
-        "The table public.suppliers is not available to you.",
+        "The table or view public.suppliers is not in this agent's policy.",
       );
 
       const rows = await ask("db_query", {
@@ -242,7 +242,7 @@ describe("databases", () => {
         "public.customers.ssn is hidden",
       );
       expect(await ask("db_query", { database: "Store", sql: "select x from secrets" })).toContain(
-        "public.secrets is not available",
+        "The table or view public.secrets is not in this agent's policy.",
       );
       expect(
         await ask("db_query", { database: "Store", sql: "delete from customers where id = 2" }),
@@ -395,6 +395,7 @@ describe("the guard and the network rule on a connected database", () => {
             readOnly: (_ms, fn) =>
               fn({
                 rows: async () => [],
+                prepare: async () => {},
                 explain: async () => {
                   throw new Error(
                     `syntax error near "${t.password}" (${Buffer.from(t.password).toString("base64")})`,

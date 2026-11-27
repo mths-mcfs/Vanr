@@ -236,6 +236,17 @@ export const quoteName = (name: string) =>
 
 const UNQUOTED_PART = /^[A-Za-z_\u0080-￿][A-Za-z0-9_$\u0080-￿]*$/;
 const encoder = new TextEncoder();
+
+/** What Postgres keeps of a longer name: its first 63 bytes, cut at a character boundary (`truncate_identifier`). */
+function truncateName(name: string): string {
+  if (encoder.encode(name).length <= 63) return name;
+  let kept = "";
+  for (const ch of name) {
+    if (encoder.encode(kept + ch).length > 63) break;
+    kept += ch;
+  }
+  return kept;
+}
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 /**
@@ -371,7 +382,7 @@ export function lexWords(sql: string): { words: string[]; operators: string[] } 
       continue;
     }
     flush();
-    if (t.kind === "word") words.push(foldName(text));
+    if (t.kind === "word") words.push(truncateName(foldName(text)));
     else if (t.kind === "quoted") {
       const unicode = /^[uU]&/.test(text);
       let name = text.slice(unicode ? 3 : 1, -1).replace(/""/g, '"');
@@ -397,7 +408,7 @@ export function lexWords(sql: string): { words: string[]; operators: string[] } 
           );
         }
       }
-      words.push(name);
+      words.push(truncateName(name));
     }
   }
   flush();
