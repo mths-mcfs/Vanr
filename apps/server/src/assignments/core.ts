@@ -110,11 +110,17 @@ export function requireOpen(row: AssignmentRow) {
 
 /**
  * The assignment's runner: the one chosen (or lent on the handover) or, with no choice, the agent's,
- * as long as the assignment's owner may use that runner.
+ * as long as the assignment's owner may use that runner. Only a runner paired to the assignment's workspace:
+ * an id that points at another workspace's runner finds none.
  */
 export async function runnerOfAssignment(db: Db, row: AssignmentRow) {
+  const inWorkspace = (id: string) =>
+    db
+      .select()
+      .from(runners)
+      .where(and(eq(runners.id, id), eq(runners.workspaceId, row.workspaceId)));
   if (row.runnerId) {
-    const [m] = await db.select().from(runners).where(eq(runners.id, row.runnerId));
+    const [m] = await inWorkspace(row.runnerId);
     return m && !m.removedAt ? m : null;
   }
   const [a] = await db
@@ -122,7 +128,7 @@ export async function runnerOfAssignment(db: Db, row: AssignmentRow) {
     .from(agents)
     .where(eq(agents.id, row.agentId));
   if (!a?.environmentId) return null;
-  const [m] = await db.select().from(runners).where(eq(runners.id, a.environmentId));
+  const [m] = await inWorkspace(a.environmentId);
   if (!m || m.removedAt) return null;
   const [owner] = await db
     .select({ role: schema.members.role })
