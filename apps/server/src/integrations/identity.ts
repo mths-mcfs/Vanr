@@ -142,7 +142,15 @@ export async function setChannelRules(
         .insert(agentChannelAccess)
         .values(
           [...unique.values()].map((r) => ({ ...r, agentId: agent.id, workspaceId: agent.workspaceId })),
-        );
+        )
+        .catch((err: unknown) => {
+          // Each statement reads its own snapshot: a channel the viewer stopped seeing between the check and the
+          // read of what to replace keeps its rule, and the new one collides with it. For the viewer it is a
+          // channel they don't see, so it answers as one.
+          throw isUniqueViolation(err)
+            ? new HttpError(400, "identity.unknown_channel", "Unknown channel")
+            : err;
+        });
   });
   return visibleRules(deps.db, agent, viewer);
 }

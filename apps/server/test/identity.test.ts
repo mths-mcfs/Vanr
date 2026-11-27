@@ -8,6 +8,7 @@ import { and, asc, desc, eq } from "drizzle-orm";
 import type { RunningServer } from "../src/server";
 import { startFakeMcp } from "./fake-mcp";
 import { SERVER_TEST_MS, settle, signedIn, startTestServer, waitFor } from "./harness";
+import { wrapQuery } from "./lock-double";
 import { type Called, call, seedAgent, ws } from "./route-calls";
 import { memberOf, type Person, seedChannel, seedDm, seedWorkspace } from "./seed";
 
@@ -527,3 +528,65 @@ describe("a channel the caller stops seeing while they save", () => {
     SERVER_TEST_MS,
   );
 });
+
+test(
+  "leaving the channel between the check and the read of what to replace answers like a hidden channel, not a 500",
+  async () => {
+    const t = await team();
+    const crew = await seedChannel(server, t.workspaceId, {
+      name: "crew2",
+      visibility: "private",
+      members: [t.beto],
+    });
+    const bia = await seedAgent(server, t.workspaceId, t.beto, `bia${n}`, [t.general, crew]);
+    const rule = { channelId: crew, connectionId: "*", level: "read" };
+    await ok(setChannels(t, t.beto, bia.id, [rule]));
+    const { deps } = server;
+    const real = deps.db;
+    let leave = true;
+    // Inside Beto's save, right after the check of the channels passed, he leaves #crew2.
+    deps.db = new Proxy(real, {
+      get(target, prop) {
+        if (prop !== "transaction") {
+          const value = Reflect.get(target, prop, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (fn: (tx: typeof real) => Promise<unknown>) =>
+          target.transaction((tx) =>
+            fn(
+              new Proxy(tx, {
+                get(txTarget, txProp) {
+                  const value = Reflect.get(txTarget, txProp, txTarget);
+                  if (txProp !== "select") return typeof value === "function" ? value.bind(txTarget) : value;
+                  return (...args: unknown[]) =>
+                    wrapQuery(value.apply(txTarget, args), async (query: { toSQL(): { sql: string } }) => {
+                      const sql = query.toSQL().sql;
+                      if (!leave || !sql.includes('from "channels"')) return;
+                      leave = false;
+                      await txTarget
+                        .delete(schema.channelMemberships)
+                        .where(
+                          and(
+                            eq(schema.channelMemberships.channelId, crew),
+                            eq(schema.channelMemberships.memberId, t.beto.user.id),
+                          ),
+                        );
+                    });
+                },
+              }) as typeof real,
+            ),
+          );
+      },
+    });
+    let res: Called;
+    try {
+      res = await setChannels(t, t.beto, bia.id, [{ ...rule, level: "approval" }]);
+    } finally {
+      deps.db = real;
+    }
+    expect(leave).toBe(false);
+    expect([res.status, res.body?.error?.code]).toEqual([400, "identity.unknown_channel"]);
+    expect((await identity(t, t.ana, bia.id)).channels).toEqual([rule]);
+  },
+  SERVER_TEST_MS,
+);
