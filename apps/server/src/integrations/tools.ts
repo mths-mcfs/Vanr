@@ -228,8 +228,11 @@ export function connectionTools(
             clients.delete(conn.id);
             if (err instanceof McpInsufficientScope) return askScope(ctx, conn, label, err.scope);
             // The service's own words, without the credential it was sent (it may echo it back).
-            const secrets = [...(await connectionSecrets(deps, now.row)), ...secretsSentBy(client)];
-            const said = err instanceof Error ? outsideText(err, secrets) : "";
+            // Without the kept credential the text can't be redacted, so it isn't shown; the failure stays the
+            // service's, so a call that never left still releases its effect key.
+            const secrets = await connectionSecrets(deps, now.row).catch(() => null);
+            const said =
+              err instanceof Error && secrets ? outsideText(err, [...secrets, ...secretsSentBy(client)]) : "";
             const why = `${conn.label} failed: ${said || "the server did not answer"}`;
             // A credential rejected in use: the connectors screen must say "Reconnect".
             if (err instanceof McpAuthRequired) await markNeedsReconnect(deps, conn.id);

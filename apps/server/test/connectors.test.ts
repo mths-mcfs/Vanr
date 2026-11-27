@@ -18,6 +18,7 @@ const mcp = startFakeMcp();
 const keyOnly = startFakeMcp({ keyOnly: true });
 /** An MCP server that answers a tool call with an error quoting the Authorization it got. */
 const QUOTED = "quoted-credential-value";
+let echoInitFails = false;
 const echo = Bun.serve({
   port: 0,
   async fetch(req) {
@@ -25,6 +26,12 @@ const echo = Bun.serve({
     const body = (await req.json()) as { id?: number; method: string };
     if (body.id === undefined) return new Response(null, { status: 202 });
     const reply = (result: unknown) => Response.json({ jsonrpc: "2.0", id: body.id, result });
+    if (body.method === "initialize" && echoInitFails)
+      return Response.json({
+        jsonrpc: "2.0",
+        id: body.id,
+        error: { code: -32000, message: `no session for ${auth}` },
+      });
     if (body.method === "initialize")
       return Response.json(
         {
@@ -727,6 +734,55 @@ test(
       })
       .where(eq(connections.id, id));
     expect(secretsSentBy(await mcpFor(server.deps, stale))).toEqual(["sent-later"]);
+  },
+  SERVER_TEST_MS,
+);
+
+test(
+  "a session that fails to open while the kept credential can't be read: the tool fails plainly, without the service's text",
+  async () => {
+    const t = await team();
+    const started = await ok(
+      connectCustom(t, t.ana, {
+        serverUrl: `http://localhost:${echo.port}/mcp`,
+        apiKey: QUOTED,
+        label: "Echo",
+        nextPath: "/",
+      }),
+    );
+    const id: string = started.server.id;
+    await ok(saveTools(t, id, { label: "Echo", tools: [{ name: "ping", access: "read", label: "" }] }));
+    await ok(setAccess(t, { connectors: { [id]: true } }));
+    const { deps } = server;
+    const real = deps.db;
+    let armed = false;
+    // The read of the kept credential (a select of `secret` alone) fails once, after the session failed to open.
+    deps.db = new Proxy(real, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop, target);
+        if (prop !== "select") return typeof value === "function" ? value.bind(target) : value;
+        return (fields?: Record<string, unknown>) => {
+          if (armed && fields && Object.keys(fields).join() === "secret") {
+            armed = false;
+            throw new Error("the database is down");
+          }
+          return value.call(target, fields);
+        };
+      },
+    });
+    echoInitFails = true;
+    try {
+      armed = true;
+      const res = await t.ask("mcp_echo__ping", {});
+      expect(armed).toBe(false);
+      // An input error (the call never left): the run goes on with the plain message, no database text.
+      expect(res?.failed).toBe(true);
+      expect(res?.result).toContain("Echo failed: the server did not answer");
+      expect(res?.result).not.toContain("database");
+    } finally {
+      echoInitFails = false;
+      deps.db = real;
+    }
   },
   SERVER_TEST_MS,
 );
