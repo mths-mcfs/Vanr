@@ -8,11 +8,10 @@ import { newId } from "@vanr/engine/ids";
 import { eq } from "drizzle-orm";
 import { channelInWorkspace } from "../src/channels";
 import type { AppDeps, WorkspaceMember } from "../src/context";
-import type { ToolContext } from "../src/forward-types";
 import { connectImap, setAgentMailbox } from "../src/integrations/mail";
 import { reserveUsage } from "../src/integrations/usage";
 import { postMessage } from "../src/messages";
-import { deliverDue, queueSend } from "../src/outbox";
+import { deliverDue, type OutboxRun, queueSend } from "../src/outbox";
 import type { RunningServer } from "../src/server";
 import { type FakeMailServer, startFakeMail } from "./fake-mail";
 import { body, SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
@@ -71,7 +70,7 @@ async function team() {
     clientId: null,
   });
   /** Beto asked: the action is recorded on the agent's answer, as runtime/tools records it. */
-  const ctx: ToolContext = {
+  const ctx: OutboxRun = {
     deps: withWakeAt(),
     workspaceId,
     agent: { id: agentId },

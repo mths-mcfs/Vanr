@@ -1,9 +1,10 @@
-// Invitations: by email, in bulk, by link, expired, on a closed sign-up, and who may invite with which role.
-// The workspace is created with members.createWorkspace (the workspaces routes come with slice S4) and the
-// routes are called over HTTP (the typed API client isn't ported yet).
+// Workspaces and invitations: creating a workspace, its settings, overview, usage, logo, people and roles; and
+// invitations by email, in bulk, by link, expired, on a closed sign-up, and who may invite with which role. The
+// invitation tests create the workspace with members.createWorkspace, the workspace tests through its route;
+// every route is called over HTTP.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
-import { sha256Hex } from "@vanr/engine/ids";
+import { newId, sha256Hex } from "@vanr/engine/ids";
 import { and, count, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppEnv } from "../src/context";
@@ -59,6 +60,149 @@ async function invite(b: Browser, workspaceId: string, email: string, role: "own
 
 const preview = (b: Browser, token: string) => call(b, "GET", `/api/v1/invitations/${token}`);
 const accept = (b: Browser, token: string) => call(b, "POST", `/api/v1/invitations/${token}/accept`);
+
+const PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+  "base64",
+).toString("base64");
+
+/** Creates a workspace through its route, as the web app does after sign-up. */
+async function create(b: Browser, input: { name: string; context?: string; timezone?: string }) {
+  const res = await call(b, "POST", "/api/v1/workspaces", input);
+  if (res.status !== 201) throw new Error(`create failed: ${res.status} ${JSON.stringify(res.body)}`);
+  return res.body as {
+    workspace: { id: string; name: string; context: string; logo: string | null };
+    defaultChannelId: string;
+  };
+}
+
+describe("workspaces", () => {
+  test("create already makes #general, puts the creator as owner and shows up in /me", async () => {
+    const { browser, user } = await signedIn(server, "Ana Souza", "ana@space.test");
+    const { workspace, defaultChannelId } = await create(browser, { name: "Bakery", context: "Bread" });
+    expect(workspace).toMatchObject({ name: "Bakery", context: "Bread", logo: null });
+    expect(defaultChannelId).toStartWith("ch_");
+    const me = (await call(browser, "GET", "/api/v1/me")).body;
+    expect(me?.workspaces).toEqual([{ id: workspace.id, name: "Bakery", role: "owner", logo: null }]);
+    const members = (await call(browser, "GET", `${ws(workspace.id)}/members`)).body.members;
+    expect(members).toHaveLength(1);
+    expect(members[0]).toMatchObject({
+      userId: user.id,
+      role: "owner",
+      handle: "ana-souza",
+      email: "ana@space.test",
+    });
+    expect((await call(browser, "GET", ws(workspace.id))).body).toMatchObject({
+      id: workspace.id,
+      name: "Bakery",
+    });
+  });
+
+  test("a non-member gets 404, no session 401", async () => {
+    const bia = await signedIn(server, "Bia", "bia@space.test");
+    const { workspace } = await create(bia.browser, { name: "Closed" });
+    const caio = await signedIn(server, "Caio", "caio@space.test");
+    const err = await call(caio.browser, "GET", ws(workspace.id));
+    expect([err.status, err.body.error.code]).toEqual([404, "not_found"]);
+    expect((await call(new Browser(server.url), "GET", ws(workspace.id))).status).toBe(401);
+    expect((await call(caio.browser, "GET", ws("workspace_missing"))).status).toBe(404);
+  });
+
+  test("settings, update, overview and usage", async () => {
+    const { browser } = await signedIn(server, "Duda", "duda@space.test");
+    const { workspace } = await create(browser, { name: "Shop" });
+    const id = workspace.id;
+    expect((await call(browser, "GET", `${ws(id)}/settings`)).body).toEqual({
+      name: "Shop",
+      context: "",
+      timezone: "America/Sao_Paulo",
+      primaryCredentialId: null,
+      agentBudgetDefaultUsd: 20,
+      approvalReviewer: false,
+    });
+    const s = await call(browser, "PATCH", `${ws(id)}/settings`, {
+      timezone: "Europe/Lisbon",
+      agentBudgetDefaultUsd: 35,
+    });
+    expect(s.body).toMatchObject({ timezone: "Europe/Lisbon", agentBudgetDefaultUsd: 35 });
+    expect((await call(browser, "PATCH", `${ws(id)}/settings`, { timezone: "Mars/Base" })).status).toBe(400);
+    await call(browser, "PATCH", ws(id), { name: "New Shop", context: "We sell" });
+    expect((await call(browser, "GET", ws(id))).body).toMatchObject({ name: "New Shop", context: "We sell" });
+    expect((await call(browser, "GET", `${ws(id)}/overview`)).body).toEqual({
+      myApprovalQueue: 0,
+      budgetSpentPct: 0,
+      people: 1,
+      agents: 0,
+    });
+    // The overview counts the viewer's own approval queue: no cache keeps it.
+    expect((await browser.fetch(`${ws(id)}/overview`)).headers.get("cache-control")).toBe("no-store");
+    const report = (await call(browser, "GET", `${ws(id)}/usage/report?since=2026-10-01`)).body;
+    expect(report).toEqual({ spendUsd: 0, since: "2026-10-01T00:00:00.000Z", perKind: [], agents: [] });
+  });
+
+  test("logo and avatar: the image is checked by its content and served only to members", async () => {
+    const { browser } = await signedIn(server, "Eva", "eva@space.test");
+    const { workspace } = await create(browser, { name: "With logo" });
+    const id = workspace.id;
+    const { logo } = (
+      await call(browser, "PUT", `${ws(id)}/logo`, { imageBase64: PNG, contentType: "image/png" })
+    ).body;
+    expect(logo).toStartWith(`/api/v1/workspaces/${id}/logo?v=`);
+    const img = await browser.fetch(logo);
+    expect(img.headers.get("content-type")).toBe("image/png");
+    expect(img.headers.get("x-content-type-options")).toBe("nosniff");
+    const fake = await call(browser, "PUT", `${ws(id)}/logo`, {
+      imageBase64: PNG,
+      contentType: "image/jpeg",
+    });
+    expect(fake.status).toBe(400);
+    const svg = Buffer.from("<svg onload=alert(1)>").toString("base64");
+    expect(
+      (await call(browser, "PUT", `${ws(id)}/logo`, { imageBase64: svg, contentType: "image/svg+xml" }))
+        .status,
+    ).toBe(400);
+    expect((await call(browser, "GET", "/api/v1/me")).body?.workspaces[0]?.logo).toBe(logo);
+    await call(browser, "DELETE", `${ws(id)}/logo`);
+    expect((await browser.fetch(logo)).status).toBe(404);
+
+    const { avatarUrl } = (
+      await call(browser, "PUT", `${ws(id)}/me/avatar`, { imageBase64: PNG, contentType: "image/png" })
+    ).body;
+    expect((await browser.fetch(avatarUrl)).status).toBe(200);
+    expect((await call(browser, "GET", `${ws(id)}/members`)).body.members[0]?.avatarUrl).toBe(avatarUrl);
+    const outsider = await signedIn(server, "Outside", "outside@space.test");
+    expect((await outsider.browser.fetch(avatarUrl)).status).toBe(404);
+    await call(browser, "DELETE", `${ws(id)}/me/avatar`);
+    expect((await call(browser, "GET", `${ws(id)}/members`)).body.members[0]?.avatarUrl).toBeNull();
+  });
+
+  test("updateMe changes name, handle and time zone; a repeated handle gives handle.taken", async () => {
+    const { browser, user } = await signedIn(server, "Gabi", "gabi@space.test");
+    const { workspace } = await create(browser, { name: "Profiles" });
+    const person = (
+      await call(browser, "PATCH", `${ws(workspace.id)}/me`, {
+        name: "Gabriela",
+        handle: "gabs",
+        timezone: "America/Recife",
+      })
+    ).body;
+    expect(person).toMatchObject({
+      userId: user.id,
+      name: "Gabriela",
+      handle: "gabs",
+      timezone: "America/Recife",
+    });
+    expect(person.online).toBe(true);
+    const people = (await call(browser, "GET", `${ws(workspace.id)}/people`)).body.people;
+    expect(people.map((p: { handle: string }) => p.handle)).toEqual(["gabs"]);
+    const link = (await call(browser, "POST", `${ws(workspace.id)}/invite-links`)).body;
+    const hugo = await signedIn(server, "Hugo", "hugo@space.test");
+    await accept(hugo.browser, tokenOf(link.url));
+    const err = await call(hugo.browser, "PATCH", `${ws(workspace.id)}/me`, { handle: "gabs" });
+    expect([err.status, err.body.error.code]).toEqual([409, "handle.taken"]);
+    expect((await call(hugo.browser, "PATCH", `${ws(workspace.id)}/me`, { handle: "A B" })).status).toBe(400);
+  });
+});
 
 describe("invitations", () => {
   test("invitation by email: preview without a session, wrong email, accept and single use", async () => {
@@ -165,6 +309,8 @@ describe("invitations", () => {
       expect((await accept(p.browser, tokenOf(link.url))).body).toEqual({ workspaceId: id });
     }
     expect((await memberRows(server.deps.db, id)).length).toBe(3);
+    expect((await call(lia.browser, "GET", `${ws(id)}/people`)).body.people.length).toBe(3);
+    expect((await call(lia.browser, "GET", `${ws(id)}/overview`)).body.people).toBe(3);
   });
 
   test("expired invitation: preview 404, accept 404 and asking for a new one tells whoever invited", async () => {
@@ -245,7 +391,7 @@ describe("asking for a new invitation", () => {
 });
 
 describe("roles", () => {
-  test("a member doesn't manage invitations; an admin doesn't invite an owner", async () => {
+  test("a member doesn't manage; an admin doesn't touch an owner; nobody changes their own role; an owner always stays", async () => {
     const sol = await owner(server, "Sol", "sol@ws.test", "Roles");
     const id = sol.workspaceId;
     const join = async (name: string, role: "admin" | "member") => {
@@ -256,17 +402,38 @@ describe("roles", () => {
     };
     const admin = await join("tais", "admin");
     const member = await join("ugo", "member");
+    const role = (b: Browser, userId: string, to: string) =>
+      call(b, "PATCH", `${ws(id)}/members/${userId}`, { role: to });
+    const remove = (b: Browser, userId: string) => call(b, "DELETE", `${ws(id)}/members/${userId}`);
 
     const byMember = await call(member.browser, "POST", `${ws(id)}/invitations`, {
       email: "x@ws.test",
       role: "member",
     });
     expect(byMember.status).toBe(403);
+    expect((await call(member.browser, "PATCH", `${ws(id)}/settings`, { name: "X" })).status).toBe(403);
+    expect((await call(member.browser, "GET", `${ws(id)}/usage/report`)).status).toBe(403);
+    expect((await role(member.browser, admin.user.id, "member")).status).toBe(403);
+
     const byAdmin = await call(admin.browser, "POST", `${ws(id)}/invitations`, {
       email: "y@ws.test",
       role: "owner",
     });
     expect(byAdmin.status).toBe(403);
+    expect((await role(admin.browser, member.user.id, "owner")).status).toBe(403);
+    expect((await role(admin.browser, sol.user.id, "member")).status).toBe(403);
+    expect((await role(admin.browser, admin.user.id, "member")).status).toBe(403);
+    expect((await role(admin.browser, member.user.id, "admin")).status).toBe(204);
+
+    const last = await remove(sol.browser, sol.user.id);
+    expect([last.status, last.body.error.code]).toEqual([409, "last_owner"]);
+    expect((await role(sol.browser, admin.user.id, "owner")).status).toBe(204);
+    expect((await remove(sol.browser, member.user.id)).status).toBe(204);
+    expect((await call(member.browser, "GET", ws(id))).status).toBe(404);
+    expect((await remove(sol.browser, sol.user.id)).status).toBe(204);
+    expect((await call(sol.browser, "GET", "/api/v1/me")).body).toMatchObject({ workspaces: [] });
+    const roles = (await call(admin.browser, "GET", `${ws(id)}/members`)).body.members;
+    expect(roles.map((m: { role: string }) => m.role)).toEqual(["owner"]);
   });
 });
 
@@ -561,6 +728,239 @@ describe("invitation rules", () => {
     expect((await call(xia.browser, "GET", `${ws(id)}/invitations?scope=everything`)).status).toBe(400);
     const all = (await call(xia.browser, "GET", `${ws(id)}/invitations?scope=all`)).body.invitations;
     expect(all).toEqual([]);
+  });
+});
+
+// Rules of the workspace routes the origin didn't test, one test each.
+describe("workspace route rules", () => {
+  /** Every route under the workspace, with a body that would pass its schema. */
+  const ROUTES = (id: string, userId: string): [string, string, unknown?][] => [
+    ["GET", ws(id)],
+    ["PATCH", ws(id), { name: "Renamed" }],
+    ["GET", `${ws(id)}/settings`],
+    ["PATCH", `${ws(id)}/settings`, { name: "Renamed" }],
+    ["GET", `${ws(id)}/overview`],
+    ["GET", `${ws(id)}/members`],
+    ["GET", `${ws(id)}/people`],
+    ["PATCH", `${ws(id)}/members/${userId}`, { role: "admin" }],
+    ["DELETE", `${ws(id)}/members/${userId}`],
+    ["PATCH", `${ws(id)}/me`, { name: "Someone" }],
+    ["PUT", `${ws(id)}/me/avatar`, { imageBase64: PNG, contentType: "image/png" }],
+    ["DELETE", `${ws(id)}/me/avatar`],
+    ["GET", `${ws(id)}/people/${userId}/avatar`],
+    ["PUT", `${ws(id)}/logo`, { imageBase64: PNG, contentType: "image/png" }],
+    ["DELETE", `${ws(id)}/logo`],
+    ["GET", `${ws(id)}/logo`],
+    ["GET", `${ws(id)}/usage/report`],
+  ];
+
+  test("every workspace route: 401 without a session and 404 outside, with nothing changed", async () => {
+    const vera = await signedIn(server, "Vera", "vera@space.test");
+    const { workspace } = await create(vera.browser, { name: "Guarded" });
+    const outsider = await signedIn(server, "Wil", "wil@space.test");
+    const anon = new Browser(server.url);
+    for (const [method, path, payload] of ROUTES(workspace.id, vera.user.id)) {
+      expect([method, path, (await call(anon, method, path, payload)).status]).toEqual([method, path, 401]);
+      const res = await call(outsider.browser, method, path, payload);
+      expect([method, path, res.status, res.body?.error?.code]).toEqual([method, path, 404, "not_found"]);
+    }
+    expect((await call(vera.browser, "GET", ws(workspace.id))).body).toMatchObject({ name: "Guarded" });
+    const members = (await call(vera.browser, "GET", `${ws(workspace.id)}/members`)).body.members;
+    expect(members.map((m: { userId: string; role: string }) => [m.userId, m.role])).toEqual([
+      [vera.user.id, "owner"],
+    ]);
+  });
+
+  test("a member reads the workspace but can't rename it, change its settings or logo, or read usage", async () => {
+    const xavi = await owner(server, "Xavi", "xavi@space.test", "Members only");
+    const id = xavi.workspaceId;
+    const { url } = await invite(xavi.browser, id, "yara@space.test", "member");
+    const yara = await signedIn(server, "Yara", "yara@space.test");
+    await accept(yara.browser, tokenOf(url));
+    for (const [method, path, payload] of [
+      ["PATCH", ws(id), { name: "Taken over" }],
+      ["PATCH", `${ws(id)}/settings`, { approvalReviewer: true }],
+      ["PUT", `${ws(id)}/logo`, { imageBase64: PNG, contentType: "image/png" }],
+      ["DELETE", `${ws(id)}/logo`],
+      ["GET", `${ws(id)}/usage/report`],
+      ["PATCH", `${ws(id)}/members/${xavi.user.id}`, { role: "member" }],
+      ["DELETE", `${ws(id)}/members/${xavi.user.id}`],
+    ] as [string, string, unknown?][]) {
+      expect([method, path, (await call(yara.browser, method, path, payload)).status]).toEqual([
+        method,
+        path,
+        403,
+      ]);
+    }
+    for (const path of [ws(id), `${ws(id)}/settings`, `${ws(id)}/overview`, `${ws(id)}/people`]) {
+      expect([path, (await call(yara.browser, "GET", path)).status]).toEqual([path, 200]);
+    }
+    expect((await call(xavi.browser, "GET", `${ws(id)}/settings`)).body).toMatchObject({
+      name: "Members only",
+      approvalReviewer: false,
+    });
+    // Anyone can leave on their own.
+    expect((await call(yara.browser, "DELETE", `${ws(id)}/members/${yara.user.id}`)).status).toBe(204);
+    expect((await call(yara.browser, "GET", ws(id))).status).toBe(404);
+  });
+
+  test("ids from another workspace don't reach into this one: member, avatar and credential", async () => {
+    const zoe = await signedIn(server, "Zoe", "zoe@space.test");
+    const mine = (await create(zoe.browser, { name: "Mine" })).workspace.id;
+    const abel = await signedIn(server, "Abel", "abel@space.test");
+    const theirs = (await create(abel.browser, { name: "Theirs" })).workspace.id;
+    await call(abel.browser, "PUT", `${ws(theirs)}/me/avatar`, {
+      imageBase64: PNG,
+      contentType: "image/png",
+    });
+
+    // Abel is no member of Mine: as Zoe, his id is unknown there.
+    expect(
+      (await call(zoe.browser, "PATCH", `${ws(mine)}/members/${abel.user.id}`, { role: "admin" })).status,
+    ).toBe(404);
+    expect((await call(zoe.browser, "DELETE", `${ws(mine)}/members/${abel.user.id}`)).status).toBe(404);
+    expect((await zoe.browser.fetch(`${ws(mine)}/people/${abel.user.id}/avatar`)).status).toBe(404);
+    expect((await abel.browser.fetch(`${ws(theirs)}/people/${abel.user.id}/avatar`)).status).toBe(200);
+
+    const credentialId = newId("cred");
+    await server.deps.db.insert(schema.credentials).values({
+      id: credentialId,
+      workspaceId: theirs,
+      label: "Theirs",
+      provider: "anthropic",
+      secret: "sealed",
+      keyPreview: "sk-…abcd",
+    });
+    const borrowed = await call(zoe.browser, "PATCH", `${ws(mine)}/settings`, {
+      primaryCredentialId: credentialId,
+    });
+    expect(borrowed.status).toBe(400);
+    expect((await call(zoe.browser, "GET", `${ws(mine)}/settings`)).body.primaryCredentialId).toBeNull();
+    const own = await call(abel.browser, "PATCH", `${ws(theirs)}/settings`, {
+      primaryCredentialId: credentialId,
+    });
+    expect(own.body.primaryCredentialId).toBe(credentialId);
+  });
+
+  test("overview and usage count only this workspace's active agents and their spend this month", async () => {
+    frozen = new Date("2026-11-20T12:00:00Z");
+    try {
+      const bento = await signedIn(server, "Bento", "bento@space.test");
+      const id = (await create(bento.browser, { name: "Spend" })).workspace.id;
+      const other = (await create(bento.browser, { name: "Elsewhere" })).workspace.id;
+      const agent = async (workspaceId: string, name: string, budgetPerMonthUsd: number | null) => {
+        const agentId = newId("agent");
+        await server.deps.db.insert(schema.agents).values({
+          id: agentId,
+          workspaceId,
+          name,
+          handle: name.toLowerCase(),
+          model: "claude-haiku-5-5",
+          ownerUserId: bento.user.id,
+          instructions: "",
+          appearance: { color: "blue", eyes: "dot", adornment: "none" },
+          budgetPerMonthUsd,
+        });
+        return agentId;
+      };
+      const run = (workspaceId: string, agentId: string, costUsd: number, createdAt: Date) =>
+        server.deps.db
+          .insert(schema.runs)
+          .values({ id: newId("run"), workspaceId, agentId, model: "claude-haiku-5-5", costUsd, createdAt });
+      const cleo = await agent(id, "Cleo", 10);
+      const dino = await agent(id, "Dino", null);
+      const gone = await agent(id, "Gone", 10);
+      await server.deps.db
+        .update(schema.agents)
+        .set({ archivedAt: frozen })
+        .where(eq(schema.agents.id, gone));
+      const far = await agent(other, "Far", 10);
+      await run(id, cleo, 3, new Date("2026-11-05T00:00:00Z"));
+      await run(id, dino, 2, new Date("2026-11-19T00:00:00Z"));
+      await run(id, cleo, 100, new Date("2026-10-31T23:59:59Z"));
+      await run(other, far, 50, new Date("2026-11-10T00:00:00Z"));
+
+      // Budget 10 + 20 (the default) = 30; spent this month 3 + 2 = 5.
+      expect((await call(bento.browser, "GET", `${ws(id)}/overview`)).body).toEqual({
+        myApprovalQueue: 0,
+        budgetSpentPct: 16.7,
+        people: 1,
+        agents: 2,
+      });
+      const report = (await call(bento.browser, "GET", `${ws(id)}/usage/report`)).body;
+      expect(report).toEqual({
+        spendUsd: 5,
+        since: "2026-11-01T00:00:00.000Z",
+        perKind: [{ kind: "model", calls: 2, costUsd: 5 }],
+        agents: [
+          {
+            agentId: cleo,
+            name: "Cleo",
+            costUsd: 3,
+            budgetPerMonthUsd: 10,
+            budgetInherited: false,
+            budgetSpentPct: 30,
+          },
+          {
+            agentId: dino,
+            name: "Dino",
+            costUsd: 2,
+            budgetPerMonthUsd: 20,
+            budgetInherited: true,
+            budgetSpentPct: 10,
+          },
+        ],
+      });
+      expect((await call(bento.browser, "GET", `${ws(id)}/usage/report?since=yesterday`)).status).toBe(400);
+    } finally {
+      frozen = null;
+    }
+  });
+
+  test("an empty update changes nothing: rename answers 204 and settings the current settings", async () => {
+    const dora = await signedIn(server, "Dora", "dora@space.test");
+    const id = (await create(dora.browser, { name: "Steady", context: "Calm" })).workspace.id;
+    const before = (await call(dora.browser, "GET", `${ws(id)}/settings`)).body;
+    expect((await call(dora.browser, "PATCH", ws(id), {})).status).toBe(204);
+    const settings = await call(dora.browser, "PATCH", `${ws(id)}/settings`, {});
+    expect([settings.status, settings.body]).toEqual([200, before]);
+    expect((await call(dora.browser, "GET", ws(id))).body).toMatchObject({ name: "Steady", context: "Calm" });
+  });
+
+  test("updateMe is all or nothing: a taken handle leaves the name and the time zone as they were", async () => {
+    const eli = await signedIn(server, "Eli", "eli@space.test");
+    const id = (await create(eli.browser, { name: "Handles" })).workspace.id;
+    const link = (await call(eli.browser, "POST", `${ws(id)}/invite-links`)).body;
+    const fred = await signedIn(server, "Fred", "fred@space.test");
+    await accept(fred.browser, tokenOf(link.url));
+    const taken = await call(fred.browser, "PATCH", `${ws(id)}/me`, {
+      name: "Frederick",
+      handle: "eli",
+      timezone: "Europe/Lisbon",
+    });
+    expect([taken.status, taken.body.error.code]).toEqual([409, "handle.taken"]);
+    const people = (await call(fred.browser, "GET", `${ws(id)}/people`)).body.people;
+    expect(people.find((p: { userId: string }) => p.userId === fred.user.id)).toMatchObject({
+      name: "Fred",
+      handle: "fred",
+      timezone: null,
+    });
+  });
+
+  test("creating a workspace validates the body before any write", async () => {
+    const cris = await signedIn(server, "Cris", "cris@space.test");
+    for (const payload of [
+      {},
+      { name: "" },
+      { name: "x".repeat(81) },
+      { name: "Ok", timezone: "Mars/Base" },
+    ]) {
+      expect((await call(cris.browser, "POST", "/api/v1/workspaces", payload)).status).toBe(400);
+    }
+    expect((await call(new Browser(server.url), "POST", "/api/v1/workspaces", { name: "Anon" })).status).toBe(
+      401,
+    );
+    expect((await call(cris.browser, "GET", "/api/v1/me")).body.workspaces).toEqual([]);
   });
 });
 

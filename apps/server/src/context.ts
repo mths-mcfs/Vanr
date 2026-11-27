@@ -12,13 +12,14 @@ import type { Auth } from "./auth";
 import type { ChannelRow } from "./channels";
 import type { Config } from "./config";
 import type { QuestionRow } from "./control";
-import type { ApprovalOutcome, RevisedApproval, RunEnd, RunLimits } from "./forward-types";
+import type { RunEnd, RunLimits } from "./forward-types";
 import { unauthorized } from "./http";
 import type { Mailer } from "./mailer";
 import type { MessageRow } from "./messages";
 import type { PushSender } from "./push";
 import type { Hub } from "./realtime/hub";
 import type { RunnerHub } from "./runners/hub";
+import type { ApprovalOutcome, RevisedApproval } from "./runtime/tools";
 import type { WikiLive } from "./wiki-collab";
 
 /**
