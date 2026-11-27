@@ -74,7 +74,11 @@ export function Trash({ workspaceId }: { workspaceId: string }) {
                 <span className="files__name">{file.title}</span>
               </span>
               <span className="files__meta">{name(file.createdBy)}</span>
-              <span className={days <= SOON_DAYS ? "files__meta files__days files__meta--soon" : "files__meta files__days"}>
+              <span
+                className={
+                  days <= SOON_DAYS ? "files__meta files__days files__meta--soon" : "files__meta files__days"
+                }
+              >
                 {t("trash.daysLeft", { count: days })}
               </span>
               <time className="files__meta" dateTime={file.deletedAt}>

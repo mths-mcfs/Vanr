@@ -98,7 +98,6 @@ export class FakeFiles {
 
   constructor(private readonly host: FilesHost) {}
 
-  /** The seeded Drive of Birchwood Labs. */
   seed(): void {
     const at = (daysAgo: number) => new Date(this.host.now().getTime() - daysAgo * DAY_MS).toISOString();
     const file = (

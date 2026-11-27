@@ -77,7 +77,7 @@ export function formatBytes(bytes: number, locale: string): string {
 /** How often relative times are worked out again: their smallest unit is the minute. */
 const RELATIVE_TICK_MS = 60_000;
 
-/** The relative time of a date, kept current with the app's clock (worked out again every minute). */
+/** The relative time of a date, kept current with the app's clock. */
 export function useRelativeTime(): (iso: string) => string {
   const { locale } = useLocale();
   const clock = useClock();

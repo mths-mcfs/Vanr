@@ -43,7 +43,6 @@ export function useBlobUrl(
         setUrl(made);
       })
       .catch(() => {
-        // Leaving the screen cancels the read; that is not a failure to show.
         if (!controller.signal.aborted) setFailed(true);
       });
     return () => {
