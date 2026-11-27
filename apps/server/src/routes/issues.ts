@@ -30,6 +30,7 @@ import {
   publishColumns,
   STAGES,
   setCriterion,
+  settleIssueWork,
   toActivity,
   toColumn,
   toIssue,
@@ -314,8 +315,17 @@ async function askAgent(deps: AppDeps, me: WorkspaceMember, issueId: string, age
     .set({ work: { state: "working", reason: null, runId: null, messageId: message.id } })
     .where(eq(issues.id, row.id))
     .returning();
-  await deps.runtime
-    .onPersonMessage({ workspaceId: me.workspaceId, channel, message })
-    .catch((err) => log.error("runtime.route_failed", { messageId: message.id, err }));
+  try {
+    await deps.runtime.onPersonMessage({ workspaceId: me.workspaceId, channel, message });
+  } catch (err) {
+    // Nothing will serve the request: the issue doesn't stay "working" with no run behind it.
+    log.error("runtime.route_failed", { messageId: message.id, err });
+    await settleIssueWork(db, me.workspaceId, [message.id], {
+      state: "blocked",
+      reason: "interrupted",
+      runId: null,
+    });
+    return issueById(db, me.workspaceId, row.id);
+  }
   return withWork ?? updated;
 }

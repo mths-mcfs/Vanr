@@ -709,6 +709,46 @@ describe("asking an agent", () => {
   );
 
   test(
+    "asked work whose routing fails: the issue is blocked, not left working with no run",
+    async () => {
+      const own = await startTestServer({
+        runtime: (port) => ({
+          ...port,
+          onPersonMessage: async () => {
+            throw new Error("routing down");
+          },
+        }),
+      });
+      try {
+        const ana = await signedIn(own, "Ana", email("ana"));
+        const { workspaceId } = await seedWorkspace(own, ana, "Board");
+        const lia = newId("agt");
+        await own.deps.db.insert(schema.agents).values({
+          id: lia,
+          workspaceId,
+          name: "Lia",
+          handle: "lia",
+          model: "claude-haiku-5-5",
+          ownerUserId: ana.user.id,
+          appearance: { color: "blue", eyes: "dot", adornment: "none" },
+        });
+        const path = (p: string) => `/api/v1/workspaces/${workspaceId}${p}`;
+        const issue = await body(await ana.browser.json(path("/issues"), "POST", { title: "Plan the week" }));
+        const asked = await body(
+          await ana.browser.json(path(`/issues/${issue.id}/ask-agent`), "POST", { agentId: lia }),
+        );
+        // The answer and the stored issue both say it: blocked, no run.
+        expect(asked.work).toMatchObject({ state: "blocked", reason: "interrupted", runId: null });
+        const [row] = await own.deps.db.select().from(schema.issues).where(eq(schema.issues.id, issue.id));
+        expect(row?.work).toMatchObject({ state: "blocked", reason: "interrupted", runId: null });
+      } finally {
+        await own.stop();
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "asked work and the server shutting down in the middle (a deploy): the issue is blocked",
     async () => {
       const own = await startTestServer();

@@ -25,7 +25,7 @@ import { postMessage } from "../src/messages";
 import type { RunningServer } from "../src/server";
 import { passing, seedAgent } from "./assignment-kit";
 import { SERVER_TEST_MS, signedIn, startTestServer, waitFor } from "./harness";
-import { DROP_LOCKS, outcome } from "./lock-double";
+import { DROP_LOCKS, outcome, wrapQuery } from "./lock-double";
 import { memberOf, type Person, seedChannel, seedWorkspace } from "./seed";
 
 const {
@@ -587,6 +587,117 @@ describe("two attempts of one item", () => {
   );
 
   test(
+    "a later attempt that goes while the earlier one's run is starting: the earlier run stops, fenced",
+    async () => {
+      const { row, agentId } = await active("Fence start", ["x"]);
+      const channel = await channelInWorkspace(server.deps.db, workspaceId, general);
+      const [agent] = await server.deps.db.select().from(schema.agents).where(eq(schema.agents.id, agentId));
+      if (!channel || !agent) throw new Error("setup");
+      const say = async (body: string) => {
+        const { message } = await postMessage(server.deps, {
+          workspaceId,
+          channel,
+          author: { type: "person", id: ana.user.id },
+          body,
+          clientId: newId("c"),
+          threadId: row.threadId,
+        });
+        const [m] = await server.deps.db.select().from(messages).where(eq(messages.id, message.id));
+        if (!m) throw new Error("no message");
+        return m;
+      };
+      const key = `${row.id}:p1`;
+      const [older, newer] = [await say("[[slow:300]] one"), await say("[[slow:300]] two")];
+      // The forced interleave: attempt 2 runs in full right after attempt 1's run row is written, before
+      // attempt 1's run is on the air.
+      let second: Awaited<ReturnType<RuntimePort["runFor"]>> | null = null;
+      const { deps } = server;
+      const real = deps.db;
+      deps.db = new Proxy(real, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop, target);
+          if (prop !== "insert") return typeof value === "function" ? value.bind(target) : value;
+          return (table: typeof runs) => {
+            const builder = target.insert(table);
+            if (table !== runs || second) return builder;
+            return wrapQuery(builder, async () => {
+              if (second) return;
+              second = { ok: false, code: "busy" };
+              second = await deps.runtime.runFor({
+                agent,
+                channel,
+                trigger: newer,
+                fence: { key, token: 2 },
+              });
+            });
+          };
+        },
+      });
+      let first: Awaited<ReturnType<RuntimePort["runFor"]>>;
+      try {
+        first = await deps.runtime.runFor({ agent, channel, trigger: older, fence: { key, token: 1 } });
+      } finally {
+        deps.db = real;
+      }
+      const later = second as Awaited<ReturnType<RuntimePort["runFor"]>> | null;
+      expect(first).toEqual({ ok: false, code: "fenced" });
+      if (!later?.ok) throw new Error("the later attempt didn't start");
+      await server.deps.runtime.settle();
+      const [olderRun] = await server.deps.db.select().from(runs).where(eq(runs.sourceMessageId, older.id));
+      const [newerRun] = await server.deps.db.select().from(runs).where(eq(runs.id, later.runId));
+      expect([olderRun?.status, newerRun?.status]).toEqual(["canceled", "done"]);
+      await close(row.id);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "the fences of an item that ended, and of an assignment that ended, are forgotten",
+    async () => {
+      const { row, agentId } = await active("Fence end", ["x", "y"]);
+      const channel = await channelInWorkspace(server.deps.db, workspaceId, general);
+      const [agent] = await server.deps.db.select().from(schema.agents).where(eq(schema.agents.id, agentId));
+      if (!channel || !agent) throw new Error("setup");
+      const fences = () =>
+        [...server.runtime["fences"].keys()].filter((k) => k.startsWith(`${row.id}:`)).sort();
+      const turn = async (itemId: string) => {
+        const { message } = await postMessage(server.deps, {
+          workspaceId,
+          channel,
+          author: { type: "person", id: ana.user.id },
+          body: `turn of ${itemId}`,
+          clientId: newId("c"),
+          threadId: row.threadId,
+        });
+        const [m] = await server.deps.db.select().from(messages).where(eq(messages.id, message.id));
+        if (!m) throw new Error("no message");
+        const res = await server.deps.runtime.runFor({
+          agent,
+          channel,
+          trigger: m,
+          fence: { key: `${row.id}:${itemId}`, token: 1 },
+        });
+        if (res.ok) await res.done;
+      };
+      await turn("p1");
+      await turn("p2");
+      expect(fences()).toEqual([`${row.id}:p1`, `${row.id}:p2`]);
+      // p1 is done: its next attempt sends nothing and its fence goes.
+      await server.deps.db
+        .update(assignmentPlanItems)
+        .set({ status: "done" })
+        .where(and(eq(assignmentPlanItems.assignmentId, row.id), eq(assignmentPlanItems.id, "p1")));
+      await act(server.deps, row.id, { type: "work", itemId: "p1", n: 2 });
+      expect(fences()).toEqual([`${row.id}:p2`]);
+      // The assignment ends (its loop, woken by the runs' ends, stops what it started): the rest go.
+      await close(row.id);
+      expect(await stepNext(server.deps, row.id)).toEqual({ type: "end" });
+      expect(fences()).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "a fenced attempt isn't put off into the next run: the run it gets back is the one that answers it",
     async () => {
       const { row, agentId } = await active("Fence put off", ["x"]);
@@ -755,6 +866,116 @@ describe("a crash in the middle of a validation", () => {
         type: "work",
         itemId: items[1]?.id,
       });
+      await close(row.id);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("the local engine stopping", () => {
+  test(
+    "a stop that lands while the loop decides: the decision isn't acted on",
+    async () => {
+      const own = await startTestServer({ assignmentVerifier: passing().verifier });
+      try {
+        const owner = await signedIn(own, "Ana", "ana@engine-stop.test");
+        const ws = await seedWorkspace(own, owner, "Stop");
+        const agentId = await seedAgent(own.deps.db, ws.workspaceId, owner, null);
+        const proposed = await createAssignment(own.deps, {
+          workspaceId: ws.workspaceId,
+          agentId,
+          agentHandle: `lia${agentId.slice(-4)}`,
+          channelId: ws.general,
+          ownerId: owner.user.id,
+          title: "Stop",
+          goal: "Stop",
+          executor: "agent",
+          runnerId: null,
+          commandPolicy: "always",
+          plan: ["One"],
+        });
+        await own.deps.db
+          .update(assignments)
+          .set({ status: "active", startedAt: own.deps.now() })
+          .where(eq(assignments.id, proposed.id));
+        // The loop's first read of the assignment (its decision) waits for the test.
+        let release!: () => void;
+        const held = new Promise<void>((r) => {
+          release = r;
+        });
+        let reached!: () => void;
+        const deciding = new Promise<void>((r) => {
+          reached = r;
+        });
+        let armed = true;
+        const real = own.deps.db;
+        own.deps.db = new Proxy(real, {
+          get(target, prop) {
+            const value = Reflect.get(target, prop, target);
+            if (prop !== "select") return typeof value === "function" ? value.bind(target) : value;
+            return (...args: Parameters<typeof target.select>) =>
+              wrapQuery(target.select(...args), async (q) => {
+                if (!armed || !String(q.toSQL?.().sql ?? "").includes('from "assignments"')) return;
+                armed = false;
+                reached();
+                await held;
+              });
+          },
+        });
+        try {
+          own.deps.assignmentEngine.wake(proposed.id);
+          await deciding;
+          const stopping = own.deps.assignmentEngine.stop();
+          release();
+          await stopping;
+        } finally {
+          own.deps.db = real;
+        }
+        const work = await own.deps.db
+          .select()
+          .from(assignmentWork)
+          .where(eq(assignmentWork.assignmentId, proposed.id));
+        expect(work).toEqual([]);
+      } finally {
+        await own.stop();
+      }
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("two steps on one validation round", () => {
+  test(
+    "two validate steps at once call the verifier once and spend one round",
+    async () => {
+      const { row } = await active("Twice", ["Docs"]);
+      await server.deps.db
+        .update(assignmentPlanItems)
+        .set({ status: "done", summary: "wrote them" })
+        .where(and(eq(assignmentPlanItems.assignmentId, row.id), eq(assignmentPlanItems.id, "p1")));
+      let calls = 0;
+      const counting: Verifier = async (_deps, _row, items) => {
+        calls++;
+        await Bun.sleep(50);
+        return {
+          ok: true,
+          runId: null,
+          verdicts: items.map((i) => ({ id: i.item.id, passes: false, reason: "No" })),
+        };
+      };
+      const deps = { ...server.deps, assignmentVerifier: counting };
+      const step = { type: "validate" as const, itemIds: ["p1"], round: 1 };
+      const waits = await Promise.all([act(deps, row.id, step), act(deps, row.id, step)]);
+      const p1 = (await planOf(server.deps, row.id)).find((i) => i.id === "p1");
+      expect([calls, p1?.checks]).toEqual([1, 1]);
+      // The step that found the round held looks again later; the round's claim is gone once it's judged.
+      expect(waits.filter((w) => w === 30_000)).toHaveLength(1);
+      expect(
+        await server.deps.db
+          .select()
+          .from(schema.effectKeys)
+          .where(eq(schema.effectKeys.key, `assignment-validate:${row.id}:1`)),
+      ).toEqual([]);
       await close(row.id);
     },
     SERVER_TEST_MS,

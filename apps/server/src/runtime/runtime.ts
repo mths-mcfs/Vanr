@@ -75,7 +75,7 @@ import {
   withPlanOwners,
 } from "../runners/plans";
 import { expireRunnerRequests } from "../runners/requests";
-import type { RunnerRow } from "../runners/runners";
+import { canUseRunner, type RunnerRow } from "../runners/runners";
 import { matchRule } from "../standing-rules";
 import { purgeReservations } from "../usage-ledger";
 import { BackgroundWork } from "./background";
@@ -125,6 +125,7 @@ const {
   assignments,
   assignmentCommands,
   gateDecisions,
+  runners,
 } = schema;
 
 type Answer = { answer: string; actorUserId: string } | null;
@@ -266,6 +267,12 @@ interface Live {
    * doesn't join the run: it waits and opens its own run after.
    */
   plan: RunnerRow | null;
+  /**
+   * The runner lent to the agent when the run started. The run's tools act with the access of whoever started
+   * it, so a message from someone who may not use this runner doesn't join the run: it opens its own, checked
+   * for that person.
+   */
+  runner: RunnerRow | null;
   /** The agent used the browser in this run and didn't close it: whoever reopens the conversation sees the card (`activeRuns`). */
   browser: boolean;
   /** The agent's assignment thread: the calls also reserve on its cap and go into the ledger as `assignment`. */
@@ -443,6 +450,7 @@ export class AgentRuntime implements RuntimePort {
       liveRun: bind("liveRun"),
       liveInfo: bind("liveInfo"),
       cancel: bind("cancel"),
+      dropFences: bind("dropFences"),
       onRunEnd: bind("onRunEnd"),
       onPersonMessage: bind("onPersonMessage"),
       providerForWorkspace: bind("providerForWorkspace"),
@@ -798,6 +806,14 @@ export class AgentRuntime implements RuntimePort {
   }
 
   /** Stops the run. False when it had already ended. */
+  dropFences(match: { key: string } | { prefix: string }): void {
+    if ("key" in match) {
+      this.fences.delete(match.key);
+      return;
+    }
+    for (const key of [...this.fences.keys()]) if (key.startsWith(match.prefix)) this.fences.delete(key);
+  }
+
   cancel(runId: string, actorUserId: string | null, fence?: RunFence): boolean {
     const l = this.live.get(runId);
     if (!l) return false;
@@ -917,7 +933,7 @@ export class AgentRuntime implements RuntimePort {
       if (!running) break;
       // The live run doesn't have this request's caps: instead of joining it, the caller tries later.
       if (input.limits) return { ok: false, code: "busy" };
-      if (fence && this.defers(running, trigger)) {
+      if (fence && (await this.defers(running, trigger))) {
         // A fenced attempt goes into the run that answers it: a run that would put it off to the next one is
         // waited out first, so the run returned (and the one its fence stops) is that one.
         await running.done;
@@ -930,7 +946,7 @@ export class AgentRuntime implements RuntimePort {
     }
     if (apiBudgetGates(agent) && (await this.budgetCheck(agent)) === "exhausted")
       return { ok: false, code: "budget" };
-    await this.startRun({
+    const runId = await this.startRun({
       agent,
       channel,
       threadId,
@@ -939,9 +955,16 @@ export class AgentRuntime implements RuntimePort {
       replyMeta: input.replyMeta,
       limits: input.limits,
     });
-    const runId = this.byKey.get(key) ?? "";
     const started = this.live.get(runId);
-    if (started && fence && !stale()) started.fence = fence;
+    if (started && fence) {
+      // A later attempt went while this run was starting: the run is this stale attempt's alone, and nobody
+      // would stop it, so it stops here. One the later attempt already went into is its and stays.
+      if (stale()) {
+        if (!started.fence) this.cancel(runId, null);
+        return { ok: false, code: "fenced" };
+      }
+      started.fence = fence;
+    }
     return { ok: true, runId, done: started?.done ?? Promise.resolve() };
   }
 
@@ -983,19 +1006,36 @@ export class AgentRuntime implements RuntimePort {
 
   /**
    * Whether the live run puts this message off to the next run instead of taking it: the run is ending, it runs
-   * on the plan of whoever paired (not even someone else's "stop" touches it), or it is pinned to another person.
+   * on the plan of whoever paired (not even someone else's "stop" touches it), it is pinned to another person,
+   * or the agent has a runner the message's author may not use (the run's tools act with its starter's access).
    */
-  private defers(live: Live, row: MessageRow): boolean {
-    if (live.closing) return true;
-    if (live.plan && !canUsePlan(personOf(row), live.plan)) return true;
+  private async defers(live: Live, row: MessageRow): Promise<boolean> {
     const who = personOf(row);
-    return who !== null && who !== live.person.id && live.person.pinned;
+    // The one await first, so the checks below read the run as it is now.
+    const barred =
+      who !== null &&
+      live.runner !== null &&
+      who !== requesterOf(live.trigger) &&
+      !isStopRequest(row.body) &&
+      !(await this.mayUseRunner(live.workspaceId, who, live.runner));
+    if (live.closing) return true;
+    if (live.plan && !canUsePlan(who, live.plan)) return true;
+    if (who !== null && who !== live.person.id && live.person.pinned) return true;
+    return barred;
+  }
+
+  private async mayUseRunner(workspaceId: string, userId: string, runner: RunnerRow): Promise<boolean> {
+    const [member] = await this.deps.db
+      .select({ role: members.role })
+      .from(members)
+      .where(and(eq(members.workspaceId, workspaceId), eq(members.userId, userId)));
+    return !!member && canUseRunner({ userId, role: member.role }, runner);
   }
 
   private async steer(live: Live, row: MessageRow) {
     const { db, hub } = this.deps;
     const stop = isStopRequest(row.body);
-    if (this.defers(live, row)) {
+    if (await this.defers(live, row)) {
       // "stop" for a run that is already ending changes nothing; anything else becomes the next run.
       if (!(live.closing && stop)) live.after.push(row);
       return;
@@ -1043,11 +1083,14 @@ export class AgentRuntime implements RuntimePort {
     trigger: MessageRow;
     replyMeta?: MessageMeta;
     limits?: RunLimits;
-  }) {
+  }): Promise<string> {
     const { db, hub } = this.deps;
     const { agent, channel, trigger } = input;
     const runId = newId("run");
     const at = this.deps.now();
+    const [runner] = agent.environmentId
+      ? await db.select().from(runners).where(eq(runners.id, agent.environmentId))
+      : [];
     await db.insert(runs).values({
       id: runId,
       workspaceId: channel.workspaceId,
@@ -1091,6 +1134,7 @@ export class AgentRuntime implements RuntimePort {
       risk: new RiskTracker(),
       replyMeta: input.replyMeta,
       plan: null,
+      runner: runner ?? null,
       browser: false,
       assignment: null,
       errorCode: null,
@@ -1130,6 +1174,7 @@ export class AgentRuntime implements RuntimePort {
           log.error("runtime.followup_failed", { runId, err });
         }
       });
+    return runId;
   }
 
   private emit(live: Live, event: Record<string, unknown> & { type: string }) {

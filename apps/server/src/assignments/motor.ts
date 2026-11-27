@@ -53,6 +53,7 @@ const {
   assignmentPlanItems,
   runnerJobs,
   messages,
+  effectKeys,
 } = schema;
 
 type AssignmentLimits = schema.AssignmentLimits;
@@ -792,6 +793,8 @@ async function dispatch(
   const item = items.find((i) => i.id === itemId) ?? null;
   if (itemId && (!item || item.status === "done" || item.status === "dropped")) {
     await end("canceled");
+    // The item is over: its fence has no later attempt to guard.
+    deps.runtime.dropFences({ key: fenceKeyOf(row.id, itemId) });
     return null;
   }
   // Already sent (the step ran again after sending): it only checks.
@@ -904,7 +907,7 @@ async function dispatch(
   // The last check before the turn goes out: an attempt another loop reaped meanwhile, or an assignment paused,
   // canceled or done meanwhile, sends nothing. The fence turns away this turn if a later attempt already went.
   if (!(await sendable())) return null;
-  const fence = { key: `${row.id}:${itemId}`, token: n };
+  const fence = { key: fenceKeyOf(row.id, itemId), token: n };
   const res = await deps.runtime.runFor({ agent, channel, trigger, fence });
   if (!res.ok && res.code === "fenced") {
     await end("canceled");
@@ -1002,7 +1005,90 @@ async function itemBrief(
 }
 
 /** A milestone's validation by a clean-context agent; a failed item becomes a fix item. */
+/** A validation round held this long with no end belongs to a step that died: another step may take it. */
+const ROUND_LEASE_MS = 20 * 60_000;
+/** Another step is judging this round: look again after this. */
+const ROUND_HELD_WAIT_MS = 30_000;
+
+/**
+ * Claims a validation round before the verifier's paid call: under the assignment row's lock, the round's key is
+ * free (or its holder died past the lease) and every target is still done, unjudged and at the epoch and checks
+ * this step read. Two steps on the same round (a forked workflow while the old one still runs its step) make one
+ * call: the other finds the round `held`, or `stale` once the first wrote its verdicts.
+ */
+async function claimRound(
+  deps: AppDeps,
+  row: AssignmentRow,
+  key: string,
+  targets: readonly PlanItemRow[],
+): Promise<"claimed" | "held" | "stale"> {
+  const now = deps.now();
+  return deps.db.transaction(async (tx) => {
+    await tx.select({ id: assignments.id }).from(assignments).where(eq(assignments.id, row.id)).for("update");
+    const [held] = await tx.select().from(effectKeys).where(eq(effectKeys.key, key));
+    if (held && now.getTime() - held.createdAt.getTime() < ROUND_LEASE_MS) return "held";
+    const current = await tx
+      .select({
+        id: assignmentPlanItems.id,
+        status: assignmentPlanItems.status,
+        passes: assignmentPlanItems.passes,
+        epoch: assignmentPlanItems.epoch,
+        checks: assignmentPlanItems.checks,
+      })
+      .from(assignmentPlanItems)
+      .where(
+        and(
+          eq(assignmentPlanItems.assignmentId, row.id),
+          inArray(
+            assignmentPlanItems.id,
+            targets.map((t) => t.id),
+          ),
+        ),
+      );
+    const due = targets.every((t) => {
+      const c = current.find((x) => x.id === t.id);
+      return c?.status === "done" && c.passes !== true && c.epoch === t.epoch && c.checks === t.checks;
+    });
+    if (!due) return "stale";
+    await tx
+      .insert(effectKeys)
+      .values({
+        key,
+        workspaceId: row.workspaceId,
+        tool: "assignment.validate",
+        status: "pending",
+        createdAt: now,
+      })
+      .onConflictDoUpdate({ target: effectKeys.key, set: { status: "pending", createdAt: now } });
+    return "claimed";
+  });
+}
+
 async function validate(
+  deps: AppDeps,
+  row: AssignmentRow,
+  itemIds: string[],
+  round: number,
+): Promise<number | null> {
+  const items = await planOf(deps, row.id);
+  const targets = itemIds
+    .map((id) => items.find((i) => i.id === id))
+    .filter((i): i is PlanItemRow => !!i && i.status === "done" && i.passes !== true);
+  if (targets.length === 0) return null;
+  const key = `assignment-validate:${row.id}:${round}`;
+  const claim = await claimRound(deps, row, key, targets);
+  if (claim === "held") return ROUND_HELD_WAIT_MS;
+  if (claim === "stale") return null;
+  try {
+    return await judgeRound(deps, row, itemIds, round);
+  } finally {
+    // The round is judged (its checks moved on) or left unspent (a pause): either way the claim's job is done.
+    await deps.db.delete(effectKeys).where(eq(effectKeys.key, key));
+  }
+}
+
+/** The validation round itself, once claimed: the verifier's call, the fixes, then the verdicts. */
+async function judgeRound(
   deps: AppDeps,
   row: AssignmentRow,
   itemIds: string[],
@@ -1214,7 +1300,10 @@ export async function stepNext(deps: AppDeps, assignmentId: string): Promise<Eng
     const row = await assignmentById(deps, assignmentId);
     if (!row) return { type: "end" };
     // A closed one still decides: a run or a job left going on after the close gets its halt before the end.
-    return decide(await snapshotOf(deps, row), deps.now());
+    const action = decide(await snapshotOf(deps, row), deps.now());
+    // Ended: the fences of its items have nothing left to turn away.
+    if (action.type === "end") deps.runtime.dropFences({ prefix: `${row.id}:` });
+    return action;
   } catch (err) {
     log.error("assignment.engine_next_failed", { err, assignmentId });
     return { type: "wait", reason: "idle", until: new Date(deps.now().getTime() + 60_000).toISOString() };
@@ -1222,6 +1311,9 @@ export async function stepNext(deps: AppDeps, assignmentId: string): Promise<Eng
     inflight--;
   }
 }
+
+/** The runtime fence of an item's attempts (`runFor`): one per assignment and item, token = the attempt's n. */
+const fenceKeyOf = (assignmentId: string, itemId: string) => `${assignmentId}:${itemId}`;
 
 /** The `act` step. Returns how long to wait (ms), or null to decide again at once. */
 export async function stepAct(deps: AppDeps, assignmentId: string, a: EngineAction): Promise<number | null> {
@@ -1388,7 +1480,8 @@ export class LocalEngine implements AssignmentEngine {
     const deps = this.getDeps();
     while (!this.stopped) {
       const a = await stepNext(deps, assignmentId);
-      if (a.type === "end") return;
+      // Stopped while deciding: the decision isn't acted on (the next start decides again).
+      if (a.type === "end" || this.stopped) return;
       const ms = await stepAct(deps, assignmentId, a);
       if (this.stopped) return;
       if (ms !== null) await box.sleep(ms);

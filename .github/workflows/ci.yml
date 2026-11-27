@@ -826,7 +826,7 @@ jobs:
       - run: bun test apps/server/test/assignment-engine-postgres.test.ts
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
-      - name: The forced assignment work test fails without the lock
+      - name: The forced assignment work and validation tests fail without the lock
         run: |
           set +e
           bun test apps/server/test/assignment-engine-postgres.test.ts --test-name-pattern forced > forced-work.log 2>&1
@@ -842,7 +842,7 @@ jobs:
               exit 1
             fi
           done
-          set -- work-claim
+          set -- work-claim validate-claim
           for label in "$@"; do
             if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" forced-work.log; then
               echo "::error::the forced $label test did not fail on its outcome without the lock"

@@ -11,6 +11,7 @@ import { moveAssignment } from "../src/assignments/core";
 import { createAssignment } from "../src/assignments/engine";
 import { jobIdOf, workIdOf } from "../src/assignments/keys";
 import { act, workflowIdOf } from "../src/assignments/motor";
+import type { Verifier } from "../src/assignments/verify";
 import type { AppDeps } from "../src/context";
 import type { RunningServer } from "../src/server";
 import { agentRuntime, pairRunner, passing, seedAgent } from "./assignment-kit";
@@ -172,6 +173,58 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("the assignment engine on Postgre
       expect(work?.refId).toBe(runtime.turns.at(-1)?.runId ?? "");
       for (const t of runtime.turns.slice(before)) runtime.finish(t.runId);
       await server.deps.runtime.settle();
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "forced: a second step on the same validation round waits on the assignment's lock, so the verifier is called once",
+    async () => {
+      const agentId = await seedAgent(server.deps.db, workspaceId, ana, null);
+      const row = await createAssignment(server.deps, {
+        workspaceId,
+        agentId,
+        agentHandle: "lia",
+        channelId: general,
+        ownerId: ana.user.id,
+        title: "Check",
+        goal: "Check",
+        executor: "agent",
+        runnerId: null,
+        commandPolicy: "always",
+        plan: ["Docs"],
+      });
+      await server.deps.db
+        .update(assignments)
+        .set({ status: "active", startedAt: server.deps.now() })
+        .where(eq(assignments.id, row.id));
+      await server.deps.db
+        .update(assignmentPlanItems)
+        .set({ status: "done", summary: "wrote them" })
+        .where(and(eq(assignmentPlanItems.assignmentId, row.id), eq(assignmentPlanItems.id, "p1")));
+      let calls = 0;
+      const counting: Verifier = async (_deps, _row, items) => {
+        calls++;
+        return {
+          ok: true,
+          runId: null,
+          verdicts: items.map((i) => ({ id: i.item.id, passes: true, reason: "ok" })),
+        };
+      };
+      const step = { type: "validate" as const, itemIds: ["p1"], round: 1 };
+      await forcedPair(
+        admin,
+        "validate-claim",
+        "select",
+        (_side, hooks) => act({ ...withDb(hooks), assignmentVerifier: counting }, row.id, step),
+        { match: "effect_keys" },
+      );
+      const [p1] = await server.deps.db
+        .select()
+        .from(assignmentPlanItems)
+        .where(and(eq(assignmentPlanItems.assignmentId, row.id), eq(assignmentPlanItems.id, "p1")));
+      outcome("validate-claim", { calls, checks: p1?.checks }, { calls: 1, checks: 1 });
+      await server.deps.db.update(assignments).set({ status: "canceled" }).where(eq(assignments.id, row.id));
     },
     SERVER_TEST_MS,
   );

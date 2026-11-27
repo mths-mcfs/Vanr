@@ -151,6 +151,8 @@ export interface RuntimePort {
   liveInfo(runId: string): { triggerAuthorId: string; ownerUserId: string } | null;
   /** Stops the run; false when it had already ended. Callers: assignments/engine, the assignment engine and routes/agents. */
   cancel(runId: string, actorUserId: string | null, fence?: RunFence): boolean;
+  /** Forgets the fences of finished work: the key itself, or every key under `prefix`. Caller: the assignment engine. */
+  dropFences(match: { key: string } | { prefix: string }): void;
   /** Tells the end of every run (after its status is saved). Caller: the assignment engine. */
   onRunEnd(listener: (end: RunEnd) => void): void;
   /** Called after a person posts; doesn't wait for the runs. Caller: assignments/core. */
