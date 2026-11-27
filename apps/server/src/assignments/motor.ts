@@ -166,7 +166,8 @@ export function decide(s: Snapshot, now: Date): EngineAction {
   // The next time something comes due on its own (the due date, the assignment going quiet): the wait wakes then.
   const soon = (base: number | null): string | null => {
     const marks = [base ?? t + MAX_WAIT_MS];
-    if (s.announceAt && s.announceAt > now) marks.push(s.announceAt.getTime());
+    // Kept even when already past (the snapshot's queries ran past it): the wait is then the 1 s floor.
+    if (s.announceAt) marks.push(s.announceAt.getTime());
     if (s.dueAt && s.dueAt > now && !s.emitted.includes(overdueKey(s.dueAt))) marks.push(s.dueAt.getTime());
     if (s.status === "active" && s.lastActivity) {
       const staleAt = s.lastActivity.getTime() + STALE_MS + 1000;

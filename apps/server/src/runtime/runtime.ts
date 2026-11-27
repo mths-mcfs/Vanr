@@ -290,6 +290,15 @@ const personOf = (row: Pick<MessageRow, "authorKind" | "authorId">) =>
  * Who asked for the run now: the trigger message's person. A routine (schedule, event, email) posts with its
  * creator as the author, but nobody is waiting; then it is null.
  */
+/**
+ * The caps a run's model calls pay into beyond the agent's month: its routine execution's and its assignment's.
+ * The run's own turns, its delegations and its reviewer all reserve against them.
+ */
+const capsOf = (live: Pick<Live, "limits" | "assignment">): BudgetScope[] => [
+  ...(live.limits?.scopes ?? []),
+  ...(live.assignment?.scope ? [live.assignment.scope] : []),
+];
+
 export const requesterOf = (row: Pick<MessageRow, "authorKind" | "authorId" | "meta">) =>
   row.meta.routine ? null : personOf(row);
 /**
@@ -654,8 +663,17 @@ export class AgentRuntime implements RuntimePort {
     return row;
   }
 
-  private wait<T>(map: Map<string, (v: T) => void>, id: string, signal: AbortSignal): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
+  /**
+   * Registers a wait for `id` in `map`, settled by whoever calls the entry or by the run's abort. `drop` takes the
+   * wait back (the card it waits on never went out): the entry and the abort listener go, and `done` rejects.
+   */
+  private wait<T>(
+    map: Map<string, (v: T) => void>,
+    id: string,
+    signal: AbortSignal,
+  ): { done: Promise<T>; drop: () => void } {
+    let drop = () => {};
+    const done = new Promise<T>((resolve, reject) => {
       const onAbort = () => {
         map.delete(id);
         reject(signal.reason ?? new RunCanceled());
@@ -665,12 +683,20 @@ export class AgentRuntime implements RuntimePort {
         return;
       }
       signal.addEventListener("abort", onAbort, { once: true });
-      map.set(id, (v) => {
+      const entry = (v: T) => {
         signal.removeEventListener("abort", onAbort);
         map.delete(id);
         resolve(v);
-      });
+      };
+      map.set(id, entry);
+      drop = () => {
+        signal.removeEventListener("abort", onAbort);
+        if (map.get(id) === entry) map.delete(id);
+        reject(new RunCanceled());
+      };
     });
+    done.catch(() => {});
+    return { done, drop };
   }
 
   private async setStatus(live: Live, status: RunStatus) {
@@ -1351,19 +1377,25 @@ export class AgentRuntime implements RuntimePort {
           });
           // Register the wait before the card: a decision on the card may arrive before the next await.
           const waiting = this.wait(this.approvalWaiters, row.id, live.controller.signal);
-          waiting.catch(() => {});
           this.approvalRevisers.set(row.id, req.revise);
-          const card = await postCard(title, { approvalId: row.id });
-          const [withCard] = await db
-            .update(approvals)
-            .set({ messageId: card.id })
-            .where(eq(approvals.id, row.id))
-            .returning();
-          // The status goes to the database before the notice: whoever fetches the run list after the event
-          // already sees the wait, and the list doesn't undo the phase the event put on screen.
-          await this.setStatus(live, "paused_for_approval");
-          await publishApproval(this.deps, withCard ?? row, "approval.requested");
-          const outcome = await waiting.finally(() => this.approvalRevisers.delete(row.id));
+          try {
+            const card = await postCard(title, { approvalId: row.id });
+            const [withCard] = await db
+              .update(approvals)
+              .set({ messageId: card.id })
+              .where(eq(approvals.id, row.id))
+              .returning();
+            // The status goes to the database before the notice: whoever fetches the run list after the event
+            // already sees the wait, and the list doesn't undo the phase the event put on screen.
+            await this.setStatus(live, "paused_for_approval");
+            await publishApproval(this.deps, withCard ?? row, "approval.requested");
+          } catch (err) {
+            // The card or its notice failed: nothing will decide this wait, so it doesn't stay behind.
+            waiting.drop();
+            this.approvalRevisers.delete(row.id);
+            throw err;
+          }
+          const outcome = await waiting.done.finally(() => this.approvalRevisers.delete(row.id));
           await this.setStatus(live, "running");
           return outcome;
         },
@@ -1384,6 +1416,9 @@ export class AgentRuntime implements RuntimePort {
             requesterId: live.trigger.authorKind === "person" ? live.trigger.authorId : null,
             requestAt: live.trigger.createdAt,
             req,
+            // The run's caps pay for its reviewer too.
+            scopes: capsOf(live),
+            assignmentId: live.assignment?.assignmentId,
           }),
         settleApproval: async (id, result) => {
           const done = this.deps.now();
@@ -1419,17 +1454,23 @@ export class AgentRuntime implements RuntimePort {
           if (!row) throw new Error("question insert returned nothing");
           // Waiting before the card: an answer on the card may arrive before the next await.
           const waiting = this.wait(this.questionWaiters, row.id, live.controller.signal);
-          waiting.catch(() => {});
           live.waitingQuestion = { id: row.id, askedUserId: row.askedUserId };
-          const card = await postCard(text, { question: toQuestion(row) });
-          const [withCard] = await db
-            .update(questions)
-            .set({ messageId: card.id })
-            .where(eq(questions.id, row.id))
-            .returning();
-          await this.setStatus(live, "paused_for_input");
-          await publishQuestion(this.deps, withCard ?? row, "question.raised");
-          const answer = await waiting.finally(() => {
+          try {
+            const card = await postCard(text, { question: toQuestion(row) });
+            const [withCard] = await db
+              .update(questions)
+              .set({ messageId: card.id })
+              .where(eq(questions.id, row.id))
+              .returning();
+            await this.setStatus(live, "paused_for_input");
+            await publishQuestion(this.deps, withCard ?? row, "question.raised");
+          } catch (err) {
+            // The card or its notice failed: nothing will answer this wait, so it doesn't stay behind.
+            waiting.drop();
+            live.waitingQuestion = null;
+            throw err;
+          }
+          const answer = await waiting.done.finally(() => {
             live.waitingQuestion = null;
           });
           await this.setStatus(live, "running");
@@ -1550,10 +1591,7 @@ export class AgentRuntime implements RuntimePort {
           : await this.reserveCall({
               agent: live.agent,
               channelId: live.channel.id,
-              scopes: [
-                ...(live.limits?.scopes ?? []),
-                ...(live.assignment?.scope ? [live.assignment.scope] : []),
-              ],
+              scopes: capsOf(live),
               promptBytes:
                 utf8Bytes(system) + utf8Bytes(JSON.stringify(history)) + utf8Bytes(JSON.stringify(specs)),
               maxTokens: MAX_TOKENS,
@@ -2019,7 +2057,7 @@ export class AgentRuntime implements RuntimePort {
     const held = await this.reserveCall({
       agent: target,
       channelId: live.channel.id,
-      scopes: [...(live.limits?.scopes ?? []), ...(live.assignment?.scope ? [live.assignment.scope] : [])],
+      scopes: capsOf(live),
       promptBytes: utf8Bytes(system) + utf8Bytes(question),
       maxTokens: CONSULT_MAX_TOKENS,
     });
@@ -2278,6 +2316,9 @@ export class AgentRuntime implements RuntimePort {
     /** When the message that opened the run arrived: the reviewer only reads what the person wrote near it. */
     requestAt: Date;
     req: ReviewRequest;
+    /** The asking run's caps beyond the agent's month (a routine's execution, an assignment). */
+    scopes?: readonly BudgetScope[];
+    assignmentId?: string;
   }): Promise<"allow" | "ask" | null> {
     const { db } = this.deps;
     const at = this.deps.now();
@@ -2307,6 +2348,8 @@ export class AgentRuntime implements RuntimePort {
       channelId: input.channelId,
       // The prompt quotes the conversation: whoever doesn't read the channel doesn't see the review run.
       sourceChannelId: input.channelId,
+      scopes: input.scopes,
+      assignmentId: input.assignmentId,
     });
     return res.ok ? verdictOf(res.text) : null;
   }

@@ -11,6 +11,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { and, eq } from "drizzle-orm";
+import { assignmentOfRun } from "../src/assignments/budget";
 import { type AssignmentRow, agentSays, moveAssignment } from "../src/assignments/core";
 import { createAssignment, createSubmission } from "../src/assignments/engine";
 import { workIdOf } from "../src/assignments/keys";
@@ -291,6 +292,82 @@ describe("a close that didn't finish", () => {
       await started.done;
       expect(await stepNext(server.deps, row.id)).toEqual({ type: "end" });
       await close(row.id);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("the reviewer of an assignment's run", () => {
+  test(
+    "a run's calls reserve against its assignment's cap; the reviewer's call too, charged to the assignment",
+    async () => {
+      const { row, agentId } = await active("Reviewed", ["x"]);
+      const channel = await channelInWorkspace(server.deps.db, workspaceId, general);
+      const [agent] = await server.deps.db.select().from(schema.agents).where(eq(schema.agents.id, agentId));
+      const caps = await assignmentOfRun(server.deps, agentId, row.threadId);
+      if (!channel || !agent || !caps) throw new Error("setup");
+      await server.deps.db
+        .update(schema.workspaces)
+        .set({ approvalReviewer: true })
+        .where(eq(schema.workspaces.id, workspaceId));
+      try {
+        // What Ana asked in the thread: the reviewer reads it.
+        const { message } = await postMessage(server.deps, {
+          workspaceId,
+          channel,
+          author: { type: "person", id: ana.user.id },
+          body: "Please post the shipping note",
+          clientId: newId("c"),
+          threadId: row.threadId,
+        });
+        const [asked] = await server.deps.db.select().from(messages).where(eq(messages.id, message.id));
+        if (!asked) throw new Error("no message");
+
+        // The caps a run's calls reserve against (its turns, its reviewer, its delegations): with the
+        // assignment's dollars at 0, a turn in its thread stops before the model.
+        await server.deps.db
+          .update(assignments)
+          .set({ limits: { ...row.limits, dollars: 0 } })
+          .where(eq(assignments.id, row.id));
+        const started = await server.deps.runtime.runFor({ agent, channel, trigger: asked });
+        if (!started.ok) throw new Error(started.code);
+        await started.done;
+        const [stopped] = await server.deps.db.select().from(runs).where(eq(runs.id, started.runId));
+        expect([stopped?.status, stopped?.errorCode]).toEqual(["failed", "assignment_budget_exhausted"]);
+        await server.deps.db
+          .update(assignments)
+          .set({ limits: row.limits, ceiling: null })
+          .where(eq(assignments.id, row.id));
+
+        const review = (scope: typeof caps.scope) =>
+          server.runtime.reviewCall({
+            agent,
+            channelId: general,
+            threadId: row.threadId,
+            requesterId: ana.user.id,
+            requestAt: asked.createdAt,
+            req: { tool: "post_message", effect: "K2", reason: "rule_of_two", preview: { title: "Post" } },
+            scopes: [scope],
+            assignmentId: row.id,
+          });
+        const reviewLines = () =>
+          server.deps.db
+            .select()
+            .from(schema.usageLines)
+            .where(and(eq(schema.usageLines.agentId, agentId), eq(schema.usageLines.source, "review")));
+        // No room left on the assignment: no verdict, and the model isn't called.
+        expect(await review({ ...caps.scope, limitUsd: 0 })).toBeNull();
+        expect(await reviewLines()).toEqual([]);
+        // With room: the call goes, and its line is the assignment's.
+        await review(caps.scope);
+        expect((await reviewLines()).map((l) => l.assignmentId)).toEqual([row.id]);
+      } finally {
+        await server.deps.db
+          .update(schema.workspaces)
+          .set({ approvalReviewer: false })
+          .where(eq(schema.workspaces.id, workspaceId));
+        await close(row.id);
+      }
     },
     SERVER_TEST_MS,
   );

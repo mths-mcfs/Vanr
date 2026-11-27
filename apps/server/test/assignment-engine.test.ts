@@ -78,6 +78,9 @@ describe("decide (pure)", () => {
       reason: "paused",
       until: at.toISOString(),
     });
+    // The grace ran out while the snapshot was read: the wait still wakes then, not hours later.
+    const past = new Date(now.getTime() - 1000);
+    expect(decide({ ...working, announceAt: past }, now)).toMatchObject({ until: past.toISOString() });
   });
 
   test("closed ends; proposed and paused wait; dead work is reaped before anything else", () => {

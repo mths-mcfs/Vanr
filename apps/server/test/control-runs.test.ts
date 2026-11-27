@@ -217,6 +217,70 @@ describe("approvals asked by a run", () => {
   );
 });
 
+describe("a card that can't be posted", () => {
+  /** Runs `body` with the database refusing to insert a run's card (its client id has `:card:`). */
+  async function cardsFail<T>(body: () => Promise<T>): Promise<T> {
+    const { deps } = server;
+    const real = deps.db;
+    deps.db = new Proxy(real, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop, target);
+        if (prop !== "insert") return typeof value === "function" ? value.bind(target) : value;
+        return (table: typeof schema.messages) => {
+          const builder = target.insert(table);
+          if (table !== schema.messages) return builder;
+          return new Proxy(builder, {
+            get(b, p) {
+              const v = Reflect.get(b, p, b);
+              if (p !== "values") return typeof v === "function" ? v.bind(b) : v;
+              return (row: { clientId?: string | null }) => {
+                if (row.clientId?.includes(":card:")) throw new Error("card insert failed");
+                return v.call(b, row);
+              };
+            },
+          });
+        };
+      },
+    });
+    try {
+      return await body();
+    } finally {
+      deps.db = real;
+    }
+  }
+  // The runtime's waits, read for the leak (private, so by name).
+  const waits = () => ({
+    approvals: server.runtime["approvalWaiters"].size,
+    revisers: server.runtime["approvalRevisers"].size,
+    questions: server.runtime["questionWaiters"].size,
+  });
+
+  test(
+    "an approval or a question whose card fails leaves no wait behind; the run fails",
+    async () => {
+      const { general, beto, lia, post } = await team();
+      const before = waits();
+      await cardsFail(async () => {
+        await post(beto, general, postToSales(lia.handle), "cf1");
+        await post(
+          beto,
+          general,
+          `@${lia.handle} [[tool:ask_user {"question":"Which color?","choices":["Blue","Green"]}]]`,
+          "cf2",
+        );
+        await settle(server);
+      });
+      expect(waits()).toEqual(before);
+      const failed = await server.deps.db
+        .select({ status: schema.runs.status })
+        .from(schema.runs)
+        .where(eq(schema.runs.agentId, lia.id));
+      expect(failed.map((r) => r.status)).toEqual(["failed", "failed"]);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
 describe("questions asked by a run", () => {
   test(
     "a card with choices, the answer from the card, a wrong choice, a repeated answer",
