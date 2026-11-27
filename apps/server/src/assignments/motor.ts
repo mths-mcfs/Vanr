@@ -16,7 +16,7 @@
 import { DBOS } from "@dbos-inc/dbos-sdk";
 import type { AssignmentLimitKind, AssignmentUsage, AssignmentWaitReason } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
-import { and, eq, gt, inArray, max, ne, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull, lt, max, ne, sql } from "drizzle-orm";
 import { channelInWorkspace } from "../channels";
 import type { AppDeps } from "../context";
 import { launchDurable } from "../durable";
@@ -25,7 +25,16 @@ import { log } from "../logger";
 import { postMessage } from "../messages";
 import { assignmentUsage, ceilingState, type LimitKind } from "./budget";
 import { type AssignmentRow, agentOf, agentSays, isClosed, moveAssignment, publishAssignment } from "./core";
-import { cancelJobs, createSubmission, jobEnded, notifyOwner, settleJob, startAssignmentJob } from "./engine";
+import {
+  announceCommand,
+  announceSubmission,
+  cancelJobs,
+  createSubmission,
+  jobEnded,
+  notifyOwner,
+  settleJob,
+  startAssignmentJob,
+} from "./engine";
 import { assignmentEvent, SYSTEM } from "./events";
 import { fixIdOf, jobIdOf, workIdOf } from "./keys";
 import { groupOf, importLegacyPlan, type PlanItemRow, planOf, writePlan } from "./plan";
@@ -58,6 +67,17 @@ const SETTLE_GRACE_MS = 2 * 60_000;
 const CLAIM_GRACE_MS = 2 * 60_000;
 const RETRY_WAIT_MS = 5 * 60_000;
 const MAX_WAIT_MS = 6 * 3600_000;
+/** After a halt the cancels land a moment later: the next look is this far off. */
+const HALT_WAIT_MS = 5_000;
+/** Refusals of a job that come before anything reached the runner: the item's turn didn't happen. */
+const BEFORE_SEND = new Set([
+  "runner.offline",
+  "assignment.needs_environment",
+  "assignment.personal_plan",
+  "assignment.job_running",
+  "assignment.closed",
+  "assignment.no_job",
+]);
 
 /** The cap a limit stops at, as the assignment row and the API name it (`dollars` is the `usd` cap). */
 const ceilingOf = (k: LimitKind): AssignmentLimitKind => (k === "dollars" ? "usd" : k);
@@ -74,6 +94,12 @@ export type EngineAction =
   | { type: "overdue" }
   | { type: "stale"; since: string }
   | { type: "reap"; workId: string }
+  /** The assignment is paused or closed but a run or a job of it still goes on: stop them. */
+  | { type: "halt" }
+  /** A command or a submission waits for a person without its card (a crash between the row and the card). */
+  | { type: "announce" }
+  /** A job ended (or never left the server) and nobody processed its end: process it now. */
+  | { type: "settle"; jobId: string }
   | { type: "plan" }
   | { type: "seed" }
   | { type: "work"; itemId: string; n: number }
@@ -103,6 +129,12 @@ export interface Snapshot {
   lastActivity: Date | null;
   /** Keys (without the assignment's prefix) of the notices that go out only once. */
   emitted: string[];
+  /** A pending command or submission with no card past the claim grace. */
+  unannounced: boolean;
+  /** Jobs whose end nobody processed past the grace, or that never reached the runner. */
+  unsettled: string[];
+  /** A run in the thread or a job on the runner still going on. */
+  stray: boolean;
 }
 
 const warnKey = (k: LimitKind, limit: number | null) => `warn:${k}:${limit}`;
@@ -145,8 +177,14 @@ export function decide(s: Snapshot, now: Date): EngineAction {
     until: soon(until),
   });
 
+  // Stopped (paused or closed) while a run or a job still went on, e.g. a pause whose cancel failed halfway.
+  if ((s.status === "done" || s.status === "canceled" || s.status === "paused") && s.stray)
+    return { type: "halt" };
   if (s.status === "done" || s.status === "canceled") return { type: "end" };
   if (s.status === "proposed") return { type: "wait", reason: "proposed", until: null };
+  if (s.unannounced) return { type: "announce" };
+  const unsettled = s.unsettled[0];
+  if (unsettled) return { type: "settle", jobId: unsettled };
   if (s.status === "paused") return { type: "wait", reason: s.ceiling ? "ceiling" : "paused", until: null };
   const dead = s.open.find((w) => !w.live);
   if (dead) return { type: "reap", workId: dead.id };
@@ -212,17 +250,28 @@ export async function snapshotOf(deps: AppDeps, row: AssignmentRow): Promise<Sna
       lastSignalAt: runnerJobs.lastSignalAt,
       endedAt: runnerJobs.endedAt,
       settledAt: runnerJobs.settledAt,
+      createdAt: runnerJobs.createdAt,
     })
     .from(runnerJobs)
     .where(eq(runnerJobs.assignmentId, row.id));
   const jobById = new Map(jobs.map((j) => [j.id, j]));
   const now = deps.now().getTime();
+  // Saved and never heard from past the grace: the server fell between the row and the send to the runner.
+  const lost = (j: (typeof jobs)[number]) =>
+    j.status === "queued" && j.lastSignalAt === null && now - j.createdAt.getTime() >= CLAIM_GRACE_MS;
   // Running, or ended a moment ago and the assignment still processes the end (cards, item): the engine waits.
   const live = (j: (typeof jobs)[number] | undefined) =>
     !!j &&
-    (j.status === "queued" ||
+    ((j.status === "queued" && !lost(j)) ||
       j.status === "running" ||
-      (j.settledAt === null && (j.endedAt === null || now - j.endedAt.getTime() < SETTLE_GRACE_MS)));
+      (j.status !== "queued" &&
+        j.settledAt === null &&
+        (j.endedAt === null || now - j.endedAt.getTime() < SETTLE_GRACE_MS)));
+  const unsettled = jobs
+    .filter(
+      (j) => lost(j) || (j.status !== "queued" && j.status !== "running" && j.settledAt === null && !live(j)),
+    )
+    .map((j) => j.id);
   const lastN: Record<string, number> = {};
   const open: Snapshot["open"] = [];
   for (const w of works) {
@@ -239,8 +288,39 @@ export async function snapshotOf(deps: AppDeps, row: AssignmentRow): Promise<Sna
           : w.refId !== null && deps.runtime.liveRun(w.refId) !== null),
     });
   }
-  const busy =
-    deps.runtime.activeRun(row.agentId, row.channelId, row.threadId) !== null || jobs.some((j) => live(j));
+  const runOnAir = deps.runtime.activeRun(row.agentId, row.channelId, row.threadId) !== null;
+  const busy = runOnAir || jobs.some((j) => live(j));
+  const stray = runOnAir || jobs.some((j) => (j.status === "queued" && !lost(j)) || j.status === "running");
+  const graceAgo = new Date(now - CLAIM_GRACE_MS);
+  const unannounced =
+    (
+      await db
+        .select({ id: assignmentCommands.id })
+        .from(assignmentCommands)
+        .where(
+          and(
+            eq(assignmentCommands.assignmentId, row.id),
+            eq(assignmentCommands.state, "pending"),
+            isNull(assignmentCommands.messageId),
+            lt(assignmentCommands.createdAt, graceAgo),
+          ),
+        )
+        .limit(1)
+    ).length > 0 ||
+    (
+      await db
+        .select({ id: assignmentSubmissions.id })
+        .from(assignmentSubmissions)
+        .where(
+          and(
+            eq(assignmentSubmissions.assignmentId, row.id),
+            eq(assignmentSubmissions.status, "pending"),
+            isNull(assignmentSubmissions.messageId),
+            lt(assignmentSubmissions.createdAt, graceAgo),
+          ),
+        )
+        .limit(1)
+    ).length > 0;
   const decisions = await db
     .select({ id: assignmentDecisions.id, deadlineAt: assignmentDecisions.deadlineAt })
     .from(assignmentDecisions)
@@ -311,6 +391,9 @@ export async function snapshotOf(deps: AppDeps, row: AssignmentRow): Promise<Sna
     person: { decisions, others, submission },
     lastActivity: await lastActivityOf(deps, row, jobs),
     emitted,
+    unannounced,
+    unsettled,
+    stray,
   };
 }
 
@@ -461,6 +544,22 @@ export async function act(deps: AppDeps, assignmentId: string, a: EngineAction):
       await reap(deps, row, a.workId);
       return null;
 
+    case "halt": {
+      const run = deps.runtime.activeRun(row.agentId, row.channelId, row.threadId);
+      if (run) deps.runtime.cancel(run, null);
+      await cancelJobs(deps, row);
+      // The cancels land a moment later: look again shortly, not at once.
+      return HALT_WAIT_MS;
+    }
+
+    case "announce":
+      await announcePending(deps, row);
+      return null;
+
+    case "settle":
+      await settleLost(deps, a.jobId);
+      return null;
+
     case "seed": {
       const w = await writePlan(deps, row.id, {
         author: SYSTEM,
@@ -517,8 +616,9 @@ async function reap(deps: AppDeps, row: AssignmentRow, workId: string): Promise<
       .select()
       .from(runnerJobs)
       .where(eq(runnerJobs.id, w.refId ?? jobIdOf(w.id)));
+    if (j?.status === "queued" && j.lastSignalAt === null) await settleLost(deps, j.id);
     // The end of a job the listener didn't process (the server died in the middle): process it now and close.
-    if (j && j.status !== "queued" && j.status !== "running") {
+    else if (j && j.status !== "queued" && j.status !== "running") {
       await jobEnded(deps, j);
       await settleJob(deps, j);
       return;
@@ -539,25 +639,119 @@ async function reap(deps: AppDeps, row: AssignmentRow, workId: string): Promise<
     });
 }
 
+/** Posts the cards a crash left out: pending commands and submissions with no card past the claim grace. */
+async function announcePending(deps: AppDeps, row: AssignmentRow): Promise<void> {
+  const graceAgo = new Date(deps.now().getTime() - CLAIM_GRACE_MS);
+  const commands = await deps.db
+    .select()
+    .from(assignmentCommands)
+    .where(
+      and(
+        eq(assignmentCommands.assignmentId, row.id),
+        eq(assignmentCommands.state, "pending"),
+        isNull(assignmentCommands.messageId),
+        lt(assignmentCommands.createdAt, graceAgo),
+      ),
+    );
+  for (const cmd of commands) await announceCommand(deps, row, cmd);
+  const submissions = await deps.db
+    .select()
+    .from(assignmentSubmissions)
+    .where(
+      and(
+        eq(assignmentSubmissions.assignmentId, row.id),
+        eq(assignmentSubmissions.status, "pending"),
+        isNull(assignmentSubmissions.messageId),
+        lt(assignmentSubmissions.createdAt, graceAgo),
+      ),
+    );
+  for (const sub of submissions) await announceSubmission(deps, row, sub, row.status === "active");
+}
+
+/**
+ * The end of a job nobody processed: one that ended while the server was down (a job the agent started has no work
+ * row for `reap` to find), or one saved and never sent (the server fell between the row and the send), which is
+ * canceled first so it stops holding the assignment's only job slot.
+ */
+async function settleLost(deps: AppDeps, jobId: string): Promise<void> {
+  const [j] = await deps.db.select().from(runnerJobs).where(eq(runnerJobs.id, jobId));
+  if (!j || j.settledAt) return;
+  if (j.status === "queued" && j.lastSignalAt === null) {
+    const [canceled] = await deps.db
+      .update(runnerJobs)
+      .set({ status: "canceled", endedAt: deps.now() })
+      .where(and(eq(runnerJobs.id, j.id), eq(runnerJobs.status, "queued"), isNull(runnerJobs.lastSignalAt)))
+      .returning();
+    if (!canceled) return;
+    await jobEnded(deps, canceled);
+    return;
+  }
+  if (j.status === "queued" || j.status === "running") return;
+  await jobEnded(deps, j);
+}
+
+/** Gives the item back the turn a claim counted when the turn never went out (refused before the send, paused). */
+async function refundTurn(deps: AppDeps, assignmentId: string, itemId: string): Promise<void> {
+  if (!itemId) return;
+  await deps.db
+    .update(assignmentPlanItems)
+    .set({ turns: sql`${assignmentPlanItems.turns} - 1` })
+    .where(
+      and(
+        eq(assignmentPlanItems.assignmentId, assignmentId),
+        eq(assignmentPlanItems.id, itemId),
+        gt(assignmentPlanItems.turns, 0),
+      ),
+    );
+}
+
 /**
  * Claims the work for this step: under the row's lock, a work row still `starting` becomes `running` and the
  * item gets its turn, once. Whoever finds it already claimed sends nothing: the effect (the agent's turn, the
  * job) goes out once per row even with two loops on the same assignment (a fork while the old workflow still
- * runs its step). A crash after the claim leaves the row running with no ref; the next step reaps it and the
- * item goes to its next attempt.
+ * runs its step). The assignment must still be active: a step decided before a pause, a cancel or the end claims
+ * nothing. A crash after the claim leaves the row running with no ref; the next step reaps it and the item goes to
+ * its next attempt.
  */
 async function claimWork(deps: AppDeps, workId: string, item: PlanItemRow | null): Promise<boolean> {
   return deps.db.transaction(async (tx) => {
     const [w] = await tx.select().from(assignmentWork).where(eq(assignmentWork.id, workId)).for("update");
     if (w?.status !== "starting") return false;
-    await tx.update(assignmentWork).set({ status: "running" }).where(eq(assignmentWork.id, workId));
-    if (item)
+    // Decided while active, acted after a pause, a cancel or the end: the turn doesn't go out.
+    const [a] = await tx
+      .select({ status: assignments.status })
+      .from(assignments)
+      .where(eq(assignments.id, w.assignmentId));
+    if (a?.status !== "active") {
       await tx
+        .update(assignmentWork)
+        .set({ status: "ended", outcome: "canceled", endedAt: deps.now() })
+        .where(eq(assignmentWork.id, workId));
+      return false;
+    }
+    if (item) {
+      // Only an item still open: one the person (or the executor) finished or dropped since the decision isn't
+      // reopened by its old turn.
+      const [turned] = await tx
         .update(assignmentPlanItems)
         .set({ status: "doing", turns: sql`${assignmentPlanItems.turns} + 1`, updatedAt: deps.now() })
         .where(
-          and(eq(assignmentPlanItems.assignmentId, w.assignmentId), eq(assignmentPlanItems.id, item.id)),
-        );
+          and(
+            eq(assignmentPlanItems.assignmentId, w.assignmentId),
+            eq(assignmentPlanItems.id, item.id),
+            inArray(assignmentPlanItems.status, ["todo", "doing", "blocked_on_you"]),
+          ),
+        )
+        .returning({ id: assignmentPlanItems.id });
+      if (!turned) {
+        await tx
+          .update(assignmentWork)
+          .set({ status: "ended", outcome: "canceled", endedAt: deps.now() })
+          .where(eq(assignmentWork.id, workId));
+        return false;
+      }
+    }
+    await tx.update(assignmentWork).set({ status: "running" }).where(eq(assignmentWork.id, workId));
     return true;
   });
 }
@@ -614,19 +808,54 @@ async function dispatch(
   });
   publishAssignment(deps, row, "plan");
 
+  // Still this attempt's to send (another loop may have reaped it), the item still open, the assignment active.
+  const sendable = async () => {
+    const [still] = await db
+      .select({ status: assignmentWork.status })
+      .from(assignmentWork)
+      .where(eq(assignmentWork.id, id));
+    if (still?.status === "ended") return false;
+    if (item) {
+      const [current] = await db
+        .select({ status: assignmentPlanItems.status })
+        .from(assignmentPlanItems)
+        .where(and(eq(assignmentPlanItems.assignmentId, row.id), eq(assignmentPlanItems.id, item.id)));
+      if (current?.status === "done" || current?.status === "dropped") {
+        await end("canceled");
+        return false;
+      }
+    }
+    const fresh = await assignmentById(deps, row.id);
+    if (fresh?.status !== "active") {
+      await end("canceled");
+      await refundTurn(deps, row.id, itemId);
+      return false;
+    }
+    return true;
+  };
+
   if (kind === "task" && item) {
     try {
+      if (!(await sendable())) return null;
       const job = await startAssignmentJob(deps, row, {
         id: jobIdOf(id),
         planItemId: item.id,
         title: item.title,
         extra: await itemBrief(deps, row, item, items, w.startedAt),
       });
-      await db.update(assignmentWork).set({ refId: job.id }).where(eq(assignmentWork.id, id));
+      const [bound] = await db
+        .update(assignmentWork)
+        .set({ refId: job.id })
+        .where(and(eq(assignmentWork.id, id), ne(assignmentWork.status, "ended")))
+        .returning();
+      // Reaped while the job was being started: the job doesn't go on for an attempt that no longer counts.
+      if (!bound) await cancelJobs(deps, row);
       return null;
     } catch (err) {
       if (!(err instanceof HttpError)) throw err;
       await end("failed");
+      // Refused before anything reached the runner (offline, no runner): the item keeps its turn.
+      if (BEFORE_SEND.has(err.code)) await refundTurn(deps, row.id, item.id);
       // Another job already runs (a person asked for something): wait for it. Runner offline: try again later.
       if (err.code === "assignment.job_running") return null;
       await assignmentEvent(deps, row, {
@@ -646,6 +875,7 @@ async function dispatch(
   }
   const agent = await agentOf(db, row);
   const text = item ? await itemBrief(deps, row, item, items, w.startedAt) : planBrief(row);
+  if (!(await sendable())) return null;
   const { message } = await postMessage(deps, {
     workspaceId: row.workspaceId,
     channel,
@@ -663,13 +893,15 @@ async function dispatch(
     await end("failed");
     return null;
   }
-  // The last check before the turn goes out: an attempt another loop reaped meanwhile sends nothing.
-  const [still] = await db
-    .select({ status: assignmentWork.status })
-    .from(assignmentWork)
-    .where(eq(assignmentWork.id, id));
-  if (still?.status === "ended") return null;
-  const res = await deps.runtime.runFor({ agent, channel, trigger });
+  // The last check before the turn goes out: an attempt another loop reaped meanwhile, or an assignment paused,
+  // canceled or done meanwhile, sends nothing. The fence turns away this turn if a later attempt already went.
+  if (!(await sendable())) return null;
+  const fence = { key: `${row.id}:${itemId}`, token: n };
+  const res = await deps.runtime.runFor({ agent, channel, trigger, fence });
+  if (!res.ok && res.code === "fenced") {
+    await end("canceled");
+    return null;
+  }
   if (!res.ok) {
     await end("failed");
     await pauseFor(
@@ -695,7 +927,8 @@ async function dispatch(
       .select({ id: assignmentWork.id })
       .from(assignmentWork)
       .where(eq(assignmentWork.refId, res.runId));
-    if (!owner) deps.runtime.cancel(res.runId, null);
+    // Fenced: if a later attempt already went into the same run, the run is that attempt's and stays.
+    if (!owner) deps.runtime.cancel(res.runId, null, fence);
   }
   return null;
 }
@@ -716,9 +949,10 @@ async function itemBrief(
   items: PlanItemRow[],
   startedAt: Date,
 ): Promise<string> {
-  // "Since your last turn": after the end of the previous work (a decision taken, a job that ended).
+  // "Since your last turn": after the start of the previous work (a decision taken, a job that ended). From its
+  // start, not its end: a job the agent started in that turn can end before the turn does.
   const [prev] = await deps.db
-    .select({ at: max(assignmentWork.endedAt) })
+    .select({ at: max(assignmentWork.startedAt) })
     .from(assignmentWork)
     .where(and(eq(assignmentWork.assignmentId, row.id), eq(assignmentWork.status, "ended")));
   const since = prev?.at ?? row.startedAt ?? startedAt;
@@ -798,6 +1032,12 @@ async function validate(
   });
   const verifier = deps.assignmentVerifier ?? modelVerifier;
   const res = await verifier(deps, row, input);
+  // The plan as it is after the call: a fix only for an item still done, with the round that was judged.
+  const after = new Map((await planOf(deps, row.id)).map((i) => [i.id, i]));
+  const unchanged = (t: PlanItemRow) => {
+    const now = after.get(t.id);
+    return now?.status === "done" && now.epoch === t.epoch && now.checks === t.checks;
+  };
   const now = deps.now();
   const verifierActor = { type: "verifier" as const, id: null };
   if (!res.ok) {
@@ -827,7 +1067,38 @@ async function validate(
         );
     return RETRY_WAIT_MS;
   }
-  const fixes: { id: string; title: string; criteria: string; kind: "fix"; fixes: string }[] = [];
+  // The fix items go in before the verdicts: a crash between the two then repeats the round's verifier call (the
+  // fix ids are fixed by item, epoch and round, so nothing doubles), instead of spending a round with no fix.
+  const fixes = res.verdicts.flatMap((v) => {
+    const t = targets.find((x) => x.id === v.id);
+    return t && !v.passes && unchanged(t)
+      ? [
+          {
+            id: fixIdOf(t.id, t.epoch, round),
+            title: t.title,
+            criteria: v.reason.slice(0, 2000),
+            kind: "fix" as const,
+            fixes: t.id,
+          },
+        ]
+      : [];
+  });
+  if (fixes.length) {
+    const w = await writePlan(deps, row.id, {
+      author: verifierActor,
+      mode: "append",
+      items: fixes,
+      note: `validation round ${round}`,
+    });
+    for (const id of w.added)
+      await assignmentEvent(deps, row, {
+        kind: "fix_created",
+        actor: verifierActor,
+        itemId: id,
+        key: `${row.id}:fix:${id}`,
+        data: { fixes: fixes.find((f) => f.id === id)?.fixes ?? null, round },
+      });
+  }
   for (const v of res.verdicts) {
     const t = targets.find((x) => x.id === v.id);
     if (!t) continue;
@@ -874,30 +1145,6 @@ async function validate(
             ),
           ),
         );
-    if (!v.passes)
-      fixes.push({
-        id: fixIdOf(t.id, t.epoch, round),
-        title: t.title,
-        criteria: v.reason.slice(0, 2000),
-        kind: "fix",
-        fixes: t.id,
-      });
-  }
-  if (fixes.length) {
-    const w = await writePlan(deps, row.id, {
-      author: verifierActor,
-      mode: "append",
-      items: fixes,
-      note: `validation round ${round}`,
-    });
-    for (const id of w.added)
-      await assignmentEvent(deps, row, {
-        kind: "fix_created",
-        actor: verifierActor,
-        itemId: id,
-        key: `${row.id}:fix:${id}`,
-        data: { fixes: fixes.find((f) => f.id === id)?.fixes ?? null, round },
-      });
   }
   publishAssignment(deps, row, "plan");
   return null;

@@ -568,6 +568,8 @@ export async function agentSays(
   row: AssignmentRow,
   text: string,
   meta: Record<string, unknown>,
+  /** A fixed client id makes the post idempotent: posting it again returns the same message. */
+  clientId: string = newId("am"),
 ) {
   const channel = await channelInWorkspace(deps.db, row.workspaceId, row.channelId);
   if (!channel) throw notFoundAssignment();
@@ -576,7 +578,7 @@ export async function agentSays(
     channel,
     author: { type: "agent", id: row.agentId },
     body: text,
-    clientId: newId("am"),
+    clientId,
     threadId: row.threadId,
     meta,
   });

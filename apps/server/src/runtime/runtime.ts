@@ -211,6 +211,16 @@ class TimeLimit extends Error {
  * turns and time. Past any of them the run stops with `budget_exhausted` (`routine_budget` when it was the
  * execution's cap), `step_limit` or `time_limit`.
  */
+/**
+ * A fencing token for `runFor`: one key per piece of work (an assignment's item) and a token that grows with each
+ * attempt. A late attempt with a lower token than one already seen gets `fenced`, and `cancel` with the fence only
+ * stops the run while that attempt is still the last one that went into it.
+ */
+export interface RunFence {
+  key: string;
+  token: number;
+}
+
 export interface RunLimits {
   scopes: readonly BudgetScope[];
   maxTurns: number;
@@ -271,6 +281,8 @@ interface Live {
   person: { id: string | null; pinned: boolean };
   /** The run's hard caps (a routine); without them the agent's month and `MAX_TURNS` apply. */
   limits?: RunLimits;
+  /** The last fenced attempt that went into this run (`runFor`). */
+  fence?: RunFence;
 }
 
 const personOf = (row: Pick<MessageRow, "authorKind" | "authorId">) =>
@@ -307,6 +319,8 @@ export class AgentRuntime implements RuntimePort {
   private readonly questionWaiters = new Map<string, (a: Answer) => void>();
   private readonly background = new BackgroundWork();
   private readonly runEndListeners: ((end: RunEnd) => void)[] = [];
+  /** The highest token seen per fence key (`runFor`). */
+  private readonly fences = new Map<string, number>();
 
   constructor(
     private readonly getDeps: () => AppDeps,
@@ -757,9 +771,11 @@ export class AgentRuntime implements RuntimePort {
   }
 
   /** Stops the run. False when it had already ended. */
-  cancel(runId: string, actorUserId: string | null): boolean {
+  cancel(runId: string, actorUserId: string | null, fence?: RunFence): boolean {
     const l = this.live.get(runId);
     if (!l) return false;
+    // A fenced stop only stops the run while the last attempt that went into it is still this one.
+    if (fence && (l.fence?.key !== fence.key || l.fence.token !== fence.token)) return false;
     l.canceledBy = actorUserId;
     l.controller.abort(new RunCanceled());
     return true;
@@ -845,11 +861,21 @@ export class AgentRuntime implements RuntimePort {
     replyMeta?: MessageMeta;
     /** The run's hard caps. With them, the message doesn't go into a run already live in the conversation (`busy`). */
     limits?: RunLimits;
+    fence?: RunFence;
   }): Promise<
     | { ok: true; runId: string; done: Promise<void> }
-    | { ok: false; code: "budget" | "personal_plan" | "busy" }
+    | { ok: false; code: "budget" | "personal_plan" | "busy" | "fenced" }
   > {
     const { agent, channel, trigger } = input;
+    // The run's thread is the trigger's, and the tools are picked by thread: the trigger must be of this channel.
+    if (trigger.channelId !== channel.id || trigger.workspaceId !== channel.workspaceId)
+      throw new Error(`runFor: message ${trigger.id} is not of channel ${channel.id}`);
+    // Checked and raised before any await: of two attempts, the older one that arrives late is turned away.
+    const { fence } = input;
+    if (fence) {
+      if (fence.token < (this.fences.get(fence.key) ?? Number.NEGATIVE_INFINITY)) return { ok: false, code: "fenced" };
+      this.fences.set(fence.key, fence.token);
+    }
     // Without routing, the personal plan's lock is here: only whoever paired triggers the agent (not even into a live run).
     const planOwner = (await withPlanOwner(this.deps.db, agent)).planOwnerUserId;
     if (planOwner !== null && planOwner !== personOf(trigger)) return { ok: false, code: "personal_plan" };
@@ -860,6 +886,7 @@ export class AgentRuntime implements RuntimePort {
     if (running) {
       // The live run doesn't have this request's caps: instead of joining it, the caller tries later.
       if (input.limits) return { ok: false, code: "busy" };
+      if (fence) running.fence = fence;
       await this.steer(running, trigger);
       return { ok: true, runId: running.runId, done: running.done };
     }
@@ -875,7 +902,9 @@ export class AgentRuntime implements RuntimePort {
       limits: input.limits,
     });
     const runId = this.byKey.get(key) ?? "";
-    return { ok: true, runId, done: this.live.get(runId)?.done ?? Promise.resolve() };
+    const started = this.live.get(runId);
+    if (started && fence) started.fence = fence;
+    return { ok: true, runId, done: started?.done ?? Promise.resolve() };
   }
 
   private async block(

@@ -146,10 +146,10 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("the assignment engine on Postgre
         commandPolicy: "always",
         plan: ["Walls"],
       });
-      // Paused straight in the database: the workflow only waits; the test runs the two steps by hand.
+      // Active straight in the database, with nothing waking it: no workflow runs it; the test runs the two steps by hand.
       await server.deps.db
         .update(assignments)
-        .set({ status: "paused", startedAt: server.deps.now() })
+        .set({ status: "active", startedAt: server.deps.now() })
         .where(eq(assignments.id, row.id));
       const before = runtime.turns.length;
       const step = { type: "work" as const, itemId: "p1", n: 1 };

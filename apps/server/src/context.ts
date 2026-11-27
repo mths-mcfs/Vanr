@@ -20,7 +20,7 @@ import type { MessageRow } from "./messages";
 import type { PushSender } from "./push";
 import type { Hub } from "./realtime/hub";
 import type { RunnerHub } from "./runners/hub";
-import type { RunEnd, RunLimits } from "./runtime/runtime";
+import type { RunEnd, RunFence, RunLimits } from "./runtime/runtime";
 import type { ApprovalOutcome, RevisedApproval } from "./runtime/tools";
 import type { WikiLive } from "./wiki-collab";
 
@@ -135,9 +135,11 @@ export interface RuntimePort {
     replyMeta?: MessageMeta;
     /** The run's hard caps. With them, the message doesn't go into a run already live in the conversation (`busy`). */
     limits?: RunLimits;
+    /** The attempt's fencing token: a late attempt older than one already seen is turned away (`fenced`). */
+    fence?: RunFence;
   }): Promise<
     | { ok: true; runId: string; done: Promise<void> }
-    | { ok: false; code: "budget" | "personal_plan" | "busy" }
+    | { ok: false; code: "budget" | "personal_plan" | "busy" | "fenced" }
   >;
   /** The agent's active run in that conversation. Callers: assignments/engine and the assignment engine. */
   activeRun(agentId: string, channelId: string, threadId: string | null): string | null;
@@ -148,7 +150,7 @@ export interface RuntimePort {
   /** Who may stop a live run: whoever started it and the agent's owner. Caller: routes/agents. */
   liveInfo(runId: string): { triggerAuthorId: string; ownerUserId: string } | null;
   /** Stops the run; false when it had already ended. Callers: assignments/engine, the assignment engine and routes/agents. */
-  cancel(runId: string, actorUserId: string | null): boolean;
+  cancel(runId: string, actorUserId: string | null, fence?: RunFence): boolean;
   /** Tells the end of every run (after its status is saved). Caller: the assignment engine. */
   onRunEnd(listener: (end: RunEnd) => void): void;
   /** Called after a person posts; doesn't wait for the runs. Caller: assignments/core. */

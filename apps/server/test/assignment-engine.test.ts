@@ -7,6 +7,7 @@
 // assignment come with slice S5; the tests call the functions those routes call.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { type Db, schema } from "@vanr/engine/db";
+import { newId } from "@vanr/engine/ids";
 import { and, eq } from "drizzle-orm";
 import { type AssignmentRow, moveAssignment } from "../src/assignments/core";
 import { createAssignment, jobEnded, settleJob } from "../src/assignments/engine";
@@ -18,10 +19,12 @@ import {
   decide,
   type Snapshot,
   snapshotOf,
+  stepNext,
 } from "../src/assignments/motor";
 import { planOf, writePlan } from "../src/assignments/plan";
 import { proofsOf } from "../src/assignments/proofs";
 import type { Verifier } from "../src/assignments/verify";
+import type { AppDeps } from "../src/context";
 import type { RunningServer } from "../src/server";
 import { agentRuntime, pairRunner, passing, seedAgent } from "./assignment-kit";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
@@ -45,6 +48,9 @@ const base: Snapshot = {
   person: { decisions: [], others: 0, submission: false },
   lastActivity: null,
   emitted: [],
+  unannounced: false,
+  unsettled: [],
+  stray: false,
 };
 const item = (id: string, over: Partial<Snapshot["items"][number]> = {}): Snapshot["items"][number] => ({
   id,
@@ -457,10 +463,10 @@ describe("the engine on its loop", () => {
           { id: "p2", title: "Two", criteria: "two" },
         ],
       });
-      // Paused straight in the database: the loop only waits; the test calls the step by hand.
+      // Active straight in the database, with nothing waking it: no loop runs it; the test calls the step by hand.
       await server.deps.db
         .update(assignments)
-        .set({ status: "paused", startedAt: server.deps.now() })
+        .set({ status: "active", startedAt: server.deps.now() })
         .where(eq(assignments.id, row.id));
       const turnsBefore = runtime.turns.length;
       await act(server.deps, row.id, { type: "work", itemId: "p1", n: 1 });
@@ -517,7 +523,7 @@ describe("the engine on its loop", () => {
       });
       await server.deps.db
         .update(assignments)
-        .set({ status: "paused", startedAt: server.deps.now() })
+        .set({ status: "active", startedAt: server.deps.now() })
         .where(eq(assignments.id, row.id));
       const before = runtime.turns.length;
       await Promise.all(
@@ -654,7 +660,7 @@ describe("the engine on its loop", () => {
     });
     await server.deps.db
       .update(assignments)
-      .set({ status: "paused", startedAt: server.deps.now() })
+      .set({ status: "active", startedAt: server.deps.now() })
       .where(eq(assignments.id, row.id));
     return reload(row.id);
   }
@@ -822,6 +828,132 @@ describe("the engine on its loop", () => {
       });
       const items = await planOf(server.deps, row.id);
       expect(items.map((i) => [i.id, i.status, i.passes, i.checks])).toEqual([["p1", "dropped", null, 0]]);
+    },
+    SERVER_TEST_MS,
+  );
+  /** On the runner and active straight in the database, with nothing waking it: the test runs the steps. */
+  async function idleOnRunner(title: string, plan: string[]) {
+    const row = await onRunner(title, plan);
+    await server.deps.db
+      .update(assignments)
+      .set({ status: "active", startedAt: server.deps.now() })
+      .where(eq(assignments.id, row.id));
+    return reload(row.id);
+  }
+  const itemOf = async (row: AssignmentRow, id: string) =>
+    (await planOf(server.deps, row.id)).find((i) => i.id === id);
+
+  test(
+    "a job's end doesn't bring back an item the person dropped meanwhile",
+    async () => {
+      const row = await idleOnRunner("Dropped meanwhile", ["Build", "Docs"]);
+      const [job] = await server.deps.db
+        .insert(runnerJobs)
+        .values({
+          id: newId("aj"),
+          workspaceId,
+          runnerId: runner.runnerId,
+          agentId: row.agentId,
+          assignmentId: row.id,
+          threadId: row.threadId,
+          channelId: row.channelId,
+          title: "Build",
+          executor: "claude_code",
+          prompt: "build",
+          planItemId: "p1",
+          status: "done",
+          result: "Built",
+          endedAt: new Date(),
+        })
+        .returning();
+      if (!job) throw new Error("no job");
+      await writePlan(server.deps, row.id, {
+        author: { type: "person", id: ana.user.id },
+        mode: "person",
+        items: [{ id: "p2", title: "Docs" }],
+      });
+      await jobEnded(server.deps, job);
+      expect((await itemOf(row, "p1"))?.status).toBe("dropped");
+      await server.deps.db.update(assignments).set({ status: "canceled" }).where(eq(assignments.id, row.id));
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "an attempt that reaches its send after the item was done starts no job on the runner",
+    async () => {
+      const row = await idleOnRunner("Done meanwhile", ["Build"]);
+      const action = await stepNext(server.deps, row.id);
+      expect(action).toEqual({ type: "work", itemId: "p1", n: 1 });
+      await server.deps.db
+        .update(schema.assignmentPlanItems)
+        .set({ status: "done" })
+        .where(
+          and(eq(schema.assignmentPlanItems.assignmentId, row.id), eq(schema.assignmentPlanItems.id, "p1")),
+        );
+      await act(server.deps, row.id, action);
+      const jobId = jobIdOf(workIdOf(row.id, "p1", 1));
+      expect(starts.get(jobId)).toBeUndefined();
+      expect(await server.deps.db.select().from(runnerJobs).where(eq(runnerJobs.id, jobId))).toEqual([]);
+      const [w] = await server.deps.db
+        .select()
+        .from(assignmentWork)
+        .where(eq(assignmentWork.id, workIdOf(row.id, "p1", 1)));
+      expect([w?.status, w?.outcome]).toEqual(["ended", "canceled"]);
+      await server.deps.db.update(assignments).set({ status: "canceled" }).where(eq(assignments.id, row.id));
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "an attempt reaped while it was starting its job: the job it started is canceled, not left running",
+    async () => {
+      const row = await idleOnRunner("Reaped while starting", ["Build"]);
+      const workId = workIdOf(row.id, "p1", 1);
+      const jobId = jobIdOf(workId);
+      const hub = server.deps.runners;
+      let reaped = false;
+      // Another loop reaps the attempt while this one writes the assignment files to the runner.
+      const slow: AppDeps = {
+        ...server.deps,
+        runners: Object.assign(Object.create(hub), {
+          call: async (...args: Parameters<typeof hub.call>) => {
+            if (!reaped && args[1] === "write") {
+              reaped = true;
+              await act(server.deps, row.id, { type: "reap", workId });
+            }
+            return hub.call(...args);
+          },
+        }),
+      };
+      await act(slow, row.id, { type: "work", itemId: "p1", n: 1 });
+      expect(reaped).toBe(true);
+      await jobSent(row, "p1");
+      await runner.next(
+        (f) => f.type === "request" && f.op === "job.cancel" && f.args.jobId === jobId,
+        15_000,
+      );
+      const [w] = await server.deps.db.select().from(assignmentWork).where(eq(assignmentWork.id, workId));
+      expect([w?.status, w?.outcome, w?.refId]).toEqual(["ended", "interrupted", null]);
+      await server.deps.db.update(assignments).set({ status: "canceled" }).where(eq(assignments.id, row.id));
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "starts refused because the runner is offline don't use up the item's turns",
+    async () => {
+      const row = await idleOnRunner("Offline", ["Build"]);
+      const hub = server.deps.runners;
+      const offline: AppDeps = {
+        ...server.deps,
+        runners: Object.assign(Object.create(hub), { isOnline: () => false }),
+      };
+      for (let n = 1; n <= 5; n++) await act(offline, row.id, { type: "work", itemId: "p1", n });
+      expect((await itemOf(row, "p1"))?.turns).toBe(0);
+      // The item isn't stuck: with the runner back, the next attempt goes.
+      expect(await stepNext(server.deps, row.id)).toMatchObject({ type: "work", itemId: "p1" });
+      await server.deps.db.update(assignments).set({ status: "canceled" }).where(eq(assignments.id, row.id));
     },
     SERVER_TEST_MS,
   );
