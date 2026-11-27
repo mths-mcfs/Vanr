@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { CredentialRef } from "@vanr/engine/action-credential";
 import { payloadHash, RiskTracker } from "@vanr/engine/effects";
 import { z } from "zod";
+import { BROWSER_TOOLS } from "../runners/agent-tools";
 import {
   type ApprovalOutcome,
   type ApprovalRequest,
@@ -15,8 +16,8 @@ import {
 
 // runTool with the gate (seam 1), without a database: the context is fake and records what the runtime would do.
 // `rules`: remembered rules by `tool|key`; `review`: the model reviewer's verdict.
-// The origin's MCP connector class cases wait for `integrations/tools`, and the browser reviewer cases for
-// `runners/agent-tools`: they come with the modules that define those tools.
+// The origin's MCP connector class cases wait for `integrations/tools`: they come with the module that defines
+// those tools.
 function fakeCtx(
   decide: (req: ApprovalRequest) => Promise<ApprovalOutcome> | ApprovalOutcome,
   opts: { rules?: Record<string, string>; review?: (req: ReviewRequest) => "allow" | "ask" | null } = {},
@@ -313,6 +314,50 @@ describe("request shortcuts: always allow and the reviewer", () => {
     expect(reviews).toEqual([]);
     expect(ran).toEqual([]);
     expect(asked[0]).toMatchObject({ effect: "K3", gateReason: "irreversible", rule: null });
+  });
+
+  // Rule of two in the browser: it read the page (A), typed the secret (B), wants to click (C, K2).
+  // The real plan reads the runner from the database; here the browser's external destination is enough.
+  const stubbed = BROWSER_TOOLS.map(
+    (t) =>
+      ({
+        ...t,
+        plan: async () => ({ destination: { kind: "external", allowed: true, target: "browser" } }),
+        run: async () => "page text",
+      }) as ToolDef<unknown>,
+  );
+  const risky = (ctx: ToolContext) => {
+    ctx.risk.raise({ flag: "A", source: "browser_read (web page)" });
+    ctx.risk.raise({ flag: "B", source: "browser_type_secret PIN" });
+  };
+
+  test("the reviewer approves a risk request in K2: it runs without a person and sees only the effect", async () => {
+    const { ctx, asked, decisions, reviews } = fakeCtx(reject, { review: () => "allow" });
+    risky(ctx);
+    const out = await runTool(ctx, stubbed, "browser_click", { target: "#send" });
+    expect(out.isError).toBe(false);
+    expect(asked).toEqual([]);
+    expect(decisions).toEqual([
+      {
+        tool: "browser_click",
+        kind: "ask",
+        reason: "rule_of_two",
+        by: { kind: "reviewer", verdict: "allow" },
+      },
+    ]);
+    // Blind to the reasoning: neither the flags with their source (what the agent read) nor the raw input.
+    expect(Object.keys(reviews[0] ?? {}).sort()).toEqual(["effect", "preview", "reason", "tool"]);
+  });
+
+  test("the reviewer asks for a person: the request goes marked; without a reviewer, the person decides as before", async () => {
+    const asks = fakeCtx(reject, { review: () => "ask" });
+    risky(asks.ctx);
+    await runTool(asks.ctx, stubbed, "browser_click", { target: "#send" });
+    expect(asks.asked[0]).toMatchObject({ gateReason: "rule_of_two", reviewed: true, rule: null });
+    const off = fakeCtx(reject, { review: () => null });
+    risky(off.ctx);
+    await runTool(off.ctx, stubbed, "browser_click", { target: "#send" });
+    expect(off.asked[0]).toMatchObject({ gateReason: "rule_of_two", reviewed: false });
   });
 
   test("a request from a workspace rule (policy) belongs to the person: the reviewer isn't consulted", async () => {
