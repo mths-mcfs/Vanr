@@ -43,11 +43,11 @@ import type { AppDeps, AppEnv, Ctx, WorkspaceMember } from "../context";
 import {
   answerRound,
   changeDebate,
+  commentOn,
   type DebatePostRow,
   type DebateRow,
   debateById,
   freezePseudonyms,
-  insertPost,
   leaveRound,
   MAX_ROUNDS,
   openDebate,
@@ -457,19 +457,12 @@ export function registerDebates(app: Hono<AppEnv>) {
         "Only a person at the table on their turn can ask for another round",
       );
     if (!myTurn) {
-      const current = row.userIds.includes(me.userId)
-        ? row
-        : await changeLocked(deps, row, (fresh) =>
-            fresh.userIds.includes(me.userId) ? null : { userIds: [...fresh.userIds, me.userId] },
-          );
-      const post = await insertPost(deps, current, {
-        author: person(me),
-        kind: "comment",
-        round: current.round,
+      const commented = await commentOn(deps, row.id, person(me), {
         body: input.body,
         replyTo: input.replyTo ?? null,
       });
-      return c.json<DebatePost>(toPost(post, current), 201);
+      if (!commented) throw closedError();
+      return c.json<DebatePost>(toPost(commented.post, commented.debate), 201);
     }
     // The position, leaving the queue and the request for one more round (on the last one, up to the maximum) go in
     // together (answerRound): the round doesn't close without them.

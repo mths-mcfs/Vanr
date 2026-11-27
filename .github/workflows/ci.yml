@@ -467,7 +467,7 @@ jobs:
               exit 1
             fi
           done
-          set -- debate-answer debate-stop
+          set -- debate-answer debate-stop debate-comment
           for label in "$@"; do
             if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" forced-debates.log; then
               echo "::error::the forced $label test did not fail on its outcome without the lock"

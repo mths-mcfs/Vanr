@@ -184,12 +184,18 @@ export function toDebate(row: DebateRow): Debate {
   };
 }
 
+/** A post's frozen label: the pseudonym it was shown with before the table changed (see `recastPseudonyms`). */
+const frozenLabel = (post: DebatePostRow) =>
+  typeof post.meta.pseudonym === "string" ? post.meta.pseudonym : null;
+
+/** The pseudonym an agent's post shows: the frozen one, otherwise the table's current one. */
+const postLabel = (post: DebatePostRow, debate: Pick<DebateRow, "pseudonyms">) =>
+  frozenLabel(post) ?? debate.pseudonyms[post.author.id] ?? null;
+
 /** The post as it goes out: while the debate is open, an agent's post loses its author and run (the pseudonym stays). */
 export function toPost(row: DebatePostRow, debate: Pick<DebateRow, "status" | "pseudonyms">): DebatePost {
   const agentAuthor = row.author.type === "agent";
-  // A post written before the table changed keeps the pseudonym it was shown with (see `recastPseudonyms`).
-  const frozen = typeof row.meta.pseudonym === "string" ? row.meta.pseudonym : null;
-  const pseudonym = agentAuthor ? (frozen ?? debate.pseudonyms[row.author.id] ?? null) : null;
+  const pseudonym = agentAuthor ? postLabel(row, debate) : null;
   const masked = agentAuthor && row.kind !== "synthesis" && isAnonymous(debate);
   return {
     id: row.id,
@@ -330,8 +336,10 @@ async function debateSpent(deps: AppDeps, row: DebateRow): Promise<number> {
 }
 
 /**
- * The votes of a round: one per participant at the table (an agent or a person with a speaker slot), by the answer's key. The member
- * is the agent's pseudonym; the person, who isn't anonymous, goes in by id.
+ * The votes of a round: one per participant at the table (an agent or a person with a speaker slot), by the answer's
+ * key. `voter` is the author's id, only for matching a participant's votes across rounds. `member` is what the
+ * summary shows: the label the agent's post was shown with, never the id, even after the agent left the table; the
+ * person, who isn't anonymous, goes in by id.
  */
 function votesOf(posts: readonly DebatePostRow[], row: DebateRow, round: number) {
   return posts.flatMap((p) => {
@@ -343,7 +351,8 @@ function votesOf(posts: readonly DebatePostRow[], row: DebateRow, round: number)
     if (!speaks) return [];
     return [
       {
-        member: row.pseudonyms[p.author.id] ?? p.author.id,
+        voter: p.author.id,
+        member: p.author.type === "agent" ? (postLabel(p, row) ?? "?") : p.author.id,
         key: claim.key,
         answer: claim.answer,
         confidence: claim.confidence,
@@ -573,6 +582,54 @@ export async function answerRound(
 }
 
 /**
+ * A comment from outside the round's queue. It is written under the debate's lock, so it never lands after the
+ * debate closed; whoever comments joins the people who read the debate. null when the debate is closed.
+ */
+export async function commentOn(
+  deps: AppDeps,
+  debateId: string,
+  who: ActorRef,
+  input: { body: string; replyTo: string | null },
+): Promise<{ debate: DebateRow; post: DebatePostRow } | null> {
+  const done = await deps.db.transaction(async (tx) => {
+    const locked = await lockDebate(tx, debateId);
+    if (!locked || locked.status === "done" || locked.status === "canceled") return null;
+    const change: DebateSet | null =
+      who.type === "person" && !locked.userIds.includes(who.id)
+        ? { userIds: [...locked.userIds, who.id] }
+        : null;
+    const [debate] = change
+      ? await tx
+          .update(debates)
+          .set({ ...change, updatedAt: deps.now() })
+          .where(eq(debates.id, debateId))
+          .returning()
+      : [locked];
+    if (!debate) throw new Error("debate update failed");
+    const [post] = await tx
+      .insert(debatePosts)
+      .values({
+        id: newId("dpost"),
+        debateId,
+        createdAt: deps.now(),
+        author: who,
+        kind: "comment",
+        round: debate.round,
+        body: input.body,
+        replyTo: input.replyTo,
+      })
+      .returning();
+    if (!post) throw new Error("debate post insert failed");
+    return { debate, post, change };
+  });
+  if (!done) return null;
+  if (done.change) await afterSave(deps, done.debate, done.change);
+  else await reindex(deps, { kind: "debate", id: debateId });
+  await publishPost(deps, done.debate, done.post);
+  return { debate: done.debate, post: done.post };
+}
+
+/**
  * Opens the hidden posts (of the round that closed, or all before the synthesis) together. All get the same time:
  * the order of arrival would tell who finished when. The ids are random, so the order by id is already shuffled.
  */
@@ -704,8 +761,14 @@ const claimLine = (claim: DebateClaim | null) =>
     ? `answer: ${asData(claim.answer, OPTION_CHARS)}${claim.confidence !== null ? ` (confidence ${claim.confidence})` : ""}\n`
     : "";
 
-/** An agent without a pseudonym (or a removed person) never goes in by id: the id would say who spoke. */
-const nameOf = (names: Map<string, string>, author: ActorRef) => names.get(author.id) ?? "Someone";
+/**
+ * The name a post goes by in a prompt. An agent's post keeps the label it was shown with, like the posts the people
+ * read. An agent without a pseudonym (or a removed person) never goes in by id: the id would say who spoke.
+ */
+const nameOf = (names: Map<string, string>, post: DebatePostRow) => {
+  const frozen = post.author.type === "agent" ? frozenLabel(post) : null;
+  return frozen ? `Participant ${frozen}` : (names.get(post.author.id) ?? "Someone");
+};
 
 /** The whole conversation (synthesis and comments), with the names the caller passes (pseudonyms for agents). */
 export function transcript(posts: DebatePostRow[], names: Map<string, string>): string {
@@ -713,7 +776,7 @@ export function transcript(posts: DebatePostRow[], names: Map<string, string>): 
     .filter((p) => p.kind !== "out_of_budget" && p.body.trim())
     .map((p) => {
       const kind = p.kind === "comment" ? ' kind="comment"' : "";
-      return `<post round="${p.round}" from="${asData(nameOf(names, p.author), NAME_CHARS)}"${kind}>\n${claimLine(p.claimData)}${asData(p.body, POST_CHARS)}\n</post>`;
+      return `<post round="${p.round}" from="${asData(nameOf(names, p), NAME_CHARS)}"${kind}>\n${claimLine(p.claimData)}${asData(p.body, POST_CHARS)}\n</post>`;
     });
   if (!lines.length) return "(nobody has spoken yet)";
   return fitLines(lines);
@@ -751,7 +814,7 @@ export function challengeContext(
   const order = shuffled(previous, seededRng(`${row.id}:${round}:${agentId}`));
   const lines = order.map((p) => {
     const claim = p.claimData;
-    const who = p.author.type === "agent" && p.author.id === agentId ? "You" : nameOf(names, p.author);
+    const who = p.author.type === "agent" && p.author.id === agentId ? "You" : nameOf(names, p);
     const head = claim ? claimLine(claim) : "no structured answer\n";
     const evidence = claim?.evidence.length
       ? `\nEvidence: ${claim.evidence.map((e) => asData(e, OPTION_CHARS * 3)).join("; ")}`
@@ -761,7 +824,7 @@ export function challengeContext(
   const comments = posts.filter((p) => p.kind === "comment" || p.kind === "free");
   const commentLines = comments.map(
     (p) =>
-      `<post from="${asData(nameOf(names, p.author), NAME_CHARS)}" kind="comment">\n${asData(p.body, POST_CHARS)}\n</post>`,
+      `<post from="${asData(nameOf(names, p), NAME_CHARS)}" kind="comment">\n${asData(p.body, POST_CHARS)}\n</post>`,
   );
   return [
     `# Positions in round ${round - 1} (pseudonymous, in random order)\n${fitLines(lines) || "(none)"}`,
@@ -897,7 +960,7 @@ async function closeRound(deps: AppDeps, seen: DebateRow): Promise<boolean> {
     const opened = await revealHidden(tx, deps, row.id);
     const posts = await postsOf(tx, row.id);
     const keysOf = (round: number) =>
-      new Map(votesOf(posts, row, round).map((v) => [v.member, v.key] as const));
+      new Map(votesOf(posts, row, round).map((v) => [v.voter, v.key] as const));
     const ofRound = posts.filter((p) => p.round === row.round);
     const skipped = ofRound.filter((p) => p.kind === "out_of_budget");
     const current = keysOf(row.round);

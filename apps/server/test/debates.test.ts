@@ -314,6 +314,7 @@ describe("the debates' debts (F2-3.2-P0-01)", () => {
       kind: "turn",
       round: i + 1,
       body: `${String(i).padStart(2, "0")}${"x".repeat(5000)}`,
+      meta: {},
     })) as unknown as DebatePostRow[];
     const text = transcript(posts, new Map([["ag", "Lia"]]));
     expect(text.length).toBeLessThanOrEqual(TRANSCRIPT_CHARS + 100);
@@ -542,6 +543,96 @@ describe("anonymity when the table changes", () => {
         .map((p: Shown) => p.pseudonym);
       expect(evaLabels.length).toBeGreaterThan(0);
       for (const label of evaLabels) expect(newLabels.has(label)).toBe(true);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("anonymity when an agent leaves", () => {
+  test(
+    "the round summary names the votes by the labels the posts showed: a removed agent's id never appears",
+    async () => {
+      const { workspaceId, general, base, open, ana, beto, lia, rui } = await team();
+      const eva = await seedAgent(server, workspaceId, ana, "eva", [general]);
+      const socket = await TestSocket.open(beto.browser, workspaceId);
+      const voters = [lia, rui, eva];
+      const t = await open(ana, {
+        title: "Leaver",
+        goal: "Who left?",
+        agentIds: voters.map((a) => a.id),
+        rounds: 5,
+        speakers: [
+          ...voters.map((a) => ({ type: "agent" as const, id: a.id })),
+          { type: "person", id: beto.user.id },
+        ],
+      });
+      await settle();
+      const row = await debateById(server.deps.db, workspaceId, t.id);
+      for (const [i, agent] of voters.entries()) {
+        const answer = i === 0 ? "yes" : "no";
+        await answerRound(
+          server.deps,
+          row,
+          { type: "agent", id: agent.id },
+          {
+            kind: "turn",
+            body: "neutral",
+            claimData: { answer, key: answer, confidence: 0.7, reason: "", evidence: [], changed: false },
+            runId: `run_${agent.handle}`,
+          },
+        );
+      }
+      expect(
+        (await call(beto, "POST", `${base}/${t.id}/posts`, { body: "neutral", answer: "no" })).status,
+      ).toBe(201);
+      await settle();
+      const removed = await call(ana, "PUT", `${base}/${t.id}/participants`, { agentsToRemove: [rui.id] });
+      expect(removed.status).toBe(200);
+      await settle();
+
+      const detail = (await call(beto, "GET", `${base}/${t.id}`)).body;
+      expect(detail.anonymous).toBe(true);
+      // The summary of round 0 lists the votes under the labels round 0's posts were shown with (and the person by
+      // id): neither the leaver's id nor the labels drawn after the change, which would pair old labels with new.
+      const shown = detail.posts
+        .filter((p: { kind: string; round: number }) => p.kind === "turn" && p.round === 0)
+        .map((p: { pseudonym: string }) => p.pseudonym);
+      expect(shown).toHaveLength(3);
+      const round0 = detail.track.roundLimit.find((r: { round: number }) => r.round === 0);
+      const members = round0.majority.groups.flatMap((g: { members: string[] }) => g.members).sort();
+      expect(members).toEqual([...shown, beto.user.id].sort());
+
+      // Who sits at the table is public; who said what isn't. Outside the table's fields, no agent id or run id.
+      const table = new Set(["agentIds", "speakers", "leadAgentId", "engagedAgentIds"]);
+      const secrets = [...voters.map((a) => a.id), ...voters.map((a) => `run_${a.handle}`)];
+      const leaked = (value: unknown) => {
+        const text = JSON.stringify(value, (k, v) => (table.has(k) ? undefined : v));
+        return secrets.filter((s) => text.includes(s));
+      };
+      const events = socket.frames.filter((f) => f.type === "event").map((f) => ev(f));
+      expect(events.some((e) => e.type === "debate.post_created")).toBe(true);
+      for (const r of [detail, removed.body, (await call(beto, "GET", base)).body, events])
+        expect(leaked(r)).toEqual([]);
+      socket.close();
+      // The synthesis reads round 0 under the labels the people read, with the table's current map at hand.
+      const now = await debateById(server.deps.db, workspaceId, t.id);
+      const posts = await server.deps.db
+        .select()
+        .from(schema.debatePosts)
+        .where(eq(schema.debatePosts.debateId, t.id));
+      const names = new Map(Object.entries(now.pseudonyms).map(([id, p]) => [id, `Participant ${p}`]));
+      const said = transcript(posts, names);
+      for (const label of shown) expect(said).toContain(`from="Participant ${label}"`);
+      for (const label of Object.values(now.pseudonyms)) expect(said).not.toContain(`Participant ${label}"`);
+      expect(leaked(said)).toEqual([]);
+      const chunks = await server.deps.db
+        .select({ text: schema.searchChunks.text, authorId: schema.searchChunks.authorId })
+        .from(schema.searchChunks)
+        .where(eq(schema.searchChunks.sourceId, t.id));
+      expect(leaked(chunks)).toEqual([]);
+      // The check bites: once the debate closes, the posts show their authors.
+      const canceled = (await call(ana, "POST", `${base}/${t.id}/cancel`)).body;
+      expect(leaked(canceled)).toEqual(expect.arrayContaining([lia.id, rui.id, eva.id]));
     },
     SERVER_TEST_MS,
   );

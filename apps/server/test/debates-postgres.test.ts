@@ -16,7 +16,7 @@ import { newId } from "@vanr/engine/ids";
 import { and, eq, sql } from "drizzle-orm";
 import postgres from "postgres";
 import type { AppDeps } from "../src/context";
-import { answerRound, openDebate, stopDebate } from "../src/debates";
+import { answerRound, changeDebate, commentOn, openDebate, stopDebate } from "../src/debates";
 import { drainQueues, dueRoutines, registerFire } from "../src/routines";
 import type { RunningServer } from "../src/server";
 import { signedIn, startTestServer } from "./harness";
@@ -176,6 +176,37 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("debates and routines at once on 
           b: false,
           answers: 0,
         },
+      );
+    });
+  }, 120_000);
+
+  test("forced: a comment waits on the debate's lock and finds the debate canceled", async () => {
+    await withServer("deb_cmt", async (server, admin, ctx) => {
+      const [a, b] = ctx.people;
+      if (!a || !b) throw new Error("no people");
+      const row = await peopleDebate(server, ctx, [a]);
+      // A: the cancel, held after its UPDATE. B: a comment that read the debate open before it.
+      const run = await forcedPair(
+        admin,
+        "debate-comment",
+        "update",
+        (side, hooks) => {
+          const deps = withDb(server.deps, hooks);
+          return side === "A"
+            ? changeDebate(deps, row.id, () => ({ status: "canceled" })).then((r) => !!r)
+            : commentOn(deps, row.id, b, { body: "late", replyTo: null }).then((r) => !!r);
+        },
+        { bKind: "select" },
+      );
+      expect(run.aPids).not.toEqual(run.bPids);
+      const comments = await server.deps.db
+        .select()
+        .from(schema.debatePosts)
+        .where(and(eq(schema.debatePosts.debateId, row.id), eq(schema.debatePosts.kind, "comment")));
+      outcome(
+        "debate-comment",
+        { a: run.a, b: run.b, comments: comments.length },
+        { a: true, b: false, comments: 0 },
       );
     });
   }, 120_000);

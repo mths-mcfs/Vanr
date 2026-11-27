@@ -77,6 +77,7 @@ describe("debates v1: rounds, claim and majority", () => {
           kind: "turn",
           round: 0,
           body: `post ${id}`,
+          meta: {},
           claimData: {
             answer: `r${i}`,
             key: `r${i}`,
