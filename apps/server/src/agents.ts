@@ -1,5 +1,15 @@
 // Agents: the API shape, the lookup in the workspace, the month's budget and who may edit.
-import { type Agent, type AgentDetail, type AgentRole, can, type Memory } from "@vanr/contract";
+import {
+  AGENT_BODIES,
+  AGENT_EXTRAS,
+  AGENT_MOUTHS,
+  type Agent,
+  type AgentAppearance,
+  type AgentDetail,
+  type AgentRole,
+  can,
+  type Memory,
+} from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import { contentSha256 } from "@vanr/engine/memory";
 import type { BudgetScope } from "@vanr/engine/usage";
@@ -49,6 +59,27 @@ export function isAgentRole(v: string): v is AgentRole {
   return AGENT_ROLES.some((r) => r === v);
 }
 
+const listed = <T extends string>(list: readonly T[], value: unknown): T | undefined =>
+  list.find((v) => v === value);
+
+/**
+ * The appearance as the API gives it. The routes write the body, the mouth and the extra only from the contract's
+ * lists; a stored value outside them (or null) is left out on the way out, as if the agent had no such part.
+ */
+export function toAppearance(stored: AgentAppearance): AgentAppearance {
+  const body = listed(AGENT_BODIES, stored.body);
+  const mouth = listed(AGENT_MOUTHS, stored.mouth);
+  const extra = listed(AGENT_EXTRAS, stored.extra);
+  return {
+    color: stored.color,
+    eyes: stored.eyes,
+    adornment: stored.adornment,
+    ...(body ? { body } : {}),
+    ...(mouth ? { mouth } : {}),
+    ...(extra ? { extra } : {}),
+  };
+}
+
 export function toAgent(row: Talker, viewerId: string, busy: boolean, testModel: boolean): Agent {
   return {
     id: row.id,
@@ -60,7 +91,7 @@ export function toAgent(row: Talker, viewerId: string, busy: boolean, testModel:
     ownerUserId: row.ownerUserId,
     audience: { mode: row.visibilityMode, userIds: row.audienceUserIds },
     reachable: canTalkTo(row, viewerId),
-    appearance: row.appearance,
+    appearance: toAppearance(row.appearance),
     harness: { kind: row.harnessKind, model: row.harnessModel ?? row.model, environment: row.environmentId },
     advisor: row.advisorModel ? { model: row.advisorModel, maxUses: row.advisorMaxUses } : null,
     busy,
@@ -159,7 +190,22 @@ export async function usageSince(db: Db, workspaceId: string, since: Date) {
   return new Map(rows.map((r) => [r.agentId, { calls: r.calls, costUsd: Number(r.cost ?? 0) }]));
 }
 
-export async function agentChannels(db: Db, agentId: string) {
+/** Who looks at an agent's channels: whoever manages agents sees every one, anyone else only those they read. */
+export interface ChannelViewer {
+  userId: string;
+  seesAll: boolean;
+}
+
+export const channelViewer = (me: WorkspaceMember): ChannelViewer => ({
+  userId: me.userId,
+  seesAll: can(me.role, "manage_agents"),
+});
+
+/**
+ * The agent's channels (DMs stay out). Given a viewer who doesn't manage agents, a private channel they are not
+ * a member of is left out: its id would name a channel whose runs answer them 404.
+ */
+export async function agentChannels(db: Db, agentId: string, viewer?: ChannelViewer) {
   return db
     .select({ id: channelMemberships.channelId, autoAnswer: channelMemberships.autoAnswer })
     .from(channelMemberships)
@@ -170,6 +216,23 @@ export async function agentChannels(db: Db, agentId: string) {
         eq(channelMemberships.memberId, agentId),
         eq(channels.kind, "channel"),
         isNull(channels.archivedAt),
+        viewer && !viewer.seesAll
+          ? or(
+              eq(channels.visibility, "public"),
+              inArray(
+                channels.id,
+                db
+                  .select({ id: channelMemberships.channelId })
+                  .from(channelMemberships)
+                  .where(
+                    and(
+                      eq(channelMemberships.memberType, "person"),
+                      eq(channelMemberships.memberId, viewer.userId),
+                    ),
+                  ),
+              ),
+            )
+          : undefined,
       ),
     );
 }
@@ -177,19 +240,19 @@ export async function agentChannels(db: Db, agentId: string) {
 export async function toAgentDetail(
   db: Db,
   row: AgentRow,
-  input: { viewerId: string; busy: boolean; testModel: boolean; now: Date },
+  input: { viewer: ChannelViewer; busy: boolean; testModel: boolean; now: Date },
 ): Promise<AgentDetail> {
   const workspace = await workspaceBudgetDefaults(db, row.workspaceId);
   const usage = (await monthUsage(db, [row.id], input.now)).get(row.id) ?? { runs: 0, tokens: 0, costUsd: 0 };
   const budget = budgetOf(row, workspace.defaultBudget);
   return {
-    ...toAgent(await withPlanOwner(db, row), input.viewerId, input.busy, input.testModel),
+    ...toAgent(await withPlanOwner(db, row), input.viewer.userId, input.busy, input.testModel),
     budgetSpentPct: budget > 0 ? Math.min(999, Math.round((usage.costUsd / budget) * 100)) : 100,
     budgetPerMonthUsd: budget,
     inheritedBudgetUsd: workspace.defaultBudget,
     budgetInherited: row.budgetPerMonthUsd === null,
     credentialId: row.credentialId,
-    channels: await agentChannels(db, row.id),
+    channels: await agentChannels(db, row.id, input.viewer),
     queuedApprovals: (
       await db
         .select({ id: schema.approvals.id })

@@ -1,5 +1,6 @@
-// The runtime port before slice S6: background work is real (and stopping the server waits for it), every
-// other method is a declared absence that throws `not_available` with its name.
+// The runtime port before slice S6: background work is real (and stopping the server waits for it), the
+// questions about live runs answer that none is live, and every other method is a declared absence that throws
+// `not_available` with its name.
 import { describe, expect, test } from "bun:test";
 import { sql } from "drizzle-orm";
 import type { RuntimePort } from "../src/context";
@@ -47,6 +48,24 @@ describe("runtime port", () => {
   );
 
   test(
+    "without the runtime no run is live: nobody is busy, no run is active and none can be found to stop",
+    async () => {
+      const server = await startTestServer();
+      try {
+        const rt = server.deps.runtime;
+        expect(rt.isBusy("agt_x")).toBe(false);
+        expect([...rt.busyAgents()]).toEqual([]);
+        expect(rt.activeRuns({ workspaceId: "w" })).toEqual([]);
+        expect(rt.activeRuns({ workspaceId: "w", channelId: "c" })).toEqual([]);
+        expect(rt.liveInfo("run_x")).toBeNull();
+      } finally {
+        await server.stop();
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "every method the runtime slice brings throws not_available with its own name",
     async () => {
       const server = await startTestServer();
@@ -56,15 +75,11 @@ describe("runtime port", () => {
           ["complete", () => rt.complete({} as never)],
           ["runFor", () => rt.runFor({} as never)],
           ["activeRun", () => rt.activeRun("a", "c", null)],
-          ["activeRuns", () => rt.activeRuns({ workspaceId: "w" })],
           ["liveRun", () => rt.liveRun("r")],
-          ["liveInfo", () => rt.liveInfo("r")],
           ["cancel", () => rt.cancel("r", null)],
           ["onRunEnd", () => rt.onRunEnd(() => {})],
           ["onPersonMessage", () => rt.onPersonMessage({} as never)],
           ["providerForWorkspace", () => rt.providerForWorkspace("w")],
-          ["isBusy", () => rt.isBusy("a")],
-          ["busyAgents", () => rt.busyAgents()],
           ["awaitsApproval", () => rt.awaitsApproval("ap")],
           ["resolveApproval", () => rt.resolveApproval("ap", {} as never)],
           ["reviseApproval", () => rt.reviseApproval("ap", {})],

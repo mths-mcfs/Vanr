@@ -1,9 +1,8 @@
-// Memory: immutable versions and restore, the three stores, the store cap. Only the scenarios the memory routes
-// answer on their own are here; the agent's tools (remember, the memory tool, flag A), the instruction versions,
-// proposals and skills wait for the runtime, the agent and skill routes (S4 to S6). Where the origin had the agent
+// Memory: immutable versions and restore, the three stores, the store cap, and the agent's instruction versions
+// (through the agent routes). The agent's tools (remember, the memory tool, flag A) wait for the runtime (P16). Where the origin had the agent
 // write a memory through a run, the test writes the same row with `createMemory` and the agent as its author.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { Memory, MemoryVersion } from "@vanr/contract";
+import type { InstructionVersion, Memory, MemoryVersion } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { MEMORY_STORE_MAX_ITEMS } from "@vanr/engine/memory";
@@ -250,5 +249,126 @@ describe("the three stores", () => {
       expect(back.status).toBe(409);
     },
     SERVER_TEST_MS * 2,
+  );
+});
+
+describe("instruction versions", () => {
+  /** Lia made through the agents route, so her first version is the one the route writes. */
+  async function withLia() {
+    const ana = await signedIn(server, "Ana", email("ana"));
+    const { workspaceId, general } = await seedWorkspace(server, ana, "Memory");
+    const beto = await memberOf(server, workspaceId, "Beto", email("beto"));
+    const lia = await call<{ id: string }>(ana, workspaceId, "POST", "/agents", {
+      name: "Lia",
+      handle: "lia",
+      role: "support",
+      instructions: "Serves customers.",
+      channelIds: [general],
+    });
+    return { workspaceId, ana, beto, lia };
+  }
+  const instructionVersions = async (who: Person, workspaceId: string, agentId: string) =>
+    (
+      await call<{ versions: InstructionVersion[] }>(
+        who,
+        workspaceId,
+        "GET",
+        `/agents/${agentId}/instruction-versions`,
+      )
+    ).versions;
+
+  test(
+    "create, edit with a reason, proposal, undo and restore: every change is a version",
+    async () => {
+      const { workspaceId, ana, beto, lia } = await withLia();
+      let list = await instructionVersions(ana, workspaceId, lia.id);
+      expect(list.map((v) => [v.seq, v.source, v.text])).toEqual([[1, "create", "Serves customers."]]);
+      expect(list[0]?.author).toEqual({ type: "person", id: ana.user.id });
+
+      await call(ana, workspaceId, "PATCH", `/agents/${lia.id}`, {
+        instructions: "Serves customers. Briefly.",
+        instructionsReason: "long answers",
+      });
+      // The same text is no version.
+      await call(ana, workspaceId, "PATCH", `/agents/${lia.id}`, {
+        instructions: "Serves customers. Briefly.",
+      });
+      list = await instructionVersions(ana, workspaceId, lia.id);
+      expect(list[0]).toMatchObject({
+        seq: 2,
+        source: "edit",
+        reason: "long answers",
+        text: "Serves customers. Briefly.",
+      });
+
+      // An accepted proposal writes a version with the proposal; undoing it writes another. The proposal is the
+      // row the agent's propose tool writes (the run comes with the runtime, P16).
+      const proposalId = newId("prp");
+      await server.deps.db.insert(schema.proposals).values({
+        id: proposalId,
+        workspaceId,
+        agentId: lia.id,
+        targetKind: "agent_prompt",
+        recipientAgentId: lia.id,
+        title: "Language",
+        before: "Serves customers. Briefly.",
+        after: "Serves customers. Briefly. In English.",
+        why: "customers abroad",
+      });
+      const accepted = await call<{ actionId: string | null }>(
+        ana,
+        workspaceId,
+        "POST",
+        `/proposals/${proposalId}/accept`,
+      );
+      list = await instructionVersions(ana, workspaceId, lia.id);
+      expect(list[0]).toMatchObject({ seq: 3, source: "proposal", proposalId, reason: "Language" });
+      await call(ana, workspaceId, "POST", `/actions/${accepted.actionId ?? ""}/undo`);
+      list = await instructionVersions(ana, workspaceId, lia.id);
+      expect(list[0]).toMatchObject({ seq: 4, source: "undo", text: "Serves customers. Briefly." });
+
+      // Going back to the first = writing its text again (nothing old changes).
+      const before = JSON.stringify(await instructionVersions(ana, workspaceId, lia.id));
+      const first = list.find((v) => v.seq === 1);
+      const restore = (who: Person, reason?: string) =>
+        call<InstructionVersion>(
+          who,
+          workspaceId,
+          "POST",
+          `/agents/${lia.id}/instruction-versions/${first?.id ?? ""}/restore`,
+          reason === undefined ? {} : { reason },
+        );
+      expect((await apiError(restore(beto, "x"))).status).toBe(403);
+      expect(await restore(ana, "back to the original")).toMatchObject({
+        seq: 5,
+        source: "restore",
+        restoredFromSeq: 1,
+        text: "Serves customers.",
+        reason: "back to the original",
+      });
+      expect((await instructionVersions(ana, workspaceId, lia.id)).slice(1)).toEqual(JSON.parse(before));
+      expect((await apiError(restore(ana))).code).toBe("instructions.same");
+      expect(
+        (await call<{ instructions: string }>(ana, workspaceId, "GET", `/agents/${lia.id}`)).instructions,
+      ).toBe("Serves customers.");
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "an agent from before the history: the first edit keeps the text that was there",
+    async () => {
+      const { workspaceId, ana, lia } = await withLia();
+      await server.deps.db
+        .delete(schema.instructionVersions)
+        .where(eq(schema.instructionVersions.agentId, lia.id));
+      await call(ana, workspaceId, "PATCH", `/agents/${lia.id}`, { instructions: "New." });
+      const list = await instructionVersions(ana, workspaceId, lia.id);
+      expect(list.map((v) => [v.seq, v.source, v.author.type, v.text])).toEqual([
+        [2, "edit", "person", "New."],
+        [1, "initial", "system", "Serves customers."],
+      ]);
+    },
+    SERVER_TEST_MS,
   );
 });
