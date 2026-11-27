@@ -1237,6 +1237,7 @@ export class FakeServer {
     snoozeNotification: (params, session) =>
       this.changeNotice(params, session, (notice, body) => {
         const until = typeof body.until === "string" ? body.until : null;
+        if (until !== null && !Number.isFinite(Date.parse(until))) return invalid();
         if (until !== null && Date.parse(until) <= this.now().getTime()) {
           return envelope(400, "notification.snooze_past", "Snooze must end in the future");
         }
@@ -1246,6 +1247,7 @@ export class FakeServer {
     remindNotification: (params, session) =>
       this.changeNotice(params, session, (notice, body) => {
         const at = typeof body.at === "string" ? body.at : null;
+        if (at !== null && !Number.isFinite(Date.parse(at))) return invalid();
         if (at !== null && Date.parse(at) <= this.now().getTime()) {
           return envelope(400, "notification.remind_past", "Reminder must be in the future");
         }

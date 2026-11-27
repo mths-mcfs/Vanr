@@ -177,8 +177,16 @@ function NoticeList({ workspaceId, filter }: { workspaceId: string; filter: Noti
   const [loadingMore, setLoadingMore] = useState(false);
   const wanted = useRef(0);
   const ticket = useRef(0);
-  /** Loads `count` more notices from `from`, after `base`. A later load started meanwhile wins. */
-  const loadExtra = async (from: string | null, count: number, base: readonly AppNotification[] = []) => {
+  /**
+   * Loads `count` notices from `from`, after `base`: the next page on a click, or the whole older
+   * range again (`rebuild`) when the first page changed. A later load started meanwhile wins.
+   */
+  const loadExtra = async (
+    from: string | null,
+    count: number,
+    base: readonly AppNotification[],
+    rebuild: boolean,
+  ) => {
     const mine = ++ticket.current;
     const items = [...base];
     let cursor = from;
@@ -193,11 +201,16 @@ function NoticeList({ workspaceId, filter }: { workspaceId: string; filter: Noti
         cursor = page.items.length === 0 ? null : page.nextCursor;
       }
     } catch (error) {
-      // An older range that could not be loaded again no longer fits the first page: drop it, so
-      // "Show older" comes back to try again.
       if (mine === ticket.current) {
-        wanted.current = 0;
-        setExtra(null);
+        if (rebuild) {
+          // An older range that could not be loaded again no longer fits the first page: drop it,
+          // so "Show older" comes back to try again.
+          wanted.current = 0;
+          setExtra(null);
+        } else {
+          // A click that failed keeps what is loaded, and the same click can be tried again.
+          wanted.current = base.length;
+        }
       }
       throw error;
     }
@@ -223,7 +236,7 @@ function NoticeList({ workspaceId, filter }: { workspaceId: string; filter: Noti
       void page.refetch();
       return;
     }
-    if (wanted.current > 0) load(page.data.nextCursor, wanted.current).catch(say.failed);
+    if (wanted.current > 0) load(page.data.nextCursor, wanted.current, [], true).catch(say.failed);
   }, [first.dataUpdatedAt, first.isFetching]);
 
   const changed = () => [
@@ -262,7 +275,7 @@ function NoticeList({ workspaceId, filter }: { workspaceId: string; filter: Noti
     wanted.current = (extra?.items.length ?? 0) + PAGE;
     setLoadingMore(true);
     try {
-      await loadExtra(cursor, PAGE, extra?.items ?? []);
+      await loadExtra(cursor, PAGE, extra?.items ?? [], false);
     } catch (error) {
       outcome.failed(error);
     } finally {

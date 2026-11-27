@@ -372,6 +372,39 @@ describe("the inbox", () => {
       expect(older.map((call) => call.params.cursor)).toEqual(["50", "100"]);
     });
 
+    test("a click on Show older that fails keeps what is loaded, and the same click works again", async () => {
+      const { server, sample } = reports();
+      for (let n = 60; n < 130; n += 1) {
+        const updatedAt = new Date(Date.parse(sample.updatedAt) - n * 60_000).toISOString();
+        server.notifications.push({
+          ...sample,
+          id: `ntf_report_${n}`,
+          updatedAt,
+          readAt: updatedAt,
+          latest: { title: `Report ${n}` },
+        });
+      }
+      const app = await renderApp({ path: `${PATH}?filter=fyi`, signedInAs: "usr_ana", server });
+      await screen.findByText("Report 0");
+      await app.user.click(screen.getByRole("button", { name: "Show older notices" }));
+      await screen.findByText("Report 99");
+      server.force(
+        "listNotifications",
+        { kind: "error", status: 500, code: "internal" },
+        1,
+        (params) => params.cursor === "100",
+      );
+      await app.user.click(screen.getByRole("button", { name: "Show older notices" }));
+      expect(await screen.findByText("The server ran into a problem. Try again.")).toBeDefined();
+      expect(count(/^Report \d+$/)).toBe(100);
+      await app.user.click(screen.getByRole("button", { name: "Show older notices" }));
+      await screen.findByText("Report 129");
+      const older = server.calls.filter(
+        (call) => call.method === "listNotifications" && call.params.cursor !== undefined,
+      );
+      expect(older.map((call) => call.params.cursor)).toEqual(["50", "100", "100"]);
+    });
+
     test("an older range that fails to load again is dropped, and Show older can try again", async () => {
       const { server, sample } = reports();
       const app = await renderApp({ path: `${PATH}?filter=fyi`, signedInAs: "usr_ana", server });
@@ -430,5 +463,20 @@ describe("the inbox", () => {
     await renderApp({ path: `${PATH}?filter=mentions`, signedInAs: "usr_ana", server });
     await screen.findByRole("button", { name: /Jonas Lind mentioned you/ });
     expect(screen.getByRole("button", { name: "Mark these read" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  test("the fake refuses a snooze or a reminder at a time that is not a date", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
+    await screen.findByRole("region", { name: "Today" });
+    const api = app.runtime.api.client.api;
+    const ids = { workspaceId: "workspace_birchwood", notificationId: "ntf_dm" };
+    await expect(api.snoozeNotification({ ...ids, body: { until: "not-a-date" } })).rejects.toMatchObject({
+      status: 400,
+    });
+    await expect(api.remindNotification({ ...ids, body: { at: "not-a-date" } })).rejects.toMatchObject({
+      status: 400,
+    });
+    expect(notice(app.server, "ntf_dm")?.mutedUntil).toBeNull();
+    expect(notice(app.server, "ntf_dm")?.remindAt).toBeNull();
   });
 });
