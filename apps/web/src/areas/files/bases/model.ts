@@ -395,7 +395,13 @@ export function groupRows(
       : def.type === "checkbox"
         ? ["true", "false"]
         : [...new Set(rows.map((row) => groupKeyOf(def, row)))];
-  return keys.map((key) => ({ key, rows: rows.filter((row) => groupKeyOf(def, row) === key) }));
+  // A value whose option was removed has no group of its own: the row shows under "none", not nowhere.
+  const known = new Set(keys);
+  const keyOf = (row: BaseRow) => {
+    const key = groupKeyOf(def, row);
+    return known.has(key) ? key : null;
+  };
+  return keys.map((key) => ({ key, rows: rows.filter((row) => keyOf(row) === key) }));
 }
 
 /** The properties a board can group by: the ones a card can be dragged across. */

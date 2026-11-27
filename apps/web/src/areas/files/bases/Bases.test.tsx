@@ -392,3 +392,183 @@ describe("a base, past the happy path", () => {
     expect(body.value).toBe("BC");
   });
 });
+
+describe("a base, at the edges", () => {
+  test("Delete on the button that opens a row leaves its title alone", async () => {
+    const server = newServer();
+    const { tasks } = ids(server);
+    const app = await renderApp({ path: `${W}/bases/${tasks.id}`, signedInAs: "usr_ana", server });
+    const grid = await screen.findByRole("table", { name: "Grid" });
+    within(grid).getByRole("button", { name: "Open Wash" }).focus();
+    await app.user.keyboard("{Delete}");
+    expect(server.calls.some((call) => call.method === "updateBaseRow")).toBe(false);
+    expect(tasks.rows[0]?.props[tasks.table.titlePropId]).toBe("Wash");
+  });
+
+  test("a board with empty groups hidden still offers them as places to move a card to", async () => {
+    const server = newServer();
+    const { tasks } = ids(server);
+    const view = tasks.views[0];
+    if (view) view.type = "board";
+    if (view) view.config = { groupBy: { prop: "status", hideEmpty: true } };
+    const app = await renderApp({ path: `${W}/bases/${tasks.id}`, signedInAs: "usr_ana", server });
+    const board = await screen.findByRole("region", { name: "Grid" });
+    expect(within(board).queryByRole("region", { name: "Doing" }) === null).toBe(true);
+    await app.user.selectOptions(within(board).getByRole("combobox", { name: "Move Wash to" }), "Doing");
+    await waitFor(() => expect(tasks.rows[0]?.props.status).toBe("doing"));
+  });
+
+  test("a row whose option was removed shows under no group, not nowhere", async () => {
+    const server = newServer();
+    const { tasks } = ids(server);
+    const status = tasks.table.defs.find((def) => def.id === "status");
+    if (status) status.options = status.options?.filter((option) => option.id !== "done");
+    const view = tasks.views[0];
+    if (view) view.config = { groupBy: { prop: "status" } };
+    await renderApp({ path: `${W}/bases/${tasks.id}`, signedInAs: "usr_ana", server });
+    const grid = await screen.findByRole("table", { name: "Grid" });
+    const none = within(grid).getByRole("rowgroup", { name: "No Status" });
+    expect(within(none).getByRole("textbox", { name: "Name of Dry" })).toBeDefined();
+  });
+
+  test("leaving a number cell without changing it writes nothing", async () => {
+    const server = newServer();
+    const { tasks } = ids(server);
+    const wash = tasks.rows[0];
+    if (wash) wash.props.hours = 1e-21;
+    const app = await renderApp({ path: `${W}/bases/${tasks.id}`, signedInAs: "usr_ana", server });
+    const grid = await screen.findByRole("table", { name: "Grid" });
+    await app.user.click(within(grid).getByRole("textbox", { name: "Hours of Wash" }));
+    await app.user.tab();
+    expect(server.calls.some((call) => call.method === "updateBaseRow")).toBe(false);
+    expect(tasks.rows[0]?.props.hours).toBe(1e-21);
+  });
+
+  test("text typed back to the old value while a save is on its way still stays", async () => {
+    const server = newServer();
+    const { tasks } = ids(server);
+    const wash = tasks.rows[0];
+    if (wash) wash.body = "A";
+    const app = await renderApp({
+      path: `${W}/bases/${tasks.id}?row=${wash?.id}`,
+      signedInAs: "usr_ana",
+      server,
+    });
+    const panel = await screen.findByRole("dialog", { name: "Row" });
+    const body = (await within(panel).findByRole("textbox", { name: "Page text" })) as HTMLTextAreaElement;
+    await waitFor(() => expect(body.value).toBe("A"));
+    await app.user.clear(body);
+    await app.user.type(body, "B");
+    const held = server.hold("updateBaseRow");
+    await app.user.click(within(panel).getByRole("button", { name: "Save text" }));
+    await app.user.clear(body);
+    await app.user.type(body, "A");
+    held.release();
+    await waitFor(() => expect(tasks.rows[0]?.body).toBe("B"));
+    await act(async () => {
+      await app.runtime.queryClient.refetchQueries({
+        predicate: (query) => query.queryKey.includes("getBaseRow"),
+      });
+    });
+    expect(body.value).toBe("A");
+    expect(within(panel).getByRole("button", { name: "Save text" }).hasAttribute("disabled")).toBe(false);
+  });
+
+  test("a property save that answers after its dialog closed leaves the next dialog open", async () => {
+    const server = newServer();
+    const { tasks } = ids(server);
+    const app = await renderApp({ path: `${W}/bases/${tasks.id}`, signedInAs: "usr_ana", server });
+    await screen.findByRole("table", { name: "Grid" });
+    await app.user.click(screen.getByRole("button", { name: "Edit property Hours" }));
+    const first = await screen.findByRole("dialog", { name: "Edit Hours" });
+    const held = server.hold("setBaseTableSchema");
+    await app.user.click(within(first).getByRole("button", { name: "Save property" }));
+    await app.user.click(within(first).getByRole("button", { name: "Cancel" }));
+    await app.user.click(screen.getByRole("button", { name: "Edit property Status" }));
+    await screen.findByRole("dialog", { name: "Edit Status" });
+    held.release();
+    await waitFor(() => expect(server.calls.some((call) => call.method === "setBaseTableSchema")).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.getByRole("dialog", { name: "Edit Status" })).toBeDefined();
+  });
+
+  test("deleting a property someone changed meanwhile shows theirs first; one deleted meanwhile says so", async () => {
+    const server = newServer();
+    const { tasks } = ids(server);
+    const app = await renderApp({ path: `${W}/bases/${tasks.id}`, signedInAs: "usr_ana", server });
+    await screen.findByRole("table", { name: "Grid" });
+    const refresh = () =>
+      act(async () => {
+        await app.runtime.queryClient.refetchQueries({
+          predicate: (query) => query.queryKey.includes("getBase"),
+        });
+      });
+    await app.user.click(screen.getByRole("button", { name: "Edit property Hours" }));
+    let dialog = await screen.findByRole("dialog", { name: "Edit Hours" });
+    const hours = tasks.table.defs.find((def) => def.id === "hours");
+    if (hours) hours.numberFormat = "percent";
+    tasks.table = { ...tasks.table, schemaVersion: tasks.table.schemaVersion + 1 };
+    await refresh();
+    await app.user.click(within(dialog).getByRole("button", { name: "Delete property" }));
+    dialog = await screen.findByRole("dialog", { name: "Edit Hours" });
+    expect((within(dialog).getByRole("combobox", { name: "Number format" }) as HTMLSelectElement).value).toBe(
+      "percent",
+    );
+    expect(server.calls.some((call) => call.method === "setBaseTableSchema")).toBe(false);
+    tasks.table = {
+      ...tasks.table,
+      defs: tasks.table.defs.filter((def) => def.id !== "hours"),
+      schemaVersion: tasks.table.schemaVersion + 1,
+    };
+    await refresh();
+    await app.user.click(within(dialog).getByRole("button", { name: "Save property" }));
+    expect(await screen.findByText("Someone deleted this property while it was open.")).toBeDefined();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Edit Hours" }) === null).toBe(true));
+  });
+
+  test("an operator that takes several options lets several be chosen", async () => {
+    const server = newServer();
+    const { tasks } = ids(server);
+    const view = tasks.views[0];
+    if (view) view.config = { filter: { and: [{ prop: "status", op: "eq", value: "todo" }] } };
+    const app = await renderApp({ path: `${W}/bases/${tasks.id}`, signedInAs: "usr_ana", server });
+    await screen.findByRole("table", { name: "Grid" });
+    await app.user.click(screen.getByRole("button", { name: /^Filters? / }));
+    const panel = await screen.findByRole("dialog", { name: "Filter" });
+    await app.user.selectOptions(
+      within(panel).getByRole("combobox", { name: "Operator of condition 1" }),
+      "is one of",
+    );
+    await app.user.click(within(panel).getByRole("checkbox", { name: "Done" }));
+    await waitFor(() =>
+      expect(tasks.views[0]?.config.filter).toEqual({
+        and: [{ prop: "status", op: "in", value: ["todo", "done"] }],
+      }),
+    );
+  });
+
+  test("an empty base grouped by status shows its groups, and a row starts in the one chosen", async () => {
+    const server = newServer();
+    const { tasks } = ids(server);
+    tasks.rows = [];
+    const view = tasks.views[0];
+    if (view) view.config = { groupBy: { prop: "status" } };
+    const app = await renderApp({ path: `${W}/bases/${tasks.id}`, signedInAs: "usr_ana", server });
+    const grid = await screen.findByRole("table", { name: "Grid" });
+    await app.user.click(within(grid).getByRole("button", { name: "New row in Doing" }));
+    await waitFor(() => expect(tasks.rows[0]?.props.status).toBe("doing"));
+  });
+
+  test("two quick changes to a view reach the server one after the other, the newest last", async () => {
+    const server = newServer();
+    const { tasks } = ids(server);
+    const app = await renderApp({ path: `${W}/bases/${tasks.id}`, signedInAs: "usr_ana", server });
+    await screen.findByRole("table", { name: "Grid" });
+    const held = server.hold("updateBaseView");
+    const quick = screen.getByRole("combobox", { name: "Quick filter" });
+    await app.user.selectOptions(quick, "Status: Done");
+    await app.user.selectOptions(screen.getByRole("combobox", { name: "Quick filter" }), "Status: Doing");
+    held.release();
+    await waitFor(() => expect(tasks.views[0]?.config.quickFilters).toHaveLength(2));
+  });
+});

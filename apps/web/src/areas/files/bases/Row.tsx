@@ -47,18 +47,15 @@ function RowEditor({
   const saved = row.data;
   const savedTitle =
     typeof saved?.props[table.titlePropId] === "string" ? String(saved.props[table.titlePropId]) : "";
-  // A change made elsewhere shows here, unless the person changed the field since it last followed
-  // the saved row: then what they typed stays (a save answered while they kept typing included).
-  const syncedTitle = useRef(savedTitle);
-  const syncedBody = useRef(saved?.body ?? "");
+  // A change made elsewhere shows here, unless the person typed in the field since they last sent
+  // it: then what they typed stays, even if it happens to match an older text.
+  const titleTyped = useRef(false);
+  const bodyTyped = useRef(false);
   useEffect(() => {
-    setTitle((now) => (now === syncedTitle.current ? savedTitle : now));
-    syncedTitle.current = savedTitle;
+    if (!titleTyped.current) setTitle(savedTitle);
   }, [savedTitle]);
   useEffect(() => {
-    const next = saved?.body ?? "";
-    setBody((now) => (now === syncedBody.current ? next : now));
-    syncedBody.current = next;
+    if (!bodyTyped.current) setBody(saved?.body ?? "");
   }, [saved?.body]);
   const files = useApiQuery("listFiles", { workspaceId });
   const remove = useApiMutation("deleteBaseRow", {
@@ -96,8 +93,12 @@ function RowEditor({
         placeholder={t("row.untitled")}
         value={title}
         maxLength={TEXT_MAX}
-        onChange={(event) => setTitle(event.target.value)}
+        onChange={(event) => {
+          titleTyped.current = true;
+          setTitle(event.target.value);
+        }}
         onBlur={() => {
+          titleTyped.current = false;
           if (title !== savedTitle) void commit({ props: { [table.titlePropId]: title } });
         }}
         onKeyDown={(event) => {
@@ -129,7 +130,10 @@ function RowEditor({
         rows={full ? 16 : 8}
         value={body}
         maxLength={BODY_MAX}
-        onChange={(event) => setBody(event.target.value)}
+        onChange={(event) => {
+          bodyTyped.current = true;
+          setBody(event.target.value);
+        }}
       />
       <div className="files__actions bases__row-actions">
         <span className="files__meta">
@@ -139,7 +143,14 @@ function RowEditor({
         <Button variant="danger" onClick={() => setConfirming(true)}>
           {t("row.delete")}
         </Button>
-        <Button variant="primary" disabled={body === saved.body} onClick={() => void commit({ body })}>
+        <Button
+          variant="primary"
+          disabled={body === saved.body}
+          onClick={() => {
+            bodyTyped.current = false;
+            void commit({ body });
+          }}
+        >
           {t("row.saveBody")}
         </Button>
       </div>
@@ -186,6 +197,8 @@ export function RowPanel({
           </Button>
         </div>
         <RowEditor
+          // Another row is another draft: nothing typed for one goes to the next.
+          key={rowId}
           workspaceId={workspaceId}
           base={base}
           table={table}
@@ -231,6 +244,7 @@ export function RowScreen() {
         <p className="page__muted">{t("base.noTable")}</p>
       ) : (
         <RowEditor
+          key={rowId}
           workspaceId={workspaceId}
           base={base.data}
           table={table}

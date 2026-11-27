@@ -294,6 +294,7 @@ export default {
   "property.rollupProperty": "Property of the linked rows",
   "property.chooseProperty": "Choose a property",
   "property.rollupFunction": "Work out",
+  "property.deletedMeanwhile": "Someone deleted this property while it was open.",
   "property.changed": "Someone changed this property while it was open. This is their version now.",
   "property.rollupTargetFailed": "The linked base's properties could not be loaded.",
   "property.save": "Save property",

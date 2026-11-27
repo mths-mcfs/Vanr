@@ -98,6 +98,10 @@ function Loaded({
   const [adding, setAdding] = useState(false);
   const picker = useRef<HTMLInputElement>(null);
   const writes = useRef(0);
+  const viewWrites = useRef<Promise<unknown>>(Promise.resolve());
+  // Each opening of the property dialog: a save that answers after it closed or another opened
+  // doesn't close or mark the newer one.
+  const opening = useRef(0);
   const toast = useToast();
   const baseKey = queryKey(client, "getBase", { workspaceId, baseId: base.id });
   const rowsPrefix = { method: "createBaseTableQuery" as const, args: { workspaceId, tableId: table.id } };
@@ -117,39 +121,66 @@ function Loaded({
   const filtered = conditions > 0 || search !== "";
 
   const setConfig = (config: BaseViewConfig) => {
+    // A refresh of the base already on its way would bring back the old setting: it is dropped.
+    void queries.cancelQueries({ queryKey: baseKey, exact: true });
     queries.setQueryData<BaseData>(baseKey, (old) =>
       old === undefined
         ? old
         : { ...old, views: old.views.map((each) => (each.id === view.id ? { ...each, config } : each)) },
     );
-    // Only the newest write brings the saved view back: an older answer must not undo a newer choice.
+    // The view's writes go one after the other, so the server keeps the newest; only the newest one
+    // brings the saved view back.
     writes.current += 1;
     const mine = writes.current;
-    void client.api
-      .updateBaseView({ workspaceId, baseId: base.id, viewId: view.id, body: { config } })
-      .catch((error: unknown) => {
-        toast.push({ tone: "danger", title: t("base.viewSaveFailed"), description: describe(error) });
-      })
-      .finally(() => {
-        if (writes.current === mine) void queries.invalidateQueries({ queryKey: baseKey, exact: true });
-      });
+    const write = () =>
+      client.api
+        .updateBaseView({ workspaceId, baseId: base.id, viewId: view.id, body: { config } })
+        .catch((error: unknown) => {
+          toast.push({ tone: "danger", title: t("base.viewSaveFailed"), description: describe(error) });
+        });
+    viewWrites.current = viewWrites.current.then(write, write).finally(() => {
+      if (writes.current === mine) void queries.invalidateQueries({ queryKey: baseKey, exact: true });
+    });
   };
 
   const saveSchema = useApiMutation("setBaseTableSchema", {
     invalidates: () => [{ method: "getBase", args: { workspaceId, baseId: base.id } }, rowsPrefix],
-    onSuccess: () => {
-      setEditing(null);
-      setSchemaError(null);
-    },
-    onError: (error) => setSchemaError(describe(error)),
   });
-  const writeDefs = (defs: BasePropDef[]) =>
-    saveSchema.mutate({
-      workspaceId,
-      baseId: base.id,
-      tableId: table.id,
-      body: { defs, parentVersion: table.schemaVersion },
-    });
+  const writeDefs = (defs: BasePropDef[]) => {
+    const mine = opening.current;
+    saveSchema.mutate(
+      { workspaceId, baseId: base.id, tableId: table.id, body: { defs, parentVersion: table.schemaVersion } },
+      {
+        onSuccess: () => {
+          if (opening.current !== mine) return;
+          setEditing(null);
+          setSchemaError(null);
+        },
+        onError: (error) => {
+          if (opening.current === mine) setSchemaError(describe(error));
+        },
+      },
+    );
+  };
+  const edit = (next: BasePropDef | "new" | null) => {
+    opening.current += 1;
+    setEditing(next);
+  };
+  /** The property as it is now, when someone changed or deleted it since the dialog opened; else null. */
+  const changedSince = (snapshot: BasePropDef) => {
+    const current = table.defs.find((each) => each.id === snapshot.id);
+    if (JSON.stringify(current) === JSON.stringify(snapshot)) return null;
+    return current ?? "deleted";
+  };
+  const showChange = (change: BasePropDef | "deleted") => {
+    if (change === "deleted") {
+      toast.push({ tone: "warning", title: t("property.deletedMeanwhile") });
+      edit(null);
+      return;
+    }
+    setSchemaError(t("property.changed"));
+    edit(change);
+  };
 
   const newRow = useApiMutation("createBaseTableRow", {
     invalidates: () => [rowsPrefix],
@@ -218,7 +249,7 @@ function Loaded({
     onOpen: (row) => open({ view: view.id, row: row.id }),
     onSave: (row, propId, value) => void saveRow(row, { props: { [propId]: value } }),
     onNewRow: addRow,
-    onEditProperty: setEditing,
+    onEditProperty: edit,
     name: viewName(view, (type) => t(`view.type.${type}`)),
   };
   const failure = [rename, remove, addView, removeView, exportCsv, importCsv, newRow].find(
@@ -393,7 +424,7 @@ function Loaded({
               : t(`panel.${each}`)}
           </Button>
         ))}
-        <Button size="sm" icon={<Icon icon={Plus} />} onClick={() => setEditing("new")}>
+        <Button size="sm" icon={<Icon icon={Plus} />} onClick={() => edit("new")}>
           {t("property.new")}
         </Button>
       </div>
@@ -407,7 +438,7 @@ function Loaded({
               size="sm"
               variant="ghost"
               aria-label={t("property.editNamed", { name: def.name })}
-              onClick={() => setEditing(def)}
+              onClick={() => edit(def)}
             >
               {def.name}
             </Button>
@@ -423,7 +454,8 @@ function Loaded({
           onRetry={() => void rows.refetch()}
           namespace="files"
         />
-      ) : all.length === 0 ? (
+      ) : all.length === 0 &&
+        (filtered || view.config.groupBy == null || view.config.groupBy.hideEmpty === true) ? (
         filtered ? (
           <EmptyState
             className="page__narrow"
@@ -491,17 +523,13 @@ function Loaded({
           saving={saveSchema.isPending}
           error={schemaError}
           onClose={() => {
-            setEditing(null);
+            edit(null);
             setSchemaError(null);
           }}
           onSave={(def) => {
-            // Someone changed this property while the dialog was open: show theirs instead of writing over it.
-            const current = editing === "new" ? undefined : table.defs.find((each) => each.id === editing.id);
-            if (editing !== "new" && JSON.stringify(current) !== JSON.stringify(editing)) {
-              setSchemaError(t("property.changed"));
-              setEditing(current ?? null);
-              return;
-            }
+            // Someone changed or deleted this property while the dialog was open: theirs is shown instead.
+            const change = editing === "new" ? null : changedSince(editing);
+            if (change !== null) return showChange(change);
             writeDefs(
               editing === "new"
                 ? [...table.defs, def]
@@ -509,7 +537,11 @@ function Loaded({
             );
           }}
           {...(editing !== "new" && {
-            onDelete: () => writeDefs(table.defs.filter((each) => each.id !== editing.id)),
+            onDelete: () => {
+              const change = changedSince(editing);
+              if (change !== null) return showChange(change);
+              writeDefs(table.defs.filter((each) => each.id !== editing.id));
+            },
           })}
         />
       )}

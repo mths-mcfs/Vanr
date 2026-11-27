@@ -16,6 +16,8 @@ import {
 } from "./model.ts";
 
 export type Panel = "filter" | "sort" | "group" | "properties";
+/** The operators that take several options as their value. */
+const MANY = new Set(["in", "not_in", "has_any", "has_all"]);
 const SORTS_MAX = 10;
 
 export function ViewPanel({
@@ -72,6 +74,33 @@ function ConditionValue({
         <option value="true">{t("board.checked")}</option>
         <option value="false">{t("board.unchecked")}</option>
       </select>
+    );
+  }
+  if (def.options !== undefined && MANY.has(condition.op)) {
+    // Several options at once ("has all of", "is one of"): each one checked or not.
+    const raw: unknown = condition.value;
+    const chosen = Array.isArray(raw) ? raw.filter((each): each is string => typeof each === "string") : [];
+    return (
+      <fieldset className="bases__many">
+        <legend className="vr-visually-hidden">{label}</legend>
+        {def.options.map((option) => (
+          <label key={option.id} className="bases__choice">
+            <input
+              type="checkbox"
+              checked={chosen.includes(option.id)}
+              onChange={(event) =>
+                onChange({
+                  ...condition,
+                  value: event.target.checked
+                    ? [...chosen, option.id]
+                    : chosen.filter((id) => id !== option.id),
+                })
+              }
+            />
+            {option.name}
+          </label>
+        ))}
+      </fieldset>
     );
   }
   if (def.options !== undefined) {
@@ -210,7 +239,22 @@ function FilterPanel({ table, config, onChange }: PanelProps) {
                   className="bases__select"
                   aria-label={t("filter.op", { n: index + 1 })}
                   value={condition.op}
-                  onChange={(event) => replace({ ...condition, op: event.target.value })}
+                  onChange={(event) => {
+                    // Switching between one option and several keeps what was chosen, in the shape the
+                    // new operator takes.
+                    const op = event.target.value;
+                    const current = condition.value;
+                    const value = MANY.has(op)
+                      ? Array.isArray(current)
+                        ? current
+                        : typeof current === "string"
+                          ? [current]
+                          : []
+                      : Array.isArray(current)
+                        ? (current[0] ?? def.options?.[0]?.id ?? "")
+                        : current;
+                    replace({ ...condition, op, ...(value !== undefined && { value }) });
+                  }}
                 >
                   {operatorsFor(def).map((op) => (
                     <option key={op} value={op}>

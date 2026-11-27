@@ -43,6 +43,10 @@ function matches(condition: { prop: string; op?: string; value?: unknown }, row:
       return typeof value === "number" && value > Number(condition.value);
     case "lt":
       return typeof value === "number" && value < Number(condition.value);
+    case "gte":
+      return typeof value === "number" && value >= Number(condition.value);
+    case "lte":
+      return typeof value === "number" && value <= Number(condition.value);
     case "has":
       return Array.isArray(value) && value.includes(condition.value);
     default:

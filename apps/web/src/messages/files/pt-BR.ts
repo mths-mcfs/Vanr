@@ -298,6 +298,7 @@ export default {
   "property.rollupProperty": "Propriedade das linhas ligadas",
   "property.chooseProperty": "Escolha uma propriedade",
   "property.rollupFunction": "Calcular",
+  "property.deletedMeanwhile": "Alguém excluiu esta propriedade enquanto ela estava aberta.",
   "property.changed":
     "Alguém alterou esta propriedade enquanto ela estava aberta. Esta é a versão dessa pessoa agora.",
   "property.rollupTargetFailed": "Não foi possível carregar as propriedades da base ligada.",

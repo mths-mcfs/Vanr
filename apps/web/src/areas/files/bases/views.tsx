@@ -52,14 +52,13 @@ type Group = {
 };
 
 /** The view's groups, or one group of every row when it has none. */
-function useGroups(props: ViewProps): { def: BasePropDef | undefined; groups: Group[] } {
+function useGroups(props: ViewProps): { def: BasePropDef | undefined; groups: Group[]; every: Group[] } {
   const t = useMessages("files");
   const def = props.table.defs.find((each) => each.id === props.view.config.groupBy?.prop);
-  if (def === undefined)
-    return {
-      def,
-      groups: [{ key: null, label: "", rows: props.rows, color: undefined, newProps: undefined }],
-    };
+  if (def === undefined) {
+    const all = [{ key: null, label: "", rows: props.rows, color: undefined, newProps: undefined }];
+    return { def, groups: all, every: all };
+  }
   const label = (key: string | null, rows: BaseRow[]) => {
     if (key === null) return t("board.none", { prop: def.name });
     if (def.type === "checkbox") return key === "true" ? t("board.checked") : t("board.unchecked");
@@ -67,21 +66,22 @@ function useGroups(props: ViewProps): { def: BasePropDef | undefined; groups: Gr
     const sample = rows[0];
     return sample === undefined ? key : cellText(def, sample, props.context);
   };
-  const groups = groupRows(def, props.rows)
-    .filter((group) => props.view.config.groupBy?.hideEmpty !== true || group.rows.length > 0)
-    .map((group) => {
-      const value = groupable(def) ? valueForGroup(def, group.key) : undefined;
-      return {
-        ...group,
-        label: label(group.key, group.rows),
-        color:
-          group.key !== null && (def.type === "select" || def.type === "status")
-            ? optionColor(def, group.key)
-            : undefined,
-        newProps: value === undefined || value === null ? undefined : { [def.id]: value },
-      };
-    });
-  return { def, groups };
+  const every = groupRows(def, props.rows).map((group) => {
+    const value = groupable(def) ? valueForGroup(def, group.key) : undefined;
+    return {
+      ...group,
+      label: label(group.key, group.rows),
+      color:
+        group.key !== null && (def.type === "select" || def.type === "status")
+          ? optionColor(def, group.key)
+          : undefined,
+      newProps: value === undefined || value === null ? undefined : { [def.id]: value },
+    };
+  });
+  const groups = every.filter(
+    (group) => props.view.config.groupBy?.hideEmpty !== true || group.rows.length > 0,
+  );
+  return { def, groups, every };
 }
 
 /** A group's heading: its name, how many rows, and a new row that starts in it. */
@@ -107,16 +107,11 @@ function GroupHead({ group, onNewRow }: { group: Group; onNewRow: ViewProps["onN
 const clearOnDelete =
   (def: BasePropDef, save: (value: unknown) => void) => (event: KeyboardEvent<HTMLTableCellElement>) => {
     if (event.key !== "Delete" && event.key !== "Backspace") return;
-    const target = event.target as HTMLElement;
-    if (target instanceof HTMLTextAreaElement) return;
-    if (
-      target instanceof HTMLInputElement &&
-      target.type !== "checkbox" &&
-      target.type !== "date" &&
-      target.type !== "datetime-local"
-    )
-      return;
     if (isComputed(def)) return;
+    // Only the control that edits this cell counts: not the button that opens the row, not a text
+    // field (where the keys edit the text), not a dialog opened from the cell.
+    const target = event.target as HTMLElement;
+    if (!event.currentTarget.contains(target) || target.dataset.cellEditor !== "clearable") return;
     event.preventDefault();
     save(def.type === "checkbox" ? false : null);
   };
@@ -285,7 +280,7 @@ export function BoardView(props: ViewProps) {
   const t = useMessages("files");
   const { table, rows } = props;
   const [dragging, setDragging] = useState<string | null>(null);
-  const { def, groups } = useGroups(props);
+  const { def, groups, every } = useGroups(props);
   if (def === undefined) return <p className="page__muted">{t("board.needsGroup")}</p>;
   const movable = groupable(def);
   const shown = others(props)
@@ -333,7 +328,7 @@ export function BoardView(props: ViewProps) {
                     value={group.key ?? ""}
                     onChange={(event) => move(row, event.target.value === "" ? null : event.target.value)}
                   >
-                    {groups.map((each) => (
+                    {every.map((each) => (
                       <option key={each.key ?? "none"} value={each.key ?? ""}>
                         {each.label}
                       </option>

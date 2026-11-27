@@ -86,6 +86,7 @@ export function CellEditor(props: CellProps) {
       return (
         <input
           type="checkbox"
+          data-cell-editor="clearable"
           className="bases__check"
           aria-label={label}
           checked={value === true}
@@ -97,6 +98,7 @@ export function CellEditor(props: CellProps) {
       return (
         <select
           className="bases__select"
+          data-cell-editor="clearable"
           aria-label={label}
           value={typeof value === "string" ? value : ""}
           onChange={(event) => onSave(event.target.value === "" ? null : event.target.value)}
@@ -181,6 +183,7 @@ function NumberCell({
   const [draft, setDraft] = useState(shown);
   useEffect(() => setDraft(shown), [shown]);
   const commit = () => {
+    if (draft === shown) return;
     const parsed = parseNumber(draft);
     if (parsed === undefined) return setDraft(shown);
     if (parsed !== value) onSave(parsed);
@@ -232,6 +235,7 @@ function DateCell({
     <input
       className="bases__input"
       type={withTime ? "datetime-local" : "date"}
+      data-cell-editor="clearable"
       aria-label={label}
       value={shown}
       onChange={(event) => {
@@ -256,7 +260,13 @@ function PickCell(props: CellProps & { label: string }) {
   const text = cellText(def, row, props.context);
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <button type="button" className="bases__pick" aria-label={label} onClick={() => setOpen(true)}>
+      <button
+        type="button"
+        className="bases__pick"
+        data-cell-editor="clearable"
+        aria-label={label}
+        onClick={() => setOpen(true)}
+      >
         {def.type === "multi_select" ? <CellValue def={def} row={row} context={props.context} /> : text}
         {text === "" && <span className="bases__placeholder">{t("cell.choose")}</span>}
       </button>
