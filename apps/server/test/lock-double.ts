@@ -147,8 +147,9 @@ export async function forcedPair<T>(
   kind: "select" | "update",
   start: (side: "A" | "B", hooks: Hooks) => Promise<T>,
   /**
-   * `match`: the SQL text the hold query must contain. `bKind` and `bMatch`: the first query of B that counts
-   * as "passed" (B can be another operation than A); default `kind` and `match`.
+   * `match`: the SQL text the hold query must contain. `bKind`: the first query of B that counts as "passed"
+   * (B can be another operation than A); default `kind`. `bMatch`: the SQL text that query must contain;
+   * default `match`.
    */
   {
     match,

@@ -287,6 +287,8 @@ export async function changeMemory(
     op: MemoryVersionRow["op"];
     expectedSha256?: string;
     expectArchived?: boolean;
+    /** The path the caller saw (a move in between changes another file than the one it meant). */
+    expectedPath?: string;
     /** Only the right store (the agent's tool doesn't change an item of another store). */
     store?: Store;
   },
@@ -303,6 +305,7 @@ export async function changeMemory(
       if (meta.expectedSha256 !== undefined && contentSha256(row.text) !== meta.expectedSha256)
         throw memoryChanged();
       if (meta.expectArchived !== undefined && row.archived !== meta.expectArchived) throw memoryChanged();
+      if (meta.expectedPath !== undefined && row.path !== meta.expectedPath) throw memoryChanged();
       // Coming back from the archive (unarchive, restore, redo) also takes a place in the store.
       if (row.archived && change.archived === false) await ensureRoom(tx, storeOf(row));
       const [last] = await tx
