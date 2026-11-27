@@ -134,6 +134,8 @@ describe("workspaces", () => {
       people: 1,
       agents: 0,
     });
+    // The overview counts the viewer's own approval queue: no cache keeps it.
+    expect((await browser.fetch(`${ws(id)}/overview`)).headers.get("cache-control")).toBe("no-store");
     const report = (await call(browser, "GET", `${ws(id)}/usage/report?since=2026-10-01`)).body;
     expect(report).toEqual({ spendUsd: 0, since: "2026-10-01T00:00:00.000Z", perKind: [], agents: [] });
   });

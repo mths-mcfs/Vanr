@@ -141,7 +141,7 @@ export function registerWorkspaces(app: Hono<AppEnv>) {
       agents: active.length,
       people: people?.n ?? 0,
     };
-    return c.json(overview);
+    return c.json(overview, 200, { "cache-control": "no-store" });
   });
 
   app.get(`${WORKSPACE}/members`, async (c) => {
