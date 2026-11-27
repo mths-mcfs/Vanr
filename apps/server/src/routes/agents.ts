@@ -593,6 +593,8 @@ export function registerAgents(app: Hono<AppEnv>) {
             ? { harnessModel: null }
             : {}),
         ...(input.fallback !== undefined ? { harnessFallback: input.fallback } : {}),
+        // As in PATCH: a new model turns off an advisor that no longer holds for it.
+        ...(remote ? {} : advisorColumns(input.model ?? row.model, undefined, row)),
         updatedAt: now(),
       })
       .where(eq(agents.id, row.id))

@@ -516,6 +516,24 @@ describe("agent registry", () => {
   );
 
   test(
+    "a model switch through /runtime turns off an advisor that no longer holds, as PATCH does",
+    async () => {
+      const { workspaceId, ana, lia } = await team();
+      const agent = agentPath(workspaceId, lia.id);
+      expect(
+        (await ok<Agent>(call(ana, "PATCH", agent, { advisor: { model: "claude-opus-5-5", maxUses: 2 } })))
+          .advisor,
+      ).toEqual({ model: "claude-opus-5-5", maxUses: 2 });
+      await ok(call(ana, "PUT", `${agent}/runtime`, { harness: "model", model: "claude-sonnet-5-5" }));
+      expect(await ok<Agent>(call(ana, "GET", agent))).toMatchObject({
+        model: "claude-sonnet-5-5",
+        advisor: null,
+      });
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "harness, models and the platform key",
     async () => {
       const { workspaceId, ana, lia } = await team();
