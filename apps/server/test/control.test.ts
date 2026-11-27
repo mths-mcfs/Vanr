@@ -1240,6 +1240,32 @@ describe("undo", () => {
         .from(schema.knowledgePages)
         .where(eq(schema.knowledgePages.id, fresh.id));
       expect(back[0]).toMatchObject({ slug: fresh.slug, body: "hello", version: 1 });
+
+      // A page someone commented on stays: the delete would take the comment with no way back.
+      const discussed = await createPage(server.deps, {
+        workspaceId: t.workspaceId,
+        title: `Discussed ${n}`,
+        body: "hi",
+        author: agent,
+      });
+      await server.deps.db.insert(schema.pageAnnotations).values({
+        id: newId("ann"),
+        workspaceId: t.workspaceId,
+        pageId: discussed.id,
+        kind: "comment",
+        author: { type: "person", id: t.beto.user.id },
+        body: "keep this",
+        status: "open",
+      });
+      const talked = await seedAction(t, "wiki_written", { type: "wiki", id: discussed.id });
+      expect(await code(await t.carla.browser.json(t.url(`/actions/${talked.id}/undo`), "POST"))).toBe(
+        "action.changed_since",
+      );
+      const kept = await server.deps.db
+        .select({ id: schema.pageAnnotations.id })
+        .from(schema.pageAnnotations)
+        .where(eq(schema.pageAnnotations.pageId, discussed.id));
+      expect(kept).toHaveLength(1);
     },
     SERVER_TEST_MS,
   );

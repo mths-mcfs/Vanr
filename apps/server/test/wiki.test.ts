@@ -1937,6 +1937,10 @@ describe("links that resolve through folders and alternate titles, and the renam
     });
     const search = (who: Person, q: string) =>
       server.deps.search.search({ workspaceId, userId: who.user.id }, q);
+    // The link's text is in the message's index (a term only the link has, past the page Beto doesn't read).
+    expect((await search(beto, "Restricted")).map((h) => h.source)).toEqual([
+      { kind: "message", id: message.id },
+    ]);
     expect((await search(beto, "antelope")).map((h) => h.source)).toContainEqual({
       kind: "message",
       id: message.id,
@@ -1958,6 +1962,16 @@ describe("links that resolve through folders and alternate titles, and the renam
     });
     const source = await a.createWikiPage(workspaceId, { title: "Links", body: "[[Architecture/Database]]" });
     expect((await a.getWikiPagePanel(workspaceId, source.slug)).outgoing[0]?.page?.slug).toBe(alias.slug);
+  });
+
+  test("a link full of slashes saves without growing the candidate query", async () => {
+    const { workspaceId, a } = await pair();
+    // 20,000 "/" in one target: only the ends that can be a title are looked for.
+    const body = `[[${"a/".repeat(20_000)}Name]]`;
+    const started = performance.now();
+    const page = await a.createWikiPage(workspaceId, { title: "Slashes", body });
+    expect(performance.now() - started).toBeLessThan(5_000);
+    expect((await a.getWikiPagePanel(workspaceId, page.slug)).outgoing[0]?.state).toBe("missing");
   });
 
   test("adding an alternate title re-resolves a stored folder-qualified link", async () => {

@@ -29,7 +29,16 @@ import { unindex } from "./search-index";
 import { refreshPage, savePage } from "./wiki";
 import { canReadPage } from "./wiki-access";
 
-const { reversibleActions, files, knowledgePages, pageRevisions, issues, issueTimeline, routines } = schema;
+const {
+  reversibleActions,
+  files,
+  knowledgePages,
+  pageAnnotations,
+  pageRevisions,
+  issues,
+  issueTimeline,
+  routines,
+} = schema;
 
 const changed = (message: string) => new HttpError(409, "action.changed_since", message);
 const gone = (message: string) => new HttpError(409, "action.gone", message);
@@ -287,6 +296,14 @@ export const CONTENT_UNDOERS: Record<
       const page = await lockedPage(deps, row, actorUserId, "update");
       if (page.version !== 1) throw changed("Someone edited the page");
       if (page.locked) throw new HttpError(403, "wiki.page_locked", "This page is locked");
+      // Comments and proposals don't change the version, and the delete would take them along (the
+      // cascade) with no way back through redo: a page someone annotated stays.
+      const [annotated] = await deps.db
+        .select({ id: pageAnnotations.id })
+        .from(pageAnnotations)
+        .where(eq(pageAnnotations.pageId, page.id))
+        .limit(1);
+      if (annotated) throw changed("Someone commented on the page");
       const deleted: z.input<typeof deletedPage> = {
         slug: page.slug,
         title: page.title,

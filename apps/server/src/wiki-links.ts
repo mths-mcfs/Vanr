@@ -25,6 +25,8 @@ export type LinkTarget = Pick<WikiRow, "id" | "slug" | "title" | "folder" | "ali
   restricted: boolean;
 };
 
+/** The longest title or alternate title a link can name (the routes take 200; a vault's file names, 255). */
+const MAX_NAME = 300;
 /** The most [[links]] one page keeps: a body past it is rejected before anything is written. */
 export const MAX_LINKS = 5_000;
 /** Link rows per insert: ten parameters each, far under Postgres's 65535 per statement. */
@@ -63,7 +65,13 @@ async function candidates(
   const names = [...new Set(targets.map((t) => stripMd(t).toLowerCase()))];
   // A title or an alternate title can be the whole target or what follows any "/" of it: folder/title and
   // folder/alternate title, with "/" allowed in the folder and in the title (as `resolveTarget` accepts).
-  const ends = (n: string) => [n, ...[...n.matchAll(/\//g)].map((m) => n.slice((m.index ?? 0) + 1))];
+  // Only the ends a name can be are kept, so a target full of "/" doesn't grow the query.
+  const ends = (n: string) => [
+    n,
+    ...[...n.matchAll(/\//g)].flatMap((m) =>
+      n.length - (m.index ?? 0) - 1 <= MAX_NAME ? [n.slice((m.index ?? 0) + 1)] : [],
+    ),
+  ];
   const titles = [...new Set(names.flatMap(ends))];
   const slugs = [...new Set([...names, ...targets.map((t) => slugify(stripMd(t)))])];
   return db

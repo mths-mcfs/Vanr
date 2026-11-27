@@ -824,6 +824,14 @@ describe("anchored comments", () => {
       ),
     );
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    // The other four are the ceiling, not any error.
+    expect(
+      results.flatMap((r) =>
+        r.status === "rejected"
+          ? [r.reason instanceof ApiError ? [r.reason.status, r.reason.code] : String(r.reason)]
+          : [],
+      ),
+    ).toEqual(Array.from({ length: 4 }, () => [409, "wiki.comment.too_many"]));
     const [total] = await db()
       .select({ n: count() })
       .from(schema.pageAnnotations)
@@ -915,7 +923,7 @@ describe("anchored comments", () => {
   });
 
   test("attack: a restricted page's annotations are 404 to whoever doesn't read it, and so is another workspace's id", async () => {
-    const { workspaceId, ana, beto } = await team();
+    const { workspaceId, ana, beto, lia } = await team();
     const other = await team();
     const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Private notes", body: "x" });
     const root = await ana.api.wiki.createWikiPageComment(workspaceId, page.slug, { body: "mine" });
@@ -930,10 +938,15 @@ describe("anchored comments", () => {
       // Another workspace's admin with this workspace's annotation id in their path.
       () => other.ana.api.wiki.setWikiAnnotationResolution(other.workspaceId, root.id),
       () => other.ana.api.wiki.deleteWikiAnnotation(other.workspaceId, root.id),
-      () =>
-        other.ana.api.wiki.decideWikiAnnotation(other.workspaceId, root.id, [{ hunkId: "h1", accept: true }]),
     ])
       expect((await apiError(call())).status).toBe(404);
+    // A real pending proposal: another workspace's decision on its id is 404 (asked first, so it isn't a
+    // "decided" refusal), and the same decision in its own workspace applies.
+    const { row: proposal } = await propose(workspaceId, slug, lia, ana, [["x", "y"]]);
+    const decide = (api: typeof ana.api, ws: string) =>
+      api.wiki.decideWikiAnnotation(ws, proposal.id, [{ hunkId: "h1", accept: true }]);
+    expect((await apiError(decide(other.ana.api, other.workspaceId))).status).toBe(404);
+    expect((await decide(ana.api, workspaceId)).page.body).toBe("y");
     // A reply that names another page's thread is a 404 too (the parent is looked up on this page).
     const otherPage = await beto.api.wiki.createWikiPage(workspaceId, { title: "Other", body: "y" });
     const elsewhere = await beto.api.wiki.createWikiPageComment(workspaceId, otherPage.slug, {
@@ -1366,56 +1379,62 @@ describe("the wiki check", () => {
     "stopping the server waits for a running check: its write lands before the database closes",
     async () => {
       const own = await startTestServer();
-      const ana = withApi(await signedIn(own, "Ana", email("ana")));
-      const { workspaceId } = await seedWorkspace(own, ana, "Stop");
-      await ana.api.wiki.createWikiPage(workspaceId, { title: "One", body: "[[Two]] [[reply:Two says no]]" });
-      await ana.api.wiki.createWikiPage(workspaceId, { title: "Two", body: "y" });
-      const inner = fakeProvider();
-      let entered!: () => void;
-      const asked = new Promise<void>((r) => {
-        entered = r;
-      });
-      let open!: () => void;
-      const gate = new Promise<void>((r) => {
-        open = r;
-      });
-      const held: ModelProvider = {
-        ...inner,
-        async *stream(req) {
-          entered();
-          await gate;
-          yield* inner.stream(req);
-        },
-      };
-      const checking = checkWorkspace(own.deps, workspaceId, { gapMs: 0, model: async () => held });
-      // A check that ends before it asks the model would leave `asked` pending: either one ends the wait.
-      const first = await Promise.race([
-        asked.then(() => "asked"),
-        checking.then(
-          (r) => `ended: ${r}`,
-          (e) => `failed: ${e}`,
-        ),
-      ]);
-      if (first !== "asked") {
-        await own.stop();
-        throw new Error(`the check didn't reach the model (${first})`);
-      }
-      let stopped = false;
-      const stopping = own.stop().then(() => {
-        stopped = true;
-      });
-      // The stop waits for the check (the server's background work): the database is still open while the
-      // check is held, and the check's write lands (a write after the close would reject the check).
+      // Stopped once whatever happens: the test's own stop when it got there, else here.
+      let stopping: Promise<void> | undefined;
       try {
-        const [stillOpen] = await own.deps.db.select({ n: count() }).from(schema.knowledgePages);
-        expect([stillOpen?.n, stopped]).toEqual([2, false]);
+        const ana = withApi(await signedIn(own, "Ana", email("ana")));
+        const { workspaceId } = await seedWorkspace(own, ana, "Stop");
+        await ana.api.wiki.createWikiPage(workspaceId, {
+          title: "One",
+          body: "[[Two]] [[reply:Two says no]]",
+        });
+        await ana.api.wiki.createWikiPage(workspaceId, { title: "Two", body: "y" });
+        const inner = fakeProvider();
+        let entered!: () => void;
+        const asked = new Promise<void>((r) => {
+          entered = r;
+        });
+        let open!: () => void;
+        const gate = new Promise<void>((r) => {
+          open = r;
+        });
+        const held: ModelProvider = {
+          ...inner,
+          async *stream(req) {
+            entered();
+            await gate;
+            yield* inner.stream(req);
+          },
+        };
+        const checking = checkWorkspace(own.deps, workspaceId, { gapMs: 0, model: async () => held });
+        // A check that ends before it asks the model would leave `asked` pending: either one ends the wait.
+        const first = await Promise.race([
+          asked.then(() => "asked"),
+          checking.then(
+            (r) => `ended: ${r}`,
+            (e) => `failed: ${e}`,
+          ),
+        ]);
+        if (first !== "asked") throw new Error(`the check didn't reach the model (${first})`);
+        let stopped = false;
+        stopping = own.stop().then(() => {
+          stopped = true;
+        });
+        // The stop waits for the check (the server's background work): the database is still open while the
+        // check is held, and the check's write lands (a write after the close would reject the check).
+        try {
+          const [stillOpen] = await own.deps.db.select({ n: count() }).from(schema.knowledgePages);
+          expect([stillOpen?.n, stopped]).toEqual([2, false]);
+        } finally {
+          // The held check is let go even when the assertion failed, so the stop can end.
+          open();
+        }
+        expect(await checking).toBe(true);
+        await stopping;
+        expect(stopped).toBe(true);
       } finally {
-        // The held check is let go even when the assertion failed, so the stop can end.
-        open();
+        await (stopping ?? own.stop()).catch(() => {});
       }
-      expect(await checking).toBe(true);
-      await stopping;
-      expect(stopped).toBe(true);
     },
     SERVER_TEST_MS,
   );
