@@ -122,8 +122,9 @@ async function apply(deps: AppDeps, row: MemoryReviewRow, me: WorkspaceMember): 
       ? { scope: "person" as const, workspaceId: row.workspaceId, userId: row.ownerUserId ?? "" }
       : { scope: "agent" as const, workspaceId: row.workspaceId, agentId: row.agentId };
   const base = row.baseSha256 ?? undefined;
-  // The path the run read when it queued the change: a move before approval makes it change another file.
-  const expectedPath = row.path !== null ? { expectedPath: row.path } : {};
+  // The path the run read when it queued the change (null: the note had none): a move before approval, or a path
+  // given to a note that had none, makes it change another file.
+  const expectedPath = { expectedPath: row.path };
   switch (row.op) {
     case "create": {
       const created = await createMemory(
