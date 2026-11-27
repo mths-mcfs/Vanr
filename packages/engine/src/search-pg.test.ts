@@ -197,8 +197,42 @@ describe("search in SQL: beyond the contract", () => {
       expect(moved.map((r) => r.id)).not.toEqual(first.map((r) => r.id));
       await index.upsert(src, version({ scope: { kind: "channel", channelId: "priv" }, page: 2 }));
       expect((await rows()).map((r) => r.id)).not.toEqual(moved.map((r) => r.id));
+      // The same `title\ntext` split elsewhere hashes the same, and is still another chunk.
+      await index.upsert(src, [chunk({ title: "Nota", text: "light\nhouse" })]);
+      const split = await rows();
+      await index.upsert(src, [chunk({ title: "Nota\nlight", text: "house" })]);
+      expect((await rows()).map((r) => r.id)).not.toEqual(split.map((r) => r.id));
     },
   );
+
+  test.each([
+    ["an exclusion", "harbor -cancelado", {}, { text: "harbor plan cancelado" }],
+    [
+      "a channel filter",
+      "harbor",
+      { filters: { channelIds: ["pub"] } },
+      { scope: { kind: "channel", channelId: "priv" } },
+    ],
+  ] as const)("a source rewritten during a search must still pass %s", async (_, query, opts, change) => {
+    const access = worldAccess(world);
+    const src: SourceRef = { kind: "wiki", id: "plan" };
+    let reads = 0;
+    const index: PgSearchIndex = new PgSearchIndex(await pglite(), {
+      access: {
+        ...access,
+        async readable(workspaceId, principal) {
+          if (++reads === 2)
+            await index.upsert(src, [
+              chunk({ text: "harbor plan", updatedAt: "2026-10-11T12:00:00Z", ...change }),
+            ]);
+          return access.readable(workspaceId, principal);
+        },
+      },
+    });
+    await index.upsert(src, [chunk({ text: "harbor plan" })]);
+    expect(await index.search({ workspaceId: "o", userId: "u1" }, query, opts)).toEqual([]);
+    expect(reads).toBe(2);
+  });
 
   test.each(["support@example.com", "https://example.com/path", "version 1.2.3"])(
     "the body is searchable with the same tokenization as the query: %s",

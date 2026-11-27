@@ -89,6 +89,7 @@ const chunkKey = (r: Row) => `${r.source_kind}:${r.ordinal}:${r.source_id}`;
 const chunkFacts = (r: {
   workspaceId: string;
   ordinal: number;
+  title: string;
   hash: string;
   url: string;
   scope: ChunkInput["scope"];
@@ -105,6 +106,8 @@ const chunkFacts = (r: {
   JSON.stringify([
     r.workspaceId,
     r.ordinal,
+    // The hash covers `title\ntext`: a newline moved across the split hashes the same.
+    r.title,
     r.hash,
     r.url,
     r.scope.kind,
@@ -132,6 +135,7 @@ const rowFacts = (r: Row) =>
   chunkFacts({
     workspaceId: r.workspace_id,
     ordinal: Number(r.ordinal),
+    title: r.title,
     hash: r.text_hash,
     url: r.url,
     scope:
@@ -290,7 +294,7 @@ export class PgSearchIndex implements SearchIndex {
       // tick) writes nothing: the rows, their ids and their vectors stay.
       const current = rowsOf(
         await tx.execute(sql`
-          select workspace_id, ordinal, text_hash, url, scope_kind, channel_id, principals, author_id, page, has,
+          select workspace_id, ordinal, title, text_hash, url, scope_kind, channel_id, principals, author_id, page, has,
             is_facets, mentions, untrusted, created_at, updated_at, embed_state
           from search_chunks where source_kind = ${source.kind} and source_id = ${source.id}
           order by ordinal`),
@@ -511,15 +515,13 @@ export class PgSearchIndex implements SearchIndex {
     // With `any`, a free term can match approximately. A phrase-only query still needs a real phrase.
     const requirePhrases = phrases.length && (match === "all" || !terms);
     const excl = excluded(q);
-    const where = sql.join(
-      [
-        perm,
-        ...this.filters(opts.kinds, opts.filters),
-        ...(requirePhrases ? [sql`(${sql.join(phrases, join)})`] : []),
-        ...(excl ? [sql`not ${excl}`] : []),
-      ],
-      sql` and `,
-    );
+    // Also on the final read: a chunk rewritten after the legs must still pass them.
+    const narrowing = [
+      ...this.filters(opts.kinds, opts.filters),
+      ...(requirePhrases ? [sql`(${sql.join(phrases, join)})`] : []),
+      ...(excl ? [sql`not ${excl}`] : []),
+    ];
+    const where = sql.join([perm, ...narrowing], sql` and `);
     const limit = Math.max(1, Math.min(opts.limit ?? 20, 500));
     const legLimit = Math.max(LEG_LIMIT, limit);
 
@@ -603,7 +605,7 @@ export class PgSearchIndex implements SearchIndex {
             ({ row }) => sql`(${row.source_kind}::text, ${row.source_id}::text, ${row.ordinal}::integer)`,
           ),
           sql`, `,
-        )}) and ${currentPerm}`),
+        )}) and ${sql.join([currentPerm, ...narrowing], sql` and `)}`),
     );
     const byKey = new Map(rows.map((r) => [chunkKey(r), r]));
     const hits: SearchHit[] = [];
