@@ -173,15 +173,23 @@ function NoticeList({ workspaceId, filter }: { workspaceId: string; filter: Noti
   // The pages after the first: loaded on demand, and loaded again from the first page's cursor every
   // time the first page changes, so the list always reads as one moment of the server. A notice that
   // moved across the page boundary is then neither lost nor shown twice.
-  const [extra, setExtra] = useState<{ items: AppNotification[]; cursor: string | null } | null>(null);
+  // `version` is the first page (its dataUpdatedAt) the range continues: a range is only ever extended
+  // while it still continues the first page on screen, and is otherwise loaded again from it.
+  const [extra, setExtra] = useState<{
+    items: AppNotification[];
+    cursor: string | null;
+    version: number;
+  } | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const wanted = useRef(0);
   const ticket = useRef(0);
   /**
-   * Loads `count` notices from `from`, after `base`: the next page on a click, or the whole older
-   * range again (`rebuild`) when the first page changed. A later load started meanwhile wins.
+   * Loads `count` notices from `from`, after `base`, for the first page `version`: the next page on a
+   * click, or the whole older range again (`rebuild`) from that first page's cursor. A later load
+   * started meanwhile wins.
    */
   const loadExtra = async (
+    version: number,
     from: string | null,
     count: number,
     base: readonly AppNotification[],
@@ -214,7 +222,7 @@ function NoticeList({ workspaceId, filter }: { workspaceId: string; filter: Noti
       }
       throw error;
     }
-    if (mine === ticket.current) setExtra({ items, cursor });
+    if (mine === ticket.current) setExtra({ items, cursor, version });
   };
 
   // An event that arrives while the first page is on its way may be missing from that answer, which
@@ -236,7 +244,9 @@ function NoticeList({ workspaceId, filter }: { workspaceId: string; filter: Noti
       void page.refetch();
       return;
     }
-    if (wanted.current > 0) load(page.data.nextCursor, wanted.current, [], true).catch(say.failed);
+    if (wanted.current > 0) {
+      load(page.dataUpdatedAt, page.data.nextCursor, wanted.current, [], true).catch(say.failed);
+    }
   }, [first.dataUpdatedAt, first.isFetching]);
 
   const changed = () => [
@@ -271,11 +281,17 @@ function NoticeList({ workspaceId, filter }: { workspaceId: string; filter: Noti
 
   const loadMore = async () => {
     if (cursor === null) return;
-    // Only the next page; loading the whole older range again is for when the first page changes.
     wanted.current = (extra?.items.length ?? 0) + PAGE;
     setLoadingMore(true);
     try {
-      await loadExtra(cursor, PAGE, extra?.items ?? [], false);
+      // The next page only while the range continues the first page on screen; otherwise (the first
+      // page changed and its range is being loaded again, or none is loaded) the whole range, one
+      // page longer, from the first page's own cursor. Either load supersedes one still running.
+      if (extra !== null && extra.version === first.dataUpdatedAt) {
+        await loadExtra(extra.version, cursor, PAGE, extra.items, false);
+      } else {
+        await loadExtra(first.dataUpdatedAt, first.data.nextCursor, wanted.current, [], true);
+      }
     } catch (error) {
       outcome.failed(error);
     } finally {

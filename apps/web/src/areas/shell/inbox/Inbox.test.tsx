@@ -435,6 +435,61 @@ describe("the inbox", () => {
       await waitFor(() => expect(count(/^Report \d+$/)).toBe(60));
     });
 
+    test("Show older clicked while the older range is being loaded again leaves no gap", async () => {
+      const { server, sample } = reports();
+      for (let n = 60; n < 200; n += 1) {
+        const updatedAt = new Date(Date.parse(sample.updatedAt) - n * 60_000).toISOString();
+        server.notifications.push({
+          ...sample,
+          id: `ntf_report_${n}`,
+          updatedAt,
+          readAt: updatedAt,
+          latest: { title: `Report ${n}` },
+        });
+      }
+      const app = await renderApp({ path: `${PATH}?filter=fyi`, signedInAs: "usr_ana", server });
+      await screen.findByText("Report 0");
+      await app.user.click(screen.getByRole("button", { name: "Show older notices" }));
+      await screen.findByText("Report 99");
+      await app.user.click(screen.getByRole("button", { name: "Show older notices" }));
+      await screen.findByText("Report 149");
+      // A new notice on top: the first page is asked again, then the older range is loaded again.
+      // The waits are real ones, so each answer lands in the order a slow network would give.
+      const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+      const firstPage = server.delay("listNotifications");
+      const fresh = {
+        ...sample,
+        id: "ntf_new",
+        updatedAt: new Date(Date.parse(sample.updatedAt) + 60_000).toISOString(),
+        readAt: null,
+        latest: { title: "Brand new" },
+      };
+      server.notifications.push(fresh);
+      await act(async () =>
+        server.emit("workspace_birchwood", { type: "notification.shown", notification: strip(fresh) }),
+      );
+      await pause(20);
+      firstPage.release();
+      const rebuild = server.delay("listNotifications");
+      await screen.findByText("Brand new");
+      await pause(20);
+      // The older range is on its way again when the person asks for one more page.
+      await app.user.click(screen.getByRole("button", { name: "Show older notices" }));
+      await pause(20);
+      rebuild.release();
+      await pause(400);
+      // Four pages now: the new notice and Reports 0 to 198. Report 199 is the next page's.
+      await waitFor(() => expect(count(/^Report 198$/)).toBe(1));
+      await settle();
+      expect(count(/^Report 199$/)).toBe(0);
+      expect(screen.getByRole("button", { name: "Show older notices" })).toBeDefined();
+      const missing = Array.from({ length: 199 }, (_, n) => n).filter(
+        (n) => count(new RegExp(`^Report ${n}$`)) !== 1,
+      );
+      expect(missing).toEqual([]);
+      // 200 rows on the page, and every step waits for the answers to land.
+    }, 20_000);
+
     test("hidden then shown again while the first page is on its way ends shown, once", async () => {
       const { server } = reports();
       await renderApp({ path: `${PATH}?filter=fyi`, signedInAs: "usr_ana", server });
