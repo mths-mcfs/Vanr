@@ -17,6 +17,8 @@ import type { Person } from "./seed";
  * does after saving the run's status).
  */
 export function agentRuntime() {
+  /** `onTurn` runs inside `runFor`, after the run is live and before it answers (a test's interleaving). */
+  const hooks: { onTurn?: (runId: string) => Promise<void> } = {};
   const listeners: ((end: RunEnd) => void)[] = [];
   const live = new Map<string, Omit<RunEnd, "runId" | "status" | "errorCode">>();
   const turns: { runId: string; triggerId: string }[] = [];
@@ -52,10 +54,11 @@ export function agentRuntime() {
         threadId: trigger.threadId,
       });
       turns.push({ runId, triggerId: trigger.id });
+      await hooks.onTurn?.(runId);
       return { ok: true, runId, done: Promise.resolve() };
     },
   });
-  return { wrap, turns, finish };
+  return { wrap, turns, finish, hooks };
 }
 
 /** A verifier that passes every item and keeps what it was asked. */

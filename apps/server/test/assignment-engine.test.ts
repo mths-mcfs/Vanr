@@ -18,9 +18,11 @@ import {
   decide,
   runtimeReady,
   type Snapshot,
+  snapshotOf,
 } from "../src/assignments/motor";
 import { planOf, writePlan } from "../src/assignments/plan";
 import { proofsOf } from "../src/assignments/proofs";
+import type { Verifier } from "../src/assignments/verify";
 import type { RunningServer } from "../src/server";
 import { agentRuntime, pairRunner, passing, seedAgent } from "./assignment-kit";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
@@ -374,6 +376,7 @@ describe("the engine on its loop", () => {
         poolSize: 2,
       });
       server.deps.assignmentEngine = first;
+      const engines: AssignmentEngine[] = [first];
       try {
         await first.start();
         const row = await start(proposed, first);
@@ -392,6 +395,7 @@ describe("the engine on its loop", () => {
 
         // The server comes back: a new engine on the same database picks the open assignment up.
         const second = createEngine(() => server.deps, "local", { url: null, version: "1", poolSize: 2 });
+        engines.push(second);
         server.deps.assignmentEngine = second;
         await second.start();
         await second.idle();
@@ -412,8 +416,8 @@ describe("the engine on its loop", () => {
           .from(assignmentWork)
           .where(eq(assignmentWork.assignmentId, row.id));
         expect(work.map((x) => [x.itemId, x.n, x.outcome])).toEqual([["p1", 1, "done"]]);
-        await second.stop();
       } finally {
+        await Promise.allSettled(engines.map((e) => e.stop()));
         server.deps.assignmentEngine = original;
       }
     },
@@ -619,6 +623,133 @@ describe("the engine on its loop", () => {
       expect(cards).toHaveLength(1);
       expect(await costOf()).toBe(2);
       expect((await itemOf("p2"))?.status).toBe("todo");
+    },
+    SERVER_TEST_MS,
+  );
+
+  /** An agent assignment with one item, paused straight in the database: the loop only waits. */
+  async function heldAgentAssignment(title: string) {
+    const agentId = await seedAgent(server.deps.db, workspaceId, ana, null);
+    const row = await createAssignment(server.deps, {
+      workspaceId,
+      agentId,
+      agentHandle: `lia${agentId.slice(-4)}`,
+      channelId: general,
+      ownerId: ana.user.id,
+      title,
+      goal: title,
+      executor: "agent",
+      runnerId: null,
+      commandPolicy: "always",
+      plan: ["Walls"],
+    });
+    await server.deps.db
+      .update(assignments)
+      .set({ status: "paused", startedAt: server.deps.now() })
+      .where(eq(assignments.id, row.id));
+    return reload(row.id);
+  }
+
+  test(
+    "a claimed work still sending stays live for the other loop; past the grace it is a dead step",
+    async () => {
+      const row = await heldAgentAssignment("Sending");
+      const id = workIdOf(row.id, "p1", 1);
+      await server.deps.db
+        .insert(assignmentWork)
+        .values({ id, assignmentId: row.id, itemId: "p1", n: 1, kind: "run", status: "running" });
+      expect((await snapshotOf(server.deps, row)).open).toEqual([{ id, live: true }]);
+      await server.deps.db
+        .update(assignmentWork)
+        .set({ startedAt: new Date(Date.now() - 3 * 60_000) })
+        .where(eq(assignmentWork.id, id));
+      expect((await snapshotOf(server.deps, row)).open).toEqual([{ id, live: false }]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "an attempt reaped while its step was still sending doesn't keep its turn",
+    async () => {
+      const row = await heldAgentAssignment("Reaped");
+      const id = workIdOf(row.id, "p1", 1);
+      // Another loop reaps the attempt while this step is inside runFor.
+      runtime.hooks.onTurn = async () => {
+        await act(server.deps, row.id, { type: "reap", workId: id });
+      };
+      try {
+        await act(server.deps, row.id, { type: "work", itemId: "p1", n: 1 });
+      } finally {
+        runtime.hooks.onTurn = undefined;
+      }
+      const run = runtime.turns.at(-1)?.runId ?? "";
+      expect(server.deps.runtime.liveRun(run)).toBeNull();
+      const [w] = await server.deps.db.select().from(assignmentWork).where(eq(assignmentWork.id, id));
+      expect([w?.status, w?.outcome, w?.refId]).toEqual(["ended", "interrupted", null]);
+      await server.deps.runtime.settle();
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a cap raised and a due date moved since the decision: the step does nothing",
+    async () => {
+      const row = await heldAgentAssignment("Moved");
+      await server.deps.db
+        .update(assignments)
+        .set({ status: "active", dueAt: new Date(Date.now() + 3600_000) })
+        .where(eq(assignments.id, row.id));
+      // The decision saw the steps cap hit (0 of 0); the owner raised it to 30 before the step.
+      await server.deps.db
+        .update(assignments)
+        .set({ limits: { dollars: 5, minutes: 480, steps: 30 } })
+        .where(eq(assignments.id, row.id));
+      await act(server.deps, row.id, { type: "ceiling", which: "steps" });
+      await act(server.deps, row.id, { type: "overdue" });
+      const after = await reload(row.id);
+      expect([after.status, after.ceiling]).toEqual(["active", null]);
+      expect(await kinds(row.id)).toEqual(["plan_edited"]);
+      await server.deps.db.update(assignments).set({ status: "paused" }).where(eq(assignments.id, row.id));
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a verdict on an item the person changed during the check is not applied",
+    async () => {
+      const row = await onRunner("Judged", ["Build"]);
+      await server.deps.db
+        .update(schema.assignmentPlanItems)
+        .set({ status: "done", summary: "Built" })
+        .where(
+          and(eq(schema.assignmentPlanItems.assignmentId, row.id), eq(schema.assignmentPlanItems.id, "p1")),
+        );
+      const editing: Verifier = async (_deps, _row, items) => {
+        // The person rewrote the criterion while the verifier read the old one.
+        await server.deps.db
+          .update(schema.assignmentPlanItems)
+          .set({ epoch: 1, criteria: "Build and test" })
+          .where(
+            and(eq(schema.assignmentPlanItems.assignmentId, row.id), eq(schema.assignmentPlanItems.id, "p1")),
+          );
+        return {
+          ok: true,
+          runId: null,
+          verdicts: items.map((i) => ({ id: i.item.id, passes: true, reason: "ok" })),
+        };
+      };
+      await act({ ...server.deps, assignmentVerifier: editing }, row.id, {
+        type: "validate",
+        itemIds: ["p1"],
+        round: 1,
+      });
+      const [p1] = await server.deps.db
+        .select()
+        .from(schema.assignmentPlanItems)
+        .where(
+          and(eq(schema.assignmentPlanItems.assignmentId, row.id), eq(schema.assignmentPlanItems.id, "p1")),
+        );
+      expect([p1?.passes, p1?.checks]).toEqual([null, 0]);
     },
     SERVER_TEST_MS,
   );

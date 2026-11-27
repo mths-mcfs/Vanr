@@ -51,6 +51,11 @@ type AssignmentLimits = schema.AssignmentLimits;
 const WORKING_WAIT_MS = 10 * 60_000;
 /** A job that ended and nobody processed in 2 min (the server died in the middle): the engine processes it. */
 const SETTLE_GRACE_MS = 2 * 60_000;
+/**
+ * A work row claimed and not yet bound to its run or job: the step that claimed it is still sending (posting the
+ * turn, writing the files to the runner). Past this it counts as a step that died and gets reaped.
+ */
+const CLAIM_GRACE_MS = 2 * 60_000;
 const RETRY_WAIT_MS = 5 * 60_000;
 const MAX_WAIT_MS = 6 * 3600_000;
 
@@ -221,12 +226,14 @@ export async function snapshotOf(deps: AppDeps, row: AssignmentRow): Promise<Sna
   for (const w of works) {
     lastN[w.itemId] = Math.max(lastN[w.itemId] ?? 0, w.n);
     if (w.status === "ended") continue;
+    const sending = w.status === "running" && w.refId === null && now - w.startedAt.getTime() < CLAIM_GRACE_MS;
     open.push({
       id: w.id,
       live:
-        w.kind === "task"
+        sending ||
+        (w.kind === "task"
           ? live(jobById.get(w.refId ?? jobIdOf(w.id)))
-          : w.refId !== null && deps.runtime.liveRun(w.refId) !== null,
+          : w.refId !== null && deps.runtime.liveRun(w.refId) !== null),
     });
   }
   const busy =
@@ -373,6 +380,8 @@ export async function act(deps: AppDeps, assignmentId: string, a: EngineAction):
 
     case "ceiling": {
       const usage = await assignmentUsage(deps, row);
+      // A cap raised since the decision: pause only if it is still hit (or a reservation was already rejected).
+      if (!row.ceiling && ceilingState(row.limits, usage).hit !== a.which) return null;
       await pauseFor(
         deps,
         row,
@@ -421,7 +430,7 @@ export async function act(deps: AppDeps, assignmentId: string, a: EngineAction):
     }
 
     case "overdue": {
-      if (!row.dueAt) return null;
+      if (!row.dueAt || row.dueAt > now) return null;
       const ev = await assignmentEvent(deps, row, {
         kind: "overdue",
         actor: SYSTEM,
@@ -665,7 +674,13 @@ async function dispatch(
     );
     return null;
   }
-  await db.update(assignmentWork).set({ refId: res.runId }).where(eq(assignmentWork.id, id));
+  const [bound] = await db
+    .update(assignmentWork)
+    .set({ refId: res.runId })
+    .where(and(eq(assignmentWork.id, id), ne(assignmentWork.status, "ended")))
+    .returning();
+  // The attempt was reaped while this step was still sending: its turn doesn't go on.
+  if (!bound) deps.runtime.cancel(res.runId, null);
   return null;
 }
 
@@ -790,6 +805,7 @@ async function validate(
             eq(assignmentPlanItems.assignmentId, row.id),
             eq(assignmentPlanItems.id, t.id),
             eq(assignmentPlanItems.checks, t.checks),
+            eq(assignmentPlanItems.epoch, t.epoch),
           ),
         );
     return RETRY_WAIT_MS;
@@ -814,6 +830,7 @@ async function validate(
           eq(assignmentPlanItems.assignmentId, row.id),
           eq(assignmentPlanItems.id, t.id),
           eq(assignmentPlanItems.checks, t.checks),
+          eq(assignmentPlanItems.epoch, t.epoch),
         ),
       )
       .returning();

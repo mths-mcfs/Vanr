@@ -120,7 +120,8 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("the assignment engine on Postgre
       expect(submission?.status).toBe("pending");
       expect(starts.get(jobId)).toBe(1);
     },
-    2 * SERVER_TEST_MS,
+    // Room for the three waits inside (30 s, 15 s and 30 s) and the setup.
+    3 * SERVER_TEST_MS,
   );
 
   const withDb = (hooks: Parameters<typeof instrumented>[1]): AppDeps => ({

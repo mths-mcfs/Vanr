@@ -795,6 +795,8 @@ export async function runAgentJob(
   try {
     job = await withAssignmentJobs(row.id, async () => {
       await openForJob(ctx.deps, row.id);
+      if ((await runningJobsOf(ctx.deps.db, row.id)).length > 0)
+        throw new HttpError(409, "assignment.job_running", "A job is already running for this assignment");
       return startJob(ctx.deps, {
         workspaceId: row.workspaceId,
         runnerId: runner.id,
