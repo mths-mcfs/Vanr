@@ -372,7 +372,7 @@ export class FakeServer {
         visibility: "public",
         budgetPerMonthUsd: null,
         createdAt: SAMPLE_TIME,
-        memberIds: birchwoodPeople,
+        memberIds: [...birchwoodPeople],
       });
     }
     this.notifications = this.seedNotifications();

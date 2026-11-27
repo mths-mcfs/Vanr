@@ -4,7 +4,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import { QUERY_RETRIES } from "@vanr/client/react";
 import type { AppNotification } from "@vanr/contract";
 import { DEFAULT_NOTIFICATION_SETTINGS } from "../../../../dev/fake-server.ts";
-import { chooseOption, newServer, renderApp } from "../../../../test/app.tsx";
+import { chooseOption, newServer, newTestRuntime, renderApp } from "../../../../test/app.tsx";
 import { dayGroupOf, destinationOf, joinPages, laterOptions } from "./notices.ts";
 
 const PATH = "/workspace/workspace_birchwood/notifications/settings";
@@ -104,6 +104,16 @@ describe("notification preferences", () => {
         true,
       ),
     );
+  });
+
+  test("joining one seeded channel does not join the other", async () => {
+    const server = newServer();
+    server.enroll("workspace_birchwood", "usr_noor", "member");
+    const { runtime } = newTestRuntime({ path: PATH, signedInAs: "usr_noor", server });
+    await runtime.api.client.api.joinChannel({ workspaceId: "workspace_birchwood", channelId: "ch_general" });
+    const members = (id: string) => server.state.channels.find((channel) => channel.id === id)?.memberIds;
+    expect(members("ch_general")).toContain("usr_noor");
+    expect(members("ch_print")).not.toContain("usr_noor");
   });
 
   test("failed: a retry that works", async () => {
