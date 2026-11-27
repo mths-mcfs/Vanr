@@ -287,7 +287,10 @@ export async function editEvent(
     // it): the same rule, with no new start or time zone, keeps it.
     const keptTimes = series?.times;
     const resent =
-      patch.rule && keptTimes && !retimed && sameKeys(patch.rule, withoutTimes({ ...series, start: undefined }))
+      patch.rule &&
+      keptTimes &&
+      !retimed &&
+      sameKeys(patch.rule, withoutTimes({ ...series, start: undefined }))
         ? { ...patch.rule, times: keptTimes }
         : patch.rule;
     const ruleChange =
