@@ -119,6 +119,7 @@ export function AccessDialog({
           <RadioGroup
             aria-label={t("access.who")}
             value={kind}
+            disabled={busy}
             onValueChange={(value) =>
               setKind(value === "private" ? "private" : value === "channel" ? "channel" : "workspace")
             }
@@ -135,7 +136,7 @@ export function AccessDialog({
                   key={member.userId}
                   label={member.userId === userId ? t("access.you", { name: member.name }) : member.name}
                   checked={member.userId === userId || people.includes(member.userId)}
-                  disabled={member.userId === userId}
+                  disabled={busy || member.userId === userId}
                   onCheckedChange={(on) => setPeople((list) => toggle(list, member.userId, on === true))}
                 />
               ))}
@@ -145,6 +146,7 @@ export function AccessDialog({
                   key={agent.id}
                   label={agent.name}
                   checked={bots.includes(agent.id)}
+                  disabled={busy}
                   onCheckedChange={(on) => setBots((list) => toggle(list, agent.id, on === true))}
                 />
               ))}
@@ -155,6 +157,7 @@ export function AccessDialog({
               aria-label={t("access.pickChannel")}
               placeholder={t("access.pickChannel")}
               value={channelId}
+              disabled={busy}
               onValueChange={setChannelId}
             >
               {(channels.data ?? []).map((channel) => (

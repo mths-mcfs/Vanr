@@ -116,10 +116,47 @@ describe("access, comments and proposals", () => {
     );
     await waitFor(() => expect(text?.getAttribute("contenteditable")).toBe("false"));
     expect(within(dialog).getByRole("button", { name: "Cancel" }).hasAttribute("disabled")).toBe(true);
+    // What it sends can't change under it either.
+    expect(
+      within(dialog).getByRole("checkbox", { name: "Jonas Lind" }).hasAttribute("disabled") &&
+        within(dialog)
+          .getByRole("radio", { name: /Everyone in the workspace/ })
+          .hasAttribute("disabled"),
+    ).toBe(true);
     held.release();
     await waitFor(() =>
       expect(screen.queryByRole("dialog", { name: "Who reads Ink suppliers" }) === null).toBe(true),
     );
+  });
+
+  test("restricting first sends the field changes still waiting their turn", async () => {
+    FakeCollabSocket.instances = [];
+    FakeCollabSocket.nextScope = "read-write";
+    FakeCollabSocket.autoOpen = true;
+    FakeCollabSocket.failHandshake = false;
+    const app = await renderApp({
+      path: `${WIKI}/ink-suppliers`,
+      signedInAs: "usr_ana",
+      wikiSocket: FakeCollabSocket as unknown as new (url: string) => WebSocket,
+    });
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Version 1 published"));
+    const held = app.server.hold("updateWikiPageMeta");
+    const field = screen.getByRole("textbox", { name: "Add to Tags" });
+    await app.user.type(field, "a{Enter}");
+    await app.user.type(field, "b{Enter}");
+    const calls = () => app.server.calls.map((call) => call.method);
+    await waitFor(() => expect(calls().filter((method) => method === "updateWikiPageMeta")).toHaveLength(1));
+    await app.user.click(screen.getByRole("button", { name: "Page actions" }));
+    await app.user.click(await screen.findByRole("menuitem", { name: "Who reads it…" }));
+    const dialog = await screen.findByRole("dialog", { name: "Who reads Ink suppliers" });
+    await app.user.click(within(dialog).getByRole("radio", { name: /Only some people and agents/ }));
+    await app.user.click(within(dialog).getByRole("button", { name: "Save" }));
+    held.release();
+    await waitFor(() => expect(calls().includes("setWikiPageAccess")).toBe(true));
+    // Both tags reached the page, before who reads it changed.
+    expect(calls().lastIndexOf("updateWikiPageMeta") < calls().indexOf("setWikiPageAccess")).toBe(true);
+    const ink = app.server.wiki.pages.find((each) => each.title === "Ink suppliers");
+    expect(ink?.tags.includes("a") === true && ink.tags.includes("b")).toBe(true);
   });
 
   test("after a revoked read who reads the page can no longer be changed from it", async () => {

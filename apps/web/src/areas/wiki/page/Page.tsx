@@ -255,10 +255,12 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
   const mayDelete = !denied && (admin || (!p.locked && createdIt && !live.readOnly));
   // Offline, the live document still takes edits: they wait in it and sync on reconnect.
   // One rule for every write control: the page says this person may edit it, and the live document has
-  // not said otherwise since (a lock seen live, a revoked read), and no change of who reads it is on its way.
-  const canWrite = p.editable && live.status !== "denied" && !live.readOnly && !restricting;
+  // not said otherwise since (a lock seen live, a revoked read). While who reads it is being saved the
+  // controls rest too, but the writes already waiting their turn still go: they are finished first.
+  const mayEdit = p.editable && live.status !== "denied" && !live.readOnly;
+  const canWrite = mayEdit && !restricting;
   const editable = canWrite && source?.kind === "live";
-  mayWrite.current = canWrite;
+  mayWrite.current = mayEdit;
   const dirty = live.touched || p.draft?.dirty === true;
   const agentName = (id: string) => agents.data?.find((agent) => agent.id === id)?.name;
 
@@ -665,7 +667,11 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
           workspaceId={workspaceId}
           page={p}
           userId={userId}
-          beforeSave={() => settle(live.live)}
+          beforeSave={async () => {
+            // The field writes already accepted go to the page's current address first.
+            await queue.current;
+            return settle(live.live);
+          }}
           onBusy={setRestricting}
           onClose={() => setSharing(false)}
           onSaved={(saved) => {
