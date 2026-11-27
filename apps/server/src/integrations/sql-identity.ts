@@ -6,7 +6,10 @@
 // whether it is pg_catalog's or a customer's `public.lower(integer)`; and the planner itself runs an IMMUTABLE
 // function with constant arguments, so a customer function can read a masked column before any check sees it.
 // The catalog says which functions exist: a customer routine that shares a name with a call in the query, or
-// that an allowed relation depends on, makes the query rejected before it is planned.
+// that an allowed relation depends on, makes the query rejected before it is planned. For the same reason a
+// relation outside the policy is refused before planning: a view expands to the tables under it, so the plan
+// can't name it, and its calls would already have run.
+import { randomBytes } from "node:crypto";
 import { isIP } from "node:net";
 import type { SqlTarget } from "@vanr/engine/sqlconn";
 import postgres from "postgres";
@@ -17,12 +20,18 @@ import {
   lexWords,
   parseRelation,
   type Relation,
+  relationText,
 } from "./sql-guard";
 
 /** What the guarded run needs from ONE read-only transaction on the customer's database. */
 export interface GuardedSession {
   /** A catalog read the guard writes itself, with bound parameters (extended protocol). */
   rows(text: string, params: unknown[]): Promise<Record<string, unknown>[]>;
+  /**
+   * `PREPARE name AS` the checked statement: parsed and rewritten (its views expanded and their relations locked),
+   * never planned, so nothing in it runs. The guard deallocates it.
+   */
+  prepare(name: string, statement: string): Promise<void>;
   /** `EXPLAIN (VERBOSE, FORMAT JSON)` of the checked statement: the plan's JSON. */
   explain(statement: string): Promise<unknown>;
   /** Runs the checked statement as is (extended protocol, no parameters). */
@@ -75,6 +84,65 @@ export function fixedSearchPath(policy: Pick<QueryPolicy, "tables">): string {
     ...schemas.filter((s) => s !== "pg_catalog" && s !== "pg_temp").map(quote),
     "pg_temp",
   ].join(", ");
+}
+
+/**
+ * `rel(oid)`: the policy's relations, found by exact schema ($1) and name ($2), compared byte for byte as the plan
+ * check compares them (no folding: "Sales View" never stands for "sales view", `Étage` is not `étage`), plus every
+ * relation the rules of those views reach, views under views included.
+ */
+const ALLOWED_CLOSURE = `with recursive rel(oid) as (
+         select c.oid
+           from rows from (pg_catalog.unnest($1::pg_catalog.text[]), pg_catalog.unnest($2::pg_catalog.text[]))
+                  as allowed(schema, name)
+           join pg_catalog.pg_namespace n
+             on n.nspname::pg_catalog.text operator(pg_catalog.=) allowed.schema collate pg_catalog."C"
+           join pg_catalog.pg_class c
+             on c.relnamespace operator(pg_catalog.=) n.oid
+            and c.relname::pg_catalog.text operator(pg_catalog.=) allowed.name collate pg_catalog."C"
+         union
+         select d.refobjid
+           from rel
+           join pg_catalog.pg_rewrite r on r.ev_class operator(pg_catalog.=) rel.oid
+           join pg_catalog.pg_depend d
+             on d.classid operator(pg_catalog.=) 'pg_catalog.pg_rewrite'::pg_catalog.regclass::pg_catalog.oid
+            and d.objid operator(pg_catalog.=) r.oid
+            and d.refclassid operator(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass::pg_catalog.oid
+          where d.refobjid operator(pg_catalog.<>) rel.oid
+       )`;
+
+/**
+ * The first relation the query reaches that the policy doesn't allow, as `schema.name`, or null. Runs before any
+ * planning: the statement is only prepared, and the relations it locked are read back. A view the policy doesn't
+ * list is refused here, because the plan shows only the tables under it, and planning would already have run the
+ * IMMUTABLE calls in it. A CTE or a function in FROM locks nothing; a view under an allowed view is allowed, since
+ * its rules are checked with that view's (step 4 of `customCode`). The system schemas are left to the plan check.
+ */
+async function outsideRelation(
+  session: GuardedSession,
+  statement: string,
+  policy: QueryPolicy,
+): Promise<string | null> {
+  const name = `vanr_guard_${randomBytes(8).toString("hex")}`;
+  await session.prepare(name, statement);
+  const relations = allowedRelations(policy);
+  const [outside] = await session.rows(
+    `${ALLOWED_CLOSURE}
+     select n.nspname as schema, c.relname as name
+       from pg_catalog.pg_locks l
+       join pg_catalog.pg_class c on c.oid operator(pg_catalog.=) l.relation
+       join pg_catalog.pg_namespace n on n.oid operator(pg_catalog.=) c.relnamespace
+      where l.locktype operator(pg_catalog.=) 'relation'
+        and l.pid operator(pg_catalog.=) pg_catalog.pg_backend_pid()
+        and n.nspname operator(pg_catalog.<>) all ($3::pg_catalog.text[])
+        and not exists (select from rel where rel.oid operator(pg_catalog.=) c.oid)
+      order by 1, 2
+      limit 1`,
+    [relations.map((r) => r.schema), relations.map((r) => r.name), NATIVE_SCHEMAS],
+  );
+  // Unique per call, and deallocated once read: a prepared statement outlives the transaction.
+  await session.rows(`deallocate ${name}`, []);
+  return outside ? relationText({ schema: String(outside.schema), name: String(outside.name) }) : null;
 }
 
 /** A customer routine the query could reach, as `schema.name(args)`, or null. Runs before any planning. */
@@ -138,29 +206,9 @@ async function customCode(
 
   // 4. A customer function or operator an allowed relation depends on: the rules of a view (and of the views
   //    under it) and the row security policies. The plan shows a view's calls only after inlining or folding.
-  //    Each relation is found by its exact schema and name, compared byte for byte as the plan check compares
-  //    them: no folding, so "Sales View" never stands for "sales view" and `Étage` is not looked up as `étage`.
   const relations = allowedRelations(policy);
   const [dep] = await session.rows(
-    `with recursive rel(oid) as (
-         select c.oid
-           from rows from (pg_catalog.unnest($1::pg_catalog.text[]), pg_catalog.unnest($2::pg_catalog.text[]))
-                  as allowed(schema, name)
-           join pg_catalog.pg_namespace n
-             on n.nspname::pg_catalog.text operator(pg_catalog.=) allowed.schema collate pg_catalog."C"
-           join pg_catalog.pg_class c
-             on c.relnamespace operator(pg_catalog.=) n.oid
-            and c.relname::pg_catalog.text operator(pg_catalog.=) allowed.name collate pg_catalog."C"
-         union
-         select d.refobjid
-           from rel
-           join pg_catalog.pg_rewrite r on r.ev_class operator(pg_catalog.=) rel.oid
-           join pg_catalog.pg_depend d
-             on d.classid operator(pg_catalog.=) 'pg_catalog.pg_rewrite'::pg_catalog.regclass::pg_catalog.oid
-            and d.objid operator(pg_catalog.=) r.oid
-            and d.refclassid operator(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass::pg_catalog.oid
-          where d.refobjid operator(pg_catalog.<>) rel.oid
-       ),
+    `${ALLOWED_CLOSURE},
        objs(classid, objid) as (
          select 'pg_catalog.pg_rewrite'::pg_catalog.regclass::pg_catalog.oid, r.oid
            from pg_catalog.pg_rewrite r join rel on r.ev_class operator(pg_catalog.=) rel.oid
@@ -193,8 +241,9 @@ async function customCode(
  *   1. `guardStatement`: one statement that only reads (no database round trip);
  *   2. the search_path is fixed (`fixedSearchPath`) for the rest of the transaction;
  *   3. the customer's code the query could reach is looked up by identity: rejected before planning;
- *   4. EXPLAIN, and `checkPlan` on it (tables, masked columns, the allowlist of functions);
- *   5. the statement runs, with the same search_path.
+ *   4. the statement is prepared, never planned, and a relation it reaches outside the policy rejects it;
+ *   5. EXPLAIN, and `checkPlan` on it (tables, masked columns, the allowlist of functions);
+ *   6. the statement runs, with the same search_path.
  */
 export async function guardedQuery(
   session: GuardedSession,
@@ -207,12 +256,15 @@ export async function guardedQuery(
   await session.rows("select pg_catalog.set_config('search_path', $1, true)", [fixedSearchPath(policy)]);
   const custom = await customCode(session, statement, policy);
   if (custom) return { failure: { reason: "function", name: custom } };
+  const table = await outsideRelation(session, statement, policy);
+  if (table) return { failure: { reason: "table", table } };
   const failure = checkPlan(await session.explain(statement), policy);
   if (failure) return { failure };
   return { result: await session.run(statement) };
 }
 
 const explainSql = (statement: string) => `explain (verbose, format json) ${statement}`;
+const prepareSql = (name: string, statement: string) => `prepare ${name} as ${statement}`;
 
 /** What the PGlite session uses of a PGlite transaction (its `query` binds parameters). */
 interface PgliteQueryable {
@@ -223,6 +275,9 @@ interface PgliteQueryable {
 export function pgliteGuardedSession(tx: PgliteQueryable): GuardedSession {
   return {
     rows: async (text, params) => (await tx.query<Record<string, unknown>>(text, params)).rows,
+    prepare: async (name, statement) => {
+      await tx.query(prepareSql(name, statement), []);
+    },
     explain: async (statement) =>
       (await tx.query<{ "QUERY PLAN": unknown }>(explainSql(statement), [])).rows[0]?.["QUERY PLAN"],
     run: async (statement) => {
@@ -239,6 +294,9 @@ export function pgliteGuardedSession(tx: PgliteQueryable): GuardedSession {
 export function postgresGuardedSession(tx: postgres.TransactionSql): GuardedSession {
   return {
     rows: async (text, params) => [...(await tx.unsafe(text, params as postgres.ParameterOrJSON<never>[]))],
+    prepare: async (name, statement) => {
+      await tx`${tx.unsafe(prepareSql(name, statement))}`;
+    },
     explain: async (statement) => {
       const [row] = await tx`${tx.unsafe(explainSql(statement))}`;
       return row?.["QUERY PLAN"];

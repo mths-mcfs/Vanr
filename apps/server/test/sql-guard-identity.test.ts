@@ -71,6 +71,15 @@ async function withDatabase(kind: "PGlite" | "Postgres", setup: string, fn: (run
   }
 }
 
+/** A listed view works, through a view under it the policy doesn't name, and the check leaves no prepared statement. */
+async function withViews(q: Run) {
+  const listed = { ...policy, tables: [...policy.tables, "names_outer"] };
+  const out = (await q("select name from names_outer", listed, (s) =>
+    s.rows("select count(*)::int as n from pg_catalog.pg_prepared_statements", []),
+  )) as { out: unknown; raw: Record<string, unknown>[] };
+  expect(out).toEqual({ out: { result: { fields: ["name"], rows: [{ name: "Alice" }] } }, raw: [{ n: 0 }] });
+}
+
 for (const kind of ["PGlite", "Postgres"] as const) {
   const run = test.skipIf(kind === "Postgres" && !TEST_POSTGRES_URL);
 
@@ -272,6 +281,61 @@ for (const kind of ["PGlite", "Postgres"] as const) {
       expect(await q("select Étiq() from customers")).toEqual({
         failure: { reason: "function", name: "public.Étiq()" },
       });
+    });
+  });
+
+  run(`${kind}: a view outside the policy is refused before planning, whatever it calls (#80)`, async () => {
+    // Mislabeled IMMUTABLE functions that read: the planner would fold each call, and the plan would show only
+    // customers and a constant. Each view below is outside the policy.
+    const setup = `
+      create function leak() returns text language sql immutable as $$ select string_agg(v, ',') from secrets $$;
+      create function leakssn() returns text language sql immutable as $$ select string_agg(ssn, ',') from customers $$;
+      create function leakarg(t text) returns text language sql immutable as $$ select v from secrets $$;
+      ${evil("public.boom()", "text", "immutable")}
+      create view v_plain as select id, name from customers;
+      create view v_ssn as select id, ssn as s from customers;
+      create view v_join as select c.id, s.v from customers c cross join secrets s;
+      create view v_leak as select id, leak() as x from customers;
+      create view v_leakssn as select id, leakssn() as x from customers;
+      create view v_boom as select id, boom() as x from customers;
+      create view v_leakarg as select id, leakarg('a') as x from customers;
+      create schema other;
+      create view other.v_leak as select id, leak() as x from public.customers;
+      create view v_const as select leak() as x;
+      create view v_sb with (security_barrier) as select id, leak() as x from customers;
+      create view v_where as select id, name from customers where leak() is not null;
+      create view "V_Leak" as select id, leak() as x from customers;
+      create view names_inner as select id, name from customers;
+      create view names_outer as select name from names_inner;
+    `;
+    await withDatabase(kind, setup, async (q) => {
+      for (const [sql, table] of [
+        ["select * from v_plain", "public.v_plain"],
+        ["select s from v_ssn", "public.v_ssn"],
+        // Two relations outside the policy: the first by name is named.
+        ["select * from v_join", "public.secrets"],
+        ["select x from v_leak", "public.v_leak"],
+        ["select x from v_leakssn", "public.v_leakssn"],
+        ["select x from v_boom", "public.v_boom"],
+        ["select x from v_leakarg", "public.v_leakarg"],
+        ["select x from other.v_leak", "other.v_leak"],
+        ["select x from v_const", "public.v_const"],
+        ["select x from v_sb", "public.v_sb"],
+        ["select * from v_where", "public.v_where"],
+        ['select x from "V_Leak"', 'public."V_Leak"'],
+        ["select c.name, (select x from v_leak limit 1) from customers c", "public.v_leak"],
+        ["select name from customers where exists (select 1 from v_const)", "public.v_const"],
+      ] as const)
+        expect([sql, await q(sql)]).toEqual([sql, { failure: { reason: "table", table } }]);
+
+      // Listed, a clean view works, and so does a view under it that the policy doesn't name.
+      await withViews(q);
+      // A CTE named like a refused view is the CTE, and a function in FROM is no relation.
+      expect(await q("with v_leak as (select 1 as x) select x from v_leak, generate_series(1, 2) g")).toEqual(
+        {
+          result: { fields: ["x"], rows: [{ x: 1 }, { x: 1 }] },
+        },
+      );
     });
   });
 

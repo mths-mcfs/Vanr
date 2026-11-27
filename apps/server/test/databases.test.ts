@@ -395,6 +395,7 @@ describe("the guard and the network rule on a connected database", () => {
             readOnly: (_ms, fn) =>
               fn({
                 rows: async () => [],
+                prepare: async () => {},
                 explain: async () => {
                   throw new Error(
                     `syntax error near "${t.password}" (${Buffer.from(t.password).toString("base64")})`,
