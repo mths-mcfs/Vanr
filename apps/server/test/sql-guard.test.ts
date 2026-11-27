@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { memoryPostgres } from "@vanr/engine/sqlconn";
-import { checkPlan, guardStatement } from "../src/integrations/sql-guard";
+import { checkPlan, guardStatement, relationKey } from "../src/integrations/sql-guard";
 
 /** The statement the guard accepts, or null. */
 const accepted = (sql: string) => {
@@ -130,4 +130,16 @@ test("apostrophes in quoted aliases do not hide functions or masked columns", as
   expect((await check(`select "a'".id + nextval('counter') + "a'".id ${from}`))?.reason).toBe("function");
   expect((await check(`select "a'".ssn || "a'".ssn ${from}`))?.reason).toBe("column");
   expect(await check(`select "a'".name || 'ssn nextval(' ${from}`)).toBeNull();
+});
+
+test("a policy name comes back as SQL that reads the same relation, keywords quoted", async () => {
+  expect(relationKey("Customers")).toBe("public.customers");
+  expect(relationKey('"Customers"')).toBe('public."Customers"');
+  expect(relationKey('"user".customers')).toBe('"user".customers');
+  expect(relationKey('sales."select"')).toBe('sales."select"');
+  await pg.exec(
+    `create schema "user"; create table "user".customers (id int); create table sales."select" (id int);`,
+  );
+  for (const name of ['"user".customers', 'sales."select"'])
+    expect((await pg.query(`select count(*)::int as n from ${relationKey(name)}`)).rows).toEqual([{ n: 0 }]);
 });

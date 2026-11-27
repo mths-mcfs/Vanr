@@ -85,6 +85,63 @@ describe(`a real Postgres as the customer's database (${TEST_POSTGRES_URL ? "pos
   );
 
   run(
+    "Postgres: a table named with a capital is another relation, kept exactly from the first policy to the query",
+    async () => {
+      const admin = postgres(customer, { max: 1, onnotice: () => {} });
+      try {
+        await admin.unsafe(`
+          create table "Customers" (id int, "Token" text, note text);
+          insert into "Customers" values (3, 'tok-3', 'other table');
+        `);
+      } finally {
+        await admin.end({ timeout: 5 });
+      }
+      const ana = await signedIn(server, "Ana", "ana-cased@databases-postgres.test");
+      const { workspaceId, general } = await seedWorkspace(server, ana, "Cased");
+      const lia = await seedAgent(server, workspaceId, ana, "lia", [general]);
+      const kai = await seedAgent(server, workspaceId, ana, "kai", [general]);
+      const channel = await channelInWorkspace(server.deps.db, workspaceId, general);
+      if (!channel) throw new Error("no channel");
+      const created = await call(ana, "POST", `${ws(workspaceId)}/databases`, {
+        provider: "other",
+        label: "Cased",
+        ...target(),
+      });
+      const conn = created.body.connection;
+      // The catalog's own order follows the database's collation: compared as sets.
+      expect([...conn.hiddenSuggestion].sort()).toEqual([
+        'public."Customers"."Token"',
+        "public.customers.ssn",
+      ]);
+      const linked = await call(ana, "PUT", `${ws(workspaceId)}/agents/${lia.id}/databases/${conn.id}`, {
+        level: "read",
+      });
+      expect([...linked.body.policy.tables].sort()).toEqual(['public."Customers"', "public.customers"]);
+      const ask = async (agent: typeof lia, sql: string) =>
+        (
+          await toolRun(server.deps, agent, channel).run(DATABASE_TOOLS, "db_query", {
+            database: "Cased",
+            sql,
+          })
+        ).content;
+      expect(await ask(lia, 'select id, note from "Customers"')).toBe("1 row(s)\nid\tnote\n3\tother table");
+      expect(await ask(lia, 'select "Token" from "Customers"')).toContain("is hidden");
+      expect(await ask(lia, "select ssn from customers")).toContain("is hidden");
+
+      // Allowed only customers: "Customers" stays closed.
+      await call(ana, "PUT", `${ws(workspaceId)}/agents/${kai.id}/databases/${conn.id}`, {
+        level: "read",
+        policy: { tables: ["customers"], maskedColumns: [] },
+      });
+      expect(await ask(kai, 'select * from "Customers"')).toContain(
+        `public."Customers" is not in this agent's policy`,
+      );
+      expect(await ask(kai, "select id from customers order by id")).toBe("2 row(s)\nid\n1\n2");
+    },
+    SERVER_TEST_MS,
+  );
+
+  run(
     "Postgres: the connector's session is read only and holds the statement timeout",
     async () => {
       const conn = await postgresGuardedConnector(target());
