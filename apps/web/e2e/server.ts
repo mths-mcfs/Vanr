@@ -70,9 +70,15 @@ async function stopChild(child: ChildProcess): Promise<void> {
   clearTimeout(timer);
 }
 
+/** The child could not take its port: another process bound it after `freePort` let it go. */
+class PortTaken extends Error {}
+
+const BOOT_ATTEMPTS = 3;
+
 /**
  * Boots the server and waits until it answers. Its stdout and stderr go to `logPath`, which the
- * caller keeps with the run's artifacts.
+ * caller keeps with the run's artifacts. The port is free when picked but not held until the child
+ * binds it, so a port taken in between is retried on a new one.
  */
 export async function startServer({
   webDist,
@@ -82,9 +88,34 @@ export async function startServer({
   logPath: string;
 }): Promise<RunningServer> {
   const dir = await mkdtemp(join(tmpdir(), "vanr-e2e-server-"));
+  const log = createWriteStream(logPath);
+  try {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await boot({ dir, webDist, log });
+      } catch (error) {
+        if (!(error instanceof PortTaken) || attempt === BOOT_ATTEMPTS) throw error;
+        log.write(`# ${error.message}; trying another port\n`);
+      }
+    }
+  } catch (error) {
+    log.end();
+    await rm(dir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function boot({
+  dir,
+  webDist,
+  log,
+}: {
+  dir: string;
+  webDist: string;
+  log: ReturnType<typeof createWriteStream>;
+}): Promise<RunningServer> {
   const port = await freePort();
   const url = `http://127.0.0.1:${port}`;
-  const log = createWriteStream(logPath);
   const child = spawn("bun", [SERVER_ENTRY], {
     // The working folder is the temporary one: what the server writes next to itself lands there.
     cwd: dir,
@@ -106,12 +137,15 @@ export async function startServer({
     },
   });
   child.stdout?.pipe(log, { end: false });
+  let portTaken = false;
   try {
-    await started(child, (line) => log.write(`${line}\n`));
+    await started(child, (line) => {
+      if (line.includes("EADDRINUSE")) portTaken = true;
+      log.write(`${line}\n`);
+    });
   } catch (error) {
     await stopChild(child);
-    log.end();
-    await rm(dir, { recursive: true, force: true });
+    if (portTaken) throw new PortTaken(`port ${port} was taken before the server bound it`);
     throw error;
   }
   return {

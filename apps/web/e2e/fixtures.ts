@@ -98,6 +98,33 @@ async function ok(response: Awaited<ReturnType<APIRequestContext["post"]>>, what
   if (!response.ok()) throw new Error(`${what}: HTTP ${response.status()} ${await response.text()}`);
 }
 
+/** Whether the session in a saved storage state is still one the server knows. */
+async function sessionHolds(server: RunningServer, path: string): Promise<boolean> {
+  const api = await request.newContext({ baseURL: server.url, storageState: path });
+  try {
+    const answer = await api.get("/api/auth/get-session");
+    return answer.ok() && (await answer.json()) !== null;
+  } finally {
+    await api.dispose();
+  }
+}
+
+/** Signs the person in through the API and saves the new session as a storage state. */
+async function signInFresh(server: RunningServer, user: SeededUser): Promise<string> {
+  const api = await apiOf(server);
+  try {
+    await ok(
+      await api.post("/api/auth/sign-in/email", { data: { email: user.email, password: user.password } }),
+      "sign-in",
+    );
+    const path = join(server.dir, `state-${encodeURIComponent(user.email)}.json`);
+    await api.storageState({ path });
+    return path;
+  } finally {
+    await api.dispose();
+  }
+}
+
 export const test = base.extend<Fixtures, WorkerFixtures>({
   server: [
     // biome-ignore lint/correctness/noEmptyPattern: Playwright reads a fixture's dependencies from this pattern.
@@ -166,23 +193,11 @@ export const test = base.extend<Fixtures, WorkerFixtures>({
 
   signIn: async ({ server, states, context }, use) => {
     await use(async (user) => {
-      let path = states.get(user.email);
-      if (path === undefined) {
-        const api = await apiOf(server);
-        try {
-          await ok(
-            await api.post("/api/auth/sign-in/email", {
-              data: { email: user.email, password: user.password },
-            }),
-            "sign-in",
-          );
-          path = join(server.dir, `state-${encodeURIComponent(user.email)}.json`);
-          await api.storageState({ path });
-          states.set(user.email, path);
-        } finally {
-          await api.dispose();
-        }
-      }
+      const saved = states.get(user.email);
+      // A saved state is reused only while its session still counts: a sign-out revokes it.
+      const path =
+        saved !== undefined && (await sessionHolds(server, saved)) ? saved : await signInFresh(server, user);
+      states.set(user.email, path);
       const state = JSON.parse(await readFile(path, "utf8")) as {
         cookies: Parameters<typeof context.addCookies>[0];
       };
