@@ -31,6 +31,11 @@ interface PlanInput {
   status?: PlanItemStatusRow;
   kind?: PlanItemRow["kind"];
   fixes?: string | null;
+  /**
+   * A validation's fix: it goes in only while the item it fixes is still done at the epoch and round that were
+   * judged, read under the plan's lock (an edit in between makes the verdict about another item).
+   */
+  judged?: { epoch: number; checks: number };
 }
 
 export async function planOf(deps: Pick<AppDeps, "db">, assignmentId: string): Promise<PlanItemRow[]> {
@@ -212,6 +217,31 @@ export async function writePlan(
         drafts.push({ row: old, next });
       } else {
         if (input.mode === "append" && raw.id && byId.has(raw.id)) continue;
+        if (raw.judged) {
+          // The item's own row, locked: a retry (touchItem) moves its epoch without the assignment's lock.
+          const [target] = raw.fixes
+            ? await tx
+                .select({
+                  status: assignmentPlanItems.status,
+                  epoch: assignmentPlanItems.epoch,
+                  checks: assignmentPlanItems.checks,
+                })
+                .from(assignmentPlanItems)
+                .where(
+                  and(
+                    eq(assignmentPlanItems.assignmentId, assignmentId),
+                    eq(assignmentPlanItems.id, raw.fixes),
+                  ),
+                )
+                .for("update")
+            : [];
+          if (
+            target?.status !== "done" ||
+            target.epoch !== raw.judged.epoch ||
+            target.checks !== raw.judged.checks
+          )
+            continue;
+        }
         let id: string;
         if (raw.id && ID_RE.test(raw.id) && !used.has(raw.id)) {
           id = raw.id;

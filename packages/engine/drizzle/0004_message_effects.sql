@@ -1,0 +1,1 @@
+ALTER TABLE "messages" ADD COLUMN "effects_pending" boolean DEFAULT false NOT NULL;

@@ -45,8 +45,10 @@ import { and, asc, eq, inArray, isNull, lte, or, type SQL, sql } from "drizzle-o
 import { z } from "zod";
 import { type AgentRow, agentBudgetScope } from "./agents";
 import { canReadChannel, channelInWorkspace, isChannelMember, readableChannelsSql } from "./channels";
-import type { AppDeps } from "./context";
+import { type ClaimOutput, claim, forget, release, settle } from "./claims";
+import type { AppDeps, CompleteResult } from "./context";
 import { notFound } from "./http";
+import { log } from "./logger";
 import { closeNotifications, notify } from "./notifications";
 import { fireRoutineEvent } from "./routines";
 import { reindex } from "./search-index";
@@ -926,8 +928,11 @@ async function step(deps: AppDeps, debateId: string): Promise<boolean> {
     if (row.phase !== "debating" && !(await saveDebate(deps, row, { phase: "debating" }, expect)))
       return true;
     // The round is parallel: each agent answers without seeing the others of this round.
-    await Promise.all(agentTurns.map((a) => agentTurn(deps, row, a.id)));
-    return true;
+    // Every turn ends before the step does, a failed one too: no turn of this debate outlives its step.
+    const moved = await Promise.allSettled(agentTurns.map((a) => agentTurn(deps, row, a.id)));
+    const failed = moved.find((m) => m.status === "rejected");
+    if (failed) throw failed.reason;
+    return moved.every((m) => m.status === "fulfilled" && m.value);
   }
   if (row.phase === "human_turn") return false;
   return !(await saveDebate(deps, row, { phase: "human_turn" }, expect));
@@ -985,34 +990,32 @@ async function closeRound(deps: AppDeps, seen: DebateRow): Promise<boolean> {
   return true;
 }
 
-async function agentTurn(deps: AppDeps, row: DebateRow, agentId: string) {
+/**
+ * One agent's turn. Its paid call is claimed first (`effect_keys`) and its answer recorded under the claim before
+ * the post: a round resumed after a fall in between posts the recorded answer instead of paying for the turn
+ * again. False when a live attempt holds the turn (the debate doesn't move on from here).
+ */
+async function agentTurn(deps: AppDeps, row: DebateRow, agentId: string): Promise<boolean> {
   const { db } = deps;
   const who: ActorRef = { type: "agent", id: agentId };
   const [agent] = await liveAgents(db, [agentId]);
   if (!agent) {
     // An archived agent leaves the queue without holding up the round.
     await leaveRound(deps, row, who);
-    return;
+    return true;
   }
   const posts = await postsOf(db, row.id);
-  const names = await promptNames(deps, row, posts);
-  const pseudonym = row.pseudonyms[agent.id] ?? "?";
-  const blind = row.round === 0;
-  const result = await deps.runtime.complete({
-    agent,
-    initiatedBy: row.requesterUserId,
-    source: "debate",
-    what: "Debate turn",
-    debateId: row.id,
-    sourceChannelId: row.channelId,
-    scopes: capScope(row),
-    ...turnPrompt(agent, row, {
-      pseudonym,
-      blind,
-      options: optionsBlock(row.options),
-      context: blind ? "" : challengeContext(posts, row, row.round, agent.id, names),
-    }),
+  const key = `debate-turn:${row.id}:${row.round}:${agent.id}`;
+  const got = await claim(db, {
+    key,
+    workspaceId: row.workspaceId,
+    tool: "debate.turn",
+    leaseMs: TURN_LEASE_MS,
+    now: deps.now(),
   });
+  if (got === "held") return false;
+  const result =
+    "done" in got ? recordedTurn(got.done) : await callTurn(deps, row, agent, posts, key, got.token);
   if (!result.ok && result.code !== "budget") {
     // The round changed while the agent thought (canceled, removed, concluded): the failure no longer counts.
     const reason = result.error.slice(0, 300);
@@ -1021,7 +1024,7 @@ async function agentTurn(deps: AppDeps, row: DebateRow, agentId: string) {
         ? { status: "stalled", phase: null, stallInfo: { agentId: agent.id, round: row.round, reason } }
         : null,
     );
-    return;
+    return true;
   }
   if (result.ok) {
     const { argument, position } = parsePosition(result.text, row.options);
@@ -1039,6 +1042,7 @@ async function agentTurn(deps: AppDeps, row: DebateRow, agentId: string) {
       claimData: { ...position, changed: !!before && before.key !== position.key },
       runId: result.runId,
     });
+    await forget(db, key);
   } else {
     await answerRound(deps, row, who, {
       kind: "out_of_budget",
@@ -1046,6 +1050,70 @@ async function agentTurn(deps: AppDeps, row: DebateRow, agentId: string) {
       meta: { reason: "budget", scope: result.scope ?? "agent" },
     });
   }
+  return true;
+}
+
+/** Longer than a turn's call may last (the runtime gives `complete` 15 min). */
+const TURN_LEASE_MS = 20 * 60_000;
+
+const recordedAnswer = z.object({ text: z.string(), runId: z.string() });
+
+/** The answer an earlier attempt recorded under the turn's claim. */
+function recordedTurn(output: ClaimOutput | null): CompleteResult {
+  const parsed = recordedAnswer.safeParse(output ? JSON.parse(output.content) : null);
+  return parsed.success
+    ? { ok: true, ...parsed.data }
+    : { ok: false, code: "failed", error: "The recorded answer of this turn is unreadable" };
+}
+
+/** The turn's paid call under its claim: an answer is recorded; no answer lets the claim go. */
+async function callTurn(
+  deps: AppDeps,
+  row: DebateRow,
+  agent: AgentRow,
+  posts: DebatePostRow[],
+  key: string,
+  token: string,
+): Promise<CompleteResult> {
+  let result: CompleteResult;
+  try {
+    const names = await promptNames(deps, row, posts);
+    const pseudonym = row.pseudonyms[agent.id] ?? "?";
+    const blind = row.round === 0;
+    result = await deps.runtime.complete({
+      agent,
+      initiatedBy: row.requesterUserId,
+      source: "debate",
+      what: "Debate turn",
+      debateId: row.id,
+      sourceChannelId: row.channelId,
+      scopes: capScope(row),
+      ...turnPrompt(agent, row, {
+        pseudonym,
+        blind,
+        options: optionsBlock(row.options),
+        context: blind ? "" : challengeContext(posts, row, row.round, agent.id, names),
+      }),
+    });
+  } catch (err) {
+    await release(deps.db, key, token);
+    throw err;
+  }
+  if (!result.ok) {
+    await release(deps.db, key, token);
+    return result;
+  }
+  try {
+    await settle(deps.db, key, token, {
+      content: JSON.stringify({ text: result.text, runId: result.runId }),
+      isError: false,
+    });
+  } catch (err) {
+    // The answer is in hand: it is posted all the same, and the claim goes (a resume can't reuse what wasn't recorded).
+    log.warn("debate.turn_record_failed", { debateId: row.id, agentId: agent.id, err });
+    await release(deps.db, key, token).catch(() => {});
+  }
+  return result;
 }
 
 /** Builds the synthesis that goes into the debate: the model's text (or the majority's) and the counted votes. */

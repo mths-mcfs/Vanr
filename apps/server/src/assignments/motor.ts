@@ -1229,6 +1229,7 @@ async function judgeRound(
             criteria: v.reason.slice(0, 2000),
             kind: "fix" as const,
             fixes: t.id,
+            judged: { epoch: t.epoch, checks: t.checks },
           },
         ]
       : [];

@@ -31,6 +31,17 @@ export const MAX_TRANSITIONS = 8;
 
 export type RunnerSocket = ServerWebSocket<RunnerSocketData>;
 
+/** The runner's refusals that it answers before it starts what was asked: nothing of the request happened. */
+const REFUSED_BEFORE_START: ReadonlySet<RunnerErrorCode> = new Set([
+  "no_slot",
+  "paused",
+  "exec_disabled",
+  "outside_work_dir",
+  "sandbox_not_ready",
+  "person_driving",
+  "page_changed",
+]);
+
 export class RunnerCallError extends Error {
   /** The request reached the runner (it failed after the send): what it asked for may have happened. */
   reached = false;
@@ -292,8 +303,10 @@ export class RunnerHub {
         } else delivered = true;
       });
     } catch (err) {
-      // A timeout, a cancel, the runner dropping or its error answer: the request had gone out.
-      if (delivered && err instanceof RunnerCallError) err.reached = true;
+      // A timeout, a cancel, the runner dropping or its error answer: the request had gone out. A refusal the
+      // runner gives before doing anything (busy, paused, turned off) didn't start it.
+      if (delivered && err instanceof RunnerCallError && !REFUSED_BEFORE_START.has(err.code))
+        err.reached = true;
       throw err;
     } finally {
       // However the call ended (result, error, deadline, runner gone, server stopping).

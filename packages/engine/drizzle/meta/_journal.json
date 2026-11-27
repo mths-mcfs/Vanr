@@ -29,6 +29,13 @@
       "when": 1795810289457,
       "tag": "0003_identity_first_attempt",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1795819716077,
+      "tag": "0004_message_effects",
+      "breakpoints": true
     }
   ]
 }

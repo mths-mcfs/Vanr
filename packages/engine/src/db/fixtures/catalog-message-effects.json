@@ -1,0 +1,26 @@
+{
+  "extensions": [],
+  "tables": [],
+  "columns": [
+    {
+      "table": "messages",
+      "name": "effects_pending",
+      "type": "boolean",
+      "notNull": true,
+      "default": "false",
+      "collation": null
+    }
+  ],
+  "constraints": [
+    {
+      "table": "messages",
+      "name": "messages_effects_pending_not_null",
+      "type": "n",
+      "definition": "NOT NULL effects_pending"
+    }
+  ],
+  "indexes": [],
+  "sequences": [],
+  "triggers": [],
+  "functions": []
+}

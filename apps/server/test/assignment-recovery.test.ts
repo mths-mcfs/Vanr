@@ -608,9 +608,10 @@ describe("two attempts of one item", () => {
       };
       const key = `${row.id}:p1`;
       const [older, newer] = [await say("[[slow:300]] one"), await say("[[slow:300]] two")];
-      // The forced interleave: attempt 2 runs in full right after attempt 1's run row is written, before
-      // attempt 1's run is on the air.
-      let second: Awaited<ReturnType<RuntimePort["runFor"]>> | null = null;
+      // The forced interleave: attempt 2 goes right after attempt 1's run row is written, before attempt 1's
+      // run is on the air. It waits for attempt 1's admission to the conversation, then finds a run it doesn't
+      // join (attempt 1 stopped it, stale) and opens its own.
+      let second: ReturnType<RuntimePort["runFor"]> | null = null;
       const { deps } = server;
       const real = deps.db;
       deps.db = new Proxy(real, {
@@ -621,14 +622,7 @@ describe("two attempts of one item", () => {
             const builder = target.insert(table);
             if (table !== runs || second) return builder;
             return wrapQuery(builder, async () => {
-              if (second) return;
-              second = { ok: false, code: "busy" };
-              second = await deps.runtime.runFor({
-                agent,
-                channel,
-                trigger: newer,
-                fence: { key, token: 2 },
-              });
+              second ??= deps.runtime.runFor({ agent, channel, trigger: newer, fence: { key, token: 2 } });
             });
           };
         },
@@ -639,7 +633,7 @@ describe("two attempts of one item", () => {
       } finally {
         deps.db = real;
       }
-      const later = second as Awaited<ReturnType<RuntimePort["runFor"]>> | null;
+      const later = await (second as ReturnType<RuntimePort["runFor"]> | null);
       expect(first).toEqual({ ok: false, code: "fenced" });
       if (!later?.ok) throw new Error("the later attempt didn't start");
       await server.deps.runtime.settle();
@@ -1232,6 +1226,51 @@ describe("two steps on one validation", () => {
       expect(await claimOf(row.id)).toBeUndefined();
       // The round is the second step's.
       expect((await planOf(server.deps, row.id)).find((i) => i.id === "p1")?.checks).toBe(1);
+      await close(row.id);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a fix isn't written for an item the owner changed after the verdict was read, before the plan's lock",
+    async () => {
+      const { row } = await active("Edited mid-fix", ["Docs"]);
+      await doneItems(row, ["p1"]);
+      const { deps: base } = server;
+      const real = base.db;
+      let judged = false;
+      let edited = false;
+      // The forced interleave: the verifier failed the item, the step read the plan again (still done, same
+      // epoch), and the owner's edit lands right before the plan write takes its lock.
+      const db = new Proxy(real, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop, target);
+          if (prop !== "transaction" || !judged || edited)
+            return typeof value === "function" ? value.bind(target) : value;
+          return async (fn: Parameters<typeof real.transaction>[0]) => {
+            edited = true;
+            await writePlan({ ...base, db: real }, row.id, {
+              author: { type: "person", id: ana.user.id },
+              mode: "person",
+              items: [{ id: "p1", title: "Docs", criteria: "Docs in two languages" }],
+            });
+            return target.transaction(fn);
+          };
+        },
+      });
+      const verifier: Verifier = async (_deps, _row, items) => {
+        judged = true;
+        return verdicts(items, false);
+      };
+      await act({ ...base, db, assignmentVerifier: verifier }, row.id, {
+        type: "validate",
+        itemIds: ["p1"],
+        round: 1,
+      });
+      const plan = await planOf(server.deps, row.id);
+      expect(edited).toBe(true);
+      expect(plan.filter((i) => i.kind === "fix").map((i) => i.fixes)).toEqual([]);
+      expect(plan.find((i) => i.id === "p1")?.criteria).toBe("Docs in two languages");
       await close(row.id);
     },
     SERVER_TEST_MS,

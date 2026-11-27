@@ -10,7 +10,7 @@ import type {
   IssuePriority,
 } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
-import { and, asc, desc, eq, ilike, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, ilike, inArray, or, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
 import { agentInWorkspace } from "../agents";
@@ -42,7 +42,7 @@ import { postMessage } from "../messages";
 import { requireCanTalk } from "../runners/plans";
 import { requireMember, WORKSPACE } from "../workspace-scope";
 
-const { issues, issueTimeline } = schema;
+const { issues, issueTimeline, messageDispatches } = schema;
 const PRIORITIES = ["none", "low", "medium", "high", "urgent"] as const satisfies readonly IssuePriority[];
 const me$ = (me: WorkspaceMember): ActorRef => ({ type: "person", id: me.userId });
 
@@ -317,13 +317,24 @@ async function askAgent(deps: AppDeps, me: WorkspaceMember, issueId: string, age
   try {
     await deps.runtime.onPersonMessage({ workspaceId: me.workspaceId, channel, message });
   } catch (err) {
-    // Nothing will serve the request: the issue doesn't stay "working" with no run behind it.
     log.error("runtime.route_failed", { messageId: message.id, err });
-    await settleIssueWork(db, me.workspaceId, [message.id], {
-      state: "blocked",
-      reason: "interrupted",
-      runId: null,
-    });
+    // A run that took the message before the failure serves the request and settles the work at its end. With
+    // none, nothing will: the issue doesn't stay "working" with no run behind it.
+    const taken = await db
+      .select({ agentId: messageDispatches.agentId })
+      .from(messageDispatches)
+      .where(
+        and(
+          eq(messageDispatches.messageId, message.id),
+          inArray(messageDispatches.state, ["claimed", "handled"]),
+        ),
+      );
+    if (taken.length === 0)
+      await settleIssueWork(db, me.workspaceId, [message.id], {
+        state: "blocked",
+        reason: "interrupted",
+        runId: null,
+      });
   }
   // Read again: the routing (or its failure) may already have settled the work (blocked: out of budget, not in
   // the channel, interrupted).

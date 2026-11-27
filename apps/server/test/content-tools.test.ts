@@ -497,9 +497,10 @@ describe("content tools", () => {
       const events = (await range(beto)).events.map((e) => e.title);
       const listed = (await call("list_events", { from: at(0), to: at(23) })).content;
       for (const title of events) expect(listed).toContain(title);
-      const after = new Date(day.getTime() + 2 * 86_400_000).toISOString();
+      // A whole day two days on, from its start (the time of day of the run must not put `from` past `to`).
+      const after = new Date(day.getTime() + 2 * 86_400_000).toISOString().replace(/T.*/, "");
       expect(
-        (await call("list_events", { from: after, to: after.replace(/T.*/, "T23:00:00.000Z") })).content,
+        (await call("list_events", { from: `${after}T00:00:00.000Z`, to: `${after}T23:00:00.000Z` })).content,
       ).toBe("No events.");
     },
     SERVER_TEST_MS,
