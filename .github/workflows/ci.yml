@@ -259,6 +259,48 @@ jobs:
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_DROP_LOCKS: "1"
+      # A workspace's last owner: two owners demoting each other or leaving at once leave one owner.
+      - run: bun test apps/server/test/workspaces-postgres.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      - name: The forced owner lock tests fail without the lock
+        run: |
+          set +e
+          bun test apps/server/test/workspaces-postgres.test.ts --test-name-pattern forced > forced-owners.log 2>&1
+          status=$?
+          cat forced-owners.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the forced owner lock tests passed without the lock"
+            exit 1
+          fi
+          for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -aqF "$broken" forced-owners.log; then
+              echo "::error::the forced owner lock tests broke ($broken) instead of failing on their outcome"
+              exit 1
+            fi
+          done
+          set -- owner-demote owner-leave
+          for label in "$@"; do
+            if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" forced-owners.log; then
+              echo "::error::the forced $label test did not fail on its outcome without the lock"
+              exit 1
+            fi
+          done
+          # Every failure is a forced test, and as many distinct tests failed as there are labels (bun prints
+          # each failure twice on the GitHub runner, so names are counted, not lines).
+          failed=$(grep -a '^(fail) ' forced-owners.log | sed -E 's/^\(fail\) //; s/ \[[0-9.]+m?s\]$//' | sort -u)
+          if printf '%s\n' "$failed" | grep -qv forced; then
+            echo "::error::a test outside the forced ones failed without the lock: $failed"
+            exit 1
+          fi
+          count=$(printf '%s\n' "$failed" | grep -c .)
+          if [ "$count" -ne "$#" ]; then
+            echo "::error::$count distinct forced tests failed without the lock, expected $#"
+            exit 1
+          fi
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_DROP_LOCKS: "1"
       # Undo against another undo, a person's edit and the send: one result each, nothing a person wrote lost (the
       # action's row lock and the content's or queued item's row lock in the undo's transaction).
       - run: bun test apps/server/test/control-postgres.test.ts

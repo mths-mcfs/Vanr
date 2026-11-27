@@ -1084,7 +1084,11 @@ export async function runTool(
     try {
       again = await planOf(ctx, tool, input);
     } catch (err) {
-      if (!(err instanceof ToolInputError)) throw err;
+      // Nothing ran: the approval is settled as failed either way, so it doesn't stay open.
+      if (!(err instanceof ToolInputError)) {
+        await ctx.settleApproval(approvalId, { ok: false, text: "Failed while planning" });
+        throw err;
+      }
       await ctx.settleApproval(approvalId, { ok: false, text: err.message });
       return { content: err.message, isError: true };
     }

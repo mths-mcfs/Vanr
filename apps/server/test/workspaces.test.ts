@@ -915,6 +915,16 @@ describe("workspace route rules", () => {
     }
   });
 
+  test("an empty update changes nothing: rename answers 204 and settings the current settings", async () => {
+    const dora = await signedIn(server, "Dora", "dora@space.test");
+    const id = (await create(dora.browser, { name: "Steady", context: "Calm" })).workspace.id;
+    const before = (await call(dora.browser, "GET", `${ws(id)}/settings`)).body;
+    expect((await call(dora.browser, "PATCH", ws(id), {})).status).toBe(204);
+    const settings = await call(dora.browser, "PATCH", `${ws(id)}/settings`, {});
+    expect([settings.status, settings.body]).toEqual([200, before]);
+    expect((await call(dora.browser, "GET", ws(id))).body).toMatchObject({ name: "Steady", context: "Calm" });
+  });
+
   test("creating a workspace validates the body before any write", async () => {
     const cris = await signedIn(server, "Cris", "cris@space.test");
     for (const payload of [

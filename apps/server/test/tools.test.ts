@@ -535,3 +535,47 @@ describe("outside effects in a routine execution run once", () => {
     expect(state.ran).toBe(3);
   });
 });
+
+describe("an approval never stays open", () => {
+  test("a crash while planning again after the approval settles it as failed and nothing runs", async () => {
+    const t = await setup("replan");
+    const state = { plans: 0, ran: 0 };
+    const tool = define({
+      name: "send_out",
+      description: "",
+      effect: "K2",
+      input: z.object({ text: z.string() }),
+      async plan(_ctx, input) {
+        state.plans++;
+        if (state.plans > 1) throw new Error("lookup failed");
+        return {
+          destination: { kind: "external", allowed: true, target: "partner" },
+          policy: "ask",
+          payload: input,
+        };
+      },
+      async run() {
+        state.ran++;
+        return "sent";
+      },
+    }) as ToolDef<unknown>;
+    const settled: { id: string; ok: boolean; text: string }[] = [];
+    const ctx = t.ctx({
+      async requestApproval(req) {
+        return {
+          id: "apv1",
+          decision: "approved",
+          reason: null,
+          byName: "Ana",
+          payloadHash: req.payloadHash,
+        };
+      },
+      async settleApproval(id, result) {
+        settled.push({ id, ...result });
+      },
+    });
+    await expect(runTool(ctx, [tool], "send_out", { text: "a" })).rejects.toThrow("lookup failed");
+    expect(settled).toEqual([{ id: "apv1", ok: false, text: "Failed while planning" }]);
+    expect(state.ran).toBe(0);
+  });
+});

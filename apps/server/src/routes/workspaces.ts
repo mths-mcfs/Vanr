@@ -4,7 +4,7 @@ import { schema } from "@vanr/engine/db";
 import { randomId } from "@vanr/engine/ids";
 import { ROLES } from "@vanr/engine/roles";
 import { HANDLE_RE } from "@vanr/engine/text";
-import { and, count, eq, inArray, isNull, ne } from "drizzle-orm";
+import { and, count, eq, isNull } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
 import { budgetOf, monthStart, requireCredential, usageSince, workspaceBudgetDefaults } from "../agents";
@@ -15,16 +15,18 @@ import { badRequest, conflict, forbidden, HttpError, notFound, param, readJson, 
 import { decodeImage, imageResponse } from "../images";
 import {
   avatarUrl,
+  changeRole,
   createWorkspace,
   logoUrl,
   memberRows,
+  removeMember,
   takenHandles,
   toMember,
   toPerson,
 } from "../members";
 import { requireMember, requirePermission, WORKSPACE } from "../workspace-scope";
 
-const { workspaces, members, users, channelMemberships, agents } = schema;
+const { workspaces, members, users, agents } = schema;
 
 const name = z.string().trim().min(1).max(80);
 const context = z.string().max(20_000);
@@ -47,6 +49,9 @@ async function loadWorkspace(c: Ctx) {
   return workspace;
 }
 
+/** An update body with no field set (`{}`, which the client allows) changes nothing. */
+const hasChanges = (input: Record<string, unknown>) => Object.values(input).some((v) => v !== undefined);
+
 const toSettings = (o: typeof workspaces.$inferSelect): WorkspaceSettings => ({
   name: o.name,
   context: o.context,
@@ -62,16 +67,6 @@ const toWorkspace = (o: typeof workspaces.$inferSelect): Workspace => ({
   context: o.context,
   logo: logoUrl(o.id, o.logoKey),
 });
-
-/** Makes sure the workspace keeps at least one owner after `userId` stops being one. */
-async function assertAnotherOwner(c: Ctx, workspaceId: string, userId: string) {
-  const [row] = await c
-    .get("deps")
-    .db.select({ n: count() })
-    .from(members)
-    .where(and(eq(members.workspaceId, workspaceId), eq(members.role, "owner"), ne(members.userId, userId)));
-  if ((row?.n ?? 0) === 0) throw conflict("last_owner", "The workspace needs at least one owner");
-}
 
 export function registerWorkspaces(app: Hono<AppEnv>) {
   app.post("/api/v1/workspaces", async (c) => {
@@ -97,7 +92,9 @@ export function registerWorkspaces(app: Hono<AppEnv>) {
   app.patch(WORKSPACE, async (c) => {
     const { workspaceId } = requirePermission(c, "configure");
     const input = await readJson(c, z.object({ name: name.optional(), context: context.optional() }));
-    await c.get("deps").db.update(workspaces).set(input).where(eq(workspaces.id, workspaceId));
+    if (hasChanges(input)) {
+      await c.get("deps").db.update(workspaces).set(input).where(eq(workspaces.id, workspaceId));
+    }
     return c.body(null, 204);
   });
 
@@ -118,7 +115,7 @@ export function registerWorkspaces(app: Hono<AppEnv>) {
     );
     const { db } = c.get("deps");
     await requireCredential(db, workspaceId, input.primaryCredentialId);
-    await db.update(workspaces).set(input).where(eq(workspaces.id, workspaceId));
+    if (hasChanges(input)) await db.update(workspaces).set(input).where(eq(workspaces.id, workspaceId));
     return c.json(toSettings(await loadWorkspace(c)));
   });
 
@@ -163,63 +160,19 @@ export function registerWorkspaces(app: Hono<AppEnv>) {
     });
   });
 
-  // Role: nobody changes their own; touching an owner (from or to) needs manage_owners.
   app.patch(`${WORKSPACE}/members/:memberId`, async (c) => {
     const me = requirePermission(c, "manage_members");
     const target = param(c, "memberId");
     const { role } = await readJson(c, z.object({ role: z.enum(ROLES) }));
-    if (target === me.userId) throw forbidden("You can't change your own role");
-    const { db } = c.get("deps");
-    const [current] = await db
-      .select({ role: members.role })
-      .from(members)
-      .where(and(eq(members.workspaceId, me.workspaceId), eq(members.userId, target)));
-    if (!current) throw notFound("Member not found");
-    if ((current.role === "owner" || role === "owner") && !can(me.role, "manage_owners")) {
-      throw forbidden("Only owners can promote or demote owners");
-    }
-    if (current.role === "owner" && role !== "owner") await assertAnotherOwner(c, me.workspaceId, target);
-    await db
-      .update(members)
-      .set({ role })
-      .where(and(eq(members.workspaceId, me.workspaceId), eq(members.userId, target)));
+    await changeRole(c.get("deps").db, { workspaceId: me.workspaceId, actorId: me.userId, target, role });
     return c.body(null, 204);
   });
 
-  // Remove: manage_members removes others; anyone can leave. An owner leaves only if another owner stays.
   app.delete(`${WORKSPACE}/members/:memberId`, async (c) => {
     const me = requireMember(c);
     const target = param(c, "memberId");
-    const self = target === me.userId;
-    if (!self && !can(me.role, "manage_members")) throw forbidden();
-    const { db } = c.get("deps");
-    const [current] = await db
-      .select({ role: members.role })
-      .from(members)
-      .where(and(eq(members.workspaceId, me.workspaceId), eq(members.userId, target)));
-    if (!current) throw notFound("Member not found");
-    if (current.role === "owner") {
-      if (!self && !can(me.role, "manage_owners")) throw forbidden("Only owners can remove owners");
-      await assertAnotherOwner(c, me.workspaceId, target);
-    }
-    await db.transaction(async (tx) => {
-      await tx
-        .delete(members)
-        .where(and(eq(members.workspaceId, me.workspaceId), eq(members.userId, target)));
-      const workspaceChannels = tx
-        .select({ id: schema.channels.id })
-        .from(schema.channels)
-        .where(eq(schema.channels.workspaceId, me.workspaceId));
-      await tx
-        .delete(channelMemberships)
-        .where(
-          and(
-            eq(channelMemberships.memberType, "person"),
-            eq(channelMemberships.memberId, target),
-            inArray(channelMemberships.channelId, workspaceChannels),
-          ),
-        );
-    });
+    if (target !== me.userId && !can(me.role, "manage_members")) throw forbidden();
+    await removeMember(c.get("deps").db, { workspaceId: me.workspaceId, actorId: me.userId, target });
     // Whoever left the workspace loses their open connections to it.
     c.get("deps").hub.dropUser(me.workspaceId, target);
     return c.body(null, 204);
