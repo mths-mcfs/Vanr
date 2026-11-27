@@ -32,8 +32,11 @@ import { filterSlash, fold, type SlashItem } from "./slash.ts";
 export type LinkCandidate = { slug: string; title: string; folder: string; altTitles: readonly string[] };
 
 export type EditorHandle = {
-  /** Scrolls to the heading with this text (the open document's own); false when there is none. */
-  scrollToHeading: (text: string) => boolean;
+  /**
+   * Scrolls to the heading with this text in the open document, the `nth` one (from 0) when several
+   * share it; false when there is none.
+   */
+  scrollToHeading: (text: string, nth?: number) => boolean;
   focus: () => void;
 };
 
@@ -48,8 +51,8 @@ type Props = {
   hooks: Omit<EditorHooks, "trigger" | "menuKey" | "links">;
   /** The passage selected now, with a little of the text around it (null: nothing selected). */
   onPick?: (picked: Picked | null) => void;
-  /** The editor is made and holds its document. */
-  onReady?: () => void;
+  /** The editor is made and holds its document: the live one, or the published text read only. */
+  onReady?: (kind: EditorSource["kind"]) => void;
 };
 
 export type Picked = { quote: string; before: string; after: string };
@@ -235,7 +238,7 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(props, ref
       }
       editorRef.current = editor;
       if (live === null) {
-        latest.current.onReady?.();
+        latest.current.onReady?.("static");
         return;
       }
       editor.action((ctx) => {
@@ -244,7 +247,7 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(props, ref
         if (live.provider.awareness !== null) service.setAwareness(live.provider.awareness);
         service.connect();
       });
-      latest.current.onReady?.();
+      latest.current.onReady?.("live");
     });
     return () => {
       disposed = true;
@@ -270,15 +273,19 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(props, ref
   }, [props.pages, props.hooks.resolve]);
 
   useImperativeHandle(ref, () => ({
-    scrollToHeading(text) {
+    scrollToHeading(text, nth = 0) {
       const wanted = text.trim().toLowerCase();
       let found = false;
       editorRef.current?.action((ctx) => {
         const view = ctx.get(editorViewCtx);
         let at: number | null = null;
+        let seen = 0;
         view.state.doc.descendants((node, position) => {
           if (at !== null) return false;
-          if (node.type.name === "heading" && node.textContent.trim().toLowerCase() === wanted) at = position;
+          if (node.type.name === "heading" && node.textContent.trim().toLowerCase() === wanted) {
+            if (seen === nth) at = position;
+            seen += 1;
+          }
           return true;
         });
         if (at === null) return;

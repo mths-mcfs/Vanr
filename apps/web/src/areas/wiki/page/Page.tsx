@@ -97,6 +97,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
   const editor = useRef<EditorHandle>(null);
   const pending = useRef(new Set<Exclude<Busy, null>>());
   const queue = useRef<Promise<void>>(Promise.resolve());
+  const mayWrite = useRef(true);
   const { at } = useSearch(PageAddress, NO_ANCHOR);
   const reachedAnchor = useRef(false);
   const p = page.data;
@@ -224,6 +225,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
   // not said otherwise since (a lock seen live, a revoked read).
   const canWrite = p.editable && live.status !== "denied" && !live.readOnly;
   const editable = canWrite && source?.kind === "live";
+  mayWrite.current = canWrite;
   const dirty = live.touched || p.draft?.dirty === true;
   const agentName = (id: string) => agents.data?.find((agent) => agent.id === id)?.name;
 
@@ -231,7 +233,8 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
   const run = async (what: Exclude<Busy, null>, action: () => Promise<void>): Promise<boolean> => {
     if (QUEUED.has(what)) {
       // Each change of the page's fields is its own write: they wait their turn, none is dropped.
-      const turn = queue.current.then(() => execute(what, action));
+      // A write waiting its turn when the right to edit goes away (a lock, a revoked read) is dropped.
+      const turn = queue.current.then(() => (mayWrite.current ? execute(what, action) : false));
       queue.current = turn.then(
         () => undefined,
         () => undefined,
@@ -595,9 +598,23 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
                 pages={pages}
                 hooks={hooks}
                 onPick={setPicked}
-                onReady={() => {
-                  if (at !== undefined && !reachedAnchor.current)
-                    reachedAnchor.current = editor.current?.scrollToHeading(at) ?? false;
+                onReady={(kind) => {
+                  if (at === undefined || reachedAnchor.current) return;
+                  if (kind === "static") {
+                    // The published text may be all there is (no live document): scroll it, but the live
+                    // editor that replaces it starts at the top, so only the live one counts as arrived.
+                    editor.current?.scrollToHeading(at);
+                    return;
+                  }
+                  // The live document fills in just after the editor is made: try until its heading is there.
+                  let tries = 0;
+                  const attempt = () => {
+                    if (reachedAnchor.current || tries > 40) return;
+                    tries += 1;
+                    if (editor.current?.scrollToHeading(at) === true) reachedAnchor.current = true;
+                    else setTimeout(attempt, 50);
+                  };
+                  attempt();
                 }}
               />
             )
@@ -607,7 +624,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
           workspaceId={workspaceId}
           page={p}
           agentName={agentName}
-          onHeading={(text) => editor.current?.scrollToHeading(text)}
+          onHeading={(text, nth) => editor.current?.scrollToHeading(text, nth)}
           onCreate={create}
         >
           <Annotations

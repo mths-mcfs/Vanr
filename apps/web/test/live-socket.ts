@@ -58,10 +58,13 @@ export class FakeCollabSocket {
   authTokens: string[] = [];
   docNames: string[] = [];
   private listeners = new Map<string, Set<(ev: unknown) => void>>();
+  /** Fills the server's document of each new socket, as a page with text would be. */
+  static seed: ((doc: Y.Doc) => void) | null = null;
   private serverDoc = new Y.Doc();
 
   constructor(url: string) {
     this.url = url;
+    FakeCollabSocket.seed?.(this.serverDoc);
     FakeCollabSocket.instances.push(this);
     queueMicrotask(() => {
       if (this.closed) return;
@@ -170,4 +173,21 @@ export class FakeCollabSocket {
     this.readyState = 3;
     this.closeCalls.push({ code, reason });
   }
+}
+
+/** A live document with these top-level blocks, in the editor's own node names (as the server writes them). */
+export function seedBlocks(
+  blocks: readonly { type: "heading" | "paragraph"; text: string; level?: number }[],
+) {
+  return (doc: Y.Doc) => {
+    const fragment = doc.getXmlFragment("prosemirror");
+    const nodes = blocks.map((block) => {
+      const element = new Y.XmlElement(block.type);
+      // The editor keeps a heading's level as a number, as y-prosemirror writes it (the type says string).
+      if (block.type === "heading") element.setAttribute("level", (block.level ?? 2) as unknown as string);
+      element.insert(0, [new Y.XmlText(block.text)]);
+      return element;
+    });
+    fragment.insert(0, nodes);
+  };
 }

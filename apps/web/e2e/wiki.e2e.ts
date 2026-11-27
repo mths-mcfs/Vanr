@@ -244,3 +244,45 @@ test("accept a proposal: an agent's change lands on the page as a new version", 
     "Cover the oven and switch it off.",
   );
 });
+
+test("a shared address with ?at= opens the page at that heading", async ({
+  page,
+  t,
+  seedUser,
+  signIn,
+  apiAs,
+}) => {
+  const owner = await seedUser({ workspace: "Harbour Café" });
+  const filler = Array.from({ length: 40 }, (_, n) => `Filler paragraph ${n}.`).join("\n\n");
+  const body = [
+    "Intro.",
+    filler,
+    "## Deliveries",
+    "Milk at ten.",
+    filler,
+    "## Closing",
+    "Lock the door.",
+    filler,
+  ].join("\n\n");
+  const title = "Long handbook";
+  const slug = await createPage(await apiAs(owner), owner, { title, body });
+  await signIn(owner);
+  // The live document arrives late, as on a slow connection: the published text is on screen and
+  // scrolled first, then the live editor takes its place and must land on the heading too.
+  await page.routeWebSocket(/\/wiki\/collab/, (socket) => {
+    const server = socket.connectToServer();
+    server.onMessage((message) => setTimeout(() => socket.send(message), 1200));
+  });
+  // Opened straight from the address, as a new tab or a shared link would.
+  await page.goto(`/workspace/${owner.workspace.id}/wiki/${slug}?at=${encodeURIComponent("Closing")}`);
+  await expect(
+    page.getByRole("status").filter({ hasText: t("wiki", "draft.published", { version: 1 }) }),
+  ).toBeVisible();
+  const editor = page.getByRole("textbox", { name: t("wiki", "page.editor", { title }) });
+  await expect(editor).toHaveAttribute("contenteditable", "true");
+  const heading = editor.getByRole("heading", { name: "Closing" });
+  await expect(heading).toBeInViewport();
+  // Still there once everything settled: nothing put the page back at the top.
+  await page.waitForTimeout(1500);
+  await expect(heading).toBeInViewport();
+});
