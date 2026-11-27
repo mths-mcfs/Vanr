@@ -1,6 +1,6 @@
 // Databases end to end: the "customer database" is an in-memory Postgres (PGlite); connecting, the tables, the
 // per-agent policy go through the real routes, and the db_* tools run through runtime/tools' gate in a run built
-// by hand (tool-run.ts) until the runtime comes. Every agent query is the guarded run (sql-identity): the guard
+// by hand (integration-run.ts) until the runtime comes. Every agent query is the guarded run (sql-identity): the guard
 // rejects a write, the network rule rejects an internal host, and the password never comes back.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
@@ -11,9 +11,9 @@ import { DATABASE_TOOLS, hasDatabases } from "../src/integrations/databases";
 import { type GuardedConnector, pgliteGuardedConnector } from "../src/integrations/sql-identity";
 import type { RunningServer } from "../src/server";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
+import { toolRun } from "./integration-run";
 import { call, seedAgent, ws } from "./route-calls";
 import { memberOf, seedWorkspace } from "./seed";
-import { toolRun } from "./tool-run";
 
 let pg: Awaited<ReturnType<typeof memoryPostgres>>;
 let server: RunningServer;

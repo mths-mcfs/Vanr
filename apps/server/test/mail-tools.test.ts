@@ -1,5 +1,5 @@
 // Email end to end: an IMAP/SMTP account on a real fake server (local TCP), the account and mailbox routes, and
-// the agent's mailbox tools through runtime/tools' gate in a run built by hand (tool-run.ts) until the runtime
+// the agent's mailbox tools through runtime/tools' gate in a run built by hand (integration-run.ts) until the runtime
 // comes. Every send is queued in the outbox (its undo window and receipt) and goes out when the outbox delivers;
 // the outbox's wake-up is the runtime's, so here it is the only runtime method given, and without it a send is
 // rejected before anything is reserved, asked or queued.
@@ -18,9 +18,9 @@ import type { ApprovalOutcome, ApprovalRequest, ToolDef } from "../src/runtime/t
 import type { RunningServer } from "../src/server";
 import { type FakeMailServer, startFakeMail } from "./fake-mail";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
+import { toolRun } from "./integration-run";
 import { call, seedAgent, ws } from "./route-calls";
 import { memberOf, seedChannel, seedWorkspace } from "./seed";
-import { toolRun } from "./tool-run";
 
 let mail: FakeMailServer;
 let server: RunningServer;

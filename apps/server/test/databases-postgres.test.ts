@@ -8,10 +8,10 @@ import { DATABASE_TOOLS } from "../src/integrations/databases";
 import { postgresGuardedConnector } from "../src/integrations/sql-identity";
 import type { RunningServer } from "../src/server";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
+import { toolRun } from "./integration-run";
 import { NO_POSTGRES, TEST_POSTGRES_URL, testDatabaseUrl } from "./postgres";
 import { call, seedAgent, ws } from "./route-calls";
 import { seedWorkspace } from "./seed";
-import { toolRun } from "./tool-run";
 
 const run = test.skipIf(!TEST_POSTGRES_URL);
 let customer = "";
@@ -76,7 +76,7 @@ describe(`a real Postgres as the customer's database (${TEST_POSTGRES_URL ? "pos
       expect(await ask("delete from customers")).toContain("Only reading");
       const check = postgres(customer, { max: 1, onnotice: () => {} });
       try {
-        expect(await check`select count(*)::int as n from customers`).toEqual([{ n: 2 }]);
+        expect([...(await check`select count(*)::int as n from customers`)]).toEqual([{ n: 2 }]);
       } finally {
         await check.end({ timeout: 5 });
       }

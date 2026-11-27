@@ -166,8 +166,6 @@ async function send(
     references?: string | null;
   },
 ): Promise<string> {
-  // The outbox's wake-up is the runtime's: without it nothing is reserved or queued.
-  requireRuntime(ctx.deps.runtime, "wakeAt");
   const reserved = await reserveUsage(ctx.deps, {
     workspaceId: ctx.workspaceId,
     agentId: ctx.agent.id,
