@@ -191,16 +191,16 @@ function FileList({
     setWho("all");
   };
 
-  // A channel file's events only reach the channel's subscribers: when the list (asked again on open
-  // and every minute) no longer has the open file, the preview asks again too and finds it gone.
+  // A channel file's events only reach the channel's subscribers: each time the list is asked again
+  // (on open and every minute), the open file is asked again too, straight from the server, so a file
+  // deleted or no longer readable shows as gone whatever filter the list has on.
   const refetch = useRefetch();
   const openFile = address.file;
+  const listedAt = list.dataUpdatedAt;
   useEffect(() => {
-    if (openFile === undefined || q !== "" || list.data === undefined || list.isPlaceholderData) return;
-    if (!list.data.some((file) => file.id === openFile)) {
-      void refetch([{ method: "getFile", args: { workspaceId, fileId: openFile } }]);
-    }
-  }, [list.data, list.isPlaceholderData, openFile, q, refetch, workspaceId]);
+    if (openFile === undefined || listedAt === 0) return;
+    void refetch([{ method: "getFile", args: { workspaceId, fileId: openFile } }]);
+  }, [listedAt, openFile, refetch, workspaceId]);
 
   // With the preview open, the arrows move to the file beside it, in the list's order.
   useEffect(() => {
