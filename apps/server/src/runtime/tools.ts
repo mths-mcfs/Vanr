@@ -278,7 +278,17 @@ export interface ToolDef<I = unknown> {
   effect: EffectClass;
   /** Destination, flags, preview and payload of this call. Without it, the class's default. */
   plan?(ctx: ToolContext, input: I): Promise<ToolPlan>;
-  run(ctx: ToolContext, input: I): Promise<ToolResult | string>;
+  /**
+   * `planned` is the plan this call runs under, the one whose hash the approval pinned when a person approved
+   * (`runTool` passes it): a tool whose effect depends on something it resolved while planning (the runner)
+   * checks it against the payload here.
+   */
+  run(ctx: ToolContext, input: I, planned?: PlannedCall): Promise<ToolResult | string>;
+}
+
+/** The plan a call runs under, as `runTool` hands it to `run`. */
+export interface PlannedCall {
+  payload: unknown;
 }
 
 export const define = <I>(def: ToolDef<I>): ToolDef<unknown> => def as ToolDef<unknown>;
@@ -1128,7 +1138,7 @@ export async function runTool(
   }
   let res: RanTool;
   try {
-    const out = await tool.run(ctx, input);
+    const out = await tool.run(ctx, input, { payload: plan.payload });
     res =
       typeof out === "string"
         ? { content: out, isError: false }

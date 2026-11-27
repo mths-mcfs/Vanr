@@ -812,6 +812,11 @@ export async function runAgentJob(
   const runner = await runnerOfAssignment(ctx.deps.db, row);
   if (!runner) throw new ToolInputError("This assignment has no runner. Ask the owner to pick one.");
   if (!ctx.deps.runners.isOnline(runner.id)) throw new ToolInputError("The runner is offline.");
+  // Claude Code and Codex use the personal plan of whoever paired the runner: only on that person's assignments.
+  if (!canUsePlan(row.ownerId, runner))
+    throw new ToolInputError(
+      "That runner's plan is personal to who paired it; only their assignments can use it.",
+    );
   const available = runner.executors.filter((e) =>
     e === "claude_code" ? runner.access.tools.claude : runner.access.tools.codex,
   );

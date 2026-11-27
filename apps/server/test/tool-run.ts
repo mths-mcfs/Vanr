@@ -12,7 +12,7 @@ import { UNDO_WINDOW_MS } from "../src/control";
 import { allowance, grantsOf, replaceGrants } from "../src/integrations/access";
 import { postMessage } from "../src/messages";
 import { AGENT_TOOLS } from "../src/runtime/content-tools";
-import { type RanTool, runTool, type ToolContext } from "../src/runtime/tools";
+import { type RanTool, runTool, type ToolContext, type ToolDef } from "../src/runtime/tools";
 import type { RunningServer } from "../src/server";
 import type { Person } from "./seed";
 
@@ -65,11 +65,18 @@ export async function channelRow(server: RunningServer, id: string): Promise<Cha
 
 /**
  * The agent's run in `channelId`, asked by `asker` (none: a routine). `call` runs one tool with the tools the
- * agent's grants allow, as the runtime will; `actions` are the receipts the calls wrote, in order.
+ * agent's grants allow, as the runtime will (`tools` adds the ones the runtime picks per run, like the
+ * assignment's and the runner's); `actions` are the receipts the calls wrote, in order.
  */
 export async function toolRun(
   server: RunningServer,
-  opts: { workspaceId: string; agent: AgentRow; channelId: string; asker?: Person | null },
+  opts: {
+    workspaceId: string;
+    agent: AgentRow;
+    channelId: string;
+    asker?: Person | null;
+    tools?: readonly ToolDef<unknown>[];
+  },
 ) {
   const channel = await channelRow(server, opts.channelId);
   const actions: string[] = [];
@@ -144,7 +151,7 @@ export async function toolRun(
   };
   const call = async (name: string, input: unknown, over: Partial<ToolContext> = {}): Promise<RanTool> => {
     const allow = allowance(await grantsOf(server.deps.db, opts.agent.id));
-    const tools = AGENT_TOOLS.filter((t) => allow.builtin(t.name));
+    const tools = [...AGENT_TOOLS, ...(opts.tools ?? [])].filter((t) => allow.builtin(t.name));
     return runTool(ctx(over), tools, name, input);
   };
   /** The id of the latest receipt of `kind`. */
