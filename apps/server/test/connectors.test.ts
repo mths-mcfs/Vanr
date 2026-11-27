@@ -17,7 +17,7 @@ const { connections, gateDecisions, runEvents, runs } = schema;
 const mcp = startFakeMcp();
 const keyOnly = startFakeMcp({ keyOnly: true });
 /** An MCP server that answers a tool call with an error quoting the Authorization it got. */
-const ECHOED_KEY = "echoed-secret-key-4815162342";
+const QUOTED = "quoted-credential-value";
 const echo = Bun.serve({
   port: 0,
   async fetch(req) {
@@ -688,7 +688,7 @@ describe("a connector's error text", () => {
       const started = await ok(
         connectCustom(t, t.ana, {
           serverUrl: `http://localhost:${echo.port}/mcp`,
-          apiKey: ECHOED_KEY,
+          apiKey: QUOTED,
           label: "Echo",
           nextPath: "/",
         }),
@@ -704,7 +704,7 @@ describe("a connector's error text", () => {
         .select()
         .from(runEvents)
         .where(eq(runEvents.runId, run?.id ?? ""));
-      expect(JSON.stringify({ run, events })).not.toContain(ECHOED_KEY);
+      expect(JSON.stringify({ run, events })).not.toContain(QUOTED);
     },
     SERVER_TEST_MS,
   );
