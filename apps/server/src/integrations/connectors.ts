@@ -16,6 +16,7 @@ import { PRODUCT } from "@vanr/product";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { AppDeps, WorkspaceMember } from "../context";
+import { isUniqueViolation } from "../db-errors";
 import { HttpError, notFound } from "../http";
 import { log } from "../logger";
 import type { ConnectionRow } from "./access";
@@ -717,7 +718,8 @@ export async function finishOAuth(
       error: outsideText(err, [s.clientSecret, s.verifier, query.code, ...received]),
     });
     await dropPending();
-    return back("connector_error=token");
+    // The agent got its own account on this service by another route meanwhile (one per service).
+    return back(isUniqueViolation(err) ? "connector_error=exists" : "connector_error=token");
   }
   return back(`connected=${encodeURIComponent(row.custom ? `custom:${row.id}` : row.connector)}`);
 }

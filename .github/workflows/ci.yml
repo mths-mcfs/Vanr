@@ -564,8 +564,9 @@ jobs:
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_DROP_LOCKS: "1"
-      # One refresh exchange per expiring OAuth token, one step-up card per scope set and no secret written onto a
-      # connection revoked during the OAuth callback, from two connections.
+      # One refresh exchange per expiring OAuth token, one step-up card per scope set, no secret written onto a
+      # connection revoked during the OAuth callback, from two connections, and no access change lost when two
+      # saves of one agent's access cross.
       - run: bun test apps/server/test/connectors-postgres.test.ts
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
@@ -585,7 +586,7 @@ jobs:
               exit 1
             fi
           done
-          labels="refresh step-up revoke"
+          labels="refresh step-up revoke access"
           for label in $labels; do
             if ! grep -qF "LOCK_OUTCOME_MISMATCH($label)" forced-connectors.log; then
               echo "::error::the forced $label test did not fail on its outcome without the lock"

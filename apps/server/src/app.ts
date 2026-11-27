@@ -10,6 +10,7 @@ import { registerAssignments } from "./routes/assignments";
 import { registerBases } from "./routes/bases";
 import { registerCalendar } from "./routes/calendar";
 import { registerChat } from "./routes/chat";
+import { registerConnectors } from "./routes/connectors";
 import { registerControl } from "./routes/control";
 import { registerDebates } from "./routes/debates";
 import { registerDrive } from "./routes/drive";
@@ -134,11 +135,6 @@ export function createApp(
   registerWaitlist(app);
   registerAccount(app);
   registerWorkspaces(app);
-  // The remaining registrars enter here, in this order, each with the slice that ports it (S2 to S6 of the
-  // server port): the chat, the threads, agents, agent lab, skills, memories and control below, then
-  // invitations, notifications and push below, then the Drive, the wiki and the bases below; issues S4,
-  // debates S4, routines S4, calendar S4, then the search below; connectors S6, then the integrations, the
-  // runners and their requests below; assignments S5.
   registerChat(app);
   registerThreads(app);
   registerAgents(app);
@@ -158,6 +154,7 @@ export function createApp(
   registerDebates(app);
   registerRoutines(app);
   registerSearch(app);
+  registerConnectors(app);
   registerIntegrations(app);
   registerRunners(app);
   registerRunnerRequests(app);

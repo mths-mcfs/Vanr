@@ -1,5 +1,6 @@
 // The connection's row lock on a real Postgres, where the server's pool runs two transactions at once. The
-// refresh of an expiring OAuth token and the step-up's attempt counter read, decide and write under that lock.
+// refresh of an expiring OAuth token and the step-up's attempt counter read, decide and write under that lock, and
+// so does a save of an agent's access under the agent's row lock.
 // The forced tests hold the first transaction right after its locked select until the second one is seen
 // waiting on the lock (lock-double.ts); with VANR_TEST_DROP_LOCKS=1 the double leaves FOR UPDATE out and the
 // CI postgres job expects them to fail on their outcome. These run only in that job.
@@ -7,7 +8,7 @@ import { afterAll, beforeAll, describe, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { eq } from "drizzle-orm";
 import postgres from "postgres";
-import type { ConnectionRow } from "../src/integrations/access";
+import { type ConnectionRow, grantsOf, replaceGrants } from "../src/integrations/access";
 import {
   connectCustom,
   disconnect,
@@ -20,8 +21,9 @@ import { REFRESH_MARGIN_MS } from "../src/integrations/oauth";
 import type { RunningServer } from "../src/server";
 import { type FakeMcp, startFakeMcp } from "./fake-mcp";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
-import { forcedPair, instrumented, outcome } from "./lock-double";
+import { forcedPair, gate, instrumented, outcome, WAIT_MS } from "./lock-double";
 import { NO_POSTGRES, TEST_POSTGRES_URL, testDatabaseUrl } from "./postgres";
+import { seedAgent } from "./route-calls";
 import { seedWorkspace } from "./seed";
 
 const onPostgres = (name: string) => (TEST_POSTGRES_URL ? name : `${name} (skipped: ${NO_POSTGRES})`);
@@ -32,6 +34,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("the connection's row lock on Pos
   let server: RunningServer;
   let admin: postgres.Sql;
   let me: Starter;
+  let ana: Awaited<ReturnType<typeof signedIn>>;
 
   beforeAll(async () => {
     mcp = startFakeMcp({ expiresIn: 90, rotateRefresh: true });
@@ -42,7 +45,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("the connection's row lock on Pos
       now: () => clock,
     });
     admin = postgres(url, { max: 1, onnotice: () => {} });
-    const ana = await signedIn(server, "Ana", "ana@connectors-pg.test");
+    ana = await signedIn(server, "Ana", "ana@connectors-pg.test");
     const { workspaceId } = await seedWorkspace(server, ana, "Locks");
     me = { workspaceId, userId: ana.user.id, role: "owner", handle: "ana", sessionId: "s" };
   }, SERVER_TEST_MS);
@@ -144,6 +147,68 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("the connection's row lock on Pos
         { b: run.b, revoked: after.revokedAt !== null, secret: after.secret !== null },
         { b: "revoked", revoked: true, secret: false },
       );
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "forced: two partial saves of one agent's access keep both changes",
+    async () => {
+      const agent = await seedAgent(server, me.workspaceId, ana, "lia");
+      const deny = { connectionId: "", scope: "deny:list_items" };
+      const all = { connectionId: "", scope: "*" };
+      const held = gate();
+      const release = gate();
+      const aPids = new Set<number>();
+      const bPids = new Set<number>();
+      // A holds right after it read the agent's grants; B then either waits on the agent's lock or, without it,
+      // reads the same grants and ends before A writes.
+      const a = replaceGrants(
+        instrumented(server.deps.db, {
+          pids: aPids,
+          after: {
+            kind: "select",
+            match: '"agent_grants"',
+            run: async () => {
+              held.open();
+              await release.opened;
+            },
+          },
+        }),
+        me.workspaceId,
+        agent.id,
+        (current) => [...current, all],
+      );
+      try {
+        await held.opened;
+        const b = replaceGrants(
+          instrumented(server.deps.db, { pids: bPids }),
+          me.workspaceId,
+          agent.id,
+          (current) => [...current, deny],
+        );
+        const waiting = async () => {
+          const end = Date.now() + WAIT_MS;
+          while (Date.now() < end) {
+            const pid = [...bPids][0];
+            if (pid !== undefined) {
+              const [row] = await admin<{ wait_event_type: string | null }[]>`
+                select wait_event_type from pg_stat_activity where pid = ${pid}`;
+              if (row?.wait_event_type === "Lock") return;
+            }
+            await Bun.sleep(25);
+          }
+          throw new Error("LOCK_WAIT_TIMEOUT(access): B neither waited nor ended");
+        };
+        await Promise.race([b, waiting()]);
+        release.open();
+        await Promise.all([a, b]);
+      } finally {
+        release.open();
+        await a.catch(() => undefined);
+      }
+      const scopes = (await grantsOf(server.deps.db, agent.id)).map((g) => g.scope).sort();
+      outcome("access", scopes, [all.scope, deny.scope].sort());
     },
     SERVER_TEST_MS,
   );
