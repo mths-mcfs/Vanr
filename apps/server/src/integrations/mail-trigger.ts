@@ -139,7 +139,9 @@ async function pollOne(deps: AppDeps, row: RoutineRow): Promise<number> {
 
   const queue: { uid: number; context: RoutineContext }[] = [];
   for (const { uid, mail } of found.messages) {
+    // Only a message with one unambiguous sender fires (fail closed): see `senderOf`.
     const from = mail.fromAddress;
+    if (!from) continue;
     if (!allowedBy(policy.senderAllowlist, from)) continue;
     if (trigger.filter?.from?.length && !allowedBy(trigger.filter.from, from)) continue;
     queue.push({

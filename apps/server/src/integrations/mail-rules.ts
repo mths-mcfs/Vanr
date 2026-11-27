@@ -21,8 +21,11 @@ export const addressOrDomain = z
 export function allowedBy(list: readonly string[], address: string): boolean {
   if (list.length === 0) return true;
   const a = address.toLowerCase();
-  const domain = a.slice(a.indexOf("@"));
-  return list.some((entry) => entry === a || entry === domain);
+  // The domain is everything after the last `@` (a quoted local part may hold one): `"x@ok.test"@bad.test` is
+  // bad.test's. Without a domain, only a whole-address entry matches.
+  const at = a.lastIndexOf("@");
+  const domain = at > 0 && at < a.length - 1 ? a.slice(at) : null;
+  return list.some((entry) => entry === a || (domain !== null && entry === domain));
 }
 
 export const MAIL_ACTIONS = [

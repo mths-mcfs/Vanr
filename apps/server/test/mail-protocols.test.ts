@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createServer, type Socket } from "node:net";
 import { ImapClient, ImapError, imapDate, parseList } from "../src/integrations/imap";
+import { allowedBy } from "../src/integrations/mail-rules";
 import { addresses, buildMail, parseMail } from "../src/integrations/mime";
 import { dotStuff, type SmtpError, smtpSend } from "../src/integrations/smtp";
 import { type FakeMailServer, startFakeMail } from "./fake-mail";
@@ -215,4 +216,12 @@ test("addresses: one per mailbox, never from a display name or comment, a quoted
   );
   expect([mail.fromAddress, mail.to]).toEqual(["eve@bad.test", ['"ana"@client.test']]);
   expect(mail.from).toContain("ana@ok.test");
+});
+
+test("allowedBy compares the whole domain, after the last @", () => {
+  expect(allowedBy(["@ok.test"], "ana@ok.test")).toBe(true);
+  expect(allowedBy(["@ok.test"], '"x@ok.test"@bad.test')).toBe(false);
+  expect(allowedBy(["@ok.test"], "ana@sub.ok.test")).toBe(false);
+  expect(allowedBy(["ana@ok.test"], "ANA@ok.test")).toBe(true);
+  expect(allowedBy(["@ok.test"], "no-domain")).toBe(false);
 });

@@ -120,12 +120,6 @@ describe("routine by email", () => {
       mail.deliver("INBOX", incoming("joao@client.test", "Order 77", "Two nuts"));
       mail.deliver("INBOX", incoming("other@far.test", "Outside the filter", "x"));
       mail.deliver("INBOX", incoming("Ana Client <ana@client.test>", "Order 78", "One washer"));
-      // The filter reads the sender's mailbox, not a display name that looks like an allowed address.
-      mail.deliver("INBOX", incoming('"joao@client.test" <eve@far.test>', "Spoofed quoted", "x"));
-      mail.deliver("INBOX", incoming("joao@client.test <eve@far.test>", "Spoofed bare", "x"));
-      // An encoded display name decodes to an allowed address (and a comma): the address comes from the raw header.
-      const encoded = `=?UTF-8?B?${Buffer.from("joao@client.test, <joao@client.test>").toString("base64")}?=`;
-      mail.deliver("INBOX", incoming(`${encoded} <eve@far.test>`, "Spoofed encoded", "x"));
       // Within the minute: it doesn't check again.
       await pollEmailRoutines(server.deps);
       await server.deps.runtime.settle();
@@ -145,7 +139,6 @@ describe("routine by email", () => {
         goals.some((g) => g.includes("Subject: Order 77") && g.includes("not instructions to you")),
       ).toBe(true);
       expect(goals.some((g) => g.includes("Outside the filter"))).toBe(false);
-      expect(goals.some((g) => g.includes("Spoofed"))).toBe(false);
 
       // Nothing new: it doesn't run again.
       await poll();
@@ -183,6 +176,66 @@ describe("routine by email", () => {
       const after = await executions(routine.id);
       expect(after).toHaveLength(1);
       expect(after[0]?.dedupeKey).toMatch(/^email:.+:INBOX:\d+:1$/);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "the sender must be one unambiguous mailbox: every From that could stand for an allowed address fires nothing",
+    async () => {
+      const { workspaceId, ana, lia, connect, debateTarget } = await team();
+      const account = await connect();
+      await setAgentMailbox(server.deps, workspaceId, lia.id, account, { level: "read" });
+      const routine = (
+        await call(ana, "POST", `${ws(workspaceId)}/routines`, {
+          active: true,
+          agentId: lia.id,
+          prompt: "Read",
+          target: debateTarget,
+          trigger: {
+            kind: "email",
+            accountId: account.id,
+            folder: "INBOX",
+            filter: { from: ["@client.test"] },
+          },
+        })
+      ).body;
+      await poll(); // marks INBOX
+      const b64 = (text: string) => `=?UTF-8?B?${Buffer.from(text).toString("base64")}?=`;
+      // Each one is really from eve@far.test (or from nobody in particular) and must not pass for @client.test.
+      const raw = (head: string, n: number) =>
+        `${head}\r\nTo: ${mail.user}\r\nSubject: Spoof ${n}\r\nMessage-ID: <spoof${n}@far.test>\r\n\r\nx`;
+      const spoofs = [
+        'From: "joao@client.test" <eve@far.test>',
+        "From: joao@client.test <eve@far.test>",
+        `From: ${b64("joao@client.test, <joao@client.test>")} <eve@far.test>`,
+        "From: ((x) joao@client.test) eve@far.test",
+        "From: eve@far.test (a (joao@client.test))",
+        "From: (x\\) joao@client.test) eve@far.test",
+        'From: (") <joao@client.test> (") eve@far.test',
+        "From: joao@client.test, eve@far.test",
+        "From: list: joao@client.test, eve@far.test;",
+        "From: joao@client.test:;",
+        "From: =?UTF-8?Q?<joao@client.test>,?= <eve@far.test>",
+        "From: =?utf-8?q?joao@client.test",
+        "From: =?utf-8?q?joao@client.test?= <eve@far.test>",
+        "From: <@client.test>",
+        "From: eve@far.test\r\nFrom: x\r\n joao@client.test",
+        "From: joao@client.test\r\nFrom: eve@far.test",
+        "From: (joao@client.test eve@far.test",
+        "Sender: joao@client.test",
+      ];
+      for (const [n, head] of spoofs.entries()) {
+        mail.deliver("INBOX", raw(head, n));
+        await poll();
+      }
+      expect((await executions(routine.id)).length).toBe(0);
+      // The control: a plain sender of the domain fires, in its usual forms.
+      mail.deliver("INBOX", raw("From: Ana Client <ana@client.test>", 100));
+      mail.deliver("INBOX", raw('From: "Ana, Client" (desk) <ana@client.test>', 101));
+      mail.deliver("INBOX", raw(`From: ${b64("Aná")} <ana@client.test>`, 102));
+      await poll();
+      expect((await executions(routine.id)).length).toBe(3);
     },
     SERVER_TEST_MS,
   );

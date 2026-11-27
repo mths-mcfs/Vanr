@@ -6,8 +6,8 @@ export interface ParsedMail {
   messageId: string | null;
   /** The From header as people read it (encoded words decoded). Never a sender's address: see `fromAddress`. */
   from: string;
-  /** The sender's address, read from the raw header before any decoding (empty when there is none). */
-  fromAddress: string;
+  /** The sender's address when the raw From is one unambiguous mailbox, else null (see `senderOf`). */
+  fromAddress: string | null;
   to: string[];
   cc: string[];
   subject: string;
@@ -62,11 +62,153 @@ function splitHead(raw: string): { headers: Map<string, string>; body: string } 
       continue;
     }
     const colon = line.indexOf(":");
-    if (colon <= 0) continue;
-    last = line.slice(0, colon).trim().toLowerCase();
-    if (!headers.has(last)) headers.set(last, line.slice(colon + 1).trim());
+    if (colon <= 0) {
+      last = "";
+      continue;
+    }
+    const name = line.slice(0, colon).trim().toLowerCase();
+    // The first header of a name wins; a repeated one is ignored with its folded lines.
+    if (headers.has(name)) {
+      last = "";
+      continue;
+    }
+    last = name;
+    headers.set(name, line.slice(colon + 1).trim());
   }
   return { headers, body };
+}
+
+/** The values of every header named `name` (unfolded), in order: how many From headers a message has. */
+function headerValues(raw: string, name: string): string[] {
+  const norm = raw.replace(/\r\n/g, "\n");
+  const at = norm.indexOf("\n\n");
+  const head = at === -1 ? norm : norm.slice(0, at);
+  const out: string[] = [];
+  let current: number | null = null;
+  for (const line of head.split("\n")) {
+    if (/^[ \t]/.test(line)) {
+      if (current !== null) out[current] = `${out[current]} ${line.trim()}`;
+      continue;
+    }
+    const colon = line.indexOf(":");
+    if (colon > 0 && line.slice(0, colon).trim().toLowerCase() === name) {
+      out.push(line.slice(colon + 1).trim());
+      current = out.length - 1;
+    } else current = null;
+  }
+  return out;
+}
+
+type AddressToken = { kind: "atom" | "quoted"; text: string } | { kind: "special"; text: string };
+
+/**
+ * Splits a raw address header into atoms, quoted strings and specials in one pass (RFC 5322 §3.2), dropping
+ * whitespace and comments. Comments nest and take `\` escapes; a quote inside a comment is just text. null when a
+ * comment or a quoted string doesn't close, or for a domain literal or a character outside the grammar.
+ */
+function addressTokens(value: string): AddressToken[] | null {
+  const tokens: AddressToken[] = [];
+  let i = 0;
+  while (i < value.length) {
+    const ch = value[i] as string;
+    if (ch === " " || ch === "\t") {
+      i++;
+    } else if (ch === "(") {
+      let depth = 0;
+      for (; i < value.length; i++) {
+        const c = value[i];
+        if (c === "\\") i++;
+        else if (c === "(") depth++;
+        else if (c === ")" && --depth === 0) break;
+      }
+      if (depth !== 0) return null;
+      i++;
+    } else if (ch === '"') {
+      let text = "";
+      let closed = false;
+      for (i++; i < value.length; i++) {
+        const c = value[i] as string;
+        if (c === "\\") {
+          i++;
+          text += value[i] ?? "";
+        } else if (c === '"') {
+          closed = true;
+          break;
+        } else text += c;
+      }
+      if (!closed) return null;
+      i++;
+      tokens.push({ kind: "quoted", text });
+    } else if ("<>:;@,.".includes(ch)) {
+      tokens.push({ kind: "special", text: ch });
+      i++;
+    } else if (ATEXT.test(ch)) {
+      let text = "";
+      while (i < value.length && ATEXT.test(value[i] as string)) text += value[i++];
+      tokens.push({ kind: "atom", text });
+    } else return null; // `[` (a domain literal), `]`, `\` or a control character
+  }
+  return tokens;
+}
+
+/** atext (RFC 5322 §3.2.3), and UTF-8 beyond ASCII (RFC 6532). */
+const ATEXT = /[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~\u0080-\uffff]/;
+const DOMAIN_LABEL = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
+
+/** `local@domain` from the tokens of an addr-spec, or null: a dot-atom or quoted local part, a host name domain. */
+function addrSpec(tokens: AddressToken[]): string | null {
+  const at = tokens.findIndex((t) => t.kind === "special" && t.text === "@");
+  if (at <= 0) return null;
+  const local = tokens.slice(0, at);
+  const domain = tokens.slice(at + 1);
+  let localText: string;
+  const [only] = local;
+  if (local.length === 1 && only?.kind === "quoted") {
+    localText = `"${only.text.replace(/(["\\])/g, "\\$1")}"`;
+  } else {
+    if (local.length % 2 === 0) return null;
+    const parts: string[] = [];
+    for (const [i, t] of local.entries()) {
+      if (i % 2 === 0 ? t.kind !== "atom" : t.kind !== "special" || t.text !== ".") return null;
+      if (i % 2 === 0) parts.push(t.text);
+    }
+    localText = parts.join(".");
+    // An encoded word never belongs in an address (RFC 2047 §5): one there is a display name in disguise.
+    if (localText.startsWith("=?")) return null;
+  }
+  if (domain.length === 0 || domain.length % 2 === 0) return null;
+  const labels: string[] = [];
+  for (const [i, t] of domain.entries()) {
+    if (i % 2 === 0) {
+      if (t.kind !== "atom" || !DOMAIN_LABEL.test(t.text)) return null;
+      labels.push(t.text.toLowerCase());
+    } else if (t.kind !== "special" || t.text !== ".") return null;
+  }
+  if (labels.length < 2) return null;
+  return `${localText.toLowerCase()}@${labels.join(".")}`;
+}
+
+/**
+ * The sender of a raw message, or null when it isn't one unambiguous mailbox: exactly one From header holding
+ * exactly one `addr-spec` or `[display-name] <addr-spec>`. A list, a group, an empty group, a source route, a
+ * display name with specials (an encoded word with `<`, `@` or `,` in it), a second From header or anything that
+ * doesn't parse is null, and a check that trusts the sender acts on nothing (fail closed). The display name is
+ * words only (atoms, quoted strings, obsolete dots) and is never read for the address.
+ */
+export function senderOf(raw: string): string | null {
+  const values = headerValues(raw, "from");
+  if (values.length !== 1) return null;
+  const tokens = addressTokens(values[0] as string);
+  if (!tokens || tokens.length === 0) return null;
+  const open = tokens.findIndex((t) => t.kind === "special" && t.text === "<");
+  if (open === -1) return addrSpec(tokens);
+  const close = tokens.length - 1;
+  if (tokens[close]?.kind !== "special" || tokens[close]?.text !== ">") return null;
+  const name = tokens.slice(0, open);
+  if (!name.every((t) => t.kind !== "special" || t.text === ".")) return null;
+  const inner = tokens.slice(open + 1, close);
+  if (inner.some((t) => t.kind === "special" && (t.text === "<" || t.text === ">"))) return null;
+  return addrSpec(inner);
 }
 
 function param(value: string, name: string): string | null {
@@ -182,7 +324,7 @@ export function parseMail(raw: string): ParsedMail {
     messageId: headers.get("message-id") ?? null,
     from: decodeWords(headers.get("from") ?? ""),
     // From the raw header: a display name in encoded words decodes to anything, an allowed address included.
-    fromAddress: addresses(headers.get("from"))[0] ?? "",
+    fromAddress: senderOf(raw),
     to: addresses(headers.get("to")),
     cc: addresses(headers.get("cc")),
     subject: decodeWords(headers.get("subject") ?? ""),
