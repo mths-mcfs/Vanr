@@ -203,8 +203,10 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("the assignment engine on Postgre
         .set({ status: "done", summary: "wrote them" })
         .where(and(eq(assignmentPlanItems.assignmentId, row.id), eq(assignmentPlanItems.id, "p1")));
       let calls = 0;
+      // Slow enough that, without the lock, both steps are past the claim before either writes its verdict.
       const counting: Verifier = async (_deps, _row, items) => {
         calls++;
+        await Bun.sleep(300);
         return {
           ok: true,
           runId: null,
