@@ -7,6 +7,7 @@ import { registerAccount } from "./routes/account";
 import { registerBases } from "./routes/bases";
 import { registerCalendar } from "./routes/calendar";
 import { registerControl } from "./routes/control";
+import { registerDebates } from "./routes/debates";
 import { registerDrive } from "./routes/drive";
 import { registerDriveUploads } from "./routes/drive-upload";
 import { registerInvitations } from "./routes/invitations";
@@ -14,6 +15,7 @@ import { registerIssues } from "./routes/issues";
 import { registerMemories } from "./routes/memories";
 import { registerNotifications } from "./routes/notifications";
 import { registerPush } from "./routes/push";
+import { registerRoutines } from "./routes/routines";
 import { registerRunnerRequests } from "./routes/runner-requests";
 import { registerRunners } from "./routes/runners";
 import { registerSearch } from "./routes/search";
@@ -35,6 +37,11 @@ const MULTIPART = [/\/files\/files$/, /\/files\/[^/]+\/files$/, /\/wiki\/import\
 const CREATES_USER = /^\/api\/auth\/(sign-up\/|sign-in\/social$|callback\/|oauth2\/callback\/)/;
 /** A part of a chunked upload: raw bytes. A form from another site doesn't send that type without a preflight. */
 const RAW_PART = /\/files\/uploads\/[^/]+$/;
+/**
+ * The signed webhooks: they authenticate by their secret's signature, never by the session cookie, and read the body
+ * as text, so any content-type is a sender's choice and not a CSRF risk.
+ */
+const SIGNED_HOOK = /^\/api\/v1\/hooks\//;
 
 export function createApp(
   deps: AppDeps,
@@ -96,6 +103,7 @@ export function createApp(
         !type.startsWith("application/json") &&
         !multipartOk &&
         !rawOk &&
+        !SIGNED_HOOK.test(c.req.path) &&
         !c.req.path.startsWith("/api/auth/")
       ) {
         return c.json(errorBody("unsupported_media_type", "Send JSON (application/json)"), 415);
@@ -104,8 +112,10 @@ export function createApp(
     await next();
   });
 
-  // Better Auth's session (cookie). App routes that require a login call requireUser.
+  // Better Auth's session (cookie). App routes that require a login call requireUser. A signed webhook never
+  // reads it: the cookie a browser attaches to a cross-site request neither identifies nor renews anything there.
   app.use("/api/v1/*", async (c, next) => {
+    if (SIGNED_HOOK.test(c.req.path)) return next();
     const session = await deps.auth.api.getSession({ headers: c.req.raw.headers });
     if (session) {
       c.set("sessionId", session.session.id);
@@ -137,6 +147,8 @@ export function createApp(
   registerBases(app);
   registerIssues(app);
   registerCalendar(app);
+  registerDebates(app);
+  registerRoutines(app);
   registerSearch(app);
   registerRunners(app);
   registerRunnerRequests(app);

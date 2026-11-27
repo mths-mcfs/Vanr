@@ -127,8 +127,13 @@ export const routines = pgTable(
     hookId: text("webhook_token"),
     /** Webhook `whsec_` secret, encrypted (`seal`). Shown only once, by the route that generates it. */
     webhookSecret: text("webhook_secret"),
-    /** Email trigger: how far the folder has been read ({uidValidity, lastUid}). */
-    cursor: jsonb("cursor").$type<{ uidValidity: number | null; lastUid: number }>(),
+    /** Email trigger: how far the folder has been read ({uidValidity, lastUid}) and which account and folder. */
+    cursor: jsonb("cursor").$type<{
+      uidValidity: number | null;
+      lastUid: number;
+      folder?: string;
+      accountId?: string;
+    }>(),
     /**
      * Missed run, overlap, cap, retry and pause policy (`RoutinePolicy`; anything missing comes from the
      * default).

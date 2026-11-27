@@ -157,3 +157,35 @@ export interface RoutineEstimate {
   recent: { avgUsd: number; maxUsd: number; runs: number } | null;
   upToUsd: number | null;
 }
+
+/** The webhook's address and secret; the secret is shown only in this answer. */
+export interface RoutineWebhookSecret {
+  secret: string;
+  url: string;
+}
+
+/** What the webhook answers: the execution it recorded, or the same message seen before. */
+export type RoutineWebhookResult = { ok: true; runId: string } | { duplicate: true; ok: true };
+
+/** "Run now". With the client's key, the same request repeated (a double click, a resend) runs once. */
+export interface RoutineRunBody {
+  key?: string;
+}
+
+export interface RoutineDuplicateBody {
+  name?: string;
+}
+
+export interface ParseScheduleBody {
+  phrase: string;
+  timezone: string;
+}
+
+export interface ParseRuleBody {
+  phrase: string;
+  timezone?: string;
+}
+
+export interface DescribeRuleBody {
+  rule: RecurrenceRule;
+}
