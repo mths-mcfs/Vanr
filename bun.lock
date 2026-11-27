@@ -61,6 +61,9 @@
       "name": "@vanr/web",
       "version": "0.0.0",
       "dependencies": {
+        "@hocuspocus/provider": "4.7.1",
+        "@milkdown/kit": "7.22.3",
+        "@milkdown/plugin-collab": "7.22.3",
         "@tanstack/react-query": "5.104.5",
         "@tanstack/react-router": "1.170.46",
         "@vanr/client": "workspace:*",
@@ -70,6 +73,9 @@
         "lucide-react": "1.64.0",
         "react": "19.3.1",
         "react-dom": "19.3.1",
+        "y-prosemirror": "1.3.7",
+        "y-protocols": "1.0.7",
+        "yjs": "13.6.33",
         "zod": "4.6.7",
       },
       "devDependencies": {
@@ -387,6 +393,8 @@
     "@milkdown/plugin-block": ["@milkdown/plugin-block@7.22.3", "", { "dependencies": { "@floating-ui/dom": "^1.5.1", "@milkdown/core": "7.22.3", "@milkdown/ctx": "7.22.3", "@milkdown/prose": "7.22.3", "@milkdown/utils": "7.22.3", "@types/lodash-es": "^4.17.12", "lodash-es": "^4.17.21" } }, "sha512-6WFfo47YSDOYAE8TvpjX5QYDiqZC7qR2EAGQGUIGf/3hTWjHvDO36svlNzYtFGXikX81EjYykhLXPX+vjWgQEw=="],
 
     "@milkdown/plugin-clipboard": ["@milkdown/plugin-clipboard@7.22.3", "", { "dependencies": { "@milkdown/core": "7.22.3", "@milkdown/ctx": "7.22.3", "@milkdown/prose": "7.22.3", "@milkdown/utils": "7.22.3" } }, "sha512-T9sALmkoYGYGNv6Oor+gDfsI+dA9mLxRMBYrw5TEL4zSx6ku/25/nJy5MhE7oro+6lmSX1aRwlRnyugkWSTdqw=="],
+
+    "@milkdown/plugin-collab": ["@milkdown/plugin-collab@7.22.3", "", { "dependencies": { "@milkdown/core": "7.22.3", "@milkdown/ctx": "7.22.3", "@milkdown/exception": "7.22.3", "@milkdown/prose": "7.22.3" }, "peerDependencies": { "y-prosemirror": "*", "y-protocols": "*", "yjs": "*" } }, "sha512-UyinUIKAmv9IDTOuVh6nVRAJR/5ZrNabendT8Mn3UgcVOhR99Mq4kgvfX0+manwYfevcn4p4SP+mS2oq5bgY+w=="],
 
     "@milkdown/plugin-cursor": ["@milkdown/plugin-cursor@7.22.3", "", { "dependencies": { "@milkdown/ctx": "7.22.3", "@milkdown/prose": "7.22.3", "@milkdown/utils": "7.22.3", "prosemirror-drop-indicator": "^0.1.0" } }, "sha512-qZi7QH5VvhF6d4MWowGXDvBgVxa3SIIjrTxkwgfsdRBid2uXMjHyankTDgYvYR4GjwKvqemzY0kBUu/L2bEr6w=="],
 

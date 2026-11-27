@@ -5,9 +5,10 @@ import { useQueryClient } from "@tanstack/react-query";
 import { type KeyPrefix, prefixKey, useApiQuery, useVanrClient } from "@vanr/client/react";
 import type { ActorRef, FileKind } from "@vanr/contract";
 import { Code, FileDiff, FileText, type LucideIcon, Paperclip, Table2, Workflow } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useLocale, useMessages } from "../../i18n/react.tsx";
-import { useClock } from "../../platform/clock.tsx";
+import { useCallback, useMemo } from "react";
+import { useMessages } from "../../i18n/react.tsx";
+
+export { relativeTime, useRelativeTime } from "../../i18n/relative-time.tsx";
 
 export const FILE_KINDS: readonly FileKind[] = ["document", "table", "diff", "diagram", "html", "file"];
 
@@ -38,25 +39,6 @@ export function useActorName(workspaceId: string): (actor: ActorRef) => string {
   }, [members.data, agents.data, t]);
 }
 
-const UNITS: [Intl.RelativeTimeFormatUnit, number][] = [
-  ["year", 365 * 86_400_000],
-  ["month", 30 * 86_400_000],
-  ["week", 7 * 86_400_000],
-  ["day", 86_400_000],
-  ["hour", 3_600_000],
-  ["minute", 60_000],
-];
-
-/** "3 hours ago", "in 2 days": the distance from now in the largest unit that fits. */
-export function relativeTime(iso: string, now: number, locale: string): string {
-  const delta = Date.parse(iso) - now;
-  const format = new Intl.RelativeTimeFormat(locale, { numeric: "auto" });
-  for (const [unit, ms] of UNITS) {
-    if (Math.abs(delta) >= ms) return format.format(Math.round(delta / ms), unit);
-  }
-  return format.format(0, "minute");
-}
-
 /** "1.5 MB": a size in bytes in the largest unit that keeps it above one. */
 export function formatBytes(bytes: number, locale: string): string {
   const units = ["byte", "kilobyte", "megabyte", "gigabyte"] as const;
@@ -72,28 +54,6 @@ export function formatBytes(bytes: number, locale: string): string {
     unitDisplay: "short",
     maximumFractionDigits: unit === 0 ? 0 : 1,
   }).format(value);
-}
-
-/** How often relative times are worked out again: their smallest unit is the minute. */
-const RELATIVE_TICK_MS = 60_000;
-
-/** The relative time of a date, kept current with the app's clock. */
-export function useRelativeTime(): (iso: string) => string {
-  const { locale } = useLocale();
-  const clock = useClock();
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    let cancel = () => {};
-    const schedule = () => {
-      cancel = clock.setTimer(() => {
-        setTick((tick) => tick + 1);
-        schedule();
-      }, RELATIVE_TICK_MS);
-    };
-    schedule();
-    return () => cancel();
-  }, [clock]);
-  return (iso) => relativeTime(iso, clock.now(), locale);
 }
 
 const fold = (text: string) =>

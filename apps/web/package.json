@@ -13,6 +13,9 @@
     "e2e": "playwright test"
   },
   "dependencies": {
+    "@hocuspocus/provider": "4.7.1",
+    "@milkdown/kit": "7.22.3",
+    "@milkdown/plugin-collab": "7.22.3",
     "@tanstack/react-query": "5.104.5",
     "@tanstack/react-router": "1.170.46",
     "@vanr/client": "workspace:*",
@@ -22,6 +25,9 @@
     "lucide-react": "1.64.0",
     "react": "19.3.1",
     "react-dom": "19.3.1",
+    "y-prosemirror": "1.3.7",
+    "y-protocols": "1.0.7",
+    "yjs": "13.6.33",
     "zod": "4.6.7"
   },
   "devDependencies": {

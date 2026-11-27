@@ -50,5 +50,6 @@ export {
   type RealtimeStatus,
   reconnectDelay,
   type SocketLike,
+  wikiCollabUrl,
 } from "./realtime/socket.ts";
 export { type UploadOptions, type UploadProgress, uploadInParts } from "./upload.ts";

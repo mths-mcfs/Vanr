@@ -10,6 +10,13 @@ export type SocketSource = {
   createSocket?: (url: string) => SocketLike;
   /** 0..1, for the jitter on each reconnection wait. Tests pass a fixed one. */
   random?: () => number;
+  /**
+   * The WebSocket class of the wiki's live pages (src/realtime/wiki-collab.ts), which speak Yjs over
+   * their own socket. Left out, the browser's.
+   */
+  wikiSocket?: new (
+    url: string,
+  ) => WebSocket;
 };
 
 /** The browser's own WebSocket, against this origin. */

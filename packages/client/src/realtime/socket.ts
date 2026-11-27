@@ -122,6 +122,16 @@ export function realtimeUrl(baseUrl: string, workspaceId: string): string {
   return `${ws}/api/v1/realtime?workspaceId=${encodeURIComponent(workspaceId)}`;
 }
 
+/**
+ * The socket of the wiki's live pages (/api/v1/wiki/collab?workspaceId=): each open page keeps its Yjs
+ * document in sync over it with the server's Hocuspocus. The session cookie signs it in.
+ */
+export function wikiCollabUrl(baseUrl: string, workspaceId: string): string {
+  const origin = baseUrl || (typeof location === "undefined" ? "" : location.origin);
+  const ws = origin.replace(/^http/, "ws");
+  return `${ws}/api/v1/wiki/collab?workspaceId=${encodeURIComponent(workspaceId)}`;
+}
+
 export class RealtimeClient {
   private socket: SocketLike | null = null;
   private attempt = 0;
