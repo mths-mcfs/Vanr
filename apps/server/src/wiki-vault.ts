@@ -24,6 +24,7 @@ import {
   requireWriter,
   TITLE_BREAKS_LINK,
 } from "./wiki";
+import type { WikiViewer } from "./wiki-access";
 import { checkLinks } from "./wiki-links";
 
 const { wikiAttachments, fileVersions, files } = schema;
@@ -213,7 +214,14 @@ export async function importVault(
   // The folder as a whole is checked before the first note is written: then every note goes in one
   // transaction, so a rejected import leaves nothing behind.
   rejectNul([input.folder, input.files.map((f) => f.path)]);
-  const existing = await allPages(deps.db, input.workspaceId);
+  // A note with the title and folder of a page the importer reads is skipped. A restricted page they don't
+  // read doesn't count: skipping the note would confirm that page exists.
+  const existing = await allPages(
+    deps.db,
+    input.author.type === "person"
+      ? { workspaceId: input.workspaceId, userId: input.author.id }
+      : { workspaceId: input.workspaceId, agentId: input.author.id },
+  );
   const key = (f: string, t: string) => `${f}\u0000${t.toLowerCase()}`;
   const taken = new Set(existing.map((p) => key(p.folder, p.title)));
   const schemaNow = await propSchemaOf(deps.db, input.workspaceId);
@@ -372,11 +380,13 @@ const fileSafe = (s: string) =>
     .trim() || "page";
 
 /**
- * The whole vault as a zip, streamed: one note per page (front matter with tags, alternate titles and
- * properties) and the imported attachments, each read and compressed only when the reader asks for more.
+ * The vault as a zip, streamed: one note per page the exporter reads (front matter with tags, alternate
+ * titles and properties) and the imported attachments, each read and compressed only when the reader asks
+ * for more.
  */
-export async function exportVault(deps: AppDeps, workspaceId: string): Promise<ReadableStream<Uint8Array>> {
-  const pages = await allPages(deps.db, workspaceId);
+export async function exportVault(deps: AppDeps, viewer: WikiViewer): Promise<ReadableStream<Uint8Array>> {
+  const { workspaceId } = viewer;
+  const pages = await allPages(deps.db, viewer);
   const { defs } = await propSchemaOf(deps.db, workspaceId);
   const enc = new TextEncoder();
   const used = new Set<string>();

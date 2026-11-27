@@ -32,6 +32,7 @@ import { cancelQueued } from "./outbox";
 import { publishMemory } from "./routes/memories";
 import { canSeeRoutine } from "./routines";
 import { reindex, unindex } from "./search-index";
+import { canReadPage } from "./wiki-access";
 
 const {
   approvals,
@@ -44,7 +45,7 @@ const {
   memories,
   reminders,
 } = schema;
-const { files, messages, outbox, routines, users } = schema;
+const { files, knowledgePages, messages, outbox, routines, users } = schema;
 
 export type ApprovalRow = typeof approvals.$inferSelect;
 export type ProposalRow = typeof proposals.$inferSelect;
@@ -847,10 +848,11 @@ export async function canUndo(db: Db, me: WorkspaceMember, row: ActionRow): Prom
 
 /**
  * The person still sees what the action touched: the conversation its receipt is in and the target itself (the
- * channel of a message, a queued post, a reminder or a file, and a routine). Issues, bases and wiki pages are seen
- * by the whole workspace today. Checked under the action's lock, so access lost since the
+ * channel of a message, a queued post, a reminder or a file, a routine, and a wiki page by its own access). Issues
+ * and bases are seen by the whole workspace today. Checked under the action's lock, so access lost since the
  * action counts; without it the action answers as one that doesn't exist, as "undo all" does. Write rights stay
- * with each undoer (a file someone can't see, a locked page). Per-page wiki access goes here too.
+ * with each undoer (a file someone can't see, a locked page), and the wiki undoers check the read again on
+ * the page's locked row.
  */
 async function assertSees(deps: AppDeps, me: WorkspaceMember, row: ActionRow): Promise<void> {
   const { db } = deps;
@@ -892,6 +894,14 @@ async function assertSees(deps: AppDeps, me: WorkspaceMember, row: ActionRow): P
       .from(routines)
       .where(and(eq(routines.id, id), eq(routines.workspaceId, row.workspaceId)));
     if (routine && !(await canSeeRoutine(deps, me, routine))) throw hidden();
+  } else if (type === "wiki") {
+    // A page an undo deleted is gone: its redo checks the access it will come back with.
+    const [page] = await db
+      .select({ workspaceId: knowledgePages.workspaceId, access: knowledgePages.access })
+      .from(knowledgePages)
+      .where(and(eq(knowledgePages.id, id), eq(knowledgePages.workspaceId, row.workspaceId)));
+    if (page && !(await canReadPage(db, { workspaceId: me.workspaceId, userId: me.userId }, page)))
+      throw hidden();
   }
 }
 

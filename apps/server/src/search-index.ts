@@ -24,6 +24,7 @@ import type { Config } from "./config";
 import type { AppDeps } from "./context";
 import { contentOf } from "./drive";
 import { log } from "./logger";
+import { accessScope } from "./wiki-access";
 import { wikiChunks } from "./wiki-search";
 
 const {
@@ -346,7 +347,8 @@ async function build(tx: Tx, ref: { kind: IndexedKind; id: string }): Promise<Ch
       const base: Omit<ChunkInput, "ordinal" | "text"> = {
         workspaceId: page.workspaceId,
         title: page.title,
-        scope: { kind: "workspace" },
+        // The page's own audience: the search filters in SQL, before the limit.
+        scope: accessScope(page.access),
         url: `/workspace/${page.workspaceId}/wiki/${page.slug}`,
         authorId: actorKey(page.updatedBy),
         updatedAt: page.updatedAt.toISOString(),

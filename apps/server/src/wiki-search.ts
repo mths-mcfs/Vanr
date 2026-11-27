@@ -1,5 +1,6 @@
-// Wiki chunks for search: the search index calls wikiChunks when it
-// reindexes the page. The page belongs to the whole workspace, so the scope is `workspace` (per-page permission comes later).
+// Wiki chunks for search: the search index calls wikiChunks when it reindexes the page. The scope that holds
+// is the page's own (search-index.ts, with `accessScope`); the `workspace` here is only the default of a
+// caller without a page.
 import type { ChunkInput } from "@vanr/engine/search";
 import { codeRanges } from "@vanr/engine/wiki/links";
 import type { WikiRow } from "./wiki";

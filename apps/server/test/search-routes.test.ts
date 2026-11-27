@@ -235,6 +235,26 @@ describe("search: every kind the index accepts", () => {
     expect(await ids(ana, workspaceId, "newword")).toEqual([`file:${file.id}`]);
     expect(await ids(ana, workspaceId, "oldword")).toEqual([]);
   });
+
+  test("a second backfill over files the index already holds rewrites nothing", async () => {
+    const { workspaceId, ana } = await team();
+    const file = await body(
+      await ana.browser.json(`${W(workspaceId)}/files`, "POST", {
+        title: "Notes",
+        content: { kind: "document", markdown: "steady text" },
+      }),
+    );
+    const chunks = () =>
+      server.deps.db
+        .select({ id: schema.searchChunks.id })
+        .from(schema.searchChunks)
+        .where(eq(schema.searchChunks.sourceId, file.id));
+    const before = await chunks();
+    expect(before).toHaveLength(1);
+    await backfillSearch(server.deps);
+    await backfillSearch(server.deps);
+    expect(await chunks()).toEqual(before);
+  });
 });
 
 describe("search: operators and the format", () => {

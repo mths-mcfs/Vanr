@@ -18,6 +18,8 @@ export type UsageSource =
   | "advisor"
   | "issue"
   | "delegation"
+  /** Contradictions between pages in the wiki check. */
+  | "wiki"
   /** The model reviewer of approvals. */
   | "review"
   | "other";

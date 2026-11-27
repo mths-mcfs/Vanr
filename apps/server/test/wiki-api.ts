@@ -3,7 +3,16 @@
 // with a later slice; until then this is the wiki's share of it, with the response types of @vanr/contract.
 import type {
   File,
+  WikiAccessInput,
+  WikiAnnotations,
+  WikiChange,
+  WikiCheckReport,
+  WikiComment,
+  WikiCommentInput,
+  WikiDecision,
   WikiDiff,
+  WikiGraph,
+  WikiIndex,
   WikiPage,
   WikiPageSummary,
   WikiPanel,
@@ -78,11 +87,12 @@ export function wikiApi(b: Browser) {
     ) => json<WikiPage>(P(ws, slug), "PUT", input),
     renameWikiPage: (ws: string, slug: string, title: string) =>
       json<WikiPage>(`${P(ws, slug)}/rename`, "POST", { title }),
-    getWikiGraph: (ws: string) =>
-      json<{
-        nodes: { slug: string; title: string; folder: string }[];
-        edges: { from: string; to: string }[];
-      }>(`${W(ws)}/graph`, "GET"),
+    getWikiGraph: (ws: string, q: { pageId?: string; depth?: number } = {}) => {
+      const qs = new URLSearchParams(
+        Object.entries(q).map(([k, v]): [string, string] => [k, String(v)]),
+      ).toString();
+      return json<WikiGraph>(`${W(ws)}/graph${qs ? `?${qs}` : ""}`, "GET");
+    },
     moveWikiPage: (ws: string, slug: string, folder: string) =>
       json<WikiPage>(`${P(ws, slug)}/move`, "POST", { folder }),
     lockWikiPage: (ws: string, slug: string, locked: boolean) =>
@@ -105,6 +115,7 @@ export function wikiApi(b: Browser) {
         props?: Record<string, unknown>;
         altTitles?: string[];
         tags?: string[];
+        agentEdits?: "direct" | "propose";
       },
     ) => json<WikiPage>(`${P(ws, slug)}/meta`, "PATCH", input),
     getWikiPageDiff: (ws: string, slug: string, q: { from?: number; to?: number } = {}) => {
@@ -146,6 +157,29 @@ export function wikiApi(b: Browser) {
           "GET",
         )
       ).attachments,
+    setWikiPageAccess: (ws: string, slug: string, access: WikiAccessInput) =>
+      json<WikiPage>(`${P(ws, slug)}/access`, "PUT", { access }),
+    listWikiPageAnnotations: (ws: string, slug: string) =>
+      json<WikiAnnotations>(`${P(ws, slug)}/annotations`, "GET"),
+    createWikiPageComment: (ws: string, slug: string, input: WikiCommentInput) =>
+      json<WikiComment>(`${P(ws, slug)}/comments`, "POST", input),
+    setWikiAnnotationResolution: (ws: string, id: string) =>
+      json<WikiComment>(`${W(ws)}/annotations/${encodeURIComponent(id)}/resolution`, "PUT"),
+    deleteWikiAnnotationResolution: (ws: string, id: string) =>
+      json<WikiComment>(`${W(ws)}/annotations/${encodeURIComponent(id)}/resolution`, "DELETE"),
+    deleteWikiAnnotation: (ws: string, id: string) =>
+      json<void>(`${W(ws)}/annotations/${encodeURIComponent(id)}`, "DELETE"),
+    decideWikiAnnotation: (ws: string, id: string, decisions: { hunkId: string; accept: boolean }[]) =>
+      json<WikiDecision>(`${W(ws)}/annotations/${encodeURIComponent(id)}/decide`, "POST", { decisions }),
+    getWikiIndex: (ws: string) => json<WikiIndex>(`${W(ws)}/index`, "GET"),
+    listWikiChanges: async (ws: string, q: { before?: string; limit?: number } = {}) => {
+      const qs = new URLSearchParams(
+        Object.entries(q).flatMap(([k, v]): [string, string][] => (v === undefined ? [] : [[k, String(v)]])),
+      ).toString();
+      return (await json<{ changes: WikiChange[] }>(`${W(ws)}/changes${qs ? `?${qs}` : ""}`, "GET")).changes;
+    },
+    getWikiChecks: (ws: string) => json<WikiCheckReport>(`${W(ws)}/checks`, "GET"),
+    createWikiCheck: (ws: string) => json<WikiCheckReport>(`${W(ws)}/checks`, "POST"),
     /** The Drive's file list (where the vault's attachments go). */
     listFiles: async (ws: string) =>
       (await ok<{ files: File[] }>(b.fetch(`/api/v1/workspaces/${encodeURIComponent(ws)}/files`))).files,

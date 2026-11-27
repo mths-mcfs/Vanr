@@ -47,7 +47,7 @@ async function team(srv = server) {
 }
 
 async function storedDraft(srv: RunningServer, workspaceId: string, slug: string) {
-  const page = await pageBySlug(srv.deps.db, workspaceId, slug);
+  const page = await pageBySlug(srv.deps.db, { workspaceId, system: true }, slug);
   const [d] = await srv.deps.db
     .select()
     .from(schema.wikiPageDocs)
@@ -155,7 +155,7 @@ describe("the page's queue", () => {
     await a.synced;
     await a.edit(() => "Published edit.\n");
     await until(() => !a.provider.hasUnsyncedChanges);
-    const row = await pageBySlug(server.deps.db, workspaceId, page.slug);
+    const row = await pageBySlug(server.deps.db, { workspaceId, system: true }, page.slug);
     const hold = holdNextTransaction(server, "before");
     const publishing = ana.api.wiki.publishWikiPageDraft(workspaceId, page.slug);
     await hold.started;

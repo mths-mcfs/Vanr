@@ -281,14 +281,17 @@ export interface LinkPage {
   folder: string;
   /** Other titles of the page (Obsidian's `aliases`): they also resolve links. */
   aliases?: readonly string[] | null;
+  /** A restricted page: in a tie it loses to a page the whole workspace reads. */
+  restricted?: boolean;
 }
 
 const bySlug = (a: LinkPage, b: LinkPage) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0);
 
 /**
- * Resolves a link target: slug, title, folder/title, other title and slug of the text, in that order.
- * With two candidates at the same step, the shortest folder wins (as in Obsidian) and then the slug. The
- * server (page_links table) and the screen use this same function, so both find the same page.
+ * Resolves a link target: slug, title, folder/title, other title, folder/other title and slug of the text,
+ * in that order (an old title kept as an alias also answers under the page's folder).
+ * With two candidates at the same step, the page the whole workspace reads wins (a restricted one only
+ * when nothing else matches), then the shortest folder (as in Obsidian) and then the slug. The server (page_links table) and the screen use this same function, so both find the same page.
  */
 export function resolveTarget<T extends LinkPage>(target: string, pages: readonly T[]): T | undefined {
   const raw = stripMd(target);
@@ -299,10 +302,18 @@ export function resolveTarget<T extends LinkPage>(target: string, pages: readonl
     (p) => p.title.toLowerCase() === t,
     (p) => !!p.folder && `${p.folder}/${p.title}`.toLowerCase() === t,
     (p) => (p.aliases ?? []).some((a) => a.toLowerCase() === t),
+    (p) => !!p.folder && (p.aliases ?? []).some((a) => `${p.folder}/${a}`.toLowerCase() === t),
     (p) => p.slug === slugify(raw),
   ];
   for (const ok of tries) {
-    const hit = pages.filter(ok).sort((a, b) => a.folder.length - b.folder.length || bySlug(a, b))[0];
+    const hit = pages
+      .filter(ok)
+      .sort(
+        (a, b) =>
+          Number(!!a.restricted) - Number(!!b.restricted) ||
+          a.folder.length - b.folder.length ||
+          bySlug(a, b),
+      )[0];
     if (hit) return hit;
   }
   return undefined;

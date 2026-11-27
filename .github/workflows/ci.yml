@@ -683,6 +683,8 @@ jobs:
             exit 1
           fi
           echo "$out"
+          # An error outside a test (no "(fail)" line of its own) proves nothing: it fails this step.
+          if grep -aqF "Unhandled error" <<< "$out"; then echo "::error::an error outside the tests"; exit 1; fi
           # It must fail for the race (each member write was accepted), not for anything else.
           grep -q '"save 200"' <<< "$out"
           grep -q '"move 200"' <<< "$out"
@@ -716,6 +718,55 @@ jobs:
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_WIKI_MEMBER_UNLOCKED: "1"
+      # The wiki's annotations and checks on a real Postgres: two decisions on the same change of a proposal
+      # (the second waits for the first's row lock and is rejected), a decision while the page is saved,
+      # comments at once at the ceiling and two checks of one workspace. The next run swaps the row locks for
+      # unlocked reads and must fail by the result, so the first run can't pass without the locks.
+      # The reads across a restriction: a read held right after its access check answers what was there before.
+      - run: bun test apps/server/test/wiki-annotations-postgres.test.ts --test-name-pattern "on Postgres"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      - name: The proposal decision race test fails without the row locks
+        run: |
+          if out=$(bun test apps/server/test/wiki-annotations-postgres.test.ts --test-name-pattern "forced: two decisions" 2>&1); then
+            echo "$out"
+            echo "::error::the proposal decision race test passed without the row locks"
+            exit 1
+          fi
+          echo "$out"
+          # An error outside a test (no "(fail)" line of its own) proves nothing: it fails this step.
+          if grep -aqF "Unhandled error" <<< "$out"; then echo "::error::an error outside the tests"; exit 1; fi
+          # Only the forced test fails (bun prints each failure twice on the runner: count distinct names),
+          # and for the race (the stale decision wrote over the other's version), not for anything else.
+          fails=$(grep -a '^(fail)' <<< "$out" | sed 's/ \[[0-9.]*ms\]$//' | sort -u)
+          echo "$fails"
+          if grep -av 'forced' <<< "$fails" | grep -aq .; then echo "::error::a test that isn't forced failed"; exit 1; fi
+          test "$(grep -ac . <<< "$fails")" -eq 1
+          grep -aq '"decide": "500 internal,200"' <<< "$out"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_WIKI_ANNOTATIONS_UNLOCKED: "1"
+      - name: The wiki read tests leak without the snapshot
+        run: |
+          if out=$(bun test apps/server/test/wiki-annotations-postgres.test.ts --test-name-pattern "forced: a .* read held" 2>&1); then
+            echo "$out"
+            echo "::error::the wiki read tests passed without the snapshot"
+            exit 1
+          fi
+          echo "$out"
+          # An error outside a test (no "(fail)" line of its own) proves nothing: it fails this step.
+          if grep -aqF "Unhandled error" <<< "$out"; then echo "::error::an error outside the tests"; exit 1; fi
+          # Each of the 4 forced read tests fails, each for the leak of its own path, and nothing else fails.
+          fails=$(grep -a '^(fail)' <<< "$out" | sed 's/ \[[0-9.]*ms\]$//' | sort -u)
+          echo "$fails"
+          if grep -av 'forced' <<< "$fails" | grep -aq .; then echo "::error::a test that isn't forced failed"; exit 1; fi
+          test "$(grep -ac . <<< "$fails")" -eq 4
+          for what in page version annotations panel; do
+            grep -aq "\"leaked\": \"SECRET AFTER in the $what read\"" <<< "$out"
+          done
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_WIKI_NO_SNAPSHOT: "1"
 
   sandbox:
     # The runner's real sandbox (bubblewrap + socat): the attack tests of the isolation of the agent's
