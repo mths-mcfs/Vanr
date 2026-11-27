@@ -39,12 +39,14 @@ async function api(who: Person, method: string, path: string, payload?: unknown)
   return { status: res.status, body: res.status === 204 ? null : await body(res) };
 }
 
-/** Ana owns the workspace and pairs a real runner; Beto asks Lia (Ana's agent, lent that runner) for tools. */
+/** Ana owns the workspace and pairs a real runner; Caio (an admin) asks Lia, Ana's agent lent that runner, for tools. */
 async function setup() {
   const ana = await signedIn(server, "Ana", email("ana"));
   const { workspaceId, general } = await seedWorkspace(server, ana, "Workshop");
   const ws = `/api/v1/workspaces/${workspaceId}`;
   const beto = await memberOf(server, workspaceId, "Beto", email("beto"));
+  // Whoever asks the agent for runner tools must be able to use the runner too: an admin of the workspace.
+  const caio = await memberOf(server, workspaceId, "Caio", email("caio"), "admin");
   const lia = await seedAgent(server, workspaceId, ana, { name: "Lia", channels: [general] });
   const home = mkdtempSync(join(tmpdir(), "runner-"));
   homes.push(home);
@@ -76,16 +78,16 @@ async function setup() {
   });
   expect(lent.status).toBe(200);
 
-  /** Beto asks Lia for one tool, with the tools the runtime would give her now. */
+  /** Caio asks Lia for one tool, with the tools the runtime would give her now. */
   const ask = async (tool: string, input: unknown, over: Partial<ToolContext> = {}) => {
     const [agent] = await server.deps.db.select().from(schema.agents).where(eq(schema.agents.id, lia.id));
     if (!agent) throw new Error("agent gone");
     const tools = await environmentToolsFor({ deps: server.deps, agent });
-    const run = await toolRun(server, { workspaceId, agent, channelId: general, asker: beto, tools });
+    const run = await toolRun(server, { workspaceId, agent, channelId: general, asker: caio, tools });
     const out = await run.call(tool, input, over);
     return { result: out.content, isError: out.isError, cards: run.cards };
   };
-  return { workspaceId, ws, general, ana, beto, lia, home, config, ask };
+  return { workspaceId, ws, general, ana, beto, caio, lia, home, config, ask };
 }
 
 const approve =
@@ -205,7 +207,7 @@ describe("the agent's runner", () => {
       expect(request.secretRequest).toMatchObject({
         name: "API_TOKEN",
         status: "pending",
-        targetUserId: t.beto.user.id,
+        targetUserId: t.caio.user.id,
       });
       const { id, publicKey } = request.secretRequest;
 
@@ -219,10 +221,10 @@ describe("the agent's runner", () => {
       const deliver = (who: Person, requestId: string, sealed: unknown) =>
         api(who, "POST", `${t.ws}/secret-requests/${requestId}/deliver`, { box: sealed });
       expect((await deliver(t.ana, id, box)).status).toBe(403);
-      const delivered = await deliver(t.beto, id, box);
+      const delivered = await deliver(t.caio, id, box);
       expect(delivered.status).toBe(200);
       expect(delivered.body.status).toBe("delivered");
-      expect((await deliver(t.beto, id, box)).body.error.code).toBe("secret.closed");
+      expect((await deliver(t.caio, id, box)).body.error.code).toBe("secret.closed");
 
       // An expired request: its own code, so the screen doesn't say someone answered.
       const late = (
@@ -241,9 +243,9 @@ describe("the agent's runner", () => {
         name: "OTHER_TOKEN",
         target: "env",
       });
-      expect((await deliver(t.beto, late.id, lateBox)).body.error.code).toBe("secret_request.expired");
+      expect((await deliver(t.caio, late.id, lateBox)).body.error.code).toBe("secret_request.expired");
       expect(
-        (await api(t.beto, "POST", `${t.ws}/secret-requests/${late.id}/decline`, {})).body.error.code,
+        (await api(t.caio, "POST", `${t.ws}/secret-requests/${late.id}/decline`, {})).body.error.code,
       ).toBe("secret_request.expired");
 
       const list = await api(t.ana, "GET", `${t.ws}/agents/${t.lia.id}/secrets`);
@@ -265,7 +267,7 @@ describe("the agent's runner", () => {
         .find(Boolean);
       expect(second?.target).toEqual({ kind: "file", path: ".ssh/id" });
       expect(
-        (await api(t.beto, "POST", `${t.ws}/secret-requests/${second?.id}/decline`, {})).body.status,
+        (await api(t.caio, "POST", `${t.ws}/secret-requests/${second?.id}/decline`, {})).body.status,
       ).toBe("declined");
       expect((await t.ask("request_secret", { name: "lowercase", purpose: "x" })).isError).toBe(true);
       expect((await t.ask("request_secret", { name: "KEY", purpose: "x", file: "../outside" })).isError).toBe(

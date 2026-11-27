@@ -48,10 +48,11 @@ import {
   toSecretRequest,
   waitIntervention,
 } from "./requests";
-import { emitEnvironment, environmentOf, type RunnerRow } from "./runners";
+import { canUseRunner, emitEnvironment, environmentOf, type RunnerRow } from "./runners";
 
 const {
   agents,
+  members,
   runners,
   agentEnvironments,
   secretPrompts,
@@ -77,9 +78,13 @@ const STDERR_MAX = 6000;
 
 /**
  * The agent's runner now (read again: a person may have swapped it in the middle of the run). Only the runner
- * lent to this agent, paired to the run's workspace and neither removed nor revoked.
+ * lent to this agent, paired to the run's workspace and neither removed nor revoked, and, when a person asked,
+ * one that person may use: lending the runner to the agent doesn't lend it to everyone who talks to the agent.
  */
-async function runnerOf(ctx: ToolContext, opts: { allowStopped?: boolean } = {}): Promise<RunnerRow> {
+async function runnerOf(
+  ctx: ToolContext,
+  opts: { allowStopped?: boolean; allowOffline?: boolean } = {},
+): Promise<RunnerRow> {
   const { db } = ctx.deps;
   const [a] = await db
     .select({ environmentId: agents.environmentId })
@@ -94,6 +99,17 @@ async function runnerOf(ctx: ToolContext, opts: { allowStopped?: boolean } = {})
     );
   if (m.removedAt || m.revokedAt)
     throw new ToolInputError("Your runner was removed. Ask a person to lend you another one.");
+  const personId = ctx.personId ?? ctx.trigger?.authorId ?? null;
+  if (personId) {
+    const [member] = await db
+      .select({ role: members.role })
+      .from(members)
+      .where(and(eq(members.workspaceId, ctx.workspaceId), eq(members.userId, personId)));
+    if (!member || !canUseRunner({ userId: personId, role: member.role }, m))
+      throw new ToolInputError(
+        "The person who asked may not use your runner, so you can't use it for them. Someone who may use it has to ask.",
+      );
+  }
   if (!opts.allowStopped) {
     const [state] = await db
       .select()
@@ -102,7 +118,7 @@ async function runnerOf(ctx: ToolContext, opts: { allowStopped?: boolean } = {})
     if (state?.status === "stopped")
       throw new ToolInputError("Your runner is stopped. Call environment_start first.");
   }
-  if (!ctx.deps.runners.isOnline(m.id))
+  if (!opts.allowOffline && !ctx.deps.runners.isOnline(m.id))
     throw new ToolInputError(`Your runner (${m.name}) is offline. Tell the person; it reconnects by itself.`);
   return m;
 }
@@ -245,6 +261,8 @@ const executeCode = defineStored({
   async plan(ctx, input) {
     // The runner is part of the approved effect: a command approved for one runner never runs on another.
     const runner = await runnerOf(ctx);
+    // Commands the owner turned off stop here, before anyone is asked to approve one.
+    if (!runner.access.tools.commands) throw new ToolInputError(EXPLAIN.exec_disabled as string);
     planned.set(input, runner.id);
     const s = await sandboxOf(ctx);
     return {
@@ -588,6 +606,18 @@ const requestSecret = defineStored({
   },
 });
 
+/**
+ * Every runner tool checks, in its plan and so before any approval, that the run may use the agent's runner (see
+ * `runnerOf`); the run checks it again with the runner online.
+ */
+const onLentRunner = (tool: ToolDef<unknown>): ToolDef<unknown> => ({
+  ...tool,
+  async plan(ctx, input) {
+    await runnerOf(ctx, { allowStopped: true, allowOffline: true });
+    return tool.plan ? tool.plan(ctx, input) : {};
+  },
+});
+
 const ENVIRONMENT_TOOLS: readonly ToolDef<unknown>[] = [
   executeCode,
   readFile,
@@ -599,7 +629,7 @@ const ENVIRONMENT_TOOLS: readonly ToolDef<unknown>[] = [
   setEnvironment("running"),
   setEnvironment("stopped"),
   requestSecret,
-];
+].map(onLentRunner);
 
 // ---- browser ----
 //
@@ -1215,7 +1245,7 @@ export const BROWSER_TOOLS: readonly ToolDef<unknown>[] = [
   browserScreenshot,
   browserAskPerson,
   browserClose,
-];
+].map(onLentRunner);
 
 /**
  * The runner tools for this agent: only with a runner lent to it, paired to its workspace and neither removed

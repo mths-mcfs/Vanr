@@ -535,6 +535,85 @@ describe("commands on the agent's runner", () => {
   );
 
   test(
+    "a person who may not use the runner can't reach it through the agent; who may, and a run without a person, can",
+    async () => {
+      const t = await team(undefined, true);
+      await server.deps.db
+        .insert(schema.sandboxPolicies)
+        .values({ workspaceId: t.workspaceId, requireApproval: true });
+      const sent = () => t.fake.runner.frames.filter((f) => f.type === "request").length;
+      const before = sent();
+      const asked: string[] = [];
+      const ask = {
+        requestApproval: async (req: { tool: string; payloadHash: string }) => {
+          asked.push(req.tool);
+          return {
+            id: "apv_p",
+            decision: "approved" as const,
+            reason: null,
+            byName: "Ana",
+            payloadHash: req.payloadHash,
+          };
+        },
+        settleApproval: async () => {},
+      };
+      // Beto is a member: he didn't pair the runner and doesn't manage agents.
+      const beto = await run(t, null, t.beto);
+      const calls: [string, unknown][] = [
+        ["execute_code", { command: "cat ~/.ssh/id_rsa" }],
+        ["read_file", { path: ".ssh/id_rsa" }],
+        ["write_file", { path: "x", content: "y" }],
+        ["list_files", { path: "." }],
+        ["environment_status", {}],
+        ["environment_stop", {}],
+        ["request_secret", { name: "TOKEN", purpose: "x" }],
+        ["browser_navigate", { url: "https://bank.example" }],
+        ["browser_read", {}],
+      ];
+      for (const [tool, input] of calls) {
+        const out = await beto.call(tool, input, ask);
+        expect(out.isError).toBe(true);
+        expect(out.content).toContain("may not use your runner");
+      }
+      expect(asked).toEqual([]);
+      expect(sent()).toBe(before);
+
+      // Ana paired it; Caio is an admin (manages agents); a routine has no person: all three reach it.
+      const caio = await memberOf(server, t.workspaceId, "Caio", email("caio"), "admin");
+      for (const who of [t.ana, caio, null]) {
+        const out = await (await run(t, null, who)).call("execute_code", { command: "echo ok" }, ask);
+        expect(out.content).toContain("ran: echo ok");
+      }
+      expect(asked).toEqual(["execute_code", "execute_code", "execute_code"]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a removed or revoked runner gets an error at the tool, even while its connection is still up",
+    async () => {
+      const t = await team();
+      const r = await run(t, null);
+      for (const gone of [{ removedAt: server.deps.now() }, { revokedAt: server.deps.now() }]) {
+        await server.deps.db
+          .update(runners)
+          .set({ removedAt: null, revokedAt: null, ...gone })
+          .where(eq(runners.id, t.fake.runnerId));
+        expect(server.deps.runners.isOnline(t.fake.runnerId)).toBe(true);
+        const out = await r.call("execute_code", { command: "echo hi" });
+        expect(out.content).toContain("was removed");
+      }
+      expect(requests(t.fake.runner, "exec")).toEqual([]);
+      // The assignment's own runner, revoked: no job starts on it.
+      const row = await assignmentOf(t, { runnerId: t.fake.runnerId });
+      const job = await (await run(t, row.threadId)).call("start_job", { title: "Fix", prompt: "Fix it" });
+      expect(job.content).toContain("no runner");
+      expect(requests(t.fake.runner, "job.start")).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "commands turned off on the runner never reach it, and the output that comes back is capped",
     async () => {
       const t = await team((req, runner) =>
@@ -569,8 +648,30 @@ describe("commands on the agent's runner", () => {
         })
         .where(eq(runners.id, t.fake.runnerId));
       const before = requests(t.fake.runner, "exec").length;
-      const off = await r.call("execute_code", { command: "echo hi" });
+      // Even with the workspace asking for every command, nobody is asked to approve one the runner won't run.
+      await server.deps.db
+        .insert(schema.sandboxPolicies)
+        .values({ workspaceId: t.workspaceId, requireApproval: true });
+      const asked: string[] = [];
+      const off = await r.call(
+        "execute_code",
+        { command: "echo hi" },
+        {
+          requestApproval: async (req) => {
+            asked.push(req.tool);
+            return {
+              id: "apv_o",
+              decision: "approved",
+              reason: null,
+              byName: "Ana",
+              payloadHash: req.payloadHash,
+            };
+          },
+          settleApproval: async () => {},
+        },
+      );
       expect(off.content).toBe("Commands are turned off on this runner.");
+      expect(asked).toEqual([]);
       expect(requests(t.fake.runner, "exec").length).toBe(before);
     },
     SERVER_TEST_MS,
