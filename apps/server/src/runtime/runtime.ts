@@ -873,7 +873,8 @@ export class AgentRuntime implements RuntimePort {
     // Checked and raised before any await: of two attempts, the older one that arrives late is turned away.
     const { fence } = input;
     if (fence) {
-      if (fence.token < (this.fences.get(fence.key) ?? Number.NEGATIVE_INFINITY)) return { ok: false, code: "fenced" };
+      if (fence.token < (this.fences.get(fence.key) ?? Number.NEGATIVE_INFINITY))
+        return { ok: false, code: "fenced" };
       this.fences.set(fence.key, fence.token);
     }
     // Without routing, the personal plan's lock is here: only whoever paired triggers the agent (not even into a live run).
