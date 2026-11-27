@@ -580,23 +580,30 @@ export function registerAgents(app: Hono<AppEnv>) {
       const ok = remote ? executorModelOk(input.harness as Executor, input.model) : !!findModel(input.model);
       if (!ok) throw badRequest("Unknown model", { field: "model" });
     }
+    const fallback = input.fallback !== undefined ? { harnessFallback: input.fallback } : {};
     const [updated] = await db
       .update(agents)
-      .set({
-        harnessKind: input.harness,
-        ...(input.model !== undefined
-          ? remote
-            ? { harnessModel: input.model || null }
-            : { model: input.model }
-          : // Another harness without a model: the previous executor's model doesn't carry over, its default applies.
-            input.harness !== row.harnessKind
-            ? { harnessModel: null }
-            : {}),
-        ...(input.fallback !== undefined ? { harnessFallback: input.fallback } : {}),
-        // As in PATCH: a new model turns off an advisor that no longer holds for it.
-        ...(remote ? {} : advisorColumns(input.model ?? row.model, undefined, row)),
-        updatedAt: now(),
-      })
+      .set(
+        // The owner without the role writes only the fallback: the harness, the model and the advisor were checked
+        // against an earlier read, and writing them back would undo an admin's change made in between.
+        can(me.role, "manage_agents")
+          ? {
+              harnessKind: input.harness,
+              ...(input.model !== undefined
+                ? remote
+                  ? { harnessModel: input.model || null }
+                  : { model: input.model }
+                : // Another harness without a model: the previous executor's model doesn't carry over.
+                  input.harness !== row.harnessKind
+                  ? { harnessModel: null }
+                  : {}),
+              ...fallback,
+              // As in PATCH: a new model turns off an advisor that no longer holds for it.
+              ...(remote ? {} : advisorColumns(input.model ?? row.model, undefined, row)),
+              updatedAt: now(),
+            }
+          : { ...fallback, updatedAt: now() },
+      )
       .where(eq(agents.id, row.id))
       .returning();
     if (!updated) throw notFound("Agent not found");

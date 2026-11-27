@@ -73,6 +73,41 @@ async function team(opts: { budget?: number } = {}) {
   return { workspaceId, general, ana, beto, lia };
 }
 
+/** The database for one request: `between` runs once, right before the request's first UPDATE of the agents table. */
+function beforeAgentUpdate(db: Db, between: () => Promise<unknown>): Db {
+  let armed = true;
+  return new Proxy(db, {
+    get(target, prop) {
+      const value = Reflect.get(target, prop, target);
+      if (prop !== "update") return typeof value === "function" ? value.bind(target) : value;
+      return (table: unknown) => {
+        const query = target.update(table as typeof schema.agents);
+        if (!armed || table !== schema.agents) return query;
+        armed = false;
+        return wrapBefore(query, between);
+      };
+    },
+  });
+}
+
+/** A query builder (and every builder it chains to) that runs `first` before it is sent. */
+// biome-ignore lint/suspicious/noExplicitAny: wraps drizzle's builders, whatever their type
+function wrapBefore(q: any, first: () => Promise<unknown>): any {
+  return new Proxy(q, {
+    get(target, prop) {
+      if (prop === "then")
+        return (ok: (v: unknown) => unknown, fail: (e: unknown) => unknown) =>
+          first().then(() => target.then(ok, fail), fail);
+      const value = Reflect.get(target, prop, target);
+      if (typeof value !== "function") return value;
+      return (...args: unknown[]) => {
+        const out = value.apply(target, args);
+        return out && typeof out === "object" ? wrapBefore(out, first) : out;
+      };
+    },
+  });
+}
+
 /**
  * The database for one save: the first transaction runs `between` right after its read of the agent's links (a
  * select over channel_memberships) resolves, before anything else. PGlite runs one transaction at a time, so the
@@ -529,6 +564,40 @@ describe("agent registry", () => {
         model: "claude-sonnet-5-5",
         advisor: null,
       });
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "an owner's fallback save keeps the harness and the model an admin switched in between",
+    async () => {
+      const { workspaceId, ana, beto, lia } = await team();
+      await ok(call(ana, "PATCH", agentPath(workspaceId, lia.id), { ownerUserId: beto.user.id }));
+      // The admin's switch lands after Beto's save read the agent and before it writes.
+      const db = server.deps.db;
+      server.deps.db = beforeAgentUpdate(db, () =>
+        db
+          .update(schema.agents)
+          .set({ harnessKind: "claude_code", harnessModel: "opus", model: "claude-sonnet-5-5" })
+          .where(eq(schema.agents.id, lia.id)),
+      );
+      try {
+        await ok(
+          call(beto, "PUT", `${agentPath(workspaceId, lia.id)}/runtime`, {
+            harness: "model",
+            fallback: false,
+          }),
+        );
+      } finally {
+        server.deps.db = db;
+      }
+      const [row] = await db.select().from(schema.agents).where(eq(schema.agents.id, lia.id));
+      expect([row?.harnessKind, row?.harnessModel, row?.model, row?.harnessFallback]).toEqual([
+        "claude_code",
+        "opus",
+        "claude-sonnet-5-5",
+        false,
+      ]);
     },
     SERVER_TEST_MS,
   );
