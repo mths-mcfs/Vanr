@@ -1,16 +1,12 @@
 // Where a wiki page's live document connects. Each open page has its own socket to the server's
 // Hocuspocus (Yjs) endpoint, apart from the workspace's real-time connection: the session cookie
 // signs it in, as it does the other one.
+import { wikiCollabUrl as collabUrl } from "@vanr/client";
 import type { SocketSource } from "./connection.ts";
-
-const COLLAB_PATH = "/api/v1/wiki/collab";
 
 /** The socket address of a workspace's live wiki pages. */
 export function wikiCollabUrl(source: SocketSource, workspaceId: string): string {
-  const url = new URL(COLLAB_PATH, source.baseUrl);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.searchParams.set("workspaceId", workspaceId);
-  return url.toString();
+  return collabUrl(source.baseUrl, workspaceId);
 }
 
 /** The document name the server gives a page: one live document per page. */
