@@ -732,7 +732,7 @@ describe("anchored comments", () => {
     });
   }
 
-  test("a comment keeps where its passage was: the client's position when the quote is there, else the found one", async () => {
+  test("a comment keeps where its passage was: the client's position when the whole context is there, else the found one", async () => {
     const { workspaceId, ana } = await team();
     const block = "abcdefghijklmnopqrstuvwxyz123456" + "2 days" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456";
     const body = `Finance\n${block}\n\nSupport\n${block}`;

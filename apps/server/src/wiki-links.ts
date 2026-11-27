@@ -42,7 +42,10 @@ export function checkLinks(body: string): void {
 export function namesOf(p: Pick<WikiRow, "slug" | "title" | "folder" | "aliases">): string[] {
   const t = p.title.toLowerCase();
   const out = new Set([p.slug, t, p.folder ? `${p.folder}/${p.title}`.toLowerCase() : t]);
-  for (const a of p.aliases ?? []) out.add(a.toLowerCase());
+  for (const a of p.aliases ?? []) {
+    out.add(a.toLowerCase());
+    if (p.folder) out.add(`${p.folder}/${a}`.toLowerCase());
+  }
   return [...out];
 }
 
@@ -79,7 +82,7 @@ async function candidates(
         sql`(
           lower(${knowledgePages.title}) in ${titles}
           or ${knowledgePages.slug} in ${slugs}
-          or exists (select 1 from jsonb_array_elements_text(${knowledgePages.aliases}) a where lower(a) in ${names})
+          or exists (select 1 from jsonb_array_elements_text(${knowledgePages.aliases}) a where lower(a) in ${titles})
         )`,
       ),
     );

@@ -373,8 +373,9 @@ export function registerWiki(app: Hono<AppEnv>) {
     if (input.title === row.title) return c.json(await pageView(c, me, row.slug));
     if (row.locked && !isAdmin(me)) throw new HttpError(403, "wiki.page_locked", "This page is locked");
     const linkers = (await linkingPages(deps.db, row.id)).filter((p) => p.id !== row.id);
-    const rewritten: { slug: string; title: string }[] = [];
-    const skipped: { slug: string; title: string }[] = [];
+    // By id: a linking page's slug can change before the answer is built.
+    const rewritten: string[] = [];
+    const skipped: string[] = [];
     const [self, ...planned] = await planRenames(deps.db, row, input.title, [
       row.body,
       ...linkers.map((p) => p.body),
@@ -400,7 +401,7 @@ export function registerWiki(app: Hono<AppEnv>) {
     for (const { p, plan } of plans) {
       if (plan.count === 0) continue;
       if (blocked.some((b) => b.p.id === p.id) || plan.md.length > MAX_BODY) {
-        skipped.push({ slug: p.slug, title: p.title });
+        skipped.push(p.id);
         continue;
       }
       try {
@@ -425,10 +426,10 @@ export function registerWiki(app: Hono<AppEnv>) {
               throw new HttpError(409, "wiki.relink.audience", "The linking page's audience changed");
           },
         });
-        rewritten.push({ slug: p.slug, title: p.title });
+        rewritten.push(p.id);
       } catch (err) {
         if (!(err instanceof HttpError)) throw err;
-        skipped.push({ slug: p.slug, title: p.title });
+        skipped.push(p.id);
       }
     }
     // A page that couldn't be rewritten (a newer version in between) keeps pointing to the old title: it
@@ -436,21 +437,27 @@ export function registerWiki(app: Hono<AppEnv>) {
     let final = saved;
     const oldName = row.title.toLowerCase();
     if (skipped.length && !final.aliases.some((a) => a.toLowerCase() === oldName)) {
+      // The rename already committed: if this save is refused (a newer version, a lock, the trash or a
+      // restriction in between), the answer still describes the rename, and `skipped` names the pages
+      // that kept the old title.
       final = await savePage(deps, {
         row: final,
         author: me$(me),
         canBypassLock: isAdmin(me),
         aliases: [...final.aliases, row.title],
         note: "meta",
+      }).catch((err) => {
+        if (err instanceof HttpError) return final;
+        throw err;
       });
     }
     // The relinking holds in every page that links here; the answer names only the ones the person reads
     // now (read again: one may have been restricted since `linkingPages`).
-    const readable = new Set(
+    const readable = new Map(
       linkers.length
         ? (
             await deps.db
-              .select({ slug: knowledgePages.slug })
+              .select({ id: knowledgePages.id, slug: knowledgePages.slug, title: knowledgePages.title })
               .from(knowledgePages)
               .where(
                 and(
@@ -461,14 +468,15 @@ export function registerWiki(app: Hono<AppEnv>) {
                   readablePagesSql(viewerOf(me)),
                 ),
               )
-          ).map((p) => p.slug)
+          ).map((p) => [p.id, { slug: p.slug, title: p.title }] as const)
         : [],
     );
+    const named = (ids: string[]) => ids.flatMap((id) => readable.get(id) ?? []);
     const out: WikiPage = {
       ...(await pageView(c, me, final.slug)),
       relinked: {
-        rewritten: rewritten.filter((p) => readable.has(p.slug)),
-        skipped: skipped.filter((p) => readable.has(p.slug)),
+        rewritten: named(rewritten),
+        skipped: named(skipped),
       },
     };
     return c.json(out);

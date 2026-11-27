@@ -60,6 +60,12 @@ describe("rewriteLinks", () => {
 });
 
 describe("resolveTarget", () => {
+  test("an alternate title also answers under the page's folder", () => {
+    const pages = [{ slug: "database", title: "Postgres", folder: "Architecture", aliases: ["Database"] }];
+    expect(resolveTarget("Architecture/Database", pages)?.slug).toBe("database");
+    expect(resolveTarget("Elsewhere/Database", pages)).toBeUndefined();
+  });
+
   const page = (slug: string, title: string, folder = "", aliases: string[] = []) => ({
     slug,
     title,

@@ -121,7 +121,7 @@ describe("links and rename (P0-05)", () => {
     });
     const locked = await ana.api.wiki.createWikiPage(workspaceId, {
       title: "Minutes",
-      body: "See [[Database]].",
+      body: "See [[Database]] and [[Architecture/Database]].",
     });
     await ana.api.wiki.lockWikiPage(workspaceId, locked.slug, true);
     const self = await ana.api.wiki.getWikiPage(workspaceId, "database");
@@ -138,9 +138,12 @@ describe("links and rename (P0-05)", () => {
       "Looks after the [[Postgres|database]], the [[Architecture/Postgres#Indexes]] and the ![[Postgres]].\n\n`[[Database]]` stays.",
     );
     expect(bruno.history[0]).toMatchObject({ author: { type: "person", id: beto.user.id } });
-    // The locked page's link still reaches the page (through the alternate title).
+    // The locked page's links still reach the page through the alternate title, with its folder too.
     const panel = await ana.api.wiki.getWikiPagePanel(workspaceId, locked.slug);
-    expect(panel.outgoing[0]).toMatchObject({ target: "Database", state: "ok", page: { title: "Postgres" } });
+    expect(panel.outgoing.map((o) => [o.target, o.state, o.page?.title])).toEqual([
+      ["Database", "ok", "Postgres"],
+      ["Architecture/Database", "ok", "Postgres"],
+    ]);
     const back = await ana.api.wiki.getWikiPagePanel(workspaceId, "database");
     expect(back.inboundLinks.map((b) => b.title).sort()).toEqual(["Bruno", "Minutes"]);
   });

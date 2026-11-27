@@ -288,7 +288,8 @@ export interface LinkPage {
 const bySlug = (a: LinkPage, b: LinkPage) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0);
 
 /**
- * Resolves a link target: slug, title, folder/title, other title and slug of the text, in that order.
+ * Resolves a link target: slug, title, folder/title, other title, folder/other title and slug of the text,
+ * in that order (an old title kept as an alias also answers under the page's folder).
  * With two candidates at the same step, the page the whole workspace reads wins (a restricted one only
  * when nothing else matches), then the shortest folder (as in Obsidian) and then the slug. The server (page_links table) and the screen use this same function, so both find the same page.
  */
@@ -301,6 +302,7 @@ export function resolveTarget<T extends LinkPage>(target: string, pages: readonl
     (p) => p.title.toLowerCase() === t,
     (p) => !!p.folder && `${p.folder}/${p.title}`.toLowerCase() === t,
     (p) => (p.aliases ?? []).some((a) => a.toLowerCase() === t),
+    (p) => !!p.folder && (p.aliases ?? []).some((a) => `${p.folder}/${a}`.toLowerCase() === t),
     (p) => p.slug === slugify(raw),
   ];
   for (const ok of tries) {
