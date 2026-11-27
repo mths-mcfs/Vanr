@@ -96,6 +96,61 @@ export interface ApprovalRule {
   uses: number;
 }
 
+/** Approve: the hash of the version the person saw; "Approve and remember" creates the rule of `rememberLabel`. */
+export interface ApproveInput {
+  payloadHash?: string;
+  reason?: string;
+  remember?: boolean;
+}
+
+/** Reject: the reason is optional and nothing runs, so no hash is needed. */
+export interface RejectInput {
+  reason?: string;
+}
+
+/** Edit and approve: only the editable fields, with the hash of the version the person saw. */
+export interface EditApprovalInput {
+  input: Record<string, unknown>;
+  payloadHash: string;
+  reason?: string;
+  remember?: boolean;
+}
+
+export interface ApprovalFilter {
+  status?: "decided" | "pending";
+}
+
+export interface ApprovalList {
+  approvals: Approval[];
+}
+
+export interface ApprovalRuleList {
+  rules: ApprovalRule[];
+}
+
+/** The gate's telemetry for one effect class. */
+export interface ApprovalStatsRow {
+  approved: number;
+  asked: number;
+  /** Ran without asking a person. */
+  auto: number;
+  /** Calls that went through the gate. */
+  calls: number;
+  denied: number;
+  edited: number;
+  effect: EffectClass;
+  expired: number;
+  /** Time from the request to the decision, in ms; null without decisions. */
+  p50Ms: number | null;
+  p90Ms: number | null;
+  rejected: number;
+}
+
+export interface ApprovalStats {
+  byEffect: ApprovalStatsRow[];
+  since: string;
+}
+
 export interface ApprovalTrailEntry {
   at: string;
   code?:
@@ -144,6 +199,15 @@ export interface Proposal {
   why: string;
 }
 
+export interface ProposalList {
+  proposals: Proposal[];
+}
+
+/** Accept: `text` replaces the proposed text (edit and accept). */
+export interface AcceptProposalInput {
+  text?: string;
+}
+
 export interface ProposalTrailEntry {
   at: string;
   code?: "accepted" | "proposed" | "redone" | "rejected" | "undone";
@@ -165,5 +229,7 @@ export interface AgentQuestion {
   text: string;
   threadId: string | null;
 }
+
+export type AnswerInput = { choice: string } | { text: string };
 
 export type BlockedReason = "not_allowed" | "private_network" | "scheme" | "sensitive";
