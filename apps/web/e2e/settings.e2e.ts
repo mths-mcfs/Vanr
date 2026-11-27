@@ -11,7 +11,7 @@ test("an owner invites several people at once; a repeated address counts once", 
   const owner = await seedUser({ workspace: "Invite Journey" });
   await signIn(owner);
   await page.goto(`/workspace/${owner.workspace.id}/settings/members`);
-  const form = page.getByRole("form", { name: t("settings", "members.inviteTitle") });
+  const form = page.getByRole("form", { name: t("settings", "members.inviteHeading") });
   const stamp = Date.now().toString(36);
   const pia = `pia-${stamp}@people.example`;
   const rui = `rui-${stamp}@people.example`;
@@ -45,7 +45,9 @@ test("an owner changes a member's role, and it holds after a reload", async ({
   const member = await seedUser({ joins: { by: owner } });
   await signIn(owner);
   await page.goto(`/workspace/${owner.workspace.id}/settings/members`);
-  const role = page.getByRole("combobox", { name: t("settings", "members.roleOf", { name: member.name }) });
+  const role = page.getByRole("combobox", {
+    name: t("settings", "members.changeRole", { name: member.name }),
+  });
   await expect(role).toHaveText(t("settings", "role.member"));
   await role.click();
   await page.getByRole("option", { name: t("settings", "role.admin") }).click();
@@ -88,7 +90,7 @@ test("a member reads the settings but changes nothing, and Storage is closed to 
   await expect(people.getByRole("listitem").filter({ hasText: owner.name })).toContainText(
     t("settings", "role.owner"),
   );
-  await expect(page.getByRole("form", { name: t("settings", "members.inviteTitle") })).toHaveCount(0);
+  await expect(page.getByRole("form", { name: t("settings", "members.inviteHeading") })).toHaveCount(0);
   await expect(page.getByRole("combobox")).toHaveCount(0);
 
   // The server refuses what the screen does not offer.
@@ -110,16 +112,18 @@ test("an owner sets the storage destination to a bucket, tests it and saves it",
   await page.goto(`/workspace/${owner.workspace.id}/settings/storage`);
   await expect(page.getByRole("radio", { name: t("settings", "storage.kind.builtin") })).toBeChecked();
   await page.getByRole("radio", { name: t("settings", "storage.kind.s3") }).check();
-  await page.getByLabel(t("settings", "storage.endpoint"), { exact: true }).fill(bucket.endpoint);
-  await page.getByLabel(t("settings", "storage.region"), { exact: true }).fill("auto");
-  await page.getByLabel(t("settings", "storage.bucket"), { exact: true }).fill(bucket.name);
-  await page.getByLabel(t("settings", "storage.accessKeyId"), { exact: true }).fill("journeykeyid0001");
-  await page.getByLabel(t("settings", "storage.secretAccessKey"), { exact: true }).fill("journeysecret0002");
-  await page.getByRole("checkbox", { name: t("settings", "storage.pathAddressing") }).check();
+  await page.getByLabel(t("settings", "storage.s3.endpoint"), { exact: true }).fill(bucket.endpoint);
+  await page.getByLabel(t("settings", "storage.s3.region"), { exact: true }).fill("auto");
+  await page.getByLabel(t("settings", "storage.s3.bucket"), { exact: true }).fill(bucket.name);
+  await page.getByLabel(t("settings", "storage.s3.accessKeyId"), { exact: true }).fill("journeykeyid0001");
+  await page
+    .getByLabel(t("settings", "storage.s3.secretAccessKey"), { exact: true })
+    .fill("journeysecret0002");
+  await page.getByRole("checkbox", { name: t("settings", "storage.s3.pathAddressing") }).check();
 
-  await page.getByRole("button", { name: t("settings", "storage.test") }).click();
-  await expect(page.getByText(t("settings", "storage.testPassed"))).toBeVisible();
-  const steps = page.getByRole("list", { name: t("settings", "storage.steps") });
+  await page.getByRole("button", { name: t("settings", "storage.check.run") }).click();
+  await expect(page.getByText(t("settings", "storage.check.passed"))).toBeVisible();
+  const steps = page.getByRole("list", { name: t("settings", "storage.check.steps") });
   await expect(steps.getByRole("listitem")).toHaveCount(4);
 
   await page.getByRole("button", { name: t("settings", "action.save") }).click();
@@ -127,7 +131,7 @@ test("an owner sets the storage destination to a bucket, tests it and saves it",
 
   await page.reload();
   await expect(page.getByRole("radio", { name: t("settings", "storage.kind.s3") })).toBeChecked();
-  await expect(page.getByLabel(t("settings", "storage.bucket"), { exact: true })).toHaveValue(bucket.name);
+  await expect(page.getByLabel(t("settings", "storage.s3.bucket"), { exact: true })).toHaveValue(bucket.name);
   await expect(page.getByText(/0001/)).toBeVisible();
   await expect(page.getByRole("heading", { name: t("settings", "storage.copyTitle") })).toBeVisible();
 });

@@ -132,7 +132,7 @@ describe("the profile", () => {
     await app.user.clear(handle);
     await app.user.type(handle, "iris-v");
     await app.user.click(screen.getByRole("button", { name: "Save" }));
-    expect(await screen.findByText("Profile saved.")).toBeDefined();
+    expect(await screen.findByText("Your profile is saved.")).toBeDefined();
     expect(
       app.server.state.members.find((m) => m.userId === "usr_iris" && m.workspaceId === "workspace_birchwood")
         ?.handle,

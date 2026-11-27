@@ -98,10 +98,10 @@ function StorageForm({ workspaceId, current }: { workspaceId: string; current: S
   const bucketLength = form.bucket.trim().length;
   const bucketError =
     bucketLength > 0 && bucketLength < LIMIT.bucketMin
-      ? t("storage.bucketInvalid", { min: LIMIT.bucketMin, max: LIMIT.bucketMax })
+      ? t("storage.s3.bucketInvalid", { min: LIMIT.bucketMin, max: LIMIT.bucketMax })
       : undefined;
   const endpointError =
-    draft !== null && form.endpoint.trim() === "" ? t("storage.endpointRequired") : undefined;
+    draft !== null && form.endpoint.trim() === "" ? t("storage.s3.endpointRequired") : undefined;
   const keys = keysState(current.s3 !== null, form);
   const ready = form.endpoint.trim() !== "" && bucketLength >= LIMIT.bucketMin && !keys.missing;
   const input = (): S3Input => ({
@@ -142,7 +142,7 @@ function StorageForm({ workspaceId, current }: { workspaceId: string; current: S
         </Field>
         {chosen === "s3" && (
           <div className="storage-grid">
-            <Field label={t("storage.endpoint")} error={endpointError} required>
+            <Field label={t("storage.s3.endpoint")} error={endpointError} required>
               <Input
                 value={form.endpoint}
                 maxLength={LIMIT.endpoint}
@@ -152,7 +152,7 @@ function StorageForm({ workspaceId, current }: { workspaceId: string; current: S
                 onChange={(event) => set({ endpoint: event.target.value })}
               />
             </Field>
-            <Field label={t("storage.region")}>
+            <Field label={t("storage.s3.region")}>
               <Input
                 value={form.region}
                 maxLength={LIMIT.region}
@@ -160,7 +160,7 @@ function StorageForm({ workspaceId, current }: { workspaceId: string; current: S
                 onChange={(event) => set({ region: event.target.value })}
               />
             </Field>
-            <Field label={t("storage.bucket")} error={bucketError} required>
+            <Field label={t("storage.s3.bucket")} error={bucketError} required>
               <Input
                 value={form.bucket}
                 maxLength={LIMIT.bucketMax}
@@ -169,7 +169,7 @@ function StorageForm({ workspaceId, current }: { workspaceId: string; current: S
                 onChange={(event) => set({ bucket: event.target.value })}
               />
             </Field>
-            <Field label={t("storage.prefix")} hint={t("storage.prefixHint")}>
+            <Field label={t("storage.s3.prefix")} hint={t("storage.s3.prefixHint")}>
               <Input
                 value={form.prefix}
                 maxLength={LIMIT.prefix}
@@ -178,7 +178,7 @@ function StorageForm({ workspaceId, current }: { workspaceId: string; current: S
                 onChange={(event) => set({ prefix: event.target.value })}
               />
             </Field>
-            <Field label={t("storage.accessKeyId")}>
+            <Field label={t("storage.s3.accessKeyId")}>
               <Input
                 mono
                 value={form.accessKeyId}
@@ -189,7 +189,7 @@ function StorageForm({ workspaceId, current }: { workspaceId: string; current: S
                 onChange={(event) => set({ accessKeyId: event.target.value })}
               />
             </Field>
-            <Field label={t("storage.secretAccessKey")}>
+            <Field label={t("storage.s3.secretAccessKey")}>
               <Input
                 mono
                 type="password"
@@ -202,18 +202,18 @@ function StorageForm({ workspaceId, current }: { workspaceId: string; current: S
             </Field>
             <p className="page__muted storage-grid__wide">
               {current.s3 === null
-                ? t("storage.keysNeeded")
+                ? t("storage.s3.keysNeeded")
                 : keys.half
-                  ? t("storage.keysBoth")
-                  : t("storage.keysSaved", {
+                  ? t("storage.s3.keysBoth")
+                  : t("storage.s3.keysSaved", {
                       key: current.s3.accessKeyIdPreview,
                       secret: current.s3.secretPreview,
                     })}
             </p>
             <div className="storage-grid__wide">
               <Checkbox
-                label={t("storage.pathAddressing")}
-                hint={t("storage.pathAddressingHint")}
+                label={t("storage.s3.pathAddressing")}
+                hint={t("storage.s3.pathAddressingHint")}
                 checked={form.pathAddressing}
                 onCheckedChange={(checked) => set({ pathAddressing: checked === true })}
               />
@@ -227,7 +227,7 @@ function StorageForm({ workspaceId, current }: { workspaceId: string; current: S
           </Callout>
         )}
         {runTest.isError && (
-          <Callout tone="danger" role="alert" title={t("storage.testError")}>
+          <Callout tone="danger" role="alert" title={t("storage.check.error")}>
             {describe(runTest.error)}
           </Callout>
         )}
@@ -240,7 +240,7 @@ function StorageForm({ workspaceId, current }: { workspaceId: string; current: S
                 runTest.mutate({ workspaceId, body: input() }, { onSuccess: (result) => setTest(result) })
               }
             >
-              {t("storage.test")}
+              {t("storage.check.run")}
             </Button>
           )}
           <Button
@@ -289,7 +289,7 @@ function StorageForm({ workspaceId, current }: { workspaceId: string; current: S
                 migrate.mutate({ workspaceId }, { onSuccess: () => outcome.done(t("storage.copyStarted")) })
               }
             >
-              {t(current.transfer?.status === "failed" ? "storage.copyAgain" : "storage.copy")}
+              {t(current.transfer?.status === "failed" ? "storage.copyAgain" : "storage.copyStart")}
             </Button>
           </div>
         </Surface>
@@ -311,15 +311,15 @@ function TestReport({ result }: { result: StorageTestResult }) {
     <Callout
       tone={result.ok ? "success" : "danger"}
       role="status"
-      title={t(result.ok ? "storage.testPassed" : "storage.testFailed")}
+      title={t(result.ok ? "storage.check.passed" : "storage.check.failed")}
     >
-      <ul className="storage-steps" aria-label={t("storage.steps")}>
+      <ul className="storage-steps" aria-label={t("storage.check.steps")}>
         {result.steps.map((step) => (
           <li key={step.step}>
             <StatusBadge
               status={step.ok ? "done" : "failed"}
-              label={t(step.ok ? "storage.stepPassed" : "storage.stepFailed", {
-                step: t(`storage.step.${step.step}`),
+              label={t(step.ok ? "storage.check.stepPassed" : "storage.check.stepFailed", {
+                step: t(`storage.check.step.${step.step}`),
               })}
             />
             {/* The provider's own words, in its own language: shown as a detail. */}
@@ -342,7 +342,7 @@ function MigrationStatus({ transfer }: { transfer: StorageConfig["transfer"] }) 
         <progress
           max={Math.max(transfer.total, 1)}
           value={transfer.copied}
-          aria-label={t("storage.copyProgress")}
+          aria-label={t("storage.copyBar")}
         />
       )}
       {transfer.status === "failed" && transfer.error !== null && (
