@@ -11,13 +11,16 @@ export const NO_POSTGRES = "needs VANR_TEST_POSTGRES_URL (the CI postgres job)";
 
 let databases = 0;
 
-/** A new, empty database on the server of VANR_TEST_POSTGRES_URL: the tests never see each other's rows. */
-export async function testDatabaseUrl(prefix = "t"): Promise<string> {
+/**
+ * A new, empty database on the server of VANR_TEST_POSTGRES_URL: the tests never see each other's rows. `options`
+ * goes after `create database` as is (`encoding 'LATIN1' template template0 …`).
+ */
+export async function testDatabaseUrl(prefix = "t", options = ""): Promise<string> {
   if (!TEST_POSTGRES_URL) throw new Error(NO_POSTGRES);
   const name = `${prefix}_${process.pid}_${Date.now().toString(36)}_${databases++}`;
   const admin = postgres(TEST_POSTGRES_URL, { max: 1, onnotice: () => {} });
   try {
-    await admin.unsafe(`create database "${name}"`);
+    await admin.unsafe(`create database "${name}" ${options}`);
   } finally {
     await admin.end({ timeout: 5 });
   }

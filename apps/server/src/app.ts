@@ -4,6 +4,8 @@ import type { AppDeps, AppEnv } from "./context";
 import { errorBody, HttpError } from "./http";
 import { log } from "./logger";
 import { registerAccount } from "./routes/account";
+import { registerAgentLab } from "./routes/agent-lab";
+import { registerAgents } from "./routes/agents";
 import { registerAssignments } from "./routes/assignments";
 import { registerBases } from "./routes/bases";
 import { registerCalendar } from "./routes/calendar";
@@ -132,11 +134,13 @@ export function createApp(
   registerAccount(app);
   registerWorkspaces(app);
   // The remaining registrars enter here, in this order, each with the slice that ports it (S2 to S6 of the
-  // server port): chat S6, then the threads and memories below; agents S5, agent lab S5,
-  // skills S4, control S5, then invitations, notifications and push below, then the Drive, the wiki and the
-  // bases below; issues S4, debates S4, routines S4, calendar S4, then the search below; connectors S6,
-  // then the integrations, the runners and their requests below; assignments S5.
+  // server port): chat S6, then the threads, agents, agent lab, skills, memories and control below, then
+  // invitations, notifications and push below, then the Drive, the wiki and the bases below; issues S4,
+  // debates S4, routines S4, calendar S4, then the search below; connectors S6, then the integrations, the
+  // runners and their requests below; assignments S5.
   registerThreads(app);
+  registerAgents(app);
+  registerAgentLab(app);
   registerSkills(app);
   registerMemories(app);
   registerControl(app);

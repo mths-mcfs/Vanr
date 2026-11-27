@@ -23,7 +23,15 @@ import { define, type ToolContext, type ToolDef, ToolInputError } from "../runti
 import { channelRulesOf } from "./access";
 import { netPolicy, socketAddress } from "./net";
 import { outsideText } from "./outside-text";
-import { type GuardFailure, guardStatement, qualified } from "./sql-guard";
+import {
+  columnKey,
+  type GuardFailure,
+  guardStatement,
+  parseRelation,
+  quoteName,
+  relationKey,
+  relationText,
+} from "./sql-guard";
 import { type GuardedConnection, type GuardedSession, guardedQuery } from "./sql-identity";
 import { recordUsage, reserveUsage } from "./usage";
 
@@ -196,7 +204,10 @@ async function inspect(deps: AppDeps, target: SqlTarget) {
       );
       const hidden = cols
         .filter((r) => SENSITIVE_COLUMN.test(String(r.column_name)))
-        .map((r) => `${r.table_schema}.${r.table_name}.${r.column_name}`.toLowerCase());
+        .map(
+          (r) =>
+            `${relationText({ schema: String(r.table_schema), name: String(r.table_name) })}.${quoteName(String(r.column_name))}`,
+        );
       return { canWrite: write?.can_write === true, hiddenSuggestion: hidden.slice(0, 200) };
     });
   } catch (err) {
@@ -292,12 +303,24 @@ export async function tablesOf(deps: AppDeps, row: DatabaseRow): Promise<Databas
   });
 }
 
-const TABLE = /^[\w$-]{1,63}(\.[\w$-]{1,63})?$/;
-const COLUMN = /^[\w$-]{1,63}(\.[\w$-]{1,63}){1,2}$/;
+/**
+ * A name typed in the policy form, read as SQL reads it (`customers` is `public.customers`, `"Customers"` keeps its
+ * capital) and kept in the one text the guard compares exactly.
+ */
+const sqlName = (key: (text: string) => string | null, what: string) =>
+  z
+    .string()
+    .max(300)
+    .transform((text, ctx) => {
+      const k = key(text);
+      if (k === null) ctx.addIssue({ code: "custom", message: `Not a ${what} name: ${text}` });
+      return k ?? "";
+    });
+const tableName = sqlName(relationKey, "table");
 export const databasePolicyInput = z
   .object({
-    tables: z.array(z.string().trim().toLowerCase().regex(TABLE)).max(500),
-    maskedColumns: z.array(z.string().trim().toLowerCase().regex(COLUMN)).max(1000),
+    tables: z.array(tableName).max(500),
+    maskedColumns: z.array(sqlName(columnKey, "column")).max(1000),
     queriesPerDay: z.number().int().min(1).max(100_000).nullable(),
     timeoutSeconds: z.union([z.literal(15), z.literal(30), z.literal(60)]),
   })
@@ -309,7 +332,7 @@ async function defaultPolicy(deps: AppDeps, row: DatabaseRow): Promise<schema.Da
   // A catalog read that fails fails the request: a policy saved empty would never read the catalog again.
   const tables = await tablesOf(deps, row);
   return {
-    tables: tables.map((t) => `${t.schema}.${t.name}`.toLowerCase()),
+    tables: tables.map(relationText),
     maskedColumns: row.hiddenSuggestion,
     queriesPerDay: 200,
     timeoutSeconds: 30,
@@ -337,7 +360,8 @@ export async function setAgentDatabase(
     ...base,
     ...parsed,
   };
-  policy.tables = [...new Set(policy.tables.map(qualified))];
+  policy.tables = [...new Set(policy.tables)];
+  policy.maskedColumns = [...new Set(policy.maskedColumns)];
   const values = { level: input.level, policy };
   const [saved] = await deps.db
     .insert(agentDatabases)
@@ -363,7 +387,7 @@ function explainFailure(f: GuardFailure): string {
     case "write":
       return "Only reading is allowed: the query would change or lock data.";
     case "table":
-      return `The table ${f.table} is not available to you.`;
+      return `The table or view ${f.table} is not in this agent's policy.`;
     case "column":
       return `The column ${f.column} is hidden. Select the columns you need by name, without it.`;
     case "function":
@@ -463,29 +487,26 @@ const dbDescribe = define({
   effect: "K0",
   input: z.object({
     database: z.string().min(1).max(120),
-    table: z.string().trim().toLowerCase().regex(TABLE).describe("schema.table or table"),
+    table: tableName.describe("schema.table or table, quoted as in SQL when it has capitals"),
   }),
   async run(ctx, input) {
     const { row, link } = await pick(ctx, input.database, "describe");
-    const table = qualified(input.table);
-    if (!link.policy.tables.includes(table))
-      throw new ToolInputError(`The table ${table} is not available to you.`);
-    const [schemaName, tableName] = table.split(".");
-    const hidden = new Set(
-      link.policy.maskedColumns.map((c) => (c.split(".").length === 2 ? `public.${c}` : c)),
-    );
-    // The policy keeps names in lowercase (and the guard compares them that way): a table created as
-    // "Suppliers" has to show here too.
+    const { table } = input;
+    const relation = parseRelation(table);
+    if (!relation || !link.policy.tables.includes(table))
+      throw new ToolInputError(`The table or view ${table} is not in this agent's policy.`);
+    // Each mask read the way checkPlan reads it, so a `table.column` mask hides here too.
+    const hidden = new Set(link.policy.maskedColumns.map((c) => columnKey(c) ?? c));
     const cols = await asToolError(() =>
       guarded(ctx.deps, row, 15_000, (s) =>
         s.rows(
-          "select column_name, data_type, is_nullable from information_schema.columns where lower(table_schema) = $1 and lower(table_name) = $2 order by ordinal_position",
-          [schemaName, tableName],
+          "select column_name, data_type, is_nullable from information_schema.columns where table_schema = $1 and table_name = $2 order by ordinal_position",
+          [relation.schema, relation.name],
         ),
       ),
     );
     if ("isError" in cols) return cols;
-    const visible = cols.filter((r) => !hidden.has(`${table}.${String(r.column_name).toLowerCase()}`));
+    const visible = cols.filter((r) => !hidden.has(`${table}.${quoteName(String(r.column_name))}`));
     if (visible.length === 0) return `No visible columns in ${table}.`;
     return visible
       .map((r) => `${r.column_name}\t${r.data_type}${r.is_nullable === "NO" ? " not null" : ""}`)
