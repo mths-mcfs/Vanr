@@ -262,6 +262,24 @@ describe("the Drive's uploads when the network or the session fails", () => {
     expect(await screen.findByText("This file was deleted or is no longer available to you.")).toBeDefined();
   });
 
+  test("with a name filter on, an open file that is no longer readable is still found gone", async () => {
+    const app = await renderApp({ path: `${PATH}?file=fil_notes`, signedInAs: "usr_ana" });
+    await screen.findByRole("dialog", { name: "field-notes.txt" });
+    await app.user.keyboard("{Escape}");
+    await app.user.type(screen.getByRole("searchbox", { name: "Search files by name" }), "field");
+    await app.user.click(await within(await list()).findByRole("button", { name: "field-notes.txt" }));
+    await screen.findByRole("dialog", { name: "field-notes.txt" });
+    // Access goes away in another session; only the next refresh of the list can tell.
+    const notes = app.server.files.files.find((file) => file.id === "fil_notes");
+    if (notes) notes.deletedAt = new Date().toISOString();
+    await act(async () => {
+      await app.runtime.queryClient.refetchQueries({
+        predicate: (query) => query.queryKey.includes("listFiles"),
+      });
+    });
+    expect(await screen.findByText("This file was deleted or is no longer available to you.")).toBeDefined();
+  });
+
   test("a failed search inside files says so, with a retry", async () => {
     const server = newServer();
     // Typing asks for "in" and then "ink", each with its retries.
