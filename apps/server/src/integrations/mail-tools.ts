@@ -10,7 +10,7 @@ import { effectiveLevel } from "@vanr/engine/action-credential";
 import { schema } from "@vanr/engine/db";
 import type { Preview } from "@vanr/engine/effects";
 import { randomId } from "@vanr/engine/ids";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import { requireRuntime } from "../context";
 import { queueSend } from "../outbox";
@@ -25,7 +25,7 @@ import { actionMode, allowedBy, isAddress, type MailAction, WRITE_ACTIONS } from
 import { buildMail, type ParsedMail, parseMail } from "./mime";
 import { releaseUsage, reserveUsage } from "./usage";
 
-const { mailConnections } = schema;
+const { mailConnections, outbox } = schema;
 type MailboxRow = Awaited<ReturnType<typeof mailboxesOf>>[number];
 
 const FOLDER = z
@@ -204,7 +204,13 @@ async function send(
       title: mail.to.join(", "),
     });
   } catch (err) {
-    await releaseUsage(ctx.deps, reserved);
+    // Back only when nothing was queued: a send already in the outbox (its wake-up failed after the commit)
+    // still goes out, and the outbox gives its reservation back if it is undone or fails.
+    const [queued] = await ctx.deps.db
+      .select({ id: outbox.id })
+      .from(outbox)
+      .where(and(eq(outbox.workspaceId, ctx.workspaceId), sql`${outbox.payload}->>'usageId' = ${reserved}`));
+    if (!queued) await releaseUsage(ctx.deps, reserved);
     throw err;
   }
   const seconds = Math.round(ctx.deps.config.undoSendMs / 1000);

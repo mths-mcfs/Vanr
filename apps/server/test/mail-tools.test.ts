@@ -537,6 +537,56 @@ describe("a send goes through the outbox", () => {
   );
 
   test(
+    "the quota comes back only when nothing was queued: a header that breaks the mail, not a wake-up that fails after the commit",
+    async () => {
+      clear();
+      const { lia, ana, url, connect, runOf, workspaceId } = await team();
+      const account = (await connect()).body.account;
+      await call(ana, "PUT", url(`/agents/${lia.id}/mail/${account.id}`), {
+        level: "read_write",
+        policy: { recipientAllowlist: ["@client.test"], autoSend: true, sendsPerDay: 5 },
+      });
+      const reservations = async () =>
+        (
+          await server.deps.db
+            .select()
+            .from(integrationUsage)
+            .where(eq(integrationUsage.workspaceId, workspaceId))
+        ).length;
+      const broken = await runOf();
+      await expect(
+        broken.ask("mail_send", {
+          account: mail.user,
+          to: ["joao@client.test"],
+          subject: "A\r\nBcc: x@bad.test",
+          text: "B",
+        }),
+      ).rejects.toMatchObject({ code: "invalid_mail_header" });
+      expect(await reservations()).toBe(0);
+
+      const failingWake: AppDeps = {
+        ...server.deps,
+        runtime: {
+          ...server.deps.runtime,
+          wakeAt: () => {
+            throw new Error("timer unavailable");
+          },
+        },
+      };
+      const late = await runOf({ deps: failingWake });
+      await expect(
+        late.ask("mail_send", { account: mail.user, to: ["joao@client.test"], subject: "A", text: "B" }),
+      ).rejects.toThrow("timer unavailable");
+      // Queued with its reservation: the outbox's sweep still sends it, once.
+      expect(await reservations()).toBe(1);
+      await deliverDue(server.deps);
+      expect(mail.sent.map((m) => m.to)).toEqual([["joao@client.test"]]);
+      expect(await reservations()).toBe(1);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "without the runtime's wake-up a send is rejected at its entry: no approval, no quota, nothing queued",
     async () => {
       clear();
