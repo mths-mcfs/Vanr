@@ -1182,4 +1182,46 @@ describe("commands on the agent's runner", () => {
     },
     SERVER_TEST_MS,
   );
+
+  test(
+    "a browser action planned on one runner isn't sent to the runner the agent was lent before it runs",
+    async () => {
+      const t = await team(undefined, true);
+      const other = await pairFake(server, t.ana, t.workspaceId, { browser: true, open });
+      const [agent] = await server.deps.db.select().from(agents).where(eq(agents.id, t.lia.id));
+      const tools = await environmentToolsFor({ deps: server.deps, agent: agent as typeof t.lia });
+      const ctx = (
+        await toolRun(server, {
+          workspaceId: t.workspaceId,
+          agent: agent as typeof t.lia,
+          channelId: t.general,
+          asker: t.ana,
+        })
+      ).ctx();
+      const calls: [string, Record<string, unknown>][] = [
+        ["browser_navigate", { url: "https://shop.example/checkout" }],
+        ["browser_click", { target: "#pay" }],
+        ["browser_back", {}],
+      ];
+      for (const [name, input] of calls) {
+        const tool = tools.find((x) => x.name === name);
+        if (!tool?.plan) throw new Error(`no ${name}`);
+        await server.deps.db
+          .update(agents)
+          .set({ environmentId: t.fake.runnerId })
+          .where(eq(agents.id, t.lia.id));
+        await tool.plan(ctx, input);
+        await server.deps.db
+          .update(agents)
+          .set({ environmentId: other.runnerId })
+          .where(eq(agents.id, t.lia.id));
+        await expect(tool.run(ctx, input)).rejects.toThrow("changed since this action was planned");
+      }
+      for (const runner of [t.fake.runner, other.runner]) {
+        expect(requests(runner, "browser.open")).toEqual([]);
+        expect(requests(runner, "browser.act")).toEqual([]);
+      }
+    },
+    SERVER_TEST_MS,
+  );
 });

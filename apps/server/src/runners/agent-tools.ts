@@ -739,6 +739,13 @@ async function browserCall<O extends BrowserOp>(
   checked?: RunnerRow,
 ): Promise<BrowserActResult> {
   const runner = checked ?? browserOf(await runnerOf(ctx));
+  // The action goes to the runner its plan checked (session risk, the element, the approval): if the agent was
+  // lent another since, nothing is sent.
+  const planned = planRunners.get(input);
+  if (planned && planned.id !== runner.id)
+    throw new ToolInputError(
+      "Your runner changed since this action was planned; nothing was done. Try again.",
+    );
   let r: BrowserActResult | null = null;
   let failure: unknown = null;
   for (let attempt = 0; attempt < 2; attempt++) {

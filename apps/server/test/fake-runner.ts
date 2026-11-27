@@ -20,6 +20,11 @@ export const exec = (stdout: string, exitCode = 0): Answer => ({
 export const doing: Answerer = (req) => {
   if (req.op === "exec") return exec(`ran: ${String(req.args.command)}\n`);
   if (req.op === "job.start") return { ok: true, data: { startedAt: new Date().toISOString() } };
+  if (req.op === "browser.inspect")
+    return {
+      ok: true,
+      data: { url: "https://shop.example/", allowed: true, element: null, fingerprint: "fp" },
+    };
   if (req.op === "browser.act")
     return { ok: true, data: { ok: true, url: "https://shop.example/", title: "Shop", tabs: [] } };
   return { ok: true, data: {} };
