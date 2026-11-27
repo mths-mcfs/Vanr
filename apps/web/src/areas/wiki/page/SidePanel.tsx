@@ -4,6 +4,7 @@
 import { useApiQuery } from "@vanr/client/react";
 import type { WikiPage } from "@vanr/contract";
 import { Skeleton } from "@vanr/ui";
+import type { ReactNode } from "react";
 import { AppLink } from "../../../app/navigation.tsx";
 import { useMessages } from "../../../i18n/react.tsx";
 import { plainSnippet } from "../shared.tsx";
@@ -14,12 +15,15 @@ export function SidePanel({
   agentName,
   onHeading,
   onCreate,
+  children,
 }: {
   workspaceId: string;
   page: WikiPage;
   agentName: (id: string) => string | undefined;
   onHeading: (index: number) => void;
   onCreate: (target: string) => void;
+  /** What goes first: the page's proposals and comments. */
+  children?: ReactNode;
 }) {
   const t = useMessages("wiki");
   // The panel follows the published version: asked again when a new one is out.
@@ -28,6 +32,7 @@ export function SidePanel({
 
   return (
     <aside className="wiki-side" aria-label={t("side.label")}>
+      {children}
       {panel.data === undefined ? (
         <div aria-busy="true">
           <Skeleton />

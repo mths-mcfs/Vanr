@@ -245,7 +245,10 @@ export class FakeServer {
     };
     this.files = new FakeFiles(host);
     this.bases = new FakeBases(host);
-    this.wiki = new FakeWiki(host);
+    this.wiki = new FakeWiki({
+      ...host,
+      nameOf: (id) => this.state.users.find((user) => user.id === id)?.name,
+    });
     this.fileOperations = {
       ...this.files.operations(),
       ...this.bases.operations(),

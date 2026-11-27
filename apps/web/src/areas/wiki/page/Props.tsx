@@ -41,7 +41,12 @@ const UNSHOWN = new Set(["formula", "relation", "rollup"]);
 
 const newId = (prefix: string) => `${prefix}_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
 
-export type MetaWrite = { props?: Record<string, unknown>; tags?: string[]; altTitles?: string[] };
+export type MetaWrite = {
+  props?: Record<string, unknown>;
+  tags?: string[];
+  altTitles?: string[];
+  agentEdits?: "direct" | "propose";
+};
 
 type Props = {
   workspaceId: string;

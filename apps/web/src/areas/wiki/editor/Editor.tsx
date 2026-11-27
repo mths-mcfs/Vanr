@@ -42,7 +42,40 @@ type Props = {
   label: string;
   pages: readonly LinkCandidate[];
   hooks: Omit<EditorHooks, "trigger" | "menuKey" | "links">;
+  /** The passage selected now, with a little of the text around it (null: nothing selected). */
+  onPick?: (picked: Picked | null) => void;
 };
+
+export type Picked = { quote: string; before: string; after: string };
+
+const AROUND = 64;
+
+/** Tells the screen which passage is selected, for a comment on it. */
+const pickPlugin = (onPick: () => ((picked: Picked | null) => void) | undefined) =>
+  $prose(
+    () =>
+      new Plugin({
+        view: () => ({
+          update(view, previous) {
+            if (previous.selection.eq(view.state.selection) && previous.doc.eq(view.state.doc)) return;
+            const report = onPick();
+            if (report === undefined) return;
+            const { from, to, empty } = view.state.selection;
+            const quote = empty ? "" : view.state.doc.textBetween(from, to, "\n").trim();
+            if (quote === "") {
+              report(null);
+              return;
+            }
+            const size = view.state.doc.content.size;
+            report({
+              quote,
+              before: view.state.doc.textBetween(Math.max(0, from - AROUND), from, "\n"),
+              after: view.state.doc.textBetween(to, Math.min(size, to + AROUND), "\n"),
+            });
+          },
+        }),
+      }),
+  );
 
 type MenuItem =
   | { kind: "slash"; item: SlashItem; label: string; icon: LucideIcon }
@@ -185,7 +218,8 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(props, ref
       .use(block)
       .use(triggerPlugin(hooks))
       .use(wikiLinkInputRule)
-      .use(wikiLinkView(hooks));
+      .use(wikiLinkView(hooks))
+      .use(pickPlugin(() => latest.current.onPick));
     if (live !== null) editor.use(collab).use(agentBlocks(() => live.provider.awareness));
     void editor.create().then(() => {
       if (disposed) {

@@ -27,6 +27,14 @@ export type FakePage = {
   versions: Version[];
   deletedAt: string | null;
   deletedBy: T.ActorRef | null;
+  /** Who reads it: null is the whole workspace. A channel's readers are everyone here. */
+  access?:
+    | { kind: "private"; userIds: string[]; agentIds: string[] }
+    | { kind: "channel"; channelId: string }
+    | null;
+  agentEdits?: "direct" | "propose";
+  comments?: T.WikiComment[];
+  proposals?: T.WikiProposal[];
 };
 
 const DAY_MS = 86_400_000;
@@ -54,7 +62,7 @@ export class FakeWiki {
   defs: { defs: T.WikiPropDef[]; version: number } = { defs: [], version: 0 };
   reads: T.WikiTopRead[] = [];
 
-  constructor(private readonly host: FilesHost) {}
+  constructor(private readonly host: FilesHost & { nameOf?: (userId: string) => string | undefined }) {}
 
   seed(): void {
     this.pages = [];
@@ -160,11 +168,60 @@ export class FakeWiki {
         ],
       }),
     );
+    const checklist = this.pages[0];
+    if (checklist !== undefined)
+      checklist.proposals = [
+        {
+          id: "ann_proposal",
+          author: scout,
+          createdAt: at(0),
+          handledAt: null,
+          handledBy: null,
+          note: "The press stays warm otherwise.",
+          parentVersion: 2,
+          status: "pending",
+          hunks: [
+            {
+              id: "h1",
+              oldStr: "Cover the press.",
+              newStr: "Cover the press and switch it off.",
+              status: "pending",
+            },
+          ],
+        },
+      ];
+    this.pages.push(
+      page({
+        title: "Salaries",
+        access: { kind: "private", userIds: ["usr_ana", "usr_jonas"], agentIds: [] },
+        versions: [
+          {
+            version: 1,
+            title: "Salaries",
+            body: "Only for the founders.",
+            author: ana,
+            at: at(5),
+            note: null,
+          },
+        ],
+      }),
+    );
     this.reads = [{ slug: "press-checklist", title: "Press checklist", total: 12, agents: ["agt_scout"] }];
   }
 
+  /** Who asks, during one call: what they may not read is never there for them. */
+  private viewer: string | null = null;
+
+  private readable(page: FakePage): boolean {
+    const access = page.access ?? null;
+    if (access === null || access.kind === "channel" || this.viewer === null) return true;
+    return access.userIds.includes(this.viewer);
+  }
+
   private live(workspaceId: string) {
-    return this.pages.filter((page) => page.workspaceId === workspaceId && page.deletedAt === null);
+    return this.pages.filter(
+      (page) => page.workspaceId === workspaceId && page.deletedAt === null && this.readable(page),
+    );
   }
 
   private find(workspaceId: string, slug: unknown) {
@@ -174,7 +231,7 @@ export class FakeWiki {
   private summary(page: FakePage): T.WikiPageSummary {
     const last = page.versions.at(-1) as Version;
     return {
-      agentEdits: "direct",
+      agentEdits: page.agentEdits ?? "direct",
       altTitles: page.altTitles,
       excerpt: last.body
         .replace(/[#>*[\]]/g, "")
@@ -185,7 +242,7 @@ export class FakeWiki {
       locked: page.locked,
       pinned: page.pinned,
       props: page.props,
-      restricted: false,
+      restricted: (page.access ?? null) !== null,
       slug: page.slug,
       sourceType: null,
       tags: page.tags,
@@ -196,6 +253,17 @@ export class FakeWiki {
     };
   }
 
+  private accessOf(page: FakePage): T.WikiAccess | null {
+    const access = page.access ?? null;
+    if (access === null) return null;
+    if (access.kind === "channel") return { kind: "channel", channelId: access.channelId, channelName: null };
+    return {
+      kind: "private",
+      people: access.userIds.map((id) => ({ id, name: this.host.nameOf?.(id) ?? null })),
+      agents: access.agentIds.map((id) => ({ id, name: null })),
+    };
+  }
+
   private detail(page: FakePage, scope: { user: T.User; role: T.Role }): T.WikiPage {
     const admin = scope.role === "owner" || scope.role === "admin";
     const inbound = this.live(page.workspaceId).filter(
@@ -203,8 +271,8 @@ export class FakeWiki {
     );
     return {
       ...this.summary(page),
-      access: null,
-      accessEditable: admin,
+      access: this.accessOf(page),
+      accessEditable: admin || page.versions[0]?.author.id === scope.user.id,
       authors: [...new Map(page.versions.map((v) => [`${v.author.type}:${v.author.id}`, v.author])).values()],
       body: page.versions.at(-1)?.body ?? "",
       draft: null,
@@ -219,6 +287,20 @@ export class FakeWiki {
         total: this.reads.find((read) => read.slug === page.slug)?.total ?? 0,
       },
     };
+  }
+
+  private setStatus(
+    scope: { workspaceId: string; user: T.User },
+    id: unknown,
+    status: "open" | "resolved",
+  ): FilesReply {
+    const page = this.live(scope.workspaceId).find((each) => (each.comments ?? []).some((c) => c.id === id));
+    const comment = page?.comments?.find((each) => each.id === id);
+    if (comment === undefined) return notFound();
+    comment.status = status;
+    comment.handledBy = status === "resolved" ? { type: "person", id: scope.user.id } : null;
+    comment.handledAt = status === "resolved" ? this.host.now().toISOString() : null;
+    return reply(200, comment);
   }
 
   private save(
@@ -247,7 +329,13 @@ export class FakeWiki {
       (handler: (scope: Scope, params: Record<string, unknown>) => FilesReply) =>
       (params: Record<string, unknown>, session: string | undefined) => {
         const scope = this.host.scope(params, session);
-        return "status" in scope ? scope : handler(scope, params);
+        if ("status" in scope) return scope;
+        this.viewer = scope.user.id;
+        try {
+          return handler(scope, params);
+        } finally {
+          this.viewer = null;
+        }
       };
     const onPage = (handler: (scope: Scope, page: FakePage, params: Record<string, unknown>) => FilesReply) =>
       within((scope, params) => {
@@ -363,7 +451,10 @@ export class FakeWiki {
       getWikiTrash: within((scope) =>
         reply(200, {
           pages: this.pages
-            .filter((page) => page.workspaceId === scope.workspaceId && page.deletedAt !== null)
+            .filter(
+              (page) =>
+                page.workspaceId === scope.workspaceId && page.deletedAt !== null && this.readable(page),
+            )
             .map((page) => ({
               slug: page.slug,
               title: page.title,
@@ -489,6 +580,91 @@ export class FakeWiki {
           return fail(409, "wiki.props_changed", "The properties changed");
         this.defs = { defs: (params.defs as T.WikiPropDef[]) ?? [], version: this.defs.version + 1 };
         return reply(200, this.defs);
+      }),
+      setWikiPageAccess: onPage((scope, page, params) => {
+        if (!admin(scope) && page.versions[0]?.author.id !== scope.user.id)
+          return fail(403, "forbidden", "Only who created the page or an admin can change who reads it");
+        const access = params.access as T.WikiAccessInput;
+        page.access =
+          access === null
+            ? null
+            : access.kind === "channel"
+              ? access
+              : {
+                  kind: "private",
+                  userIds: [...new Set([...access.userIds, scope.user.id])],
+                  agentIds: access.agentIds,
+                };
+        return reply(200, this.detail(page, scope));
+      }),
+      getWikiPageAnnotations: onPage((_scope, page) =>
+        reply(200, { comments: page.comments ?? [], proposals: page.proposals ?? [] }),
+      ),
+      createWikiPageComment: onPage((scope, page, params) => {
+        const body = text(params.body)?.trim() ?? "";
+        if (body === "") return fail(400, "invalid_request", "A comment needs text");
+        const parentId = text(params.parentId) ?? null;
+        const anchor = (params.anchor as T.WikiAnchor | undefined) ?? null;
+        const comment: T.WikiComment = {
+          id: this.host.id("ann"),
+          agentId: null,
+          anchor: parentId === null ? anchor : null,
+          anchorState:
+            parentId === null && anchor !== null
+              ? (page.versions.at(-1)?.body ?? "").includes(anchor.quote)
+                ? "ok"
+                : "orphan"
+              : null,
+          author: { type: "person", id: scope.user.id },
+          body,
+          createdAt: this.host.now().toISOString(),
+          handledAt: null,
+          handledBy: null,
+          parentId,
+          status: "open",
+        };
+        page.comments = [...(page.comments ?? []), comment];
+        return reply(201, comment);
+      }),
+      resolveWikiAnnotation: within((scope, params) =>
+        this.setStatus(scope, params.annotationId, "resolved"),
+      ),
+      reopenWikiAnnotation: within((scope, params) => this.setStatus(scope, params.annotationId, "open")),
+      deleteWikiAnnotation: within((scope, params) => {
+        const page = this.live(scope.workspaceId).find((each) =>
+          (each.comments ?? []).some((c) => c.id === params.annotationId),
+        );
+        if (page === undefined) return notFound();
+        page.comments = (page.comments ?? []).filter(
+          (c) => c.id !== params.annotationId && c.parentId !== params.annotationId,
+        );
+        return reply(204, null);
+      }),
+      decideWikiAnnotation: within((scope, params) => {
+        const page = this.live(scope.workspaceId).find((each) =>
+          (each.proposals ?? []).some((p) => p.id === params.annotationId),
+        );
+        const proposal = page?.proposals?.find((each) => each.id === params.annotationId);
+        if (page === undefined || proposal === undefined) return notFound();
+        const decisions = (params.decisions as { hunkId: string; accept: boolean }[]) ?? [];
+        let body = page.versions.at(-1)?.body ?? "";
+        for (const decision of decisions) {
+          const hunk = proposal.hunks.find((each) => each.id === decision.hunkId);
+          if (hunk === undefined || hunk.status !== "pending") continue;
+          if (!decision.accept) hunk.status = "rejected";
+          else if (body.split(hunk.oldStr).length === 2) {
+            body = body.replace(hunk.oldStr, hunk.newStr);
+            hunk.status = "accepted";
+          } else hunk.status = "stale";
+        }
+        if (body !== page.versions.at(-1)?.body)
+          this.save(page, scope.user, { body }, `proposal ${proposal.id}`);
+        if (proposal.hunks.every((hunk) => hunk.status !== "pending")) {
+          proposal.status = "done";
+          proposal.handledAt = this.host.now().toISOString();
+          proposal.handledBy = { type: "person", id: scope.user.id };
+        }
+        return reply(200, { proposal, page: this.detail(page, scope) });
       }),
       listWikiAttachments: within(() => reply(200, { attachments: [] })),
       importWiki: within((scope, params) => {

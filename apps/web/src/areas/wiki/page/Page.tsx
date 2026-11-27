@@ -4,7 +4,7 @@
 // where the draft stands. Beside it, the outline, the links and who reads it.
 import { isApiError } from "@vanr/client";
 import { useApiQuery, useVanrClient } from "@vanr/client/react";
-import { can, type WikiPropDef } from "@vanr/contract";
+import { can, type WikiAnchor, type WikiPropDef } from "@vanr/contract";
 import {
   Avatar,
   Button,
@@ -20,14 +20,18 @@ import {
 import {
   Bot,
   Check,
+  EyeOff,
   History,
   Lock,
   LockOpen,
+  MessageSquarePlus,
   MoreHorizontal,
   Pin,
   PinOff,
   Trash2,
   Undo2,
+  UserRoundCheck,
+  Users,
 } from "lucide-react";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { AppLink, useGo, useRouteParams } from "../../../app/navigation.tsx";
@@ -35,9 +39,11 @@ import { ScreenError, ScreenLoading, useDocumentTitle, useErrorMessage } from ".
 import { useMessages } from "../../../i18n/react.tsx";
 import { useRelativeTime } from "../../../i18n/relative-time.tsx";
 import { href } from "../../../routes.ts";
-import { Editor, type EditorHandle, type EditorSource } from "../editor/Editor.tsx";
+import { Editor, type EditorHandle, type EditorSource, type Picked } from "../editor/Editor.tsx";
 import type { ResolvedLink } from "../editor/plugins.ts";
 import { linkResolver, REFRESH_MS, TITLE_MAX, useActorName, useRole, useWikiRefresh } from "../shared.tsx";
+import { AccessDialog, accessSummary } from "./Access.tsx";
+import { Annotations, anchorFor } from "./Annotations.tsx";
 import { type LiveEvent, settle, useLive } from "./collab.ts";
 import { HistoryDialog } from "./History.tsx";
 import { type MetaWrite, PropsBar } from "./Props.tsx";
@@ -77,6 +83,9 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
   const [title, setTitle] = useState<string | null>(null);
   const [history, setHistory] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [sharing, setSharing] = useState(false);
+  const [picked, setPicked] = useState<Picked | null>(null);
+  const [anchor, setAnchor] = useState<WikiAnchor | null>(null);
   const editor = useRef<EditorHandle>(null);
   const p = page.data;
   useDocumentTitle(p?.title ?? t("index.title"));
@@ -294,6 +303,11 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
                 <Icon icon={Lock} /> {t("page.locked")}
               </span>
             )}
+            {p.restricted && (
+              <span className="wiki-page__restricted">
+                <Icon icon={EyeOff} /> {accessSummary(p, t)}
+              </span>
+            )}
           </p>
         </div>
         <ul className="wiki-page__presence" aria-label={t("live.presence")}>
@@ -359,6 +373,21 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
                 }
               >
                 {p.locked ? t("page.unlock") : t("page.lock")}
+              </MenuItem>
+            )}
+            {p.accessEditable && (
+              <MenuItem icon={<Icon icon={Users} />} onSelect={() => setSharing(true)}>
+                {t("access.open")}
+              </MenuItem>
+            )}
+            {p.editable && (
+              <MenuItem
+                icon={<Icon icon={UserRoundCheck} />}
+                onSelect={() =>
+                  void writeMeta({ agentEdits: p.agentEdits === "propose" ? "direct" : "propose" })
+                }
+              >
+                {p.agentEdits === "propose" ? t("page.agentsEdit") : t("page.agentsPropose")}
               </MenuItem>
             )}
             {mayDelete && (
@@ -451,6 +480,19 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
               {t("draft.readOnlyBody")}
             </p>
           )}
+          <div className="wiki-doc__tools">
+            <Button
+              size="sm"
+              variant="ghost"
+              icon={<Icon icon={MessageSquarePlus} />}
+              disabled={picked === null}
+              onClick={() => {
+                if (picked !== null) setAnchor(anchorFor(p.body, picked));
+              }}
+            >
+              {t("comments.onSelection")}
+            </Button>
+          </div>
           {source !== null && source.kind === "static" && p.body.trim() === "" ? (
             <p className="wiki-doc__empty">{t("page.empty")}</p>
           ) : (
@@ -464,6 +506,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
                 label={t("page.editor", { title: p.title })}
                 pages={pages}
                 hooks={hooks}
+                onPick={setPicked}
               />
             )
           )}
@@ -474,8 +517,34 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
           agentName={agentName}
           onHeading={(index) => editor.current?.scrollToHeading(index)}
           onCreate={create}
-        />
+        >
+          <Annotations
+            workspaceId={workspaceId}
+            page={p}
+            draft={anchor}
+            onDraftDone={() => setAnchor(null)}
+            onDecided={(saved) => {
+              toast.push({ tone: "success", title: t("proposals.decided", { version: saved.version }) });
+              void refresh();
+            }}
+          />
+        </SidePanel>
       </div>
+      {sharing && (
+        <AccessDialog
+          workspaceId={workspaceId}
+          page={p}
+          userId={userId}
+          onClose={() => setSharing(false)}
+          onSaved={(saved) => {
+            setSharing(false);
+            void refresh();
+            // Restricting gives the page a new address, so the old one no longer tells it exists.
+            if (saved.slug !== slug)
+              void go("wikiPage", { workspaceId, pageId: saved.slug }, { replace: true });
+          }}
+        />
+      )}
       {history && (
         <HistoryDialog
           workspaceId={workspaceId}

@@ -21,6 +21,7 @@ import {
 import {
   ChevronRight,
   Download,
+  EyeOff,
   FilePlus,
   Folder,
   Lock,
@@ -59,6 +60,7 @@ function PageLink({ workspaceId, page }: { workspaceId: string; page: WikiPageSu
       <span className="wiki-index__title">{page.title}</span>
       {page.pinned && <Icon icon={Pin} label={t("page.pinned")} />}
       {page.locked && <Icon icon={Lock} label={t("page.locked")} />}
+      {page.restricted && <Icon icon={EyeOff} label={t("access.restricted")} />}
     </AppLink>
   );
 }
