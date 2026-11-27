@@ -187,11 +187,30 @@ export function HistoryDialog({
                 {describe(restore.error)}
               </Callout>
             )}
-            {first && firstBody.data !== undefined ? (
-              <div className="wiki-diff">
-                <p className="wiki-diff__stats">{t("history.firstVersion")}</p>
-                <pre className="wiki-diff__lines wiki-diff__whole">{firstBody.data.body}</pre>
-              </div>
+            {first ? (
+              firstBody.data !== undefined ? (
+                <div className="wiki-diff">
+                  <p className="wiki-diff__stats">{t("history.firstVersion")}</p>
+                  <pre className="wiki-diff__lines wiki-diff__whole">{firstBody.data.body}</pre>
+                </div>
+              ) : firstBody.isError ? (
+                <Callout
+                  tone="danger"
+                  role="alert"
+                  title={t("history.failed")}
+                  actions={
+                    <Button size="sm" onClick={() => void firstBody.refetch()}>
+                      {common("action.retry")}
+                    </Button>
+                  }
+                >
+                  {describe(firstBody.error)}
+                </Callout>
+              ) : (
+                <p className="page__muted" role="status">
+                  <Spinner /> {common("state.loading")}
+                </p>
+              )
             ) : diff.data === undefined ? (
               diff.isError ? (
                 <Callout

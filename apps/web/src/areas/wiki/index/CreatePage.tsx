@@ -68,6 +68,8 @@ export function CreatePageDialog({
           // Enter in the title or the folder creates the page: the form has two text fields and its
           // button sits in the dialog's footer, so the browser would not submit on its own.
           onKeyDown={(event) => {
+            // The Enter that ends an input method's composition only picks the text.
+            if (event.nativeEvent.isComposing) return;
             if (event.key === "Enter" && event.target instanceof HTMLInputElement) {
               event.preventDefault();
               submit();

@@ -78,6 +78,17 @@ describe("the wiki index", () => {
     expect(app.server.calls.filter((call) => call.method === "createWikiPage")).toHaveLength(1);
   });
 
+  test("the Enter that ends an input method's composition does not create the page", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
+    await tree();
+    await app.user.click(screen.getByRole("button", { name: "New page" }));
+    const dialog = await screen.findByRole("dialog", { name: "New page" });
+    await app.user.type(within(dialog).getByLabelText(/Title/), "Papel");
+    fireEvent.keyDown(within(dialog).getByLabelText(/Folder/), { key: "Enter", isComposing: true });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(app.server.calls.some((call) => call.method === "createWikiPage")).toBe(false);
+  });
+
   test("a vault is imported on its own: a zip picked with other files is refused", async () => {
     await renderApp({ path: PATH, signedInAs: "usr_ana" });
     await tree();

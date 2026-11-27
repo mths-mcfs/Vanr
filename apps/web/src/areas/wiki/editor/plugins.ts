@@ -91,6 +91,14 @@ export const triggerPlugin = (hooks: Hooks) =>
           },
         },
         props: {
+          // A blur is no transaction, so `update` would leave the menu open: it closes here, and comes
+          // back on the next change once the editor has the focus again.
+          handleDOMEvents: {
+            blur: () => {
+              hooks.current.trigger(null);
+              return false;
+            },
+          },
           handleKeyDown(view, event) {
             const trigger = currentTrigger(view);
             if (trigger === null || triggerKey.getState(view.state)?.dismissed === trigger.from) return false;
