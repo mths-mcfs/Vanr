@@ -1157,6 +1157,44 @@ describe("two steps on one validation", () => {
   );
 
   test(
+    "a pause that lands between the claim and the verifier's call: no paid call, and the claim is released",
+    async () => {
+      const { row } = await active("Paused mid-round", ["Docs"]);
+      await doneItems(row, ["p1"]);
+      let calls = 0;
+      const counting: Verifier = async (_deps, _row, items) => {
+        calls++;
+        return verdicts(items, true);
+      };
+      // The round's input reads the assignment's jobs after the claim: the pause lands right there.
+      let paused = false;
+      const db = new Proxy(server.deps.db, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop, target);
+          if (prop !== "select") return typeof value === "function" ? value.bind(target) : value;
+          return (...args: Parameters<typeof target.select>) =>
+            wrapQuery(target.select(...args), async (q) => {
+              if (paused || !String(q.toSQL?.().sql ?? "").includes('from "runner_jobs"')) return;
+              paused = true;
+              await server.deps.db
+                .update(assignments)
+                .set({ status: "paused" })
+                .where(eq(assignments.id, row.id));
+            });
+        },
+      });
+      await act({ ...server.deps, db, assignmentVerifier: counting }, row.id, {
+        type: "validate",
+        itemIds: ["p1"],
+        round: 1,
+      });
+      expect([paused, calls, await claimOf(row.id)]).toEqual([true, 0, undefined]);
+      await close(row.id);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "a step past the lease loses the claim to the next one, and its end doesn't release the next one's claim",
     async () => {
       const { row } = await active("Lease", ["Docs"]);

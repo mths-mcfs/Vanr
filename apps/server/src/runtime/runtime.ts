@@ -1395,6 +1395,7 @@ export class AgentRuntime implements RuntimePort {
           authorName: await this.personName(live),
         },
         personId: requesterOf(live.trigger),
+        runRunnerId: live.runner?.id ?? null,
         personStore: () => {
           if (live.person.id) live.person.pinned = true;
           return live.person.id;

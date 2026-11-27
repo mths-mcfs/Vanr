@@ -146,4 +146,45 @@ describe("the agent's runner, for whoever may use it", () => {
     },
     SERVER_TEST_MS,
   );
+  test(
+    "a run keeps the runner it started with: one swapped in mid-run isn't used, not even for a message let in",
+    async () => {
+      const ana = await signedIn(server, "Ana", "ana@runner-swap.test");
+      const { workspaceId, general } = await seedWorkspace(server, ana, "Swap");
+      const beto = await memberOf(server, workspaceId, "Beto", "beto@runner-swap.test");
+      const lia = await seedAgent(server, workspaceId, ana, "lia", [general]);
+      const anas = await pairFake(server, ana, workspaceId, { open });
+      const betos = await pairFake(server, beto, workspaceId, { open });
+      // Lia starts on Beto's runner, which Beto may use.
+      await server.deps.db.update(agents).set({ environmentId: betos.runnerId }).where(eq(agents.id, lia.id));
+      const path = `${ws(workspaceId)}/channels/${general}/messages`;
+      const post = async (who: Parameters<typeof call>[0], body: string, clientId: string) =>
+        (await call(who, "POST", path, { body, clientId })).body.id as string;
+      const long = await post(ana, `@${lia.handle} [[slow:400]] tell me a long story about bread`, "s1");
+      await waitFor(async () => server.deps.runtime.isBusy(lia.id));
+      // Mid-run, Lia's runner becomes Ana's; then Beto's command goes into the run (he may use the run's runner).
+      await server.deps.db.update(agents).set({ environmentId: anas.runnerId }).where(eq(agents.id, lia.id));
+      const steered = await post(beto, `@${lia.handle} [[tool:execute_code {"command":"${SECRET}"}]]`, "s2");
+      await settle(server);
+      const [run] = await server.deps.db.select().from(runs).where(eq(runs.sourceMessageId, long));
+      const [dispatch] = await server.deps.db
+        .select()
+        .from(schema.messageDispatches)
+        .where(eq(schema.messageDispatches.messageId, steered));
+      expect(dispatch?.runId).toBe(run?.id ?? "");
+      const execs = (r: typeof anas) =>
+        r.runner.frames.filter((f): f is Request => f.type === "request" && f.op === "exec").length;
+      expect([execs(anas), execs(betos)]).toEqual([0, 0]);
+      const results = (
+        await server.deps.db
+          .select()
+          .from(runEvents)
+          .where(eq(runEvents.runId, run?.id ?? ""))
+      ).filter((e) => e.kind === "tool_result");
+      expect(results.map((e) => String((e.data as { content: unknown }).content)).join()).toContain(
+        "Your runner was changed during this conversation",
+      );
+    },
+    SERVER_TEST_MS,
+  );
 });

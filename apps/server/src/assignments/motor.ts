@@ -1178,6 +1178,8 @@ async function judgeRound(
     };
   });
   const verifier = deps.assignmentVerifier ?? modelVerifier;
+  // Paused or closed while the input was gathered (after the claim): no paid call.
+  if ((await assignmentById(deps, row.id))?.status !== "active") return null;
   const res = await verifier(deps, row, input);
   if (!(await holds())) return null;
   // The plan as it is after the call: a fix only for an item still done, with the round that was judged.

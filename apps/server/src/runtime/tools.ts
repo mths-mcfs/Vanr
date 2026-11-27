@@ -83,6 +83,11 @@ export interface ToolContext {
   /** The person who started the run (the message's author, if a person): the origin of what the run writes. */
   personId?: string | null;
   /**
+   * The runner lent to the agent when the run started (null: none). The run's admission checked who may use
+   * that one, so the run keeps it: a runner swapped in mid-run isn't used (`runners/agent-tools.ts`).
+   */
+  runRunnerId?: string | null;
+  /**
    * Owner of the `/memories/you` store this run may use, or null: no person (routine, another agent) or
    * another person spoke in the run. Calling it pins the run to that person: from then on, a message from
    * someone else doesn't join this run and waits for its own.

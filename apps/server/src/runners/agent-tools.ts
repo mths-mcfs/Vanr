@@ -99,6 +99,11 @@ async function runnerOf(
     .where(and(eq(agents.id, ctx.agent.id), eq(agents.workspaceId, ctx.workspaceId)));
   if (!a?.environmentId)
     throw new ToolInputError("You have no runner. Ask a person to lend you one in your settings.");
+  // Swapped since the run started: who may use the new one wasn't checked for this run's messages. Fail closed.
+  if (ctx.runRunnerId !== undefined && a.environmentId !== ctx.runRunnerId)
+    throw new ToolInputError(
+      "Your runner was changed during this conversation, so this run can't use it. A new message starts a run on it.",
+    );
   const [m] = await db.select().from(runners).where(eq(runners.id, a.environmentId));
   if (!m || m.workspaceId !== ctx.workspaceId)
     throw new ToolInputError(
