@@ -236,12 +236,15 @@ export const quoteName = (name: string) =>
 
 const UNQUOTED_PART = /^[A-Za-z_\u0080-￿][A-Za-z0-9_$\u0080-￿]*$/;
 const encoder = new TextEncoder();
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 /**
  * The parts of a dotted name as SQL resolves it: an unquoted part folds (`foldName`), a quoted one keeps its case,
- * spaces and dots. Null when malformed, or when a part is longer than Postgres keeps a name (63 bytes).
+ * spaces and dots. Null when malformed, when a part is longer than Postgres keeps a name (63 bytes), or when the
+ * text holds what no Postgres name can: a NUL, or a lone surrogate that has no UTF-8 form.
  */
 function nameParts(text: string): string[] | null {
+  if (text.includes("\0") || LONE_SURROGATE.test(text)) return null;
   const parts: string[] = [];
   let i = 0;
   for (;;) {

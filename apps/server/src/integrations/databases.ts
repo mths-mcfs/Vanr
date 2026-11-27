@@ -495,7 +495,8 @@ const dbDescribe = define({
     const relation = parseRelation(table);
     if (!relation || !link.policy.tables.includes(table))
       throw new ToolInputError(`The table ${table} is not available to you.`);
-    const hidden = new Set(link.policy.maskedColumns);
+    // Each mask read the way checkPlan reads it, so a `table.column` mask hides here too.
+    const hidden = new Set(link.policy.maskedColumns.map((c) => columnKey(c) ?? c));
     const cols = await asToolError(() =>
       guarded(ctx.deps, row, 15_000, (s) =>
         s.rows(

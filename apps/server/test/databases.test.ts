@@ -182,6 +182,11 @@ describe("databases", () => {
         { tables: ["public."] },
         { maskedColumns: ["ssn"] },
         { maskedColumns: ['customers."ssn'] },
+        // No Postgres name holds a NUL or a lone surrogate: refused here, never a failed write.
+        { tables: ['"sample\u0000name"'] },
+        { tables: ['"sample\ud800name"'] },
+        { maskedColumns: ['customers."ss\u0000n"'] },
+        { maskedColumns: ['"Sales\udc00".ssn'] },
       ])
         expect(
           (await call(ana, "PUT", url(`/agents/${lia.id}/databases/${conn.id}`), { level: "read", policy }))
@@ -208,6 +213,17 @@ describe("databases", () => {
       const described = await ask("db_describe_table", { database: "Store", table: "customers" });
       expect(described).toContain("name");
       expect(described).not.toContain("ssn");
+      // A mask stored as `table.column` (no write path stores one) still hides the column in the description.
+      const stored = { ...link.body.policy, maskedColumns: ["customers.ssn"] };
+      await server.deps.db
+        .update(schema.agentDatabases)
+        .set({ policy: stored })
+        .where(eq(schema.agentDatabases.agentId, lia.id));
+      expect(await ask("db_describe_table", { database: "Store", table: "customers" })).not.toContain("ssn");
+      await server.deps.db
+        .update(schema.agentDatabases)
+        .set({ policy: link.body.policy })
+        .where(eq(schema.agentDatabases.agentId, lia.id));
       // A table with a capital letter in its name is named as in SQL, quoted.
       expect(await ask("db_describe_table", { database: "Store", table: '"Suppliers"' })).toContain(
         "company",
