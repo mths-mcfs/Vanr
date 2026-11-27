@@ -15,25 +15,6 @@ import {
 
 export type AssignmentAction = "pause" | "resume" | "start" | "stop";
 
-export interface CreateAssignmentBody {
-  agentId: string;
-  goal: string;
-  title?: string;
-  channelId: string;
-  threadId?: string;
-  commandPolicy?: T.CommandPolicy;
-  executor?: T.AssignmentExecutor;
-  runnerId?: string;
-}
-
-export interface PlanItemInput {
-  /** Absent for a new item. */
-  id?: string;
-  title: string;
-  criteria: string;
-  milestone?: string | null;
-}
-
 const Policy = s.object({ commandPolicy: C.CommandPolicy });
 
 export const assignments = {
@@ -53,17 +34,13 @@ export const assignments = {
     "POST",
     "/api/v1/workspaces/:workspaceId/assignments",
     C.Assignment,
-  ).body<CreateAssignmentBody>(),
+  ).body<T.AssignmentInput>(),
   getAssignment: e("GET", "/api/v1/workspaces/:workspaceId/assignments/:assignmentId", C.Assignment),
   updateAssignment: e(
     "PATCH",
     "/api/v1/workspaces/:workspaceId/assignments/:assignmentId",
     C.Assignment,
-  ).body<{
-    resumeJobs?: boolean;
-    limits?: Partial<T.AssignmentLimits>;
-    dueAt?: string | null;
-  }>(),
+  ).body<T.AssignmentPatch>(),
   setAssignmentResumeJobs: e(
     "PATCH",
     "/api/v1/workspaces/:workspaceId/assignments/:assignmentId",
@@ -94,12 +71,12 @@ export const assignments = {
     "POST",
     "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/close",
     C.Assignment,
-  ).body<{ outcome: "canceled" | "done"; copyToWiki?: boolean; note?: string }>(),
+  ).body<T.AssignmentCloseInput>(),
   transferAssignment: e(
     "POST",
     "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/transfer",
     s.merge(C.Assignment, s.object({ code: s.optional(s.string) })),
-  ).body<{ userId: string; lendRunner?: boolean }>(),
+  ).body<T.AssignmentTransferInput>(),
   createAssignmentMessage: e(
     "POST",
     "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/messages",
@@ -109,11 +86,7 @@ export const assignments = {
     "PUT",
     "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/runner",
     C.Assignment,
-  ).body<{
-    runnerId: string;
-    /** "" clears the folder; leaving it out keeps the current one. */
-    checkoutPath?: string;
-  }>(),
+  ).body<T.AssignmentRunnerInput>(),
   setAssignmentExecutor: e(
     "PUT",
     "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/executor",
@@ -143,7 +116,7 @@ export const assignments = {
     "PUT",
     "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/runtime",
     C.AssignmentHarness,
-  ).body<{ harness: T.AssignmentExecutor; model?: string }>(),
+  ).body<T.AssignmentHarnessInput>(),
 
   listAssignmentParticipants: e(
     "GET",
@@ -211,7 +184,7 @@ export const assignments = {
     "POST",
     "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/commands/retry",
     s.object({ rules: s.array(s.string), delivered: s.boolean }),
-  ).body<{ jobId: string; commands: string[] }>(),
+  ).body<T.AssignmentCommandRetryInput>(),
   deleteAssignmentCommandRule: e(
     "DELETE",
     "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/command-rules/:commandRuleId",
@@ -275,7 +248,7 @@ export const assignments = {
     "PUT",
     "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/plan",
     AssignmentPlan,
-  ).body<{ parentVersion: number; items: PlanItemInput[]; note?: string }>(),
+  ).body<T.AssignmentPlanInput>(),
   listAssignmentPlanVersions: e(
     "GET",
     "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/plan/versions",

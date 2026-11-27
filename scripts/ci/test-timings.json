@@ -59,6 +59,8 @@
     "apps/server/test/assignment-core.test.ts": 5553,
     "apps/server/test/assignment-engine-postgres.test.ts": 300,
     "apps/server/test/assignment-engine.test.ts": 7000,
+    "apps/server/test/assignment-routes-postgres.test.ts": 50,
+    "apps/server/test/assignments.test.ts": 16000,
     "apps/server/test/base-tools.test.ts": 6200,
     "apps/server/test/base.test.ts": 8770,
     "apps/server/test/bases-postgres.test.ts": 600,
