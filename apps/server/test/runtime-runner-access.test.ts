@@ -160,11 +160,55 @@ describe("the agent's runner, for whoever may use it", () => {
       const path = `${ws(workspaceId)}/channels/${general}/messages`;
       const post = async (who: Parameters<typeof call>[0], body: string, clientId: string) =>
         (await call(who, "POST", path, { body, clientId })).body.id as string;
-      const long = await post(ana, `@${lia.handle} [[slow:400]] tell me a long story about bread`, "s1");
-      await waitFor(async () => server.deps.runtime.isBusy(lia.id));
-      // Mid-run, Lia's runner becomes Ana's; then Beto's command goes into the run (he may use the run's runner).
-      await server.deps.db.update(agents).set({ environmentId: anas.runnerId }).where(eq(agents.id, lia.id));
-      const steered = await post(beto, `@${lia.handle} [[tool:execute_code {"command":"${SECRET}"}]]`, "s2");
+      // A barrier: Ana's run stays open (its first text step waits) until Beto's command is in it.
+      let reached!: () => void;
+      const textStep = new Promise<void>((r) => {
+        reached = r;
+      });
+      let release!: () => void;
+      const admitted = new Promise<void>((r) => {
+        release = r;
+      });
+      const { deps } = server;
+      const real = deps.db;
+      let armed = true;
+      deps.db = new Proxy(real, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop, target);
+          if (prop !== "insert") return typeof value === "function" ? value.bind(target) : value;
+          return (table: typeof runEvents) => {
+            const builder = target.insert(table);
+            if (table !== runEvents) return builder;
+            return new Proxy(builder, {
+              get(bld, p) {
+                const v = Reflect.get(bld, p, bld);
+                if (p !== "values") return typeof v === "function" ? v.bind(bld) : v;
+                return (row: { kind?: string }) => {
+                  const q = v.call(bld, row);
+                  if (!armed || row.kind !== "text") return q;
+                  armed = false;
+                  return wrapQuery(q, async () => {
+                    reached();
+                    await admitted;
+                  });
+                };
+              },
+            });
+          };
+        },
+      });
+      let long = "";
+      let steered = "";
+      try {
+        long = await post(ana, `@${lia.handle} tell me a story about bread`, "s1");
+        await textStep;
+        // Mid-run, Lia's runner becomes Ana's; then Beto's command goes into the run (he may use the run's runner).
+        await real.update(agents).set({ environmentId: anas.runnerId }).where(eq(agents.id, lia.id));
+        steered = await post(beto, `@${lia.handle} [[tool:execute_code {"command":"${SECRET}"}]]`, "s2");
+      } finally {
+        release();
+        deps.db = real;
+      }
       await settle(server);
       const [run] = await server.deps.db.select().from(runs).where(eq(runs.sourceMessageId, long));
       const [dispatch] = await server.deps.db
