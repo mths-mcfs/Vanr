@@ -36,8 +36,13 @@ export const IMAP_MAX_REPLY_BYTES = 32 * 1024 * 1024;
 
 export interface ImapFolder {
   name: string;
-  /** Special use announced by the server (RFC 6154). */
-  special: "inbox" | "sent" | "drafts" | "trash" | "archive" | "junk" | null;
+  /** Special use announced by the server (RFC 6154): the folder's one role for the screen, in a fixed order. */
+  special: FolderRole | null;
+  /**
+   * Every special use the server announced. A folder may have several (`\Sent \Trash`), and a check that cares
+   * about one role (is this a trash?) reads it here, not in `special`.
+   */
+  roles: FolderRole[];
 }
 
 export interface FetchedMessage {
@@ -68,6 +73,18 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 /** Date in the SEARCH SINCE format: 1-Oct-2026. */
 export const imapDate = (d: Date) => `${d.getUTCDate()}-${MONTHS[d.getUTCMonth()]}-${d.getUTCFullYear()}`;
 
+type FolderRole = "inbox" | "sent" | "drafts" | "trash" | "archive" | "junk";
+
+/** The special-use attributes (RFC 6154) and the role each one announces. */
+const ROLE_FLAGS: readonly [string, FolderRole][] = [
+  ["\\sent", "sent"],
+  ["\\drafts", "drafts"],
+  ["\\trash", "trash"],
+  ["\\archive", "archive"],
+  ["\\all", "archive"],
+  ["\\junk", "junk"],
+];
+
 /** Reads a LIST reply: `* LIST (\HasNoChildren \Sent) "/" "Sent"`. */
 export function parseList(line: string): ImapFolder | null {
   const m = /^\* LIST \(([^)]*)\) (?:"(?:[^"\\]|\\.)*"|NIL) (.+)$/i.exec(line);
@@ -76,21 +93,13 @@ export function parseList(line: string): ImapFolder | null {
   if (flags.includes("\\noselect") || flags.includes("\\nonexistent")) return null;
   let name = m[2].trim();
   if (name.startsWith('"')) name = name.slice(1, -1).replace(/\\(.)/g, "$1");
-  const special =
-    name.toUpperCase() === "INBOX"
-      ? "inbox"
-      : flags.includes("\\sent")
-        ? "sent"
-        : flags.includes("\\drafts")
-          ? "drafts"
-          : flags.includes("\\trash")
-            ? "trash"
-            : flags.includes("\\archive") || flags.includes("\\all")
-              ? "archive"
-              : flags.includes("\\junk")
-                ? "junk"
-                : null;
-  return { name, special };
+  const roles = [
+    ...new Set<FolderRole>([
+      ...(name.toUpperCase() === "INBOX" ? (["inbox"] as const) : []),
+      ...ROLE_FLAGS.filter(([flag]) => flags.includes(flag)).map(([, role]) => role),
+    ]),
+  ];
+  return { name, special: roles[0] ?? null, roles };
 }
 
 export class ImapClient {

@@ -4,7 +4,6 @@ import type { Db } from "@vanr/engine/db";
 import type { ModelProvider } from "@vanr/engine/models/types";
 import type { Sealer } from "@vanr/engine/seal";
 import type { PgSearchIndex } from "@vanr/engine/search-pg";
-import type { SqlConnector } from "@vanr/engine/sqlconn";
 import type { BudgetScope, UsageLedger, UsageSource } from "@vanr/engine/usage";
 import type { Context } from "hono";
 import type { AgentRow } from "./agents";
@@ -16,6 +15,7 @@ import type { Config } from "./config";
 import type { QuestionRow } from "./control";
 import type { RunEnd, RunLimits } from "./forward-types";
 import { unauthorized } from "./http";
+import type { GuardedConnector } from "./integrations/sql-identity";
 import type { Mailer } from "./mailer";
 import type { MessageRow } from "./messages";
 import type { PushSender } from "./push";
@@ -54,8 +54,8 @@ export interface AppDeps {
   sealer: Sealer;
   /** Outgoing requests (GitHub). Tests replace it with a fake one. */
   fetchExternal: typeof fetch;
-  /** Connection to the databases workspaces connect (a real Postgres; PGlite in the tests). */
-  sql: SqlConnector;
+  /** Connection to the databases workspaces connect (a real Postgres; PGlite in the tests), in guarded sessions. */
+  sql: GuardedConnector;
   /** Paired runners connected now and the RPC with them. */
   runners: RunnerHub;
   /** Web Push (VAPID): public key and encrypted sending. */
