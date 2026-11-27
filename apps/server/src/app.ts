@@ -37,6 +37,11 @@ const MULTIPART = [/\/files\/files$/, /\/files\/[^/]+\/files$/, /\/wiki\/import\
 const CREATES_USER = /^\/api\/auth\/(sign-up\/|sign-in\/social$|callback\/|oauth2\/callback\/)/;
 /** A part of a chunked upload: raw bytes. A form from another site doesn't send that type without a preflight. */
 const RAW_PART = /\/files\/uploads\/[^/]+$/;
+/**
+ * The signed webhooks: they authenticate by their secret's signature, never by the session cookie, and read the body
+ * as text, so any content-type is a sender's choice and not a CSRF risk.
+ */
+const SIGNED_HOOK = /^\/api\/v1\/hooks\//;
 
 export function createApp(
   deps: AppDeps,
@@ -98,6 +103,7 @@ export function createApp(
         !type.startsWith("application/json") &&
         !multipartOk &&
         !rawOk &&
+        !SIGNED_HOOK.test(c.req.path) &&
         !c.req.path.startsWith("/api/auth/")
       ) {
         return c.json(errorBody("unsupported_media_type", "Send JSON (application/json)"), 415);

@@ -194,6 +194,31 @@ describe("F4-3.3-P0-06: signed webhook, the webhook-id as the dedupe key, the se
   );
 
   test(
+    "the signature decides, not the content-type: a text or untyped body fires, an unsigned form is 401",
+    async () => {
+      const { ana, base, r, path } = await hookTeam();
+      const { secret } = (await call(ana, "POST", `${base}/${r.id}/webhook-secret`)).body;
+      const raw = (body: string, headers: Record<string, string>) =>
+        fetch(`${server.url}${path}`, { method: "POST", headers, body });
+      const text = "order=1";
+      const plain = await raw(text, { "content-type": "text/plain", ...signed(secret, "t1", text) });
+      expect(plain.status).toBe(202);
+      // fetch sends a string body as text/plain unless told otherwise; a Blob without a type sends none.
+      const untyped = await fetch(`${server.url}${path}`, {
+        method: "POST",
+        headers: signed(secret, "t2", text),
+        body: new Blob([text]),
+      });
+      expect(untyped.status).toBe(202);
+      const form = await raw(text, { "content-type": "application/x-www-form-urlencoded" });
+      expect([form.status, await codeOf(form)]).toEqual([401, "webhook.unsigned"]);
+      await settle();
+      expect((await runsOf(r.id)).map((x) => x.dedupeKey).sort()).toEqual(["webhook:t1", "webhook:t2"]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "the secret never shows in the routine's JSON and stays sealed in the database",
     async () => {
       const { workspaceId, ana, base, r } = await hookTeam();
