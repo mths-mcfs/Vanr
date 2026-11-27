@@ -47,7 +47,7 @@ async function team() {
       id: string;
       body: string;
       author: { type: string; id: string };
-      meta: Record<string, unknown>;
+      meta: { approvalId?: string; question?: { id: string; text: string } };
       actions: { kind: string }[];
     }[];
   return { workspaceId, w, general, sales, ana, beto, caio, lia, post, messagesIn };
@@ -236,10 +236,8 @@ describe("questions asked by a run", () => {
         askedUserId: string;
       };
       expect(question).toMatchObject({ status: "open", askedUserId: beto.user.id });
-      const card = (await messagesIn(beto, general)).find(
-        (m) => (m.meta.question as { id?: string } | undefined)?.id === question.id,
-      );
-      expect((card?.meta.question as { text: string }).text).toBe("Which color?");
+      const card = (await messagesIn(beto, general)).find((m) => m.meta.question?.id === question.id);
+      expect(card?.meta.question?.text).toBe("Which color?");
 
       // Only whoever was asked answers: Caio reads the channel, but the question is Beto's.
       const answer = (who: Person, input: unknown) =>

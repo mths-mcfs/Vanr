@@ -47,7 +47,6 @@ import { assignmentPrompt, assignmentRouting } from "../assignments/tools";
 import { type ChannelRow, channelBudgetScope, channelSpendScope } from "../channels";
 import type { AppDeps, CompleteInput, CompleteResult, RuntimePort } from "../context";
 import {
-  type ApprovalRow,
   DECISION_TTL_MS,
   publishActions,
   publishApproval,
@@ -163,7 +162,7 @@ class RunCanceled extends Error {
   }
 }
 
-/** The month's cap (the agent's or the channel's) or the execution's (`routine_run`) doesn't fit the next call: the reservation was refused. */
+/** The month's cap (the agent's or the channel's) or the execution's (`routine_run`) doesn't fit the next call: the reservation was rejected. */
 class BudgetExhausted extends Error {
   constructor(readonly scope: BudgetScope["kind"] = "agent") {
     super(
@@ -1518,7 +1517,7 @@ export class AgentRuntime implements RuntimePort {
         });
 
       let finalText = "";
-      // The advisor only through the API, and only with a valid pair; fixed for the run (the API refuses to drop
+      // The advisor only through the API, and only with a valid pair; fixed for the run (the API rejects dropping
       // the tool while its result is in the history).
       const advisor = remote ? undefined : advisorOf(live.agent);
       const maxTurns = live.limits?.maxTurns ?? MAX_TURNS;
@@ -1919,7 +1918,7 @@ export class AgentRuntime implements RuntimePort {
       workspace.context.trim() ? `# About the company\n${workspace.context.trim()}` : "",
       memory,
       skillRows.length
-        ? `# Skills (load one with load_skill before following it)\n${skillRows.map((s) => `- ${s.name}: ${s.description}`).join("\n")}`
+        ? `# Skills (load one with use_skill before following it)\n${skillRows.map((s) => `- ${s.name}: ${s.description}`).join("\n")}`
         : "",
       `# This conversation\nYou are in ${where}. Messages from people arrive as "Name (@handle): text". ` +
         "Answer in the language of the person, in plain chat style and briefly. " +
@@ -2273,7 +2272,7 @@ export class AgentRuntime implements RuntimePort {
   /**
    * The agent's spend this month against its cap: tells the owner at 80% and at the end (once a month each).
    * "exhausted" when not even one answer fits in the worst case (the whole `MAX_TOKENS` output), or when a
-   * reservation was just refused (`refused`).
+   * reservation was just rejected (`refused`).
    */
   private async budgetCheck(agent: AgentRow, rejected = false): Promise<"ok" | "warning" | "exhausted"> {
     const at = this.deps.now();
@@ -2320,7 +2319,7 @@ export class AgentRuntime implements RuntimePort {
 
   /**
    * The channel's spend this month against its cap: warns at 75% and 90% and when it runs out (or a
-   * reservation was just refused), one of each per month. Whoever asked and whoever configures the workspace
+   * reservation was just rejected), one of each per month. Whoever asked and whoever configures the workspace
    * (who can raise the cap) receive it. A channel without a cap: nothing.
    */
   private async channelBudgetCheck(channelId: string, requesterId: string | null, rejected = false) {

@@ -690,7 +690,7 @@ async function settleLost(deps: AppDeps, jobId: string): Promise<void> {
   await jobEnded(deps, j);
 }
 
-/** Gives the item back the turn a claim counted when the turn never went out (refused before the send, paused). */
+/** Gives the item back the turn a claim counted when the turn never went out (rejected before the send, paused). */
 async function refundTurn(deps: AppDeps, assignmentId: string, itemId: string): Promise<void> {
   if (!itemId) return;
   await deps.db
@@ -854,7 +854,7 @@ async function dispatch(
     } catch (err) {
       if (!(err instanceof HttpError)) throw err;
       await end("failed");
-      // Refused before anything reached the runner (offline, no runner): the item keeps its turn.
+      // Rejected before anything reached the runner (offline, no runner): the item keeps its turn.
       if (BEFORE_SEND.has(err.code)) await refundTurn(deps, row.id, item.id);
       // Another job already runs (a person asked for something): wait for it. Runner offline: try again later.
       if (err.code === "assignment.job_running") return null;
