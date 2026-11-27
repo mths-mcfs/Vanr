@@ -247,6 +247,22 @@ describe("a wiki page", () => {
     expect(within(dialog).queryByText(/same version/) === null).toBe(true);
   });
 
+  test("the first version that fails to load says so and tries again", async () => {
+    const server = newServer();
+    server.force("getWikiPageVersion", { kind: "error", status: 500, code: "internal" }, 50);
+    const app = await renderApp({ path: PAGE, signedInAs: "usr_ana", server });
+    await title();
+    await app.user.click(within(await actions(app)).getByRole("menuitem", { name: "Version history" }));
+    const dialog = await screen.findByRole("dialog", { name: "History of Press checklist" });
+    await app.user.click(within(dialog).getByRole("button", { name: /Version 1/ }));
+    const alert = await within(dialog).findByRole("alert");
+    expect(within(alert).getByText("The comparison could not be loaded")).toBeDefined();
+    expect(within(dialog).queryByText(/same version/) === null).toBe(true);
+    server.unforce("getWikiPageVersion");
+    await app.user.click(within(alert).getByRole("button", { name: "Retry" }));
+    expect(await within(dialog).findByText("The first version, as it was written:")).toBeDefined();
+  });
+
   test("who an agent wrote a page for may move it to the trash, as the server allows", async () => {
     const server = newServer();
     const ink = server.wiki.pages.find((each) => each.slug === "ink-suppliers");
