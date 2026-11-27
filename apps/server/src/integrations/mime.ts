@@ -4,7 +4,10 @@ import { HttpError } from "../http";
 
 export interface ParsedMail {
   messageId: string | null;
+  /** The From header as people read it (encoded words decoded). Never a sender's address: see `fromAddress`. */
   from: string;
+  /** The sender's address, read from the raw header before any decoding (empty when there is none). */
+  fromAddress: string;
   to: string[];
   cc: string[];
   subject: string;
@@ -162,7 +165,8 @@ export function addresses(value: string | undefined): string[] {
   // Without quoted strings and comments, a comma only separates mailboxes.
   const bare = value.replace(/"(?:[^"\\]|\\.)*"/g, " ").replace(/\([^()]*\)/g, " ");
   for (const mailbox of bare.split(",")) {
-    const angle = mailbox.match(/<([^>]*)>/);
+    // In `name <addr>` the address ends the mailbox: a display name can't add one after it.
+    const angle = [...mailbox.matchAll(/<([^>]*)>/g)].at(-1);
     const addr = (angle ? angle[1] : mailbox.match(/[^\s,;:<>"]+@[^\s,;:<>"]+/)?.[0])?.trim().toLowerCase();
     if (addr) out.push(addr);
   }
@@ -176,6 +180,8 @@ export function parseMail(raw: string): ParsedMail {
   return {
     messageId: headers.get("message-id") ?? null,
     from: decodeWords(headers.get("from") ?? ""),
+    // From the raw header: a display name in encoded words decodes to anything, an allowed address included.
+    fromAddress: addresses(headers.get("from"))[0] ?? "",
     to: addresses(headers.get("to")),
     cc: addresses(headers.get("cc")),
     subject: decodeWords(headers.get("subject") ?? ""),

@@ -123,6 +123,9 @@ describe("routine by email", () => {
       // The filter reads the sender's mailbox, not a display name that looks like an allowed address.
       mail.deliver("INBOX", incoming('"joao@client.test" <eve@far.test>', "Spoofed quoted", "x"));
       mail.deliver("INBOX", incoming("joao@client.test <eve@far.test>", "Spoofed bare", "x"));
+      // An encoded display name decodes to an allowed address (and a comma): the address comes from the raw header.
+      const encoded = `=?UTF-8?B?${Buffer.from("joao@client.test, <joao@client.test>").toString("base64")}?=`;
+      mail.deliver("INBOX", incoming(`${encoded} <eve@far.test>`, "Spoofed encoded", "x"));
       // Within the minute: it doesn't check again.
       await pollEmailRoutines(server.deps);
       await server.deps.runtime.settle();

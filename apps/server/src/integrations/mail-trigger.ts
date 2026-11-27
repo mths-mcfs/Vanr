@@ -25,7 +25,7 @@ import {
 import { quote } from "./imap";
 import { mailboxesOf, withImap } from "./mail";
 import { allowedBy } from "./mail-rules";
-import { addresses, parseMail } from "./mime";
+import { parseMail } from "./mime";
 
 const { routines, mailConnections } = schema;
 export const POLL_MS = 60_000;
@@ -139,7 +139,7 @@ async function pollOne(deps: AppDeps, row: RoutineRow): Promise<number> {
 
   const queue: { uid: number; context: RoutineContext }[] = [];
   for (const { uid, mail } of found.messages) {
-    const from = addresses(mail.from)[0] ?? "";
+    const from = mail.fromAddress;
     if (!allowedBy(policy.senderAllowlist, from)) continue;
     if (trigger.filter?.from?.length && !allowedBy(trigger.filter.from, from)) continue;
     queue.push({
