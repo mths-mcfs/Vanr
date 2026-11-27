@@ -67,7 +67,13 @@ describe("the web's own styles", () => {
     ["fg", "bg-active", "the open version of a file"],
     ["fg", "accent-wash", "the query's words marked in a snippet, a source's number"],
     ["warning-fg", "bg-canvas", "the last days of a file in the trash"],
-    ["danger-fg", "bg-sunken", "an upload that failed"],
+    ["danger-fg", "bg-sunken", "an upload that failed, a formula's errors"],
+    ["neutral-fg", "neutral-wash", "a gray option"],
+    ["info-fg", "info-wash", "a blue option"],
+    ["warning-fg", "warning-wash", "an amber option"],
+    ["success-fg", "success-wash", "a green option"],
+    ["danger-fg", "danger-wash", "a red option"],
+    ["fg", "danger-wash", "the part of a formula an error points at"],
   ];
   for (const [text, surface, where] of PAIRS) {
     for (const theme of ["light", "dark"] as const) {
