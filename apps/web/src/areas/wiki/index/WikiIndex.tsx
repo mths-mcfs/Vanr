@@ -36,7 +36,7 @@ import { AppLink, useGo, useRouteParams, useSearch } from "../../../app/navigati
 import { ScreenError, ScreenLoading, useDocumentTitle, useErrorMessage } from "../../../app/screens.tsx";
 import { useMessages } from "../../../i18n/react.tsx";
 import { useRelativeTime } from "../../../i18n/relative-time.tsx";
-import { REFRESH_MS, SEARCH_MAX } from "../shared.tsx";
+import { FOLDER_MAX, REFRESH_MS, SEARCH_MAX, TITLE_MAX } from "../shared.tsx";
 import { CreatePageDialog } from "./CreatePage.tsx";
 import { TrashDialog } from "./Trash.tsx";
 import { useWikiTransfer } from "./transfer.ts";
@@ -44,7 +44,13 @@ import { useWikiTransfer } from "./transfer.ts";
 const RECENT = 8;
 const MOST_READ = 5;
 
-const IndexAddress = z.object({ new: z.string().max(400).optional() });
+/** A [[link]] path: a folder, a slash and a title, each as long as the server takes. */
+const IndexAddress = z.object({
+  new: z
+    .string()
+    .max(FOLDER_MAX + 1 + TITLE_MAX)
+    .optional(),
+});
 type IndexAddress = z.infer<typeof IndexAddress>;
 const EMPTY: IndexAddress = {};
 

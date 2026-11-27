@@ -54,9 +54,10 @@ type Props = {
   defs: WikiPropDef[];
   editable: boolean;
   busy: boolean;
-  onMeta: (write: MetaWrite) => Promise<void>;
-  onMove: (folder: string) => Promise<void>;
-  onDefs: (defs: WikiPropDef[]) => Promise<void>;
+  onMeta: (write: MetaWrite) => Promise<unknown>;
+  onMove: (folder: string) => Promise<unknown>;
+  /** Saves the workspace's definitions; false when that failed (the failure is already shown). */
+  onDefs: (defs: WikiPropDef[]) => Promise<boolean>;
 };
 
 /** A text field that saves on Enter or on leaving it, and goes back on Escape. */
@@ -226,13 +227,14 @@ export function PropsBar({ workspaceId, page, defs, editable, busy, onMeta, onMo
             type="date"
             editable={editable}
             value={start.slice(0, 10)}
-            onSave={(next) => setValue(def, next === "" ? null : { start: next })}
+            // A time stored with the date (from the API or an import) stays when only the day changes.
+            onSave={(next) => setValue(def, next === "" ? null : { start: `${next}${start.slice(10)}` })}
           />
         );
       }
       case "select":
-      case "status":
-        return (
+      case "status": {
+        const picker = (
           <Select
             size="sm"
             aria-label={label}
@@ -248,6 +250,36 @@ export function PropsBar({ workspaceId, page, defs, editable, busy, onMeta, onMo
             ))}
           </Select>
         );
+        return (
+          <div className="wiki-props__words">
+            {picker}
+            {editable && (
+              <InlineText
+                label={t("props.newOption", { name: label })}
+                editable
+                value=""
+                onSave={(text) => {
+                  const optionName = text.trim();
+                  if (optionName === "") return;
+                  const known = def.options?.find((option) => option.name === optionName);
+                  if (known !== undefined) {
+                    setValue(def, known.id);
+                    return;
+                  }
+                  // A new option is saved on the definition first, then picked.
+                  const option = { id: newId("opt"), name: optionName };
+                  const options = [...(def.options ?? []), option];
+                  void onDefs(defs.map((each) => (each.id === def.id ? { ...def, options } : each))).then(
+                    (saved) => {
+                      if (saved) setValue(def, option.id);
+                    },
+                  );
+                }}
+              />
+            )}
+          </div>
+        );
+      }
       case "multi_select": {
         const ids = Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : [];
         const byName = new Map((def.options ?? []).map((option) => [option.name, option.id]));
@@ -266,8 +298,12 @@ export function PropsBar({ workspaceId, page, defs, editable, busy, onMeta, onMo
               ];
               const ids = next.map((each) => options.find((option) => option.name === each)?.id ?? each);
               const save = async () => {
-                if (fresh.length > 0)
-                  await onDefs(defs.map((each) => (each.id === def.id ? { ...def, options } : each)));
+                // A value never points at an option whose definition did not save.
+                if (
+                  fresh.length > 0 &&
+                  !(await onDefs(defs.map((each) => (each.id === def.id ? { ...def, options } : each))))
+                )
+                  return;
                 await onMeta({ props: { [def.id]: ids } });
               };
               void save();
@@ -297,6 +333,21 @@ export function PropsBar({ workspaceId, page, defs, editable, busy, onMeta, onMo
               {actors.map((actor) => (
                 <li key={`${actor.type}:${actor.id}`} className="wiki-props__chip">
                   {name(actor)}
+                  {editable && (
+                    <button
+                      type="button"
+                      className="wiki-props__remove"
+                      aria-label={t("props.remove", { name: name(actor) })}
+                      onClick={() =>
+                        setValue(
+                          def,
+                          actors.filter((each) => each.type !== actor.type || each.id !== actor.id),
+                        )
+                      }
+                    >
+                      <Icon icon={X} size="sm" />
+                    </button>
+                  )}
                 </li>
               ))}
             </ul>
@@ -411,7 +462,8 @@ export function PropsBar({ workspaceId, page, defs, editable, busy, onMeta, onMo
             const label = creating.name.trim();
             if (label === "") return;
             const id = newId("prop");
-            void onDefs([...defs, { id, name: label, type: creating.type }]).then(() => {
+            void onDefs([...defs, { id, name: label, type: creating.type }]).then((saved) => {
+              if (!saved) return;
               setAdded((list) => [...list, id]);
               setCreating(null);
             });

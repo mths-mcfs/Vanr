@@ -151,12 +151,18 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
     }),
     [api, create, go, resolve, workspaceId],
   );
-  const source = useMemo<EditorSource | null>(() => {
-    if (live.live !== null && live.ready && live.status !== "denied")
-      return { kind: "live", live: live.live };
-    if (p === undefined) return null;
-    return { kind: "static", body: p.body };
-  }, [live.live, live.ready, live.status, p]);
+  // Each source keeps its identity while its document is the same: a new object would make the editor
+  // again, losing the cursor and the undo history (a pin or a status change gives a new page object).
+  const liveSource = useMemo<EditorSource | null>(
+    () => (live.live === null ? null : { kind: "live", live: live.live }),
+    [live.live],
+  );
+  const body = p?.body;
+  const staticSource = useMemo<EditorSource | null>(
+    () => (body === undefined ? null : { kind: "static", body }),
+    [body],
+  );
+  const source = liveSource !== null && live.ready && live.status !== "denied" ? liveSource : staticSource;
 
   if (p === undefined) {
     if (page.isError && isApiError(page.error) && page.error.status === 404)
@@ -190,13 +196,15 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
   const agentName = (id: string) => agents.data?.find((agent) => agent.id === id)?.name;
 
   /** Runs one action of the page at a time, shows its failure, and reads the wiki again after it. */
-  const run = async (what: Exclude<Busy, null>, action: () => Promise<void>) => {
+  const run = async (what: Exclude<Busy, null>, action: () => Promise<void>): Promise<boolean> => {
     setBusy(what);
     setFailure(null);
     try {
       await action();
+      return true;
     } catch (error) {
       setFailure(error);
+      return false;
     } finally {
       setBusy(null);
       await refresh();
@@ -206,7 +214,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
   const publish = (force = false) =>
     run("publish", async () => {
       // What is still on its way to the server goes in first.
-      await settle(live.live);
+      if (!(await settle(live.live))) throw new Error(t("draft.stillSyncing"));
       try {
         const saved = await api.publishWikiPageDraft({
           workspaceId,
@@ -499,7 +507,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
             source !== null && (
               <Editor
                 // A new published text, while the live document is away, is a new read-only document.
-                key={source.kind === "live" ? "live" : `static:${p.version}`}
+                key={source.kind}
                 ref={editor}
                 source={source}
                 editable={editable}

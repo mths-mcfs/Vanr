@@ -97,6 +97,48 @@ describe("a wiki page", () => {
     expect(within(menu).queryByRole("menuitem", { name: "Move to trash" }) === null).toBe(true);
   });
 
+  test("pinning the page keeps the editor that is open: the same document, not a new one", async () => {
+    const app = await renderApp({ path: PAGE, signedInAs: "usr_ana" });
+    const text = await screen.findByRole("textbox", { name: "Text of Press checklist" });
+    await app.user.click(within(await actions(app)).getByRole("menuitem", { name: "Unpin" }));
+    await waitFor(() => expect(app.server.wiki.pages[0]?.pinned).toBe(false));
+    await within(await actions(app)).findByRole("menuitem", { name: "Pin" });
+    await app.user.keyboard("{Escape}");
+    expect(text.isConnected).toBe(true);
+    expect(screen.getByRole("textbox", { name: "Text of Press checklist" })).toBe(text);
+  });
+
+  test("a new option of a select property is saved on its definition, then picked", async () => {
+    const app = await renderApp({ path: PAGE, signedInAs: "usr_ana" });
+    await title();
+    await app.user.click(screen.getByRole("button", { name: "Add a property" }));
+    await app.user.click(await screen.findByRole("menuitem", { name: "Stage" }));
+    await app.user.type(
+      await screen.findByRole("textbox", { name: "New option for Stage" }),
+      "Review{Enter}",
+    );
+    await waitFor(() =>
+      expect(app.server.wiki.defs.get("workspace_birchwood")?.defs[1]?.options?.map((o) => o.name)).toEqual([
+        "Draft",
+        "Live",
+        "Review",
+      ]),
+    );
+    const review = app.server.wiki.defs.get("workspace_birchwood")?.defs[1]?.options?.[2]?.id;
+    await waitFor(() => expect(app.server.wiki.pages[0]?.props.prop_stage).toBe(review));
+  });
+
+  test("the side panel says when its links failed, and tries again", async () => {
+    const server = newServer();
+    server.force("getWikiPagePanel", { kind: "error", status: 500, code: "internal" }, 50);
+    const app = await renderApp({ path: PAGE, signedInAs: "usr_ana", server });
+    expect(await screen.findByText("The links could not be loaded")).toBeDefined();
+    server.unforce("getWikiPagePanel");
+    const side = screen.getByRole("complementary", { name: "About this page" });
+    await app.user.click(within(side).getByRole("button", { name: "Retry" }));
+    expect(await within(side).findByRole("link", { name: "Ink suppliers" })).toBeDefined();
+  });
+
   test("a locked page reads only for a member: its title is not a field", async () => {
     await renderApp({ path: `${WIKI}/holidays`, signedInAs: "usr_iris" });
     expect(await screen.findByRole("heading", { level: 1, name: "Holidays" })).toBeDefined();

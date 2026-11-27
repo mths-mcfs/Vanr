@@ -42,6 +42,7 @@ export default {
     one: "{count} file could not be imported.",
     other: "{count} files could not be imported.",
   },
+  "import.vaultAlone": "Import a vault on its own: pick one .zip and nothing else.",
   "import.failed": "The import stopped",
   "export.action": "Export as .zip",
   "export.failed": "The wiki could not be exported",
@@ -159,6 +160,7 @@ export default {
   "draft.conflictBody": "Version {version} came out while this draft was open. Your changes are still here.",
   "draft.publishOver": "Publish over version {version}",
   "draft.publishFailed": "The draft could not be published. It is still here.",
+  "draft.stillSyncing": "Some changes are still syncing, so nothing was published. Try again in a moment.",
   "draft.saveFailed": "The draft could not be saved. It is still here.",
 
   "slash.label": "Turn into",
@@ -186,6 +188,7 @@ export default {
   "props.none": "Empty",
   "props.addPerson": "Add a person or agent",
   "props.files": { one: "{count} file", other: "{count} files" },
+  "props.newOption": "New option for {name}",
   "props.addProperty": "Add a property",
   "props.newProperty": "New property…",
   "props.newName": "Property name",
@@ -212,6 +215,7 @@ export default {
   "side.state.missing": "no page",
   "side.state.trashed": "in the trash",
   "side.state.broken_anchor": "heading gone",
+  "side.failed": "The links could not be loaded",
   "side.reads": "Who reads it",
   "side.readCount": { one: "Read {count} time", other: "Read {count} times" },
 

@@ -271,6 +271,7 @@ export class FakeServer {
     this.bases.bases = [];
     this.wiki.pages = [];
     this.wiki.reads = [];
+    this.wiki.defs = new Map();
     if (name === "empty") return;
     const inDays = (days: number) => new Date(this.now().getTime() + days * DAY_MS);
     const people: [string, string, string][] = [

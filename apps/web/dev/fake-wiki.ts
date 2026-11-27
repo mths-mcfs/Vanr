@@ -59,14 +59,16 @@ export function slugify(title: string): string {
 
 export class FakeWiki {
   pages: FakePage[] = [];
-  defs: { defs: T.WikiPropDef[]; version: number } = { defs: [], version: 0 };
+  /** Each workspace's property definitions, with the version a write must name. */
+  defs = new Map<string, { defs: T.WikiPropDef[]; version: number }>();
   reads: T.WikiTopRead[] = [];
 
   constructor(private readonly host: FilesHost & { nameOf?: (userId: string) => string | undefined }) {}
 
   seed(): void {
     this.pages = [];
-    this.defs = {
+    this.defs = new Map();
+    this.defs.set("workspace_birchwood", {
       version: 1,
       defs: [
         { id: "prop_owner", name: "Owner", type: "text" },
@@ -80,7 +82,7 @@ export class FakeWiki {
           ],
         },
       ],
-    };
+    });
     const ana: T.ActorRef = { type: "person", id: "usr_ana" };
     const scout: T.ActorRef = { type: "agent", id: "agt_scout" };
     const at = (days: number) => new Date(this.host.now().getTime() - days * DAY_MS).toISOString();
@@ -228,6 +230,19 @@ export class FakeWiki {
     return this.live(workspaceId).find((page) => page.slug === slug);
   }
 
+  private defsOf(workspaceId: string) {
+    return this.defs.get(workspaceId) ?? { defs: [], version: 0 };
+  }
+
+  /** The title's slug, or the first free `-2`, `-3`… in the workspace (the trash counts). */
+  private freeSlug(workspaceId: string, title: string): string {
+    const base = slugify(title);
+    let slug = base;
+    for (let n = 2; this.pages.some((page) => page.workspaceId === workspaceId && page.slug === slug); n++)
+      slug = `${base}-${n}`;
+    return slug;
+  }
+
   private summary(page: FakePage): T.WikiPageSummary {
     const last = page.versions.at(-1) as Version;
     return {
@@ -368,13 +383,7 @@ export class FakeWiki {
       createWikiPage: within((scope, params) => {
         const title = text(params.title)?.trim() ?? "";
         if (title === "") return fail(400, "invalid_request", "A title is needed");
-        let slug = slugify(title);
-        for (
-          let n = 2;
-          this.pages.some((page) => page.workspaceId === scope.workspaceId && page.slug === slug);
-          n++
-        )
-          slug = `${slugify(title)}-${n}`;
+        const slug = this.freeSlug(scope.workspaceId, title);
         const page: FakePage = {
           workspaceId: scope.workspaceId,
           slug,
@@ -574,12 +583,14 @@ export class FakeWiki {
           this.reads.filter((read) => this.find(scope.workspaceId, read.slug) !== undefined),
         ),
       ),
-      listWikiProps: within(() => reply(200, this.defs)),
-      setWikiProps: within((_scope, params) => {
-        if (params.parentVersion !== this.defs.version)
+      listWikiProps: within((scope) => reply(200, this.defsOf(scope.workspaceId))),
+      setWikiProps: within((scope, params) => {
+        const current = this.defsOf(scope.workspaceId);
+        if (params.parentVersion !== current.version)
           return fail(409, "wiki.props_changed", "The properties changed");
-        this.defs = { defs: (params.defs as T.WikiPropDef[]) ?? [], version: this.defs.version + 1 };
-        return reply(200, this.defs);
+        const next = { defs: (params.defs as T.WikiPropDef[]) ?? [], version: current.version + 1 };
+        this.defs.set(scope.workspaceId, next);
+        return reply(200, next);
       }),
       setWikiPageAccess: onPage((scope, page, params) => {
         if (!admin(scope) && page.versions[0]?.author.id !== scope.user.id)
@@ -675,7 +686,7 @@ export class FakeWiki {
           const folder = file.path.split("/").slice(0, -1).join("/");
           this.pages.push({
             workspaceId: scope.workspaceId,
-            slug: slugify(`${folder} ${title}`),
+            slug: this.freeSlug(scope.workspaceId, title),
             title,
             folder,
             tags: [],

@@ -67,6 +67,33 @@ describe("the wiki index", () => {
     expect(await screen.findByRole("textbox", { name: "Page title" })).toBeDefined();
   });
 
+  test("Enter in any field of the form creates the page", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
+    await tree();
+    await app.user.click(screen.getByRole("button", { name: "New page" }));
+    const dialog = await screen.findByRole("dialog", { name: "New page" });
+    await app.user.type(within(dialog).getByLabelText(/Title/), "Paper stock");
+    await app.user.type(within(dialog).getByLabelText(/Folder/), "Print{Enter}");
+    await waitFor(() => expect(app.address()).toBe(`${PATH}/paper-stock`));
+    expect(app.server.calls.filter((call) => call.method === "createWikiPage")).toHaveLength(1);
+  });
+
+  test("a vault is imported on its own: a zip picked with other files is refused", async () => {
+    await renderApp({ path: PATH, signedInAs: "usr_ana" });
+    await tree();
+    fireEvent.change(screen.getByTestId("wiki-import"), {
+      target: {
+        files: [
+          new File(["zip"], "vault.zip", { type: "application/zip" }),
+          new File(["note"], "note.md", { type: "text/markdown" }),
+        ],
+      },
+    });
+    expect(
+      await screen.findByText("Import a vault on its own: pick one .zip and nothing else."),
+    ).toBeDefined();
+  });
+
   test("a title is needed before a page can be created", async () => {
     const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
     await tree();

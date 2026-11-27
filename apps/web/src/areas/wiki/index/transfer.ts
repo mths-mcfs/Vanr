@@ -77,8 +77,10 @@ export function useWikiTransfer(workspaceId: string) {
     setImporting(true);
     setNotice(null);
     try {
-      const zip = files.find((file) => file.name.toLowerCase().endsWith(".zip"));
-      await (zip === undefined ? importNotes(files) : importVault(zip));
+      const zips = files.filter((file) => file.name.toLowerCase().endsWith(".zip"));
+      // A vault comes alone: one zip, with nothing else picked beside it.
+      if (zips.length > 0 && files.length > 1) setNotice({ tone: "danger", title: t("import.vaultAlone") });
+      else await (zips[0] === undefined ? importNotes(files) : importVault(zips[0]));
     } catch (error) {
       setNotice({ tone: "danger", title: t("import.failed"), detail: describe(error) });
     } finally {

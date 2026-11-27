@@ -24,10 +24,16 @@ describe("the wiki's pieces", () => {
     expect(plan.skipped).toBe(1);
   });
 
-  test("a batch closes before it passes 20 million characters", () => {
+  test("a batch closes before its JSON passes 24 MB, counted in UTF-8 bytes", () => {
     const big = (n: number) => ({ path: `big-${n}.md`, text: "x".repeat(500_000) });
-    const plan = importBatches(Array.from({ length: 41 }, (_, n) => big(n)));
-    expect(plan.batches.map((batch) => batch.length)).toEqual([40, 1]);
+    expect(importBatches(Array.from({ length: 49 }, (_, n) => big(n))).batches.map((b) => b.length)).toEqual([
+      47, 2,
+    ]);
+    // Two bytes a letter: half as many notes fit.
+    const accented = (n: number) => ({ path: `acc-${n}.md`, text: "é".repeat(500_000) });
+    expect(
+      importBatches(Array.from({ length: 30 }, (_, n) => accented(n))).batches.map((b) => b.length),
+    ).toEqual([23, 7]);
   });
 
   test("a link path is a folder and a title", () => {
