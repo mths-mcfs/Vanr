@@ -33,6 +33,25 @@ describe("access, comments and proposals", () => {
     );
   });
 
+  test("after a revoked read who reads the page can no longer be changed from it", async () => {
+    FakeCollabSocket.instances = [];
+    FakeCollabSocket.nextScope = "read-write";
+    FakeCollabSocket.autoOpen = true;
+    FakeCollabSocket.failHandshake = false;
+    const app = await renderApp({
+      path: `${WIKI}/ink-suppliers`,
+      signedInAs: "usr_ana",
+      wikiSocket: FakeCollabSocket as unknown as new (url: string) => WebSocket,
+    });
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Version 1 published"));
+    app.server.force("getWikiPage", { kind: "error", status: 404, code: "not_found" }, 50);
+    await act(async () => FakeCollabSocket.instances[0]?.serverClose(4403, "access-revoked"));
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Read only"));
+    await app.user.click(screen.getByRole("button", { name: "Page actions" }));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).queryByRole("menuitem", { name: "Who reads it…" }) === null).toBe(true);
+  });
+
   test("someone who did not create a page is not offered who reads it", async () => {
     const app = await renderApp({ path: PAGE, signedInAs: "usr_iris" });
     await screen.findByRole("textbox", { name: "Page title" });

@@ -398,7 +398,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
                 {p.locked ? t("page.unlock") : t("page.lock")}
               </MenuItem>
             )}
-            {p.accessEditable && (
+            {p.accessEditable && !denied && (
               <MenuItem icon={<Icon icon={Users} />} onSelect={() => setSharing(true)}>
                 {t("access.open")}
               </MenuItem>
