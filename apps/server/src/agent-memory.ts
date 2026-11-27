@@ -287,8 +287,11 @@ export async function changeMemory(
     op: MemoryVersionRow["op"];
     expectedSha256?: string;
     expectArchived?: boolean;
-    /** The path the caller saw (a move in between changes another file than the one it meant). */
-    expectedPath?: string;
+    /**
+     * The path the caller saw (a move in between changes another file than the one it meant). `null`: it had no
+     * path (a remembered note) and must still have none; omitted: not checked.
+     */
+    expectedPath?: string | null;
     /** Only the right store (the agent's tool doesn't change an item of another store). */
     store?: Store;
   },
