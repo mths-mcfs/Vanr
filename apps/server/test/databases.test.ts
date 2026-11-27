@@ -454,4 +454,46 @@ describe("the guard and the network rule on a connected database", () => {
     },
     SERVER_TEST_MS,
   );
+
+  test(
+    "a catalog that can't be read fails the first read link instead of saving an empty policy",
+    async () => {
+      const { ana, lia, ask, url } = await team();
+      const conn = (await call(ana, "POST", url("/databases"), { ...connectInput, label: "Flaky" })).body
+        .connection;
+      const down: GuardedConnector = async () => {
+        throw new Error("connection refused");
+      };
+      await withConnector(down, async () => {
+        const res = await call(ana, "PUT", url(`/agents/${lia.id}/databases/${conn.id}`), { level: "read" });
+        expect([res.status, res.body.error.code]).toEqual([400, "database.unreachable"]);
+      });
+      expect((await call(ana, "GET", url(`/agents/${lia.id}/databases`))).body.databases).toEqual([]);
+      // Back up: the same request reads the catalog and gives the tables.
+      const link = await call(ana, "PUT", url(`/agents/${lia.id}/databases/${conn.id}`), { level: "read" });
+      expect(link.body.policy.tables).toContain("public.customers");
+      expect(await ask("db_list_tables", { database: "Flaky" })).toContain("public.orders");
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "two result columns with one name are rejected instead of showing one value twice",
+    async () => {
+      const { ana, lia, ask, url } = await team();
+      const conn = (await call(ana, "POST", url("/databases"), { ...connectInput, label: "Twins" })).body
+        .connection;
+      await call(ana, "PUT", url(`/agents/${lia.id}/databases/${conn.id}`), { level: "read" });
+      expect(
+        await ask("db_query", { database: "Twins", sql: "select id as v, name as v from customers" }),
+      ).toBe("Two result columns have the same name; give each one its own alias.");
+      expect(
+        await ask("db_query", {
+          database: "Twins",
+          sql: "select id as a, name as b from customers order by id",
+        }),
+      ).toBe("2 row(s)\na\tb\n1\tJoana\n2\tRui");
+    },
+    SERVER_TEST_MS,
+  );
 });

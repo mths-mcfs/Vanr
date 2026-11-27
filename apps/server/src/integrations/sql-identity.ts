@@ -247,12 +247,15 @@ const timeoutSql = (ms: number) => `set local statement_timeout = ${Math.max(100
 
 /** A real Postgres, one connection per use (the caller closes it), to the checked address with the name for TLS. */
 export const postgresGuardedConnector: GuardedConnector = async (t) => {
+  // postgres.js splits a host string on `:` for a port, which cuts an IPv6 address: a one-element list goes to
+  // the address as is (its types only declare the string form).
+  const to = { host: [t.address ?? t.host], port: [t.port] } as unknown as { host: string; port: number };
   const sql = postgres({
-    host: t.address ?? t.host,
-    port: t.port,
+    ...to,
     database: t.database,
     username: t.username,
-    password: t.password,
+    // A function, so an empty password stays empty: a string "" falls back to the installation's PGPASSWORD.
+    password: () => t.password,
     ssl:
       t.sslmode === "disable"
         ? false

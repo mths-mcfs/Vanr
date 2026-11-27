@@ -306,7 +306,8 @@ export const databasePolicyInput = z
 
 /** The first time: every table there is now, the suggested columns hidden, 200 queries a day. */
 async function defaultPolicy(deps: AppDeps, row: DatabaseRow): Promise<schema.DatabasePolicyRow> {
-  const tables = await tablesOf(deps, row).catch(() => [] as DatabaseTable[]);
+  // A catalog read that fails fails the request: a policy saved empty would never read the catalog again.
+  const tables = await tablesOf(deps, row);
   return {
     tables: tables.map((t) => `${t.schema}.${t.name}`.toLowerCase()),
     maskedColumns: row.hiddenSuggestion,
@@ -539,6 +540,12 @@ const dbQuery = define({
     if ("error" in outcome) return { content: outcome.error, isError: true };
     if ("failure" in outcome) return { content: explainFailure(outcome.failure), isError: true };
     const { fields, rows } = outcome.result;
+    // Rows come as objects by column name: two columns with one name would show the last value twice.
+    if (new Set(fields).size !== fields.length)
+      return {
+        content: "Two result columns have the same name; give each one its own alias.",
+        isError: true,
+      };
     const shown = rows.slice(0, ROW_CAP);
     const lines = [fields.join("\t"), ...shown.map((r) => fields.map((f) => cell(r[f])).join("\t"))];
     const more = rows.length > ROW_CAP ? `\n[only the first ${ROW_CAP} rows]` : "";

@@ -126,10 +126,10 @@ function visible(policy: schema.MailPolicyRow, mail: ParsedMail, now: Date): boo
     !(mail.fromAddress && allowedBy(policy.senderAllowlist, mail.fromAddress))
   )
     return false;
-  if (policy.lookbackDays !== null && mail.date) {
-    const at = new Date(mail.date);
-    if (!Number.isNaN(at.getTime()) && now.getTime() - at.getTime() > policy.lookbackDays * 86_400_000)
-      return false;
+  // With a day window, a message without a readable date is outside it (fail closed).
+  if (policy.lookbackDays !== null) {
+    const at = mail.date ? new Date(mail.date).getTime() : Number.NaN;
+    if (Number.isNaN(at) || now.getTime() - at > policy.lookbackDays * 86_400_000) return false;
   }
   return true;
 }
@@ -140,9 +140,11 @@ async function readOne(
   folder: string,
   uid: number,
   now: Date,
+  /** Opens the folder for writing: the change then acts on the message checked here, in the same selection. */
+  writable = false,
 ) {
   folderAllowed(policy, folder);
-  await imap.open(folder, true);
+  await imap.open(folder, !writable);
   const [msg] = await imap.fetch([uid], 262_144);
   if (!msg) throw new ToolInputError(`No message ${uid} in ${folder}.`);
   const mail = parseMail(msg.raw);
@@ -277,10 +279,14 @@ const mailFolders = define({
     const b = await pick(ctx, input.account, "folders");
     const folders = await withImap(ctx.deps, b.account, (imap) => imap.folders());
     const allowed = b.box.policy.folders;
-    return folders
-      .filter((f) => allowed.length === 0 || allowed.includes(f.name))
-      .map((f) => `${f.name}${f.special ? ` (${f.special})` : ""}`)
-      .join("\n");
+    // The names come from the mail server: they count as outside content for the run's next calls.
+    return {
+      content: folders
+        .filter((f) => allowed.length === 0 || allowed.includes(f.name))
+        .map((f) => `${f.name}${f.special ? ` (${f.special})` : ""}`)
+        .join("\n"),
+      reads: READ_UNTRUSTED(`mail_folders ${input.account}`),
+    };
   },
 });
 
@@ -390,6 +396,7 @@ const mailDraft = define({
     });
     const folder = await withImap(ctx.deps, b.account, async (imap) => {
       const drafts = await folderByRole(imap, "drafts", "Drafts");
+      folderAllowed(b.box.policy, drafts);
       await imap.append(drafts, raw, "\\Draft \\Seen");
       return drafts;
     });
@@ -416,8 +423,7 @@ const mailOrganize = define({
     const b = await pick(ctx, input.account, "organize");
     if (input.moveTo) folderAllowed(b.box.policy, input.moveTo);
     await withImap(ctx.deps, b.account, async (imap) => {
-      await readOne(imap, b.box.policy, input.folder, input.uid, ctx.deps.now());
-      await imap.open(input.folder, false);
+      await readOne(imap, b.box.policy, input.folder, input.uid, ctx.deps.now(), true);
       if (input.markRead) await imap.addFlags(input.uid, "\\Seen");
       if (input.flag) await imap.addFlags(input.uid, "\\Flagged");
       if (input.moveTo) await imap.move(input.uid, input.moveTo);
@@ -621,9 +627,9 @@ const mailDelete = define({
   async run(ctx, input) {
     const b = await pick(ctx, input.account, "delete");
     await withImap(ctx.deps, b.account, async (imap) => {
-      await readOne(imap, b.box.policy, input.folder, input.uid, ctx.deps.now());
       const trash = await folderByRole(imap, "trash", "Trash");
-      await imap.open(input.folder, false);
+      folderAllowed(b.box.policy, trash);
+      await readOne(imap, b.box.policy, input.folder, input.uid, ctx.deps.now(), true);
       await imap.move(input.uid, trash);
     });
     return "Moved to the trash.";

