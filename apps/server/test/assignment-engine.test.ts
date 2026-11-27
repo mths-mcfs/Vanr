@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { type Db, schema } from "@vanr/engine/db";
 import { and, eq } from "drizzle-orm";
 import { type AssignmentRow, moveAssignment } from "../src/assignments/core";
-import { createAssignment } from "../src/assignments/engine";
+import { createAssignment, jobEnded, settleJob } from "../src/assignments/engine";
 import { jobIdOf, workIdOf } from "../src/assignments/keys";
 import {
   type AssignmentEngine,
@@ -19,7 +19,8 @@ import {
   runtimeReady,
   type Snapshot,
 } from "../src/assignments/motor";
-import { writePlan } from "../src/assignments/plan";
+import { planOf, writePlan } from "../src/assignments/plan";
+import { proofsOf } from "../src/assignments/proofs";
 import type { RunningServer } from "../src/server";
 import { agentRuntime, pairRunner, passing, seedAgent } from "./assignment-kit";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
@@ -519,6 +520,105 @@ describe("the engine on its loop", () => {
       expect([p1?.status, p1?.turns]).toEqual(["doing", 1]);
       for (const t of runtime.turns.slice(before)) runtime.finish(t.runId);
       await server.deps.runtime.settle();
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a job's end processed again after a crash records the item, the proofs and the cost, once",
+    async () => {
+      const row = await onRunner("Runner", ["A", "B"]);
+      // The runner as executor; the assignment stays proposed (the engine doesn't step in).
+      const mk = async (id: string, itemId: string, denied: string[] = []) => {
+        const now = new Date();
+        const [job] = await server.deps.db
+          .insert(runnerJobs)
+          .values({
+            id,
+            workspaceId,
+            runnerId: runner.runnerId,
+            agentId: row.agentId,
+            assignmentId: row.id,
+            title: `job ${itemId}`,
+            executor: "claude_code",
+            prompt: "x",
+            status: "done",
+            files: ["src/a.ts"],
+            diff: "diff --git a/src/a.ts b/src/a.ts\n+ok",
+            result: "done",
+            usage: {
+              inputTokens: 1000,
+              outputTokens: 500,
+              cachedTokens: 0,
+              cacheWriteTokens: 0,
+              costUsd: null,
+              model: "x",
+            },
+            denied,
+            planItemId: itemId,
+            startedAt: now,
+            endedAt: now,
+          })
+          .returning();
+        if (!job) throw new Error("no job");
+        return job;
+      };
+      const costOf = async () =>
+        (
+          await server.deps.db
+            .select()
+            .from(schema.usageLines)
+            .where(eq(schema.usageLines.assignmentId, row.id))
+        ).length;
+      const itemOf = async (id: string) => (await planOf(server.deps, row.id)).find((i) => i.id === id);
+
+      // Crash: the first pass recorded the end's event and died before the rest.
+      const crashed = await mk(`aj_crash_${row.id}`, "p1");
+      await server.deps.db.insert(assignmentEvents).values({
+        assignmentId: row.id,
+        key: `${row.id}:job:${crashed.id}`,
+        kind: "job_done",
+        actor: { type: "agent", id: row.agentId },
+        itemId: "p1",
+        data: {},
+        at: new Date(),
+      });
+      // What the engine does in `reap`, twice (the second changes nothing).
+      for (let i = 0; i < 2; i++) {
+        await jobEnded(server.deps, crashed);
+        await settleJob(server.deps, crashed);
+      }
+      expect((await itemOf("p1"))?.status).toBe("done");
+      const proofs = await proofsOf(server.deps, row.id);
+      expect(
+        proofs
+          .filter((p) => p.itemId === "p1")
+          .map((p) => p.kind)
+          .sort(),
+      ).toEqual(["diff", "files"]);
+      expect(await costOf()).toBe(1);
+      const [settled] = await server.deps.db.select().from(runnerJobs).where(eq(runnerJobs.id, crashed.id));
+      expect(settled?.settledAt).not.toBeNull();
+
+      // A crash after the blocked command's card: the second pass makes neither another card nor another cost.
+      const blocked = await mk(`aj_blocked_${row.id}`, "p2", ["rm -rf build"]);
+      await server.deps.db.insert(schema.assignmentCommands).values({
+        id: `acmd_${row.id}`,
+        assignmentId: row.id,
+        jobId: blocked.id,
+        command: "rm -rf build",
+        tool: "Bash",
+        rules: [],
+      });
+      await jobEnded(server.deps, blocked);
+      await jobEnded(server.deps, blocked);
+      const cards = await server.deps.db
+        .select()
+        .from(schema.assignmentCommands)
+        .where(eq(schema.assignmentCommands.jobId, blocked.id));
+      expect(cards).toHaveLength(1);
+      expect(await costOf()).toBe(2);
+      expect((await itemOf("p2"))?.status).toBe("todo");
     },
     SERVER_TEST_MS,
   );

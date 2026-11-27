@@ -1076,7 +1076,7 @@ export class LocalEngine implements AssignmentEngine {
   async start(): Promise<void> {
     const deps = this.getDeps();
     if (!runtimeReady(deps)) {
-      log.warn("assignment.engine_waiting_for_runtime", { kind: this.kind });
+      log.info("assignment.engine_waiting_for_runtime", { kind: this.kind });
       return;
     }
     this.started = true;
@@ -1180,7 +1180,7 @@ export class DbosEngine implements AssignmentEngine {
   async start(): Promise<void> {
     const deps = this.getDeps();
     if (!runtimeReady(deps)) {
-      log.warn("assignment.engine_waiting_for_runtime", { kind: this.kind });
+      log.info("assignment.engine_waiting_for_runtime", { kind: this.kind });
       return;
     }
     assignmentWorkflow();
