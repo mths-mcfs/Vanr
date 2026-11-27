@@ -516,7 +516,8 @@
       grid-template-columns: minmax(0, 1fr) auto;
     }
 
-    .files__row > .files__meta:not(time) {
+    /* On a phone a file's line keeps its name and what it is; a deleted one keeps its days left. */
+    .files__row > .files__meta:not(.files__ear):not(.files__days) {
       display: none;
     }
 
