@@ -506,7 +506,7 @@ describe("content tools", () => {
   );
 
   test(
-    "Debates: a suggestion in the chat; opening without the runtime writes nothing; reading what both see",
+    "Debates: a suggestion in the chat; opening at once runs the turns; reading what both see",
     async () => {
       const { workspaceId: ws, general, ana, lia, call, cards } = await team();
       const rui = await seedAgent(server, ws, ana, { name: "Rui", channels: [general] });
@@ -529,16 +529,23 @@ describe("content tools", () => {
         server.deps.db.select().from(schema.debates).where(eq(schema.debates.workspaceId, ws));
       expect(await debates()).toEqual([]);
 
-      // opening at once needs the agents' turns (the runtime): rejected before anything is written
+      // Opening at once: the debate opens, and the agents' turns run on the runtime.
       const opened = await call("open_debate", {
         title: "Deadline",
         goal: "Set it",
         agents: [rui.handle],
         open: true,
       });
-      expect(opened.isError).toBe(true);
-      expect(opened.content).toContain("not available");
-      expect(await debates()).toEqual([]);
+      expect(opened.isError).toBe(false);
+      await server.deps.runtime.settle();
+      const [deadline] = await debates();
+      expect(deadline).toMatchObject({ title: "Deadline", agentIds: [rui.id] });
+      const turns = await server.deps.db
+        .select()
+        .from(schema.debatePosts)
+        .where(and(eq(schema.debatePosts.debateId, deadline?.id ?? ""), eq(schema.debatePosts.kind, "turn")));
+      expect(turns.map((p) => p.author.id)).toContain(rui.id);
+      await server.deps.db.delete(schema.debates).where(eq(schema.debates.id, deadline?.id ?? ""));
       expect((await call("open_debate", { title: "x", goal: "y", agents: ["@ghost"] })).content).toBe(
         "No agent @ghost",
       );

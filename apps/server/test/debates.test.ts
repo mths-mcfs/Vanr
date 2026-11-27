@@ -1,19 +1,14 @@
 // Ported from the origin's debate tests, through routes/debates. An agent's turn and the synthesis ask the runtime
-// for a text (slice S6): until then the debate's advance stops at that step and the debate waits, so the
-// scenarios that need an agent to speak keep only what happens before it (the ledger lists the rest). An agent's
-// answer is saved the way its turn saves it (`answerRound`), to see what the routes show of it.
+// for a text, which answers with the test's script (`script`): the debate calls follow it, anything else is the
+// fake model.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { ActorRef } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
+import { fakeProvider } from "@vanr/engine/models/fake";
+import type { ModelRequest } from "@vanr/engine/models/types";
 import { and, eq, sql } from "drizzle-orm";
-import {
-  answerRound,
-  type DebatePostRow,
-  debateById,
-  POST_CHARS,
-  TRANSCRIPT_CHARS,
-  transcript,
-} from "../src/debates";
+import { textProvider } from "../src/debate-benchmark";
+import { type DebatePostRow, debateById, POST_CHARS, TRANSCRIPT_CHARS, transcript } from "../src/debates";
 import type { RunningServer } from "../src/server";
 import {
   Browser,
@@ -26,9 +21,31 @@ import {
 import { addToChannel, call, seedAgent, ws } from "./route-calls";
 import { memberOf, type Person, seedChannel, seedWorkspace } from "./seed";
 
+const lastText = (req: ModelRequest) =>
+  req.messages
+    .at(-1)
+    ?.content.flatMap((c) => (c.type === "text" ? [c.text] : []))
+    .join("") ?? "";
+/** An agent's turn: the argument, then the position as the debate protocol reads it. */
+const position = (answer: string) =>
+  `I say ${answer}.\n${JSON.stringify({ answer, confidence: 0.7, reason: "", evidence: [] })}`;
+/** What a debate call answers, by the agent's name, the round (null: the synthesis). */
+type Script = (agent: string, round: number | null) => string;
+const byName: Script = (agent) => position(agent.toLowerCase());
+let script: Script = byName;
+
 let server: RunningServer;
 beforeAll(async () => {
-  server = await startTestServer();
+  const scripted = textProvider((req) => {
+    const agent = /^You are (\S+)/.exec(req.system)?.[1] ?? "?";
+    const round = /^Round (\d+)/.exec(lastText(req));
+    return script(agent, round ? Number(round[1]) : null);
+  });
+  const fake = fakeProvider();
+  const debateCall = (req: ModelRequest) => /^(Round \d+ of|Write the synthesis)/.test(lastText(req));
+  server = await startTestServer({
+    modelProvider: { kind: "fake", stream: (req) => (debateCall(req) ? scripted : fake).stream(req) },
+  });
 }, SERVER_TEST_MS);
 afterAll(() => server.stop(), SERVER_TEST_MS);
 
@@ -341,42 +358,21 @@ describe("anonymity through the routes", () => {
     async () => {
       const { workspaceId, base, open, ana, beto, lia, rui } = await team();
       const socket = await TestSocket.open(beto.browser, workspaceId);
+      // A new answer every round: the table never settles, so it stays open while the routes are tried.
+      script = (agent, round) => position(`${agent === "Lia" ? "yes" : "no"} ${round}`);
       const t = await open(ana, {
         title: "Masked",
         goal: "Who said it?",
         agentIds: [lia.id, rui.id],
-        rounds: 2,
+        rounds: 5,
         speakers: [
           { type: "agent", id: lia.id },
           { type: "agent", id: rui.id },
           { type: "person", id: beto.user.id },
         ],
       });
+      // The agents answer round 0 through the runtime.
       await settle();
-      // The agents answer round 0 the way their turn does (the runtime's, S6).
-      const row = await debateById(server.deps.db, workspaceId, t.id);
-      const claim = (answer: string) => ({
-        answer,
-        key: answer,
-        confidence: 0.7,
-        reason: "",
-        evidence: [],
-        changed: false,
-      });
-      for (const [agent, answer] of [
-        [lia, "yes"],
-        [rui, "no"],
-      ] as const) {
-        const who: ActorRef = { type: "agent", id: agent.id };
-        expect(
-          await answerRound(server.deps, row, who, {
-            kind: "turn",
-            body: `I say ${answer}`,
-            claimData: claim(answer),
-            runId: `run_${agent.handle}`,
-          }),
-        ).not.toBeNull();
-      }
       // Beto's answer closes round 0: the hidden posts open together, under pseudonyms.
       const [hiddenPost] = await server.deps.db
         .select()
@@ -443,17 +439,26 @@ describe("anonymity through the routes", () => {
       expect(leaks(events)).toEqual([]);
       socket.close();
 
-      // Concluding keeps it masked until the synthesis closes it; canceling closes it and shows who spoke.
-      expect(leaks((await call(ana, "POST", `${base}/${t.id}/conclude`)).body)).toEqual([]);
+      // Canceling closes it and shows who spoke.
+      const turnRuns = (
+        await server.deps.db.select().from(schema.debatePosts).where(eq(schema.debatePosts.debateId, t.id))
+      ).flatMap((p) => (p.kind === "turn" && p.runId ? [p.runId] : []));
+      expect(turnRuns.length).toBeGreaterThanOrEqual(2);
+      script = byName;
       const canceled = (await call(ana, "POST", `${base}/${t.id}/cancel`)).body;
       expect(canceled.anonymous).toBe(false);
       // The check sees an author when there is one: closed, both agents and their runs show.
-      expect(leaks(canceled).sort()).toEqual([...agentIds, "run_lia", "run_rui"].sort());
+      const shown = new Set(leaks(canceled));
+      for (const id of agentIds) expect(shown.has(id)).toBe(true);
+      expect(turnRuns.filter((r) => shown.has(r)).length).toBeGreaterThanOrEqual(2);
       expect(
-        canceled.posts
-          .filter((p: { kind: string }) => p.kind === "turn")
-          .map((p: { author: ActorRef }) => p.author.id)
-          .sort(),
+        [
+          ...new Set(
+            canceled.posts
+              .filter((p: { kind: string }) => p.kind === "turn")
+              .map((p: { author: ActorRef }) => p.author.id),
+          ),
+        ].sort(),
       ).toEqual(agentIds.sort());
     },
     SERVER_TEST_MS,
@@ -466,6 +471,7 @@ describe("anonymity when the table changes", () => {
     async () => {
       const { workspaceId, general, base, open, ana, beto, lia, rui } = await team();
       const eva = await seedAgent(server, workspaceId, ana, "eva", [general]);
+      script = (agent, round) => position(`answer ${round}.${agent}`);
       const t = await open(ana, {
         title: "Recast",
         goal: "Who joined?",
@@ -479,33 +485,12 @@ describe("anonymity when the table changes", () => {
       });
       await settle();
       /**
-       * One round: each agent still in the queue answers the way its turn does (each its own answer, a new one
-       * every round, so the table neither agrees nor settles and goes on), then Beto closes it.
+       * One round: each agent in the queue answered through the runtime (each its own answer, a new one every
+       * round, so the table neither agrees nor settles and goes on); then Beto closes it.
        */
       let played = 0;
-      const round = async (agents: { id: string }[]) => {
+      const round = async (_agents: { id: string }[]) => {
         played++;
-        for (const [i, agent] of agents.entries()) {
-          const answer = `answer ${played}.${i}`;
-          const row = await debateById(server.deps.db, workspaceId, t.id);
-          await answerRound(
-            server.deps,
-            row,
-            { type: "agent", id: agent.id },
-            {
-              kind: "turn",
-              body: "neutral",
-              claimData: {
-                answer,
-                key: answer,
-                confidence: 0.7,
-                reason: "",
-                evidence: [],
-                changed: played > 1,
-              },
-            },
-          );
-        }
         const closing = await call(beto, "POST", `${base}/${t.id}/posts`, {
           body: "neutral",
           answer: `mine ${played}`,
@@ -522,6 +507,12 @@ describe("anonymity when the table changes", () => {
       const oldLabels = new Set(before.map((p) => p.pseudonym));
       expect(oldLabels.size).toBe(2);
 
+      // Every post written so far, the ones still hidden in the round now open too: they keep the old labels.
+      const existing = new Set(
+        (
+          await server.deps.db.select().from(schema.debatePosts).where(eq(schema.debatePosts.debateId, t.id))
+        ).map((p) => p.id),
+      );
       const added = await call(ana, "PUT", `${base}/${t.id}/participants`, { agentsToAdd: [eva.id] });
       expect(added.status).toBe(200);
       expect(added.body).toMatchObject({ anonymous: true, pseudonyms: null });
@@ -532,13 +523,14 @@ describe("anonymity when the table changes", () => {
           .select()
           .from(schema.debatePosts)
           .where(eq(schema.debatePosts.debateId, t.id));
-        if (posts.some((p) => p.author.id === eva.id)) break;
+        // Shown: a post of the round still open is hidden until it closes.
+        if (posts.some((p) => p.author.id === eva.id && !p.hiddenUntilRoundEnd)) break;
         await round([lia, rui, eva]);
       }
       const after = await turns();
       // What was published keeps its label.
       for (const p of before) expect(after.find((q) => q.id === p.id)?.pseudonym).toBe(p.pseudonym);
-      const later = after.filter((p) => !before.some((q) => q.id === p.id));
+      const later = after.filter((p) => !existing.has(p.id));
       for (const p of later) expect(p.author).toBeNull();
       // After the change, the three agents show under three labels the debate never showed before: none is "the
       // one label that is new", so the newcomer's posts look like anyone's.
@@ -553,6 +545,7 @@ describe("anonymity when the table changes", () => {
         .map((p: Shown) => p.pseudonym);
       expect(evaLabels.length).toBeGreaterThan(0);
       for (const label of evaLabels) expect(newLabels.has(label)).toBe(true);
+      script = byName;
     },
     SERVER_TEST_MS,
   );
@@ -592,6 +585,7 @@ describe("anonymity when an agent leaves", () => {
       const eva = await seedAgent(server, workspaceId, ana, "eva", [general]);
       const socket = await TestSocket.open(beto.browser, workspaceId);
       const voters = [lia, rui, eva];
+      script = (agent) => position(agent === "Lia" ? "yes" : "no");
       const t = await open(ana, {
         title: "Leaver",
         goal: "Who left?",
@@ -602,22 +596,8 @@ describe("anonymity when an agent leaves", () => {
           { type: "person", id: beto.user.id },
         ],
       });
+      // The agents answer round 0 through the runtime.
       await settle();
-      const row = await debateById(server.deps.db, workspaceId, t.id);
-      for (const [i, agent] of voters.entries()) {
-        const answer = i === 0 ? "yes" : "no";
-        await answerRound(
-          server.deps,
-          row,
-          { type: "agent", id: agent.id },
-          {
-            kind: "turn",
-            body: "neutral",
-            claimData: { answer, key: answer, confidence: 0.7, reason: "", evidence: [], changed: false },
-            runId: `run_${agent.handle}`,
-          },
-        );
-      }
       expect(
         (await call(beto, "POST", `${base}/${t.id}/posts`, { body: "neutral", answer: "no" })).status,
       ).toBe(201);
@@ -640,7 +620,11 @@ describe("anonymity when an agent leaves", () => {
 
       // Who sits at the table is public; who said what isn't. Outside the table's fields, no agent id or run id.
       const table = new Set(["agentIds", "speakers", "leadAgentId", "engagedAgentIds"]);
-      const secrets = [...voters.map((a) => a.id), ...voters.map((a) => `run_${a.handle}`)];
+      const voterRuns = (
+        await server.deps.db.select().from(schema.debatePosts).where(eq(schema.debatePosts.debateId, t.id))
+      ).flatMap((p) => (p.kind === "turn" && p.runId ? [p.runId] : []));
+      expect(voterRuns.length).toBeGreaterThanOrEqual(3);
+      const secrets = [...voters.map((a) => a.id), ...voterRuns];
       const leaked = (value: unknown) => {
         const text = JSON.stringify(value, (k, v) => (table.has(k) ? undefined : v));
         return secrets.filter((s) => text.includes(s));
@@ -669,6 +653,7 @@ describe("anonymity when an agent leaves", () => {
       // The check bites: once the debate closes, the posts show their authors.
       const canceled = (await call(ana, "POST", `${base}/${t.id}/cancel`)).body;
       expect(leaked(canceled)).toEqual(expect.arrayContaining([lia.id, rui.id, eva.id]));
+      script = byName;
     },
     SERVER_TEST_MS,
   );
@@ -712,9 +697,9 @@ describe("an answer when closing its notice fails", () => {
       }
       expect(failed).toBe(true);
       await settle();
-      // The only voter answered: the round closed and the debate went on to its synthesis.
+      // The only voter answered: the round closed and the debate went on to its synthesis, which the lead wrote.
       const row = await debateById(server.deps.db, workspaceId, t.id);
-      expect([row.round, row.phase, row.endReason]).toEqual([0, "concluding", "unanimous"]);
+      expect([row.round, row.status, row.endReason]).toEqual([0, "done", "unanimous"]);
     },
     SERVER_TEST_MS,
   );
@@ -741,8 +726,18 @@ describe("debates: who may call each route", () => {
   test(
     "another workspace, a non-member, a signed-out caller, the wrong role and a private channel are rejected",
     async () => {
-      const { workspaceId, general, base, open, ana, beto, lia } = await team();
-      const t = await open(ana, { title: "Guarded", goal: "x", agentIds: [lia.id], rounds: 1 });
+      const { workspaceId, general, base, open, ana, beto, caio, lia } = await team();
+      // Caio at the table keeps it open while the routes are tried.
+      const t = await open(ana, {
+        title: "Guarded",
+        goal: "x",
+        agentIds: [lia.id],
+        rounds: 1,
+        speakers: [
+          { type: "agent", id: lia.id },
+          { type: "person", id: caio.user.id },
+        ],
+      });
       await settle();
       const [m] = await server.deps.db
         .insert(schema.messages)

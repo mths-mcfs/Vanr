@@ -1,27 +1,43 @@
-// Ported from the origin's debate v1 tests. The rounds, claims and the benchmark that need an agent to speak go
-// through the runtime (a later slice); src/debates.test.ts and src/debate-extras.test.ts cover them without it.
-// Through routes/debates here: part B of the harness (the verdict, the blind read and the decision metrics, on a
-// debate whose rounds were answered the way the agents' turns answer them and whose synthesis is the one the lead's
-// call writes) and the comment of whoever isn't on their turn.
+// Ported from the origin's debate v1 tests, through routes/debates: part B of the harness (the verdict, the blind
+// read and the decision metrics, on a debate the agents play through the runtime with the test's script) and the
+// comment of whoever isn't on their turn.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { ActorRef } from "@vanr/contract";
-import { schema } from "@vanr/engine/db";
-import { eq } from "drizzle-orm";
-import {
-  answerRound,
-  challengeContext,
-  type DebatePostRow,
-  debateById,
-  scheduleAdvance,
-} from "../src/debates";
+import { fakeProvider } from "@vanr/engine/models/fake";
+import type { ModelRequest } from "@vanr/engine/models/types";
+import { textProvider } from "../src/debate-benchmark";
+import { challengeContext, type DebatePostRow, debateById } from "../src/debates";
 import type { RunningServer } from "../src/server";
-import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
+import { SERVER_TEST_MS, signedIn, startTestServer, waitFor } from "./harness";
 import { call, seedAgent, ws } from "./route-calls";
 import { memberOf, seedWorkspace } from "./seed";
 
+const lastText = (req: ModelRequest) =>
+  req.messages
+    .at(-1)
+    ?.content.flatMap((c) => (c.type === "text" ? [c.text] : []))
+    .join("") ?? "";
+const position = (answer: string) =>
+  `I argue for ${answer}.\n${JSON.stringify({ answer, confidence: 0.6, reason: "", evidence: [] })}`;
+/** What a debate call answers, by the agent's name and the round (null: the synthesis). */
+type Script = (agent: string, round: number | null) => string | Promise<string>;
+let script: Script = (agent) => position(agent.toLowerCase());
+/** Each debate call, as it came in. */
+const calls: { agent: string; round: number | null }[] = [];
+
 let server: RunningServer;
 beforeAll(async () => {
-  server = await startTestServer();
+  const scripted = textProvider(async (req) => {
+    const agent = /^You are (\S+)/.exec(req.system)?.[1] ?? "?";
+    const round = /^Round (\d+)/.exec(lastText(req));
+    const at = round ? Number(round[1]) : null;
+    calls.push({ agent, round: at });
+    return script(agent, at);
+  });
+  const fake = fakeProvider();
+  const debateCall = (req: ModelRequest) => /^(Round \d+ of|Write the synthesis)/.test(lastText(req));
+  server = await startTestServer({
+    modelProvider: { kind: "fake", stream: (req) => (debateCall(req) ? scripted : fake).stream(req) },
+  });
 }, SERVER_TEST_MS);
 afterAll(() => server.stop(), SERVER_TEST_MS);
 
@@ -35,36 +51,6 @@ async function team() {
   const beto = await memberOf(server, workspaceId, "Beto", email("beto"));
   const agent = (handle: string) => seedAgent(server, workspaceId, ana, handle);
   return { workspaceId, ana, beto, agent, base: `${ws(workspaceId)}/debates` };
-}
-
-const claim = (answer: string, changed = false) => ({
-  answer,
-  key: answer,
-  confidence: null,
-  reason: "",
-  evidence: [],
-  changed,
-});
-
-/** Answers the debate's current round for an agent, as its turn does (the turn itself is the runtime's, S6). */
-async function agentAnswers(
-  workspaceId: string,
-  debateId: string,
-  agentId: string,
-  answer: string,
-  changed = false,
-) {
-  const row = await debateById(server.deps.db, workspaceId, debateId);
-  const who: ActorRef = { type: "agent", id: agentId };
-  const done = await answerRound(server.deps, row, who, {
-    kind: "turn",
-    body: `I argue for ${answer}.`,
-    claimData: claim(answer, changed),
-  });
-  if (!done) throw new Error("not the agent's turn");
-  // After the turn the debate moves on (the round closes once everyone answered).
-  scheduleAdvance(server.deps, debateId);
-  await settle();
 }
 
 describe("debates v1: rounds, claim and majority", () => {
@@ -122,29 +108,18 @@ describe("debates v1: harness (P0-07)", () => {
       expect((await call(ana, "GET", `${base}/${open.id}/review`)).body.error.code).toBe("debate.not_done");
       await call(ana, "POST", `${base}/${open.id}/cancel`);
 
+      // Round 0 splits, round 1 agrees (Back changes its position); the lead writes the synthesis.
+      script = (agent, round) => {
+        if (round === null) return JSON.stringify({ summary: "Debate summary", decision: "Go" });
+        if (agent === "Go") return position("go");
+        return position(round === 0 ? "stay" : "go");
+      };
       const t = (
         await call(ana, "POST", base, { title: "Trip", goal: "Go?", agentIds: [a.id, b.id], rounds: 1 })
       ).body;
       await settle();
-      // Round 0 splits, round 1 agrees (Back changes its position).
-      await agentAnswers(workspaceId, t.id, a.id, "go");
-      await agentAnswers(workspaceId, t.id, b.id, "stay");
-      await agentAnswers(workspaceId, t.id, a.id, "go");
-      await agentAnswers(workspaceId, t.id, b.id, "go", true);
-      // The lead's synthesis is a model call (S6): the state it leaves when the round ends unanimous.
-      await server.deps.db
-        .update(schema.debates)
-        .set({
-          status: "done",
-          phase: null,
-          endReason: "unanimous",
-          synthesis: {
-            format: "decision",
-            revision: 1,
-            structured: { summary: "Debate summary", decision: "Go" },
-          },
-        })
-        .where(eq(schema.debates.id, t.id));
+      const played = await debateById(server.deps.db, workspaceId, t.id);
+      expect([played.status, played.endReason]).toEqual(["done", "unanimous"]);
 
       // Only whoever runs it accepts or reverts.
       expect((await call(beto, "POST", `${base}/${t.id}/verdict`, { action: "accept" })).status).toBe(403);
@@ -208,10 +183,20 @@ describe("debates v1: attacks on the anonymity and the visibility", () => {
     async () => {
       const { workspaceId, ana, beto, agent, base } = await team();
       const [a, b] = [await agent("ari"), await agent("bia")];
+      // The agents' turns wait for the test: the queue stays as it is while Beto posts.
+      let release!: () => void;
+      const held = new Promise<void>((r) => {
+        release = r;
+      });
+      const before = calls.length;
+      script = async (who) => {
+        await held;
+        return position(who.toLowerCase());
+      };
       const t = (
         await call(ana, "POST", base, { title: "Outside", goal: "x", agentIds: [a.id, b.id], rounds: 1 })
       ).body;
-      await settle();
+      await waitFor(async () => calls.length - before >= 2);
       // Beto isn't at the table: asking for a round is rejected; commenting stays free.
       const asked = await call(beto, "POST", `${base}/${t.id}/posts`, {
         body: "one more!",
@@ -225,6 +210,9 @@ describe("debates v1: attacks on the anonymity and the visibility", () => {
       expect(row.userIds).toContain(beto.user.id);
       expect(row.roundLimit).toBe(1);
       expect(row.pendingSpeakers.map((s) => s.id).sort()).toEqual([a.id, b.id].sort());
+      release();
+      await settle();
+      script = (who) => position(who.toLowerCase());
     },
     SERVER_TEST_MS,
   );
