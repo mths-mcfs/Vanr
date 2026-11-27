@@ -6,10 +6,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { eq } from "drizzle-orm";
+import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import sharp from "sharp";
 import { purgeTrash } from "../src/drive";
 import { extractPending } from "../src/drive-extract";
-import { expireUploads, PART_SIZE } from "../src/routes/drive-upload";
+import { expireUploads, PART_SIZE, uploadFolder } from "../src/routes/drive-upload";
 import type { RunningServer } from "../src/server";
 import { makeDocx, makePdf, makePng, makePptx, makeXlsx } from "./files";
 import { Browser, body, signedIn, startTestServer, waitFor } from "./harness";
@@ -884,7 +887,7 @@ test("the running server removes expired staging files and trash after 30 days",
     const session = await body(
       await ana.browser.json(`${W(workspaceId)}/files/uploads`, "POST", { fileName: "left.bin", size: 1 }),
     );
-    const staging = `${(await import("node:os")).tmpdir()}/vanr-uploads/${session.id}`;
+    const staging = join(uploadFolder("memory"), session.id);
     expect(await Bun.file(staging).exists()).toBe(true);
     const file = await uploaded(ana, workspaceId, "discarded", "old.txt");
     await ana.browser.json(`${W(workspaceId)}/files/${file.id}`, "DELETE");
@@ -899,3 +902,23 @@ test("the running server removes expired staging files and trash after 30 days",
     await running.stop();
   }
 }, 30_000);
+
+describe("where open uploads are kept", () => {
+  test("in memory, each server keeps them in its own working folder, never in a folder the machine shares", async () => {
+    const { workspaceId, ana } = await team();
+    const start = await ana.browser.json(`${W(workspaceId)}/files/uploads`, "POST", {
+      fileName: "kept.txt",
+      size: 4,
+    });
+    const session = await body(start);
+    expect(existsSync(join(process.cwd(), ".data", "uploads", session.id))).toBe(true);
+    expect(existsSync(join(tmpdir(), "vanr-uploads", session.id))).toBe(false);
+    await ana.browser.json(`${W(workspaceId)}/files/uploads/${session.id}`, "DELETE");
+  });
+
+  test("two servers in memory with different working folders get different folders; a data dir keeps its own", () => {
+    expect(uploadFolder("memory", "/srv/one")).toBe(join("/srv/one", ".data", "uploads"));
+    expect(uploadFolder("memory", "/srv/two")).not.toBe(uploadFolder("memory", "/srv/one"));
+    expect(uploadFolder("/var/vanr")).toBe(join("/var/vanr", "uploads"));
+  });
+});

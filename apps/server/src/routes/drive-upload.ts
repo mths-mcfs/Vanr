@@ -4,7 +4,6 @@
 // version); repeating "complete" returns the same result.
 
 import { mkdir, open, readdir, rm, statfs } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { UploadSession } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
@@ -33,8 +32,13 @@ const STUCK_COMPLETE_MS = 10 * 60_000;
 /** Space left on the disk after reserving the file. */
 const DISK_MARGIN = 512 * 1024 * 1024;
 
-const uploadDir = (deps: AppDeps) =>
-  deps.config.dataDir === "memory" ? join(tmpdir(), "vanr-uploads") : join(deps.config.dataDir, "uploads");
+/**
+ * Where the parts of open uploads are kept. In memory the folder is the server's working folder's
+ * `.data`, as for mail, so two servers on one machine (E2E workers among them) never share it.
+ */
+export const uploadFolder = (dataDir: string, cwd = process.cwd()) =>
+  join(dataDir === "memory" ? join(cwd, ".data") : dataDir, "uploads");
+const uploadDir = (deps: AppDeps) => uploadFolder(deps.config.dataDir);
 const stagingPath = (deps: AppDeps, id: string) => join(uploadDir(deps), id);
 
 function toSession(row: SessionRow): UploadSession {
