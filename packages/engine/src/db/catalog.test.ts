@@ -8,6 +8,7 @@ import postgres from "postgres";
 import { type Catalog, type CatalogQuery, readCatalog } from "./catalog";
 import expected from "./fixtures/catalog.json";
 import basesRelations from "./fixtures/catalog-bases-relations.json";
+import messageEffects from "./fixtures/catalog-message-effects.json";
 import wikiAnnotations from "./fixtures/catalog-wiki-annotations.json";
 import { MIGRATIONS_DIR, openDb } from "./index";
 
@@ -17,7 +18,7 @@ import { MIGRATIONS_DIR, openDb } from "./index";
 // historical catalog plus those additions.
 const fixture: Catalog = expected;
 /** What each migration after the initial one adds, in the order of the journal. */
-const additions: Partial<Catalog>[] = [basesRelations, wikiAnnotations];
+const additions: Partial<Catalog>[] = [basesRelations, wikiAnnotations, messageEffects];
 
 const sections = [
   "extensions",

@@ -89,6 +89,11 @@ export const messages = pgTable(
     replyCount: integer("reply_count").notNull().default(0),
     lastReplyAt: ts("last_reply_at"),
     editedAt: ts("edited_at"),
+    /**
+     * Written true with the post and cleared once its effects ran (the search, the events, the thread, the
+     * notices and, for a person's post, the join and the routing): a resend of its clientId runs what's missing.
+     */
+    effectsPending: boolean("effects_pending").notNull().default(false),
     createdAt: createdAt(),
   },
   (t) => [

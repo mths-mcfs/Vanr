@@ -917,6 +917,40 @@ jobs:
           fi
         env:
           VANR_TEST_DROP_LOCKS: "1"
+      # The runtime's admission per conversation (in memory, so PGlite shows it): the mutant takes it out of the
+      # source, and two messages at once must open two runs and messages steered while the run ends be lost.
+      - name: The forced admission tests fail without the conversation's admission
+        run: |
+          set +e
+          bun test --preload ./apps/server/test/drop-admission.ts apps/server/test/runtime-durability.test.ts --test-name-pattern forced > forced-admission.log 2>&1
+          status=$?
+          cat forced-admission.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the forced admission tests passed without the admission"
+            exit 1
+          fi
+          if ! grep -aqF "drop-admission: the conversation's admission is left out" forced-admission.log; then
+            echo "::error::the mutant was not applied"
+            exit 1
+          fi
+          for broken in CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -aqF "$broken" forced-admission.log; then
+              echo "::error::the forced admission tests broke ($broken) instead of failing on their outcome"
+              exit 1
+            fi
+          done
+          set -- admission readmit
+          for label in "$@"; do
+            if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" forced-admission.log; then
+              echo "::error::the forced $label test did not fail on its outcome without the admission"
+              exit 1
+            fi
+          done
+          failed=$(grep -a '^(fail) ' forced-admission.log | sed -E 's/^\(fail\) //; s/ \[[0-9.]+m?s\]$//' | sort -u)
+          if printf '%s\n' "$failed" | grep -qv forced; then
+            echo "::error::a test outside the forced ones failed without the admission: $failed"
+            exit 1
+          fi
       # The agent's assignment and runner tools: reports at once all land in the notes, and requests for a
       # person in the browser at once make one.
       - run: bun test apps/server/test/agent-tools-postgres.test.ts

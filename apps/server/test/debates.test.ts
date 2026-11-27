@@ -8,7 +8,14 @@ import { fakeProvider } from "@vanr/engine/models/fake";
 import type { ModelRequest } from "@vanr/engine/models/types";
 import { and, eq, sql } from "drizzle-orm";
 import { textProvider } from "../src/debate-benchmark";
-import { type DebatePostRow, debateById, POST_CHARS, TRANSCRIPT_CHARS, transcript } from "../src/debates";
+import {
+  type DebatePostRow,
+  debateById,
+  POST_CHARS,
+  resumeDebates,
+  TRANSCRIPT_CHARS,
+  transcript,
+} from "../src/debates";
 import type { RunningServer } from "../src/server";
 import {
   Browser,
@@ -69,6 +76,69 @@ async function team() {
   };
   return { workspaceId, general, ana, beto, caio, lia, rui, base, open };
 }
+
+describe("a turn's paid call", () => {
+  test(
+    "a round resumed after a fall between an agent's answer and its post posts the recorded answer, without a second call",
+    async () => {
+      const { open, ana, lia } = await team();
+      let calls = 0;
+      let armed = false;
+      script = (agent, round) => {
+        if (agent === "Lia" && round === 0 && ++calls === 1) armed = true;
+        return byName(agent, round);
+      };
+      // The fall: the post's write fails once, right after the answer came back.
+      const real = server.deps.db;
+      server.deps.db = new Proxy(real, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop, target);
+          if (prop !== "transaction") return typeof value === "function" ? value.bind(target) : value;
+          return (fn: (tx: unknown) => Promise<unknown>) =>
+            target.transaction((tx) =>
+              fn(
+                new Proxy(tx, {
+                  get(t, p) {
+                    const v = Reflect.get(t, p, t);
+                    if (p !== "insert") return typeof v === "function" ? v.bind(t) : v;
+                    return (table: unknown) => {
+                      if (armed && table === schema.debatePosts) {
+                        armed = false;
+                        throw new Error("fell before the post");
+                      }
+                      return t.insert(table as typeof schema.debatePosts);
+                    };
+                  },
+                }),
+              ),
+            );
+        },
+      });
+      try {
+        const created = await open(ana, {
+          title: "Paid once?",
+          goal: "Decide",
+          agentIds: [lia.id],
+          rounds: 0,
+          speakers: [{ type: "agent", id: lia.id }],
+        });
+        await settle();
+        expect(calls).toBe(1);
+        await resumeDebates(server.deps);
+        await settle();
+        const posts = await server.deps.db
+          .select()
+          .from(schema.debatePosts)
+          .where(and(eq(schema.debatePosts.debateId, created.id), eq(schema.debatePosts.kind, "turn")));
+        expect([calls, posts.map((p) => p.body)]).toEqual([1, ["I say lia."]]);
+      } finally {
+        server.deps.db = real;
+        script = byName;
+      }
+    },
+    SERVER_TEST_MS,
+  );
+});
 
 describe("debates", () => {
   test(

@@ -502,10 +502,15 @@ describe("who answers a post", () => {
       expect([again.status, again.body.id]).toEqual([200, accepted.body.id]);
       await settle(server);
       expect(await answeredBy(server, accepted.body.id)).toEqual([]);
-      // A first request that failed after the post was written left Beto outside: the resend has him join.
+      // A first request that failed after the post was written (before its join and routing) left Beto outside
+      // and the post unsettled: the resend has him join, and routes it then.
       await server.deps.db
         .delete(schema.channelMemberships)
         .where(eq(schema.channelMemberships.memberId, beto.user.id));
+      await server.deps.db
+        .update(schema.messages)
+        .set({ effectsPending: true })
+        .where(eq(schema.messages.id, accepted.body.id));
       const resent = await call(beto, "POST", `${w}/channels/${open}/messages`, {
         body: "hi all",
         clientId: "r-1",
@@ -513,6 +518,8 @@ describe("who answers a post", () => {
       expect(resent.status).toBe(200);
       const joined = (await call(ana, "GET", `${w}/channels/${open}/members`)).body.members;
       expect(joined.map((m: { id: string }) => m.id)).toContain(beto.user.id);
+      await settle(server);
+      expect(await answeredBy(server, accepted.body.id)).toEqual([lia.id]);
 
       const other = await seedChannel(server, workspaceId, { name: "other", members: [ana] });
       const caio = await memberOf(server, workspaceId, "Caio", email("caio"));

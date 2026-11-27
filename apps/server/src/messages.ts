@@ -36,6 +36,7 @@ const {
 } = schema;
 
 export type MessageRow = typeof messages.$inferSelect;
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
 export const EXCERPT = 140;
 export const excerpt = (body: string) => (body.length > EXCERPT ? `${body.slice(0, EXCERPT - 1)}…` : body);
@@ -320,7 +321,15 @@ export interface PostMessageInput {
   meta?: MessageMeta;
   runId?: string | null;
   usage?: MessageRow["usage"];
+  /** The caller's part of the post (a person's join and routing): see `PostEffects`. */
+  then?: PostEffects;
 }
+
+/**
+ * The caller's part of a post, run after the post's own effects. A resend of the clientId runs it again while
+ * the post isn't settled (a first request that failed before or inside it); once it resolves, the post is.
+ */
+export type PostEffects = (message: Message) => Promise<void>;
 
 export interface PostedMessage {
   message: Message;
@@ -332,7 +341,7 @@ export async function postMessage(deps: AppDeps, input: PostMessageInput): Promi
   const { workspaceId, channel, author } = input;
   if (input.clientId) {
     const existing = await byClientId(db, channel.id, author.id, input.clientId);
-    if (existing) return { message: await hydrateOne(db, existing), created: false };
+    if (existing) return { message: await resumePost(deps, existing, channel, input.then), created: false };
   }
 
   let root: MessageRow | null = null;
@@ -376,42 +385,97 @@ export async function postMessage(deps: AppDeps, input: PostMessageInput): Promi
 
   let row: MessageRow;
   try {
-    const [inserted] = await db
-      .insert(messages)
-      .values({
-        id: newId("msg"),
-        workspaceId,
-        channelId: channel.id,
-        threadId: root?.id ?? null,
-        authorKind: author.type,
-        authorId: author.id,
-        body: input.body,
-        meta,
-        clientId: input.clientId,
-        runId: input.runId ?? null,
-        agentMentionIds,
-        mentionedUserIds,
-        usage: input.usage ?? null,
-      })
-      .returning();
-    if (!inserted) throw new Error("insert returned nothing");
-    row = inserted;
+    const insert = async (q: Db | Tx) => {
+      const [inserted] = await q
+        .insert(messages)
+        .values({
+          id: newId("msg"),
+          workspaceId,
+          channelId: channel.id,
+          threadId: root?.id ?? null,
+          authorKind: author.type,
+          authorId: author.id,
+          body: input.body,
+          meta,
+          clientId: input.clientId,
+          runId: input.runId ?? null,
+          agentMentionIds,
+          mentionedUserIds,
+          usage: input.usage ?? null,
+          effectsPending: true,
+        })
+        .returning();
+      if (!inserted) throw new Error("insert returned nothing");
+      return inserted;
+    };
+    const thread = root;
+    // A reply's count on the root goes in with the reply: the one effect that isn't safe to run twice.
+    row = thread
+      ? await db.transaction(async (tx) => {
+          const inserted = await insert(tx);
+          await countReply(tx, thread, deps.now());
+          return inserted;
+        })
+      : await insert(db);
   } catch (err) {
     // Two sends of the same clientId at once: the unique index picks one and the other returns it.
     if (input.clientId && isUniqueViolation(err)) {
       const existing = await byClientId(db, channel.id, author.id, input.clientId);
-      if (existing) return { message: await hydrateOne(db, existing), created: false };
+      if (existing) return { message: await resumePost(deps, existing, channel, input.then), created: false };
     }
     throw err;
   }
-
   const message = toMessage(row);
-  await reindex(deps, { kind: "message", id: row.id });
-  deps.hub.toChannel(channel.id, { type: "message.posted", message });
-  if (!row.threadId) await announceUnread(deps, channel.id, author);
-  if (root) await touchThread(deps, { root, reply: row, author });
-  await notifyForMessage(deps, { row, channel, author });
+  await settlePost(deps, row, message, channel, root, input.then);
   return { message, created: true };
+}
+
+/** Posts settling in this process now: a resend that comes meanwhile leaves them to the request that posted. */
+const settling = new Set<string>();
+
+/**
+ * A resend of a post already written: what the first request left undone runs now (it failed, or the server fell
+ * in the middle), unless that request is still at it. Returns the message as it is.
+ */
+export async function resumePost(
+  deps: AppDeps,
+  row: MessageRow,
+  channel: ChannelRow,
+  then?: PostEffects,
+): Promise<Message> {
+  if (row.effectsPending && !settling.has(row.id)) {
+    const root = row.threadId ? await messageInWorkspace(deps.db, row.workspaceId, row.threadId) : null;
+    await settlePost(deps, row, toMessage(row), channel, root, then);
+  }
+  return hydrateOne(deps.db, row);
+}
+
+/**
+ * The post's effects, then the caller's; the post is settled once they all ran. Each one is safe to run again on a
+ * resend except the notices, whose count a resend after a failure past them can raise once more.
+ */
+async function settlePost(
+  deps: AppDeps,
+  row: MessageRow,
+  message: Message,
+  channel: ChannelRow,
+  root: MessageRow | null,
+  then: PostEffects | undefined,
+) {
+  if (settling.has(row.id)) return;
+  settling.add(row.id);
+  try {
+    const author = { type: row.authorKind, id: row.authorId };
+    await reindex(deps, { kind: "message", id: row.id });
+    deps.hub.toChannel(channel.id, { type: "message.posted", message });
+    if (!row.threadId) await announceUnread(deps, channel.id, author);
+    if (root) await touchThread(deps, { root, reply: row, author });
+    await notifyForMessage(deps, { row, channel, author });
+    await then?.(message);
+    await deps.db.update(messages).set({ effectsPending: false }).where(eq(messages.id, row.id));
+  } finally {
+    settling.delete(row.id);
+  }
 }
 
 /**
@@ -470,18 +534,23 @@ async function replyRef(
 }
 
 /** A thread reply: counts on the root, creates the thread state if missing and follows who took part. */
+/** The root's reply count and last reply, in the reply's own transaction. */
+async function countReply(tx: Tx, root: MessageRow, at: Date) {
+  await tx
+    .update(messages)
+    .set({
+      replyCount: sql`${messages.replyCount} + 1`,
+      lastReplyAt: sql`greatest(${messages.lastReplyAt}, ${at.toISOString()}::timestamptz)`,
+    })
+    .where(eq(messages.id, root.id));
+}
+
+/** The thread's state for a new reply: every step is safe to run again (a resend that settles the reply). */
 async function touchThread(deps: AppDeps, input: { root: MessageRow; reply: MessageRow; author: ActorRef }) {
   const { db } = deps;
   const { root, reply, author } = input;
   const at = deps.now();
   const atSql = sql`${at.toISOString()}::timestamptz`;
-  await db
-    .update(messages)
-    .set({
-      replyCount: sql`${messages.replyCount} + 1`,
-      lastReplyAt: sql`greatest(${messages.lastReplyAt}, ${atSql})`,
-    })
-    .where(eq(messages.id, root.id));
   await ensureThread(db, { root, by: author, at });
   // One statement each, and only forward: two replies at once leave the later one (in the page's order, created
   // at then id) as the last message, whichever update lands last.

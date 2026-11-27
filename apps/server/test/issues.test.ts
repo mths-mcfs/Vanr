@@ -710,6 +710,89 @@ describe("asking an agent", () => {
   );
 
   test(
+    "a boot that fails before it settles the fallen runs' work leaves those runs to the next boot",
+    async () => {
+      const { workspaceId, ana } = await team();
+      const lia = await seedAgent(workspaceId, ana, `lia${n}`);
+      const issue = await ok<Issue>(
+        call(ana, workspaceId, "POST", "/issues", { title: "[[slow:500]] Count the stock" }),
+        201,
+      );
+      await ok<Issue>(call(ana, workspaceId, "POST", `/issues/${issue.id}/ask-agent`, { agentId: lia }));
+      await running(workspaceId, ana, lia);
+      // The server comes back with the run in the middle, and the first boot falls on the issue's write.
+      const real = server.deps.db;
+      server.deps.db = new Proxy(real, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop, target);
+          if (prop !== "update") return typeof value === "function" ? value.bind(target) : value;
+          return (table: unknown) => {
+            if (table === schema.issues) throw new Error("boot fell");
+            return target.update(table as typeof schema.issues);
+          };
+        },
+      });
+      try {
+        await expect(server.runtime.start()).rejects.toThrow("boot fell");
+      } finally {
+        server.deps.db = real;
+      }
+      await server.runtime.start();
+      expect((await issueOf(ana, workspaceId, issue.number)).work).toMatchObject({
+        state: "blocked",
+        reason: "interrupted",
+      });
+      await settle(server);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "asked work whose routing fails after a run took the message: the run serves it, the issue isn't blocked",
+    async () => {
+      const own = await startTestServer({
+        runtime: (port) => ({
+          ...port,
+          onPersonMessage: async (input) => {
+            await port.onPersonMessage(input);
+            throw new Error("routing fell after the run opened");
+          },
+        }),
+      });
+      try {
+        const ana = await signedIn(own, "Ana", email("ana"));
+        const { workspaceId } = await seedWorkspace(own, ana, "Board");
+        const lia = newId("agt");
+        await own.deps.db.insert(schema.agents).values({
+          id: lia,
+          workspaceId,
+          name: "Lia",
+          handle: "lia",
+          model: "claude-haiku-5-5",
+          ownerUserId: ana.user.id,
+          appearance: { color: "blue", eyes: "dot", adornment: "none" },
+        });
+        const path = (p: string) => `/api/v1/workspaces/${workspaceId}${p}`;
+        const issue = await body(await ana.browser.json(path("/issues"), "POST", { title: "Plan the week" }));
+        const asked = await body(
+          await ana.browser.json(path(`/issues/${issue.id}/ask-agent`), "POST", { agentId: lia }),
+        );
+        expect(asked.work.state === "blocked").toBe(false);
+        await own.deps.runtime.settle();
+        const [run] = await own.deps.db.select().from(schema.runs).where(eq(schema.runs.agentId, lia));
+        const [row] = await own.deps.db.select().from(schema.issues).where(eq(schema.issues.id, issue.id));
+        expect([run?.status, row?.work]).toMatchObject([
+          "done",
+          { state: "idle", reason: null, runId: run?.id ?? "" },
+        ]);
+      } finally {
+        await own.stop();
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "asked work whose routing fails: the issue is blocked, not left working with no run",
     async () => {
       const own = await startTestServer({
