@@ -304,7 +304,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("undo at the same time on Postgre
             : instrumented(server.deps.db, hooks)
                 .transaction((tx) => deliverDue({ ...server.deps, db: tx, now: () => sendAt }))
                 .then((sent) => `B:${sent}`),
-        { match: 'select "id" from "outbox"', bKind: "update" },
+        { match: 'select "id" from "outbox"', bKind: "update", bMatch: 'update "outbox"' },
       );
       expect(run.aPids[0]).not.toBe(run.bPids[0]);
       const [row] = await server.deps.db.select().from(outbox).where(eq(outbox.id, id));
