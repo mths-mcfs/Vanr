@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createServer, type Socket } from "node:net";
 import { ImapClient, ImapError, imapDate, parseList } from "../src/integrations/imap";
-import { buildMail, parseMail } from "../src/integrations/mime";
+import { allowedBy } from "../src/integrations/mail-rules";
+import { addresses, buildMail, parseMail } from "../src/integrations/mime";
 import { dotStuff, type SmtpError, smtpSend } from "../src/integrations/smtp";
 import { type FakeMailServer, startFakeMail } from "./fake-mail";
 
@@ -195,4 +196,32 @@ test.each([true, false])("mail response timeout closes the socket (IMAP=%s)", as
     peer?.destroy();
     server.close();
   }
+});
+
+test("addresses: one per mailbox, never from a display name or comment, a quoted local part kept", () => {
+  expect(addresses('"ana@ok.test" <eve@bad.test>')).toEqual(["eve@bad.test"]);
+  expect(addresses("ana@ok.test <eve@bad.test>")).toEqual(["eve@bad.test"]);
+  expect(addresses('"x <a@ok.test>" <eve@bad.test>')).toEqual(["eve@bad.test"]);
+  expect(addresses("(a@ok.test) eve@bad.test")).toEqual(["eve@bad.test"]);
+  expect(addresses('"Doe, John" <j@x.test>, Ana Client <Ana@Client.test>')).toEqual([
+    "j@x.test",
+    "ana@client.test",
+  ]);
+  expect(addresses('Ana <"ana"@client.test>')).toEqual(['"ana"@client.test']);
+  expect(addresses("undisclosed-recipients:;")).toEqual([]);
+  // The sender's address is read before the encoded words are decoded.
+  const encoded = `=?UTF-8?B?${Buffer.from("ana@ok.test, <ana@ok.test>").toString("base64")}?=`;
+  const mail = parseMail(
+    `From: ${encoded} <eve@bad.test>\r\nTo: Ana <"ana"@client.test>\r\nSubject: x\r\n\r\nbody`,
+  );
+  expect([mail.fromAddress, mail.to]).toEqual(["eve@bad.test", ['"ana"@client.test']]);
+  expect(mail.from).toContain("ana@ok.test");
+});
+
+test("allowedBy compares the whole domain, after the last @", () => {
+  expect(allowedBy(["@ok.test"], "ana@ok.test")).toBe(true);
+  expect(allowedBy(["@ok.test"], '"x@ok.test"@bad.test')).toBe(false);
+  expect(allowedBy(["@ok.test"], "ana@sub.ok.test")).toBe(false);
+  expect(allowedBy(["ana@ok.test"], "ANA@ok.test")).toBe(true);
+  expect(allowedBy(["@ok.test"], "no-domain")).toBe(false);
 });

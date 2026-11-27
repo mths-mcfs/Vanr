@@ -32,6 +32,7 @@ import {
   PROMPT_GOAL_CHARS,
   PROMPT_OPTIONS,
   PROMPT_TITLE_CHARS,
+  recastPseudonyms,
   resumeDebates,
   scheduleAdvance,
   stopDebate,
@@ -45,7 +46,6 @@ import {
   turnPrompt,
   visibleDebateById,
   visibleDebates,
-  withPseudonym,
 } from "./debates";
 import { Hub, type RealtimeEvent } from "./realtime/hub";
 import { contextChars } from "./routines";
@@ -982,18 +982,20 @@ describe("what goes to the model", () => {
     expect(full - base).toBeLessThanOrEqual(TURN_EXTRA_CHARS);
   });
 
-  test("a new agent at the table gets a free pseudonym and the old ones stay", () => {
+  test("a change of agents draws every pseudonym again from labels the debate never showed", () => {
     const before = { agt_a: "A", agt_b: "B" };
-    const after = withPseudonym(before, ["agt_a", "agt_c", "agt_c"]);
-    expect(after.agt_a).toBe("A");
-    expect(after.agt_b).toBe("B");
-    expect(after.agt_c).toMatch(/^[C-Z]$/);
-    expect(withPseudonym(before, ["agt_a"])).toBe(before);
-    const crowd = withPseudonym(
+    expect(recastPseudonyms(before, ["agt_b", "agt_a", "agt_a"], ["A", "B"])).toBe(before);
+    const after = recastPseudonyms(before, ["agt_a", "agt_b", "agt_c", "agt_c"], ["A", "B", "C"]);
+    expect(Object.keys(after).sort()).toEqual(["agt_a", "agt_b", "agt_c"]);
+    expect(Object.values(after).sort()).toEqual(["D", "E", "F"]);
+    expect(Object.keys(recastPseudonyms(before, ["agt_a"], []))).toEqual(["agt_a"]);
+    const crowd = recastPseudonyms(
       {},
       Array.from({ length: 40 }, (_, i) => `agt_${i}`),
+      ["A"],
     );
     expect(new Set(Object.values(crowd)).size).toBe(40);
+    expect(Object.values(crowd)).not.toContain("A");
   });
 });
 

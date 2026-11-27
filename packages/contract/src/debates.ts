@@ -186,3 +186,84 @@ export interface DebateEstimate {
   calls: number;
   upToUsd: number;
 }
+
+/** Body of opening a debate. `rounds`: challenge rounds after round 0 (0 = a vote). */
+export interface CreateDebateBody {
+  agentIds: string[];
+  channelId?: string;
+  deadline?: string;
+  format?: DebateFormat;
+  goal: string;
+  options?: string[];
+  rounds?: number;
+  sourceIssueId?: string;
+  speakers?: DebateSpeaker[];
+  /** The debate's cap in % of the monthly budget of the cheapest agent at the table. */
+  spendCapPercent?: number;
+  title: string;
+  userIds?: string[];
+}
+
+/** A post: the position of a person at the table on their turn, otherwise a comment. */
+export interface DebatePostBody {
+  /** The person's answer in the round (when they hold a speaker slot). */
+  answer?: string;
+  body: string;
+  confidence?: number;
+  replyTo?: string;
+  wantsExtraRound?: boolean;
+}
+
+export interface DebateParticipantsBody {
+  addSpeakerUserIds?: string[];
+  agentsToAdd?: string[];
+  agentsToRemove?: string[];
+  peopleToAdd?: string[];
+  peopleToRemove?: string[];
+  removeSpeakerUserIds?: string[];
+}
+
+/** An item of the synthesis that becomes an issue. */
+export interface DebateIssueItem {
+  description?: string;
+  owner?: string;
+  step?: string;
+  title: string;
+}
+
+export interface DebateIssuesBody {
+  items: DebateIssueItem[];
+}
+
+export interface DebateIssuesResult {
+  issues: { id: string; number: number; title: string }[];
+  numbers: number[];
+}
+
+export interface DebateVerdictBody {
+  action: "accept" | "revert";
+}
+
+/** Blind read: the synthesis against a single agent's answer, in an order drawn once per person. */
+export interface DebateBlindReview {
+  a: string;
+  b: string;
+  pick: "a" | "b" | "tie" | null;
+}
+
+export interface DebateReviewPickBody {
+  pick: "a" | "b" | "tie";
+}
+
+/** What the person changes in a suggestion before opening it. */
+export interface DebateSuggestionOverrides {
+  agentIds?: string[];
+  goal?: string;
+  rounds?: number;
+  title?: string;
+}
+
+export interface AcceptedDebateSuggestion {
+  debate: DebateDetail;
+  suggestion: DebateSuggestion;
+}
