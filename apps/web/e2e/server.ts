@@ -43,13 +43,16 @@ function started(child: ChildProcess, onLine: (line: string) => void): Promise<v
     const timer = setTimeout(() => reject(new Error(`the server did not start in ${BOOT_MS} ms`)), BOOT_MS);
     const done = (error?: Error) => {
       clearTimeout(timer);
-      child.off("exit", exited);
+      child.off("close", exited);
       if (error === undefined) resolve();
       else reject(error);
     };
-    const exited = (code: number | null, signal: NodeJS.Signals | null) =>
+    const exited = (code: number | null, signal: NodeJS.Signals | null) => {
+      if (rest !== "") onLine(rest);
       done(new Error(`the server exited before it started (${code ?? signal})`));
-    child.once("exit", exited);
+    };
+    // `close`, not `exit`: it comes after stderr has drained, so an EADDRINUSE line is never missed.
+    child.once("close", exited);
     child.stderr?.on("data", (chunk: Buffer) => {
       const lines = (rest + chunk.toString("utf8")).split("\n");
       rest = lines.pop() ?? "";
