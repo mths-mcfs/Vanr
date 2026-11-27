@@ -333,6 +333,27 @@ describe("a wiki page", () => {
     }
   });
 
+  test("the outline's second heading of the same name scrolls to the second one", async () => {
+    const server = newServer();
+    const last = server.wiki.pages[0]?.versions.at(-1);
+    if (last !== undefined) last.body = "## Notes\n\nFirst.\n\n## Notes\n\nSecond.";
+    const hit: number[] = [];
+    const original = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) {
+      hit.push([...document.querySelectorAll(".wiki-prose h2")].indexOf(this));
+    };
+    try {
+      const app = await renderApp({ path: PAGE, server, signedInAs: "usr_ana" });
+      await screen.findByRole("textbox", { name: "Text of Press checklist" });
+      const outline = await screen.findByRole("navigation", { name: "On this page" });
+      await waitFor(() => expect(within(outline).getAllByRole("button", { name: "Notes" })).toHaveLength(2));
+      await app.user.click(within(outline).getAllByRole("button", { name: "Notes" })[1] as HTMLElement);
+      expect(hit).toEqual([1]);
+    } finally {
+      HTMLElement.prototype.scrollIntoView = original;
+    }
+  });
+
   test("the Enter that ends an input method's composition saves no tag and no property", async () => {
     const metaCalls = (app: Awaited<ReturnType<typeof renderApp>>) =>
       app.server.calls.filter((call) => call.method === "updateWikiPageMeta").length;

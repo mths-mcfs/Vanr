@@ -4,7 +4,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { act, screen, waitFor, within } from "@testing-library/react";
 import { newServer, renderApp, TEST_NOW } from "../../../../test/app.tsx";
-import { FakeCollabSocket } from "../../../../test/live-socket.ts";
+import { FakeCollabSocket, seedBlocks } from "../../../../test/live-socket.ts";
 
 const WIKI = "/workspace/workspace_birchwood/wiki";
 const live = FakeCollabSocket as unknown as new (url: string) => WebSocket;
@@ -253,5 +253,50 @@ describe("a live wiki page", () => {
     await act(async () => owner.blur());
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(app.server.calls.some((call) => call.method === "updateWikiPageMeta")).toBe(false);
+  });
+  test("a field change waiting its turn when the read is revoked is never sent", async () => {
+    const server = withIrisPage();
+    const app = await renderApp({
+      path: `${WIKI}/iris-note`,
+      signedInAs: "usr_iris",
+      wikiSocket: live,
+      server,
+    });
+    await waitFor(() => expect(status()).toBe("Version 1 published"));
+    const held = app.server.hold("updateWikiPageMeta");
+    const field = screen.getByRole("textbox", { name: "Add to Tags" });
+    await app.user.type(field, "a{Enter}");
+    await app.user.type(field, "b{Enter}");
+    const sent = () => app.server.calls.filter((call) => call.method === "updateWikiPageMeta").length;
+    await waitFor(() => expect(sent()).toBe(1));
+    await act(async () => socket().serverClose(4403, "access-revoked"));
+    await waitFor(() => expect(status()).toBe("Read only"));
+    held.release();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(sent()).toBe(1);
+    expect(screen.queryByRole("alert") === null).toBe(true);
+  });
+
+  test("an address with ?at= scrolls the live editor to that heading, not only the published text before it", async () => {
+    const scrolled: string[] = [];
+    const original = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) {
+      const editable = this.closest(".wiki-prose")?.getAttribute("contenteditable");
+      scrolled.push(`${editable === "true" ? "live" : "static"}:${this.textContent ?? ""}`);
+    };
+    FakeCollabSocket.seed = seedBlocks([
+      { type: "heading", text: "Before a run" },
+      { type: "paragraph", text: "Clean the rollers." },
+      { type: "heading", text: "After" },
+      { type: "paragraph", text: "Cover the press." },
+    ]);
+    try {
+      await renderApp({ path: `${WIKI}/press-checklist?at=After`, signedInAs: "usr_ana", wikiSocket: live });
+      await waitFor(() => expect(status()).toBe("Version 2 published"));
+      await waitFor(() => expect(scrolled).toContain("live:After"));
+    } finally {
+      FakeCollabSocket.seed = null;
+      HTMLElement.prototype.scrollIntoView = original;
+    }
   });
 });

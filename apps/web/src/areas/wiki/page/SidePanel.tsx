@@ -19,7 +19,7 @@ export function SidePanel({
   page: WikiPage;
   agentName: (id: string) => string | undefined;
   /** Scrolls the editor to the heading with this text. */
-  onHeading: (text: string) => void;
+  onHeading: (text: string, nth: number) => void;
   onCreate: (target: string) => void;
 }) {
   const t = useMessages("wiki");
@@ -60,12 +60,22 @@ export function SidePanel({
                 {t("side.outline")}
               </h2>
               <ol className="wiki-side__outline">
-                {panel.data.outline.map((heading) => (
+                {panel.data.outline.map((heading, index, all) => (
                   <li
                     key={`${heading.line}`}
                     style={{ paddingInlineStart: `${(heading.level - 1) * 0.75}rem` }}
                   >
-                    <button type="button" className="wiki-side__jump" onClick={() => onHeading(heading.text)}>
+                    <button
+                      type="button"
+                      className="wiki-side__jump"
+                      onClick={() =>
+                        // Which of the headings with this text: the second "Notes" goes to the second one.
+                        onHeading(
+                          heading.text,
+                          all.slice(0, index).filter((each) => each.text === heading.text).length,
+                        )
+                      }
+                    >
                       {heading.text}
                     </button>
                   </li>
