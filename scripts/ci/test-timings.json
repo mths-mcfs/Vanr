@@ -133,6 +133,7 @@
     "apps/server/test/tools.test.ts": 10160,
     "apps/server/test/undo-send.test.ts": 1872,
     "apps/server/test/usage-ledger.test.ts": 1574,
+    "apps/server/test/usage.test.ts": 4000,
     "apps/server/test/wiki-annotations-postgres.test.ts": 11,
     "apps/server/test/wiki-collab.test.ts": 8739,
     "apps/server/test/wiki-leaks.test.ts": 6953,
