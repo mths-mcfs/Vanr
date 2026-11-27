@@ -312,8 +312,8 @@ for (const kind of ["PGlite", "Postgres"] as const) {
       for (const [sql, table] of [
         ["select * from v_plain", "public.v_plain"],
         ["select s from v_ssn", "public.v_ssn"],
-        // Two relations outside the policy: the first by name is named.
-        ["select * from v_join", "public.secrets"],
+        // Two relations outside the policy: the one the query wrote is named, not the one under it.
+        ["select * from v_join", "public.v_join"],
         ["select x from v_leak", "public.v_leak"],
         ["select x from v_leakssn", "public.v_leakssn"],
         ["select x from v_boom", "public.v_boom"],
@@ -336,6 +336,78 @@ for (const kind of ["PGlite", "Postgres"] as const) {
           result: { fields: ["x"], rows: [{ x: 1 }, { x: 1 }] },
         },
       );
+    });
+  });
+
+  run(
+    `${kind}: a type whose input runs customer code is refused before it runs, at parse time or later`,
+    async () => {
+      const setup = `
+      ${evil("public.chk(t text)", "boolean", "immutable")}
+      create domain dom as text check (chk(value));
+      create domain dom2 as dom;
+      create type comp as (a dom);
+      create type nested as (c comp);
+      create table tagged (id int, tag dom);
+      create domain posint as int check (value > 0);
+      create type dom_range as range (subtype = dom);
+      create table booked (id int, r dom_range);
+      create view dom_view as select (jsonb_populate_record(null::comp, '{"a": "x"}')).a::text as v;
+    `;
+      await withDatabase(kind, setup, async (q) => {
+        const by = (type: string) => ({
+          failure: { reason: "function", name: `public.chk (used by the type ${type})` },
+        });
+        // record_in and array_in call domain_in while the statement is still being parsed.
+        expect(await q("select '(x)'::comp")).toEqual(by("public.dom"));
+        expect(await q("select '{x}'::dom[]")).toEqual(by("public.dom"));
+        expect(await q("select '{x}'::_dom")).toEqual(by("public.dom"));
+        expect(await q("select '((x))'::nested")).toEqual(by("public.dom"));
+        // A range literal: its constructor, named like the type, is already a customer function (step 1).
+        expect(await q("select '[a,z]'::dom_range")).toMatchObject({ failure: { reason: "function" } });
+        expect(await q("select 'x'::dom2")).toEqual(by("public.dom"));
+        // A plain literal runs the CHECK only when the statement runs.
+        expect(await q("select 'x'::dom")).toEqual(by("public.dom"));
+        // A column cast runs the CHECK at execution, past every check that reads the plan.
+        expect(await q("select name::dom from customers")).toEqual(by("public.dom"));
+        expect(await q("select cast(name as dom) from customers")).toEqual(by("public.dom"));
+        // A table with such a column: a record filled from JSON would run it, so naming the table is refused.
+        const withTagged = { ...policy, tables: [...policy.tables, "tagged"] };
+        expect(await q(`select jsonb_populate_record(t, '{"tag": "x"}') from tagged t`, withTagged)).toEqual(
+          by("public.dom"),
+        );
+        expect(await q("select id from tagged", withTagged)).toEqual(by("public.dom"));
+        // Through a range column's subtype, with no function named in the query.
+        expect(await q("select id from booked", { ...policy, tables: [...policy.tables, "booked"] })).toEqual(
+          by("public.dom"),
+        );
+        // Inside an allowed view's rules, with no type named in the query.
+        const withView = { ...policy, tables: [...policy.tables, "dom_view"] };
+        expect(await q("select 1 from dom_view", withView)).toEqual(by("public.dom"));
+        // A domain whose CHECK is the database's own still works.
+        expect(await q("select 5::posint as p")).toEqual({ result: { fields: ["p"], rows: [{ p: 5 }] } });
+      });
+    },
+  );
+
+  run(`${kind}: a failed lock read still deallocates the prepared statement`, async () => {
+    await withDatabase(kind, "", async (q) => {
+      const failing = (session: GuardedSession): GuardedSession => ({
+        ...session,
+        rows: async (text, params) => {
+          // A real failure inside the read: the transaction aborts, as a timeout or a cancel would.
+          if (text.includes("pg_locks")) await session.rows("select 1 / 0", []);
+          return session.rows(text, params);
+        },
+      });
+      const out = (await q("select 1", policy, async (s) => {
+        const error = await guardedQuery(failing(s), "select name from customers", policy).catch(
+          (e: Error) => e.message,
+        );
+        const [left] = await s.rows("select count(*)::int as n from pg_catalog.pg_prepared_statements", []);
+        return { error, left };
+      })) as { raw: { error: unknown; left: unknown } };
+      expect(out.raw).toEqual({ error: expect.stringContaining("division by zero"), left: { n: 0 } });
     });
   });
 

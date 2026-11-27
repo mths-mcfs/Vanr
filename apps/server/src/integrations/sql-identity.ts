@@ -29,7 +29,8 @@ export interface GuardedSession {
   rows(text: string, params: unknown[]): Promise<Record<string, unknown>[]>;
   /**
    * `PREPARE name AS` the checked statement: parsed and rewritten (its views expanded and their relations locked),
-   * never planned, so nothing in it runs. The guard deallocates it.
+   * never planned, so no call is folded. Parsing still runs the input of a typed literal (a domain's CHECK through
+   * array_in, record_in, range_in): `customCode` refuses such a type first. The guard deallocates it.
    */
   prepare(name: string, statement: string): Promise<void>;
   /** `EXPLAIN (VERBOSE, FORMAT JSON)` of the checked statement: the plan's JSON. */
@@ -126,22 +127,34 @@ async function outsideRelation(
   const name = `vanr_guard_${randomBytes(8).toString("hex")}`;
   await session.prepare(name, statement);
   const relations = allowedRelations(policy);
-  const [outside] = await session.rows(
-    `${ALLOWED_CLOSURE}
-     select n.nspname as schema, c.relname as name
-       from pg_catalog.pg_locks l
-       join pg_catalog.pg_class c on c.oid operator(pg_catalog.=) l.relation
-       join pg_catalog.pg_namespace n on n.oid operator(pg_catalog.=) c.relnamespace
-      where l.locktype operator(pg_catalog.=) 'relation'
-        and l.pid operator(pg_catalog.=) pg_catalog.pg_backend_pid()
-        and n.nspname operator(pg_catalog.<>) all ($3::pg_catalog.text[])
-        and not exists (select from rel where rel.oid operator(pg_catalog.=) c.oid)
-      order by 1, 2
-      limit 1`,
-    [relations.map((r) => r.schema), relations.map((r) => r.name), NATIVE_SCHEMAS],
-  );
-  // Unique per call, and deallocated once read: a prepared statement outlives the transaction.
-  await session.rows(`deallocate ${name}`, []);
+  const { words } = lexWords(statement);
+  let outside: Record<string, unknown> | undefined;
+  try {
+    // A savepoint, so a failed read (a timeout, a cancel) still leaves the transaction able to deallocate.
+    await session.rows("savepoint vanr_guard_locks", []);
+    [outside] = await session.rows(
+      `${ALLOWED_CLOSURE}
+       select n.nspname as schema, c.relname as name
+         from pg_catalog.pg_locks l
+         join pg_catalog.pg_class c on c.oid operator(pg_catalog.=) l.relation
+         join pg_catalog.pg_namespace n on n.oid operator(pg_catalog.=) c.relnamespace
+        where l.locktype operator(pg_catalog.=) 'relation'
+          and l.pid operator(pg_catalog.=) pg_catalog.pg_backend_pid()
+          and n.nspname operator(pg_catalog.<>) all ($3::pg_catalog.text[])
+          and not exists (select from rel where rel.oid operator(pg_catalog.=) c.oid)
+        -- One the query wrote, before one under it.
+        order by (c.relname::pg_catalog.text collate pg_catalog."C") operator(pg_catalog.=) any ($4::pg_catalog.text[]) desc,
+                 1, 2
+        limit 1`,
+      [relations.map((r) => r.schema), relations.map((r) => r.name), NATIVE_SCHEMAS, [...new Set(words)]],
+    );
+  } catch (err) {
+    await session.rows("rollback to savepoint vanr_guard_locks", []);
+    throw err;
+  } finally {
+    // A prepared statement outlives the transaction: deallocated whatever happened (its name is unique per call).
+    await session.rows(`deallocate ${name}`, []);
+  }
   return outside ? relationText({ schema: String(outside.schema), name: String(outside.name) }) : null;
 }
 
@@ -233,6 +246,84 @@ async function customCode(
     [relations.map((r) => r.schema), relations.map((r) => r.name), NATIVE_SCHEMAS],
   );
   if (dep) return `${dep.schema}.${dep.name} (used by an allowed relation)`;
+
+  // 5. A customer function a type the query reaches runs on input: a domain's CHECK constraints, and a type's
+  //    I/O functions outside C. A literal cast ('(x)'::comp, '{x}'::dom[]), a column cast (name::dom) or a
+  //    record filled from JSON runs them, while parsing or while running, and nothing checks what they read.
+  //    Reached: every type named like a word of the query (a table's name is also its row type), the types and
+  //    relations the allowed views' rules use, and from each, an array's element, a domain's base, a composite's
+  //    columns and a range's subtype. A table with such a domain column rejects every query that names it.
+  const [typed] = await session.rows(
+    `${ALLOWED_CLOSURE},
+       rules(oid) as (
+         select r.oid from pg_catalog.pg_rewrite r join rel on r.ev_class operator(pg_catalog.=) rel.oid
+       ),
+       reached(oid) as (
+         select t.oid from pg_catalog.pg_type t
+          where (t.typname::pg_catalog.text collate pg_catalog."C") operator(pg_catalog.=) any ($3::pg_catalog.text[])
+         union
+         select case when c.oid is null then d.refobjid else c.reltype end
+           from pg_catalog.pg_depend d
+           join rules on d.objid operator(pg_catalog.=) rules.oid
+           left join pg_catalog.pg_class c
+             on d.refclassid operator(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass::pg_catalog.oid
+            and c.oid operator(pg_catalog.=) d.refobjid
+          where d.classid operator(pg_catalog.=) 'pg_catalog.pg_rewrite'::pg_catalog.regclass::pg_catalog.oid
+            and d.refclassid operator(pg_catalog.=) any (array[
+                  'pg_catalog.pg_type'::pg_catalog.regclass::pg_catalog.oid,
+                  'pg_catalog.pg_class'::pg_catalog.regclass::pg_catalog.oid])
+         union
+         select x.next
+           from reached
+           join pg_catalog.pg_type t on t.oid operator(pg_catalog.=) reached.oid
+           cross join lateral (
+             select t.typelem
+             union all select t.typbasetype
+             union all select a.atttypid from pg_catalog.pg_attribute a
+                        where a.attrelid operator(pg_catalog.=) t.typrelid
+                          and a.attnum operator(pg_catalog.>) 0 and not a.attisdropped
+             union all select g.rngsubtype from pg_catalog.pg_range g
+                        where t.oid operator(pg_catalog.=) any (array[g.rngtypid, g.rngmultitypid])
+           ) as x(next)
+          where x.next operator(pg_catalog.<>) 0
+       ),
+       code(fn, type) as (
+         select case
+                  when d.refclassid operator(pg_catalog.=) 'pg_catalog.pg_proc'::pg_catalog.regclass::pg_catalog.oid then d.refobjid
+                  when d.refclassid operator(pg_catalog.=) 'pg_catalog.pg_operator'::pg_catalog.regclass::pg_catalog.oid then
+                    (select op.oprcode::pg_catalog.oid from pg_catalog.pg_operator op
+                      where op.oid operator(pg_catalog.=) d.refobjid)
+                end, k.contypid
+           from pg_catalog.pg_constraint k
+           join reached on k.contypid operator(pg_catalog.=) reached.oid
+           join pg_catalog.pg_depend d
+             on d.classid operator(pg_catalog.=) 'pg_catalog.pg_constraint'::pg_catalog.regclass::pg_catalog.oid
+            and d.objid operator(pg_catalog.=) k.oid
+         union all
+         select io.fn, t.oid
+           from reached
+           join pg_catalog.pg_type t on t.oid operator(pg_catalog.=) reached.oid
+           cross join lateral pg_catalog.unnest(array[t.typinput::pg_catalog.oid, t.typoutput::pg_catalog.oid,
+             t.typreceive::pg_catalog.oid, t.typsend::pg_catalog.oid]) as io(fn)
+           join pg_catalog.pg_proc f on f.oid operator(pg_catalog.=) io.fn
+           join pg_catalog.pg_language l on l.oid operator(pg_catalog.=) f.prolang
+          where l.lanname operator(pg_catalog.<>) all (array['c', 'internal'])
+       )
+     select n.nspname as schema, f.proname as name, tn.nspname as type_schema, t.typname as type_name
+       from code
+       join pg_catalog.pg_proc f on f.oid operator(pg_catalog.=) code.fn
+       join pg_catalog.pg_namespace n on n.oid operator(pg_catalog.=) f.pronamespace
+       join pg_catalog.pg_type t on t.oid operator(pg_catalog.=) code.type
+       join pg_catalog.pg_namespace tn on tn.oid operator(pg_catalog.=) t.typnamespace
+      where n.nspname operator(pg_catalog.<>) all ($4::pg_catalog.text[])
+      order by 1, 2, 3, 4
+      limit 1`,
+    [relations.map((r) => r.schema), relations.map((r) => r.name), [...new Set(words)], NATIVE_SCHEMAS],
+  );
+  if (typed) {
+    const type = relationText({ schema: String(typed.type_schema), name: String(typed.type_name) });
+    return `${typed.schema}.${typed.name} (used by the type ${type})`;
+  }
   return null;
 }
 

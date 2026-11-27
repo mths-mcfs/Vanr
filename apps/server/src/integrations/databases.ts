@@ -387,7 +387,7 @@ function explainFailure(f: GuardFailure): string {
     case "write":
       return "Only reading is allowed: the query would change or lock data.";
     case "table":
-      return `The table ${f.table} is not available to you.`;
+      return `The table or view ${f.table} is not in this agent's policy.`;
     case "column":
       return `The column ${f.column} is hidden. Select the columns you need by name, without it.`;
     case "function":
@@ -494,7 +494,7 @@ const dbDescribe = define({
     const { table } = input;
     const relation = parseRelation(table);
     if (!relation || !link.policy.tables.includes(table))
-      throw new ToolInputError(`The table ${table} is not available to you.`);
+      throw new ToolInputError(`The table or view ${table} is not in this agent's policy.`);
     // Each mask read the way checkPlan reads it, so a `table.column` mask hides here too.
     const hidden = new Set(link.policy.maskedColumns.map((c) => columnKey(c) ?? c));
     const cols = await asToolError(() =>
