@@ -456,10 +456,6 @@ const proposeWikiEdit = defineStored({
   async run(ctx, input) {
     const page = await domain(pageBySlug(ctx.deps.db, wikiViewer(ctx), input.slug));
     const edits = input.edits.map((e) => ({ oldStr: e.old_str, newStr: e.new_str }));
-    // Every subset of the changes may be accepted on its own: the worst case adds every growing change.
-    const growth = edits.reduce((n, e) => n + Math.max(0, e.newStr.length - e.oldStr.length), 0);
-    if (page.body.length + growth > MAX_BODY)
-      throw new ToolInputError(`The page would pass ${MAX_BODY} characters`);
     const { row, warnings } = await domain(
       proposeWikiChanges(ctx.deps, {
         page,
@@ -694,6 +690,7 @@ const listEvents = defineStored({
     const me = await asRequester(ctx);
     const from = input.from ? new Date(input.from) : ctx.deps.now();
     const to = input.to ? new Date(input.to) : new Date(from.getTime() + 7 * 86_400_000);
+    if (to < from) throw new ToolInputError("The range ends before it starts: `to` must be after `from`");
     const events = (await eventsInRange(ctx.deps.db, me, from, to)).flatMap((r) => expand(r, from, to));
     if (events.length === 0) return "No events.";
     return events
@@ -929,8 +926,14 @@ const updateRoutineTool = defineStored({
       throw new ToolInputError(`Routine ${input.routineId} not found`);
     // Only the instructions: nothing else is written, so a pause in between stays a pause.
     if (input.schedule === undefined && input.active === undefined) {
-      if (!input.prompt) return "Nothing to change.";
-      await db.update(routines).set({ prompt: input.prompt }).where(eq(routines.id, found.id));
+      const prompt = input.prompt;
+      if (!prompt) return "Nothing to change.";
+      await db.transaction(async (tx) => {
+        const [locked] = await tx.select().from(routines).where(eq(routines.id, found.id)).for("update");
+        if (!locked || JSON.stringify(locked.target) !== JSON.stringify(found.target))
+          throw new ToolInputError(`Routine ${input.routineId} changed; list your routines again`);
+        await tx.update(routines).set({ prompt }).where(eq(routines.id, locked.id));
+      });
       return `Updated routine "${found.name}".`;
     }
     const parsed = input.schedule

@@ -122,6 +122,8 @@ async function apply(deps: AppDeps, row: MemoryReviewRow, me: WorkspaceMember): 
       ? { scope: "person" as const, workspaceId: row.workspaceId, userId: row.ownerUserId ?? "" }
       : { scope: "agent" as const, workspaceId: row.workspaceId, agentId: row.agentId };
   const base = row.baseSha256 ?? undefined;
+  // The path the run read when it queued the change: a move before approval makes it change another file.
+  const expectedPath = row.path !== null ? { expectedPath: row.path } : {};
   switch (row.op) {
     case "create": {
       const created = await createMemory(
@@ -166,6 +168,7 @@ async function apply(deps: AppDeps, row: MemoryReviewRow, me: WorkspaceMember): 
           ...meta,
           op: "update",
           expectedSha256: base,
+          ...expectedPath,
           store,
         },
       );
@@ -179,6 +182,7 @@ async function apply(deps: AppDeps, row: MemoryReviewRow, me: WorkspaceMember): 
           ...meta,
           op: "archive",
           expectedSha256: base,
+          ...expectedPath,
           store,
         },
       );
@@ -192,6 +196,7 @@ async function apply(deps: AppDeps, row: MemoryReviewRow, me: WorkspaceMember): 
           ...meta,
           op: "rename",
           expectedSha256: base,
+          ...expectedPath,
           store,
         },
       );

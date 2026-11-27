@@ -7,10 +7,11 @@ import type { Memory, MemoryReview, MemoryVersion, Proposal, ProposalList } from
 import { schema } from "@vanr/engine/db";
 import { RiskTracker } from "@vanr/engine/effects";
 import { and, eq } from "drizzle-orm";
+import { createMemory } from "../src/agent-memory";
 import type { RunningServer } from "../src/server";
 import { body, SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
 import { memberOf, type Person, seedWorkspace } from "./seed";
-import { seedAgent, toolRun, undo } from "./tool-run";
+import { racing, seedAgent, toolRun, undo } from "./tool-run";
 
 let server: RunningServer;
 beforeAll(async () => {
@@ -392,6 +393,71 @@ describe("memory tool: three stores in Postgres", () => {
         asker: t.ana,
       });
       expect((await allowed.call("memory", { command: "view", path: "/memories" })).isError).toBe(false);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a move before the write is a conflict: a remembered note renamed meanwhile, a queued edit approved after a rename",
+    async () => {
+      const t = await team();
+      const { db } = server.deps;
+      const forAna = await t.as(t.ana);
+      // a remembered note (no path) that a concurrent rename gives a path between the tool's read and its write
+      const note = await createMemory(
+        db,
+        server.deps.now(),
+        {
+          workspaceId: t.workspaceId,
+          agentId: t.lia.id,
+          scope: "agent",
+          text: "the old note",
+          origin: { by: null, name: null, channel: null, at: server.deps.now().toISOString() },
+        },
+        { author: { type: "system" } },
+      );
+      const moved = racing(server, () =>
+        db.update(schema.memories).set({ path: "a.md" }).where(eq(schema.memories.id, note.id)),
+      );
+      const edit = await forAna.call(
+        "memory",
+        {
+          command: "str_replace",
+          path: `/memories/agent/remembered/${note.id}.md`,
+          old_str: "old",
+          new_str: "new",
+        },
+        { deps: moved },
+      );
+      expect(edit.isError).toBe(true);
+      const [after] = await db.select().from(schema.memories).where(eq(schema.memories.id, note.id));
+      expect(after).toMatchObject({ path: "a.md", text: "the old note" });
+
+      // a run with flag A queues an edit of b.md; before approval b.md is renamed to c.md
+      await forAna.call("memory", { command: "create", path: "/memories/agent/b.md", file_text: "keep me" });
+      const queued = await forAna.call(
+        "memory",
+        { command: "str_replace", path: "/memories/agent/b.md", old_str: "keep me", new_str: "lie" },
+        { risk: untrusted() },
+      );
+      expect(queued.content).toContain("Not saved yet");
+      await forAna.call("memory", {
+        command: "rename",
+        old_path: "/memories/agent/b.md",
+        new_path: "/memories/agent/c.md",
+      });
+      const { reviews } = await ok(
+        api<{ reviews: MemoryReview[] }>(t.ana, t.workspaceId, "GET", `/memory-reviews?agentId=${t.lia.id}`),
+      );
+      const approve = await api(
+        t.ana,
+        t.workspaceId,
+        "POST",
+        `/memory-reviews/${reviews[0]?.id}/approve`,
+        {},
+      );
+      expect(approve.status).toBe(409);
+      expect((await t.mems()).map((m) => [m.path, m.text])).toContainEqual(["c.md", "keep me"]);
     },
     SERVER_TEST_MS,
   );

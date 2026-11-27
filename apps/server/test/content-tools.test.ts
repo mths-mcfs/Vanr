@@ -11,7 +11,7 @@ import { and, eq } from "drizzle-orm";
 import type { RunningServer } from "../src/server";
 import { body, SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
 import { memberOf, type Person, seedChannel, seedWorkspace } from "./seed";
-import { seedAgent, toolRun, undo } from "./tool-run";
+import { racing, seedAgent, toolRun, undo } from "./tool-run";
 import { apiError, wikiApi } from "./wiki-api";
 
 let server: RunningServer;
@@ -779,6 +779,80 @@ describe("content tools", () => {
       });
       expect(out).toMatchObject({ isError: true, content: "The page would pass 500000 characters" });
       expect((await wiki.ana.listWikiPageAnnotations(ws, page.slug)).proposals).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "concurrent writes: a proposal is checked against the page as locked; a prompt change of a moved routine is rejected",
+    async () => {
+      const { workspaceId: ws, wiki, ana, lia, general, call } = await team();
+      const { db } = server.deps;
+      // the page is 499,997 characters when the agent reads it; another save takes it to 500,000 first
+      const page = await wiki.ana.createWikiPage(ws, {
+        title: "Almost full",
+        body: `${"x".repeat(499_994)}END`,
+      });
+      const grown = racing(server, () =>
+        db
+          .update(schema.knowledgePages)
+          .set({ body: `${"x".repeat(499_997)}END` })
+          .where(eq(schema.knowledgePages.slug, page.slug)),
+      );
+      const proposal = await call(
+        "propose_wiki_edit",
+        { slug: page.slug, parent_version: 1, edits: [{ old_str: "END", new_str: "END!" }] },
+        { deps: grown },
+      );
+      expect(proposal).toMatchObject({ isError: true });
+      expect(proposal.content).toContain("would pass 500000 characters");
+      expect((await wiki.ana.listWikiPageAnnotations(ws, page.slug)).proposals).toEqual([]);
+
+      // a routine of #general moves to a private channel between the visibility check and the write
+      const board = await seedChannel(server, ws, { name: "board", visibility: "private", members: [ana] });
+      const id = newId("rtn");
+      await db.insert(schema.routines).values({
+        id,
+        workspaceId: ws,
+        name: "Digest",
+        prompt: "old instructions",
+        agentId: lia.id,
+        target: { kind: "channel", channelId: general },
+        trigger: {
+          kind: "schedule",
+          rule: { freq: "daily", interval: 1, times: ["09:00"], timezone: "UTC" },
+        },
+        active: true,
+        createdBy: ana.user.id,
+      });
+      const moved = racing(server, () =>
+        db
+          .update(schema.routines)
+          .set({ target: { kind: "channel", channelId: board } })
+          .where(eq(schema.routines.id, id)),
+      );
+      const change = await call(
+        "update_routine",
+        { routineId: id, prompt: "new instructions" },
+        { deps: moved },
+      );
+      expect(change).toMatchObject({
+        isError: true,
+        content: `Routine ${id} changed; list your routines again`,
+      });
+      const [row] = await db.select().from(schema.routines).where(eq(schema.routines.id, id));
+      expect(row?.prompt).toBe("old instructions");
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "Calendar: a range that ends before it starts is an input error",
+    async () => {
+      const { call } = await team();
+      const out = await call("list_events", { from: "2026-11-27T18:00:00Z", to: "2026-11-27T09:00:00Z" });
+      expect(out).toMatchObject({ isError: true });
+      expect(out.content).toContain("ends before it starts");
     },
     SERVER_TEST_MS,
   );

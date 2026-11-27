@@ -172,3 +172,24 @@ export async function undo(
   const data = (await res.json().catch(() => null)) as { error?: { code?: string } } | null;
   return { status: res.status, code: res.ok ? null : (data?.error?.code ?? `http_${res.status}`) };
 }
+
+/**
+ * The server's deps with a concurrent write: `before` runs once, right before the first transaction the tool
+ * opens, so the tool's read happened before it and its locked write sees it.
+ */
+export function racing(server: RunningServer, before: () => Promise<unknown>): RunningServer["deps"] {
+  let fired = false;
+  const db = new Proxy(server.deps.db, {
+    get(target, prop) {
+      if (prop !== "transaction") return Reflect.get(target, prop, target);
+      return async (...args: Parameters<typeof target.transaction>) => {
+        if (!fired) {
+          fired = true;
+          await before();
+        }
+        return target.transaction(...args);
+      };
+    },
+  });
+  return { ...server.deps, db };
+}
