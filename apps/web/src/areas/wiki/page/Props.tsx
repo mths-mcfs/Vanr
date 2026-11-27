@@ -73,7 +73,8 @@ function InlineText({
 }) {
   const [draft, setDraft] = useState<string | null>(null);
   const commit = () => {
-    if (draft !== null && draft !== value) onSave(draft);
+    // A value typed before the right to edit went away (a lock, a revoked read) is not sent.
+    if (editable && draft !== null && draft !== value) onSave(draft);
     setDraft(null);
   };
   return (
@@ -450,7 +451,7 @@ export function PropsBar({ workspaceId, page, defs, editable, busy, onMeta, onMo
           </MenuContent>
         </Menu>
       )}
-      {creating !== null && (
+      {editable && creating !== null && (
         <form
           className="wiki-props__new"
           onSubmit={(event) => {
