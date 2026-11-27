@@ -719,9 +719,66 @@ describe("content tools", () => {
       expect(change).toMatchObject({ isError: true, content: `Routine ${id} not found` });
       const [row] = await server.deps.db.select().from(schema.routines).where(eq(schema.routines.id, id));
       expect(row?.active).toBe(true);
-      // Ana, who reads the channel, sees it; a run with no person sees the agent's own routines
-      expect((await (await as(ana)).call("list_routines", {})).content).toContain("Payroll digest");
-      expect((await (await as(null)).call("list_routines", {})).content).toContain("Payroll digest");
+      // from #general, everyone's channel, nobody acts on it: not Ana, its creator and the workspace's owner,
+      // and not a run with no person (a routine's own run, whose requester is the routine's creator)
+      for (const asker of [ana, null]) {
+        const run = await as(asker);
+        expect((await run.call("list_routines", {})).content).toBe("You have no routines.");
+        expect((await run.call("update_routine", { routineId: id, active: false })).isError).toBe(true);
+      }
+      const [still] = await server.deps.db.select().from(schema.routines).where(eq(schema.routines.id, id));
+      expect(still?.active).toBe(true);
+      // in its own channel it shows, with Ana or with no person
+      await server.deps.db
+        .insert(schema.channelMemberships)
+        .values({ channelId: board, memberType: "agent", memberId: lia.id });
+      for (const asker of [ana, null]) {
+        const run = await toolRun(server, { workspaceId: ws, agent: lia, channelId: board, asker });
+        expect((await run.call("list_routines", {})).content).toContain("Payroll digest");
+      }
+      // a routine of a public channel is everyone's to know about
+      const pub = await seedChannel(server, ws, { name: "news", members: [ana] });
+      await server.deps.db.insert(schema.routines).values({
+        id: newId("rtn"),
+        workspaceId: ws,
+        name: "News digest",
+        prompt: "Sum the news",
+        agentId: lia.id,
+        target: { kind: "channel", channelId: pub },
+        trigger: {
+          kind: "schedule",
+          rule: { freq: "daily", interval: 1, times: ["09:00"], timezone: "UTC" },
+        },
+        active: true,
+        createdBy: ana.user.id,
+      });
+      const listed = (await call("list_routines", {})).content;
+      expect(listed).toContain("News digest");
+      expect(listed).not.toContain("Payroll digest");
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "Wiki: a proposal can't pass the page cap however its changes are accepted one by one",
+    async () => {
+      const { workspaceId: ws, wiki, call } = await team();
+      const text = `${"x".repeat(499_990)}GROW-CUTCUT`;
+      const page = await wiki.ana.createWikiPage(ws, { title: "Near the cap", body: text.slice(0, 500_000) });
+      expect(page.slug).toBeTruthy();
+      const body = (await wiki.ana.getWikiPage(ws, page.slug)).body;
+      expect(body.length).toBe(500_000);
+      // one change grows by 2 and another shrinks by 4: together they fit, the first alone doesn't
+      const out = await call("propose_wiki_edit", {
+        slug: page.slug,
+        parent_version: 1,
+        edits: [
+          { old_str: "GROW", new_str: "GROW++" },
+          { old_str: "CUTC", new_str: "" },
+        ],
+      });
+      expect(out).toMatchObject({ isError: true, content: "The page would pass 500000 characters" });
+      expect((await wiki.ana.listWikiPageAnnotations(ws, page.slug)).proposals).toEqual([]);
     },
     SERVER_TEST_MS,
   );

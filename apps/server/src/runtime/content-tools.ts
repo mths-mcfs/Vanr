@@ -9,6 +9,7 @@ import { applyEdits, editFailureMessage } from "@vanr/engine/wiki-edit";
 import { and, asc, desc, eq, ilike, isNull, or } from "drizzle-orm";
 import { z } from "zod";
 import { eventsInRange, expand } from "../calendar";
+import { channelInWorkspace } from "../channels";
 import { type RuntimePort, requireRuntime, type WorkspaceMember } from "../context";
 import {
   agentCanSeeDebate,
@@ -32,7 +33,7 @@ import {
 import { HttpError } from "../http";
 import { columnsOf, createIssue, issueByNumber, notifyComment, updateIssue } from "../issues";
 import { log } from "../logger";
-import { anchorOf, canSeeRoutine, nextRunFor, type RoutineRow } from "../routines";
+import { anchorOf, canSeeRoutine, nextRunFor, type RoutineRow, targetOf } from "../routines";
 import { createPage, MAX_BODY, pageBySlug, recordRead, savePage } from "../wiki";
 import { audienceWithin, type WikiViewer } from "../wiki-access";
 import { annotationsOf, MAX_HUNKS, createProposal as proposeWikiChanges } from "../wiki-annotations";
@@ -455,9 +456,9 @@ const proposeWikiEdit = defineStored({
   async run(ctx, input) {
     const page = await domain(pageBySlug(ctx.deps.db, wikiViewer(ctx), input.slug));
     const edits = input.edits.map((e) => ({ oldStr: e.old_str, newStr: e.new_str }));
-    // Accepting every change must still fit the page's cap.
-    const all = applyEdits(page.body, edits);
-    if (all.ok && all.text.length > MAX_BODY)
+    // Every subset of the changes may be accepted on its own: the worst case adds every growing change.
+    const growth = edits.reduce((n, e) => n + Math.max(0, e.newStr.length - e.oldStr.length), 0);
+    if (page.body.length + growth > MAX_BODY)
       throw new ToolInputError(`The page would pass ${MAX_BODY} characters`);
     const { row, warnings } = await domain(
       proposeWikiChanges(ctx.deps, {
@@ -841,12 +842,41 @@ const createRoutineTool = defineStored({
   },
 });
 
-/** The agent's routines the person asking may see; with no person (a routine's own run), all of them. */
+/**
+ * Whether everyone in this run's conversation may know about the routine: one of this channel, of a public
+ * channel, or of a file or a debate (the whole workspace sees those). A routine that writes to a person's DM or
+ * conversation shows only in a DM run that person started.
+ */
+async function inRunAudience(ctx: ToolContext, row: RoutineRow): Promise<boolean> {
+  const target = targetOf(row);
+  switch (target.kind) {
+    case "file":
+    case "debate":
+      return true;
+    case "channel": {
+      if (target.channelId === ctx.channel.id) return true;
+      const channel = await channelInWorkspace(ctx.deps.db, ctx.workspaceId, target.channelId);
+      return channel?.kind === "channel" && channel.visibility === "public";
+    }
+    case "dm":
+    case "conversation":
+      return ctx.channel.kind === "dm" && row.createdBy === ctx.trigger?.authorId;
+  }
+}
+
+/**
+ * The agent's routines this run may show or change: the ones its conversation's audience may know about and,
+ * when a person asked, only those they see too. A workspace admin sees every routine on the routines screen
+ * (`canSeeRoutine`); from a run, the conversation's audience still holds.
+ */
 async function seenRoutines(ctx: ToolContext, rows: RoutineRow[]): Promise<RoutineRow[]> {
-  if (!ctx.trigger) return rows;
-  const me = await asRequester(ctx);
+  const me = ctx.trigger ? await asRequester(ctx) : null;
   const out: RoutineRow[] = [];
-  for (const r of rows) if (await canSeeRoutine(ctx.deps, me, r)) out.push(r);
+  for (const r of rows) {
+    if (!(await inRunAudience(ctx, r))) continue;
+    if (me && !(await canSeeRoutine(ctx.deps, me, r))) continue;
+    out.push(r);
+  }
   return out;
 }
 
