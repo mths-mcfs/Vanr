@@ -330,6 +330,11 @@ for (const kind of ["PGlite", "Postgres"] as const) {
 
       // Listed, a clean view works, and so does a view under it that the policy doesn't name.
       await withViews(q);
+      // That inner view, named on its own, is outside the policy.
+      const listed = { ...policy, tables: [...policy.tables, "names_outer"] };
+      expect(await q("select name from names_inner", listed)).toEqual({
+        failure: { reason: "table", table: "public.names_inner" },
+      });
       // A CTE named like a refused view is the CTE, and a function in FROM is no relation.
       expect(await q("with v_leak as (select 1 as x) select x from v_leak, generate_series(1, 2) g")).toEqual(
         {
@@ -352,6 +357,7 @@ for (const kind of ["PGlite", "Postgres"] as const) {
       create domain posint as int check (value > 0);
       create type dom_range as range (subtype = dom);
       create table booked (id int, r dom_range);
+      create table booked_m (id int, m dom_multirange);
       create view dom_view as select (jsonb_populate_record(null::comp, '{"a": "x"}')).a::text as v;
     `;
       await withDatabase(kind, setup, async (q) => {
@@ -381,14 +387,38 @@ for (const kind of ["PGlite", "Postgres"] as const) {
         expect(await q("select id from booked", { ...policy, tables: [...policy.tables, "booked"] })).toEqual(
           by("public.dom"),
         );
+        expect(
+          await q("select id from booked_m", { ...policy, tables: [...policy.tables, "booked_m"] }),
+        ).toEqual(by("public.dom"));
         // Inside an allowed view's rules, with no type named in the query.
         const withView = { ...policy, tables: [...policy.tables, "dom_view"] };
         expect(await q("select 1 from dom_view", withView)).toEqual(by("public.dom"));
+        // A query that doesn't reach that view is not refused for it.
+        expect(await q("select name from customers", withView)).toEqual({
+          result: { fields: ["name"], rows: [{ name: "Alice" }] },
+        });
         // A domain whose CHECK is the database's own still works.
         expect(await q("select 5::posint as p")).toEqual({ result: { fields: ["p"], rows: [{ p: 5 }] } });
       });
     },
   );
+
+  run(`${kind}: a name longer than Postgres keeps is looked up the way Postgres truncates it`, async () => {
+    const kept = "f".repeat(63);
+    const setup = `
+      ${evil(`public.${kept}()`, "text", "immutable")}
+      create domain ${"d".repeat(63)} as text check (chk_long(value));
+    `;
+    const chk = `${evil("public.chk_long(t text)", "boolean", "immutable")}`;
+    await withDatabase(kind, chk + setup, async (q) => {
+      expect(await q(`select ${kept}tail()`)).toEqual({
+        failure: { reason: "function", name: `public.${kept}()` },
+      });
+      expect(await q(`select 'x'::${"d".repeat(70)}`)).toEqual({
+        failure: { reason: "function", name: `public.chk_long (used by the type public.${"d".repeat(63)})` },
+      });
+    });
+  });
 
   run(`${kind}: a failed lock read still deallocates the prepared statement`, async () => {
     await withDatabase(kind, "", async (q) => {
@@ -400,14 +430,17 @@ for (const kind of ["PGlite", "Postgres"] as const) {
           return session.rows(text, params);
         },
       });
-      const out = (await q("select 1", policy, async (s) => {
+      let seen: unknown;
+      // postgres.js still fails the whole transaction for the error it saw; PGlite doesn't. Both are fine here:
+      // what counts is what the session holds right after the guard gave up.
+      await q("select 1", policy, async (s) => {
         const error = await guardedQuery(failing(s), "select name from customers", policy).catch(
           (e: Error) => e.message,
         );
         const [left] = await s.rows("select count(*)::int as n from pg_catalog.pg_prepared_statements", []);
-        return { error, left };
-      })) as { raw: { error: unknown; left: unknown } };
-      expect(out.raw).toEqual({ error: expect.stringContaining("division by zero"), left: { n: 0 } });
+        seen = { error, left };
+      }).catch(() => {});
+      expect(seen).toEqual({ error: expect.stringContaining("division by zero"), left: { n: 0 } });
     });
   });
 

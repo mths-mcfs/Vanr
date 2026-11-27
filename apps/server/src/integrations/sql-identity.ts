@@ -90,9 +90,10 @@ export function fixedSearchPath(policy: Pick<QueryPolicy, "tables">): string {
 /**
  * `rel(oid)`: the policy's relations, found by exact schema ($1) and name ($2), compared byte for byte as the plan
  * check compares them (no folding: "Sales View" never stands for "sales view", `Étage` is not `étage`), plus every
- * relation the rules of those views reach, views under views included.
+ * relation the rules of those views reach, views under views included. `only` narrows the policy's relations the
+ * walk starts from (a condition on `c`, the relation).
  */
-const ALLOWED_CLOSURE = `with recursive rel(oid) as (
+const allowedClosure = (only = "") => `with recursive rel(oid) as (
          select c.oid
            from rows from (pg_catalog.unnest($1::pg_catalog.text[]), pg_catalog.unnest($2::pg_catalog.text[]))
                   as allowed(schema, name)
@@ -101,6 +102,7 @@ const ALLOWED_CLOSURE = `with recursive rel(oid) as (
            join pg_catalog.pg_class c
              on c.relnamespace operator(pg_catalog.=) n.oid
             and c.relname::pg_catalog.text operator(pg_catalog.=) allowed.name collate pg_catalog."C"
+          ${only}
          union
          select d.refobjid
            from rel
@@ -113,11 +115,24 @@ const ALLOWED_CLOSURE = `with recursive rel(oid) as (
        )`;
 
 /**
+ * A policy relation this backend has locked: one the prepared statement reaches, so an allowed view only lets
+ * through what is under it when the query uses that view.
+ */
+const LOCKED_HERE = `and exists (select from pg_catalog.pg_locks l
+            where l.locktype operator(pg_catalog.=) 'relation'
+              and l.pid operator(pg_catalog.=) pg_catalog.pg_backend_pid()
+              and l.relation operator(pg_catalog.=) c.oid)`;
+
+/** A policy relation named like a word of the query ($3): one the query can reach without a view in between. */
+const NAMED_BY_A_WORD = `and (c.relname::pg_catalog.text collate pg_catalog."C") operator(pg_catalog.=) any ($3::pg_catalog.text[])`;
+
+/**
  * The first relation the query reaches that the policy doesn't allow, as `schema.name`, or null. Runs before any
  * planning: the statement is only prepared, and the relations it locked are read back. A view the policy doesn't
  * list is refused here, because the plan shows only the tables under it, and planning would already have run the
- * IMMUTABLE calls in it. A CTE or a function in FROM locks nothing; a view under an allowed view is allowed, since
- * its rules are checked with that view's (step 4 of `customCode`). The system schemas are left to the plan check.
+ * IMMUTABLE calls in it. A CTE or a function in FROM locks nothing; a view under an allowed view the query uses is
+ * allowed, since its rules are checked with that view's (step 4 of `customCode`), but named on its own it is not.
+ * The system schemas are left to the plan check.
  */
 async function outsideRelation(
   session: GuardedSession,
@@ -133,7 +148,7 @@ async function outsideRelation(
     // A savepoint, so a failed read (a timeout, a cancel) still leaves the transaction able to deallocate.
     await session.rows("savepoint vanr_guard_locks", []);
     [outside] = await session.rows(
-      `${ALLOWED_CLOSURE}
+      `${allowedClosure(LOCKED_HERE)}
        select n.nspname as schema, c.relname as name
          from pg_catalog.pg_locks l
          join pg_catalog.pg_class c on c.oid operator(pg_catalog.=) l.relation
@@ -221,7 +236,7 @@ async function customCode(
   //    under it) and the row security policies. The plan shows a view's calls only after inlining or folding.
   const relations = allowedRelations(policy);
   const [dep] = await session.rows(
-    `${ALLOWED_CLOSURE},
+    `${allowedClosure()},
        objs(classid, objid) as (
          select 'pg_catalog.pg_rewrite'::pg_catalog.regclass::pg_catalog.oid, r.oid
            from pg_catalog.pg_rewrite r join rel on r.ev_class operator(pg_catalog.=) rel.oid
@@ -254,7 +269,7 @@ async function customCode(
   //    relations the allowed views' rules use, and from each, an array's element, a domain's base, a composite's
   //    columns and a range's subtype. A table with such a domain column rejects every query that names it.
   const [typed] = await session.rows(
-    `${ALLOWED_CLOSURE},
+    `${allowedClosure(NAMED_BY_A_WORD)},
        rules(oid) as (
          select r.oid from pg_catalog.pg_rewrite r join rel on r.ev_class operator(pg_catalog.=) rel.oid
        ),
@@ -283,7 +298,9 @@ async function customCode(
                         where a.attrelid operator(pg_catalog.=) t.typrelid
                           and a.attnum operator(pg_catalog.>) 0 and not a.attisdropped
              union all select g.rngsubtype from pg_catalog.pg_range g
-                        where t.oid operator(pg_catalog.=) any (array[g.rngtypid, g.rngmultitypid])
+                        -- rngmultitypid is Postgres 14's: read through the row, null before it.
+                        where t.oid operator(pg_catalog.=) any (array[g.rngtypid,
+                          (pg_catalog.to_jsonb(g) operator(pg_catalog.->>) 'rngmultitypid')::pg_catalog.oid])
            ) as x(next)
           where x.next operator(pg_catalog.<>) 0
        ),
