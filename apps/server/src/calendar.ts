@@ -46,14 +46,29 @@ export function wallTimes(row: EventRow): string[] {
 const daySpan = (row: EventRow) =>
   (Date.parse(localDate(row.end, row.timezone)) - Date.parse(localDate(row.start, row.timezone))) /
   86_400_000;
+
+/**
+ * The end of an event that starts at `start` and keeps the length of `base`: the same whole local days for an
+ * all-day one (a day is 23 or 25 hours across a daylight saving change), the same duration otherwise. The days
+ * of `base` are counted in `spanTz` (the zone it was in), the end is laid out in `tz`.
+ */
+export function endAfterMove(
+  base: { start: Date; end: Date },
+  start: Date,
+  allDay: boolean,
+  tz: string,
+  spanTz = tz,
+): Date {
+  if (!allDay) return new Date(start.getTime() + base.end.getTime() - base.start.getTime());
+  const days =
+    (Date.parse(localDate(base.end, spanTz)) - Date.parse(localDate(base.start, spanTz))) / 86_400_000;
+  return shiftDays(start, days, tz);
+}
 const shiftDays = (at: Date, days: number, tz: string) => {
   const p = localParts(at, tz);
   return zonedTime({ y: p.y, m: p.m, d: p.d + days }, 0, 0, tz);
 };
-const eventEnd = (row: EventRow, start: Date) =>
-  row.allDay
-    ? shiftDays(start, daySpan(row), row.timezone)
-    : new Date(start.getTime() + row.end.getTime() - row.start.getTime());
+export const eventEnd = (row: EventRow, start: Date) => endAfterMove(row, start, row.allDay, row.timezone);
 
 export function toEvent(row: EventRow, occurrence?: Date): CalendarEvent {
   const start = occurrence ?? row.start;

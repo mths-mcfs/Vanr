@@ -18,6 +18,8 @@ import { z } from "zod";
 import {
   clockTime,
   type EventRow,
+  endAfterMove,
+  eventEnd,
   eventFor,
   seriesRule as eventRule,
   eventsInRange,
@@ -240,21 +242,21 @@ export async function editEvent(
     requireEditor(row, me);
     const timezone = patch.timezone ?? row.timezone;
     if (patch.rule) checkSeriesRule(patch.rule, timezone);
-    const duration = row.end.getTime() - row.start.getTime();
+    const allDay = patch.allDay ?? row.allDay;
     const fields = (base: { start: Date; end: Date }) => {
       const start = patch.start ? new Date(patch.start) : base.start;
       const end = patch.end
         ? new Date(patch.end)
         : patch.start
-          ? new Date(start.getTime() + (base.end.getTime() - base.start.getTime()))
+          ? endAfterMove(base, start, allDay, timezone, row.timezone)
           : base.end;
       checkTimes(start, end);
-      checkAllDay(patch.allDay ?? row.allDay, start, end, timezone);
+      checkAllDay(allDay, start, end, timezone);
       return {
         title: patch.title ?? row.title,
         start,
         end,
-        allDay: patch.allDay ?? row.allDay,
+        allDay,
         timezone,
         participants: patch.participants ?? row.participants,
         location: patch.location !== undefined ? patch.location : row.location,
@@ -263,13 +265,18 @@ export async function editEvent(
       };
     };
     const series = ruleOf(row);
-    // A new start or time zone gives the series its time of day again: a kept local time no longer applies.
+    // A new start or time zone gives the series its time of day again: a kept local time no longer applies. A new
+    // time zone is the rule's too (the occurrences follow the rule's zone).
     const retimed = patch.start !== undefined || patch.timezone !== undefined;
+    const retime = (rule: RecurrenceRule): RecurrenceRule => ({
+      ...withoutTimes(rule),
+      ...(patch.timezone !== undefined ? { timezone: patch.timezone } : {}),
+    });
     const ruleChange =
       patch.rule !== undefined
         ? { rule: patch.rule }
-        : series?.times && retimed
-          ? { rule: withoutTimes(series) }
+        : series && (patch.timezone !== undefined || (series.times && retimed))
+          ? { rule: retime(series) }
           : {};
     // What is the same across the family follows an edit of "all" or "this and the following" to the other
     // parts it reaches; the times stay with each part.
@@ -314,7 +321,7 @@ export async function editEvent(
     }
 
     const occ = checkOccurrence(row, instanceStart);
-    const base = { start: occ, end: new Date(occ.getTime() + duration) };
+    const base = { start: occ, end: eventEnd(row, occ) };
     if (scope === "this") {
       // The occurrence becomes an event of its own and leaves the series. It points to the family's root (not
       // to the part it left), like the parts: so "all" and "this and the following" reach it too.
@@ -371,7 +378,7 @@ export async function editEvent(
     // differs from the series'), the rule keeps the series' local time so the later ones don't move.
     const times = wallTimes(row);
     const kept = retimed
-      ? withoutTimes(series)
+      ? retime(series)
       : times.length === 1 && times[0] === clockTime(occ, series.timezone || row.timezone)
         ? series
         : { ...series, times };

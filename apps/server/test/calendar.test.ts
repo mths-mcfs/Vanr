@@ -639,6 +639,69 @@ describe("calendar", () => {
 
 describe("time zones and limits", () => {
   test(
+    "an all-day day on the 25-hour fall-back day keeps whole days; a new time zone is the series' too",
+    async () => {
+      const { workspaceId, ana } = await team();
+      const tz = "America/New_York";
+      // 1 November 2026 lasts 25 hours in New York: the day ends at 05:00Z, not 04:00Z.
+      const days = () =>
+        create(ana, workspaceId, {
+          title: "Day",
+          allDay: true,
+          timezone: tz,
+          start: "2026-10-31T04:00:00Z",
+          end: "2026-11-01T04:00:00Z",
+          rule: { freq: "daily", count: 4, timezone: tz },
+        });
+      const one = await days();
+      const renamed = await update(ana, workspaceId, one.id, {
+        scope: "this",
+        instanceStart: "2026-11-01T04:00:00Z",
+        title: "Renamed",
+      });
+      expect([renamed.start, renamed.end]).toEqual(["2026-11-01T04:00:00.000Z", "2026-11-02T05:00:00.000Z"]);
+      await remove(ana, workspaceId, one.id, { scope: "all" });
+      const two = await days();
+      const rest = await update(ana, workspaceId, two.id, {
+        scope: "following",
+        instanceStart: "2026-11-01T04:00:00Z",
+        title: "Rest",
+      });
+      expect([rest.start, rest.end]).toEqual(["2026-11-01T04:00:00.000Z", "2026-11-02T05:00:00.000Z"]);
+      await remove(ana, workspaceId, two.id, { scope: "all" });
+      // A single all-day event moved onto that day by its start only.
+      const single = await create(ana, workspaceId, {
+        title: "One",
+        allDay: true,
+        timezone: tz,
+        start: "2026-10-30T04:00:00Z",
+        end: "2026-10-31T04:00:00Z",
+      });
+      const moved = await update(ana, workspaceId, single.id, { start: "2026-11-01T04:00:00Z" });
+      expect(moved.end).toBe("2026-11-02T05:00:00.000Z");
+
+      // A daily 09:00 in New York moved to UTC without a rule: it is 13:00Z every day, also after 1 November.
+      const ny = await create(ana, workspaceId, {
+        title: "NY",
+        timezone: tz,
+        start: "2026-10-30T13:00:00Z",
+        end: "2026-10-30T14:00:00Z",
+        rule: { freq: "daily", timezone: tz },
+      });
+      const utc = await update(ana, workspaceId, ny.id, { scope: "all", timezone: "UTC" });
+      expect([utc.timezone, utc.rule?.timezone]).toEqual(["UTC", "UTC"]);
+      const r = await range(ana, workspaceId, "2026-10-30T00:00:00Z", "2026-11-03T00:00:00Z");
+      expect(r.events.filter((e) => e.title === "NY").map((e) => e.start)).toEqual([
+        "2026-10-30T13:00:00.000Z",
+        "2026-10-31T13:00:00.000Z",
+        "2026-11-01T13:00:00.000Z",
+        "2026-11-02T13:00:00.000Z",
+      ]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "the range: proposals that start after it stay out, no shared cache; all-day bounds; the rule's own start is dropped",
     async () => {
       const { workspaceId, ana } = await team();
