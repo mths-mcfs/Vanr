@@ -275,13 +275,9 @@ const askDecision = defineStored({
           ? new Date(ctx.deps.now().getTime() + input.deadlineMinutes * 60_000)
           : null,
     });
-    // Without its card nobody can answer it, and a blocking decision would hold the assignment: it goes too.
-    const card = await ctx
-      .postCard(input.question, { assignmentDecision: { assignmentId: row.id, decisionId: id } })
-      .catch(async (err: unknown) => {
-        await ctx.deps.db.delete(assignmentDecisions).where(eq(assignmentDecisions.id, id));
-        throw err;
-      });
+    const card = await ctx.postCard(input.question, {
+      assignmentDecision: { assignmentId: row.id, decisionId: id },
+    });
     await ctx.deps.db
       .update(assignmentDecisions)
       .set({ messageId: card.id })
@@ -325,12 +321,9 @@ const requestReview = defineStored({
       fileIds,
       prUrl: input.prUrl ?? null,
     });
-    const card = await ctx
-      .postCard(input.title, { assignmentReview: { assignmentId: row.id, reviewId: id } })
-      .catch(async (err: unknown) => {
-        await ctx.deps.db.delete(assignmentReviews).where(eq(assignmentReviews.id, id));
-        throw err;
-      });
+    const card = await ctx.postCard(input.title, {
+      assignmentReview: { assignmentId: row.id, reviewId: id },
+    });
     await ctx.deps.db
       .update(assignmentReviews)
       .set({ messageId: card.id })

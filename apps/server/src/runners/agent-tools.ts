@@ -475,6 +475,8 @@ const environmentStatus = define({
   effect: "K0",
   input: z.object({}),
   async run(ctx) {
+    // The plan checked the access; it is checked again here, since it may have changed before the run.
+    await runnerOf(ctx, { allowStopped: true, allowOffline: true });
     const environment = await environmentOf(ctx.deps, ctx.agent.id);
     const runnerId = environment.target?.runnerId;
     if (!environment.target || !runnerId) return "You have no runner.";
@@ -1088,14 +1090,15 @@ const browserAskPerson = defineStored({
       return inserted ?? null;
     });
     if (!row) throw new ToolInputError("You already asked a person; wait for that request first.");
-    // Without its card nobody can take the request, and it would block the agent's next ones until it expires.
+    // Without its card nobody can take the request, and it would block the agent's next ones until it expires. Only
+    // a request nobody answered yet is canceled: a person who already took or finished it keeps what they did.
     const card = await ctx
       .postCard(input.instructions, { browserIntervention: { id } })
       .catch(async (err: unknown) => {
         await ctx.deps.db
           .update(browserInterventions)
           .set({ status: "canceled", handledAt: ctx.deps.now() })
-          .where(eq(browserInterventions.id, id));
+          .where(and(eq(browserInterventions.id, id), eq(browserInterventions.status, "pending")));
         throw err;
       });
     const [withCard] = await ctx.deps.db

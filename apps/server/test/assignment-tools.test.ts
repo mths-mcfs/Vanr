@@ -416,30 +416,40 @@ describe("assignment tools", () => {
   );
 
   test(
-    "a decision or a review whose card can't be posted leaves nothing waiting",
+    "a card posted before its post call fails keeps its decision and its review: the card points at them",
     async () => {
       const t = await team();
       const row = await assignmentOf(t);
       const r = await run(t, row.threadId);
-      const failing = { postCard: async () => Promise.reject(new Error("chat down")) };
+      const base = r.ctx();
+      // The message is written and published, then something after it (a notice) fails.
+      const late = {
+        postCard: async (body: string, meta: Parameters<typeof base.postCard>[1]) => {
+          await base.postCard(body, meta);
+          throw new Error("notice failed");
+        },
+      };
       await expect(
-        r.call("ask_decision", { question: "Retry or rewrite?", options: ["retry", "rewrite"] }, failing),
-      ).rejects.toThrow("chat down");
-      await expect(r.call("request_review", { title: "Look", summary: "s" }, failing)).rejects.toThrow(
-        "chat down",
+        r.call("ask_decision", { question: "Retry or rewrite?", options: ["retry", "rewrite"] }, late),
+      ).rejects.toThrow("notice failed");
+      await expect(r.call("request_review", { title: "Look", summary: "s" }, late)).rejects.toThrow(
+        "notice failed",
       );
+      const pointed = r.cards.map(
+        (c) =>
+          c.meta as { assignmentDecision?: { decisionId: string }; assignmentReview?: { reviewId: string } },
+      );
+      const decisionId = pointed.find((m) => m.assignmentDecision)?.assignmentDecision?.decisionId as string;
+      const reviewId = pointed.find((m) => m.assignmentReview)?.assignmentReview?.reviewId as string;
       expect(
-        await server.deps.db
-          .select()
-          .from(assignmentDecisions)
-          .where(eq(assignmentDecisions.assignmentId, row.id)),
-      ).toEqual([]);
+        await server.deps.db.select().from(assignmentDecisions).where(eq(assignmentDecisions.id, decisionId)),
+      ).toHaveLength(1);
       expect(
         await server.deps.db
           .select()
           .from(schema.assignmentReviews)
-          .where(eq(schema.assignmentReviews.assignmentId, row.id)),
-      ).toEqual([]);
+          .where(eq(schema.assignmentReviews.id, reviewId)),
+      ).toHaveLength(1);
     },
     SERVER_TEST_MS,
   );
@@ -972,6 +982,105 @@ describe("commands on the agent's runner", () => {
       const out = await asking;
       expect(out.content).toContain("The person finished: solved.");
       expect(risk.reasons).toContainEqual({ flag: "A", source: "browser_ask_person (web page)" });
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a person who finished the request while its card's post was failing keeps it done",
+    async () => {
+      const t = await team(undefined, true);
+      const r = await run(t, null);
+      const base = r.ctx();
+      const finishing = {
+        postCard: async (body: string, meta: Parameters<typeof base.postCard>[1]) => {
+          await base.postCard(body, meta);
+          const [open] = await server.deps.db
+            .select()
+            .from(schema.browserInterventions)
+            .where(eq(schema.browserInterventions.agentId, t.lia.id));
+          await moveIntervention(server.deps, open?.id as string, ["pending"], {
+            status: "done",
+            note: "signed in",
+          });
+          throw new Error("notice failed");
+        },
+      };
+      await expect(
+        r.call("browser_ask_person", { kind: "login", instructions: "Sign in" }, finishing),
+      ).rejects.toThrow("notice failed");
+      const [kept] = await server.deps.db
+        .select()
+        .from(schema.browserInterventions)
+        .where(eq(schema.browserInterventions.agentId, t.lia.id));
+      expect(kept).toMatchObject({ status: "done", note: "signed in" });
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "between a tool's plan and its run: lost access, a swapped runner and a revoked default runner all stop it",
+    async () => {
+      const t = await team();
+      const caio = await memberOf(server, t.workspaceId, "Caio", email("caio"), "admin");
+      const toolOf = async (name: string) => {
+        const [agent] = await server.deps.db.select().from(agents).where(eq(agents.id, t.lia.id));
+        const tool = (await environmentToolsFor({ deps: server.deps, agent: agent as typeof t.lia })).find(
+          (x) => x.name === name,
+        );
+        if (!tool?.plan) throw new Error(`no ${name}`);
+        return tool as Required<typeof tool>;
+      };
+      const ctxOf = async (asker: Person) => {
+        const [agent] = await server.deps.db.select().from(agents).where(eq(agents.id, t.lia.id));
+        return (
+          await toolRun(server, {
+            workspaceId: t.workspaceId,
+            agent: agent as typeof t.lia,
+            channelId: t.general,
+            asker,
+          })
+        ).ctx();
+      };
+
+      // Caio is an admin when the status is planned and a member when it runs.
+      const status = await toolOf("environment_status");
+      const asCaio = await ctxOf(caio);
+      await status.plan(asCaio, {});
+      await server.deps.db
+        .update(schema.members)
+        .set({ role: "member" })
+        .where(and(eq(schema.members.workspaceId, t.workspaceId), eq(schema.members.userId, caio.user.id)));
+      await expect(status.run(asCaio, {})).rejects.toThrow("may not use your runner");
+
+      // A command planned on one runner, with the agent lent another before it runs.
+      const other = await pairFake(server, t.ana, t.workspaceId, { open });
+      const exec = await toolOf("execute_code");
+      const asAna = await ctxOf(t.ana);
+      const input = { command: "deploy.sh" };
+      await exec.plan(asAna, input);
+      await server.deps.db
+        .update(agents)
+        .set({ environmentId: other.runnerId })
+        .where(eq(agents.id, t.lia.id));
+      await expect(exec.run(asAna, input)).rejects.toThrow("changed since this command was planned");
+      expect(requests(other.runner, "exec")).toEqual([]);
+      expect(requests(t.fake.runner, "exec")).toEqual([]);
+
+      // The assignment has no runner of its own and the agent's, still connected, was revoked.
+      await server.deps.db
+        .update(agents)
+        .set({ environmentId: t.fake.runnerId })
+        .where(eq(agents.id, t.lia.id));
+      const row = await assignmentOf(t, { runnerId: null });
+      await server.deps.db
+        .update(runners)
+        .set({ revokedAt: server.deps.now() })
+        .where(eq(runners.id, t.fake.runnerId));
+      expect(server.deps.runners.isOnline(t.fake.runnerId)).toBe(true);
+      const job = await (await run(t, row.threadId)).call("start_job", { title: "Fix", prompt: "Fix it" });
+      expect(job.content).toContain("no runner");
+      expect(requests(t.fake.runner, "job.start")).toEqual([]);
     },
     SERVER_TEST_MS,
   );
