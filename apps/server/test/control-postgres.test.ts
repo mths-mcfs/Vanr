@@ -170,8 +170,6 @@ async function undoAgainstSend(
     posted.map((m) => m.meta.retracted !== undefined),
     action?.revertedAt != null,
   ];
-  if (!Object.values(SEND_UNDO_ENDS).some((want) => Bun.deepEquals(want, end)))
-    console.log(`UNDO_SEND_MISMATCH ${JSON.stringify(end)}`);
   expect(Object.values(SEND_UNDO_ENDS)).toContainEqual(end);
   return Object.entries(SEND_UNDO_ENDS).find(([, want]) => Bun.deepEquals(want, end))?.[0];
 }
@@ -226,7 +224,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("undo at the same time on Postgre
     });
   }, 60_000);
 
-  test("undo against the send at the deadline, N times: each post is canceled, retracted or late, never left out", async () => {
+  test("undo against the send at the deadline, N times: an ok undo never leaves the post showing", async () => {
     await withServer("undo_send", async (server, _admin, ctx) => {
       const sendAt = new Date(Date.now() + 60_000);
       const items = [];
@@ -238,9 +236,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("undo at the same time on Postgre
         deliverDue(sweep),
         deliverDue(sweep),
       ]);
-      const kinds: unknown[] = [];
-      for (const [i, it] of items.entries()) kinds.push(await undoAgainstSend(server, it, results[i]));
-      console.log(`UNDO_SEND_TALLY ${kinds.join(",")}`);
+      for (const [i, it] of items.entries()) await undoAgainstSend(server, it, results[i]);
     });
   }, 60_000);
 
