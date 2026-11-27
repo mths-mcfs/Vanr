@@ -212,7 +212,6 @@ export class FakeServer {
   /** How many sockets browsers asked for, accepted or not. */
   socketsAsked = 0;
   readonly files: FakeFiles;
-  /** Bases: tables, views, rows and relations. */
   readonly bases: FakeBases;
   private readonly fileOperations: ReturnType<FakeFiles["operations"]>;
   private readonly accounts = new Map<string, Account>();

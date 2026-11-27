@@ -71,7 +71,6 @@ describe("a base", () => {
     await app.user.clear(hours);
     await app.user.type(hours, "4,5{Enter}");
     await waitFor(() => expect(tasks.rows[0]?.props.hours).toBe(4.5));
-    // Not a number: the old value stays and nothing is sent.
     const calls = server.calls.filter((call) => call.method === "updateBaseRow").length;
     await app.user.clear(hours);
     await app.user.type(hours, "lots{Enter}");

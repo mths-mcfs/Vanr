@@ -483,7 +483,6 @@ function RollupEditor({
   );
 }
 
-/** Marks the part of the formula an error points at. */
 function MarkedAt({ source, at }: { source: string; at: [number, number] }) {
   const start = Math.max(0, Math.min(at[0], source.length));
   const end = Math.max(start + 1, Math.min(at[1], source.length));

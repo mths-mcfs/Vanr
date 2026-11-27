@@ -26,13 +26,11 @@ test("shots", async ({ page, server, seedUser, signIn }, info) => {
     },
   });
   await page.goto(`/workspace/${ws}/files`);
-  await page
-    .getByTestId("files-upload")
-    .setInputFiles({
-      name: "field-notes.txt",
-      mimeType: "text/plain",
-      buffer: Buffer.from("Ink drying times by paper weight."),
-    });
+  await page.getByTestId("files-upload").setInputFiles({
+    name: "field-notes.txt",
+    mimeType: "text/plain",
+    buffer: Buffer.from("Ink drying times by paper weight."),
+  });
   await expect(page.getByText("Uploaded")).toBeVisible();
   await page.screenshot({ path: `${OUT}/drive-grid.png`, fullPage: true });
   await page.getByRole("button", { name: "List" }).click();

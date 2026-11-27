@@ -154,7 +154,7 @@ function TextCell({
   );
 }
 
-/** A number typed with a comma or a dot; anything else is refused and the old value stays. */
+/** A number typed with a comma or a dot: null when empty, undefined when it is not a finite number. */
 export function parseNumber(text: string): number | null | undefined {
   const trimmed = text.trim();
   if (trimmed === "") return null;

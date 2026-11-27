@@ -1,5 +1,5 @@
 /*
- * The files area: the Drive, the trace of each upload, the preview of a file, the trash and the search.
+ * The files area: the Drive, the trace of each upload, the preview of a file, the trash, the search and the bases.
  * Loaded with the area's chunk. Tokens only, as in app.css (styles.test.ts reads this file too).
  *
  * One mark of its own: the version ear, a tab on the corner of each file that says what the file is and

@@ -46,7 +46,6 @@ test("bases: a relation links projects to tasks and a rollup adds up their hours
   await expect(page.getByRole("heading", { level: 1, name: t("files", "bases.title") })).toBeVisible();
   await expect(page.getByText(t("files", "bases.empty.title"))).toBeVisible();
 
-  // Tasks, with the hours each one takes.
   await newBase(page, t, "Tasks");
   await newProperty(page, t, "Hours", t("files", "type.number"));
   const grid = page.getByRole("table");
@@ -64,7 +63,6 @@ test("bases: a relation links projects to tasks and a rollup adds up their hours
     await expect(time).toHaveValue(hours.replace(",", "."));
   }
 
-  // Projects, linked to tasks, with the sum of their hours.
   await page.goto(`/workspace/${user.workspace.id}/bases`);
   await newBase(page, t, "Projects");
   await newProperty(page, t, "Tasks", t("files", "type.relation"), async (dialog) => {

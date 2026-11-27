@@ -138,7 +138,7 @@ function RowEditor({
   );
 }
 
-/** The row beside the base, over it. */
+/** The row in a side panel over the base. */
 export function RowPanel({
   workspaceId,
   base,

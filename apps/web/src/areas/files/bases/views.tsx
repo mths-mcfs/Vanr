@@ -1,6 +1,6 @@
 // The four ways a view shows rows. The grid edits cells in place and opens a row from its title; the
 // board needs a group and moves a card to another column by dragging it (or by its own control); the
-// list shows up to four properties and the gallery cards of two or six. Each one opens a row's panel
+// list shows up to four properties and a gallery card two, or six when large. Each one opens a row's panel
 // and adds a row.
 import type { BasePropDef, BaseRelationTarget, BaseRow, BaseTable, BaseView } from "@vanr/contract";
 import { Button, Icon } from "@vanr/ui";
@@ -112,7 +112,6 @@ export function TableView(props: ViewProps) {
   );
 }
 
-/** The card of a row: its title and a few properties. */
 function Card({ props, row, shown }: { props: ViewProps; row: BaseRow; shown: BasePropDef[] }) {
   const t = useMessages("files");
   const title = titleOf(props.table, row);
