@@ -25,10 +25,12 @@ import {
   eventsInRange,
   expand,
   isPersonIn,
+  isSubDaily,
   localDate,
   publishDeleted,
   publishEvent,
   ruleOf,
+  timesFit,
   toEvent,
   toProposal,
   wallTimes,
@@ -274,11 +276,15 @@ export async function editEvent(
     });
     // A rule from the client never carries the local time the server keeps (`clientRule` drops it). While the
     // start and the time zone stay (the event's and the rule's), a new rule keeps that time: only the server sets it.
-    const keepTimes = (rule: RecurrenceRule | null | undefined, times: string[] | undefined) =>
-      rule && times?.length && !retimed && rule.timezone === (series?.timezone || row.timezone)
+    const keepTimes = (rule: RecurrenceRule | null | undefined, times: string[] | undefined, start: Date) =>
+      rule &&
+      times?.length &&
+      !retimed &&
+      rule.timezone === (series?.timezone || row.timezone) &&
+      timesFit(rule, times, start, rule.timezone)
         ? { ...rule, times }
         : rule;
-    const resent = keepTimes(patch.rule, series?.times);
+    const resent = keepTimes(patch.rule, series?.times, row.start);
     const ruleChange =
       resent !== undefined
         ? { rule: resent }
@@ -386,12 +392,13 @@ export async function editEvent(
     const times = wallTimes(row);
     const kept = retimed
       ? retime(series)
-      : times.length === 1 && times[0] === clockTime(occ, series.timezone || row.timezone)
+      : isSubDaily(series) ||
+          (times.length === 1 && times[0] === clockTime(occ, series.timezone || row.timezone))
         ? series
         : { ...series, times };
     const nextRule =
       patch.rule !== undefined
-        ? keepTimes(patch.rule, kept.times)
+        ? keepTimes(patch.rule, kept.times, occ)
         : series.count
           ? { ...kept, count: series.count - before }
           : kept;

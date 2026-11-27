@@ -37,6 +37,23 @@ export function clockTime(at: Date, tz: string): string {
   return `${String(p.hh).padStart(2, "0")}:${String(p.mm).padStart(2, "0")}`;
 }
 
+/** A rule that repeats within a day: its occurrences step from the start, and `times` doesn't apply. */
+export const isSubDaily = (rule: RecurrenceRule) => rule.freq === "minutely" || rule.freq === "hourly";
+
+/**
+ * Do kept `times` still describe a rule that starts at `start`? Only for a daily or longer rule, and only when
+ * one of them laid on the start's local day lands on the start itself (the case of a daylight saving gap,
+ * where 02:30 moves to 03:00): otherwise the start's own clock time is the series' time.
+ */
+export function timesFit(rule: RecurrenceRule, times: string[], start: Date, tz: string): boolean {
+  if (isSubDaily(rule)) return false;
+  const day = localParts(start, tz);
+  return times.some((t) => {
+    const [hh, mm] = t.split(":").map(Number);
+    return zonedTime(day, hh ?? 0, mm ?? 0, tz).getTime() === start.getTime();
+  });
+}
+
 /** The local time of day of the series' occurrences. */
 export function wallTimes(row: EventRow): string[] {
   const rule = seriesRule(row);

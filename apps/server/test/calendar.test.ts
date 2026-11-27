@@ -468,6 +468,33 @@ describe("calendar", () => {
       await remove(ana, workspaceId, early.id, { scope: "following", instanceStart: "2027-04-05T12:00:00Z" });
       expect(await listed("2027-04-05T00:00:00Z", "2027-04-14T00:00:00Z")).toEqual([]);
 
+      // An hourly series split at 11:00 and turned daily: the continuation runs at 11:00, its own start (the
+      // series' 09:00 belongs to the hourly rule, not to the new one).
+      const hourly = await create(ana, workspaceId, {
+        title: "Hourly",
+        start: "2027-03-13T09:00:00Z",
+        end: "2027-03-13T09:30:00Z",
+        timezone: "UTC",
+        rule: { freq: "hourly", count: 4, timezone: "UTC" },
+      });
+      const daily = await update(ana, workspaceId, hourly.id, {
+        scope: "following",
+        instanceStart: "2027-03-13T11:00:00Z",
+        rule: { freq: "daily", count: 2, timezone: "UTC" },
+      });
+      expect([daily.start, daily.rule?.times]).toEqual(["2027-03-13T11:00:00.000Z", undefined]);
+      expect(
+        (await range(ana, workspaceId, "2027-03-13T00:00:00Z", "2027-03-17T00:00:00Z")).events.map(
+          (x) => x.start,
+        ),
+      ).toEqual([
+        "2027-03-13T09:00:00.000Z",
+        "2027-03-13T10:00:00.000Z",
+        "2027-03-13T11:00:00.000Z",
+        "2027-03-14T11:00:00.000Z",
+      ]);
+      await remove(ana, workspaceId, hourly.id, { scope: "all" });
+
       // 02:30 in New York: on 2027-03-14 that time doesn't exist and the occurrence moves to 03:00 EDT.
       // Splitting there keeps 02:30 for the days after. The rule's own `times` from a client are ignored.
       const tz = "America/New_York";
