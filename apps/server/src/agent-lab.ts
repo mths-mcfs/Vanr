@@ -12,7 +12,7 @@ import { newId } from "@vanr/engine/ids";
 import { PRODUCT } from "@vanr/product";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { type AgentRow, workspaceBudgetDefaults } from "./agents";
-import { type AppDeps } from "./context";
+import type { AppDeps } from "./context";
 import { isUniqueViolation } from "./db-errors";
 import { conflict } from "./http";
 

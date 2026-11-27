@@ -201,10 +201,7 @@ describe("on the real agent runtime", () => {
       expect(work.length).toBeGreaterThan(0);
       const [first] = work;
       // The turn went out as a message of the assignment's thread and the agent's run on it ended.
-      const turns = await server.deps.db
-        .select()
-        .from(schema.runs)
-        .where(eq(schema.runs.agentId, agentId));
+      const turns = await server.deps.db.select().from(schema.runs).where(eq(schema.runs.agentId, agentId));
       expect(turns.length).toBeGreaterThan(0);
       expect(turns.every((r) => r.status === "done")).toBe(true);
       expect(first?.refId && turns.some((r) => r.id === first.refId)).toBe(true);

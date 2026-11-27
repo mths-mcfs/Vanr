@@ -22,7 +22,7 @@ import type { Hono } from "hono";
 import { z } from "zod";
 import { createMemory } from "../agent-memory";
 import { canReadChannel, readableChannel } from "../channels";
-import { type AppEnv, type WorkspaceMember } from "../context";
+import type { AppEnv, WorkspaceMember } from "../context";
 import {
   type ActionRow,
   actionInWorkspace,

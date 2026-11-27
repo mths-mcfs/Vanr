@@ -16,7 +16,7 @@ import { asc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { jsonFrom } from "./agent-lab";
 import { AGENT_ROLES, type AgentRow, isAgentRole } from "./agents";
-import { type AppDeps, type WorkspaceMember } from "./context";
+import type { AppDeps, WorkspaceMember } from "./context";
 import { proposalsView, proposalTrail, publishProposal } from "./control";
 import { forbidden, HttpError } from "./http";
 import { takenHandles } from "./members";

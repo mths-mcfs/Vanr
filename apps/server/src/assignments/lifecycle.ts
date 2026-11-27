@@ -14,7 +14,7 @@ import { type Db, schema } from "@vanr/engine/db";
 import { MODELS } from "@vanr/engine/models/catalog";
 import { and, eq, inArray } from "drizzle-orm";
 import type { AgentRow } from "../agents";
-import { type AppDeps, type WorkspaceMember } from "../context";
+import type { AppDeps, WorkspaceMember } from "../context";
 import { badRequest, conflict, HttpError } from "../http";
 import { log } from "../logger";
 import { closeNotificationGroups, closeNotifications } from "../notifications";

@@ -18,7 +18,7 @@ import type { AssignmentLimitKind, AssignmentUsage, AssignmentWaitReason } from 
 import { schema } from "@vanr/engine/db";
 import { and, eq, gt, inArray, max, ne, sql } from "drizzle-orm";
 import { channelInWorkspace } from "../channels";
-import { type AppDeps, type RuntimePort } from "../context";
+import type { AppDeps } from "../context";
 import { launchDurable } from "../durable";
 import { HttpError } from "../http";
 import { log } from "../logger";

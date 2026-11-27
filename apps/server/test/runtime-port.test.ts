@@ -59,9 +59,9 @@ describe("runtime port", () => {
         expect(rt.activeRun("agt_x", "chn_x", null)).toBeNull();
         expect(rt.cancel("run_x", null)).toBe(false);
         expect(rt.awaitsApproval("apv_x")).toBe(false);
-        expect(rt.resolveApproval("apv_x", { id: "apv_x", decision: "expired", reason: null, byName: null })).toBe(
-          false,
-        );
+        expect(
+          rt.resolveApproval("apv_x", { id: "apv_x", decision: "expired", reason: null, byName: null }),
+        ).toBe(false);
         expect(await rt.reviseApproval("apv_x", {})).toBeNull();
         expect(await rt.answerQuestion("q_x", "yes", "usr_x")).toBeNull();
       } finally {

@@ -17,7 +17,7 @@ import { assignmentWorkState } from "@vanr/engine/work-state";
 import { and, count, eq, gt, inArray } from "drizzle-orm";
 import type { AgentRow } from "../agents";
 import { canReadChannel, channelInWorkspace } from "../channels";
-import { type AppDeps, type WorkspaceMember } from "../context";
+import type { AppDeps, WorkspaceMember } from "../context";
 import { HttpError } from "../http";
 import { postMessage } from "../messages";
 import { canUseRunner } from "../runners/runners";

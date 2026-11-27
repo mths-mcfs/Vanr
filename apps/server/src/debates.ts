@@ -45,7 +45,7 @@ import { and, asc, eq, inArray, isNull, lte, or, type SQL, sql } from "drizzle-o
 import { z } from "zod";
 import { type AgentRow, agentBudgetScope } from "./agents";
 import { canReadChannel, channelInWorkspace, isChannelMember, readableChannelsSql } from "./channels";
-import { type AppDeps } from "./context";
+import type { AppDeps } from "./context";
 import { notFound } from "./http";
 import { closeNotifications, notify } from "./notifications";
 import { fireRoutineEvent } from "./routines";

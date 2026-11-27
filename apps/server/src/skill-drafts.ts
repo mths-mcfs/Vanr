@@ -7,7 +7,7 @@ import { asc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { jsonFrom } from "./agent-lab";
 import { agentInWorkspace } from "./agents";
-import { type AppDeps, type WorkspaceMember } from "./context";
+import type { AppDeps, WorkspaceMember } from "./context";
 import { HttpError } from "./http";
 import { readableRun } from "./run-access";
 

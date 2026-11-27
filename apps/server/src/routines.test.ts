@@ -272,7 +272,10 @@ describe("executing", () => {
         const [after] = await executionsOf(routine.id);
         expect([target.kind, after?.status]).toEqual([target.kind, "ok"]);
         expect(after?.runId).toBeTruthy();
-        const [run] = await server.deps.db.select().from(schema.runs).where(eq(schema.runs.id, after?.runId ?? ""));
+        const [run] = await server.deps.db
+          .select()
+          .from(schema.runs)
+          .where(eq(schema.runs.id, after?.runId ?? ""));
         expect([target.kind, run?.status, run?.agentId]).toEqual([target.kind, "done", agent.id]);
         if (target.kind === "file") expect(after?.summaryKey).toBe("routines.run.file");
         else {
@@ -281,7 +284,11 @@ describe("executing", () => {
             .select()
             .from(schema.messages)
             .where(eq(schema.messages.id, after?.messageId ?? ""));
-          expect([reply?.authorKind, reply?.authorId, reply?.runId]).toEqual(["agent", agent.id, after?.runId]);
+          expect([reply?.authorKind, reply?.authorId, reply?.runId]).toEqual([
+            "agent",
+            agent.id,
+            after?.runId,
+          ]);
           expect(reply?.meta.fromRoutine).toEqual({ routineId: routine.id, name: routine.name });
         }
         expect((await routineRow(routine.id)).runningSince).toBeNull();

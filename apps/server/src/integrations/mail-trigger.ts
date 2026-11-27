@@ -12,15 +12,9 @@
 // The email is outside data, never instructions: it goes into the request as the fire's untrusted context.
 import { schema } from "@vanr/engine/db";
 import { and, eq, sql } from "drizzle-orm";
-import { type AppDeps } from "../context";
+import type { AppDeps } from "../context";
 import { log } from "../logger";
-import {
-  fireRoutine,
-  type RoutineContext,
-  type RoutineRow,
-  targetOf,
-  triggerOf,
-} from "../routines";
+import { fireRoutine, type RoutineContext, type RoutineRow, triggerOf } from "../routines";
 import { quote } from "./imap";
 import { mailboxesOf, withImap } from "./mail";
 import { allowedBy } from "./mail-rules";

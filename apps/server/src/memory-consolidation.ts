@@ -10,7 +10,7 @@ import { z } from "zod";
 import { jsonFrom } from "./agent-lab";
 import { changeMemory, createMemory, type MemoryRow, storeWhere } from "./agent-memory";
 import type { AgentRow } from "./agents";
-import { type AppDeps, type WorkspaceMember } from "./context";
+import type { AppDeps, WorkspaceMember } from "./context";
 import { isUniqueViolation } from "./db-errors";
 import { conflict, notFound } from "./http";
 

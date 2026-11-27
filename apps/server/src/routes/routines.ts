@@ -29,7 +29,7 @@ import type { Hono } from "hono";
 import { z } from "zod";
 import { type AgentRow, agentInWorkspace } from "../agents";
 import { writableChannel } from "../channels";
-import { type AppDeps, type AppEnv, type Ctx, type WorkspaceMember } from "../context";
+import type { AppDeps, AppEnv, Ctx, WorkspaceMember } from "../context";
 import {
   debateEstimate,
   fileUpToUsd,

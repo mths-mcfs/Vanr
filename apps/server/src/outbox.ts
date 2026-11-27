@@ -15,7 +15,7 @@ import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { AgentRow } from "./agents";
 import { agentCanPost } from "./channels";
-import { type AppDeps } from "./context";
+import type { AppDeps } from "./context";
 import { HttpError } from "./http";
 import { mailboxesOf, sentOutOf, transmitMail } from "./integrations/mail";
 import { actionMode } from "./integrations/mail-rules";

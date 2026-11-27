@@ -7,7 +7,6 @@ import type { GuardedConnector } from "../src/integrations/sql-identity";
 import { type BootSteps, type RunningServer, startServer } from "../src/server";
 import type { SignupQueueLimits } from "../src/signup-queue";
 
-
 export interface TestServerOptions {
   /** Shorter limits for the closed sign-up queue. */
   signupQueue?: Partial<SignupQueueLimits>;

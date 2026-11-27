@@ -24,7 +24,7 @@ import {
   type ModelRequest,
 } from "@vanr/engine/models/types";
 import { eq, inArray } from "drizzle-orm";
-import { type AppDeps } from "./context";
+import type { AppDeps } from "./context";
 import { openDebate } from "./debates";
 
 export interface BenchmarkItem {

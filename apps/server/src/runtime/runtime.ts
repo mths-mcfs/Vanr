@@ -1,16 +1,16 @@
-// Runtime dos agentes: roteia mensagens de pessoas, roda no máximo um run por agente e conversa,
-// transmite o trabalho pelo WebSocket do canal, grava os passos e posta a resposta final.
+// The agents' runtime: routes people's messages, runs at most one run per agent and conversation, streams
+// the work over the channel's WebSocket, records the steps and posts the final answer.
 //
-// Conversa = (agente, canal, thread). Mensagem nova numa conversa com run ativo entra nele
-// (`agent.run.steered`); "pare" sozinho para o run.
+// Conversation = (agent, channel, thread). A new message in a conversation with a live run goes into it
+// (`run.steered`); a lone "stop" stops the run.
 //
-// Controle: cada chamada de ferramenta passa pelo gate (costura 1) com as flags A/B/C do run; o que ele
-// pede põe o run em `waiting_approval` até a decisão (ou 24 h); `ask_user` põe em `waiting_input` até a
-// resposta de quem foi perguntado, pelo cartão ou por uma mensagem na conversa. Ao subir, o servidor
-// cancela aprovações e perguntas de runs que não existem mais.
+// Control: every tool call goes through the gate (seam 1) with the run's A/B/C flags; what it asks for puts the
+// run in `paused_for_approval` until the decision (or 24 h); `ask_user` puts it in `paused_for_input` until the
+// asked person answers, on the card or with a message in the conversation. At boot the server cancels the
+// approvals and questions of runs that no longer exist.
 //
-// Custo: toda chamada ao modelo pela API reserva o pior caso no teto do agente antes (costura 2) e
-// grava o custo real no razão depois; sem saldo para a reserva, a chamada não sai.
+// Cost: every model call through the API reserves its worst case on the agent's cap first (seam 2) and records
+// the real cost in the ledger after; without room for the reservation, the call doesn't go out.
 
 import type { ActiveRun, HandledStatus, Message, MessageMeta, RunStatus } from "@vanr/contract";
 import { actionCredential, type CredentialRef } from "@vanr/engine/action-credential";
@@ -41,6 +41,9 @@ import { and, asc, desc, eq, inArray, isNotNull, isNull, lte, or, sql } from "dr
 import { failInterruptedAgentJobs } from "../agent-lab";
 import { memoryPrompt } from "../agent-memory";
 import { type AgentRow, agentBudgetScope, agentNames, monthKey, workspaceBudgetDefaults } from "../agents";
+import { assignmentOfRun } from "../assignments/budget";
+import { publishAssignment } from "../assignments/core";
+import { assignmentPrompt, assignmentRouting } from "../assignments/tools";
 import { type ChannelRow, channelBudgetScope, channelSpendScope } from "../channels";
 import type { AppDeps, CompleteInput, CompleteResult, RuntimePort } from "../context";
 import {
@@ -60,7 +63,10 @@ import { resumeStorageMigrations } from "../integrations/storage";
 import { toolsFor } from "../integrations/tools";
 import { settleIssueWork } from "../issues";
 import { log } from "../logger";
-import type { RunnerRow } from "../runners/runners";
+import { type MessageRow, postMessage } from "../messages";
+import { closeNotifications, notificationTick } from "../notifications";
+import { deliverDue } from "../outbox";
+import { drainQueues, dueRoutines } from "../routines";
 import {
   canUsePlan,
   EXECUTOR_NAME,
@@ -70,13 +76,7 @@ import {
   withPlanOwners,
 } from "../runners/plans";
 import { expireRunnerRequests } from "../runners/requests";
-import { type MessageRow, postMessage } from "../messages";
-import { assignmentOfRun } from "../assignments/budget";
-import { publishAssignment } from "../assignments/core";
-import { assignmentPrompt, assignmentRouting } from "../assignments/tools";
-import { closeNotifications, notificationTick } from "../notifications";
-import { deliverDue } from "../outbox";
-import { drainQueues, dueRoutines } from "../routines";
+import type { RunnerRow } from "../runners/runners";
 import { matchRule } from "../standing-rules";
 import { purgeReservations } from "../usage-ledger";
 import { BackgroundWork } from "./background";
@@ -103,8 +103,17 @@ import {
   toolSpecs,
 } from "./tools";
 
-const { agents, runs, runEvents, messages, channelMemberships, channels, messageDispatches, skills, skillGrants } =
-  schema;
+const {
+  agents,
+  runs,
+  runEvents,
+  messages,
+  channelMemberships,
+  channels,
+  messageDispatches,
+  skills,
+  skillGrants,
+} = schema;
 const {
   members,
   workspaces,
@@ -126,14 +135,14 @@ const MAX_TURNS = 12;
 const MAX_TOKENS = 16_000;
 const HISTORY_LIMIT = 30;
 const HEARTBEAT_MS = 15_000;
-/** O servidor desiste da consulta em 15 min (o cliente mostra até 20). */
+/** The server gives up on a delegation after 15 min (the client shows up to 20). */
 const CONSULT_TIMEOUT_MS = 15 * 60_000;
 const CONSULT_MAX_TOKENS = 4000;
 const BUDGET_WARNING_RATIO = 0.8;
-/** Avisos do teto do canal (F2-3.5-P1-01): um de cada por mês, mais o de "acabou". */
+/** The channel cap's warnings: one of each per month, plus the "ran out" one. */
 const CHANNEL_WARNINGS = [0.75, 0.9] as const;
 
-/** Só a org e a credencial decidem o provedor (o "descreva e eu monto" pede antes de o agente existir). */
+/** Only the workspace and the credential decide the provider (drafting an agent asks before the agent exists). */
 export type ProviderLookup = (
   agent: Pick<AgentRow, "workspaceId" | "credentialId">,
 ) => Promise<ModelProvider | ProviderUnavailable>;
@@ -143,7 +152,7 @@ export type ProviderUnavailable = { error: "no_credential" | "unsupported_provid
 
 export interface RuntimeOptions {
   providerFor: ProviderLookup;
-  /** Intervalo da varredura de lembretes; 0 desliga o timer (os testes chamam tick()). */
+  /** The sweep's interval; 0 turns the timer off (the tests call tick()). */
   tickEveryMs?: number;
 }
 
@@ -154,7 +163,7 @@ class RunCanceled extends Error {
   }
 }
 
-/** O teto do mês (do agente ou do canal) ou o da execução (`routine_run`) não comporta a próxima chamada: a reserva foi recusada. */
+/** The month's cap (the agent's or the channel's) or the execution's (`routine_run`) doesn't fit the next call: the reservation was refused. */
 class BudgetExhausted extends Error {
   constructor(readonly scope: BudgetScope["kind"] = "agent") {
     super(
@@ -170,7 +179,7 @@ class BudgetExhausted extends Error {
   }
 }
 
-/** Fim de um run, para quem acompanha (o motor das missões acorda a missão da thread). */
+/** The end of a run, for whoever follows it (the assignment engine wakes the thread's assignment). */
 export interface RunEnd {
   runId: string;
   workspaceId: string;
@@ -181,7 +190,7 @@ export interface RunEnd {
   errorCode: string | null;
 }
 
-/** O run passou do número de voltas do modelo que o chamador permitiu (`RunLimits.maxTurns`). */
+/** The run went past the model turns the caller allowed (`RunLimits.maxTurns`). */
 class StepLimit extends Error {
   constructor(turns: number) {
     super(`Stopped after ${turns} model turns (step limit)`);
@@ -189,7 +198,7 @@ class StepLimit extends Error {
   }
 }
 
-/** O run passou do tempo que o chamador permitiu (`RunLimits.timeoutMs`). */
+/** The run went past the time the caller allowed (`RunLimits.timeoutMs`). */
 class TimeLimit extends Error {
   constructor(ms: number) {
     super(`Stopped after ${Math.round(ms / 60_000)} min (time limit)`);
@@ -198,17 +207,17 @@ class TimeLimit extends Error {
 }
 
 /**
- * Teto duro de um run que ninguém acompanha (execução de rotina): tetos de gasto além do mês do
- * agente, voltas do modelo e tempo. Passou de qualquer um, o run para com `budget_exhausted`
- * (`routine_budget` se foi o teto da execução), `step_limit` ou `time_limit`.
+ * The hard caps of a run nobody follows (a routine's execution): spend caps beyond the agent's month, model
+ * turns and time. Past any of them the run stops with `budget_exhausted` (`routine_budget` when it was the
+ * execution's cap), `step_limit` or `time_limit`.
  */
 export interface RunLimits {
   scopes: readonly BudgetScope[];
   maxTurns: number;
   timeoutMs: number;
   /**
-   * Chave da execução (a mesma em todas as tentativas): efeito para fora (K2/K3 ou destino externo)
-   * com a mesma chave e o mesmo payload não roda de novo na retentativa.
+   * The execution's key (the same on every attempt): an outside effect (K2/K3 or an external destination)
+   * with the same key and the same payload doesn't run again on the retry.
    */
   effectKey?: string;
 }
@@ -221,13 +230,13 @@ interface Live {
   threadId: string | null;
   key: string;
   trigger: MessageRow;
-  /** Mensagens que chegaram durante o run e ainda não entraram no contexto. */
+  /** Messages that arrived during the run and aren't in the context yet. */
   inbox: MessageRow[];
-  /** Mensagens que este run ainda vai atender (gatilho e as que entraram depois). */
+  /** Messages this run will still answer (the trigger and the ones that joined later). */
   handles: string[];
   /**
-   * O run já decidiu a resposta final (ou falhou) e está fechando: mensagem nova não entra mais
-   * nele. Ela espera aqui e abre um run novo assim que este terminar.
+   * The run already decided its final answer (or failed) and is closing: a new message no longer joins it.
+   * It waits here and opens a new run as soon as this one ends.
    */
   closing: boolean;
   after: MessageRow[];
@@ -237,48 +246,48 @@ interface Live {
   startedAt: Date;
   lastPingAt: Date;
   done: Promise<void>;
-  /** Pergunta aberta deste run: a próxima mensagem de quem foi perguntado a responde. */
+  /** This run's open question: the asked person's next message answers it. */
   waitingQuestion: { id: string; askedUserId: string | null } | null;
-  /** Flags A/B/C do run (costura 1): o gate lê antes de cada ferramenta. */
+  /** The run's A/B/C flags (seam 1): the gate reads them before each tool. */
   risk: RiskTracker;
-  /** Meta extra nas respostas deste run (ex.: `viaRoutine`). */
+  /** Extra meta on this run's answers (e.g. `fromRoutine`). */
   replyMeta?: MessageMeta;
   /**
-   * Computador cujo plano (Claude Code/Codex) este run usa. Mensagem de quem não pode usar o plano
-   * não entra no run: espera e abre o próprio run depois.
+   * The runner whose plan (Claude Code/Codex) this run uses. A message from someone who can't use the plan
+   * doesn't join the run: it waits and opens its own run after.
    */
   plan: RunnerRow | null;
-  /** O agente usou o navegador neste run e não o fechou: quem reabre a conversa vê o cartão (`activeRuns`). */
+  /** The agent used the browser in this run and didn't close it: whoever reopens the conversation sees the card (`activeRuns`). */
   browser: boolean;
-  /** Thread de missão do agente: as chamadas reservam também no teto dela e saem como `mission` no razão. */
+  /** The agent's assignment thread: the calls also reserve on its cap and go into the ledger as `assignment`. */
   assignment: { assignmentId: string; scope: BudgetScope | null } | null;
-  /** Código do fim (falha), para o aviso de fim de run. */
+  /** The end's code (a failure), for the end-of-run notice. */
   errorCode: string | null;
   /**
-   * Loja `/memories/you` do run: a pessoa que pediu, enquanto só ela falou nele (`id`), e se o run
-   * já abriu a loja dela (`pinned`). Outra pessoa que fala antes da loja abrir tira a loja do run;
-   * depois de aberta, a mensagem dela espera o próprio run, porque o contexto já tem dados da dona.
+   * The run's `/memories/you` store: the person who asked, while only they spoke in it (`id`), and whether the
+   * run already opened their store (`pinned`). Someone else who speaks before the store opens takes the store
+   * away from the run; once it is open, their message waits for its own run, because the context already holds the owner's data.
    */
   person: { id: string | null; pinned: boolean };
-  /** Teto duro do run (rotina); sem ele valem o mês do agente e `MAX_TURNS`. */
+  /** The run's hard caps (a routine); without them the agent's month and `MAX_TURNS` apply. */
   limits?: RunLimits;
 }
 
 const personOf = (row: Pick<MessageRow, "authorKind" | "authorId">) =>
   row.authorKind === "person" ? row.authorId : null;
 /**
- * Quem pediu o run agora: a pessoa da mensagem-gatilho. A rotina (agenda, evento, e-mail) posta
- * com o criador dela como autor, mas ninguém está esperando; aí é null.
+ * Who asked for the run now: the trigger message's person. A routine (schedule, event, email) posts with its
+ * creator as the author, but nobody is waiting; then it is null.
  */
 export const requesterOf = (row: Pick<MessageRow, "authorKind" | "authorId" | "meta">) =>
   row.meta.routine ? null : personOf(row);
 /**
- * O orçamento é da API. Agente que pensa no computador (plano, sem custo aqui) não é barrado antes do
- * run; se o run cair no modelo pela API, o próprio run confere o orçamento antes de chamar.
+ * The budget is the API's. An agent that thinks on a runner (a plan, no cost here) isn't stopped before the
+ * run; if the run falls back to the model through the API, the run itself checks the budget before calling.
  */
 const apiBudgetGates = (agent: AgentRow) => agent.harnessKind === "model";
 
-/** Conselheiro do agente como vai no pedido, ou nada (desligado ou par que deixou de valer). */
+/** The agent's advisor as it goes in the request, or nothing (off, or a pair that stopped being valid). */
 function advisorOf(agent: AgentRow): AdvisorSpec | undefined {
   if (!agent.advisorModel || !advisorPairOk(agent.model, agent.advisorModel)) return undefined;
   return { model: agent.advisorModel, maxUses: agent.advisorMaxUses, maxTokens: ADVISOR_MAX_TOKENS };
@@ -288,12 +297,12 @@ export class AgentRuntime implements RuntimePort {
   private readonly live = new Map<string, Live>();
   private readonly byKey = new Map<string, string>();
   private timer: ReturnType<typeof setInterval> | null = null;
-  /** Timers das entregas da fila de envio (um por prazo), além da varredura do tick. */
+  /** Timers of the send queue's deliveries (one per due time), besides the tick's sweep. */
   private readonly wakes = new Set<ReturnType<typeof setTimeout>>();
   private ticking = false;
   private stopped = false;
   private readonly approvalWaiters = new Map<string, (o: ApprovalOutcome) => void>();
-  /** Edição pela pessoa de uma aprovação esperando: revalida e planeja de novo no run. */
+  /** A person's edit of a waiting approval: the run revalidates and plans again. */
   private readonly approvalRevisers = new Map<string, ApprovalRequest["revise"]>();
   private readonly questionWaiters = new Map<string, (a: Answer) => void>();
   private readonly background = new BackgroundWork();
@@ -309,9 +318,9 @@ export class AgentRuntime implements RuntimePort {
   }
 
   /**
-   * Runs que estavam ativos quando o servidor caiu não voltam: viram `failed` com `interrupted`, as
-   * aprovações e perguntas que eles esperavam são canceladas (ninguém mais vai usar a decisão) e a
-   * tarefa pedida a eles fica bloqueada.
+   * Runs that were live when the server fell don't come back: they become `failed` with `interrupted`, the
+   * approvals and questions they waited on are canceled (nobody will use the decision any more) and the
+   * work asked of them is blocked.
    */
   async start(): Promise<void> {
     const at = this.deps.now();
@@ -322,7 +331,7 @@ export class AgentRuntime implements RuntimePort {
       .where(inArray(runs.status, [...ACTIVE_STATUSES]))
       .returning({ id: runs.id, workspaceId: runs.workspaceId });
     await this.closeWaits(null);
-    // Tarefa que esperava um desses runs ("Pedir a um agente") fica bloqueada, não trabalhando para sempre.
+    // Work that waited on one of these runs ("Ask an agent") is blocked, not working forever.
     for (const run of dead) {
       const claimed = await db
         .select({ messageId: messageDispatches.messageId })
@@ -335,11 +344,11 @@ export class AgentRuntime implements RuntimePort {
         { state: "blocked", reason: "interrupted", runId: run.id },
       );
     }
-    // Fórum aberto no meio de uma rodada volta a andar (as vezes rodam em memória).
+    // A debate open in the middle of a round moves again (the rounds run in memory).
     await resumeDebates(this.deps);
-    // Migração do Drive para o S3 que o reinício interrompeu.
+    // A Drive migration to S3 that the restart cut.
     await resumeStorageMigrations(this.deps);
-    // Avaliação de casos e consolidação da memória que o reinício cortou viram `failed`.
+    // Case evaluations and memory consolidations the restart cut become `failed`.
     await failInterruptedAgentJobs(this.deps.db);
     const every = this.opts.tickEveryMs ?? 15_000;
     if (every > 0) {
@@ -359,7 +368,7 @@ export class AgentRuntime implements RuntimePort {
     await this.settle();
   }
 
-  /** Espera todos os runs e o trabalho em segundo plano terminarem (testes e desligamento). */
+  /** Waits until every run and the background work ended (tests and shutdown). */
   async settle(): Promise<void> {
     do {
       await Promise.allSettled([...this.live.values()].map((l) => l.done));
@@ -367,14 +376,14 @@ export class AgentRuntime implements RuntimePort {
     } while (this.live.size > 0);
   }
 
-  /** Avisa o fim de cada run (depois de gravar o status). */
+  /** Tells the end of every run (after its status is saved). */
   onRunEnd(listener: (end: RunEnd) => void): void {
     this.runEndListeners.push(listener);
   }
 
   /**
-   * Entrega a fila de envio em `at` (outbox.ts), sem esperar a próxima varredura. Sem timers
-   * (`tickEveryMs: 0`, os testes), só o tick() entrega.
+   * Delivers the send queue at `at` (outbox.ts), without waiting for the next sweep. Without timers
+   * (`tickEveryMs: 0`, the tests), only tick() delivers.
    */
   wakeAt(at: Date): void {
     if ((this.opts.tickEveryMs ?? 15_000) <= 0 || this.stopped) return;
@@ -388,7 +397,7 @@ export class AgentRuntime implements RuntimePort {
     this.wakes.add(t);
   }
 
-  /** Trabalho em segundo plano (rodadas do fórum, rotinas) que o settle também espera. */
+  /** Background work (debate rounds, routines) that settle also waits for. */
   track(work: Promise<unknown>, what: string): void {
     this.background.track(work, what);
   }
@@ -427,9 +436,9 @@ export class AgentRuntime implements RuntimePort {
   }
 
   /**
-   * Pede um texto a um agente fora de uma conversa (vez no fórum, síntese, rotina que gera arquivo).
-   * Reserva no teto do agente no mês (e nos escopos que o chamador passar: rotina, tópico, missão)
-   * antes de chamar; sem saldo, nem chama o modelo.
+   * Asks an agent for a text outside a conversation (a debate turn, a synthesis, a routine that writes a file).
+   * Reserves on the agent's monthly cap (and the scopes the caller passes: routine, debate, assignment) before
+   * calling; without room it doesn't even call the model.
    */
   async complete(input: CompleteInput): Promise<CompleteResult> {
     const { db } = this.deps;
@@ -462,7 +471,7 @@ export class AgentRuntime implements RuntimePort {
           scope,
           error: "The routine run spending cap does not fit this call",
         };
-      // Só o teto do mês do agente avisa o dono; o do tópico é de quem abriu.
+      // Only the agent's monthly cap tells the owner; a debate's cap belongs to whoever opened it.
       if (scope === "agent") {
         await this.budgetCheck(agent, true);
         return { ok: false, code: "budget", scope, error: `${agent.name} is out of budget this month` };
@@ -542,7 +551,7 @@ export class AgentRuntime implements RuntimePort {
     }
   }
 
-  /** Provedor da org (credencial padrão ou plataforma), para pedir antes de o agente existir. */
+  /** The workspace's provider (its primary credential or the platform's), to ask before the agent exists. */
   providerForWorkspace(workspaceId: string): Promise<ModelProvider | ProviderUnavailable> {
     return this.opts.providerFor({ workspaceId, credentialId: null });
   }
@@ -558,7 +567,10 @@ export class AgentRuntime implements RuntimePort {
 
   activeRuns(filter: { workspaceId: string; channelId?: string }): ActiveRun[] {
     return [...this.live.values()]
-      .filter((l) => l.workspaceId === filter.workspaceId && (!filter.channelId || l.channel.id === filter.channelId))
+      .filter(
+        (l) =>
+          l.workspaceId === filter.workspaceId && (!filter.channelId || l.channel.id === filter.channelId),
+      )
       .map((l) => ({
         runId: l.runId,
         status: l.status,
@@ -578,20 +590,20 @@ export class AgentRuntime implements RuntimePort {
     return l ? { workspaceId: l.workspaceId, channelId: l.channel.id } : null;
   }
 
-  /** Quem pode parar: quem disparou, o responsável pelo agente (o resto a rota decide). */
+  /** Who may stop: whoever triggered it, the agent's owner (the route decides the rest). */
   liveInfo(runId: string): { triggerAuthorId: string; ownerUserId: string } | null {
     const l = this.live.get(runId);
     return l ? { triggerAuthorId: l.trigger.authorId, ownerUserId: l.agent.ownerUserId } : null;
   }
 
-  // ---- controle ----
+  // ---- control ----
 
-  /** Há um run esperando esta aprovação? */
+  /** Whether a run waits on this approval. */
   awaitsApproval(approvalId: string): boolean {
     return this.approvalWaiters.has(approvalId);
   }
 
-  /** A rota decidiu: acorda o run que espera. false = nenhum run esperando. */
+  /** The route decided: wakes the waiting run. false = no run waits. */
   resolveApproval(approvalId: string, outcome: ApprovalOutcome): boolean {
     const wake = this.approvalWaiters.get(approvalId);
     if (!wake) return false;
@@ -600,8 +612,8 @@ export class AgentRuntime implements RuntimePort {
   }
 
   /**
-   * A pessoa editou os campos editáveis antes de aprovar: o run valida e devolve o efeito novo (prévia
-   * e hash). null = nenhum run esperando esta aprovação.
+   * The person edited the editable fields before approving: the run validates and returns the new effect
+   * (preview and hash). null = no run waits on this approval.
    */
   async reviseApproval(
     approvalId: string,
@@ -612,8 +624,8 @@ export class AgentRuntime implements RuntimePort {
   }
 
   /**
-   * Responde uma pergunta aberta (pelo cartão ou por mensagem na conversa) e acorda o run.
-   * null = a pergunta não estava mais aberta.
+   * Answers an open question (on the card or with a message in the conversation) and wakes the run.
+   * null = the question was no longer open.
    */
   async answerQuestion(questionId: string, answer: string, actorUserId: string): Promise<QuestionRow | null> {
     const [row] = await this.deps.db
@@ -652,8 +664,8 @@ export class AgentRuntime implements RuntimePort {
   }
 
   /**
-   * Fecha o que um run deixou esperando: aprovações pendentes viram `canceled` e perguntas abertas
-   * `expired`. Sem runId, fecha tudo (o servidor acabou de subir e não há run vivo).
+   * Closes what a run left waiting: pending approvals become `canceled` and open questions `expired`. Without
+   * a runId it closes everything (the server just came up and no run is live).
    */
   private async closeWaits(runId: string | null) {
     const { db } = this.deps;
@@ -675,8 +687,8 @@ export class AgentRuntime implements RuntimePort {
       .where(and(eq(questions.status, "open"), runId ? eq(questions.runId, runId) : undefined))
       .returning();
     for (const row of expired) await publishQuestion(this.deps, row, "question.closed");
-    // Comando de missão que o run esperava. O de tarefa no computador (`taskId`) não depende do run:
-    // "liberar e tentar de novo" retoma a tarefa.
+    // The assignment command the run waited on. A runner job's (`jobId`) doesn't depend on the run:
+    // "allow and retry" resumes the job.
     const commands = await db
       .update(assignmentCommands)
       .set({ state: "expired" })
@@ -691,16 +703,20 @@ export class AgentRuntime implements RuntimePort {
     const touched = [...new Set(commands.map((c) => c.assignmentId))];
     if (touched.length) {
       for (const row of await db.select().from(assignments).where(inArray(assignments.id, touched))) {
-        // O pedido acabou: o aviso "esperando você" do comando fecha junto.
+        // The request ended: the command's "waiting for you" notice closes with it.
         for (const c of commands)
           if (c.assignmentId === row.id && c.messageId)
-            await closeNotifications(this.deps, row.workspaceId, `assignment:${row.id}:approval:${c.messageId}`);
+            await closeNotifications(
+              this.deps,
+              row.workspaceId,
+              `assignment:${row.id}:approval:${c.messageId}`,
+            );
         publishAssignment(this.deps, row, "command");
       }
     }
   }
 
-  /** Aprovações e perguntas sem resposta há 24 h expiram; o run que esperava segue sem elas. */
+  /** Approvals and questions with no answer for 24 h expire; the run that waited goes on without them. */
   private async expireWaits() {
     const { db } = this.deps;
     const at = this.deps.now();
@@ -735,12 +751,12 @@ export class AgentRuntime implements RuntimePort {
     }
   }
 
-  /** Run ativo do agente nessa conversa (para parar uma missão). */
+  /** The agent's active run in that conversation (to stop an assignment). */
   activeRun(agentId: string, channelId: string, threadId: string | null): string | null {
     return this.byKey.get(`${agentId}:${channelId}:${threadId ?? "-"}`) ?? null;
   }
 
-  /** Para o run. Devolve false se ele já tinha terminado. */
+  /** Stops the run. False when it had already ended. */
   cancel(runId: string, actorUserId: string | null): boolean {
     const l = this.live.get(runId);
     if (!l) return false;
@@ -749,72 +765,43 @@ export class AgentRuntime implements RuntimePort {
     return true;
   }
 
-  // ---- roteamento ----
+  // ---- routing ----
 
-  /** Chamado depois que uma pessoa posta. Não espera os runs. */
-  async onPersonMessage(input: { workspaceId: string; channel: ChannelRow; message: Message }): Promise<void> {
+  /** Called after a person posts. Doesn't wait for the runs. */
+  async onPersonMessage(input: {
+    workspaceId: string;
+    channel: ChannelRow;
+    message: Message;
+  }): Promise<void> {
     const { db, hub } = this.deps;
     const { workspaceId, channel, message } = input;
     if (message.author.type !== "person" || message.meta.feedback) return;
     const [row] = await db.select().from(messages).where(eq(messages.id, message.id));
-    if (!row) return;
-    // Thread de missão: sugestão de quem não decide e missão pausada não chegam ao agente.
-    if (!(await assignmentRouting(this.deps, row))) return;
+    // The thread and the agents are picked by this channel: a message of another channel never routes here.
+    if (!row || row.channelId !== channel.id || row.workspaceId !== workspaceId) return;
+    const routing = await routeMessage(this.deps, channel, row);
+    if (!routing) return;
+    const { mentioned, threadAgentIds, byId, talker, routed } = routing;
 
-    const handles = parseMentions(row.body);
-    const mentioned = handles.length
-      ? await db
-          .select()
-          .from(agents)
-          .where(and(eq(agents.workspaceId, workspaceId), inArray(agents.handle, handles), isNull(agents.archivedAt)))
-      : [];
-    // Na ordem em que aparecem no texto.
-    mentioned.sort((a, b) => handles.indexOf(a.handle) - handles.indexOf(b.handle));
-    const inChannel = await db
-      .select({ agent: agents, autoAnswer: channelMemberships.autoAnswer })
-      .from(channelMemberships)
-      .innerJoin(agents, eq(agents.id, channelMemberships.memberId))
-      .where(
-        and(
-          eq(channelMemberships.channelId, channel.id),
-          eq(channelMemberships.memberType, "agent"),
-          isNull(agents.archivedAt),
-        ),
-      );
-    let threadAgentIds: string[] = [];
-    if (row.threadId) {
-      const spoke = await db
-        .selectDistinct({ id: messages.authorId })
-        .from(messages)
-        .where(
-          and(
-            eq(messages.authorKind, "agent"),
-            or(eq(messages.threadId, row.threadId), eq(messages.id, row.threadId)),
-          ),
-        );
-      threadAgentIds = spoke.map((s) => s.id);
-    }
-    const byId = new Map<string, AgentRow>(
-      [...mentioned, ...inChannel.map((m) => m.agent)].map((a) => [a.id, a]),
+    // Routing again (a resend of a post whose first request failed after the insert) reaches only the agents
+    // this message hasn't reached yet: each agent's dispatch row is the mark that it was routed.
+    const reached = new Set(
+      (
+        await db
+          .select({ agentId: messageDispatches.agentId })
+          .from(messageDispatches)
+          .where(eq(messageDispatches.messageId, row.id))
+      ).map((r) => r.agentId),
     );
-    // Quem pareou o computador de cada agente que pensa pelo plano: só essa pessoa fala com ele.
-    const talkers = new Map((await withPlanOwners(db, [...byId.values()])).map((a) => [a.id, a]));
-    const talker = (a: AgentRow) => talkers.get(a.id) ?? { ...a, planOwnerUserId: null };
-    const routed = route({
-      authorUserId: message.author.id,
-      mentioned: mentioned.map(talker),
-      inChannel: inChannel.map((m) => ({ agent: talker(m.agent), autoAnswer: m.autoAnswer })),
-      isDm: channel.kind === "dm",
-      threadAgentIds,
-    });
-
-    // Sem orçamento no mês também bloqueia (run em andamento continua recebendo a mensagem).
+    // No budget left this month also blocks (a run in progress keeps receiving the message).
     const threadId = row.threadId ?? (row.meta.spawnsThread ? row.id : null);
-    const blocked: { agent: RouteAgent; reason: BlockReason | "budget" }[] = [...routed.blocked];
-    const plan: { agent: AgentRow; key: string; live: Live | undefined }[] = [];
+    const blocked: { agent: RouteAgent; reason: BlockReason | "budget" }[] = routed.blocked.filter(
+      (b) => !reached.has(b.agent.id),
+    );
+    let plan: { agent: AgentRow; key: string; live: Live | undefined }[] = [];
     for (const target of routed.targets) {
       const agent = byId.get(target.id);
-      if (!agent) continue;
+      if (!agent || reached.has(agent.id)) continue;
       const key = `${agent.id}:${channel.id}:${threadId ?? "-"}`;
       const running = this.byKey.get(key);
       const live = running ? this.live.get(running) : undefined;
@@ -827,12 +814,19 @@ export class AgentRuntime implements RuntimePort {
     if (plan.length === 0 && blocked.length === 0) return;
     for (const b of blocked) await this.block(row, channel, b.agent, b.reason);
     if (plan.length) {
-      await db
-        .insert(messageDispatches)
-        .values(plan.map((p) => ({ messageId: row.id, agentId: p.agent.id, state: "routed" as const })))
-        .onConflictDoNothing();
+      // Two routings of the same message at once: the one whose row lands takes the agent.
+      const claimed = new Set(
+        (
+          await db
+            .insert(messageDispatches)
+            .values(plan.map((p) => ({ messageId: row.id, agentId: p.agent.id, state: "routed" as const })))
+            .onConflictDoNothing()
+            .returning({ agentId: messageDispatches.agentId })
+        ).map((r) => r.agentId),
+      );
+      plan = plan.filter((p) => claimed.has(p.agent.id));
     }
-    // seenBy: quem a mensagem alcançou; pickedBy: quem vai responder; blocked: quem não pode.
+    // viewedBy: whom the message reached; claimedBy: who will answer; blocked: who can't.
     hub.toChannel(channel.id, {
       type: "message.routed",
       messageId: row.id,
@@ -840,10 +834,10 @@ export class AgentRuntime implements RuntimePort {
       claimedBy: plan.map((p) => p.agent.id),
       blocked: blocked.map((b) => ({ agentId: b.agent.id, reason: b.reason })),
     });
-    // Ninguém chamou (sem menção, fora de DM e de thread com o agente): quem responde entrou sozinho.
+    // Nobody called (no mention, outside a DM and a thread with the agent): whoever answers joined on its own.
     const volunteered = mentioned.length === 0 && channel.kind !== "dm" && threadAgentIds.length === 0;
     for (const p of plan) {
-      // Olha de novo: entre o plano e aqui houve await, e o run pode ter acabado.
+      // Look again: there was an await between the plan and here, and the run may have ended.
       const runId = this.byKey.get(p.key);
       const live = runId ? this.live.get(runId) : undefined;
       if (live) await this.steer(live, row);
@@ -860,22 +854,22 @@ export class AgentRuntime implements RuntimePort {
   }
 
   /**
-   * Roda o agente para uma mensagem específica, sem depender de menção (rotina agendada). Se ele já
-   * está num run nessa conversa, a mensagem entra nele. Devolve o run para acompanhar o fim.
+   * Runs the agent for one given message, without a mention (a scheduled routine). If it is already in a run in
+   * that conversation, the message goes into it. Returns the run, to follow its end.
    */
   async runFor(input: {
     agent: AgentRow;
     channel: ChannelRow;
     trigger: MessageRow;
     replyMeta?: MessageMeta;
-    /** Teto duro do run. Com ele, a mensagem não entra num run que já está vivo na conversa (`busy`). */
+    /** The run's hard caps. With them, the message doesn't go into a run already live in the conversation (`busy`). */
     limits?: RunLimits;
   }): Promise<
     | { ok: true; runId: string; done: Promise<void> }
     | { ok: false; code: "budget" | "personal_plan" | "busy" }
   > {
     const { agent, channel, trigger } = input;
-    // Sem roteamento, a trava do plano pessoal é aqui: só quem pareou aciona o agente (nem entra num run vivo).
+    // Without routing, the personal plan's lock is here: only whoever paired triggers the agent (not even into a live run).
     const planOwner = (await withPlanOwner(this.deps.db, agent)).planOwnerUserId;
     if (planOwner !== null && planOwner !== personOf(trigger)) return { ok: false, code: "personal_plan" };
     const threadId = trigger.threadId ?? (trigger.meta.spawnsThread ? trigger.id : null);
@@ -883,7 +877,7 @@ export class AgentRuntime implements RuntimePort {
     const runningId = this.byKey.get(key);
     const running = runningId ? this.live.get(runningId) : undefined;
     if (running) {
-      // O run vivo não tem o teto deste pedido: em vez de entrar nele, quem chamou tenta depois.
+      // The live run doesn't have this request's caps: instead of joining it, the caller tries later.
       if (input.limits) return { ok: false, code: "busy" };
       await this.steer(running, trigger);
       return { ok: true, runId: running.runId, done: running.done };
@@ -943,11 +937,11 @@ export class AgentRuntime implements RuntimePort {
     const { db, hub } = this.deps;
     const stop = isStopRequest(row.body);
     if (live.closing) {
-      // "pare" para um run que já está acabando não muda nada; o resto vira o próximo run.
+      // "stop" for a run that is already ending changes nothing; anything else becomes the next run.
       if (!stop) live.after.push(row);
       return;
     }
-    // Nem o "pare" de outra pessoa mexe num run no plano de quem pareou.
+    // Not even someone else's "stop" touches a run on the plan of whoever paired.
     if (live.plan && !canUsePlan(personOf(row), live.plan)) {
       live.after.push(row);
       return;
@@ -981,8 +975,8 @@ export class AgentRuntime implements RuntimePort {
       live.controller.abort(new RunCanceled());
       return;
     }
-    // O agente perguntou e está esperando: a mensagem de quem foi perguntado é a resposta, não um
-    // pedido novo. Mensagem de outra pessoa entra no run como mensagem comum.
+    // The agent asked and is waiting: the asked person's message is the answer, not a new request. A message
+    // from someone else joins the run as an ordinary message.
     const q = live.waitingQuestion;
     if (q && (q.askedUserId === null || q.askedUserId === row.authorId)) {
       const text = row.body.replace(/@[a-z0-9][a-z0-9_-]{1,31}/gi, "").trim() || row.body;
@@ -991,7 +985,7 @@ export class AgentRuntime implements RuntimePort {
     live.inbox.push(row);
   }
 
-  // ---- execução ----
+  // ---- execution ----
 
   private async startRun(input: {
     agent: AgentRow;
@@ -1120,7 +1114,7 @@ export class AgentRuntime implements RuntimePort {
       live.lastPingAt = this.deps.now();
       void db.update(runs).set({ lastPingAt: live.lastPingAt }).where(eq(runs.id, live.runId));
     }, HEARTBEAT_MS);
-    // Teto de tempo: passou, aborta o que estiver rodando (modelo, ferramenta ou espera de aprovação).
+    // Time cap: once past, abort whatever is running (the model, a tool or an approval wait).
     const timeoutMs = live.limits?.timeoutMs;
     const deadline = timeoutMs
       ? setTimeout(() => live.controller.abort(new TimeLimit(timeoutMs)), timeoutMs)
@@ -1135,7 +1129,7 @@ export class AgentRuntime implements RuntimePort {
     let delegatedTo: string | null = null;
     let usageModel = live.agent.model;
     let toolSteps = 0;
-    // Sem chave, o provedor é o de teste: a resposta diz isso, para a tela não mostrar o modelo do agente.
+    // Without a key the provider is the test one: the answer says so, so the screen doesn't show the agent's model.
     let testModel = false;
     const step = async (kind: "text" | "tool_call" | "tool_result", data: Record<string, unknown>) => {
       await db.insert(runEvents).values({ runId: live.runId, seq: stepSeq++, kind, data });
@@ -1170,7 +1164,7 @@ export class AgentRuntime implements RuntimePort {
         runId: live.runId,
         usage: { model: usageModel, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens },
       });
-      // As ações do run até aqui ganham o recibo nesta mensagem.
+      // The run's actions so far get their receipt on this message.
       const linked = await db
         .update(reversibleActions)
         .set({ messageId: message.id })
@@ -1200,9 +1194,9 @@ export class AgentRuntime implements RuntimePort {
         if ("error" in p) throw new ModelError("auth", p.error);
         return p;
       };
-      // Claude Code/Codex no computador, com o plano de quem pareou; senão o modelo pela API.
+      // Claude Code/Codex on the runner, with the plan of whoever paired; else the model through the API.
       let harness = await runHarnessFor(this.deps, live.agent, personOf(live.trigger));
-      // O fallback cobre o computador fora do ar, não outra pessoa: o agente do plano só atende quem pareou.
+      // The fallback covers a runner that is down, not another person: the plan's agent only answers whoever paired.
       if (harness.kind === "unavailable" && harness.code !== "personal_plan" && live.agent.harnessFallback)
         harness = { kind: "model" };
       if (harness.kind === "unavailable")
@@ -1218,7 +1212,7 @@ export class AgentRuntime implements RuntimePort {
       if (remote) {
         const plan = remote.runner;
         live.plan = plan;
-        // O que chegou de quem não pode usar o plano antes desta decisão espera o próprio run.
+        // What arrived before this decision from someone who can't use the plan waits for its own run.
         const others = live.inbox.filter((m) => !canUsePlan(personOf(m), plan));
         if (others.length) {
           const ids = new Set(others.map((m) => m.id));
@@ -1233,8 +1227,8 @@ export class AgentRuntime implements RuntimePort {
       // The thread comes from the trigger, a message of this channel (startRun checks it): the assignment
       // tools are picked by thread, so a thread of another channel never reaches toolsFor.
       const tools = await toolsFor(this.deps, live.agent, { channel: live.channel, threadId: live.threadId });
-      // Carga sob demanda (F5-3.4-P0-08): pela API, só as fixas vão inteiras quando as definições
-      // pesam; o resto vai adiado e a busca da API acha. O cérebro no computador recebe todas.
+      // Tools on demand: through the API, only the pinned ones go whole when the definitions are heavy; the
+      // rest goes deferred and the API's search finds them. The harness on the runner gets them all.
       const specs =
         !remote && this.deps.config.toolSearch === "auto"
           ? withLoading(toolSpecs(tools), await pinnedTools(db, live.agent.id, this.deps.now()))
@@ -1292,7 +1286,7 @@ export class AgentRuntime implements RuntimePort {
               tool: req.tool,
               scope: req.card.scope ?? `tool:${req.tool}`,
               title,
-              // O texto inteiro do efeito, sem corte (X-F3-O0-3): é o que a pessoa aprova.
+              // The effect's whole text, uncut: it is what the person approves.
               detail: req.preview.body ?? "",
               params: req.card.params ?? {},
               why: req.card.why ?? "",
@@ -1339,12 +1333,12 @@ export class AgentRuntime implements RuntimePort {
             .set({ messageId: card.id })
             .where(eq(approvals.id, row.id))
             .returning();
-          // Registra a espera antes de avisar: a decisão pode chegar antes do próximo await.
+          // Register the wait before telling: the decision may arrive before the next await.
           const waiting = this.wait(this.approvalWaiters, row.id, live.controller.signal);
           waiting.catch(() => {});
           this.approvalRevisers.set(row.id, req.revise);
-          // O status vai para o banco antes do aviso: quem buscar a lista de runs depois do
-          // evento já vê a espera, e a lista não desfaz a fase que o evento pôs na tela.
+          // The status goes to the database before the notice: whoever fetches the run list after the event
+          // already sees the wait, and the list doesn't undo the phase the event put on screen.
           await this.setStatus(live, "paused_for_approval");
           await publishApproval(this.deps, withCard ?? row, "approval.requested");
           const outcome = await waiting.finally(() => this.approvalRevisers.delete(row.id));
@@ -1353,7 +1347,13 @@ export class AgentRuntime implements RuntimePort {
         },
         recordDecision: (d) => this.recordDecision(live, d),
         standingRule: (tool, key) =>
-          matchRule(db, { workspaceId: live.workspaceId, agentId: live.agent.id, tool, key, at: this.deps.now() }),
+          matchRule(db, {
+            workspaceId: live.workspaceId,
+            agentId: live.agent.id,
+            tool,
+            key,
+            at: this.deps.now(),
+          }),
         review: (req) =>
           this.reviewCall({
             agent: live.agent,
@@ -1476,13 +1476,13 @@ export class AgentRuntime implements RuntimePort {
           turn,
         });
         if (call.name === "browser_close" && !out.isError) live.browser = false;
-        // tool: null fecha a chamada (a linha deixa de mostrar "executando").
+        // tool: null closes the call (the line stops showing "running").
         this.emit(live, { type: "run.tool_call", toolUseId: call.id, tool: null, turn });
         return out;
       };
-      // Ferramenta pedida pelo Claude Code/Codex no meio do turno: o texto até ali vira narração. O CLI
-      // pode pedir várias ao mesmo tempo; elas rodam uma de cada vez, como no caminho do modelo
-      // (aprovação, pergunta e a saída ao vivo valem para uma chamada por vez).
+      // A tool Claude Code/Codex asks for mid-turn: the text so far becomes commentary. The CLI may ask for
+      // several at once; they run one at a time, as on the model's path (approval, question and live output
+      // hold for one call at a time).
       let toolQueue: Promise<unknown> = Promise.resolve();
       const invoke: ToolInvoker = (name, input) => {
         const next = toolQueue.then(async () => {
@@ -1507,8 +1507,8 @@ export class AgentRuntime implements RuntimePort {
         });
 
       let finalText = "";
-      // Conselheiro só pela API, e só com par válido; fixo durante o run (a API recusa tirar a
-      // ferramenta com resultado dele no histórico).
+      // The advisor only through the API, and only with a valid pair; fixed for the run (the API refuses to drop
+      // the tool while its result is in the history).
       const advisor = remote ? undefined : advisorOf(live.agent);
       const maxTurns = live.limits?.maxTurns ?? MAX_TURNS;
       let finished = false;
@@ -1521,20 +1521,23 @@ export class AgentRuntime implements RuntimePort {
         let result: { content: ModelMessage["content"]; raw: unknown; stop: string; usage: Usage } | null =
           null;
         partial = "";
-        // Pela API, reserva o pior caso desta chamada antes de fazer (o plano do computador não custa aqui).
+        // Through the API, reserve this call's worst case before making it (the runner's plan costs nothing here).
         const held = remote
           ? null
           : await this.reserveCall({
               agent: live.agent,
               channelId: live.channel.id,
-              scopes: [...(live.limits?.scopes ?? []), ...(live.assignment?.scope ? [live.assignment.scope] : [])],
+              scopes: [
+                ...(live.limits?.scopes ?? []),
+                ...(live.assignment?.scope ? [live.assignment.scope] : []),
+              ],
               promptBytes:
                 utf8Bytes(system) + utf8Bytes(JSON.stringify(history)) + utf8Bytes(JSON.stringify(specs)),
               maxTokens: MAX_TOKENS,
               advisor,
             });
         if (held && !held.ok) {
-          // Teto do canal (F2-3.5-P1-01): para aqui e avisa quem pediu, na thread.
+          // The channel's cap: stop here and tell whoever asked, in the thread.
           if (held.scope.kind === "channel") {
             await this.channelBudgetCheck(live.channel.id, personOf(live.trigger), true);
             throw new BudgetExhausted("channel");
@@ -1567,7 +1570,7 @@ export class AgentRuntime implements RuntimePort {
           }
         } catch (err) {
           if (reservation) await this.deps.ledger.release(reservation);
-          // O computador falhou antes de fazer qualquer coisa: com o fallback ligado, responde pela API.
+          // The runner failed before doing anything: with the fallback on, answer through the API.
           const untouched = !usedTools && !turnText.trim() && !live.controller.signal.aborted;
           if (err instanceof HarnessError && remote && live.agent.harnessFallback && untouched) {
             remote = null;
@@ -1585,14 +1588,18 @@ export class AgentRuntime implements RuntimePort {
           throw new ModelError("network", "Stream ended without a turn");
         }
         usage = addUsage(usage, result.usage);
-        // Uma linha por chamada no razão. O plano do Claude/ChatGPT não é cobrado aqui: a linha do run
-        // pelo computador sai com custo 0 e não pesa no teto.
+        // One ledger line per call. The Claude/ChatGPT plan isn't charged here: the runner run's line has cost 0
+        // and doesn't weigh on the cap.
         const call = {
           agent: live.agent,
           userId: personOf(live.trigger),
           runId: live.runId,
           channelId: live.channel.id,
-          source: (live.replyMeta?.fromRoutine ? "routine" : live.assignment ? "assignment" : "chat") as UsageSource,
+          source: (live.replyMeta?.fromRoutine
+            ? "routine"
+            : live.assignment
+              ? "assignment"
+              : "chat") as UsageSource,
           usage: result.usage,
           assignmentId: live.assignment?.assignmentId ?? null,
         };
@@ -1627,7 +1634,7 @@ export class AgentRuntime implements RuntimePort {
           continue;
         }
 
-        // A API parou no meio da busca de ferramentas dela: devolve o turno como veio e continua.
+        // The API paused in the middle of its own tool search: hand the turn back as it came and go on.
         if (result.stop === "pause") {
           history.push({ role: "assistant", content: result.content, raw: result.raw });
           continue;
@@ -1635,8 +1642,8 @@ export class AgentRuntime implements RuntimePort {
 
         if (text) await step("text", { text, turn });
         if (live.inbox.length > 0) {
-          // Chegou mensagem durante este turno: posta o que já tem e continua com ela. O que veio
-          // antes já foi respondido; o fim do run só decide o destino das mensagens novas.
+          // A message arrived during this turn: post what there is and go on with it. What came before is
+          // already answered; the run's end only decides where the new messages go.
           const fresh = new Set(live.inbox.map((m) => m.id));
           const answered = live.handles.filter((id) => !fresh.has(id));
           if (text) await post(text);
@@ -1655,7 +1662,7 @@ export class AgentRuntime implements RuntimePort {
         finished = true;
         break;
       }
-      // Rotina: acabar as voltas ainda pedindo ferramenta é parar no teto, não terminar o trabalho.
+      // A routine: running out of turns while still asking for tools is stopping at the cap, not finishing the work.
       if (!finished && live.limits) throw new StepLimit(maxTurns);
 
       clearInterval(beat);
@@ -1669,7 +1676,7 @@ export class AgentRuntime implements RuntimePort {
       live.closing = true;
       clearInterval(beat);
       if (deadline) clearTimeout(deadline);
-      // O teto de tempo aborta pelo controller: o erro que sobe é o do stream; a causa é o TimeLimit.
+      // The time cap aborts through the controller: the error that comes up is the stream's; the cause is the TimeLimit.
       const reason: unknown = live.controller.signal.reason;
       const err = reason instanceof TimeLimit ? reason : caught;
       const canceled =
@@ -1774,8 +1781,8 @@ export class AgentRuntime implements RuntimePort {
     }
     await this.closeWaits(live.runId);
     await this.markHandled(live, live.handles, end.handled);
-    // Cancelado pelo desligamento do servidor (ninguém pediu para parar): o trabalho ficou pela metade,
-    // como na queda do `start()`.
+    // Canceled by the server's shutdown (nobody asked to stop): the work was left halfway, as with the fall
+    // that `start()` handles.
     const interrupted = end.status === "canceled" && this.stopped && !live.canceledBy;
     await settleIssueWork(db, live.workspaceId, live.handles, {
       state: end.status === "failed" || interrupted ? "blocked" : "idle",
@@ -1795,7 +1802,7 @@ export class AgentRuntime implements RuntimePort {
     }
   }
 
-  // ---- contexto ----
+  // ---- context ----
 
   private async personName(live: Live): Promise<string> {
     const [row] = await this.deps.db
@@ -1805,7 +1812,7 @@ export class AgentRuntime implements RuntimePort {
     return row?.name ?? "";
   }
 
-  /** Mensagem com conteúdo de fora (e-mail, webhook) no prompt: o run passa a ter A. */
+  /** A message with outside content (email, webhook) in the prompt: the run now has A. */
   private noteUntrusted(live: Live, row: MessageRow) {
     const source = row.meta.untrusted;
     if (typeof source === "string" && source) live.risk.raise({ flag: "A", source });
@@ -1840,7 +1847,7 @@ export class AgentRuntime implements RuntimePort {
     return out;
   }
 
-  /** Últimas mensagens da conversa até o gatilho, como turnos do modelo. */
+  /** The conversation's latest messages up to the trigger, as model turns. */
   private async history(live: Live): Promise<ModelMessage[]> {
     const { db } = this.deps;
     const where = live.threadId
@@ -1863,7 +1870,7 @@ export class AgentRuntime implements RuntimePort {
     for (const r of rows) {
       this.noteUntrusted(live, r);
       if (r.authorKind === "agent" && r.authorId === live.agent.id) {
-        if (out.length === 0) continue; // o primeiro turno tem que ser de quem pede
+        if (out.length === 0) continue; // the first turn has to be the asker's
         out.push({ role: "assistant", content: [{ type: "text", text: r.body || "(no text)" }] });
       } else {
         out.push({
@@ -1909,7 +1916,7 @@ export class AgentRuntime implements RuntimePort {
     return parts.filter(Boolean).join("\n\n");
   }
 
-  // ---- consulta entre agentes ----
+  // ---- delegation between agents ----
 
   private async delegate(live: Live, target: AgentRow, question: string): Promise<string> {
     const { db } = this.deps;
@@ -1945,8 +1952,8 @@ export class AgentRuntime implements RuntimePort {
         answer,
       });
     };
-    // Agente que pensa no computador de alguém: a consulta (pedida por outro agente) não usa o plano
-    // dessa pessoa; vai pela API se o fallback deixar, e só quando quem pediu o run é quem pareou.
+    // An agent that thinks on someone's runner: the delegation (asked by another agent) doesn't use that
+    // person's plan; it goes through the API if the fallback allows, and only when whoever asked for the run paired it.
     const planOwner = (await withPlanOwner(db, target)).planOwnerUserId;
     if (
       target.harnessKind !== "model" &&
@@ -1959,8 +1966,8 @@ export class AgentRuntime implements RuntimePort {
       `You are ${target.name} (@${target.handle}), an AI agent on ${PRODUCT.name}. ` +
       `Another agent, ${live.agent.name} (@${live.agent.handle}), is asking you for help. Answer briefly.\n\n` +
       `# Your instructions\n${target.instructions.trim() || "-"}`;
-    // A consulta gasta do alvo (X-F3-O0-4): sem saldo no teto dele, nem chama o modelo.
-    // O gasto é do canal de quem pergunta, e o teto do run que pergunta (execução de rotina) também paga.
+    // The delegation spends from the delegate: without room on its cap, the model isn't even called. The spend
+    // is the asking channel's, and the cap of the asking run (a routine's execution) pays too.
     const held = await this.reserveCall({
       agent: target,
       channelId: live.channel.id,
@@ -1991,7 +1998,7 @@ export class AgentRuntime implements RuntimePort {
       id: runId,
       workspaceId: live.workspaceId,
       agentId: target.id,
-      // O run não é de um canal, mas a pergunta veio deste: quem não lê o canal não vê a pergunta (X-F3-O0-2).
+      // The run isn't a channel's, but the question came from this one: whoever doesn't read the channel doesn't see it.
       sourceChannelId: live.channel.id,
       status: "running",
       what: whatOf(`@${live.agent.handle}: ${question}`),
@@ -2055,27 +2062,27 @@ export class AgentRuntime implements RuntimePort {
     }
   }
 
-  // ---- custo ----
+  // ---- cost ----
 
-  /** Modelo sem linha na tabela de preços é cobrado como o padrão (como era antes do razão). */
+  /** A model with no row in the price table is charged as the default one. */
   private billed(model: string, at: Date): string {
     return PRICES.at(model, at) ? model : DEFAULT_MODEL;
   }
 
   /**
-   * Reserva o pior caso da próxima chamada no teto do agente no mês e nos escopos extras, todos ou
-   * nenhum (costura 2). null = algum teto não comporta: a chamada não sai.
+   * Reserves the next call's worst case on the agent's monthly cap and the extra scopes, all or none (seam 2).
+   * ok: false = some cap doesn't fit: the call doesn't go out.
    */
   private async reserveCall(req: {
     agent: AgentRow;
-    /** Sem ele, o modelo do agente. */
+    /** Without it, the agent's model. */
     model?: string;
-    /** Canal do gasto: a reserva entra no escopo dele, com teto ou só contando (F2-3.5-P1-01). */
+    /** The spend's channel: the reservation goes into its scope, capped or only counting. */
     channelId?: string | null;
     scopes?: readonly BudgetScope[];
     promptBytes: number;
     maxTokens: number;
-    /** Cada consulta relê a conversa e escreve até `maxTokens` no modelo do conselheiro. */
+    /** Each advisor call rereads the conversation and writes up to `maxTokens` on the advisor's model. */
     advisor?: AdvisorSpec;
   }): Promise<{ ok: true; reservation: Reservation } | { ok: false; scope: BudgetScope }> {
     const at = this.deps.now();
@@ -2096,21 +2103,26 @@ export class AgentRuntime implements RuntimePort {
         req.advisor.maxUses *
         estimateUsd(PRICES, {
           model: this.billed(req.advisor.model, at),
-          // Lê o prompt e o que o executor já escreveu (no máximo a saída inteira dele).
+          // Reads the prompt and what the executor already wrote (at most its whole output).
           promptBytes: req.promptBytes + req.maxTokens,
           maxTokens: req.advisor.maxTokens,
           at,
         });
-    const res = await this.deps.ledger.reserve({ workspaceId: req.agent.workspaceId, scopes, estimateUsd: estimate, at });
+    const res = await this.deps.ledger.reserve({
+      workspaceId: req.agent.workspaceId,
+      scopes,
+      estimateUsd: estimate,
+      at,
+    });
     return res.ok ? { ok: true, reservation: res.reservation } : { ok: false, scope: res.scope };
   }
 
-  /** Grava a chamada no razão com o custo real e solta a reserva. Devolve o custo. */
+  /** Records the call in the ledger with the real cost and releases the reservation. Returns the cost. */
   private async settleCall(
     reservation: Reservation,
     call: {
       agent: AgentRow;
-      /** Sem ele, o modelo do agente. */
+      /** Without it, the agent's model. */
       model?: string;
       userId: string | null;
       runId: string;
@@ -2137,7 +2149,7 @@ export class AgentRuntime implements RuntimePort {
     return costUsd;
   }
 
-  /** Chamada pelo plano do computador: entra no razão com custo 0 (não pesa no teto). */
+  /** A call through the runner's plan: it goes into the ledger with cost 0 (it doesn't weigh on the cap). */
   private async recordPlanCall(
     call: Parameters<AgentRuntime["settleCall"]>[1],
     model: string,
@@ -2161,7 +2173,7 @@ export class AgentRuntime implements RuntimePort {
     return costUsd;
   }
 
-  /** Telemetria do gate: uma linha por chamada de ferramenta, com a classe e a decisão. */
+  /** The gate's telemetry: one row per tool call, with the class and the decision. */
   private async recordDecision(
     live: Live,
     d: {
@@ -2173,13 +2185,13 @@ export class AgentRuntime implements RuntimePort {
     },
   ): Promise<void> {
     const { decision, by } = d;
-    // Costura 7: quem age é o agente; quem pediu fica só como auditoria; credencial de quem pediu falha aqui.
+    // Seam 7: whoever acts is the agent; whoever asked stays as audit only; the asker's credential fails here.
     const who = actionCredential({
       agentId: live.agent.id,
       requesterId: requesterOf(live.trigger),
       credential: d.credential ?? null,
     });
-    // Regra ou revisor resolvem um "ask" do gate: a linha guarda o desfecho e o motivo do gate.
+    // A rule or the reviewer settles the gate's "ask": the row keeps the outcome and the gate's reason.
     const outcome = by ? (by.kind === "rule" ? "allow" : by.verdict) : decision.kind;
     await this.deps.db.insert(gateDecisions).values({
       id: newId("tdec"),
@@ -2201,17 +2213,17 @@ export class AgentRuntime implements RuntimePort {
   }
 
   /**
-   * Revisor de modelo (F3-3.2-P1-02, reviewer.ts). null = não decide e a pessoa decide: revisor
-   * desligado na org, disjuntor aberto, quem pediu não é pessoa ou não escreveu nada aqui, falha ou
-   * sem saldo.
+   * The model reviewer (reviewer.ts). null = no verdict and the person decides: the reviewer is off in the
+   * workspace, the breaker is open, whoever asked isn't a person or wrote nothing here, a failure, or no
+   * room in the budget.
    */
   async reviewCall(input: {
     agent: AgentRow;
     channelId: string;
     threadId: string | null;
-    /** Autor do pedido; null quando o run não veio de uma pessoa. */
+    /** The request's author; null when the run didn't come from a person. */
     requesterId: string | null;
-    /** Quando chegou a mensagem que abriu o run: o revisor só lê o que a pessoa escreveu perto dela. */
+    /** When the message that opened the run arrived: the reviewer only reads what the person wrote near it. */
     requestAt: Date;
     req: ReviewRequest;
   }): Promise<"allow" | "ask" | null> {
@@ -2246,9 +2258,9 @@ export class AgentRuntime implements RuntimePort {
   }
 
   /**
-   * Gasto do agente no mês contra o teto: avisa o responsável em 80% e no fim (uma vez por mês cada).
-   * "exhausted" quando não cabe nem uma resposta no pior caso (a saída inteira de `MAX_TOKENS`), ou
-   * quando uma reserva acabou de ser recusada (`refused`).
+   * The agent's spend this month against its cap: tells the owner at 80% and at the end (once a month each).
+   * "exhausted" when not even one answer fits in the worst case (the whole `MAX_TOKENS` output), or when a
+   * reservation was just refused (`refused`).
    */
   private async budgetCheck(agent: AgentRow, rejected = false): Promise<"ok" | "warning" | "exhausted"> {
     const at = this.deps.now();
@@ -2271,7 +2283,7 @@ export class AgentRuntime implements RuntimePort {
     return "ok";
   }
 
-  /** Um aviso de cada tipo por mês, para o responsável pelo agente. */
+  /** One notice of each kind per month, for the agent's owner. */
   private async notifyBudget(agent: AgentRow, kind: "warning" | "exhausted", spent: number, budget: number) {
     const { db, hub } = this.deps;
     const month = monthKey(this.deps.now());
@@ -2294,9 +2306,9 @@ export class AgentRuntime implements RuntimePort {
   }
 
   /**
-   * Gasto do canal no mês contra o teto dele (F2-3.5-P1-01): avisa em 75% e 90% e quando acaba (ou a
-   * reserva acabou de ser recusada), um de cada por mês. Recebem quem pediu e quem configura a org
-   * (quem pode subir o teto). Canal sem teto: nada.
+   * The channel's spend this month against its cap: warns at 75% and 90% and when it runs out (or a
+   * reservation was just refused), one of each per month. Whoever asked and whoever configures the workspace
+   * (who can raise the cap) receive it. A channel without a cap: nothing.
    */
   private async channelBudgetCheck(channelId: string, requesterId: string | null, rejected = false) {
     const { db, hub } = this.deps;
@@ -2321,7 +2333,7 @@ export class AgentRuntime implements RuntimePort {
     if (!row) return;
     const [lastLevel, lastMonth] = (row.notice ?? "").split(":");
     if (lastMonth === month && rank(lastLevel ?? "") >= rank(level)) return;
-    // Quem grava o aviso primeiro avisa: duas checagens ao mesmo tempo não mandam dois.
+    // Whoever writes the notice first tells: two checks at the same time don't send two.
     const claimed = await db
       .update(channels)
       .set({ budgetNotice: `${level}:${month}` })
@@ -2349,16 +2361,16 @@ export class AgentRuntime implements RuntimePort {
       });
   }
 
-  // ---- lembretes ----
+  // ---- sweep ----
 
-  /** Posta os lembretes vencidos. Cada um é reservado antes (status sent), então dois ticks não duplicam. */
+  /** Posts the reminders that came due. Each one is claimed first (status sent), so two ticks don't duplicate. */
   async tick(): Promise<number> {
     if (this.ticking) return 0;
     this.ticking = true;
     try {
       const { db } = this.deps;
       await this.expireWaits();
-      // Caixa: pedido resolvido fecha o aviso, adiado e lembrete voltam, retenção, push e e-mail.
+      // The inbox: a settled request closes its notice, snoozed ones and reminders come back, retention, push and email.
       await notificationTick(this.deps);
       await debateDeadlines(this.deps);
       await dueRoutines(this.deps);
@@ -2405,7 +2417,77 @@ export class AgentRuntime implements RuntimePort {
   }
 }
 
-/** Resumo curto do input para a linha da ferramenta: o primeiro texto que ele tiver. */
+/**
+ * Who answers a person's post, by the reply rule (runtime/route): the mentioned agents of the channel, else the
+ * DM's agent, else the agents that already spoke in the thread, else the channel's agents that answer without a
+ * mention; only those the author may talk to. null: the post doesn't route at all (a suggestion from someone who
+ * doesn't decide, or a paused assignment, in an assignment thread). The one place that assembles the routing input.
+ */
+export async function routeMessage(
+  deps: AppDeps,
+  channel: ChannelRow,
+  post: Pick<MessageRow, "authorId" | "body" | "threadId" | "meta">,
+) {
+  const { db } = deps;
+  // An assignment thread: a suggestion from someone who doesn't decide, and a paused assignment, don't reach the agent.
+  if (!(await assignmentRouting(deps, post))) return null;
+
+  const handles = parseMentions(post.body);
+  const mentioned = handles.length
+    ? await db
+        .select()
+        .from(agents)
+        .where(
+          and(
+            eq(agents.workspaceId, channel.workspaceId),
+            inArray(agents.handle, handles),
+            isNull(agents.archivedAt),
+          ),
+        )
+    : [];
+  // In the order they appear in the text.
+  mentioned.sort((a, b) => handles.indexOf(a.handle) - handles.indexOf(b.handle));
+  const inChannel = await db
+    .select({ agent: agents, autoAnswer: channelMemberships.autoAnswer })
+    .from(channelMemberships)
+    .innerJoin(agents, eq(agents.id, channelMemberships.memberId))
+    .where(
+      and(
+        eq(channelMemberships.channelId, channel.id),
+        eq(channelMemberships.memberType, "agent"),
+        isNull(agents.archivedAt),
+      ),
+    );
+  let threadAgentIds: string[] = [];
+  if (post.threadId) {
+    const spoke = await db
+      .selectDistinct({ id: messages.authorId })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.authorKind, "agent"),
+          or(eq(messages.threadId, post.threadId), eq(messages.id, post.threadId)),
+        ),
+      );
+    threadAgentIds = spoke.map((s) => s.id);
+  }
+  const byId = new Map<string, AgentRow>(
+    [...mentioned, ...inChannel.map((m) => m.agent)].map((a) => [a.id, a]),
+  );
+  // Whoever paired the runner of each agent that thinks through a plan: only that person talks to it.
+  const talkers = new Map((await withPlanOwners(db, [...byId.values()])).map((a) => [a.id, a]));
+  const talker = (a: AgentRow) => talkers.get(a.id) ?? { ...a, planOwnerUserId: null };
+  const routed = route({
+    authorUserId: post.authorId,
+    mentioned: mentioned.map(talker),
+    inChannel: inChannel.map((m) => ({ agent: talker(m.agent), autoAnswer: m.autoAnswer })),
+    isDm: channel.kind === "dm",
+    threadAgentIds,
+  });
+  return { mentioned, threadAgentIds, byId, talker, routed };
+}
+
+/** A short summary of the input for the tool's line: the first text it has. */
 export function toolDetail(input: unknown): string | null {
   if (typeof input !== "object" || input === null) return null;
   for (const value of Object.values(input)) {

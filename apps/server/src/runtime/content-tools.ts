@@ -10,7 +10,7 @@ import { and, asc, desc, eq, ilike, isNull, or } from "drizzle-orm";
 import { z } from "zod";
 import { eventsInRange, expand } from "../calendar";
 import { channelInWorkspace } from "../channels";
-import { type RuntimePort, type WorkspaceMember } from "../context";
+import type { WorkspaceMember } from "../context";
 import {
   agentCanSeeDebate,
   canSeeDebate,

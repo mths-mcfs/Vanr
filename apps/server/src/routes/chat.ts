@@ -4,21 +4,20 @@ import type {
   DirectMessage,
   DirectoryMember,
   FileRef,
-  MessageMeta,
   MessagePin,
   ReactionCount,
 } from "@vanr/contract";
 import { can } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
-import { channelName, parseMentions } from "@vanr/engine/text";
+import { channelName } from "@vanr/engine/text";
 import { and, asc, count, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
-import { type AgentRow, agentInWorkspace, agentNames } from "../agents";
-import { assignmentPostMeta, assignmentRouting } from "../assignments/tools";
+import { agentInWorkspace, agentNames } from "../agents";
+import { assignmentPostMeta } from "../assignments/tools";
 import { type ChannelRow, canReadChannel, openDm, readableChannel, writableChannel } from "../channels";
-import { type AppDeps, type AppEnv, type Ctx } from "../context";
+import type { AppEnv, Ctx } from "../context";
 import { isUniqueViolation } from "../db-errors";
 import { fileFor } from "../drive";
 import { badRequest, conflict, forbidden, notFound, param, readJson, readQuery } from "../http";
@@ -34,12 +33,10 @@ import {
   reactionsFor,
 } from "../messages";
 import { notifyReaction } from "../notify-sources";
-import { requireCanTalk, withPlanOwners } from "../runners/plans";
-import { route } from "../runtime/route";
+import { requireCanTalk } from "../runners/plans";
 import { requireMember, requirePermission, WORKSPACE } from "../workspace-scope";
 
 const {
-  agents,
   channels,
   channelMemberships,
   members,
@@ -191,70 +188,6 @@ async function pinsOf(db: Db, rows: (typeof pins.$inferSelect)[]): Promise<Messa
       },
     ];
   });
-}
-
-/**
- * Whether an agent would answer this post, by the runtime's routing rule (runtime/route): the mentioned agents of
- * the channel, else the DM's agent, else the agents that already spoke in the thread, else the channel's agents
- * that answer without a mention; only those the author may talk to, and not a suggestion or a paused assignment.
- */
-async function agentWouldAnswer(
-  deps: AppDeps,
-  channel: ChannelRow,
-  post: { authorId: string; body: string; threadId: string | null; meta: MessageMeta },
-): Promise<boolean> {
-  const { db } = deps;
-  if (!(await assignmentRouting(deps, post))) return false;
-  const handles = parseMentions(post.body);
-  const mentioned = handles.length
-    ? await db
-        .select()
-        .from(agents)
-        .where(
-          and(
-            eq(agents.workspaceId, channel.workspaceId),
-            inArray(agents.handle, handles),
-            isNull(agents.archivedAt),
-          ),
-        )
-    : [];
-  const inChannel = await db
-    .select({ agent: agents, autoAnswer: channelMemberships.autoAnswer })
-    .from(channelMemberships)
-    .innerJoin(agents, eq(agents.id, channelMemberships.memberId))
-    .where(
-      and(
-        eq(channelMemberships.channelId, channel.id),
-        eq(channelMemberships.memberType, "agent"),
-        isNull(agents.archivedAt),
-      ),
-    );
-  if (mentioned.length === 0 && inChannel.length === 0) return false;
-  const threadAgentIds = post.threadId
-    ? (
-        await db
-          .selectDistinct({ id: messages.authorId })
-          .from(messages)
-          .where(
-            and(
-              eq(messages.authorKind, "agent"),
-              or(eq(messages.threadId, post.threadId), eq(messages.id, post.threadId)),
-            ),
-          )
-      ).map((r) => r.id)
-    : [];
-  const talkers = new Map(
-    (await withPlanOwners(db, [...mentioned, ...inChannel.map((m) => m.agent)])).map((a) => [a.id, a]),
-  );
-  const talker = (a: AgentRow) => talkers.get(a.id) ?? { ...a, planOwnerUserId: null };
-  const routed = route({
-    authorUserId: post.authorId,
-    mentioned: mentioned.map(talker),
-    inChannel: inChannel.map((m) => ({ agent: talker(m.agent), autoAnswer: m.autoAnswer })),
-    isDm: channel.kind === "dm",
-    threadAgentIds,
-  });
-  return routed.targets.length > 0;
 }
 
 /** The person joins the channel (nothing when they already are a member). */
@@ -581,9 +514,14 @@ export function registerChat(app: Hono<AppEnv>) {
     // A resend of a post already accepted answers it as it is, whatever changed in the channel since.
     const resent = await byClientId(deps.db, channel.id, me.userId, input.clientId);
     if (resent) {
-      // The first request may have failed after the post was written: the resend finishes joining.
+      // The first request may have failed after the post was written: the resend finishes joining and routing
+      // (the runtime reaches only the agents the message hasn't reached yet).
       if (!isMember) await joinChannel(deps.db, channel.id, me.userId);
-      return c.json(await hydrateOne(deps.db, resent), 200);
+      const message = await hydrateOne(deps.db, resent);
+      await deps.runtime
+        .onPersonMessage({ workspaceId: me.workspaceId, channel, message })
+        .catch((err) => log.error("runtime.route_failed", { messageId: message.id, err }));
+      return c.json(message, 200);
     }
     const assignment = await assignmentPostMeta(deps, me, input.threadId, body);
     // An attachment is a file of this channel (or of the whole workspace): whoever reads the message can open it.
@@ -609,12 +547,10 @@ export function registerChat(app: Hono<AppEnv>) {
       },
     });
     if (!isMember) await joinChannel(deps.db, channel.id, me.userId);
-    // A resend of the same clientId doesn't route again. A routing failure doesn't fail the post.
-    if (created) {
-      await deps.runtime
-        .onPersonMessage({ workspaceId: me.workspaceId, channel, message })
-        .catch((err) => log.error("runtime.route_failed", { messageId: message.id, err }));
-    }
+    // A routing failure doesn't fail the post.
+    await deps.runtime
+      .onPersonMessage({ workspaceId: me.workspaceId, channel, message })
+      .catch((err) => log.error("runtime.route_failed", { messageId: message.id, err }));
     return c.json(message, created ? 201 : 200);
   });
 

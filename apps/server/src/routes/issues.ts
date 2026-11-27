@@ -15,7 +15,7 @@ import type { Hono } from "hono";
 import { z } from "zod";
 import { agentInWorkspace } from "../agents";
 import { channelInWorkspace, openDm, writableChannel } from "../channels";
-import { type AppDeps, type AppEnv, type Ctx, type WorkspaceMember } from "../context";
+import type { AppDeps, AppEnv, Ctx, WorkspaceMember } from "../context";
 import { fileFor } from "../drive";
 import { notFound, param, readJson, readQuery } from "../http";
 import {
