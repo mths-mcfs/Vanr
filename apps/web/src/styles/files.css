@@ -620,6 +620,25 @@
     font-variant-numeric: tabular-nums;
   }
 
+  .bases__header {
+    padding: 0;
+    background: none;
+    border: 0;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .bases__header:hover {
+    color: var(--vr-fg);
+  }
+
+  .bases__header:focus-visible {
+    outline: var(--vr-ring) solid var(--vr-focus);
+    outline-offset: var(--vr-ring);
+    border-radius: var(--vr-radius-1);
+  }
+
   .bases__title-cell {
     display: flex;
     align-items: center;

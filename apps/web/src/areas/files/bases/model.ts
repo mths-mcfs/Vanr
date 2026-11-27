@@ -9,6 +9,7 @@ import type {
   BasePropDef,
   BaseRow,
   BaseTable,
+  BaseView,
   BaseViewConfig,
 } from "@vanr/contract";
 import { filterKind, OPS_BY_KIND } from "@vanr/engine/bases/view";
@@ -369,6 +370,10 @@ export function valueForGroup(def: BasePropDef, key: string | null): unknown {
       return undefined;
   }
 }
+
+/** A view's name; one saved without a name (a base's first view) goes by its type. */
+export const viewName = (view: BaseView, typeName: (type: BaseView["type"]) => string) =>
+  view.name.trim() === "" ? typeName(view.type) : view.name;
 
 /** The properties a board can group by: the ones a card can be dragged across. */
 export const groupable = (def: BasePropDef) =>

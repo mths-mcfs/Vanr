@@ -31,6 +31,10 @@ export type ViewProps = {
   onOpen: (row: BaseRow) => void;
   onSave: (row: BaseRow, propId: string, value: unknown) => void;
   onNewRow: (props?: Record<string, unknown>) => void;
+  /** The grid's column headers open their property. */
+  onEditProperty: (def: BasePropDef) => void;
+  /** The view's name as shown (a nameless view goes by its type). */
+  name: string;
 };
 
 const titleOf = (table: BaseTable, row: BaseRow) => {
@@ -44,12 +48,19 @@ export function TableView(props: ViewProps) {
   const columns = viewColumns(table, view.config);
   return (
     <div className="bases__scroll">
-      <table className="bases__grid" aria-label={view.name}>
+      <table className="bases__grid" aria-label={props.name}>
         <thead>
           <tr>
             {columns.map((def) => (
               <th key={def.id} scope="col" className={isTabular(def) ? "bases__num" : undefined}>
-                {def.name}
+                <button
+                  type="button"
+                  className="bases__header"
+                  aria-label={t("property.editNamed", { name: def.name })}
+                  onClick={() => props.onEditProperty(def)}
+                >
+                  {def.name}
+                </button>
               </th>
             ))}
           </tr>
@@ -130,7 +141,7 @@ export function ListView(props: ViewProps) {
   const shown = others(props).slice(0, 4);
   return (
     <>
-      <ul className="bases__items" aria-label={props.view.name}>
+      <ul className="bases__items" aria-label={props.name}>
         {props.rows.map((row) => (
           <li key={row.id} className="bases__item">
             <Card props={props} row={row} shown={shown} />
@@ -149,7 +160,7 @@ export function GalleryView(props: ViewProps) {
   const shown = others(props).slice(0, props.view.config.cardSize === "large" ? 6 : 2);
   return (
     <>
-      <ul className="bases__gallery" aria-label={props.view.name}>
+      <ul className="bases__gallery" aria-label={props.name}>
         {props.rows.map((row) => (
           <li key={row.id} className="bases__card">
             <Card props={props} row={row} shown={shown} />
@@ -191,7 +202,7 @@ export function BoardView(props: ViewProps) {
     if (value !== undefined && groupKeyOf(def, row) !== key) props.onSave(row, def.id, value);
   };
   return (
-    <section className="bases__board" aria-label={view.name}>
+    <section className="bases__board" aria-label={props.name}>
       {keys.map((key) => {
         const inColumn = rows.filter((row) => groupKeyOf(def, row) === key);
         if (view.config.groupBy?.hideEmpty === true && inColumn.length === 0) return null;

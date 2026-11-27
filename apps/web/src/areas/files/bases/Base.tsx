@@ -20,7 +20,7 @@ import { ScreenError, ScreenLoading, useDocumentTitle, useErrorMessage } from ".
 import { useLocale, useMessages } from "../../../i18n/react.tsx";
 import { TITLE_MAX, useActorName, useRefetch } from "../shared.tsx";
 import { downloadText, useRows, useSaveRow } from "./data.ts";
-import { type CellContext, flatFilter } from "./model.ts";
+import { type CellContext, flatFilter, viewName } from "./model.ts";
 import { PropertyDialog } from "./PropertyDialog.tsx";
 import { RowPanel } from "./Row.tsx";
 import { type Panel, ViewPanel } from "./toolbar.tsx";
@@ -209,6 +209,8 @@ function Loaded({
     onOpen: (row) => open({ view: view.id, row: row.id }),
     onSave: (row, propId, value) => void saveRow(row, { props: { [propId]: value } }),
     onNewRow: addRow,
+    onEditProperty: setEditing,
+    name: viewName(view, (type) => t(`view.type.${type}`)),
   };
   const failure = [rename, remove, addView, removeView, exportCsv, importCsv, newRow].find(
     (each) => each.isError,
@@ -330,7 +332,7 @@ function Loaded({
               className="bases__tab"
               onClick={() => open({ view: each.id })}
             >
-              {each.name}
+              {viewName(each, (type) => t(`view.type.${type}`))}
             </button>
           ))}
         </div>
@@ -363,7 +365,7 @@ function Loaded({
             loading={removeView.isPending}
             onClick={() => removeView.mutate({ workspaceId, baseId: base.id, viewId: view.id })}
           >
-            {t("view.delete", { name: view.name })}
+            {t("view.delete", { name: viewName(view, (type) => t(`view.type.${type}`)) })}
           </Button>
         )}
       </div>
@@ -387,20 +389,22 @@ function Loaded({
           {t("property.new")}
         </Button>
       </div>
-      <fieldset className="bases__defs">
-        <legend className="vr-visually-hidden">{t("property.list")}</legend>
-        {table.defs.map((def) => (
-          <Button
-            key={def.id}
-            size="sm"
-            variant="ghost"
-            aria-label={t("property.editNamed", { name: def.name })}
-            onClick={() => setEditing(def)}
-          >
-            {def.name}
-          </Button>
-        ))}
-      </fieldset>
+      {(view.type !== "table" || all.length === 0) && (
+        <fieldset className="bases__defs">
+          <legend className="vr-visually-hidden">{t("property.list")}</legend>
+          {table.defs.map((def) => (
+            <Button
+              key={def.id}
+              size="sm"
+              variant="ghost"
+              aria-label={t("property.editNamed", { name: def.name })}
+              onClick={() => setEditing(def)}
+            >
+              {def.name}
+            </Button>
+          ))}
+        </fieldset>
+      )}
       {rows.isPending ? (
         <ScreenLoading />
       ) : rows.isError ? (
