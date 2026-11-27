@@ -331,4 +331,25 @@ describe("email delivery against the provider's idempotency keys", () => {
       server.deps.mailer = mailer;
     }
   });
+
+  test("the window counts from the first attempt: a first attempt 30 h late whose answer was lost is retried an hour later", async () => {
+    const provider = resendWithKeys();
+    const mailer = server.deps.mailer;
+    server.deps.mailer = resendMailer("k", "n@example.com", { fetch: provider.fetchFn });
+    try {
+      clock = new Date(clock.getTime() + hours(30));
+      expect(await drainDeliveries(server.deps)).toBe(0);
+      expect(await row()).toMatchObject({ status: "pending", attempts: 1, note: "email_timeout" });
+      clock = new Date(clock.getTime() + hours(1));
+      await drainDeliveries(server.deps);
+      expect(await row()).toMatchObject({ status: "sent", attempts: 2 });
+      expect(provider.keys).toEqual([
+        `notification-delivery/${delivery}`,
+        `notification-delivery/${delivery}`,
+      ]);
+      expect(provider.sentBodies.length).toBe(1);
+    } finally {
+      server.deps.mailer = mailer;
+    }
+  });
 });

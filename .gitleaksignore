@@ -1,0 +1,2 @@
+# Fake key from the connector redaction test (connectors.test.ts), renamed to a non-secret value in the next commit.
+e4b78f929ffbbb3cd6278d864c8e657854f58804:apps/server/test/connectors.test.ts:generic-api-key:20

@@ -383,6 +383,11 @@ export const notificationDeliveries = pgTable(
     attempts: integer("attempts").notNull().default(0),
     lockedAt: ts("locked_at"),
     sentAt: ts("sent_at"),
+    /**
+     * When this row's email first went to the provider. Its idempotency key lives 24 hours from then,
+     * so a retry past that window could send it twice. null = never sent to the provider yet.
+     */
+    firstAttemptAt: ts("first_attempt_at"),
     /** Why it did not go out (skipped/failed): read, resolved, preference, no subscription, error. */
     note: text("note"),
     createdAt: createdAt(),
