@@ -399,12 +399,14 @@ describe("feedback on an answer", () => {
     async (failure) => {
       const t = await team();
       const reply = await answer(t, t.general);
-      const condition =
-        failure === "insert" ? sql`NEW.thread_id IS NOT NULL` : sql`NEW.reply_count > OLD.reply_count`;
+      // The insert fails on the message itself; the thread update after it, on the thread's state (the root's
+      // reply count goes in with the reply, so it fails with the insert).
+      const condition = failure === "insert" ? sql`NEW.thread_id IS NOT NULL` : sql`TRUE`;
+      const table = sql.raw(failure === "insert" ? "messages" : "threads");
       await server.deps.db.execute(sql`CREATE FUNCTION fail_feedback() RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN IF ${condition} THEN RAISE EXCEPTION 'feedback write failed'; END IF; RETURN NEW; END $$`);
       await server.deps.db.execute(sql`CREATE TRIGGER fail_feedback BEFORE ${sql.raw(failure === "insert" ? "INSERT" : "UPDATE")}
-        ON messages FOR EACH ROW EXECUTE FUNCTION fail_feedback()`);
+        ON ${table} FOR EACH ROW EXECUTE FUNCTION fail_feedback()`);
       try {
         const res = await call(t.caio, t.workspaceId, "POST", `/messages/${reply.id}/feedback`, {
           body: "It's 7 days.",
@@ -433,7 +435,7 @@ describe("feedback on an answer", () => {
           });
         }
       } finally {
-        await server.deps.db.execute(sql`DROP TRIGGER fail_feedback ON messages`);
+        await server.deps.db.execute(sql`DROP TRIGGER fail_feedback ON ${table}`);
         await server.deps.db.execute(sql`DROP FUNCTION fail_feedback()`);
       }
     },
