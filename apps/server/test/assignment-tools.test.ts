@@ -1084,4 +1084,33 @@ describe("commands on the agent's runner", () => {
     },
     SERVER_TEST_MS,
   );
+
+  test(
+    "start_job doesn't use the personal plan of whoever paired the runner on someone else's assignment",
+    async () => {
+      const t = await team();
+      // Beto owns the assignment; the runner (with its Claude Code plan) was paired by Ana.
+      const row = await createAssignment(server.deps, {
+        workspaceId: t.workspaceId,
+        agentId: t.lia.id,
+        agentHandle: t.lia.handle,
+        channelId: t.general,
+        ownerId: t.beto.user.id,
+        title: "Beto's job",
+        goal: "Fix it",
+        executor: "agent",
+        runnerId: t.fake.runnerId,
+        commandPolicy: "never",
+      });
+      await server.deps.db.update(assignments).set({ status: "active" }).where(eq(assignments.id, row.id));
+      const job = await (await run(t, row.threadId)).call("start_job", { title: "Fix", prompt: "Fix it" });
+      expect(job.isError).toBe(true);
+      expect(job.content).toContain("plan is personal");
+      expect(requests(t.fake.runner, "job.start")).toEqual([]);
+      expect(
+        await server.deps.db.select().from(runnerJobs).where(eq(runnerJobs.assignmentId, row.id)),
+      ).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
 });
