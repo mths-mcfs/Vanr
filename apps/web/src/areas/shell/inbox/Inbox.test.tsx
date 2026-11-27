@@ -1,7 +1,7 @@
 // The inbox against the fake server. Ana's Birchwood inbox holds two open requests (an approval and a
 // question), a mention and a DM, then reactions, a finished assignment and a routine report.
 import { describe, expect, test } from "bun:test";
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import { QUERY_RETRIES } from "@vanr/client/react";
 import { newServer, renderApp } from "../../../../test/app.tsx";
 
@@ -248,5 +248,133 @@ describe("the inbox", () => {
     server.emit("workspace_birchwood", { type: "notification.shown", notification: shown });
     await waitFor(() => expect(screen.queryByText("Unread 57") === null).toBe(true));
     expect(screen.getByText("Unread 58")).toBeDefined();
+  });
+
+  describe("older pages stay whole while the first page changes", () => {
+    const reports = () => {
+      const server = newServer();
+      const sample = server.notifications.find((candidate) => candidate.id === "ntf_routine");
+      if (sample === undefined) throw new Error("no sample");
+      server.notifications = server.notifications.filter((candidate) => candidate.tab !== "fyi");
+      for (let n = 0; n < 60; n += 1) {
+        const updatedAt = new Date(Date.parse(sample.updatedAt) - n * 60_000).toISOString();
+        server.notifications.push({
+          ...sample,
+          id: `ntf_report_${n}`,
+          updatedAt,
+          readAt: updatedAt,
+          latest: { title: `Report ${n}` },
+        });
+      }
+      return { server, sample };
+    };
+    const strip = (notice: ReturnType<typeof newServer>["notifications"][number]) => {
+      const { workspaceId: _w, userId: _u, ...rest } = notice;
+      return rest;
+    };
+    const count = (pattern: RegExp) => screen.queryAllByText(pattern).length;
+    const settle = () => act(async () => new Promise((resolve) => setTimeout(resolve, 100)));
+
+    test("a new notice on top pushes the last of the first page down, and it stays", async () => {
+      const { server, sample } = reports();
+      const app = await renderApp({ path: `${PATH}?filter=fyi`, signedInAs: "usr_ana", server });
+      await screen.findByText("Report 0");
+      await app.user.click(screen.getByRole("button", { name: "Show older notices" }));
+      expect(await screen.findByText("Report 59")).toBeDefined();
+      const fresh = {
+        ...sample,
+        id: "ntf_new",
+        updatedAt: new Date(Date.parse(sample.updatedAt) + 60_000).toISOString(),
+        readAt: null,
+        latest: { title: "Brand new" },
+      };
+      server.notifications.push(fresh);
+      await act(async () =>
+        server.emit("workspace_birchwood", { type: "notification.shown", notification: strip(fresh) }),
+      );
+      expect(await screen.findByText("Brand new")).toBeDefined();
+      await waitFor(() => expect(count(/^Report \d+$/)).toBe(60));
+      expect(count(/^Report 49$/)).toBe(1);
+    });
+
+    test("changes while the first page is on its way all land", async () => {
+      const { server } = reports();
+      const app = await renderApp({ path: `${PATH}?filter=fyi`, signedInAs: "usr_ana", server });
+      await screen.findByText("Report 0");
+      await app.user.click(screen.getByRole("button", { name: "Show older notices" }));
+      expect(await screen.findByText("Report 57")).toBeDefined();
+      const late = server.delay("listNotifications");
+      const ten = notice(server, "ntf_report_10");
+      if (ten === undefined) throw new Error("no notice");
+      ten.latest = { title: "Report 10 edited" };
+      await act(async () =>
+        server.emit("workspace_birchwood", { type: "notification.shown", notification: strip(ten) }),
+      );
+      server.notifications = server.notifications.filter(
+        (candidate) => candidate.id !== "ntf_report_3" && candidate.id !== "ntf_report_57",
+      );
+      await act(async () => {
+        server.emit("workspace_birchwood", { type: "notification.hidden", id: "ntf_report_3" });
+        server.emit("workspace_birchwood", { type: "notification.hidden", id: "ntf_report_57" });
+      });
+      late.release();
+      await waitFor(() => expect(count(/^Report 10 edited$/)).toBe(1));
+      await waitFor(() => expect(count(/^Report \d+( edited)?$/)).toBe(58));
+      expect(count(/^Report 3$/)).toBe(0);
+      expect(count(/^Report 57$/)).toBe(0);
+    });
+
+    test("changes while older notices are on their way all land", async () => {
+      const { server } = reports();
+      const app = await renderApp({ path: `${PATH}?filter=fyi`, signedInAs: "usr_ana", server });
+      await screen.findByText("Report 0");
+      const late = server.delay("listNotifications");
+      await app.user.click(screen.getByRole("button", { name: "Show older notices" }));
+      server.notifications = server.notifications.filter((candidate) => candidate.id !== "ntf_report_57");
+      const moved = notice(server, "ntf_report_55");
+      const top = notice(server, "ntf_report_0");
+      if (moved === undefined || top === undefined) throw new Error("no notice");
+      moved.updatedAt = new Date(Date.parse(top.updatedAt) + 60_000).toISOString();
+      moved.latest = { title: "Report 55 moved" };
+      await act(async () => {
+        server.emit("workspace_birchwood", { type: "notification.hidden", id: "ntf_report_57" });
+        server.emit("workspace_birchwood", { type: "notification.shown", notification: strip(moved) });
+      });
+      late.release();
+      await waitFor(() => expect(count(/^Report 59$/)).toBe(1));
+      await settle();
+      expect(count(/^Report 57$/)).toBe(0);
+      expect(count(/^Report 55( moved)?$/)).toBe(1);
+      expect(count(/^Report \d+( moved)?$/)).toBe(59);
+    });
+
+    test("hidden then shown again while the first page is on its way ends shown, once", async () => {
+      const { server } = reports();
+      await renderApp({ path: `${PATH}?filter=fyi`, signedInAs: "usr_ana", server });
+      await screen.findByText("Report 2");
+      const late = server.delay("listNotifications");
+      const two = notice(server, "ntf_report_2");
+      if (two === undefined) throw new Error("no notice");
+      await act(async () =>
+        server.emit("workspace_birchwood", { type: "notification.hidden", id: "ntf_report_2" }),
+      );
+      two.latest = { title: "Report 2 back" };
+      await act(async () =>
+        server.emit("workspace_birchwood", { type: "notification.shown", notification: strip(two) }),
+      );
+      late.release();
+      await waitFor(() => expect(count(/^Report 2 back$/)).toBe(1));
+      expect(count(/^Report 2$/)).toBe(0);
+    });
+  });
+
+  test("Mark these read stays off in a filter with nothing unread, even when other notices are", async () => {
+    const server = newServer();
+    const mention = notice(server, "ntf_mention");
+    if (mention === undefined) throw new Error("no notice");
+    mention.readAt = mention.updatedAt;
+    await renderApp({ path: `${PATH}?filter=mentions`, signedInAs: "usr_ana", server });
+    await screen.findByRole("button", { name: /Jonas Lind mentioned you/ });
+    expect(screen.getByRole("button", { name: "Mark these read" }).hasAttribute("disabled")).toBe(true);
   });
 });

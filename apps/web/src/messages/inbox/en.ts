@@ -22,6 +22,7 @@ export default {
   readAll: "Mark all read",
   readFiltered: "Mark these read",
   readAllDone: "Marked as read.",
+  readAllNone: "Nothing here was unread.",
   loadMore: "Show older notices",
 
   "empty.action_needed.title": "Nothing needs you right now",

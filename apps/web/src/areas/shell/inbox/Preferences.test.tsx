@@ -5,7 +5,7 @@ import { QUERY_RETRIES } from "@vanr/client/react";
 import type { AppNotification } from "@vanr/contract";
 import { DEFAULT_NOTIFICATION_SETTINGS } from "../../../../dev/fake-server.ts";
 import { chooseOption, newServer, renderApp } from "../../../../test/app.tsx";
-import { dayGroupOf, destinationOf, inFilter, joinPages, laterOptions } from "./notices.ts";
+import { dayGroupOf, destinationOf, joinPages, laterOptions } from "./notices.ts";
 
 const PATH = "/workspace/workspace_birchwood/notifications/settings";
 const saved = (server: ReturnType<typeof newServer>) =>
@@ -167,15 +167,6 @@ describe("where a notice leads", () => {
     ).toEqual({ route: "dmAgent", params: { workspaceId: ws, agentId: "agt" } });
     expect(destinationOf({ ...base, actors: [{ type: "agent", id: "agt" }] }, ws)?.route).toBe("agent");
     expect(destinationOf(base, ws)).toBeUndefined();
-  });
-
-  test("which notices belong in each filter", () => {
-    expect(inFilter({ ...base, readAt: "2026-11-14T10:00:00.000Z" }, "unread")).toBe(false);
-    expect(inFilter(base, "unread")).toBe(true);
-    expect(inFilter({ ...base, doneAt: "2026-11-14T10:00:00.000Z" }, "all")).toBe(false);
-    expect(inFilter({ ...base, tab: "fyi" }, "action_needed")).toBe(false);
-    expect(inFilter({ ...base, kind: "reaction" }, "mentions")).toBe(false);
-    expect(inFilter({ ...base, waiting: true }, "waiting")).toBe(true);
   });
 
   test("pages are joined without repeating a notice", () => {

@@ -22,6 +22,7 @@ export default {
   readAll: "Marcar tudo como lido",
   readFiltered: "Marcar estes como lidos",
   readAllDone: "Marcados como lidos.",
+  readAllNone: "Nada aqui estava sem ler.",
   loadMore: "Mostrar avisos mais antigos",
 
   "empty.action_needed.title": "Nada precisa de você agora",

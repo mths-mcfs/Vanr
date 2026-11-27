@@ -88,26 +88,6 @@ export const ALL_FILTERS = ["all", "mentions", "waiting", "unread", "reactions"]
 export const tabOf = (filter: NotificationFilter): Tab =>
   filter === "action_needed" || filter === "fyi" ? filter : "all";
 
-/** Whether a notice belongs in a filter of the inbox (the server's rule, for notices changed here). */
-export function inFilter(notice: AppNotification, filter: NotificationFilter): boolean {
-  if (notice.doneAt !== null) return false;
-  switch (filter) {
-    case "all":
-      return true;
-    case "action_needed":
-    case "fyi":
-      return notice.tab === filter;
-    case "mentions":
-      return notice.kind === "mention";
-    case "reactions":
-      return notice.kind === "reaction";
-    case "unread":
-      return notice.readAt === null;
-    case "waiting":
-      return notice.waiting;
-  }
-}
-
 /** Pages joined in order; a notice that moved between pages, or came twice, appears once. */
 export function joinPages(...pages: readonly (readonly AppNotification[])[]): AppNotification[] {
   const seen = new Set<string>();

@@ -911,8 +911,9 @@ export class FakeServer {
       all: seen.length,
       badge: count((notice) => pending(notice) && notice.kind !== "approval"),
       fyi: count((notice) => notice.tab === "fyi" && notice.readAt === null),
-      mentions: count((notice) => notice.kind === "mention" && notice.readAt === null),
-      reactions: count((notice) => notice.kind === "reaction" && notice.readAt === null),
+      // As the server counts them: every mention and reaction in the inbox, read or not.
+      mentions: count((notice) => notice.kind === "mention"),
+      reactions: count((notice) => notice.kind === "reaction"),
       unread: count((notice) => notice.readAt === null),
       waiting: count((notice) => notice.waiting),
     };

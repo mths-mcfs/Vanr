@@ -35,7 +35,6 @@ import {
   DAY_GROUPS,
   dayGroupOf,
   destinationOf,
-  inFilter,
   joinPages,
   laterOptions,
   TABS,
@@ -165,39 +164,62 @@ function useOpenFromLink(workspaceId: string, open: string | undefined, filter: 
   }, [client, go, open, workspaceId, filter]);
 }
 
-type Patch = { notice: AppNotification | null; at: number };
-
 function NoticeList({ workspaceId, filter }: { workspaceId: string; filter: NotificationFilter }) {
   const t = useMessages("inbox");
   const client = useVanrClient();
   const clock = useClock();
   const outcome = useOutcome("inbox");
   const first = useApiQuery("listNotifications", { workspaceId, query: { filter, limit: PAGE } });
-  const [more, setMore] = useState<{ items: AppNotification[]; cursor: string | null } | null>(null);
+  // The pages after the first: loaded on demand, and loaded again from the first page's cursor every
+  // time the first page changes, so the list always reads as one moment of the server. A notice that
+  // moved across the page boundary is then neither lost nor shown twice.
+  const [extra, setExtra] = useState<{ items: AppNotification[]; cursor: string | null } | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
-  // What this browser changed since the list arrived: the new notice, or null when it left the inbox.
-  // A patch gives way only to a first page whose fetch started after it, so an answer that was on
-  // its way when the change happened never undoes it (all of these are Date.now times).
-  const [patches, setPatches] = useState<ReadonlyMap<string, Patch>>(new Map());
-  const fetchStarts = useRef<{ pending?: number; shown: number; seen: number }>({ shown: 0, seen: 0 });
-  const starts = fetchStarts.current;
-  if (first.fetchStatus === "fetching" && starts.pending === undefined) starts.pending = Date.now();
-  if (first.dataUpdatedAt !== starts.seen) {
-    starts.seen = first.dataUpdatedAt;
-    starts.shown = starts.pending ?? first.dataUpdatedAt;
-    starts.pending = undefined;
-  }
+  const wanted = useRef(0);
+  const ticket = useRef(0);
+  const loadExtra = async (from: string | null, count: number) => {
+    const mine = ++ticket.current;
+    const items: AppNotification[] = [];
+    let cursor = from;
+    while (cursor !== null && items.length < count) {
+      const page = await client.api.listNotifications({
+        workspaceId,
+        query: { filter, cursor, limit: PAGE },
+      });
+      // A later load started meanwhile: its answer wins.
+      if (mine !== ticket.current) return;
+      items.push(...page.items);
+      cursor = page.items.length === 0 ? null : page.nextCursor;
+    }
+    if (mine === ticket.current) setExtra({ items, cursor });
+  };
+  // An event that arrives while the first page is on its way may be missing from that answer, which
+  // was computed before it: the first page is asked for once more when it lands.
+  const askAgain = useRef(false);
+  const onEvent = () => {
+    if (first.isFetching) askAgain.current = true;
+  };
+  useRealtimeEvent("notification.hidden", onEvent);
+  useRealtimeEvent("notification.shown", onEvent);
+  const latest = useRef({ first, loadExtra, outcome });
+  latest.current = { first, loadExtra, outcome };
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new first page is the trigger; the rest is read fresh.
+  useEffect(() => {
+    const { first: page, loadExtra: load, outcome: say } = latest.current;
+    if (page.isFetching || page.data === undefined) return;
+    if (askAgain.current) {
+      askAgain.current = false;
+      void page.refetch();
+      return;
+    }
+    if (wanted.current > 0) load(page.data.nextCursor, wanted.current).catch(say.failed);
+  }, [first.dataUpdatedAt, first.isFetching]);
+
   const changed = () => [
     { method: "listNotifications" as const, args: { workspaceId } },
     { method: "listNotificationCounts" as const, args: { workspaceId } },
   ];
   const readAll = useApiMutation("markNotificationAllRead", { invalidates: changed });
-  const record = (id: string, notice: AppNotification | null) =>
-    setPatches((current) => new Map(current).set(id, { notice, at: Date.now() }));
-  useRealtimeEvent("notification.hidden", (event) => record(event.payload.id, null));
-  useRealtimeEvent("notification.shown", (event) =>
-    record(event.payload.notification.id, event.payload.notification),
-  );
 
   if (first.isPending) return <ScreenLoading />;
   if (first.isError) {
@@ -211,25 +233,24 @@ function NoticeList({ workspaceId, filter }: { workspaceId: string; filter: Noti
     );
   }
 
-  // A changed notice that no longer belongs in this filter leaves the list, as the server's would.
-  const patched = (list: readonly AppNotification[], fresh: number) =>
-    list.flatMap((notice) => {
-      const patch = patches.get(notice.id);
-      if (patch === undefined || patch.at < fresh) return [notice];
-      return patch.notice === null || !inFilter(patch.notice, filter) ? [] : [patch.notice];
-    });
-  const items = joinPages(patched(first.data.items, starts.shown), patched(more?.items ?? [], 0));
-  const cursor = more === null ? first.data.nextCursor : more.cursor;
+  const items = joinPages(first.data.items, extra?.items ?? []);
+  const cursor = extra === null ? first.data.nextCursor : extra.cursor;
+  const { counts } = first.data;
+  // Whether this filter has something unread. The counts say so exactly for everything and for FYI;
+  // for the other filters, the loaded notices do once the list is complete.
+  const unreadHere =
+    filter === "all" || filter === "unread"
+      ? counts.unread > 0
+      : filter === "fyi"
+        ? counts.fyi > 0
+        : items.some((notice) => notice.readAt === null) || (cursor !== null && counts.unread > 0);
 
   const loadMore = async () => {
     if (cursor === null) return;
+    wanted.current = items.length - first.data.items.length + PAGE;
     setLoadingMore(true);
     try {
-      const page = await client.api.listNotifications({
-        workspaceId,
-        query: { filter, cursor, limit: PAGE },
-      });
-      setMore((current) => ({ items: [...(current?.items ?? []), ...page.items], cursor: page.nextCursor }));
+      await loadExtra(first.data.nextCursor, wanted.current);
     } catch (error) {
       outcome.failed(error);
     } finally {
@@ -247,18 +268,14 @@ function NoticeList({ workspaceId, filter }: { workspaceId: string; filter: Noti
         <Button
           size="sm"
           icon={<CheckCheck aria-hidden="true" />}
-          // The server reads everything in the filter, loaded or not: only "nothing unread at all" is final.
-          disabled={first.data.counts.unread === 0}
+          disabled={!unreadHere}
           loading={readAll.isPending}
           onClick={() =>
             readAll.mutate(
               { workspaceId, body: { filter } },
               {
-                onSuccess: () => {
-                  setMore(null);
-                  setPatches(new Map());
-                  outcome.done(t("readAllDone"));
-                },
+                onSuccess: (result) =>
+                  outcome.done(t(result.ids.length === 0 ? "readAllNone" : "readAllDone")),
                 onError: outcome.failed,
               },
             )
@@ -276,23 +293,12 @@ function NoticeList({ workspaceId, filter }: { workspaceId: string; filter: Noti
       ) : (
         <div className="inbox__groups">
           {waiting.length > 0 && (
-            <NoticeGroup
-              label={t("group.waiting")}
-              notices={waiting}
-              workspaceId={workspaceId}
-              onChange={record}
-            />
+            <NoticeGroup label={t("group.waiting")} notices={waiting} workspaceId={workspaceId} />
           )}
           {DAY_GROUPS.map((group) => {
             const list = rest.filter((notice) => dayGroupOf(notice.updatedAt, now) === group);
             return list.length === 0 ? null : (
-              <NoticeGroup
-                key={group}
-                label={t(`group.${group}`)}
-                notices={list}
-                workspaceId={workspaceId}
-                onChange={record}
-              />
+              <NoticeGroup key={group} label={t(`group.${group}`)} notices={list} workspaceId={workspaceId} />
             );
           })}
           {cursor !== null && (
@@ -312,19 +318,17 @@ function NoticeGroup({
   label,
   notices,
   workspaceId,
-  onChange,
 }: {
   label: string;
   notices: readonly AppNotification[];
   workspaceId: string;
-  onChange: (id: string, notice: AppNotification | null) => void;
 }) {
   return (
     <section className="inbox__group" aria-label={label}>
       <h2 className="inbox__group-title">{label}</h2>
       <ul className="inbox__list">
         {notices.map((notice) => (
-          <NoticeRow key={notice.id} notice={notice} workspaceId={workspaceId} onChange={onChange} />
+          <NoticeRow key={notice.id} notice={notice} workspaceId={workspaceId} />
         ))}
       </ul>
     </section>
@@ -341,15 +345,7 @@ function useActorNames(workspaceId: string) {
       : people.data?.find((person) => person.userId === actor.id)?.name;
 }
 
-function NoticeRow({
-  notice,
-  workspaceId,
-  onChange,
-}: {
-  notice: AppNotification;
-  workspaceId: string;
-  onChange: (id: string, notice: AppNotification | null) => void;
-}) {
+function NoticeRow({ notice, workspaceId }: { notice: AppNotification; workspaceId: string }) {
   const t = useMessages("inbox");
   const { locale } = useLocale();
   const clock = useClock();
@@ -391,8 +387,7 @@ function NoticeRow({
   const unread = notice.readAt === null;
 
   const open = async () => {
-    if (unread)
-      read.mutate({ ...ids, body: { read: true } }, { onSuccess: (next) => onChange(notice.id, next) });
+    if (unread) read.mutate({ ...ids, body: { read: true } });
     const destination = destinationOf(notice, workspaceId);
     if (destination !== undefined) await go(destination.route, destination.params);
   };
@@ -427,12 +422,7 @@ function NoticeRow({
             variant="ghost"
             icon={<Check aria-hidden="true" />}
             loading={complete.isPending}
-            onClick={() =>
-              complete.mutate(
-                { ...ids, body: { done: true } },
-                { onSuccess: () => onChange(notice.id, null), onError: outcome.failed },
-              )
-            }
+            onClick={() => complete.mutate({ ...ids, body: { done: true } }, { onError: outcome.failed })}
           >
             {t("done")}
           </Button>
@@ -449,7 +439,6 @@ function NoticeRow({
               { ...ids, body: { saved: notice.savedAt === null } },
               {
                 onSuccess: (next) => {
-                  onChange(notice.id, next);
                   outcome.done(t(next.savedAt === null ? "unsavedDone" : "savedDone"));
                 },
                 onError: outcome.failed,
@@ -476,7 +465,6 @@ function NoticeRow({
                     { ...ids, body: { until: option.at.toISOString() } },
                     {
                       onSuccess: () => {
-                        onChange(notice.id, null);
                         outcome.done(t("snoozedDone", { time: time(option.at.toISOString()) }));
                       },
                       onError: outcome.failed,
@@ -507,7 +495,7 @@ function NoticeRow({
                 onSelect={() =>
                   remind.mutate(
                     { ...ids, body: { at: option.at.toISOString() } },
-                    { onSuccess: (next) => onChange(notice.id, next), onError: outcome.failed },
+                    { onError: outcome.failed },
                   )
                 }
               >
@@ -518,12 +506,7 @@ function NoticeRow({
               <>
                 <MenuSeparator />
                 <MenuItem
-                  onSelect={() =>
-                    remind.mutate(
-                      { ...ids, body: { at: null } },
-                      { onSuccess: (next) => onChange(notice.id, next), onError: outcome.failed },
-                    )
-                  }
+                  onSelect={() => remind.mutate({ ...ids, body: { at: null } }, { onError: outcome.failed })}
                 >
                   {t("remindClear")}
                 </MenuItem>
