@@ -1113,4 +1113,73 @@ describe("commands on the agent's runner", () => {
     },
     SERVER_TEST_MS,
   );
+
+  test(
+    "environment_status answers from the runner it checked, even if the agent is lent another right after the check",
+    async () => {
+      const t = await team();
+      // Beto may use Lia's runner (he paired it); the other one, Ana's, he may not.
+      await server.deps.db
+        .update(runners)
+        .set({ pairedByUserId: t.beto.user.id, workDir: "/fixture/beto-folder" })
+        .where(eq(runners.id, t.fake.runnerId));
+      const other = await pairFake(server, t.ana, t.workspaceId, { open });
+      await server.deps.db
+        .update(runners)
+        .set({ workDir: "/fixture/private-folder" })
+        .where(eq(runners.id, other.runnerId));
+      // The run's access check (the second one: the plan has its own) reads the members; right after it, Lia is
+      // lent the other runner.
+      let checks = 0;
+      const swapAfterRunCheck = async () => {
+        if (++checks !== 2) return;
+        await server.deps.db
+          .update(agents)
+          .set({ environmentId: other.runnerId })
+          .where(eq(agents.id, t.lia.id));
+      };
+      const db = new Proxy(server.deps.db, {
+        get(target, prop) {
+          if (prop !== "select") return Reflect.get(target, prop, target);
+          return (...args: Parameters<typeof target.select>) => {
+            const query = target.select(...args);
+            return new Proxy(query, {
+              get(q, key) {
+                if (key !== "from") return Reflect.get(q, key, q);
+                return (table: unknown) => {
+                  const from = (q.from as (t: unknown) => ReturnType<typeof q.from>)(table);
+                  if (table !== schema.members) return from;
+                  return new Proxy(from, {
+                    get(f, k) {
+                      if (k !== "where") return Reflect.get(f, k, f);
+                      return (...w: unknown[]) => {
+                        const rows = (f.where as (...a: unknown[]) => Promise<unknown>)(...w);
+                        return {
+                          // biome-ignore lint/suspicious/noThenProperty: a thenable that stands for the query
+                          then: (ok: (v: unknown) => unknown, ko: (e: unknown) => unknown) =>
+                            rows
+                              .then(async (v) => {
+                                await swapAfterRunCheck();
+                                return v;
+                              })
+                              .then(ok, ko),
+                        };
+                      };
+                    },
+                  });
+                };
+              },
+            });
+          };
+        },
+      });
+      const r = await run(t, null, t.beto);
+      const out = await r.call("environment_status", {}, { deps: { ...server.deps, db } });
+      expect(checks).toBe(2);
+      expect(out.isError).toBe(false);
+      expect(out.content).toContain("/fixture/beto-folder");
+      expect(out.content).not.toContain("/fixture/private-folder");
+    },
+    SERVER_TEST_MS,
+  );
 });

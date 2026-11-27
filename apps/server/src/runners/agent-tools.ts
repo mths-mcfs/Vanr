@@ -36,7 +36,7 @@ import { HttpError } from "../http";
 import { defineStored } from "../runtime/base-tools";
 import { domain, self, visibleFile } from "../runtime/content-tools";
 import { define, type ToolContext, type ToolDef, ToolInputError, type ToolPlan } from "../runtime/tools";
-import { openIntervention, policyFor, pushPolicy, recordStep } from "./browser-guard";
+import { driverOf, openIntervention, policyFor, recordStep } from "./browser-guard";
 import { RunnerCallError } from "./hub";
 import { blockedText, networkPolicyFor, publishNetwork, recordBlocked, toNetworkRequest } from "./network";
 import {
@@ -48,7 +48,7 @@ import {
   toSecretRequest,
   waitIntervention,
 } from "./requests";
-import { canUseRunner, emitEnvironment, environmentOf, type RunnerRow } from "./runners";
+import { canUseRunner, emitEnvironment, type RunnerRow } from "./runners";
 
 const {
   agents,
@@ -110,8 +110,17 @@ async function runnerOf(
         "The person who asked may not use your runner, so you can't use it for them. Someone who may use it has to ask.",
       );
   }
+  return ready(ctx, m, opts);
+}
+
+/** The checked runner can take a call now: the agent didn't stop it and it is connected. */
+async function ready(
+  ctx: ToolContext,
+  m: RunnerRow,
+  opts: { allowStopped?: boolean; allowOffline?: boolean } = {},
+): Promise<RunnerRow> {
   if (!opts.allowStopped) {
-    const [state] = await db
+    const [state] = await ctx.deps.db
       .select()
       .from(agentEnvironments)
       .where(eq(agentEnvironments.agentId, ctx.agent.id));
@@ -121,6 +130,19 @@ async function runnerOf(
   if (!opts.allowOffline && !ctx.deps.runners.isOnline(m.id))
     throw new ToolInputError(`Your runner (${m.name}) is offline. Tell the person; it reconnects by itself.`);
   return m;
+}
+
+/**
+ * The runner each call's plan checked (the key is the input `runTool` plans and then runs). Each phase resolves
+ * and checks the agent's runner once and hands that runner down: the plan's own steps use this one, and the run
+ * resolves it again once (an approval or a person may have changed things in between).
+ */
+const planRunners = new WeakMap<object, RunnerRow>();
+
+function plannedRunner(input: unknown): RunnerRow {
+  const runner = typeof input === "object" && input ? planRunners.get(input) : undefined;
+  if (!runner) throw new ToolInputError("Your runner was not checked for this call; nothing was done.");
+  return runner;
 }
 
 const BROWSER_UNAVAILABLE = "There is no browser on this runner.";
@@ -245,9 +267,6 @@ async function gated(ctx: ToolContext, tool: string, command: string) {
   }
 }
 
-/** The runner each `execute_code` call was planned for (the key is the input `runTool` plans and then runs). */
-const planned = new WeakMap<object, string>();
-
 const executeCode = defineStored({
   name: "execute_code",
   description:
@@ -260,10 +279,9 @@ const executeCode = defineStored({
   }),
   async plan(ctx, input) {
     // The runner is part of the approved effect: a command approved for one runner never runs on another.
-    const runner = await runnerOf(ctx);
+    const runner = await ready(ctx, plannedRunner(input));
     // Commands the owner turned off stop here, before anyone is asked to approve one.
     if (!runner.access.tools.commands) throw new ToolInputError(EXPLAIN.exec_disabled as string);
-    planned.set(input, runner.id);
     const s = await sandboxOf(ctx);
     return {
       payload: { ...input, runnerId: runner.id },
@@ -289,8 +307,7 @@ const executeCode = defineStored({
   async run(ctx, input) {
     // The runner is checked before the assignment asks anyone: a command for a runner it can't reach never waits.
     const runner = await runnerOf(ctx);
-    const approvedFor = planned.get(input);
-    if (approvedFor && approvedFor !== runner.id)
+    if (plannedRunner(input).id !== runner.id)
       throw new ToolInputError(
         "Your runner changed since this command was planned; nothing was run. Try again.",
       );
@@ -475,21 +492,18 @@ const environmentStatus = define({
   effect: "K0",
   input: z.object({}),
   async run(ctx) {
-    // The plan checked the access; it is checked again here, since it may have changed before the run.
-    await runnerOf(ctx, { allowStopped: true, allowOffline: true });
-    const environment = await environmentOf(ctx.deps, ctx.agent.id);
-    const runnerId = environment.target?.runnerId;
-    if (!environment.target || !runnerId) return "You have no runner.";
-    const [m] = await ctx.deps.db
-      .select()
-      .from(runners)
-      .where(and(eq(runners.id, runnerId), eq(runners.workspaceId, ctx.workspaceId)));
-    if (!m) return "You have no runner.";
+    // Checked again here (it may have changed since the plan), and everything below reads the runner checked.
+    const m = await runnerOf(ctx, { allowStopped: true, allowOffline: true });
+    const [state] = await ctx.deps.db
+      .select({ status: agentEnvironments.status })
+      .from(agentEnvironments)
+      .where(eq(agentEnvironments.agentId, ctx.agent.id));
+    const online = ctx.deps.runners.isOnline(m.id);
     const tools = Object.entries(m.access.tools)
       .filter(([, on]) => on)
       .map(([t]) => t);
     return [
-      `Runner: ${m.name} (${m.os}/${m.arch}), ${environment.target.online ? "online" : "offline"}, ${environment.status}${m.paused ? ", paused" : ""}.`,
+      `Runner: ${m.name} (${m.os}/${m.arch}), ${online ? "online" : "offline"}, ${state?.status ?? "stopped"}${m.paused ? ", paused" : ""}.`,
       m.workDir ? `Your folder is inside ${m.workDir}.` : "",
       `Allowed: ${tools.join(", ") || "nothing"}.`,
       m.access.folders.length ? `Extra folders: ${m.access.folders.map((f) => f.path).join(", ")}.` : "",
@@ -610,12 +624,12 @@ const requestSecret = defineStored({
 
 /**
  * Every runner tool checks, in its plan and so before any approval, that the run may use the agent's runner (see
- * `runnerOf`); the run checks it again with the runner online.
+ * `runnerOf`), and the plan's steps use that runner (`plannedRunner`); the run checks it again with the runner online.
  */
 const onLentRunner = (tool: ToolDef<unknown>): ToolDef<unknown> => ({
   ...tool,
   async plan(ctx, input) {
-    await runnerOf(ctx, { allowStopped: true, allowOffline: true });
+    planRunners.set(input as object, await runnerOf(ctx, { allowStopped: true, allowOffline: true }));
     return tool.plan ? tool.plan(ctx, input) : {};
   },
 });
@@ -689,10 +703,20 @@ async function waitForPerson(ctx: ToolContext): Promise<void> {
   );
 }
 
-async function browserRunner(ctx: ToolContext): Promise<RunnerRow> {
-  const runner = await runnerOf(ctx);
+function browserOf(runner: RunnerRow): RunnerRow {
   if (!runner.browser || !runner.access.tools.browser) throw new ToolInputError(BROWSER_UNAVAILABLE);
   return runner;
+}
+
+/** Tells the checked runner the policy again (who drives now), so a hand-back that didn't reach it does. */
+async function repush(ctx: ToolContext, runner: RunnerRow) {
+  const policy = await policyFor(
+    ctx.deps,
+    ctx.agent.id,
+    runner.id,
+    await driverOf(ctx.deps.db, ctx.agent.id, ctx.deps.now()),
+  );
+  await onRunner(ctx, "browser.policy", { policy }, { runner, timeoutMs: 10_000 }).catch(() => {});
 }
 
 type BrowserOp = "browser.open" | "browser.act" | "browser.close";
@@ -712,13 +736,14 @@ async function browserCall<O extends BrowserOp>(
   op: O,
   args: Omit<OpArgs<O>, "policy" | "driver">,
   timeoutMs = 45_000,
+  checked?: RunnerRow,
 ): Promise<BrowserActResult> {
-  const runner = await browserRunner(ctx);
+  const runner = checked ?? browserOf(await runnerOf(ctx));
   let r: BrowserActResult | null = null;
   let failure: unknown = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     await waitForPerson(ctx);
-    if (attempt > 0) await pushPolicy(ctx.deps, ctx.agent.id);
+    if (attempt > 0) await repush(ctx, runner);
     const full =
       op === "browser.close"
         ? { ...args, driver: "agent" }
@@ -781,12 +806,12 @@ const pageRead = (name: string) => [{ flag: "A" as const, source: `${name} (web 
 
 const browserPlan =
   (kind: BrowserKind, name: string) =>
-  async (ctx: ToolContext): Promise<ToolPlan> => {
+  async <I>(ctx: ToolContext, input: I): Promise<ToolPlan> => {
     if (kind === "read") return { raises: pageRead(name) };
     if (kind === "act")
       return {
         destination: { kind: "external", allowed: true, target: "browser" },
-        raises: await sessionRisk(ctx, (await browserRunner(ctx)).id),
+        raises: await sessionRisk(ctx, browserOf(plannedRunner(input)).id),
         reads: pageRead(name),
       };
     return { reads: pageRead(name) };
@@ -850,7 +875,7 @@ const inspected = new WeakMap<object, string>();
 async function inspect(ctx: ToolContext, runner: RunnerRow, a: Aim): Promise<BrowserInspectResult> {
   for (let attempt = 0; ; attempt++) {
     await waitForPerson(ctx);
-    if (attempt > 0) await pushPolicy(ctx.deps, ctx.agent.id);
+    if (attempt > 0) await repush(ctx, runner);
     const policy = await policyFor(ctx.deps, ctx.agent.id, runner.id, "agent");
     try {
       return (
@@ -893,7 +918,7 @@ function aimTitle(a: Aim, what: string, site: string): string {
  * the log keeps it.
  */
 async function aimedPlan(ctx: ToolContext, name: string, input: object, a: Aim): Promise<ToolPlan> {
-  const runner = await browserRunner(ctx);
+  const runner = browserOf(plannedRunner(input));
   const plan: ToolPlan = {
     destination: { kind: "external", allowed: true, target: "browser" },
     raises: await sessionRisk(ctx, runner.id),
@@ -990,7 +1015,7 @@ const browserNavigate = define({
   async plan(ctx, input) {
     return {
       destination: { kind: "external", allowed: true, target: normalizeUrl(input.url) },
-      raises: await sessionRisk(ctx, (await browserRunner(ctx)).id),
+      raises: await sessionRisk(ctx, browserOf(plannedRunner(input)).id),
       reads: pageRead("browser_navigate"),
     };
   },
@@ -1048,10 +1073,16 @@ const browserAskPerson = defineStored({
     return input.kind === "login" ? { raises: [{ flag: "B", source: "browser_ask_person login" }] } : {};
   },
   async run(ctx, input) {
-    const runner = await browserRunner(ctx);
-    const page = await browserCall(ctx, "browser_list_tabs", {}, "browser.act", { action: "tabs" }).catch(
-      () => null,
-    );
+    const runner = browserOf(await runnerOf(ctx));
+    const page = await browserCall(
+      ctx,
+      "browser_list_tabs",
+      {},
+      "browser.act",
+      { action: "tabs" },
+      undefined,
+      runner,
+    ).catch(() => null);
     const now = ctx.deps.now();
     const id = newId("bi");
     // At most one open request per agent: the check and the insert run under the agent's row lock, so two
