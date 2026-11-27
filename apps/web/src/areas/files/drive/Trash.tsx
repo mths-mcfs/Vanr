@@ -5,9 +5,9 @@
 import { useApiMutation, useApiQuery } from "@vanr/client/react";
 import type { TrashedFile } from "@vanr/contract";
 import { can } from "@vanr/contract";
-import { Button, EmptyState, Icon } from "@vanr/ui";
+import { Button, Callout, EmptyState, Icon } from "@vanr/ui";
 import { RotateCcw } from "lucide-react";
-import { ScreenError, ScreenLoading } from "../../../app/screens.tsx";
+import { ScreenError, ScreenLoading, useErrorMessage } from "../../../app/screens.tsx";
 import { useMessages } from "../../../i18n/react.tsx";
 import { useClock } from "../../../platform/clock.tsx";
 import { useSession } from "../../../session/react.tsx";
@@ -22,6 +22,7 @@ export function Trash({ workspaceId }: { workspaceId: string }) {
   const clock = useClock();
   const { me } = useSession();
   const name = useActorName(workspaceId);
+  const describe = useErrorMessage("files");
   const when = useRelativeTime();
   const trash = useApiQuery("getFileTrash", { workspaceId }, { refetchOnMount: "always" });
   const restore = useApiMutation("restoreFile", {
@@ -55,40 +56,47 @@ export function Trash({ workspaceId }: { workspaceId: string }) {
     );
   }
   return (
-    <ul className="files__rows" aria-label={t("trash.list")}>
-      {trash.data.map((file) => {
-        const days = Math.max(0, Math.ceil((Date.parse(file.expungeAt) - clock.now()) / DAY_MS));
-        return (
-          <li key={file.id} className="files__row">
-            <span className="files__open files__open--static">
-              <span className="files__glyph" aria-hidden="true">
-                <Icon icon={KIND_ICON[file.kind]} />
+    <>
+      {restore.isError && (
+        <Callout tone="danger" role="alert" title={t("trash.restoreFailed")}>
+          {describe(restore.error)}
+        </Callout>
+      )}
+      <ul className="files__rows" aria-label={t("trash.list")}>
+        {trash.data.map((file) => {
+          const days = Math.max(0, Math.ceil((Date.parse(file.expungeAt) - clock.now()) / DAY_MS));
+          return (
+            <li key={file.id} className="files__row">
+              <span className="files__open files__open--static">
+                <span className="files__glyph" aria-hidden="true">
+                  <Icon icon={KIND_ICON[file.kind]} />
+                </span>
+                <span className="files__name">{file.title}</span>
               </span>
-              <span className="files__name">{file.title}</span>
-            </span>
-            <span className="files__meta">{name(file.createdBy)}</span>
-            <span className={days <= SOON_DAYS ? "files__meta files__meta--soon" : "files__meta"}>
-              {t("trash.daysLeft", { count: days })}
-            </span>
-            <time className="files__meta" dateTime={file.deletedAt}>
-              {t("trash.deleted", { when: when(file.deletedAt) })}
-            </time>
-            {mayRestore(file) ? (
-              <Button
-                size="sm"
-                icon={<Icon icon={RotateCcw} />}
-                loading={restore.isPending && restore.variables?.fileId === file.id}
-                aria-label={t("trash.restoreNamed", { title: file.title })}
-                onClick={() => restore.mutate({ workspaceId, fileId: file.id })}
-              >
-                {t("trash.restore")}
-              </Button>
-            ) : (
-              <span className="files__meta">{t("trash.whoRestores")}</span>
-            )}
-          </li>
-        );
-      })}
-    </ul>
+              <span className="files__meta">{name(file.createdBy)}</span>
+              <span className={days <= SOON_DAYS ? "files__meta files__meta--soon" : "files__meta"}>
+                {t("trash.daysLeft", { count: days })}
+              </span>
+              <time className="files__meta" dateTime={file.deletedAt}>
+                {t("trash.deleted", { when: when(file.deletedAt) })}
+              </time>
+              {mayRestore(file) ? (
+                <Button
+                  size="sm"
+                  icon={<Icon icon={RotateCcw} />}
+                  loading={restore.isPending && restore.variables?.fileId === file.id}
+                  aria-label={t("trash.restoreNamed", { title: file.title })}
+                  onClick={() => restore.mutate({ workspaceId, fileId: file.id })}
+                >
+                  {t("trash.restore")}
+                </Button>
+              ) : (
+                <span className="files__meta">{t("trash.whoRestores")}</span>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </>
   );
 }

@@ -4,7 +4,7 @@
 import type { ArgsOf } from "@vanr/client";
 import { useApiQuery, useVanrClient } from "@vanr/client/react";
 import type { FileContent, FileDetail } from "@vanr/contract";
-import { Chip } from "@vanr/ui";
+import { Button, Callout, Chip } from "@vanr/ui";
 import { useEffect, useRef, useState } from "react";
 import { ScreenError, ScreenLoading } from "../../../app/screens.tsx";
 import { useLocale, useMessages } from "../../../i18n/react.tsx";
@@ -14,16 +14,26 @@ type UploadedContent = Extract<FileContent, { kind: "file" }>;
 
 const IMAGE = /^image\/(png|jpeg|gif|webp|avif|bmp)$/;
 
-/** A local address for a version's bytes, read through the client; undefined until they arrive or if they fail. */
-export function useBlobUrl(args: ArgsOf<"getFileBlob">): string | undefined {
+/**
+ * A local address for a version's bytes, read through the client: `url` once they arrive, `failed` when
+ * they could not be read (with `retry`). Nothing is fetched while `enabled` is false.
+ */
+export function useBlobUrl(
+  args: ArgsOf<"getFileBlob">,
+  enabled = true,
+): { url: string | undefined; failed: boolean; retry: () => void } {
   const client = useVanrClient();
   const [url, setUrl] = useState<string>();
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   const key = JSON.stringify(args);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: `key` stands for `args`, a new object on every render.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `key` stands for `args`, a new object on every render; `attempt` asks again.
   useEffect(() => {
+    if (!enabled) return;
     const controller = new AbortController();
     let made: string | undefined;
     setUrl(undefined);
+    setFailed(false);
     client.api
       .getFileBlob(args, { signal: controller.signal })
       .then((download) => download.blob())
@@ -32,13 +42,16 @@ export function useBlobUrl(args: ArgsOf<"getFileBlob">): string | undefined {
         made = URL.createObjectURL(blob);
         setUrl(made);
       })
-      .catch(() => undefined);
+      .catch(() => {
+        // Leaving the screen cancels the read; that is not a failure to show.
+        if (!controller.signal.aborted) setFailed(true);
+      });
     return () => {
       controller.abort();
       if (made !== undefined) URL.revokeObjectURL(made);
     };
-  }, [client, key]);
-  return url;
+  }, [client, key, enabled, attempt]);
+  return { url, failed, retry: () => setAttempt((n) => n + 1) };
 }
 
 /** Where the reading of the file's text stands: working, done with its pages, or failed and why. */
@@ -110,19 +123,42 @@ function Uploaded({
   page?: number;
 }) {
   const t = useMessages("files");
+  const common = useMessages("common");
   const { locale } = useLocale();
   const type = content.detectedType ?? "";
   const media = IMAGE.test(type) || type === "application/pdf" || /^(audio|video)\//.test(type);
   const showsPreview = !media && content.hasPreview;
-  const url = useBlobUrl({
-    workspaceId,
-    fileId: detail.id,
-    query: { version: detail.viewVersion, format: "inline", variant: showsPreview ? "preview" : "original" },
-  });
+  // Only the views that show the bytes read them: plain text, pages and metadata need none.
+  const { url, failed, retry } = useBlobUrl(
+    {
+      workspaceId,
+      fileId: detail.id,
+      query: {
+        version: detail.viewVersion,
+        format: "inline",
+        variant: showsPreview ? "preview" : "original",
+      },
+    },
+    media || showsPreview,
+  );
   const atPage = page === undefined ? "" : `#page=${page}`;
   let view: React.ReactNode;
   if (media || showsPreview) {
-    if (url === undefined) view = <ScreenLoading />;
+    if (failed) {
+      view = (
+        <Callout
+          tone="danger"
+          role="alert"
+          title={t("preview.mediaFailed")}
+          actions={<Button onClick={retry}>{common("action.retry")}</Button>}
+        >
+          {t("preview.binary", {
+            type: content.detectedType ?? content.contentType,
+            size: formatBytes(content.size, locale),
+          })}
+        </Callout>
+      );
+    } else if (url === undefined) view = <ScreenLoading />;
     else if (IMAGE.test(type)) view = <img className="files__image" src={url} alt={detail.title} />;
     else if (type.startsWith("video/"))
       // biome-ignore lint/a11y/useMediaCaption: a file someone uploaded, with no captions to attach.

@@ -462,13 +462,19 @@ export class FakeFiles {
       }),
       getFileUpload: within((scope, params) => {
         const upload = this.uploads.find(
-          (each) => each.id === params.uploadId && each.userId === scope.user.id,
+          (each) =>
+            each.id === params.uploadId &&
+            each.userId === scope.user.id &&
+            each.workspaceId === scope.workspaceId,
         );
         return upload === undefined ? notFound() : reply(200, this.session(upload));
       }),
       replaceFileUpload: within((scope, params, raw) => {
         const upload = this.uploads.find(
-          (each) => each.id === params.uploadId && each.userId === scope.user.id,
+          (each) =>
+            each.id === params.uploadId &&
+            each.userId === scope.user.id &&
+            each.workspaceId === scope.workspaceId,
         );
         if (upload === undefined) return notFound();
         if (upload.status !== "open") return fail(409, "upload.closed", "This upload is closed");
@@ -483,9 +489,17 @@ export class FakeFiles {
       }),
       completeFileUpload: within((scope, params) => {
         const upload = this.uploads.find(
-          (each) => each.id === params.uploadId && each.userId === scope.user.id,
+          (each) =>
+            each.id === params.uploadId &&
+            each.userId === scope.user.id &&
+            each.workspaceId === scope.workspaceId,
         );
         if (upload === undefined) return notFound();
+        // Completing again gives back what the first completion made, as the server does.
+        if (upload.status === "done" && upload.resultFileId !== null) {
+          const made = this.find(scope.workspaceId, upload.resultFileId);
+          if (made !== undefined) return reply(200, this.detail(made, scope));
+        }
         if (upload.received < upload.size) return fail(409, "upload.incomplete", "Parts are missing");
         const now = this.host.now().toISOString();
         const content = uploaded(
@@ -511,6 +525,10 @@ export class FakeFiles {
           this.host.emit(scope.workspaceId, { type: "file.created", fileId: file.id, channelId: null });
         } else {
           const latest = file.versions.at(-1)?.version ?? 0;
+          // Someone saved while the parts went up: the version this one replaces is no longer the current one.
+          if (upload.parentVersion !== null && upload.parentVersion !== latest) {
+            return fail(409, "file.version_conflict", "Someone saved a newer version");
+          }
           file.versions.push({
             version: latest + 1,
             content,
@@ -530,7 +548,10 @@ export class FakeFiles {
       }),
       deleteFileUpload: within((scope, params) => {
         const at = this.uploads.findIndex(
-          (each) => each.id === params.uploadId && each.userId === scope.user.id,
+          (each) =>
+            each.id === params.uploadId &&
+            each.userId === scope.user.id &&
+            each.workspaceId === scope.workspaceId,
         );
         if (at === -1) return notFound();
         this.uploads.splice(at, 1);

@@ -164,3 +164,43 @@ describe("the Drive", () => {
     await waitFor(async () => expect(await names()).toContain("Paper stock"));
   });
 });
+
+describe("the Drive's uploads, past the happy path", () => {
+  test("a file picked again after a reload goes on with its session, and a finished one is not made twice", async () => {
+    const server = newServer();
+    server.files.partSize = 4;
+    const first = await renderApp({ path: PATH, signedInAs: "usr_ana", server });
+    await list();
+    const held = server.hold("completeFileUpload");
+    const file = picked("again.txt", 8);
+    await first.user.upload(screen.getByTestId("files-upload"), file);
+    await waitFor(() =>
+      expect(server.calls.filter((call) => call.method === "replaceFileUpload")).toHaveLength(2),
+    );
+    // The completion reaches the server, but the page goes away before its answer.
+    first.unmount();
+    held.release();
+    await waitFor(() => expect(server.files.uploads[0]?.status).toBe("done"));
+    const count = server.files.files.length;
+    const again = await renderApp({ path: PATH, signedInAs: "usr_ana", server, store: first.runtime.store });
+    await list();
+    await again.user.upload(screen.getByTestId("files-upload"), file);
+    await within(await screen.findByRole("list", { name: "Uploads" })).findByText("Uploaded");
+    expect(server.calls.filter((call) => call.method === "createFileUpload")).toHaveLength(1);
+    expect(server.files.files).toHaveLength(count);
+  });
+
+  test("clearing a failed upload also closes its session on the server", async () => {
+    const server = newServer();
+    server.files.partSize = 4;
+    server.force("replaceFileUpload", { kind: "error", status: 400, code: "upload.empty_part" });
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana", server });
+    await list();
+    await app.user.upload(screen.getByTestId("files-upload"), picked("broken.txt", 8));
+    const tray = await screen.findByRole("list", { name: "Uploads" });
+    await within(tray).findByText("Failed");
+    expect(server.files.uploads).toHaveLength(1);
+    await app.user.click(screen.getByRole("button", { name: "Clear finished" }));
+    await waitFor(() => expect(server.files.uploads).toHaveLength(0));
+  });
+});

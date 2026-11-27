@@ -48,8 +48,13 @@ const View = z.enum(["grid", "list"]);
 type Who = "all" | "agent" | "person";
 
 export function DriveScreen() {
-  const t = useMessages("files");
   const { workspaceId } = useRouteParams("files");
+  // Another workspace is another Drive: its own queue, so nothing picked here goes up there.
+  return <Drive key={workspaceId} workspaceId={workspaceId} />;
+}
+
+function Drive({ workspaceId }: { workspaceId: string }) {
+  const t = useMessages("files");
   const address = useSearch(DriveAddress, EMPTY);
   const go = useGo();
   const open = useCallback(
@@ -352,7 +357,7 @@ function useOrigin(workspaceId: string): (file: DriveFile) => string {
 }
 
 function Thumb({ workspaceId, file }: { workspaceId: string; file: DriveFile }) {
-  const url = useBlobUrl({
+  const { url } = useBlobUrl({
     workspaceId,
     fileId: file.id,
     query: { version: file.version, format: "inline", variant: "thumb" },

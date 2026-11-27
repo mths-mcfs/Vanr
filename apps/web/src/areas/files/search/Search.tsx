@@ -131,7 +131,11 @@ export function SearchScreen() {
                   type="button"
                   className="files__operator"
                   aria-label={t("search.addOperator", { operator })}
-                  onClick={() => write(`${text.trim()} ${operator}`.trim())}
+                  onClick={() => {
+                    const next = `${text.trim()} ${operator}`.trim();
+                    // An operator that does not fit leaves the query as it is.
+                    if (next.length <= TITLE_MAX) write(next);
+                  }}
                 >
                   <code>{operator}</code>
                 </button>
