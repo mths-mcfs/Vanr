@@ -20,20 +20,15 @@ export function useRows(workspaceId: string, base: Base, view: BaseView, search:
     workspaceId,
     baseId: base.id,
     tableId: view.tableId,
-    body: { viewId: view.id, limit: PAGE, ...(search !== "" && { search }), config: view.config },
+    body: { viewId: view.id, limit: PAGE, ...(search !== "" && { search }) },
   };
   return useInfiniteQuery({
-    queryKey: queryKey(client, "createBaseTableQuery", args),
+    // The view's config goes after the call's own key, so a change to it asks again; the server reads it
+    // from the view. Events still match the key by its method and arguments.
+    queryKey: [...queryKey(client, "createBaseTableQuery", args), view.config],
     initialPageParam: null as string | null,
-    queryFn: ({ pageParam, signal }) => {
-      // The view's config is in the key so a change refetches; the server reads it from the view itself.
-      const { config: _config, ...body } = args.body;
-      return client.call(
-        "createBaseTableQuery",
-        { ...args, body: { ...body, cursor: pageParam } },
-        { signal },
-      );
-    },
+    queryFn: ({ pageParam, signal }) =>
+      client.call("createBaseTableQuery", { ...args, body: { ...args.body, cursor: pageParam } }, { signal }),
     getNextPageParam: (last: BaseQueryResult) => last.nextCursor,
   });
 }

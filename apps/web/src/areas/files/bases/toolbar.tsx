@@ -3,7 +3,7 @@
 import type { BaseFilterCondition, BaseSort, BaseTable, BaseViewConfig } from "@vanr/contract";
 import { Button, Dialog, DialogContent } from "@vanr/ui";
 import { useState } from "react";
-import { useMessages } from "../../../i18n/react.tsx";
+import { useLookup, useMessages } from "../../../i18n/react.tsx";
 import {
   flatFilter,
   isHidden,
@@ -116,6 +116,7 @@ function ConditionValue({
 
 function FilterPanel({ table, config, onChange }: PanelProps) {
   const t = useMessages("files");
+  const lookup = useLookup("files");
   const { mode, conditions } = flatFilter(config.filter);
   const write = (nextMode: "and" | "or", next: BaseFilterCondition[]) =>
     onChange({ ...config, filter: toFilter(nextMode, next) });
@@ -171,7 +172,7 @@ function FilterPanel({ table, config, onChange }: PanelProps) {
                 >
                   {operatorsFor(def).map((op) => (
                     <option key={op} value={op}>
-                      {t(`op.${op}` as "op.eq")}
+                      {lookup(`op.${op}`) ?? op}
                     </option>
                   ))}
                 </select>
