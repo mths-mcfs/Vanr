@@ -63,6 +63,9 @@ export function WikiPageScreen() {
   return <PageView key={`${workspaceId}/${pageId}`} workspaceId={workspaceId} slug={pageId} />;
 }
 
+/** The writes to the page's fields: queued one after another, never dropped as duplicates. */
+const QUEUED: ReadonlySet<string> = new Set(["meta", "move", "rename"]);
+
 type Busy = null | "publish" | "discard" | "rename" | "meta" | "move" | "pin" | "lock" | "delete";
 
 function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) {
@@ -93,6 +96,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
   const [anchor, setAnchor] = useState<WikiAnchor | null>(null);
   const editor = useRef<EditorHandle>(null);
   const pending = useRef(new Set<Exclude<Busy, null>>());
+  const queue = useRef<Promise<void>>(Promise.resolve());
   const { at } = useSearch(PageAddress, NO_ANCHOR);
   const reachedAnchor = useRef(false);
   const p = page.data;
@@ -225,8 +229,21 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
 
   /** Runs one action of the page at a time, shows its failure, and reads the wiki again after it. */
   const run = async (what: Exclude<Busy, null>, action: () => Promise<void>): Promise<boolean> => {
-    // The same action twice at once would send it twice.
+    if (QUEUED.has(what)) {
+      // Each change of the page's fields is its own write: they wait their turn, none is dropped.
+      const turn = queue.current.then(() => execute(what, action));
+      queue.current = turn.then(
+        () => undefined,
+        () => undefined,
+      );
+      return turn;
+    }
+    // The same action twice at once (a second Publish click) would send it twice.
     if (pending.current.has(what)) return false;
+    return execute(what, action);
+  };
+
+  const execute = async (what: Exclude<Busy, null>, action: () => Promise<void>): Promise<boolean> => {
     pending.current.add(what);
     setBusy(new Set(pending.current));
     setFailure(null);
