@@ -10,12 +10,14 @@ import { RotateCcw } from "lucide-react";
 import { ScreenError, ScreenLoading, useErrorMessage } from "../../../app/screens.tsx";
 import { useMessages } from "../../../i18n/react.tsx";
 import { useClock } from "../../../platform/clock.tsx";
+import { useInvalidateOn } from "../../../realtime/react.tsx";
 import { useSession } from "../../../session/react.tsx";
 import { KIND_ICON, useActorName, useRelativeTime } from "../shared.tsx";
 
 const DAY_MS = 86_400_000;
 /** The last days before a file is gone are marked. */
 const SOON_DAYS = 3;
+const REFRESH_MS = 60_000;
 
 export function Trash({ workspaceId }: { workspaceId: string }) {
   const t = useMessages("files");
@@ -24,7 +26,14 @@ export function Trash({ workspaceId }: { workspaceId: string }) {
   const name = useActorName(workspaceId);
   const describe = useErrorMessage("files");
   const when = useRelativeTime();
-  const trash = useApiQuery("getFileTrash", { workspaceId }, { refetchOnMount: "always" });
+  // A restore made elsewhere arrives as `file.updated`, which the client's table doesn't map to the
+  // trash; it is also asked again every minute, like the list.
+  const trash = useApiQuery(
+    "getFileTrash",
+    { workspaceId },
+    { refetchOnMount: "always", refetchInterval: REFRESH_MS },
+  );
+  useInvalidateOn("file.updated", { method: "getFileTrash", args: { workspaceId } });
   const restore = useApiMutation("restoreFile", {
     invalidates: () => [
       { method: "getFileTrash", args: { workspaceId } },
@@ -95,7 +104,7 @@ export function Trash({ workspaceId }: { workspaceId: string }) {
                   {t("trash.restore")}
                 </Button>
               ) : (
-                <span className="files__meta">{t("trash.whoRestores")}</span>
+                <span className="files__meta files__who">{t("trash.whoRestores")}</span>
               )}
             </li>
           );

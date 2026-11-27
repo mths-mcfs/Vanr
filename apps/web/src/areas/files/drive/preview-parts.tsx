@@ -59,11 +59,7 @@ function ExtractChip({ content }: { content: UploadedContent }) {
   if (content.extract === "none" || (content.extract === "ready" && content.totalPages === 0)) return null;
   if (content.extract === "ready") return <Chip>{t("extract.ready", { count: content.totalPages })}</Chip>;
   if (content.extract === "failed") {
-    return (
-      <Chip className="files__chip--failed">
-        {t("extract.failed", { reason: content.extractError ?? "" })}
-      </Chip>
-    );
+    return <Chip className="files__chip--failed">{t("extract.failed")}</Chip>;
   }
   return <Chip>{t("extract.working")}</Chip>;
 }

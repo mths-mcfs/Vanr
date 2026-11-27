@@ -174,10 +174,8 @@ describe("the Drive's uploads, past the happy path", () => {
     const held = server.hold("completeFileUpload");
     const file = picked("again.txt", 8);
     await first.user.upload(screen.getByTestId("files-upload"), file);
-    await waitFor(() =>
-      expect(server.calls.filter((call) => call.method === "replaceFileUpload")).toHaveLength(2),
-    );
     // The completion reaches the server, but the page goes away before its answer.
+    await waitFor(() => expect(server.calls.some((call) => call.method === "completeFileUpload")).toBe(true));
     first.unmount();
     held.release();
     await waitFor(() => expect(server.files.uploads[0]?.status).toBe("done"));
@@ -202,5 +200,78 @@ describe("the Drive's uploads, past the happy path", () => {
     expect(server.files.uploads).toHaveLength(1);
     await app.user.click(screen.getByRole("button", { name: "Clear finished" }));
     await waitFor(() => expect(server.files.uploads).toHaveLength(0));
+  });
+});
+
+describe("the Drive's uploads when the network or the session fails", () => {
+  test("a lost completion and a failed lookup of the session never make the file twice", async () => {
+    const server = newServer();
+    server.files.partSize = 4;
+    const first = await renderApp({ path: PATH, signedInAs: "usr_ana", server });
+    await list();
+    const held = server.hold("completeFileUpload");
+    const file = picked("twice.txt", 8);
+    await first.user.upload(screen.getByTestId("files-upload"), file);
+    // The completion reaches the server before the page goes away.
+    await waitFor(() => expect(server.calls.some((call) => call.method === "completeFileUpload")).toBe(true));
+    first.unmount();
+    held.release();
+    await waitFor(() => expect(server.files.uploads[0]?.status).toBe("done"));
+    const count = server.files.files.length;
+    // After the reload, asking about the remembered session fails for a moment.
+    server.force("getFileUpload", { kind: "error", status: 503, code: "http_503" });
+    const again = await renderApp({ path: PATH, signedInAs: "usr_ana", server, store: first.runtime.store });
+    await list();
+    await again.user.upload(screen.getByTestId("files-upload"), file);
+    const tray = await screen.findByRole("list", { name: "Uploads" });
+    await within(tray).findByText("Failed");
+    expect(server.calls.filter((call) => call.method === "createFileUpload")).toHaveLength(1);
+    await again.user.click(within(tray).getByRole("button", { name: "Try twice.txt again" }));
+    await within(tray).findByText("Uploaded");
+    expect(server.calls.filter((call) => call.method === "createFileUpload")).toHaveLength(1);
+    expect(server.files.files).toHaveLength(count);
+  });
+
+  test("a retry after the session expired starts a new session", async () => {
+    const server = newServer();
+    server.files.partSize = 4;
+    server.force("replaceFileUpload", { kind: "error", status: 400, code: "upload.empty_part" });
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana", server });
+    await list();
+    await app.user.upload(screen.getByTestId("files-upload"), picked("late.txt", 8));
+    const tray = await screen.findByRole("list", { name: "Uploads" });
+    await within(tray).findByText("Failed");
+    // The session expires on the server.
+    server.files.uploads.length = 0;
+    await app.user.click(within(tray).getByRole("button", { name: "Try late.txt again" }));
+    await within(tray).findByText("Uploaded");
+    expect(server.calls.filter((call) => call.method === "createFileUpload")).toHaveLength(2);
+  });
+
+  test("an open file deleted elsewhere is found gone when the list is asked again", async () => {
+    const app = await renderApp({ path: `${PATH}?file=fil_notes`, signedInAs: "usr_ana" });
+    await screen.findByRole("dialog", { name: "field-notes.txt" });
+    // Its channel's event never reaches this person; the list's next refresh no longer has it.
+    const notes = app.server.files.files.find((file) => file.id === "fil_notes");
+    if (notes) notes.deletedAt = new Date().toISOString();
+    await act(async () => {
+      await app.runtime.queryClient.refetchQueries({
+        predicate: (query) => query.queryKey.includes("listFiles"),
+      });
+    });
+    expect(await screen.findByText("This file was deleted or is no longer available to you.")).toBeDefined();
+  });
+
+  test("a failed search inside files says so, with a retry", async () => {
+    const server = newServer();
+    // Typing asks for "in" and then "ink", each with its retries.
+    server.force("getSearch", { kind: "error", status: 500, code: "internal" }, 2 * (1 + QUERY_RETRIES));
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana", server });
+    await list();
+    await app.user.type(screen.getByRole("searchbox", { name: "Search files by name" }), "ink");
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("The search inside files did not go through");
+    await app.user.click(within(alert).getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("region", { name: "Found inside files" })).toBeDefined();
   });
 });

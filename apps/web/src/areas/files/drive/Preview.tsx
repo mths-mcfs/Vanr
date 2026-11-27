@@ -2,17 +2,17 @@
 // the person may do with it. A new version of an uploaded file goes up the same resumable way as the
 // list's uploads. A document's edit keeps the version it started from; if someone saved first, the
 // server refuses it and the person picks between dropping their text and saving it over the newer one.
-import { isApiError, uploadInParts } from "@vanr/client";
 import { useApiMutation, useApiQuery, useVanrClient } from "@vanr/client/react";
 import type { FileDetail } from "@vanr/contract";
 import { Button, Callout, Chip, Dialog, DialogContent, Icon, Textarea } from "@vanr/ui";
 import { Download, Pencil, Trash2, Upload } from "lucide-react";
 import { useRef, useState } from "react";
 import { ScreenError, ScreenLoading, useErrorMessage } from "../../../app/screens.tsx";
-import { useLocale, useMessages } from "../../../i18n/react.tsx";
-import { DOCUMENT_MAX, formatBytes, useActorName, useRefetch, useRelativeTime } from "../shared.tsx";
+import { useMessages } from "../../../i18n/react.tsx";
+import { DOCUMENT_MAX, useActorName, useRefetch, useRelativeTime } from "../shared.tsx";
 import { FileBody } from "./preview-parts.tsx";
-import { MAX_UPLOAD_BYTES } from "./upload-queue.ts";
+import { UploadTray } from "./UploadTray.tsx";
+import { useUploadQueue } from "./upload-queue.ts";
 
 type Edit = { text: string; parentVersion: number };
 
@@ -93,7 +93,6 @@ function Opened({
 }) {
   const t = useMessages("files");
   const common = useMessages("common");
-  const { locale } = useLocale();
   const client = useVanrClient();
   const describe = useErrorMessage("files");
   const name = useActorName(workspaceId);
@@ -102,9 +101,7 @@ function Opened({
   const versions = useApiQuery("listFileVersions", { workspaceId, fileId: detail.id });
   const [edit, setEdit] = useState<Edit | null>(null);
   const [conflict, setConflict] = useState(false);
-  const [sending, setSending] = useState<{ sent: number; total: number } | null>(null);
   const [failure, setFailure] = useState<unknown>(null);
-  const [tooBig, setTooBig] = useState(false);
   const picker = useRef<HTMLInputElement>(null);
   const latest = detail.viewVersion === detail.version;
   const fresh = () =>
@@ -150,38 +147,22 @@ function Opened({
           // Someone saved first: the text stays, and saving now goes over the version they saved.
           const newest = await client.api.getFile({ workspaceId, fileId: detail.id }).catch(() => null);
           setConflict(true);
-          setEdit({ ...current, parentVersion: newest?.version ?? current.parentVersion });
+          // Whatever was typed while the newest version was asked for stays: only the parent moves.
+          setEdit((now) =>
+            now === null ? now : { ...now, parentVersion: newest?.version ?? now.parentVersion },
+          );
           await fresh();
         },
       },
     );
   };
 
-  const sendVersion = async (file: File) => {
-    setFailure(null);
-    if (file.size > MAX_UPLOAD_BYTES) return setTooBig(true);
-    setTooBig(false);
-    setSending({ sent: 0, total: file.size });
-    try {
-      await uploadInParts(
-        client.api,
-        workspaceId,
-        file,
-        {
-          fileName: file.name,
-          ...(file.type !== "" && { contentType: file.type }),
-          fileId: detail.id,
-          parentVersion: detail.version,
-        },
-        { onProgress: (progress) => setSending(progress) },
-      );
-      await fresh();
-    } catch (error) {
-      setFailure(isApiError(error) ? error : null);
-    } finally {
-      setSending(null);
-    }
-  };
+  // A new version goes up through the same queue as the list's uploads: the same limit, and a session
+  // that survives closing the preview, so picking the same file again goes on from where it stopped.
+  const uploads = useUploadQueue(workspaceId, () => void fresh());
+  const sendVersion = (file: File) =>
+    uploads.add([file], { fileId: detail.id, parentVersion: detail.version });
+  const sending = uploads.items.some((item) => item.state === "sending" || item.state === "queued");
 
   const canEdit = latest && detail.editable && detail.content.kind === "document";
   return (
@@ -215,7 +196,7 @@ function Opened({
               <Button
                 size="sm"
                 icon={<Icon icon={Upload} />}
-                loading={sending !== null}
+                loading={sending}
                 onClick={() => picker.current?.click()}
               >
                 {t("preview.newVersion")}
@@ -229,7 +210,7 @@ function Opened({
                 onChange={(event) => {
                   const file = event.target.files?.[0];
                   event.target.value = "";
-                  if (file !== undefined) void sendVersion(file);
+                  if (file !== undefined) sendVersion(file);
                 }}
               />
             </>
@@ -261,19 +242,7 @@ function Opened({
             </Button>
           )}
         </div>
-        {sending !== null && (
-          <p className="files__meta" role="status">
-            {t("upload.progress", {
-              sent: formatBytes(sending.sent, locale),
-              total: formatBytes(sending.total, locale),
-            })}
-          </p>
-        )}
-        {tooBig && (
-          <Callout tone="danger" role="alert">
-            {t("upload.tooBigWhy")}
-          </Callout>
-        )}
+        <UploadTray queue={uploads} />
         {(failure !== null || remove.isError || download.isError) && (
           <Callout tone="danger" role="alert">
             {describe(failure ?? remove.error ?? download.error)}
@@ -321,7 +290,17 @@ function Opened({
         </p>
         <h3 className="files__aside-title">{t("preview.history")}</h3>
         {versions.isError ? (
-          <p className="page__muted">{describe(versions.error)}</p>
+          <Callout
+            tone="danger"
+            role="alert"
+            actions={
+              <Button size="sm" onClick={() => void versions.refetch()}>
+                {common("action.retry")}
+              </Button>
+            }
+          >
+            {describe(versions.error)}
+          </Callout>
         ) : (
           <ol className="files__versions" aria-label={t("preview.history")}>
             {[...(versions.data ?? [])]

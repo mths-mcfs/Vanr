@@ -30,10 +30,10 @@ export const isLive = (item: UploadItem) =>
 
 /**
  * The browser's key for a file and where it goes: the same file picked again after a reload for the
- * same place has the same key; for another file (a new version of it) it is another upload.
+ * same place (and over the same version) has the same key; anything else is another upload.
  */
 export const fileKey = (workspaceId: string, file: File, target: UploadTarget = {}) =>
-  `${workspaceId}:${target.fileId ?? "new"}:${file.name}:${file.size}:${file.lastModified}`;
+  `${workspaceId}:${target.fileId ?? "new"}:${target.parentVersion ?? ""}:${file.name}:${file.size}:${file.lastModified}`;
 
 const Saved = z.record(z.string(), z.string());
 
@@ -115,16 +115,25 @@ export function useUploadQueue(workspaceId: string, onDone: (file: FileDetail) =
       controllers.current.set(item.id, controller);
       dispatch({ type: "patch", id: item.id, patch: { state: "sending", error: undefined } });
       try {
-        // A session from this tab (paused) or from before a reload (kept in the browser).
-        let resume = sessions.current.get(item.id);
-        const before = readStored(store, STORAGE_KEYS.uploads, Saved)?.[key];
-        if (resume === undefined && before !== undefined) {
-          resume = await client.api
-            .getFileUpload({ workspaceId, uploadId: before }, { signal: controller.signal })
-            .catch(() => undefined);
-          // A finished session is kept too: completing it again gives back the file it made, instead of
-          // a second file when the answer to the first completion was lost.
-          if (resume === undefined || resume.offset > item.file.size) resume = undefined;
+        // A session from this tab (paused, failed) or from before a reload (kept in the browser) is asked
+        // about first. Gone (expired, removed): a new one starts. Any other failure creates nothing and
+        // leaves the item failed, so a lost completion never becomes a second file.
+        const known =
+          sessions.current.get(item.id)?.id ?? readStored(store, STORAGE_KEYS.uploads, Saved)?.[key];
+        let resume: UploadSession | undefined;
+        if (known !== undefined) {
+          try {
+            resume = await client.api.getFileUpload(
+              { workspaceId, uploadId: known },
+              { signal: controller.signal },
+            );
+          } catch (cause) {
+            if (!isApiError(cause) || cause.status !== 404) throw cause;
+            sessions.current.delete(item.id);
+            remember(key, null);
+          }
+          // A finished session is kept too: completing it again gives back the file it made.
+          if (resume !== undefined && resume.offset > item.file.size) resume = undefined;
         }
         const detail = await uploadInParts(
           client.api,
