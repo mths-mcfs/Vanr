@@ -383,6 +383,12 @@ export async function createProposal(
       const out = applyEdits(locked.body, [{ oldStr: edit.oldStr, newStr: edit.newStr }]);
       if (!out.ok) throw new HttpError(400, "wiki.proposal.invalid", editFailureMessage({ ...out, index }));
     }
+    // Any subset of the changes may be accepted alone: the worst case adds every growing change to this text.
+    const growth = input.edits.reduce((n, e) => n + Math.max(0, e.newStr.length - e.oldStr.length), 0);
+    if (locked.body.length + growth > MAX_BODY)
+      throw new HttpError(400, "wiki.too_large", `The page would pass ${MAX_BODY} characters`, {
+        max: MAX_BODY,
+      });
     const [created] = await tx
       .insert(pageAnnotations)
       .values({
