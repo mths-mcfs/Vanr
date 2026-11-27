@@ -53,6 +53,8 @@
     "apps/server/src/runtime/route.test.ts": 2,
     "apps/server/src/signup-place.test.ts": 210,
     "apps/server/test/agent-builder.test.ts": 1897,
+    "apps/server/test/agents-p1.test.ts": 6600,
+    "apps/server/test/agents.test.ts": 5500,
     "apps/server/test/assignment-budget.test.ts": 1582,
     "apps/server/test/assignment-core.test.ts": 5553,
     "apps/server/test/assignment-engine-postgres.test.ts": 300,
