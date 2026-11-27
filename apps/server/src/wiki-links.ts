@@ -61,8 +61,10 @@ async function candidates(
 ): Promise<LinkTarget[]> {
   if (!targets.length) return [];
   const names = [...new Set(targets.map((t) => stripMd(t).toLowerCase()))];
-  // The title can be the whole target or the end of folder/title (and the title may contain "/").
-  const titles = [...new Set([...names, ...names.map((n) => n.split("/").pop() ?? n)])];
+  // A title or an alternate title can be the whole target or what follows any "/" of it: folder/title and
+  // folder/alternate title, with "/" allowed in the folder and in the title (as `resolveTarget` accepts).
+  const ends = (n: string) => [n, ...[...n.matchAll(/\//g)].map((m) => n.slice((m.index ?? 0) + 1))];
+  const titles = [...new Set(names.flatMap(ends))];
   const slugs = [...new Set([...names, ...targets.map((t) => slugify(stripMd(t)))])];
   return db
     .select({

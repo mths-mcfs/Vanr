@@ -1243,4 +1243,109 @@ describe("undo", () => {
     },
     SERVER_TEST_MS,
   );
+
+  test(
+    "content: a restricted page's undo and redo answer 404 to whoever lost its read, and change nothing",
+    async () => {
+      const t = await team();
+      const agent = { type: "agent" as const, id: t.agentId };
+      const page = await createPage(server.deps, {
+        workspaceId: t.workspaceId,
+        title: `Secret plan ${n}`,
+        body: "v1",
+        author: agent,
+      });
+      const restrict = (principals: string[]) =>
+        server.deps.db
+          .update(schema.knowledgePages)
+          .set({ access: { kind: "private", principals } })
+          .where(eq(schema.knowledgePages.id, page.id));
+      await restrict([`user:${t.ana.user.id}`, `user:${t.carla.user.id}`]);
+      await savePage(server.deps, { row: page, author: agent, canBypassLock: false, body: "v2" });
+      const params = { params: { fromVersion: 1, toVersion: 2 } };
+      const undone = await seedAction(t, "wiki_updated", { type: "wiki", id: page.id }, params);
+      const pending = await seedAction(t, "wiki_updated", { type: "wiki", id: page.id }, params);
+      const rowOf = async () =>
+        (
+          await server.deps.db
+            .select()
+            .from(schema.knowledgePages)
+            .where(eq(schema.knowledgePages.id, page.id))
+        )[0];
+      // Carla reads it: her undo applies.
+      expect((await t.carla.browser.json(t.url(`/actions/${undone.id}/undo`), "POST")).status).toBe(200);
+      const before = await rowOf();
+      expect(before).toMatchObject({ body: "v1", version: 3 });
+      // Then only Ana reads it: Carla's redo and her other undo answer 404, and the page stays as it was.
+      await restrict([`user:${t.ana.user.id}`]);
+      expect((await t.carla.browser.json(t.url(`/actions/${undone.id}/redo`), "POST")).status).toBe(404);
+      // Its version is stale too (the page is at 3): the read is checked first, so the answer doesn't tell
+      // her the page changed (409 action.changed_since) either.
+      expect((await t.carla.browser.json(t.url(`/actions/${pending.id}/undo`), "POST")).status).toBe(404);
+      expect(await rowOf()).toMatchObject({
+        body: "v1",
+        version: 3,
+        updatedAt: before?.updatedAt,
+        access: { kind: "private", principals: [`user:${t.ana.user.id}`] },
+      });
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "content: undoing and redoing a restricted page the agent wrote brings it back restricted, with its agent mode",
+    async () => {
+      const t = await team();
+      const agent = { type: "agent" as const, id: t.agentId };
+      const fresh = await createPage(server.deps, {
+        workspaceId: t.workspaceId,
+        title: `Private notes ${n}`,
+        body: "hello",
+        author: agent,
+      });
+      const access = { kind: "private" as const, principals: [`user:${t.carla.user.id}`] };
+      await server.deps.db
+        .update(schema.knowledgePages)
+        .set({ access, agentEdits: "propose" })
+        .where(eq(schema.knowledgePages.id, fresh.id));
+      const write = await seedAction(t, "wiki_written", { type: "wiki", id: fresh.id });
+      expect((await t.carla.browser.json(t.url(`/actions/${write.id}/undo`), "POST")).status).toBe(200);
+      expect((await t.carla.browser.json(t.url(`/actions/${write.id}/redo`), "POST")).status).toBe(200);
+      const [back] = await server.deps.db
+        .select()
+        .from(schema.knowledgePages)
+        .where(eq(schema.knowledgePages.id, fresh.id));
+      expect(back).toMatchObject({ slug: fresh.slug, body: "hello", access, agentEdits: "propose" });
+      // Beto, who doesn't read it, finds nothing of it in the search.
+      const hits = await server.deps.search.search(
+        { workspaceId: t.workspaceId, userId: t.beto.user.id },
+        "hello",
+      );
+      expect(hits.filter((h) => h.source.kind === "wiki" && h.source.id === fresh.id)).toEqual([]);
+      // Undone again, then Carla loses the read: the redo can't bring it back.
+      expect((await t.carla.browser.json(t.url(`/actions/${write.id}/undo`), "POST")).status).toBe(200);
+      const saved = await server.deps.db
+        .select({ params: reversibleActions.params })
+        .from(reversibleActions)
+        .where(eq(reversibleActions.id, write.id));
+      const deleted = (saved[0]?.params as { deleted?: Record<string, unknown> } | undefined)?.deleted;
+      if (!deleted) throw new Error("the undo saved no page");
+      await server.deps.db
+        .update(reversibleActions)
+        .set({
+          params: {
+            deleted: { ...deleted, access: { kind: "private", principals: [`user:${t.ana.user.id}`] } },
+          },
+        })
+        .where(eq(reversibleActions.id, write.id));
+      expect((await t.carla.browser.json(t.url(`/actions/${write.id}/redo`), "POST")).status).toBe(404);
+      expect(
+        await server.deps.db
+          .select()
+          .from(schema.knowledgePages)
+          .where(eq(schema.knowledgePages.id, fresh.id)),
+      ).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
 });

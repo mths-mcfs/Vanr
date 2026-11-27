@@ -4,10 +4,15 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { WikiPropDef } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import type { Viewer } from "@vanr/engine/search";
+import { resolveTarget } from "@vanr/engine/wiki/links";
 import { VAULT_ATTACHMENTS, VAULT_NOTES } from "@vanr/engine/wiki/vault-fixture";
 import { and, eq, sql } from "drizzle-orm";
 import { strToU8, unzipSync, zipSync } from "fflate";
 import * as Y from "yjs";
+import { channelInWorkspace } from "../src/channels";
+import { HttpError } from "../src/http";
+import { postMessage } from "../src/messages";
+import { reindex } from "../src/search-index";
 import type { RunningServer } from "../src/server";
 import { MAX_BODY, memberLock, pageBySlug, pageLock, purgeWikiTrash, savePage } from "../src/wiki";
 import { MAX_LINKS } from "../src/wiki-links";
@@ -1785,4 +1790,189 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki attachments on Postgres"), 
       await pg.stop();
     }
   }, 60_000);
+});
+
+describe("links that resolve through folders and alternate titles, and the rename's answer", () => {
+  async function pair() {
+    const ana = await signedIn(server, "Ana", email("ana"));
+    const { workspaceId, general } = await seedWorkspace(server, ana, "Review");
+    const beto = await memberOf(server, workspaceId, "Beto", email("beto"));
+    return { workspaceId, general, ana, beto, a: wikiApi(ana.browser), b: wikiApi(beto.browser) };
+  }
+
+  test("the rename names a linking page by its slug and title now, followed by id", async () => {
+    const { workspaceId, a } = await pair();
+    const target = await a.createWikiPage(workspaceId, { title: "Before", body: "main" });
+    const linker = await a.createWikiPage(workspaceId, { title: "Linker", body: "[[Before]]" });
+    const original = pageLock.row;
+    // The linking page gets a new slug and title once the rename locks it.
+    pageLock.row = async (tx, id) => {
+      const row = await original(tx, id);
+      if (row?.slug !== linker.slug) return row;
+      const [moved] = await tx
+        .update(schema.knowledgePages)
+        .set({ slug: "new-linker", title: "New Linker" })
+        .where(eq(schema.knowledgePages.id, id))
+        .returning();
+      return moved ?? null;
+    };
+    try {
+      const renamed = await a.renameWikiPage(workspaceId, target.slug, "After");
+      expect(renamed.relinked).toEqual({
+        rewritten: [{ slug: "new-linker", title: "New Linker" }],
+        skipped: [],
+      });
+      expect((await a.getWikiPage(workspaceId, "new-linker")).body).toBe("[[After]]");
+    } finally {
+      pageLock.row = original;
+    }
+  });
+
+  test("a refused alias save after the rename still answers the committed rename", async () => {
+    const { workspaceId, a } = await pair();
+    const target = await a.createWikiPage(workspaceId, { title: "Sun", body: "main" });
+    const text = "[[Sun]]";
+    const linker = await a.createWikiPage(workspaceId, {
+      title: "Full",
+      body: text + "a".repeat(MAX_BODY - text.length),
+    });
+    const original = pageLock.row;
+    let reads = 0;
+    // The second lock of the renamed page is the alias save: it is refused as a newer version.
+    pageLock.row = async (tx, id) => {
+      const row = await original(tx, id);
+      if (row?.slug === target.slug && ++reads === 2)
+        throw new HttpError(409, "wiki.stale_draft", "Someone saved a newer version");
+      return row;
+    };
+    try {
+      const response = await a.renameWikiPage(workspaceId, target.slug, "Sunrise");
+      expect(reads).toBe(2);
+      expect(response).toMatchObject({
+        title: "Sunrise",
+        altTitles: [],
+        relinked: { rewritten: [], skipped: [{ slug: linker.slug, title: "Full" }] },
+      });
+      expect((await a.getWikiPage(workspaceId, target.slug)).title).toBe("Sunrise");
+    } finally {
+      pageLock.row = original;
+    }
+  });
+
+  test("folder-qualified links to a shared title and to alternate titles follow the reader's access", async () => {
+    const { workspaceId, a, b } = await pair();
+    const page = (title: string, folder: string, altTitles: string[] = []) =>
+      a.createWikiPage(workspaceId, { title, folder, body: "fixture", altTitles });
+    const first = await page("Database", "Architecture");
+    const second = await page("Database", "Operations");
+    const third = await page("Postgres", "Data", ["Database"]);
+    const secret = await page("Private DB", "Vault", ["Database"]);
+    const restricted = await a.setWikiPageAccess(workspaceId, secret.slug, {
+      kind: "private",
+      userIds: [],
+      agentIds: [],
+    });
+    const source = await a.createWikiPage(workspaceId, {
+      title: "Links",
+      body: "[[Database]] [[Architecture/Database]] [[Operations/Database]] [[Data/Database]] [[Vault/Database]] [[Elsewhere/Database]]",
+    });
+    const destinations = async (w: typeof a) =>
+      (await w.getWikiPagePanel(workspaceId, source.slug)).outgoing.map((o) => o.page?.slug ?? null);
+    expect(await destinations(a)).toEqual([
+      first.slug,
+      first.slug,
+      second.slug,
+      third.slug,
+      restricted.slug,
+      null,
+    ]);
+    expect(await destinations(b)).toEqual([first.slug, first.slug, second.slug, third.slug, null, null]);
+    expect((await b.getWikiPagePanel(workspaceId, third.slug)).inboundLinks.map((o) => o.slug)).toEqual([
+      source.slug,
+    ]);
+  });
+
+  test("an alternate title with a slash, under the folder, resolves to the same page on the server as in the engine", async () => {
+    const { workspaceId, a } = await pair();
+    const alias = await a.createWikiPage(workspaceId, {
+      title: "Postgres",
+      folder: "Architecture",
+      body: "correct",
+      altTitles: ["Q3/Database"],
+    });
+    const other = await a.createWikiPage(workspaceId, { title: "Architecture Q3 Database", body: "wrong" });
+    const link = "Architecture/Q3/Database";
+    const source = await a.createWikiPage(workspaceId, { title: "Links", body: `[[${link}]]` });
+    const engine = resolveTarget(link, [
+      { slug: alias.slug, title: alias.title, folder: alias.folder, aliases: alias.altTitles },
+      { slug: other.slug, title: other.title, folder: other.folder },
+    ]);
+    expect(engine?.slug).toBe(alias.slug);
+    expect((await a.getWikiPagePanel(workspaceId, source.slug)).outgoing[0]?.page?.slug).toBe(alias.slug);
+  });
+
+  test("a message's search text has the link, not a restricted page's content", async () => {
+    const { workspaceId, general, ana, beto, a } = await pair();
+    const secret = await a.createWikiPage(workspaceId, {
+      title: "Restricted Wiki",
+      body: "hippopotamuskumquat",
+    });
+    const restricted = await a.setWikiPageAccess(workspaceId, secret.slug, {
+      kind: "private",
+      userIds: [],
+      agentIds: [],
+    });
+    const row = await pageBySlug(server.deps.db, { workspaceId, userId: ana.user.id }, restricted.slug);
+    await reindex(server.deps, { kind: "wiki", id: row.id });
+    const channel = await channelInWorkspace(server.deps.db, workspaceId, general);
+    if (!channel) throw new Error("missing channel");
+    const { message } = await postMessage(server.deps, {
+      workspaceId,
+      channel,
+      author: { type: "person", id: ana.user.id },
+      body: "antelope [[Restricted Wiki]]",
+      clientId: null,
+      threadId: null,
+      replyTo: null,
+    });
+    const search = (who: Person, q: string) =>
+      server.deps.search.search({ workspaceId, userId: who.user.id }, q);
+    expect((await search(beto, "antelope")).map((h) => h.source)).toContainEqual({
+      kind: "message",
+      id: message.id,
+    });
+    expect(await search(beto, "hippopotamuskumquat")).toEqual([]);
+    expect((await search(ana, "hippopotamuskumquat")).map((h) => h.source)).toContainEqual({
+      kind: "wiki",
+      id: row.id,
+    });
+  });
+
+  test("a link written only with the folder finds the page by its alternate title", async () => {
+    const { workspaceId, a } = await pair();
+    const alias = await a.createWikiPage(workspaceId, {
+      title: "Postgres",
+      folder: "Architecture",
+      body: "fixture",
+      altTitles: ["Database"],
+    });
+    const source = await a.createWikiPage(workspaceId, { title: "Links", body: "[[Architecture/Database]]" });
+    expect((await a.getWikiPagePanel(workspaceId, source.slug)).outgoing[0]?.page?.slug).toBe(alias.slug);
+  });
+
+  test("adding an alternate title re-resolves a stored folder-qualified link", async () => {
+    const { workspaceId, a } = await pair();
+    const alias = await a.createWikiPage(workspaceId, {
+      title: "Postgres",
+      folder: "Architecture",
+      body: "fixture",
+    });
+    const source = await a.createWikiPage(workspaceId, { title: "Links", body: "[[Architecture/Database]]" });
+    expect((await a.getWikiPagePanel(workspaceId, source.slug)).outgoing[0]?.state).toBe("missing");
+    await a.updateWikiPageMeta(workspaceId, alias.slug, {
+      parentVersion: alias.version,
+      altTitles: ["Database"],
+    });
+    expect((await a.getWikiPagePanel(workspaceId, source.slug)).outgoing[0]?.page?.slug).toBe(alias.slug);
+  });
 });
