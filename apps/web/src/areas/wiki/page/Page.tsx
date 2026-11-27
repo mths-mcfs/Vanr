@@ -184,6 +184,9 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
   // Scrolls to the `?at=` heading in the editor on screen. The published text is scrolled while it is
   // there, but the live editor that replaces it starts at the top, so only the live one counts as arrived;
   // its document fills in just after it is made, so it is tried until the heading is there.
+  // The address's heading now: a search for an earlier one stops instead of scrolling there late.
+  const wantedAnchor = useRef(at);
+  wantedAnchor.current = at;
   const seekAnchor = useCallback(
     (kind: EditorSource["kind"]) => {
       if (at === undefined || reachedAnchor.current === at) return;
@@ -193,7 +196,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
       }
       let tries = 0;
       const attempt = () => {
-        if (reachedAnchor.current === at || tries > 40) return;
+        if (wantedAnchor.current !== at || reachedAnchor.current === at || tries > 40) return;
         tries += 1;
         if (editor.current?.scrollToHeading(at) === true) reachedAnchor.current = at;
         else setTimeout(attempt, 50);
