@@ -6,7 +6,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
-import { and, desc, eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { AgentRow } from "../src/agents";
 import { channelInWorkspace } from "../src/channels";
 import { replaceGrants } from "../src/integrations/access";
@@ -455,12 +455,15 @@ describe("who answers a post", () => {
         .where(eq(schema.channelMemberships.memberId, lia.id));
       const anyone = await answered(ana, general, "Anyone?");
       expect(anyone.by).toEqual([lia.id]);
+      // Her reply to that post (by the post's run), not just her latest message.
+      const [run] = await server.deps.db
+        .select({ id: schema.runs.id })
+        .from(schema.runs)
+        .where(eq(schema.runs.sourceMessageId, anyone.id));
       const [joined] = await server.deps.db
         .select({ meta: schema.messages.meta })
         .from(schema.messages)
-        .where(and(eq(schema.messages.channelId, general), eq(schema.messages.authorId, lia.id)))
-        .orderBy(desc(schema.messages.createdAt))
-        .limit(1);
+        .where(and(eq(schema.messages.runId, run?.id ?? ""), eq(schema.messages.authorId, lia.id)));
       expect(joined?.meta.joined).toBe(true);
 
       // Her DM: every message there reaches her.

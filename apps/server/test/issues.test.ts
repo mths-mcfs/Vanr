@@ -661,7 +661,7 @@ describe("asking an agent", () => {
 
       // A new message mid-run: the request was already answered and the issue leaves "working".
       const a = await ok<Issue>(
-        call(ana, workspaceId, "POST", "/issues", { title: "[[slow:150]] Write the FAQ" }),
+        call(ana, workspaceId, "POST", "/issues", { title: "[[slow:400]] Write the FAQ" }),
         201,
       );
       await ask(a.id, lia);
@@ -679,7 +679,7 @@ describe("asking an agent", () => {
 
       // Asked again of Leo while Lia still runs: the end of Lia's run doesn't close Leo's work.
       const b = await ok<Issue>(
-        call(ana, workspaceId, "POST", "/issues", { title: "[[slow:150]] Check the prices" }),
+        call(ana, workspaceId, "POST", "/issues", { title: "[[slow:400]] Check the prices" }),
         201,
       );
       await ask(b.id, lia);
@@ -696,7 +696,7 @@ describe("asking an agent", () => {
 
       // The server comes back with the run in the middle: the issue is blocked, not working forever.
       const c = await ok<Issue>(
-        call(ana, workspaceId, "POST", "/issues", { title: "[[slow:300]] Plan the week" }),
+        call(ana, workspaceId, "POST", "/issues", { title: "[[slow:500]] Plan the week" }),
         201,
       );
       await ask(c.id, lia);

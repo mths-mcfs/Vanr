@@ -1349,16 +1349,16 @@ export class AgentRuntime implements RuntimePort {
             credential: req.credential,
             ...(req.reviewed ? { by: { kind: "reviewer", verdict: "ask" } as const } : {}),
           });
+          // Register the wait before the card: a decision on the card may arrive before the next await.
+          const waiting = this.wait(this.approvalWaiters, row.id, live.controller.signal);
+          waiting.catch(() => {});
+          this.approvalRevisers.set(row.id, req.revise);
           const card = await postCard(title, { approvalId: row.id });
           const [withCard] = await db
             .update(approvals)
             .set({ messageId: card.id })
             .where(eq(approvals.id, row.id))
             .returning();
-          // Register the wait before telling: the decision may arrive before the next await.
-          const waiting = this.wait(this.approvalWaiters, row.id, live.controller.signal);
-          waiting.catch(() => {});
-          this.approvalRevisers.set(row.id, req.revise);
           // The status goes to the database before the notice: whoever fetches the run list after the event
           // already sees the wait, and the list doesn't undo the phase the event put on screen.
           await this.setStatus(live, "paused_for_approval");
@@ -1417,15 +1417,16 @@ export class AgentRuntime implements RuntimePort {
             })
             .returning();
           if (!row) throw new Error("question insert returned nothing");
+          // Waiting before the card: an answer on the card may arrive before the next await.
+          const waiting = this.wait(this.questionWaiters, row.id, live.controller.signal);
+          waiting.catch(() => {});
+          live.waitingQuestion = { id: row.id, askedUserId: row.askedUserId };
           const card = await postCard(text, { question: toQuestion(row) });
           const [withCard] = await db
             .update(questions)
             .set({ messageId: card.id })
             .where(eq(questions.id, row.id))
             .returning();
-          const waiting = this.wait(this.questionWaiters, row.id, live.controller.signal);
-          waiting.catch(() => {});
-          live.waitingQuestion = { id: row.id, askedUserId: row.askedUserId };
           await this.setStatus(live, "paused_for_input");
           await publishQuestion(this.deps, withCard ?? row, "question.raised");
           const answer = await waiting.finally(() => {
@@ -2304,6 +2305,8 @@ export class AgentRuntime implements RuntimePort {
       source: "review",
       model: REVIEWER_MODEL,
       channelId: input.channelId,
+      // The prompt quotes the conversation: whoever doesn't read the channel doesn't see the review run.
+      sourceChannelId: input.channelId,
     });
     return res.ok ? verdictOf(res.text) : null;
   }

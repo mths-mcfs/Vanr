@@ -27,7 +27,8 @@ beforeAll(async () => {
     modelProvider: {
       kind: "fake",
       stream: (req) => {
-        seen.push(req);
+        // A copy of the history as it went: the runtime keeps adding to the same array after the call.
+        seen.push({ ...req, messages: [...req.messages] });
         return fake.stream(req);
       },
     },

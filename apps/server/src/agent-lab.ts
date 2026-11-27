@@ -140,10 +140,7 @@ export async function startEval(
 
 async function runEval(deps: AppDeps, row: EvalRow, agent: AgentRow, cases: TestCaseRow[], userId: string) {
   const { db, runtime } = deps;
-  const systems = {
-    before: await evalSystem(db, agent, row.beforeText),
-    after: await evalSystem(db, agent, row.textAfter),
-  };
+  const systems = { before: "", after: "" };
   let stop: string | null = null;
   const side = async (c: TestCaseRow, which: "before" | "after", i: number) => {
     const res = await runtime.complete({
@@ -188,6 +185,9 @@ async function runEval(deps: AppDeps, row: EvalRow, agent: AgentRow, cases: Test
     }
   };
   try {
+    // Inside the try: a failure building the prompts fails the run instead of leaving it running.
+    systems.before = await evalSystem(db, agent, row.beforeText);
+    systems.after = await evalSystem(db, agent, row.textAfter);
     await Promise.all(Array.from({ length: Math.min(EVAL_CONCURRENCY, cases.length) }, worker));
   } catch (err) {
     stop = err instanceof Error ? err.message : String(err);

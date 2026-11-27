@@ -28,6 +28,7 @@ import type { AppDeps } from "../src/context";
 import type { RunningServer } from "../src/server";
 import { agentRuntime, pairRunner, passing, seedAgent } from "./assignment-kit";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
+import { wrapQuery } from "./lock-double";
 import type { ProtocolRunner } from "./protocol-runner";
 import { type Person, seedWorkspace } from "./seed";
 
@@ -910,13 +911,32 @@ describe("the engine on its loop", () => {
       const row = await idleOnRunner("Done meanwhile", ["Build"]);
       const action = await stepNext(server.deps, row.id);
       expect(action).toEqual({ type: "work", itemId: "p1", n: 1 });
-      await server.deps.db
-        .update(schema.assignmentPlanItems)
-        .set({ status: "done" })
-        .where(
-          and(eq(schema.assignmentPlanItems.assignmentId, row.id), eq(schema.assignmentPlanItems.id, "p1")),
-        );
-      await act(server.deps, row.id, action);
+      // The item is done right after the claim (on the claim's item_started event), before the last check.
+      let fired = false;
+      const db = new Proxy(server.deps.db, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop, target);
+          if (prop !== "insert") return typeof value === "function" ? value.bind(target) : value;
+          return (table: typeof schema.assignmentEvents) => {
+            const builder = target.insert(table);
+            if (table !== schema.assignmentEvents || fired) return builder;
+            return wrapQuery(builder, async () => {
+              fired = true;
+              await server.deps.db
+                .update(schema.assignmentPlanItems)
+                .set({ status: "done" })
+                .where(
+                  and(
+                    eq(schema.assignmentPlanItems.assignmentId, row.id),
+                    eq(schema.assignmentPlanItems.id, "p1"),
+                  ),
+                );
+            });
+          };
+        },
+      });
+      await act({ ...server.deps, db }, row.id, action);
+      expect(fired).toBe(true);
       const jobId = jobIdOf(workIdOf(row.id, "p1", 1));
       expect(starts.get(jobId)).toBeUndefined();
       expect(await server.deps.db.select().from(runnerJobs).where(eq(runnerJobs.id, jobId))).toEqual([]);

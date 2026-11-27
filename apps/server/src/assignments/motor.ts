@@ -1103,7 +1103,19 @@ async function validate(
       mode: "append",
       items: fixes,
       note: `validation round ${round}`,
+    }).catch(async (err: unknown) => {
+      if (!(err instanceof HttpError) || err.code !== "assignment.plan_too_long") throw err;
+      // No room for the fixes: the round isn't spent (no verdict goes in), and the person makes room.
+      await pauseFor(
+        deps,
+        row,
+        { waitReason: "paused" },
+        "I paused: the plan is full, so the verifier's fixes don't fit. Remove items from the plan and resume.",
+        { why: "plan_too_long", round },
+      );
+      return null;
     });
+    if (!w) return null;
     for (const id of w.added)
       await assignmentEvent(deps, row, {
         kind: "fix_created",
@@ -1199,7 +1211,8 @@ export async function stepNext(deps: AppDeps, assignmentId: string): Promise<Eng
   inflight++;
   try {
     const row = await assignmentById(deps, assignmentId);
-    if (!row || isClosed(row)) return { type: "end" };
+    if (!row) return { type: "end" };
+    // A closed one still decides: a run or a job left going on after the close gets its halt before the end.
     return decide(await snapshotOf(deps, row), deps.now());
   } catch (err) {
     log.error("assignment.engine_next_failed", { err, assignmentId });

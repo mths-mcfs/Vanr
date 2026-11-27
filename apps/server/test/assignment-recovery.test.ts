@@ -265,6 +265,37 @@ describe("a stop that didn't finish", () => {
   );
 });
 
+describe("a close that didn't finish", () => {
+  test(
+    "canceled with the agent's run still on the air: the loop halts it before it ends",
+    async () => {
+      const { row, agentId } = await active("Close", ["Sand"]);
+      const channel = await channelInWorkspace(server.deps.db, workspaceId, general);
+      const [agent] = await server.deps.db.select().from(schema.agents).where(eq(schema.agents.id, agentId));
+      if (!channel || !agent) throw new Error("setup");
+      const { message } = await postMessage(server.deps, {
+        workspaceId,
+        channel,
+        author: { type: "person", id: ana.user.id },
+        body: "[[slow:400]] keep going",
+        clientId: newId("c"),
+        threadId: row.threadId,
+      });
+      const [trigger] = await server.deps.db.select().from(messages).where(eq(messages.id, message.id));
+      if (!trigger) throw new Error("no message");
+      const started = await server.deps.runtime.runFor({ agent, channel, trigger });
+      if (!started.ok) throw new Error(started.code);
+      await server.deps.db.update(assignments).set({ status: "canceled" }).where(eq(assignments.id, row.id));
+      expect(await stepNext(server.deps, row.id)).toEqual({ type: "halt" });
+      await act(server.deps, row.id, { type: "halt" });
+      await started.done;
+      expect(await stepNext(server.deps, row.id)).toEqual({ type: "end" });
+      await close(row.id);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
 describe("a job whose end nobody processed", () => {
   const job = (row: AssignmentRow, agentId: string, over: Partial<typeof runnerJobs.$inferInsert>) => ({
     id: newId("aj"),
@@ -647,6 +678,34 @@ describe("a crash in the middle of a validation", () => {
         type: "work",
         itemId: items[1]?.id,
       });
+      await close(row.id);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("a validation with no room for its fix", () => {
+  test(
+    "a full plan pauses the assignment and leaves the round unspent, instead of calling the verifier again",
+    async () => {
+      const titles = Array.from({ length: 60 }, (_, i) => `Part ${i + 1}`);
+      const { row } = await active("Full", titles);
+      await server.deps.db
+        .update(assignmentPlanItems)
+        .set({ status: "done", summary: "done" })
+        .where(and(eq(assignmentPlanItems.assignmentId, row.id), eq(assignmentPlanItems.id, "p1")));
+      const failing: Verifier = async (_deps, _row, items) => ({
+        ok: true,
+        runId: null,
+        verdicts: items.map((i) => ({ id: i.item.id, passes: false, reason: "Not yet" })),
+      });
+      await act({ ...server.deps, assignmentVerifier: failing }, row.id, {
+        type: "validate",
+        itemIds: ["p1"],
+        round: 1,
+      });
+      const p1 = (await planOf(server.deps, row.id)).find((i) => i.id === "p1");
+      expect([p1?.checks, p1?.passes, (await reload(row.id)).status]).toEqual([0, null, "paused"]);
       await close(row.id);
     },
     SERVER_TEST_MS,
