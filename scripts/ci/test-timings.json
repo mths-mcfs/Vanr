@@ -126,6 +126,7 @@
     "apps/server/test/wiki-md.test.ts": 237,
     "apps/server/test/wiki-search.test.ts": 46,
     "apps/server/test/wiki.test.ts": 15154,
+    "apps/server/test/workspaces-postgres.test.ts": 5,
     "apps/server/test/workspaces.test.ts": 23710,
     "packages/client/test/fake-server.test.ts": 11,
     "packages/client/test/http.test.ts": 7,
