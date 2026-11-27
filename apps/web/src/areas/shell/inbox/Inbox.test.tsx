@@ -211,4 +211,42 @@ describe("the inbox", () => {
     await app.user.click(within(dm.closest("li") as HTMLElement).getByRole("button", { name: "Feito" }));
     expect(await screen.findByText("Responda o pedido primeiro: ele sai da caixa sozinho.")).toBeDefined();
   });
+
+  test("a notice hidden while the first answer is on its way stays hidden", async () => {
+    const server = newServer();
+    // The answer is computed now and reaches the browser only on release: it still has the DM.
+    const late = server.delay("listNotifications");
+    await renderApp({ path: PATH, signedInAs: "usr_ana", server });
+    server.notifications = server.notifications.filter((candidate) => candidate.id !== "ntf_dm");
+    server.emit("workspace_birchwood", { type: "notification.hidden", id: "ntf_dm" });
+    late.release();
+    await screen.findByRole("region", { name: "Today" });
+    expect(screen.queryByText("Lunch on Friday?") === null).toBe(true);
+  });
+
+  test("an older notice changed in real time out of the filter leaves it", async () => {
+    const server = newServer();
+    const sample = server.notifications.find((candidate) => candidate.id === "ntf_routine");
+    if (sample === undefined) throw new Error("no sample");
+    for (let n = 0; n < 60; n += 1) {
+      const updatedAt = new Date(Date.parse(sample.updatedAt) - n * 60_000).toISOString();
+      server.notifications.push({
+        ...sample,
+        id: `ntf_unread_${n}`,
+        updatedAt,
+        latest: { title: `Unread ${n}` },
+      });
+    }
+    const app = await renderApp({ path: `${PATH}?filter=unread`, signedInAs: "usr_ana", server });
+    await screen.findByText("Unread 0");
+    await app.user.click(screen.getByRole("button", { name: "Show older notices" }));
+    expect(await screen.findByText("Unread 57")).toBeDefined();
+    const changed = notice(server, "ntf_unread_57");
+    if (changed === undefined) throw new Error("no notice");
+    changed.readAt = changed.updatedAt;
+    const { workspaceId: _w, userId: _u, ...shown } = changed;
+    server.emit("workspace_birchwood", { type: "notification.shown", notification: shown });
+    await waitFor(() => expect(screen.queryByText("Unread 57") === null).toBe(true));
+    expect(screen.getByText("Unread 58")).toBeDefined();
+  });
 });

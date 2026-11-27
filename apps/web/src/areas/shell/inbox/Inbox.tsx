@@ -35,6 +35,7 @@ import {
   DAY_GROUPS,
   dayGroupOf,
   destinationOf,
+  inFilter,
   joinPages,
   laterOptions,
   TABS,
@@ -175,8 +176,17 @@ function NoticeList({ workspaceId, filter }: { workspaceId: string; filter: Noti
   const [more, setMore] = useState<{ items: AppNotification[]; cursor: string | null } | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   // What this browser changed since the list arrived: the new notice, or null when it left the inbox.
-  // A patch older than the list's last fetch gives way to what the server sent (both use Date.now).
+  // A patch gives way only to a first page whose fetch started after it, so an answer that was on
+  // its way when the change happened never undoes it (all of these are Date.now times).
   const [patches, setPatches] = useState<ReadonlyMap<string, Patch>>(new Map());
+  const fetchStarts = useRef<{ pending?: number; shown: number; seen: number }>({ shown: 0, seen: 0 });
+  const starts = fetchStarts.current;
+  if (first.fetchStatus === "fetching" && starts.pending === undefined) starts.pending = Date.now();
+  if (first.dataUpdatedAt !== starts.seen) {
+    starts.seen = first.dataUpdatedAt;
+    starts.shown = starts.pending ?? first.dataUpdatedAt;
+    starts.pending = undefined;
+  }
   const changed = () => [
     { method: "listNotifications" as const, args: { workspaceId } },
     { method: "listNotificationCounts" as const, args: { workspaceId } },
@@ -201,13 +211,14 @@ function NoticeList({ workspaceId, filter }: { workspaceId: string; filter: Noti
     );
   }
 
+  // A changed notice that no longer belongs in this filter leaves the list, as the server's would.
   const patched = (list: readonly AppNotification[], fresh: number) =>
     list.flatMap((notice) => {
       const patch = patches.get(notice.id);
       if (patch === undefined || patch.at < fresh) return [notice];
-      return patch.notice === null ? [] : [patch.notice];
+      return patch.notice === null || !inFilter(patch.notice, filter) ? [] : [patch.notice];
     });
-  const items = joinPages(patched(first.data.items, first.dataUpdatedAt), patched(more?.items ?? [], 0));
+  const items = joinPages(patched(first.data.items, starts.shown), patched(more?.items ?? [], 0));
   const cursor = more === null ? first.data.nextCursor : more.cursor;
 
   const loadMore = async () => {

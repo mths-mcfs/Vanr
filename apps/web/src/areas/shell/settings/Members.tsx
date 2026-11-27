@@ -71,12 +71,14 @@ function InviteForm() {
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (emails.length === 0 || tooMany) return;
+    const typed = text;
     invite.mutate(
       { workspaceId, body: { emails, role } },
       {
         onSuccess: (answer) => {
           setResults(answer);
-          setText("");
+          // Addresses typed while this was sending stay for the next round.
+          setText((current) => (current === typed ? "" : current));
           const sent = answer.filter((result) => result.status === "invited").length;
           if (sent > 0) outcome.done(t("members.invited", { count: sent }));
         },

@@ -116,6 +116,19 @@ describe("invitations", () => {
     expect((within(form).getByLabelText("Emails") as HTMLInputElement).value).toBe("");
   });
 
+  test("addresses typed while a round is sending stay for the next one", async () => {
+    const server = newServer();
+    const held = server.hold("createInvitationBulk");
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const field = await screen.findByLabelText("Emails");
+    await app.user.type(field, "pia@birchwood.example");
+    await app.user.click(screen.getByRole("button", { name: "Send invitation" }));
+    await app.user.type(field, " rui@birchwood.example");
+    held.release();
+    await screen.findByRole("list", { name: "Invitations" });
+    expect((field as HTMLInputElement).value).toBe("pia@birchwood.example rui@birchwood.example");
+  });
+
   test("more than 100 addresses are refused before anything is sent", async () => {
     const app = await renderApp({ path: PATH, signedInAs: "usr_jonas" });
     const field = await screen.findByLabelText("Emails");
