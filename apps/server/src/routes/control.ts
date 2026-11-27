@@ -232,7 +232,6 @@ export function registerControl(app: Hono<AppEnv>) {
         if (decision === "approved") sameEffect(row, payloadHash);
         const remembers = decision === "approved" && remember === true;
         if (remembers) rememberCheck(row);
-        // The run that waits on the decision is the runtime's: without it, nothing is written.
         const at = deps.now();
         const name = await actorName(db, me.workspaceId, { type: "person", id: me.userId });
         if (!runtime.awaitsApproval(row.id)) {
@@ -561,7 +560,7 @@ export function registerControl(app: Hono<AppEnv>) {
       }
       answer = input.choice;
     } else answer = input.text;
-    // The run that waits on the answer is the runtime's: without it, nothing is written.
+    // The runtime closes the question and wakes the run that waits on it, if one still does.
     const next = await runtime.answerQuestion(row.id, answer, me.userId);
     if (!next) throw conflict("question.closed", "The question is no longer open");
     return c.json(toQuestion(next) satisfies AgentQuestion);

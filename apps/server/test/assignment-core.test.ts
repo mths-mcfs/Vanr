@@ -394,22 +394,24 @@ describe("changing an assignment", () => {
   );
 
   test(
-    "a person's message waits for the runtime: rejected before anything is written",
+    "a person's message goes into the assignment's thread and the runtime hands it to the agent",
     async () => {
       const t = await team();
       const before = await messagesIn(t.channelId);
-      const err = await personSays(server.deps, t.row, t.ana.user.id, "start").catch((e) => e);
-      expect(err).toMatchObject({
-        status: 503,
-        code: "not_available",
-        params: { method: "onPersonMessage" },
-      });
-      expect(await messagesIn(t.channelId)).toHaveLength(before.length);
+      const said = await personSays(server.deps, t.row, t.ana.user.id, "start");
+      await server.deps.runtime.settle();
+      expect(said).toMatchObject({ threadId: t.root.id, author: { type: "person", id: t.ana.user.id } });
+      expect((await messagesIn(t.channelId)).length).toBeGreaterThan(before.length);
       const [root] = await server.deps.db
         .select()
         .from(schema.messages)
         .where(eq(schema.messages.id, t.root.id));
-      expect(root?.replyCount).toBe(0);
+      expect(root?.replyCount).toBeGreaterThanOrEqual(1);
+      const dispatched = await server.deps.db
+        .select()
+        .from(schema.messageDispatches)
+        .where(eq(schema.messageDispatches.messageId, said.id));
+      expect(dispatched.map((d) => d.agentId)).toEqual([t.row.agentId]);
     },
     SERVER_TEST_MS,
   );
@@ -592,11 +594,13 @@ describe("the verifier's entry", () => {
           { id: "s2", passes: false, reason: "No evidence: no summary, job result or proof." },
         ],
       });
-      // `complete` is the runtime's (S6): today it answers not_available.
-      expect(await modelVerifier(server.deps, t.row, [item("s1", "done it")]).catch((e) => e)).toMatchObject({
-        code: "not_available",
-        params: { method: "complete" },
-      });
+      // With evidence the verifier is a clean-context call of the agent through the runtime (the test model
+      // passes every deliverable without [[reject]]).
+      const checked = await modelVerifier(server.deps, t.row, [item("s1", "done it")]);
+      expect(checked).toMatchObject({ ok: true, verdicts: [{ id: "s1", passes: true }] });
+      if (!checked.ok || !checked.runId) throw new Error("no verifier run");
+      const [run] = await server.deps.db.select().from(schema.runs).where(eq(schema.runs.id, checked.runId));
+      expect([run?.status, run?.agentId]).toEqual(["done", t.row.agentId]);
     },
     SERVER_TEST_MS,
   );

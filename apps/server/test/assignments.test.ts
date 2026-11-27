@@ -8,7 +8,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
-import { and, eq } from "drizzle-orm";
+import { and, eq, like } from "drizzle-orm";
 import { createAssignment } from "../src/assignments/engine";
 import { jobIdOf, workIdOf } from "../src/assignments/keys";
 import {
@@ -1457,7 +1457,7 @@ describe("the transitions on their own", () => {
   );
 });
 
-describe("without the agent runtime (before slice S6)", () => {
+describe("on the real agent runtime", () => {
   let bare: RunningServer;
   beforeAll(async () => {
     bare = await startTestServer();
@@ -1467,7 +1467,7 @@ describe("without the agent runtime (before slice S6)", () => {
   }, SERVER_TEST_MS);
 
   test(
-    "stopping or telling the agent is rejected with not_available before any write; the rest works",
+    "telling the agent reaches its run, a review is approved, and pausing then closing stop it",
     async () => {
       const ana = await signedIn(bare, "Ana", email("ana"));
       const { workspaceId, general } = await seedWorkspace(bare, ana, "Bare");
@@ -1483,41 +1483,39 @@ describe("without the agent runtime (before slice S6)", () => {
         (await call(ana, "PUT", `${path}/plan`, { parentVersion: 0, items: [{ title: "One" }] })).status,
       ).toBe(200);
       expect((await call(ana, "POST", `${path}/start`)).body.status).toBe("active");
+      await bare.deps.assignmentEngine.idle();
+      await bare.deps.runtime.settle();
+      // A person's message in the thread is a turn of the agent: its run answers it.
+      const told = await call(ana, "POST", `${path}/messages`, { text: "hello" });
+      expect(told.status).toBe(200);
+      await bare.deps.runtime.settle();
+      const [hello] = await bare.deps.db
+        .select()
+        .from(schema.messages)
+        .where(and(eq(schema.messages.workspaceId, workspaceId), like(schema.messages.body, "% hello")));
+      const heard = await bare.deps.db
+        .select()
+        .from(schema.messageDispatches)
+        .where(eq(schema.messageDispatches.messageId, hello?.id ?? ""));
+      expect(heard.map((r) => [r.agentId, r.state])).toEqual([[agentId, "handled"]]);
+
       const review = newId("arev");
       await bare.deps.db
         .insert(assignmentReviews)
         .values({ id: review, assignmentId: created.body.id, title: "T", summary: "S" });
-      const sub = newId("asub");
-      await bare.deps.db
-        .insert(schema.assignmentSubmissions)
-        .values({ id: sub, assignmentId: created.body.id, note: "Done", checklist: [] });
-      const rejected: [string, string, unknown?][] = [
-        ["POST", "/pause"],
-        ["POST", "/stop"],
-        ["POST", "/close", { outcome: "done" }],
-        ["POST", `/submissions/${sub}/accept`, {}],
-        ["POST", "/messages", { text: "hello" }],
-        ["POST", `/reviews/${review}/approve`, {}],
-      ];
-      for (const [method, tail, payload] of rejected) {
-        const r = await call(ana, method, `${path}${tail}`, payload);
-        expect([tail, r.status, code(r)]).toEqual([tail, 503, "not_available"]);
-      }
-      const [row] = await bare.deps.db.select().from(assignments).where(eq(assignments.id, created.body.id));
-      expect(row?.status).toBe("active");
+      expect((await call(ana, "POST", `${path}/reviews/${review}/approve`, {})).status).toBe(200);
       const [r] = await bare.deps.db.select().from(assignmentReviews).where(eq(assignmentReviews.id, review));
-      expect(r?.status).toBe("pending");
-      const [s] = await bare.deps.db
-        .select()
-        .from(schema.assignmentSubmissions)
-        .where(eq(schema.assignmentSubmissions.id, sub));
-      expect(s?.status).toBe("pending");
-      // Only the plan card is in the conversation: no person's message reached it for an agent that can't hear.
-      const posted = await bare.deps.db
-        .select()
-        .from(schema.messages)
-        .where(eq(schema.messages.workspaceId, workspaceId));
-      expect(posted.map((m) => m.authorKind)).toEqual(["agent"]);
+      expect(r?.status).toBe("approved");
+
+      expect((await call(ana, "POST", `${path}/pause`)).status).toBe(200);
+      await bare.deps.assignmentEngine.idle();
+      await bare.deps.runtime.settle();
+      // Paused, the agent has no run on the air in the thread.
+      expect(bare.deps.runtime.activeRun(agentId, general, created.body.threadId ?? null)).toBeNull();
+      const closed = await call(ana, "POST", `${path}/close`, { outcome: "canceled" });
+      expect(closed.status).toBe(200);
+      const [row] = await bare.deps.db.select().from(assignments).where(eq(assignments.id, created.body.id));
+      expect(row?.status).toBe("canceled");
     },
     SERVER_TEST_MS,
   );

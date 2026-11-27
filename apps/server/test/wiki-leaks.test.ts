@@ -478,11 +478,14 @@ describe("mentions and the search with an answer", () => {
     };
     expect(await as(beto)).toEqual([]);
     expect((await as(ana)).some((h) => (h.text ?? "").includes("quokkacorp"))).toBe(true);
-    // The ask route itself answers not_available until the runtime's model lookup, before any search.
+    // The answer is built from those same results: Beto's has no source and no text of the page.
     const res = await beto.browser.json(`/api/v1/workspaces/${workspaceId}/search/ask`, "POST", {
       q: "quokkacorp",
     });
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(200);
+    const answer = await res.json();
+    expect(answer.sources).toEqual([]);
+    expect(JSON.stringify(answer)).not.toContain("merger");
   });
 
   test("a restricted page created through the domain function is still filtered (no route bypass)", async () => {
