@@ -1,0 +1,156 @@
+// The inbox against the fake server. Ana's Birchwood inbox holds two open requests (an approval and a
+// question), a mention and a DM, then reactions, a finished assignment and a routine report.
+import { describe, expect, test } from "bun:test";
+import { screen, waitFor, within } from "@testing-library/react";
+import { QUERY_RETRIES } from "@vanr/client/react";
+import { newServer, renderApp } from "../../../../test/app.tsx";
+
+const PATH = "/workspace/workspace_birchwood/notifications";
+const group = (name: string) => screen.getByRole("region", { name });
+const headlines = (name: string) =>
+  within(group(name))
+    .getAllByRole("button", { name: /mentioned|asked|question|wrote|reacted|finished|report/ })
+    .map((button) => button.textContent);
+const rowOf = (headline: RegExp) => {
+  const row = screen.getByRole("button", { name: headline }).closest("li");
+  if (row === null) throw new Error("no row");
+  return row;
+};
+const notice = (server: ReturnType<typeof newServer>, id: string) =>
+  server.notifications.find((candidate) => candidate.id === id);
+
+describe("the inbox", () => {
+  test("Action needed: open requests first, then the rest by day, with the counts on the tabs", async () => {
+    await renderApp({ path: PATH, signedInAs: "usr_ana" });
+    await screen.findByRole("region", { name: "Waiting on you" });
+    expect(headlines("Waiting on you")).toEqual([
+      "Unread:Ledger asked for your approval",
+      "Unread:Scout has a question for you",
+    ]);
+    expect(headlines("Today")).toEqual([
+      "Unread:Jonas Lind mentioned you in #print-queue",
+      "Unread:Íris Valença wrote to you",
+    ]);
+    expect(screen.getByRole("tab", { name: /Action needed/ }).textContent).toContain("4");
+    expect(screen.getByRole("tab", { name: /FYI/ }).getAttribute("aria-selected")).toBe("false");
+    expect(rowOf(/mentioned you in #print-queue/).textContent).toContain(
+      "@ana can you look at the stuck job in the queue?",
+    );
+    expect(rowOf(/mentioned you in #print-queue/).textContent).toContain("mentioned you");
+    expect(document.title).toBe("Inbox | Birchwood Labs | Vanr");
+  });
+
+  test("an open request has no Done: it leaves the inbox once it is answered", async () => {
+    await renderApp({ path: PATH, signedInAs: "usr_ana" });
+    const approval = await screen.findByRole("button", { name: /asked for your approval/ });
+    const row = approval.closest("li") as HTMLElement;
+    expect(within(row).queryByRole("button", { name: "Done" })).toBeNull();
+    expect(within(rowOf(/wrote to you/)).getByRole("button", { name: "Done" })).toBeDefined();
+  });
+
+  test("opening a notice marks it read and goes where it came from", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
+    await app.user.click(await screen.findByRole("button", { name: /Jonas Lind mentioned you/ }));
+    await waitFor(() => expect(app.address()).toBe("/workspace/workspace_birchwood/channel/ch_print"));
+    await waitFor(() => expect(notice(app.server, "ntf_mention")?.readAt).not.toBeNull());
+  });
+
+  test("snoozing (muting) a notice takes it out until then", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
+    await screen.findByRole("button", { name: /wrote to you/ });
+    await app.user.click(within(rowOf(/wrote to you/)).getByRole("button", { name: "Snooze" }));
+    await app.user.click(await screen.findByRole("menuitem", { name: "Until tomorrow, 9:00" }));
+    expect(await screen.findByText(/^Snoozed until /)).toBeDefined();
+    await waitFor(() => expect(screen.queryByRole("button", { name: /wrote to you/ })).toBeNull());
+    expect(notice(app.server, "ntf_dm")?.mutedUntil).not.toBeNull();
+  });
+
+  test("Done takes a notice out of the inbox; Pin keeps it past the retention", async () => {
+    const app = await renderApp({ path: `${PATH}?filter=fyi`, signedInAs: "usr_ana" });
+    const reaction = await screen.findByRole("button", { name: /Tomás Eriksen reacted 🎉/ });
+    await app.user.click(within(reaction.closest("li") as HTMLElement).getByRole("button", { name: "Pin" }));
+    expect(await screen.findByText("Pinned: it stays past the three months.")).toBeDefined();
+    expect(notice(app.server, "ntf_reaction")?.savedAt).not.toBeNull();
+    await app.user.click(within(rowOf(/Tomás Eriksen reacted/)).getByRole("button", { name: "Done" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: /Tomás Eriksen reacted/ })).toBeNull());
+    expect(notice(app.server, "ntf_reaction")?.doneAt).not.toBeNull();
+  });
+
+  test("FYI groups by day; All has filters", async () => {
+    const app = await renderApp({ path: `${PATH}?filter=fyi`, signedInAs: "usr_ana" });
+    await screen.findByRole("region", { name: "Yesterday" });
+    expect(screen.getByRole("region", { name: "This week" })).toBeDefined();
+    expect(screen.getByRole("region", { name: "Older" })).toBeDefined();
+    await app.user.click(screen.getByRole("tab", { name: "All" }));
+    await waitFor(() => expect(app.address()).toBe(`${PATH}?filter=all`));
+    await app.user.click(await screen.findByRole("button", { name: "Mentions (1)" }));
+    await waitFor(() => expect(app.address()).toBe(`${PATH}?filter=mentions`));
+    await waitFor(() =>
+      expect(screen.getAllByRole("button", { name: /^Unread:/ }).map((b) => b.textContent)).toEqual([
+        "Unread:Jonas Lind mentioned you in #print-queue",
+      ]),
+    );
+  });
+
+  test("Mark all read reads what the tab shows", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
+    await app.user.click(await screen.findByRole("button", { name: "Mark these read" }));
+    expect(await screen.findByText("Marked as read.")).toBeDefined();
+    expect(notice(app.server, "ntf_dm")?.readAt).not.toBeNull();
+    expect(notice(app.server, "ntf_reaction")?.readAt).toBeNull();
+    await waitFor(() => expect(screen.queryAllByRole("button", { name: /^Unread:/ })).toHaveLength(0));
+  });
+
+  test("empty: what lands in the tab", async () => {
+    const server = newServer();
+    server.notifications = [];
+    await renderApp({ path: PATH, signedInAs: "usr_ana", server });
+    expect(await screen.findByText("Nothing needs you right now")).toBeDefined();
+    expect(screen.getByText("Requests, direct messages and mentions land here.")).toBeDefined();
+  });
+
+  test("failed: what could not be loaded and a retry that works", async () => {
+    const server = newServer();
+    server.force("listNotifications", { kind: "error", status: 500, code: "internal" }, 1 + QUERY_RETRIES);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana", server });
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("The inbox could not be loaded");
+    await app.user.click(within(alert).getByRole("button", { name: "Retry" }));
+    await screen.findByRole("region", { name: "Waiting on you" });
+  });
+
+  test("older pages are added below, each notice once", async () => {
+    const server = newServer();
+    const sample = server.notifications.find((candidate) => candidate.id === "ntf_routine");
+    if (sample === undefined) throw new Error("no sample");
+    for (let n = 0; n < 60; n += 1) {
+      server.notifications.push({ ...sample, id: `ntf_old_${n}`, latest: { title: `Report ${n}` } });
+    }
+    const app = await renderApp({ path: `${PATH}?filter=fyi`, signedInAs: "usr_ana", server });
+    await screen.findByRole("region", { name: "Older" });
+    const notices = () => within(screen.getByRole("main")).getAllByRole("listitem");
+    const before = notices().length;
+    expect(before).toBe(50);
+    await app.user.click(screen.getByRole("button", { name: "Show older notices" }));
+    await waitFor(() => expect(notices()).toHaveLength(64));
+    expect(screen.queryByRole("button", { name: "Show older notices" })).toBeNull();
+  });
+
+  test("a link from a push or an email opens the notice's source", async () => {
+    const app = await renderApp({ path: `${PATH}?open=ntf_dm`, signedInAs: "usr_ana" });
+    await waitFor(() => expect(app.address()).toBe("/workspace/workspace_birchwood/dm/person/usr_iris"));
+    expect(notice(app.server, "ntf_dm")?.readAt).not.toBeNull();
+  });
+
+  test("a notice that arrives in real time shows up", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
+    await screen.findByRole("region", { name: "Today" });
+    const sample = notice(app.server, "ntf_mention");
+    if (sample === undefined) throw new Error("no sample");
+    const fresh = { ...sample, id: "ntf_fresh", latest: { text: "One more thing" } };
+    app.server.notifications.push(fresh);
+    const { workspaceId: _w, userId: _u, ...shown } = fresh;
+    app.server.emit("workspace_birchwood", { type: "notification.shown", notification: shown });
+    expect(await screen.findByText("One more thing")).toBeDefined();
+  });
+});

@@ -62,7 +62,8 @@ const NOTICE_PAGE = 50;
 const ROLES = ["member", "admin", "owner"] as const;
 const FILTERS = ["action_needed", "all", "fyi", "mentions", "reactions", "unread", "waiting"] as const;
 
-const DEFAULT_NOTIFICATION_SETTINGS: T.NotificationSettings = {
+/** What a person who never changed their preferences gets (the server's defaults, in English). */
+export const DEFAULT_NOTIFICATION_SETTINGS: T.NotificationSettings = {
   push: true,
   email: true,
   emailDelayMinutes: 15,
