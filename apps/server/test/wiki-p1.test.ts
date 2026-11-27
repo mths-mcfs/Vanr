@@ -751,6 +751,17 @@ describe("anchored comments", () => {
     const positions = Object.fromEntries(comments.map((c) => [c.id, [c.anchor?.position, c.anchorState]]));
     expect(positions[onSecond.id]).toEqual([second, "ok"]);
     expect(positions[wrong.id]).toEqual([body.indexOf("2 days"), "ok"]);
+    // The quote is at the client's position, but under another section's context: the context decides.
+    const swapped = "Finance: 2 days.\n\nSupport: 2 days!";
+    const other = await ana.api.wiki.createWikiPage(workspaceId, { title: "Swapped", body: swapped });
+    const support = await ana.api.wiki.createWikiPageComment(workspaceId, other.slug, {
+      body: "Support's deadline",
+      anchor: { prefix: "Support: ", quote: "2 days", suffix: "!", position: swapped.indexOf("2 days") },
+    });
+    const stored = (await ana.api.wiki.listWikiPageAnnotations(workspaceId, other.slug)).comments.find(
+      (c) => c.id === support.id,
+    );
+    expect(stored?.anchor?.position).toBe(swapped.lastIndexOf("2 days"));
   });
 
   test("attack: a short quote in a long page doesn't stall the read; special characters, MiBs and blocks", () => {

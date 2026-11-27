@@ -279,14 +279,13 @@ export async function createComment(
 }
 
 /**
- * The anchor as stored: where the passage starts in the published text the comment was made on. The client's
- * position counts only when the quote is there (it tells apart passages with the same context).
+ * The anchor as stored: where the passage starts in the published text the comment was made on, found by the
+ * same rule as every read. The client's position is only the hint `locate` starts from: it counts where the
+ * whole context is, and tells apart passages with the same context.
  */
 function anchorOn(body: string, anchor: Anchor): Anchor {
   const { quote, prefix, suffix } = anchor;
-  const given = anchor.position;
-  const at =
-    given !== undefined && body.startsWith(quote, given) ? given : locate(body, { quote, prefix, suffix });
+  const at = locate(body, anchor);
   return at === null ? { quote, prefix, suffix } : { quote, prefix, suffix, position: at };
 }
 

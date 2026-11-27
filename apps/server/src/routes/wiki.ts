@@ -16,7 +16,7 @@ import { type Db, schema } from "@vanr/engine/db";
 import { PROP_TYPES, propText } from "@vanr/engine/props";
 import { diffText } from "@vanr/engine/wiki/diff";
 import { WIKI_PROP_LIMITS } from "@vanr/engine/wiki/props-vault";
-import { and, desc, eq, gte, ilike, isNotNull, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, ilike, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import { type ZodType, z } from "zod";
 import type { AppEnv, Ctx, WorkspaceMember } from "../context";
@@ -61,7 +61,7 @@ import {
   wikiRead,
   writeProps,
 } from "../wiki";
-import { audienceWithin, canReadPage, parseAccess, readablePagesSql } from "../wiki-access";
+import { audienceWithin, parseAccess, readablePagesSql } from "../wiki-access";
 import {
   annotationsOf,
   createComment,
@@ -414,10 +414,13 @@ export function registerWiki(app: Hono<AppEnv>) {
           // The audience is checked again on the locked linker against this page's access now: either may
           // have changed since the plan, and a change of access is not a version.
           inTx: async (tx, linker) => {
+            // Shared, so a restriction of this page waits for the commit; one already holding it skips this
+            // linker (no wait, no deadlock), which keeps the old title as an alias.
             const [now] = await tx
               .select({ access: knowledgePages.access })
               .from(knowledgePages)
-              .where(eq(knowledgePages.id, row.id));
+              .where(eq(knowledgePages.id, row.id))
+              .for("share", { skipLocked: true });
             if (!now || !audienceWithin(linker.access, now.access))
               throw new HttpError(409, "wiki.relink.audience", "The linking page's audience changed");
           },
@@ -441,13 +444,25 @@ export function registerWiki(app: Hono<AppEnv>) {
         note: "meta",
       });
     }
-    // The relinking holds in every page that links here; the answer names only the ones the person reads.
+    // The relinking holds in every page that links here; the answer names only the ones the person reads
+    // now (read again: one may have been restricted since `linkingPages`).
     const readable = new Set(
-      (
-        await Promise.all(
-          linkers.map(async (p) => ((await canReadPage(deps.db, viewerOf(me), p)) ? p.slug : null)),
-        )
-      ).filter((x): x is string => x !== null),
+      linkers.length
+        ? (
+            await deps.db
+              .select({ slug: knowledgePages.slug })
+              .from(knowledgePages)
+              .where(
+                and(
+                  inArray(
+                    knowledgePages.id,
+                    linkers.map((p) => p.id),
+                  ),
+                  readablePagesSql(viewerOf(me)),
+                ),
+              )
+          ).map((p) => p.slug)
+        : [],
     );
     const out: WikiPage = {
       ...(await pageView(c, me, final.slug)),
