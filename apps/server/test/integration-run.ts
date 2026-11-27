@@ -32,7 +32,9 @@ export function toolRun(
   deps: AppDeps,
   agent: AgentRow,
   channel: ChannelRow,
-  over: Partial<ToolContext> & { decide?: (req: ApprovalRequest) => ApprovalOutcome["decision"] } = {},
+  over: Partial<ToolContext> & {
+    decide?: (req: ApprovalRequest) => ApprovalOutcome["decision"] | Promise<ApprovalOutcome["decision"]>;
+  } = {},
 ): ToolRun {
   const approvals: ApprovalRequest[] = [];
   const decisions: ToolRun["decisions"] = [];
@@ -54,7 +56,7 @@ export function toolRun(
       approvals.push(req);
       return {
         id: newId("apv"),
-        decision: decide(req),
+        decision: await decide(req),
         reason: null,
         byName: "Ana",
         input: req.input,

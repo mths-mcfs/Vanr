@@ -81,7 +81,7 @@ async function team() {
    */
   const runOf = async (
     opts: {
-      decide?: (req: ApprovalRequest) => ApprovalOutcome["decision"];
+      decide?: (req: ApprovalRequest) => ApprovalOutcome["decision"] | Promise<ApprovalOutcome["decision"]>;
       deps?: AppDeps;
       where?: ChannelRow;
       agent?: AgentRow;
@@ -482,6 +482,47 @@ describe("the email gate: allowed destinations", () => {
         ["mail_delete", "K3", "irreversible"],
       ]);
       expect(mail.folders.get("INBOX")?.messages.map((m) => m.uid)).toContain(uid);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("an approval covers the class it was granted for", () => {
+  test(
+    "a send approved as K2 whose recipient stops being allowed while the person decides plans as K3: same payload and scope, refused",
+    async () => {
+      clear();
+      const { lia, ana, url, connect, runOf, workspaceId } = await team();
+      const account = (await connect()).body.account;
+      // Known recipients but no sending without asking: every send asks a person, and the class says K2.
+      await call(ana, "PUT", url(`/agents/${lia.id}/mail/${account.id}`), {
+        level: "read_write",
+        policy: { recipientAllowlist: ["@client.test"], autoSend: false, sendsPerDay: 5 },
+      });
+      const r = await runOf({
+        decide: async () => {
+          // While the person decides, the admin takes the domain off the mailbox's list: the same send is now K3.
+          await call(ana, "PUT", url(`/agents/${lia.id}/mail/${account.id}`), {
+            level: "read_write",
+            policy: { recipientAllowlist: ["@other.test"] },
+          });
+          return "approved";
+        },
+      });
+      const out = await r.ask("mail_send", {
+        account: mail.user,
+        to: ["joao@client.test"],
+        subject: "Order",
+        text: "Packed.",
+      });
+      expect(r.approvals.map((a) => [a.effect, a.card.scope])).toEqual([["K2", `mail:${account.id}:send`]]);
+      expect(out.isError).toBe(true);
+      expect(out.content).toContain("no longer what was approved");
+      expect(await server.deps.db.select().from(outbox).where(eq(outbox.workspaceId, workspaceId))).toEqual(
+        [],
+      );
+      await deliverDue(server.deps);
+      expect(mail.sent).toEqual([]);
     },
     SERVER_TEST_MS,
   );
