@@ -537,7 +537,7 @@ describe("a send goes through the outbox", () => {
   );
 
   test(
-    "the quota comes back only when nothing was queued: a header that breaks the mail, not a wake-up that fails after the commit",
+    "a line break in a header is rejected before any approval; the quota stays held when the wake-up fails after the commit",
     async () => {
       clear();
       const { lia, ana, url, connect, runOf, workspaceId } = await team();
@@ -553,15 +553,27 @@ describe("a send goes through the outbox", () => {
             .from(integrationUsage)
             .where(eq(integrationUsage.workspaceId, workspaceId))
         ).length;
-      const broken = await runOf();
-      await expect(
-        broken.ask("mail_send", {
-          account: mail.user,
-          to: ["joao@client.test"],
-          subject: "A\r\nBcc: x@bad.test",
-          text: "B",
-        }),
-      ).rejects.toMatchObject({ code: "invalid_mail_header" });
+      // A line break in the subject or in a recipient is rejected at the input: no plan, no approval, no quota.
+      const broken = await runOf({ decide: () => "approved" });
+      for (const bad of [
+        { to: ["maria@supplier.test"], subject: "A\r\nBcc: x@bad.test" },
+        { to: ["maria@supplier.test\r\nBcc: x@bad.test"], subject: "A" },
+        { to: ["maria@supplier.test"], cc: ["x@bad.test\nBcc: y@bad.test"], subject: "A" },
+      ]) {
+        const out = await broken.ask("mail_send", { account: mail.user, text: "B", ...bad });
+        expect([out.isError, out.content.startsWith("Invalid input:")]).toEqual([true, true]);
+      }
+      expect(
+        (
+          await broken.ask("mail_draft", {
+            account: mail.user,
+            to: ["joao@client.test"],
+            subject: "A\nBcc: x@bad.test",
+            text: "B",
+          })
+        ).content,
+      ).toStartWith("Invalid input:");
+      expect(broken.approvals).toEqual([]);
       expect(await reservations()).toBe(0);
 
       const failingWake: AppDeps = {
@@ -670,6 +682,8 @@ describe("the mailbox's policy holds on every path", () => {
       expect((await fresh.ask("mail_delete", { account: mail.user, uid: fresh2 })).content).toContain(
         "The folder Trash is not available",
       );
+      // Both refused in the plan: nobody was asked to approve an effect that couldn't run.
+      expect(fresh.approvals).toEqual([]);
       expect(mail.folders.get("Drafts")?.messages ?? []).toEqual([]);
       expect(mail.folders.get("Trash")?.messages ?? []).toEqual([]);
     },

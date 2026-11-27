@@ -95,6 +95,13 @@ describe(`a real Postgres as the customer's database (${TEST_POSTGRES_URL ? "pos
         await expect(conn.readOnly(200, (s) => s.rows("select pg_sleep(2)", []))).rejects.toThrow(
           /statement timeout/,
         );
+        // Sent first in the session, past the text guard: the transaction is already sealed read only.
+        await expect(
+          conn.readOnly(5_000, async (s) => {
+            await s.run("set transaction read write");
+            await s.run("insert into customers values (4, 'Mal', '444')");
+          }),
+        ).rejects.toThrow(/before any query|read-only transaction/);
         expect(
           await conn.readOnly(5_000, (s) => s.rows("select count(*)::int as n from customers", [])),
         ).toEqual([{ n: 2 }]);

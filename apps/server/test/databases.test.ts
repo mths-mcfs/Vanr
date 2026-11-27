@@ -8,7 +8,11 @@ import { memoryPostgres } from "@vanr/engine/sqlconn";
 import { eq } from "drizzle-orm";
 import { channelInWorkspace } from "../src/channels";
 import { DATABASE_TOOLS, hasDatabases } from "../src/integrations/databases";
-import { type GuardedConnector, pgliteGuardedConnector } from "../src/integrations/sql-identity";
+import {
+  type GuardedConnector,
+  pgliteGuardedConnector,
+  postgresOptions,
+} from "../src/integrations/sql-identity";
 import type { RunningServer } from "../src/server";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
 import { toolRun } from "./integration-run";
@@ -496,4 +500,61 @@ describe("the guard and the network rule on a connected database", () => {
     },
     SERVER_TEST_MS,
   );
+
+  test(
+    "the session itself stays read only: SET TRANSACTION READ WRITE sent first, past the text guard, can't reopen writes",
+    async () => {
+      const conn = await pgliteGuardedConnector(pg)({ ...connectInput, port: 5432 });
+      await expect(
+        conn.readOnly(5_000, async (s) => {
+          await s.run("set transaction read write");
+          await s.run("insert into secrets values ('written')");
+        }),
+      ).rejects.toThrow(/before any query|read-only transaction/);
+      expect((await pg.query("select count(*)::int as n from secrets")).rows).toEqual([{ n: 0 }]);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("the Postgres connection's options", () => {
+  const target = {
+    host: "db.example.test",
+    port: 6543,
+    database: "shop",
+    username: "reader",
+    password: "",
+    sslmode: "require" as const,
+  };
+
+  test("the checked address and port go as one-element lists: an IPv6 address is never split on ':'", () => {
+    const opts = postgresOptions({ ...target, address: "2001:db8::5" }) as unknown as {
+      host: string[];
+      port: number[];
+      ssl: { servername?: string; rejectUnauthorized: boolean };
+    };
+    expect([opts.host, opts.port]).toEqual([["2001:db8::5"], [6543]]);
+    // The TLS name is still the host the person entered, not the address.
+    expect(opts.ssl).toEqual({ rejectUnauthorized: false, servername: "db.example.test" });
+    const byIp = postgresOptions({ ...target, host: "203.0.113.7", sslmode: "verify-full" }) as unknown as {
+      host: string[];
+      ssl: { servername?: string; rejectUnauthorized: boolean };
+    };
+    expect([byIp.host, byIp.ssl]).toEqual([["203.0.113.7"], { rejectUnauthorized: true }]);
+    expect(postgresOptions({ ...target, sslmode: "disable" }).ssl).toBe(false);
+  });
+
+  test("an empty password stays empty: it is a function, so the installation's PGPASSWORD never fills it", async () => {
+    const before = process.env.PGPASSWORD;
+    process.env.PGPASSWORD = "installation-secret";
+    try {
+      const { password } = postgresOptions(target);
+      expect(typeof password).toBe("function");
+      expect(await password()).toBe("");
+      expect(await postgresOptions({ ...target, password: "mine" }).password()).toBe("mine");
+    } finally {
+      if (before === undefined) delete process.env.PGPASSWORD;
+      else process.env.PGPASSWORD = before;
+    }
+  });
 });

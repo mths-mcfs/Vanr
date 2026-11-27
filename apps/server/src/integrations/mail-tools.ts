@@ -39,6 +39,11 @@ const SEARCH_TEXT = z
   .max(200)
   .transform((s) => s.replace(/[\r\n\0]/g, " "));
 const ADDRESS = z.string().trim().toLowerCase().refine(isAddress, { message: "Use a full email address" });
+/** A subject is one header line: a line break would start a header of its own (a hidden Bcc). */
+const SUBJECT = z
+  .string()
+  .max(300)
+  .regex(/^[^\r\n\0]*$/, "The subject can't have a line break");
 
 /** What the mailbox tools read of a run: its agent, its workspace and the channel it runs in. */
 type MailRun = Pick<ToolContext, "deps" | "agent" | "workspaceId" | "channel">;
@@ -382,11 +387,17 @@ const mailDraft = define({
     account,
     to: z.array(ADDRESS).min(1).max(50),
     cc: z.array(ADDRESS).max(50).default([]),
-    subject: z.string().max(300),
+    subject: SUBJECT,
     text: z.string().max(50_000),
   }),
   async plan(ctx, input) {
-    return askedBy(await pick(ctx, input.account, "draft"));
+    const b = await pick(ctx, input.account, "draft");
+    // With a folder list, the drafts folder must be in it: checked here, before a person is asked.
+    if (b.box.policy.folders.length > 0)
+      await withImap(ctx.deps, b.account, async (imap) =>
+        folderAllowed(b.box.policy, await folderByRole(imap, "drafts", "Drafts")),
+      );
+    return askedBy(b);
   },
   async run(ctx, input) {
     const b = await pick(ctx, input.account, "draft");
@@ -442,7 +453,7 @@ const sendInput = z.object({
   account,
   to: z.array(ADDRESS).min(1).max(50),
   cc: z.array(ADDRESS).max(50).default([]),
-  subject: z.string().max(300),
+  subject: SUBJECT,
   text: z.string().min(1).max(50_000),
 });
 
@@ -610,9 +621,11 @@ const mailDelete = define({
   input: z.object({ account, folder: FOLDER.default("INBOX"), uid: z.number().int().positive() }),
   async plan(ctx, input) {
     const b = await pick(ctx, input.account, "delete");
-    const { mail } = await withImap(ctx.deps, b.account, (imap) =>
-      readOne(imap, b.box.policy, input.folder, input.uid, ctx.deps.now()),
-    );
+    // The trash must be in the folder list too: checked here, before a person is asked.
+    const { mail } = await withImap(ctx.deps, b.account, async (imap) => {
+      folderAllowed(b.box.policy, await folderByRole(imap, "trash", "Trash"));
+      return readOne(imap, b.box.policy, input.folder, input.uid, ctx.deps.now());
+    });
     return {
       payload: {
         account: b.account.address,

@@ -245,12 +245,18 @@ export type GuardedConnector = (target: SqlTarget) => Promise<GuardedConnection>
 /** Statement timeout for the current transaction, never below 100 ms. */
 const timeoutSql = (ms: number) => `set local statement_timeout = ${Math.max(100, Math.floor(ms))}`;
 
-/** A real Postgres, one connection per use (the caller closes it), to the checked address with the name for TLS. */
-export const postgresGuardedConnector: GuardedConnector = async (t) => {
+/**
+ * Run right after the transaction opens: once a query ran, `SET TRANSACTION READ WRITE` is refused, so the
+ * transaction stays read only whatever the session sends next (the text guard is a second layer, not the lock).
+ */
+const SEAL_READ_ONLY = "select 1";
+
+/** The postgres.js options of a connection to `t`: the checked address and port, the name for TLS. */
+export function postgresOptions(t: SqlTarget) {
   // postgres.js splits a host string on `:` for a port, which cuts an IPv6 address: a one-element list goes to
   // the address as is (its types only declare the string form).
   const to = { host: [t.address ?? t.host], port: [t.port] } as unknown as { host: string; port: number };
-  const sql = postgres({
+  return {
     ...to,
     database: t.database,
     username: t.username,
@@ -258,7 +264,7 @@ export const postgresGuardedConnector: GuardedConnector = async (t) => {
     password: () => t.password,
     ssl:
       t.sslmode === "disable"
-        ? false
+        ? (false as const)
         : {
             rejectUnauthorized: t.sslmode === "verify-full",
             ...(isIP(t.host) ? {} : { servername: t.host }),
@@ -268,12 +274,18 @@ export const postgresGuardedConnector: GuardedConnector = async (t) => {
     idle_timeout: 5,
     prepare: false,
     onnotice: () => {},
-  });
+  };
+}
+
+/** A real Postgres, one connection per use (the caller closes it), to the checked address with the name for TLS. */
+export const postgresGuardedConnector: GuardedConnector = async (t) => {
+  const sql = postgres(postgresOptions(t));
   return {
     async readOnly<T>(timeoutMs: number, fn: (s: GuardedSession) => Promise<T>): Promise<T> {
       let result!: T;
       await sql.begin("read only", async (tx) => {
         await tx.unsafe(timeoutSql(timeoutMs));
+        await tx.unsafe(SEAL_READ_ONLY);
         result = await fn(postgresGuardedSession(tx));
       });
       return result;
@@ -296,6 +308,7 @@ export function pgliteGuardedConnector(pg: PgliteLike): GuardedConnector {
       pg.transaction(async (tx) => {
         await tx.exec("set transaction read only");
         await tx.exec(timeoutSql(timeoutMs));
+        await tx.exec(SEAL_READ_ONLY);
         return fn(pgliteGuardedSession(tx));
       }),
     close: async () => {},
