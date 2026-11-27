@@ -896,8 +896,8 @@ export class AgentRuntime implements RuntimePort {
           .where(
             and(
               eq(messageDispatches.messageId, row.id),
-              inArray(messageDispatches.state, ["claimed", "handled"]),
-              sql`not (${runs.status} is not distinct from 'failed' and ${runs.errorCode} is not distinct from 'interrupted')`,
+              // An answer counts whatever happened to its run after; a claim, unless the boot found its run fallen.
+              sql`(${messageDispatches.state} = 'handled' or (${messageDispatches.state} = 'claimed' and not (${runs.status} is not distinct from 'failed' and ${runs.errorCode} is not distinct from 'interrupted')))`,
             ),
           )
       ).map((d) => d.agentId),
@@ -941,8 +941,8 @@ export class AgentRuntime implements RuntimePort {
       await this.admit(p.key, async () => {
         // Look again: there was an await between the plan and here, and the run may have ended.
         const live = this.liveOf(p.key);
-        // It already holds the message (put off to its next run, or in its inbox): a resend doesn't add it twice.
-        if (live && (live.handles.includes(row.id) || live.after.some((m) => m.id === row.id))) return;
+        // It already put the message off to its next run (its dispatch still `routed`): a resend doesn't add it twice.
+        if (live?.after.some((m) => m.id === row.id)) return;
         if (live) await this.steer(live, row);
         else
           await this.startRun({
@@ -1975,15 +1975,17 @@ export class AgentRuntime implements RuntimePort {
       await this.finish(live, { status: "done", handled: status, messageId: message?.id ?? null });
       await this.budgetNotices(live.agent, live.channel.id, personOf(live.trigger));
     } catch (caught) {
-      // A run that fails or is stopped mid-turn didn't hear its inbox either: the next run takes it.
-      deferUnheard(live);
-      clearInterval(beat);
-      if (deadline) clearTimeout(deadline);
+      live.closing = true;
       // The time cap aborts through the controller: the error that comes up is the stream's; the cause is the TimeLimit.
       const reason: unknown = live.controller.signal.reason;
       const err = reason instanceof TimeLimit ? reason : caught;
       const canceled =
         !(err instanceof TimeLimit) && (err instanceof RunCanceled || live.controller.signal.aborted);
+      // A run that fails or is stopped mid-turn didn't hear its inbox: the next run takes it. A person's stop
+      // cancels it with the run instead (it stays in `handles`, handled as canceled).
+      if (!(canceled && live.canceledBy !== null)) deferUnheard(live);
+      clearInterval(beat);
+      if (deadline) clearTimeout(deadline);
       if (canceled) {
         if (partial.trim()) await post(partial.trim(), { canceled: true }).catch(() => null);
         await this.finish(live, { status: "canceled", handled: "canceled", messageId: null });

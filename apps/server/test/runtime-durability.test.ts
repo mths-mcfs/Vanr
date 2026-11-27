@@ -141,8 +141,21 @@ const dispatchesOf = (server: RunningServer, ids: string[]) =>
 describe("one conversation, one admission", () => {
   const model = heldModel();
   let server: RunningServer;
+  /** The next routing fails right after it routed: the post answers 201 and stays unsettled. */
+  let routedThenFails = false;
   beforeAll(async () => {
-    server = await startTestServer({ modelProvider: model.provider });
+    server = await startTestServer({
+      modelProvider: model.provider,
+      runtime: (port) => ({
+        ...port,
+        async onPersonMessage(input) {
+          const fails = routedThenFails;
+          routedThenFails = false;
+          await port.onPersonMessage(input);
+          if (fails) throw new Error("routing fell after it routed");
+        },
+      }),
+    });
   }, SERVER_TEST_MS);
   afterAll(() => server.stop(), SERVER_TEST_MS);
 
@@ -361,6 +374,78 @@ describe("one conversation, one admission", () => {
       expect(failedRun?.status).toBe("failed");
       const [d] = await dispatchesOf(server, [late.body.id]);
       expect([d?.state, d?.status, d?.runId === failedRun?.id]).toEqual(["handled", "answered", false]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a person's stop cancels the message waiting in the run's inbox with the run",
+    async () => {
+      const { say } = await dmTeam(server);
+      const thinking = model.hold("long-job-then-stop");
+      const first = await say("long-job-then-stop, please");
+      await thinking.entered;
+      let also: Awaited<ReturnType<typeof say>>;
+      try {
+        also = await say("and also this");
+        expect((await say("stop")).status).toBe(201);
+      } finally {
+        thinking.open();
+      }
+      await settle(server);
+      const [stopped] = await server.deps.db
+        .select()
+        .from(runs)
+        .where(eq(runs.sourceMessageId, first.body.id));
+      const [d] = await dispatchesOf(server, [also.body.id]);
+      const opened = await server.deps.db.select().from(runs).where(eq(runs.sourceMessageId, also.body.id));
+      expect([stopped?.status, d?.state, d?.status, d?.runId === stopped?.id, opened.length]).toEqual([
+        "canceled",
+        "handled",
+        "canceled",
+        true,
+        0,
+      ]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a post put off to the next run and sent again is in that run once",
+    async () => {
+      const { say } = await dmTeam(server);
+      const thinking = model.hold("ends-while-put-off");
+      await say("ends-while-put-off, please");
+      await thinking.entered;
+      // The run holds in its end; the next post is put off to the next run, and its settle fails after routing.
+      const ending = gate();
+      const release = gate();
+      const restore = onWrite(server, "update", runs, (q, row) =>
+        row.status === "done"
+          ? wrapQuery(q, async () => {
+              ending.open();
+              await release.opened;
+            })
+          : q,
+      );
+      let put: Awaited<ReturnType<typeof say>>;
+      try {
+        thinking.open();
+        await ending.opened;
+        restore();
+        routedThenFails = true;
+        put = await say("put-off-once", "put-off");
+        expect((await say("put-off-once", "put-off")).status).toBe(200);
+      } finally {
+        restore();
+        release.open();
+      }
+      await settle(server);
+      const opened = await server.deps.db.select().from(runs).where(eq(runs.sourceMessageId, put.body.id));
+      const seen = model.seen
+        .filter((t) => t.includes("put-off-once"))
+        .map((t) => t.split("put-off-once").length - 1);
+      expect([opened.length, seen]).toEqual([1, [1]]);
     },
     SERVER_TEST_MS,
   );
@@ -662,6 +747,41 @@ describe("durable effects", () => {
       expect(again.status).toBe(200);
       await settle(server);
       expect(await answersTo(first.body.id ?? again.body.id, dm, lia.id)).toEqual({ runs: 1, replies: 1 });
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a resend of a post answered by a run the boot later found fallen doesn't route it again",
+    async () => {
+      const { lia, dm, say } = await dmTeam(server);
+      let failed = false;
+      const restore = onWrite(server, "update", messages, (q, row) => {
+        if (row.effectsPending === false && !failed) {
+          failed = true;
+          throw new Error("mark failed");
+        }
+        return q;
+      });
+      try {
+        expect((await say("answered then fell", "answered-fell")).status).toBe(500);
+      } finally {
+        restore();
+      }
+      await settle(server);
+      const [row] = await server.deps.db
+        .select()
+        .from(messages)
+        .where(eq(messages.clientId, "answered-fell"));
+      if (!row) throw new Error("no post");
+      // The run answered it, went on, and the boot found it fallen.
+      await server.deps.db
+        .update(runs)
+        .set({ status: "failed", errorCode: "interrupted" })
+        .where(eq(runs.sourceMessageId, row.id));
+      expect((await say("answered then fell", "answered-fell")).status).toBe(200);
+      await settle(server);
+      expect(await answersTo(row.id, dm, lia.id)).toEqual({ runs: 1, replies: 1 });
     },
     SERVER_TEST_MS,
   );
