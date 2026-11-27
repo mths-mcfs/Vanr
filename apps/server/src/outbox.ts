@@ -8,13 +8,14 @@
 // wins, so undoing in the last second while it goes out never sends anything halfway. A send that broke in
 // the middle stays `sending` and is never repeated (for email, at most once is the safe side). With a window of
 // 0 (config), the tools send at once, without coming here.
-import { schema } from "@vanr/engine/db";
+import type { AgentAction, AgentActionKind } from "@vanr/contract";
+import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import { z } from "zod";
+import type { AgentRow } from "./agents";
 import { agentCanPost } from "./channels";
 import { type AppDeps, requireRuntime } from "./context";
-import type { ToolContext } from "./forward-types";
 import { HttpError } from "./http";
 import { mailboxesOf, sentOutOf, transmitMail } from "./integrations/mail";
 import { actionMode } from "./integrations/mail-rules";
@@ -46,12 +47,34 @@ type Item = { kind: "mail"; payload: MailItem } | { kind: "post"; payload: PostI
 /** How many due items one pass delivers (the next pass takes the rest). */
 export const DELIVER_BATCH = 50;
 
+/** What `queueSend` reads of the run that asks for a send (a `runtime/tools` context fits it). */
+export interface OutboxRun {
+  deps: AppDeps;
+  workspaceId: string;
+  agent: Pick<AgentRow, "id">;
+  runId: string;
+  /**
+   * Records an action a person can undo; the receipt goes with the agent's next message. With `tx`, the action is
+   * written in that transaction (the outbox's: the queued send and its receipt exist together or not at all).
+   */
+  recordAction(
+    action: {
+      kind: AgentActionKind;
+      target: AgentAction["target"];
+      params?: Record<string, unknown>;
+      /** Until when it can be undone; by default, the usual window (24 h). */
+      revertibleUntil?: Date;
+    },
+    tx: Parameters<Parameters<Db["transaction"]>[0]>[0],
+  ): Promise<void>;
+}
+
 /**
  * Queues the send and records the undoable action that goes in the receipt. The email can only be undone until
  * it goes out; the post, once out, can still be retracted (the usual undo). The send is woken by the runtime at
  * `sendAt`: without it (until slice S6) the call is rejected before anything is written.
  */
-export async function queueSend(ctx: ToolContext, item: Item & { title: string }): Promise<OutboxRow> {
+export async function queueSend(ctx: OutboxRun, item: Item & { title: string }): Promise<OutboxRow> {
   const { db, now, config, runtime } = ctx.deps;
   requireRuntime(runtime, "wakeAt");
   const at = now();
