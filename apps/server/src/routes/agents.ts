@@ -43,7 +43,7 @@ import {
   toAgentDetail,
 } from "../agents";
 import { readableChannel, readableChannelsSql } from "../channels";
-import { type AppEnv, requireUser } from "../context";
+import { type AppEnv, requireUser, type WorkspaceMember } from "../context";
 import { waitingForMe } from "../control";
 import { isUniqueViolation } from "../db-errors";
 import { revealedDebateIds } from "../debates";
@@ -211,6 +211,22 @@ function privateChannelsOutside(db: Db, userId: string, ids: string[]) {
       ),
     );
 }
+
+/**
+ * The workspace's runs the person may see: of a channel they read (or none), and a debate's turn only once the
+ * debate they see revealed who said what (the output tokens per agent would tell whose each anonymous turn is).
+ */
+function readableRuns(db: Db, me: WorkspaceMember) {
+  return and(
+    eq(runs.workspaceId, me.workspaceId),
+    or(isNull(runs.channelId), sql`${runs.channelId} in ${readableChannelsSql(me)}`),
+    or(isNull(runs.debateId), inArray(runs.debateId, revealedDebateIds(db, me))),
+  );
+}
+
+/** A delegation asked from a channel the person doesn't read: the run shows, the question doesn't. */
+const questionHidden = (me: WorkspaceMember) =>
+  sql<boolean>`${runs.sourceChannelId} is not null and ${runs.sourceChannelId} not in ${readableChannelsSql(me)}`;
 
 export function toRun(row: typeof runs.$inferSelect): Run {
   return {
@@ -572,7 +588,10 @@ export function registerAgents(app: Hono<AppEnv>) {
           ? remote
             ? { harnessModel: input.model || null }
             : { model: input.model }
-          : {}),
+          : // Another harness without a model: the previous executor's model doesn't carry over, its default applies.
+            input.harness !== row.harnessKind
+            ? { harnessModel: null }
+            : {}),
         ...(input.fallback !== undefined ? { harnessFallback: input.fallback } : {}),
         updatedAt: now(),
       })
@@ -699,24 +718,10 @@ export function registerAgents(app: Hono<AppEnv>) {
         limit: z.coerce.number().int().min(1).max(200).default(50),
       }),
     );
-    const readable = readableChannelsSql(me);
     const rows = await db
-      .select({
-        run: runs,
-        // A delegation asked from a channel the person doesn't read: the run shows, the question doesn't.
-        hidden: sql<boolean>`${runs.sourceChannelId} is not null and ${runs.sourceChannelId} not in ${readable}`,
-      })
+      .select({ run: runs, hidden: questionHidden(me) })
       .from(runs)
-      .where(
-        and(
-          eq(runs.workspaceId, me.workspaceId),
-          q.agentId ? eq(runs.agentId, q.agentId) : undefined,
-          or(isNull(runs.channelId), sql`${runs.channelId} in ${readable}`),
-          // A debate's turn: only of a debate the person sees and that already revealed who said what (the
-          // output tokens per agent would tell whose each anonymous turn is).
-          or(isNull(runs.debateId), inArray(runs.debateId, revealedDebateIds(db, me))),
-        ),
-      )
+      .where(and(readableRuns(db, me), q.agentId ? eq(runs.agentId, q.agentId) : undefined))
       .orderBy(desc(runs.createdAt), desc(runs.id))
       .limit(q.limit);
     return c.json({ runs: rows.map((r) => toRun(r.hidden ? { ...r.run, what: "" } : r.run)) });
@@ -866,20 +871,27 @@ export function registerAgents(app: Hono<AppEnv>) {
     const { db, now } = c.get("deps");
     const row = await agentInWorkspace(db, me.workspaceId, param(c, "agentId"));
     const { limit } = readQuery(c, z.object({ limit: z.coerce.number().int().min(1).max(50).default(10) }));
+    // Stricter than the source: the person's own runs, under the same rule as GET /runs, so one of a private
+    // channel they left doesn't show its question or its place.
     const mine = await db
-      .select({ run: runs })
+      .select({ run: runs, hidden: questionHidden(me) })
       .from(runs)
       .innerJoin(messages, eq(messages.id, runs.sourceMessageId))
       .where(
-        and(eq(runs.agentId, row.id), eq(messages.authorKind, "person"), eq(messages.authorId, me.userId)),
+        and(
+          readableRuns(db, me),
+          eq(runs.agentId, row.id),
+          eq(messages.authorKind, "person"),
+          eq(messages.authorId, me.userId),
+        ),
       )
       .orderBy(desc(runs.createdAt))
       .limit(limit);
     const out: AgentInbox = {
       waiting: await waitingForMe(db, me, row.id, now()),
-      recent: mine.map(({ run }) => ({
+      recent: mine.map(({ run, hidden }) => ({
         runId: run.id,
-        what: run.what,
+        what: hidden ? "" : run.what,
         status: run.status,
         at: run.createdAt.toISOString(),
         channelId: run.channelId,

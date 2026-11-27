@@ -5,7 +5,7 @@
 // The run scenarios of the origin's file (a mention runs the agent, stop, budget...) wait for the runtime (P16) and
 // the chat routes; see the ledger.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { Agent, AgentAppearance, AgentChannel, AgentDetail, Member } from "@vanr/contract";
+import type { Agent, AgentAppearance, AgentChannel, AgentDetail, AgentInbox, Member } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { and, eq } from "drizzle-orm";
@@ -420,6 +420,97 @@ describe("agent registry", () => {
         ).resolvedModel,
       ).toBe("claude-sonnet-5-5");
       expect(await model()).toBe("claude-sonnet-5-5");
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "switching to another executor without a model leaves the previous executor's model behind",
+    async () => {
+      const { workspaceId, ana, lia } = await team();
+      // Ana paired a runner with Claude Code and Codex, both logged in on her plan.
+      const runnerId = newId("run");
+      await server.deps.db.insert(schema.runners).values({
+        id: runnerId,
+        workspaceId,
+        name: "ana-laptop",
+        tokenHash: newId("h"),
+        storeKey: "k",
+        pairedByUserId: ana.user.id,
+        executors: ["claude_code", "codex"],
+        access: { folders: [], tools: { claude: true, codex: true, commands: false, browser: false } },
+        cli: {
+          claude_code: { login: "subscription", plan: null, version: "1" },
+          codex: { login: "subscription", plan: null, version: "1" },
+        },
+      });
+      await server.deps.db
+        .update(schema.agents)
+        .set({ harnessKind: "claude_code", harnessModel: "opus", environmentId: runnerId })
+        .where(eq(schema.agents.id, lia.id));
+      const set = await ok<{ harness: string; resolvedModel: string }>(
+        call(ana, "PUT", `${agentPath(workspaceId, lia.id)}/runtime`, {
+          harness: "codex",
+          agreeToPlanTerms: true,
+        }),
+      );
+      expect(set).toMatchObject({ harness: "codex", resolvedModel: "" });
+      const [row] = await server.deps.db.select().from(schema.agents).where(eq(schema.agents.id, lia.id));
+      expect([row?.harnessKind, row?.harnessModel]).toEqual(["codex", null]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "the agent's inbox drops the person's runs of a private channel they no longer read",
+    async () => {
+      const { workspaceId, ana, beto, lia } = await team();
+      const support = await seedChannel(server, workspaceId, {
+        name: "support",
+        visibility: "private",
+        members: [ana, beto],
+      });
+      const messageId = newId("msg");
+      await server.deps.db.insert(schema.messages).values({
+        id: messageId,
+        workspaceId,
+        channelId: support,
+        authorKind: "person",
+        authorId: beto.user.id,
+        body: "@lia the refund for order 42",
+      });
+      const runId = newId("run");
+      await server.deps.db.insert(schema.runs).values({
+        id: runId,
+        workspaceId,
+        agentId: lia.id,
+        channelId: support,
+        sourceMessageId: messageId,
+        status: "done",
+        what: "Refund for order 42",
+        model: "claude-haiku-5-5",
+      });
+      const inbox = async () =>
+        (await ok<AgentInbox>(call(beto, "GET", `${agentPath(workspaceId, lia.id)}/inbox`))).recent.map(
+          (r) => r.runId,
+        );
+      expect(await inbox()).toEqual([runId]);
+      // Beto leaves #support: his old run there no longer shows, as in GET /runs.
+      await server.deps.db
+        .delete(schema.channelMemberships)
+        .where(
+          and(
+            eq(schema.channelMemberships.channelId, support),
+            eq(schema.channelMemberships.memberType, "person"),
+            eq(schema.channelMemberships.memberId, beto.user.id),
+          ),
+        );
+      expect(await inbox()).toEqual([]);
+      expect(
+        (await ok<{ runs: { id: string }[] }>(call(beto, "GET", `${ws(workspaceId)}/runs`))).runs.map(
+          (r) => r.id,
+        ),
+      ).toEqual([]);
     },
     SERVER_TEST_MS,
   );
