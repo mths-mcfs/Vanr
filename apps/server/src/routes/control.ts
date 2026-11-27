@@ -635,7 +635,10 @@ export function registerControl(app: Hono<AppEnv>) {
         failed.push({ actionId: row.id, code: err.code });
       }
     }
-    await publishActions(deps, messageId);
+    // Committed: a failed refresh of the receipt is logged, and the result still says what was undone.
+    await publishActions(deps, messageId).catch((err) =>
+      log.error("undo.publish_failed", { messageId, direction: "undo", err }),
+    );
     const after = await db
       .select()
       .from(reversibleActions)
