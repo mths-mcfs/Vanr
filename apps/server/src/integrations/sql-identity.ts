@@ -7,7 +7,9 @@
 // function with constant arguments, so a customer function can read a masked column before any check sees it.
 // The catalog says which functions exist: a customer routine that shares a name with a call in the query, or
 // that an allowed relation depends on, makes the query rejected before it is planned.
-import type postgres from "postgres";
+import { isIP } from "node:net";
+import type { SqlTarget } from "@vanr/engine/sqlconn";
+import postgres from "postgres";
 import { checkPlan, type GuardFailure, guardStatement, lexWords, qualified } from "./sql-guard";
 
 /** What the guarded run needs from ONE read-only transaction on the customer's database. */
@@ -226,4 +228,73 @@ export function postgresGuardedSession(tx: postgres.TransactionSql): GuardedSess
       return { fields: rows.columns?.map((c) => c.name) ?? [], rows: [...rows] };
     },
   };
+}
+
+/**
+ * One connection to a customer's database. Every use is ONE read-only transaction with a statement timeout, and
+ * the session is the guarded one: catalog reads with bound parameters, the plan, and the checked statement.
+ */
+export interface GuardedConnection {
+  readOnly<T>(timeoutMs: number, fn: (s: GuardedSession) => Promise<T>): Promise<T>;
+  close(): Promise<void>;
+}
+
+/** Opens a connection to `target` (its `address` already checked by the network rule). */
+export type GuardedConnector = (target: SqlTarget) => Promise<GuardedConnection>;
+
+/** Statement timeout for the current transaction, never below 100 ms. */
+const timeoutSql = (ms: number) => `set local statement_timeout = ${Math.max(100, Math.floor(ms))}`;
+
+/** A real Postgres, one connection per use (the caller closes it), to the checked address with the name for TLS. */
+export const postgresGuardedConnector: GuardedConnector = async (t) => {
+  const sql = postgres({
+    host: t.address ?? t.host,
+    port: t.port,
+    database: t.database,
+    username: t.username,
+    password: t.password,
+    ssl:
+      t.sslmode === "disable"
+        ? false
+        : {
+            rejectUnauthorized: t.sslmode === "verify-full",
+            ...(isIP(t.host) ? {} : { servername: t.host }),
+          },
+    max: 1,
+    connect_timeout: 10,
+    idle_timeout: 5,
+    prepare: false,
+    onnotice: () => {},
+  });
+  return {
+    async readOnly<T>(timeoutMs: number, fn: (s: GuardedSession) => Promise<T>): Promise<T> {
+      let result!: T;
+      await sql.begin("read only", async (tx) => {
+        await tx.unsafe(timeoutSql(timeoutMs));
+        result = await fn(postgresGuardedSession(tx));
+      });
+      return result;
+    },
+    close: () => sql.end({ timeout: 2 }),
+  };
+};
+
+/** What the PGlite connector uses of a PGlite instance. */
+interface PgliteLike {
+  transaction<T>(
+    fn: (tx: PgliteQueryable & { exec(sql: string): Promise<unknown> }) => Promise<T>,
+  ): Promise<T>;
+}
+
+/** An already open PGlite as the customer's database (tests): the target is ignored. */
+export function pgliteGuardedConnector(pg: PgliteLike): GuardedConnector {
+  return async () => ({
+    readOnly: (timeoutMs, fn) =>
+      pg.transaction(async (tx) => {
+        await tx.exec("set transaction read only");
+        await tx.exec(timeoutSql(timeoutMs));
+        return fn(pgliteGuardedSession(tx));
+      }),
+    close: async () => {},
+  });
 }

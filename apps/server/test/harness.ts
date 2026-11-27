@@ -1,8 +1,8 @@
 import type { Me } from "@vanr/contract";
-import type { SqlConnector } from "@vanr/engine/sqlconn";
 import type { Verifier } from "../src/assignments/verify";
 import { loadConfig } from "../src/config";
 import type { RuntimePort } from "../src/context";
+import type { GuardedConnector } from "../src/integrations/sql-identity";
 import { type BootSteps, type RunningServer, startServer } from "../src/server";
 import type { SignupQueueLimits } from "../src/signup-queue";
 
@@ -19,7 +19,7 @@ export interface TestServerOptions {
   env?: Record<string, string>;
   now?: () => Date;
   fetchExternal?: typeof fetch;
-  sql?: SqlConnector;
+  sql?: GuardedConnector;
   /** No forcing of the fake provider: the production rule of the lookup applies (production tests). */
   realModels?: boolean;
   /** The inactivity limit of every request, in seconds (Bun's default is 10). */
