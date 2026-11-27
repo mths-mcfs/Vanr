@@ -17,6 +17,7 @@ const url = process.env.VANR_TEST_POSTGRES_URL;
 
 /** PGlite returns `{ rows }`. */
 const StateRows = z.array(z.object({ source_id: z.string(), embed_state: z.string() }));
+const IdRows = z.array(z.object({ id: z.string(), embed_state: z.string() }));
 
 const opened: OpenDb[] = [];
 afterAll(async () => {
@@ -136,6 +137,102 @@ describe("search in SQL: beyond the contract", () => {
       expect(await pending).toEqual([]);
     },
   );
+
+  test.each(url ? ["PGlite", "real Postgres"] : ["PGlite"])(
+    "a reindex of the source during a search still returns it (%s)",
+    async (backend) => {
+      const real = backend === "real Postgres";
+      const access = worldAccess(world);
+      const src: SourceRef = { kind: "file", id: "harbor" };
+      const version = (updatedAt: string) => [
+        chunk({ text: "harbor expansion roadmap", scope: { kind: "workspace" }, updatedAt }),
+      ];
+      let reads = 0;
+      const db = real ? await realPostgres() : await pglite();
+      const index: PgSearchIndex = new PgSearchIndex(db, {
+        ...(real ? { embedder: fakeEmbedder() } : {}),
+        access: {
+          ...access,
+          // The second read is the permission check after the legs: the file is saved again right then.
+          async readable(workspaceId, principal) {
+            if (++reads === 2) await index.upsert(src, version("2026-10-11T12:00:00Z"));
+            return access.readable(workspaceId, principal);
+          },
+        },
+      });
+      await index.upsert(src, version("2026-10-10T12:00:00Z"));
+      if (real) expect(await index.embedPending()).toBe(1);
+      const hits = await index.search({ workspaceId: "o", userId: "u1" }, "harbor");
+      expect(reads).toBe(2);
+      expect(hits.map((h) => h.source.id)).toEqual(["harbor"]);
+    },
+  );
+
+  test.each(url ? ["PGlite", "real Postgres"] : ["PGlite"])(
+    "replaying a source the index already holds writes nothing; a changed fact replaces it (%s)",
+    async (backend) => {
+      const db = backend === "real Postgres" ? await realPostgres() : await pglite();
+      const index = new PgSearchIndex(db, { access: worldAccess(world), embedder: fakeEmbedder() });
+      const src: SourceRef = { kind: "file", id: "steady" };
+      const version = (over: Partial<ChunkInput> = {}) => [
+        chunk({ text: "lighthouse", ...over }),
+        chunk({ text: "keeper", ordinal: 1, ...over }),
+      ];
+      const rows = async () => {
+        const result = await db.execute(
+          sql`select id::text as id, embed_state from search_chunks where source_id = 'steady' order by ordinal`,
+        );
+        return IdRows.parse(Array.isArray(result) ? result : (result as { rows?: unknown }).rows);
+      };
+      await index.upsert(src, version());
+      const first = await rows();
+      await index.upsert(src, version());
+      await index.upsert(src, [...version()].reverse());
+      expect(await rows()).toEqual(first);
+      // The channel the file sits in is now private (no `channelVisibility` on the way): the replay takes the
+      // chunks off the vector queue.
+      await index.upsert(src, version({ scope: { kind: "channel", channelId: "priv" } }));
+      const moved = await rows();
+      expect(moved.map((r) => r.embed_state)).toEqual(["none", "none"]);
+      expect(moved.map((r) => r.id)).not.toEqual(first.map((r) => r.id));
+      await index.upsert(src, version({ scope: { kind: "channel", channelId: "priv" }, page: 2 }));
+      expect((await rows()).map((r) => r.id)).not.toEqual(moved.map((r) => r.id));
+      // The same `title\ntext` split elsewhere hashes the same, and is still another chunk.
+      await index.upsert(src, [chunk({ title: "Nota", text: "light\nhouse" })]);
+      const split = await rows();
+      await index.upsert(src, [chunk({ title: "Nota\nlight", text: "house" })]);
+      expect((await rows()).map((r) => r.id)).not.toEqual(split.map((r) => r.id));
+    },
+  );
+
+  test.each([
+    ["an exclusion", "harbor -cancelado", {}, { text: "harbor plan cancelado" }],
+    [
+      "a channel filter",
+      "harbor",
+      { filters: { channelIds: ["pub"] } },
+      { scope: { kind: "channel", channelId: "priv" } },
+    ],
+  ] as const)("a source rewritten during a search must still pass %s", async (_, query, opts, change) => {
+    const access = worldAccess(world);
+    const src: SourceRef = { kind: "wiki", id: "plan" };
+    let reads = 0;
+    const index: PgSearchIndex = new PgSearchIndex(await pglite(), {
+      access: {
+        ...access,
+        async readable(workspaceId, principal) {
+          if (++reads === 2)
+            await index.upsert(src, [
+              chunk({ text: "harbor plan", updatedAt: "2026-10-11T12:00:00Z", ...change }),
+            ]);
+          return access.readable(workspaceId, principal);
+        },
+      },
+    });
+    await index.upsert(src, [chunk({ text: "harbor plan" })]);
+    expect(await index.search({ workspaceId: "o", userId: "u1" }, query, opts)).toEqual([]);
+    expect(reads).toBe(2);
+  });
 
   test.each(["support@example.com", "https://example.com/path", "version 1.2.3"])(
     "the body is searchable with the same tokenization as the query: %s",
