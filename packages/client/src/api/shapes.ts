@@ -119,10 +119,15 @@ export const BaseQueryResult = s.object({
   total: s.number,
   nextCursor: s.nullable(s.string),
   groups: s.optional(s.array(s.object({ key: s.nullable(s.string), count: s.number }))),
+  /** Title and place of each row that these rows' relations link to. */
+  linked: s.optional(s.record(C.BaseLinkedRow)),
 });
 export type BaseQueryResult = Infer<typeof BaseQueryResult>;
 
-export const BaseRowDetail = s.merge(C.BaseRow, s.object({ body: s.string }));
+export const BaseRowDetail = s.merge(
+  C.BaseRow,
+  s.object({ body: s.string, linked: s.optional(s.record(C.BaseLinkedRow)) }),
+);
 export type BaseRowDetail = Infer<typeof BaseRowDetail>;
 
 export const BaseImportResult = s.object({
