@@ -82,6 +82,75 @@ function rowsOf(result: unknown): Row[] {
 /** A chunk's identity across reindexes: `search_chunks_source_uq`. */
 const chunkKey = (r: Row) => `${r.source_kind}:${r.ordinal}:${r.source_id}`;
 
+/**
+ * What a stored chunk says, without what is derived from it (`title_fold`, `tsv`) and with the vector only as
+ * "may go out or not" (its progress is the queue's). Equal on both sides: replacing the chunk changes nothing.
+ */
+const chunkFacts = (r: {
+  workspaceId: string;
+  ordinal: number;
+  hash: string;
+  url: string;
+  scope: ChunkInput["scope"];
+  authorId: string | null;
+  page: number | null;
+  has: readonly string[];
+  is: readonly string[];
+  mentions: readonly string[];
+  untrusted: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  embed: boolean;
+}) =>
+  JSON.stringify([
+    r.workspaceId,
+    r.ordinal,
+    r.hash,
+    r.url,
+    r.scope.kind,
+    r.scope.kind === "channel" ? r.scope.channelId : null,
+    storableList(
+      r.scope.kind === "private"
+        ? r.scope.principals
+        : r.scope.kind === "channel"
+          ? (r.scope.also ?? [])
+          : [],
+    ),
+    r.authorId,
+    r.page,
+    storableList(r.has),
+    storableList(r.is),
+    storableList(r.mentions),
+    r.untrusted,
+    r.createdAt.getTime(),
+    r.updatedAt.getTime(),
+    r.embed,
+  ]);
+
+/** The facts of a row of `search_chunks`, read back as `chunkFacts` writes them. */
+const rowFacts = (r: Row) =>
+  chunkFacts({
+    workspaceId: r.workspace_id,
+    ordinal: Number(r.ordinal),
+    hash: r.text_hash,
+    url: r.url,
+    scope:
+      r.scope_kind === "channel"
+        ? { kind: "channel", channelId: r.channel_id, also: r.principals }
+        : r.scope_kind === "private"
+          ? { kind: "private", principals: r.principals }
+          : { kind: "workspace" },
+    authorId: r.author_id ?? null,
+    page: r.page ?? null,
+    has: r.has,
+    is: r.is_facets,
+    mentions: r.mentions,
+    untrusted: r.untrusted ?? null,
+    createdAt: new Date(r.created_at),
+    updatedAt: new Date(r.updated_at),
+    embed: r.embed_state !== "none",
+  });
+
 const hashText = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 32);
 
 /** Postgres text cannot hold NUL: a stored value never has one, so text loses it before it is stored. */
@@ -92,9 +161,9 @@ const storable = (s: string) => s.replaceAll(NUL, "");
  * A text[] literal. An element with NUL (a filter id typed in the query) cannot equal any stored value,
  * so it is left out instead of failing the whole statement.
  */
+const storableList = (xs: readonly string[]) => xs.filter((x) => !x.includes(NUL));
 const textArray = (xs: readonly string[]) =>
-  sql`${`{${xs
-    .filter((x) => !x.includes(NUL))
+  sql`${`{${storableList(xs)
     .map((x) => `"${x.replace(/(["\\])/g, "\\$1")}"`)
     .join(",")}}`}::text[]`;
 
@@ -194,7 +263,22 @@ export class PgSearchIndex implements SearchIndex {
     const prepared = await Promise.all(
       chunks.map(async (raw) => {
         const c = { ...raw, title: storable(raw.title), text: storable(raw.text) };
-        return { c, hash: hashText(`${c.title}\n${c.text}`), embed: await this.eligible(c) };
+        const hash = hashText(`${c.title}\n${c.text}`);
+        const embed = await this.eligible(c);
+        const facts = chunkFacts({
+          ...c,
+          hash,
+          authorId: c.authorId ?? null,
+          page: c.page ?? null,
+          has: c.facets?.has ?? [],
+          is: c.facets?.is ?? [],
+          mentions: c.facets?.mentions ?? [],
+          untrusted: c.untrusted ?? null,
+          createdAt: new Date(c.createdAt ?? c.updatedAt),
+          updatedAt: new Date(c.updatedAt),
+          embed,
+        });
+        return { c, hash, embed, facts };
       }),
     );
     await this.db.transaction(async (tx) => {
@@ -202,6 +286,18 @@ export class PgSearchIndex implements SearchIndex {
       await tx.execute(
         sql`select pg_advisory_xact_lock(hashtextextended(${`${source.kind}:${source.id}`}, 0))`,
       );
+      // A replay of a source the index already holds as it is (the backfill replays every live file each
+      // tick) writes nothing: the rows, their ids and their vectors stay.
+      const current = rowsOf(
+        await tx.execute(sql`
+          select workspace_id, ordinal, text_hash, url, scope_kind, channel_id, principals, author_id, page, has,
+            is_facets, mentions, untrusted, created_at, updated_at, embed_state
+          from search_chunks where source_kind = ${source.kind} and source_id = ${source.id}
+          order by ordinal`),
+      );
+      const wanted = prepared.map((p) => p.facts).sort();
+      const stored = current.map(rowFacts).sort();
+      if (wanted.length === stored.length && wanted.every((f, i) => f === stored[i])) return;
       // The vector of an unchanged chunk (same hash) stays: editing a page does not send it all again.
       const keep = new Map<string, string>();
       if (vector) {
