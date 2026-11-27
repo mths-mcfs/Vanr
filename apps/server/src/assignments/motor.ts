@@ -226,7 +226,8 @@ export async function snapshotOf(deps: AppDeps, row: AssignmentRow): Promise<Sna
   for (const w of works) {
     lastN[w.itemId] = Math.max(lastN[w.itemId] ?? 0, w.n);
     if (w.status === "ended") continue;
-    const sending = w.status === "running" && w.refId === null && now - w.startedAt.getTime() < CLAIM_GRACE_MS;
+    const sending =
+      w.status === "running" && w.refId === null && now - w.startedAt.getTime() < CLAIM_GRACE_MS;
     open.push({
       id: w.id,
       live:
