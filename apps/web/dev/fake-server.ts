@@ -272,7 +272,10 @@ export class FakeServer {
   private readonly now: () => Date;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly sessions = new Map<string, string>();
-  private readonly forced = new Map<FakeMethod, { answer: Forced; times: number }>();
+  private readonly forced = new Map<
+    FakeMethod,
+    { answer: Forced; times: number; when: ((params: Record<string, unknown>) => boolean) | undefined }
+  >();
   private readonly held = new Map<FakeMethod, Promise<void>>();
   private readonly delayed = new Map<FakeMethod, Promise<void>>();
   private readonly slowed = new Map<FakeMethod, number>();
@@ -588,8 +591,14 @@ export class FakeServer {
   }
 
   /** The next `times` calls of an operation get this answer instead of the real one. */
-  force(method: FakeMethod, forced: Forced, times = 1): void {
-    this.forced.set(method, { answer: forced, times });
+  force(
+    method: FakeMethod,
+    forced: Forced,
+    times = 1,
+    /** Only the calls whose path, query and body fields match get the answer. */
+    when?: (params: Record<string, unknown>) => boolean,
+  ): void {
+    this.forced.set(method, { answer: forced, times, when });
   }
 
   /** Lifts a forced answer that has calls left. */
@@ -783,7 +792,7 @@ export class FakeServer {
     if (slow !== undefined) await this.sleep(slow);
 
     const forced = this.forced.get(route.name);
-    if (forced !== undefined) {
+    if (forced !== undefined && (forced.when === undefined || forced.when(params))) {
       if (forced.times <= 1) this.forced.delete(route.name);
       else forced.times -= 1;
       // What fetch does when the network is down.

@@ -348,6 +348,60 @@ describe("the inbox", () => {
       expect(count(/^Report \d+( moved)?$/)).toBe(59);
     });
 
+    test("Show older asks only for the next page", async () => {
+      const { server, sample } = reports();
+      for (let n = 60; n < 130; n += 1) {
+        const updatedAt = new Date(Date.parse(sample.updatedAt) - n * 60_000).toISOString();
+        server.notifications.push({
+          ...sample,
+          id: `ntf_report_${n}`,
+          updatedAt,
+          readAt: updatedAt,
+          latest: { title: `Report ${n}` },
+        });
+      }
+      const app = await renderApp({ path: `${PATH}?filter=fyi`, signedInAs: "usr_ana", server });
+      await screen.findByText("Report 0");
+      await app.user.click(screen.getByRole("button", { name: "Show older notices" }));
+      await screen.findByText("Report 99");
+      await app.user.click(screen.getByRole("button", { name: "Show older notices" }));
+      await screen.findByText("Report 129");
+      const older = server.calls.filter(
+        (call) => call.method === "listNotifications" && call.params.cursor !== undefined,
+      );
+      expect(older.map((call) => call.params.cursor)).toEqual(["50", "100"]);
+    });
+
+    test("an older range that fails to load again is dropped, and Show older can try again", async () => {
+      const { server, sample } = reports();
+      const app = await renderApp({ path: `${PATH}?filter=fyi`, signedInAs: "usr_ana", server });
+      await screen.findByText("Report 0");
+      await app.user.click(screen.getByRole("button", { name: "Show older notices" }));
+      await screen.findByText("Report 59");
+      server.force(
+        "listNotifications",
+        { kind: "error", status: 500, code: "internal" },
+        1,
+        (params) => params.cursor !== undefined,
+      );
+      const fresh = {
+        ...sample,
+        id: "ntf_new",
+        updatedAt: new Date(Date.parse(sample.updatedAt) + 60_000).toISOString(),
+        readAt: null,
+        latest: { title: "Brand new" },
+      };
+      server.notifications.push(fresh);
+      await act(async () =>
+        server.emit("workspace_birchwood", { type: "notification.shown", notification: strip(fresh) }),
+      );
+      await screen.findByText("Brand new");
+      await waitFor(() => expect(count(/^Report 59$/)).toBe(0));
+      expect(count(/^Report 49$/)).toBe(0);
+      await app.user.click(screen.getByRole("button", { name: "Show older notices" }));
+      await waitFor(() => expect(count(/^Report \d+$/)).toBe(60));
+    });
+
     test("hidden then shown again while the first page is on its way ends shown, once", async () => {
       const { server } = reports();
       await renderApp({ path: `${PATH}?filter=fyi`, signedInAs: "usr_ana", server });

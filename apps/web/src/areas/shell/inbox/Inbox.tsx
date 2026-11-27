@@ -177,22 +177,33 @@ function NoticeList({ workspaceId, filter }: { workspaceId: string; filter: Noti
   const [loadingMore, setLoadingMore] = useState(false);
   const wanted = useRef(0);
   const ticket = useRef(0);
-  const loadExtra = async (from: string | null, count: number) => {
+  /** Loads `count` more notices from `from`, after `base`. A later load started meanwhile wins. */
+  const loadExtra = async (from: string | null, count: number, base: readonly AppNotification[] = []) => {
     const mine = ++ticket.current;
-    const items: AppNotification[] = [];
+    const items = [...base];
     let cursor = from;
-    while (cursor !== null && items.length < count) {
-      const page = await client.api.listNotifications({
-        workspaceId,
-        query: { filter, cursor, limit: PAGE },
-      });
-      // A later load started meanwhile: its answer wins.
-      if (mine !== ticket.current) return;
-      items.push(...page.items);
-      cursor = page.items.length === 0 ? null : page.nextCursor;
+    try {
+      while (cursor !== null && items.length - base.length < count) {
+        const page = await client.api.listNotifications({
+          workspaceId,
+          query: { filter, cursor, limit: PAGE },
+        });
+        if (mine !== ticket.current) return;
+        items.push(...page.items);
+        cursor = page.items.length === 0 ? null : page.nextCursor;
+      }
+    } catch (error) {
+      // An older range that could not be loaded again no longer fits the first page: drop it, so
+      // "Show older" comes back to try again.
+      if (mine === ticket.current) {
+        wanted.current = 0;
+        setExtra(null);
+      }
+      throw error;
     }
     if (mine === ticket.current) setExtra({ items, cursor });
   };
+
   // An event that arrives while the first page is on its way may be missing from that answer, which
   // was computed before it: the first page is asked for once more when it lands.
   const askAgain = useRef(false);
@@ -247,10 +258,11 @@ function NoticeList({ workspaceId, filter }: { workspaceId: string; filter: Noti
 
   const loadMore = async () => {
     if (cursor === null) return;
-    wanted.current = items.length - first.data.items.length + PAGE;
+    // Only the next page; loading the whole older range again is for when the first page changes.
+    wanted.current = (extra?.items.length ?? 0) + PAGE;
     setLoadingMore(true);
     try {
-      await loadExtra(first.data.nextCursor, wanted.current);
+      await loadExtra(cursor, PAGE, extra?.items ?? []);
     } catch (error) {
       outcome.failed(error);
     } finally {
