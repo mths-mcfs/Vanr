@@ -469,6 +469,72 @@ describe("commands on the agent's runner", () => {
   );
 
   test(
+    "the assignment's default runner (the agent's) in another workspace is not reached either",
+    async () => {
+      const t = await team();
+      const eve = await signedIn(server, "Eve", email("eve"));
+      const foreign = await seedWorkspace(server, eve, "Other");
+      const theirs = await pairFake(server, eve, foreign.workspaceId, { open });
+      // No runner chosen for the assignment: it uses the agent's, which now points at the other workspace's.
+      const row = await assignmentOf(t, { runnerId: null });
+      await server.deps.db
+        .update(agents)
+        .set({ environmentId: theirs.runnerId })
+        .where(eq(agents.id, t.lia.id));
+      const job = await (await run(t, row.threadId)).call("start_job", {
+        title: "Fix",
+        prompt: "Fix the test",
+      });
+      expect(job.isError).toBe(true);
+      expect(job.content).toContain("no runner");
+      expect(requests(theirs.runner, "job.start")).toEqual([]);
+      expect(requests(theirs.runner, "write")).toEqual([]);
+      expect(
+        await server.deps.db.select().from(runnerJobs).where(eq(runnerJobs.assignmentId, row.id)),
+      ).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a command approved for one runner doesn't run on the runner lent in the meantime",
+    async () => {
+      const t = await team();
+      const other = await pairFake(server, t.ana, t.workspaceId, { open });
+      await server.deps.db
+        .insert(schema.sandboxPolicies)
+        .values({ workspaceId: t.workspaceId, requireApproval: true });
+      const r = await run(t, null);
+      const out = await r.call(
+        "execute_code",
+        { command: "deploy.sh" },
+        {
+          // While the approval waits, a person lends Lia the other runner; then the approval comes.
+          requestApproval: async (req) => {
+            await server.deps.db
+              .update(agents)
+              .set({ environmentId: other.runnerId })
+              .where(eq(agents.id, t.lia.id));
+            return {
+              id: "apv_l",
+              decision: "approved",
+              reason: null,
+              byName: "Ana",
+              payloadHash: req.payloadHash,
+            };
+          },
+          settleApproval: async () => {},
+        },
+      );
+      expect(out.isError).toBe(true);
+      expect(out.content).toContain("no longer what was approved");
+      expect(requests(other.runner, "exec")).toEqual([]);
+      expect(requests(t.fake.runner, "exec")).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "commands turned off on the runner never reach it, and the output that comes back is capped",
     async () => {
       const t = await team((req, runner) =>

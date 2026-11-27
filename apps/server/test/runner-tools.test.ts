@@ -122,16 +122,18 @@ describe("the agent's runner", () => {
       expect(failed.isError).toBe(true);
       expect(failed.result).toContain("exit code: 3");
 
-      expect(
-        (await t.ask("write_file", { path: "notes/plan.md", content: "# Plan\n- test" })).result,
-      ).toContain("Wrote");
+      expect((await t.ask("write_file", { path: "notes/plan.md", content: "# Plan\n- test" })).result).toBe(
+        "Wrote notes/plan.md (13 bytes).",
+      );
       expect((await t.ask("read_file", { path: "notes/plan.md" })).result).toContain("- test");
       expect((await t.ask("list_files", { path: "notes" })).result).toContain("plan.md");
       expect((await t.ask("read_file", { path: "/etc/hostname" })).isError).toBe(true);
       const exported = await t.ask("export_file", { path: "notes/plan.md" });
       expect(exported.result).toContain("Saved notes/plan.md to the Drive");
       const fileId = /\((file_[^)]+)\)/.exec(exported.result)?.[1] as string;
-      expect((await t.ask("import_file", { fileId, path: "copy.md" })).result).toContain("Copied");
+      expect((await t.ask("import_file", { fileId, path: "copy.md" })).result).toBe(
+        'Copied "plan.md" to copy.md (13 bytes).',
+      );
       expect((await t.ask("read_file", { path: "copy.md" })).result).toContain("# Plan");
 
       expect((await t.ask("environment_status", {})).result).toContain("online");

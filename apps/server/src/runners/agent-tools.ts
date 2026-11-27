@@ -177,6 +177,12 @@ async function onRunner<O extends RunnerOp, T>(
   }
 }
 
+/** What the runner answers to a `write`. */
+interface WriteResult {
+  path: string;
+  bytes: number;
+}
+
 async function touch(ctx: ToolContext) {
   await ctx.deps.db
     .update(agentEnvironments)
@@ -223,6 +229,9 @@ async function gated(ctx: ToolContext, tool: string, command: string) {
   }
 }
 
+/** The runner each `execute_code` call was planned for (the key is the input `runTool` plans and then runs). */
+const planned = new WeakMap<object, string>();
+
 const executeCode = defineStored({
   name: "execute_code",
   description:
@@ -234,8 +243,12 @@ const executeCode = defineStored({
     timeoutSeconds: z.number().int().min(1).max(3600).optional(),
   }),
   async plan(ctx, input) {
+    // The runner is part of the approved effect: a command approved for one runner never runs on another.
+    const runner = await runnerOf(ctx);
+    planned.set(input, runner.id);
     const s = await sandboxOf(ctx);
     return {
+      payload: { ...input, runnerId: runner.id },
       // The command reaches the network: it counts as acting outside (C). With a delivered secret, it raises B.
       destination: { kind: "external", allowed: true, target: "environment" },
       raises: (await hasSecrets(ctx)) ? [{ flag: "B", source: "execute_code with the agent's secrets" }] : [],
@@ -258,6 +271,11 @@ const executeCode = defineStored({
   async run(ctx, input) {
     // The runner is checked before the assignment asks anyone: a command for a runner it can't reach never waits.
     const runner = await runnerOf(ctx);
+    const approvedFor = planned.get(input);
+    if (approvedFor && approvedFor !== runner.id)
+      throw new ToolInputError(
+        "Your runner changed since this command was planned; nothing was run. Try again.",
+      );
     // The owner turned commands off on this runner: stopped here too, so nothing waits on a person for it.
     if (!runner.access.tools.commands) throw new ToolInputError(EXPLAIN.exec_disabled as string);
     // In an assignment, its autonomy decides whether the command goes on its own or waits for a person.
@@ -342,13 +360,13 @@ const writeFile = define({
     append: z.boolean().optional(),
   }),
   async run(ctx, input) {
-    const { data } = await onRunner<"write", { path: string; size: number }>(ctx, "write", {
+    const { data } = await onRunner<"write", WriteResult>(ctx, "write", {
       path: input.path,
       content: input.content,
       encoding: "utf8",
       append: input.append ?? false,
     });
-    return `Wrote ${data.path} (${data.size} bytes).`;
+    return `Wrote ${data.path} (${data.bytes} bytes).`;
   },
 });
 
@@ -423,13 +441,13 @@ const importFile = define({
         : JSON.stringify(structured, null, 2);
     const bytes = blob ? blob.bytes : new TextEncoder().encode(text);
     if (bytes.length > FILE_MAX) throw new ToolInputError("The file is larger than 5 MB.");
-    const { data } = await onRunner<"write", { path: string; size: number }>(ctx, "write", {
+    const { data } = await onRunner<"write", WriteResult>(ctx, "write", {
       path: input.path,
       content: Buffer.from(bytes).toString("base64"),
       encoding: "base64",
       append: false,
     });
-    return `Copied "${row.title}" to ${data.path} (${data.size} bytes).`;
+    return `Copied "${row.title}" to ${data.path} (${data.bytes} bytes).`;
   },
 });
 
