@@ -153,7 +153,8 @@ function WordList({
             if (event.key === "Enter" || event.key === ",") {
               event.preventDefault();
               add();
-            } else if (event.key === "Backspace" && draft === "" && words.length > 0)
+            } else if (event.key === "Escape") setDraft("");
+            else if (event.key === "Backspace" && draft === "" && words.length > 0)
               onChange(words.slice(0, -1));
           }}
         />

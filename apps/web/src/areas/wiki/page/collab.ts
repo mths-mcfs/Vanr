@@ -26,7 +26,9 @@ export type LiveEvent =
   | { type: "conflict"; version: number }
   | { type: "discarded"; version: number }
   | { type: "publish_failed" }
-  | { type: "draft_save_failed" };
+  | { type: "draft_save_failed" }
+  /** The server changed what this person may do on the page (a lock, a revoked read): read it again. */
+  | { type: "rights" };
 
 export type Live = { doc: Y.Doc; provider: HocuspocusProvider };
 
@@ -112,6 +114,13 @@ export function useLive(
     });
     const doc = new Y.Doc();
     let denied = false;
+    /** The server took the page away from this person: stop for good, never reconnect. */
+    const deny = () => {
+      denied = true;
+      setStatus("denied");
+      socket.disconnect();
+      handler.current({ type: "rights" });
+    };
     const provider = new HocuspocusProvider({
       websocketProvider: socket,
       name: wikiDocumentName(workspaceId, slug),
@@ -129,21 +138,21 @@ export function useLive(
         setReady(true);
         setReadOnly(provider.authorizedScope === "readonly");
       },
-      onAuthenticationFailed: () => {
-        denied = true;
-        setStatus("denied");
-      },
+      onAuthenticationFailed: deny,
       onStatus: ({ status: next }) => {
         if (denied) return;
+        // Once the page was live, every retry is still "offline" to the person, not a new start.
         if (next === "disconnected") setStatus("offline");
         else if (next === "connecting")
-          setStatus((current) => (current === "synced" ? "offline" : "connecting"));
+          setStatus((current) => (current === "connecting" ? "connecting" : "offline"));
       },
       onClose: ({ event }) => {
         if (event.code === WIKI_CLOSE.sessionEnded) gate.ended();
-        else if (event.code === WIKI_CLOSE.revoked) {
-          denied = true;
-          setStatus("denied");
+        else if (event.code === WIKI_CLOSE.revoked) deny();
+        else if (event.code === WIKI_CLOSE.readOnly) {
+          // Locked while open: write nothing until the reconnect says which scope this person has now.
+          setReadOnly(true);
+          handler.current({ type: "rights" });
         } else if (event.code === WIKI_CLOSE.outOfSync || event.code === WIKI_CLOSE.tooLarge)
           setGeneration((n) => n + 1);
       },

@@ -2,11 +2,18 @@
 import { describe, expect, test } from "bun:test";
 import { screen, within } from "@testing-library/react";
 import { renderApp } from "../../../test/app.tsx";
+import en from "../../messages/wiki/en.ts";
+import ptBR from "../../messages/wiki/pt-BR.ts";
 
 const W = "/workspace/workspace_birchwood/wiki";
 const pt = { signedInAs: "usr_ana", languages: ["pt-BR"] };
 
 describe("a wiki em português", () => {
+  test("todo texto da wiki existe em português, e nenhum está vazio", () => {
+    expect(Object.keys(ptBR).sort()).toEqual(Object.keys(en).sort());
+    expect(Object.entries(ptBR).filter(([, text]) => text === "")).toEqual([]);
+  });
+
   test("o índice mostra as páginas por pasta, as fixadas e as mais lidas", async () => {
     await renderApp({ path: W, ...pt });
     expect(await screen.findByText("3 páginas")).toBeDefined();

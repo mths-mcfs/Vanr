@@ -85,6 +85,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
     (event: LiveEvent) => {
       if (event.type === "conflict") setConflict(event.version);
       else if (event.type === "published" || event.type === "discarded") setConflict(null);
+      if (event.type === "rights") setConflict(null);
       if (event.type === "publish_failed" || event.type === "draft_save_failed")
         setFailure(
           new Error(t(event.type === "publish_failed" ? "draft.publishFailed" : "draft.saveFailed")),
@@ -180,9 +181,15 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
 
   const admin = can(role, "configure");
   const firstAuthor = p.history.at(-1)?.author;
-  const mayDelete = admin || (!p.locked && firstAuthor?.type === "person" && firstAuthor.id === userId);
+  // Who created the page, as the server counts it: their own first version, or an agent's made for them.
+  const createdIt =
+    firstAuthor?.type === "person" ? firstAuthor.id === userId : firstAuthor?.actingFor === userId;
+  const mayDelete = admin || (!p.locked && createdIt);
   // Offline, the live document still takes edits: they wait in it and sync on reconnect.
-  const editable = p.editable && source?.kind === "live" && !live.readOnly;
+  // One rule for every write control: the page says this person may edit it, and the live document has
+  // not said otherwise since (a lock seen live, a revoked read).
+  const canWrite = p.editable && live.status !== "denied" && !live.readOnly;
+  const editable = canWrite && source?.kind === "live";
   const dirty = live.touched || p.draft?.dirty === true;
   const agentName = (id: string) => agents.data?.find((agent) => agent.id === id)?.name;
 
@@ -324,7 +331,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
         <span className="wiki-page__status" role="status" data-tone={status.tone}>
           {status.text}
         </span>
-        {p.editable && dirty && conflict === null && live.status === "synced" && (
+        {canWrite && dirty && conflict === null && live.status === "synced" && (
           <Button
             variant="primary"
             icon={<Icon icon={Check} />}
@@ -342,7 +349,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
             <MenuItem icon={<Icon icon={History} />} onSelect={() => setHistory(true)}>
               {t("page.history")}
             </MenuItem>
-            {p.editable && dirty && (
+            {canWrite && dirty && (
               <MenuItem icon={<Icon icon={Undo2} />} onSelect={() => void discard()}>
                 {t("draft.discard")}
               </MenuItem>
@@ -379,7 +386,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
       </header>
       <div className="wiki-page__body">
         <article className="wiki-doc" data-draft={status.tone}>
-          {p.editable ? (
+          {canWrite ? (
             <input
               className="wiki-doc__title"
               aria-label={t("page.title")}
@@ -406,7 +413,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
               workspaceId={workspaceId}
               page={p}
               defs={schema.data.defs}
-              editable={p.editable}
+              editable={canWrite}
               busy={busy === "meta"}
               onMeta={writeMeta}
               onMove={(folder) =>
@@ -432,22 +439,26 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
                   <Button size="sm" variant="ghost" onClick={() => setHistory(true)}>
                     {t("draft.seeHistory")}
                   </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    loading={busy === "discard"}
-                    onClick={() => void discard()}
-                  >
-                    {t("draft.discardMine")}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="primary"
-                    loading={busy === "publish"}
-                    onClick={() => void publish(true)}
-                  >
-                    {t("draft.publishOver", { version: conflict })}
-                  </Button>
+                  {canWrite && live.status === "synced" && (
+                    <>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        loading={busy === "discard"}
+                        onClick={() => void discard()}
+                      >
+                        {t("draft.discardMine")}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        loading={busy === "publish"}
+                        onClick={() => void publish(true)}
+                      >
+                        {t("draft.publishOver", { version: conflict })}
+                      </Button>
+                    </>
+                  )}
                 </>
               }
             >
@@ -487,7 +498,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
       {history && (
         <HistoryDialog
           workspaceId={workspaceId}
-          page={p}
+          page={{ ...p, editable: canWrite }}
           onClose={() => setHistory(false)}
           onRestored={(saved, from) => {
             setHistory(false);

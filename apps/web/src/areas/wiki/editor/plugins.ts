@@ -128,8 +128,9 @@ export const wikiLinkInputRule = $inputRule(
 
 /**
  * A link as an `<a>`: its label, marked when nothing answers it, and a click that opens the page or
- * creates it. It resolves again when the screen says so (a page created, renamed or deleted while the
- * editor is open). An embedded image attachment shows as the image.
+ * creates it. It resolves again when the screen says so (a page created, renamed or deleted, or the
+ * attachments loaded while the editor is open). An embedded image attachment shows as the image, also
+ * when it only resolves to one after the editor opened.
  */
 export const wikiLinkView = (hooks: Hooks) =>
   $view(wikiLinkNode.node, () => (node) => {
@@ -137,38 +138,42 @@ export const wikiLinkView = (hooks: Hooks) =>
     const embed = raw.startsWith("!");
     const { target, anchor } = parseLinkInner(raw.replace(/^!?\[\[|\]\]$/g, ""));
     let resolved = hooks.current.resolve(target);
-    if (embed && resolved.kind === "file" && resolved.image) {
-      const image = document.createElement("img");
-      image.className = "wiki-embed";
-      image.alt = resolved.name;
-      image.dataset.raw = raw;
-      image.contentEditable = "false";
-      let url: string | undefined;
-      let gone = false;
-      void hooks.current.imageUrl(resolved.fileId).then(
+    // The node's DOM is a frame that holds the link or the image, so one can become the other.
+    const frame = document.createElement("span");
+    frame.className = "wiki-node";
+    frame.contentEditable = "false";
+    frame.dataset.raw = raw;
+    const link = document.createElement("a");
+    link.textContent = linkLabel(raw);
+    let image: { element: HTMLImageElement; fileId: string; url?: string } | null = null;
+    let gone = false;
+
+    const dropImage = () => {
+      if (image?.url !== undefined) URL.revokeObjectURL(image.url);
+      image = null;
+    };
+    const showImage = (fileId: string, name: string) => {
+      if (image?.fileId === fileId) return;
+      dropImage();
+      const element = document.createElement("img");
+      element.className = "wiki-embed";
+      element.alt = name;
+      const shown = { element, fileId } as { element: HTMLImageElement; fileId: string; url?: string };
+      image = shown;
+      void hooks.current.imageUrl(fileId).then(
         (made) => {
-          if (gone) URL.revokeObjectURL(made);
+          if (gone || image !== shown) URL.revokeObjectURL(made);
           else {
-            url = made;
-            image.src = made;
+            shown.url = made;
+            element.src = made;
           }
         },
-        () => image.classList.add("wiki-embed--failed"),
+        () => element.classList.add("wiki-embed--failed"),
       );
-      return {
-        dom: image,
-        ignoreMutation: () => true,
-        destroy: () => {
-          gone = true;
-          if (url !== undefined) URL.revokeObjectURL(url);
-        },
-      };
-    }
-    const link = document.createElement("a");
-    link.dataset.raw = raw;
-    link.contentEditable = "false";
-    link.textContent = linkLabel(raw);
-    const render = () => {
+      frame.replaceChildren(element);
+    };
+    const showLink = () => {
+      dropImage();
       const missing = resolved.kind === "missing";
       const name = `wiki-link${embed ? " wiki-link--embed" : ""}${missing ? " wiki-link--missing" : ""}`;
       if (link.className !== name) link.className = name;
@@ -176,6 +181,11 @@ export const wikiLinkView = (hooks: Hooks) =>
       if (link.getAttribute("href") !== href) link.setAttribute("href", href);
       if (missing) link.dataset.missing = "true";
       else delete link.dataset.missing;
+      if (frame.firstChild !== link) frame.replaceChildren(link);
+    };
+    const render = () => {
+      if (embed && resolved.kind === "file" && resolved.image) showImage(resolved.fileId, resolved.name);
+      else showLink();
     };
     const refresh = () => {
       resolved = hooks.current.resolve(target);
@@ -192,9 +202,13 @@ export const wikiLinkView = (hooks: Hooks) =>
       else if (target !== "") hooks.current.create(target);
     });
     return {
-      dom: link,
+      dom: frame,
       ignoreMutation: () => true,
       stopEvent: (event) => event.type === "click",
-      destroy: () => hooks.current.links.delete(refresh),
+      destroy: () => {
+        gone = true;
+        dropImage();
+        hooks.current.links.delete(refresh);
+      },
     };
   });

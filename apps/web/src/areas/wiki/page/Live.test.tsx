@@ -1,0 +1,147 @@
+// A wiki page with its live document, over a socket that speaks the server's protocol: the editor stays
+// the same through someone else's publish and through a dropped connection, and whatever the server
+// says about the right to write (a conflict, a lock, a revoked read) takes every write control away.
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { act, screen, waitFor, within } from "@testing-library/react";
+import { newServer, renderApp, TEST_NOW } from "../../../../test/app.tsx";
+import { FakeCollabSocket } from "../../../../test/live-socket.ts";
+
+const WIKI = "/workspace/workspace_birchwood/wiki";
+const live = FakeCollabSocket as unknown as new (url: string) => WebSocket;
+const status = () => screen.getByRole("status").textContent;
+/** The live editor, once it took over from the published text: editable for who may write. */
+const liveEditor = async (name: string) => {
+  let found: HTMLElement | undefined;
+  await waitFor(() => {
+    found = screen.getByRole("textbox", { name });
+    expect(found.getAttribute("contenteditable")).toBe("true");
+  });
+  return found as HTMLElement;
+};
+const socket = (index = 0) => {
+  const found = FakeCollabSocket.instances[index];
+  if (found === undefined) throw new Error(`no socket ${index}`);
+  return found;
+};
+
+beforeEach(() => {
+  FakeCollabSocket.instances = [];
+  FakeCollabSocket.nextScope = "read-write";
+  FakeCollabSocket.failHandshake = false;
+  FakeCollabSocket.autoOpen = true;
+});
+afterEach(() => {
+  FakeCollabSocket.nextScope = "read-write";
+});
+
+/** A page of Íris's own, so a member may edit it until an admin locks it. */
+function withIrisPage() {
+  const server = newServer();
+  server.wiki.pages.push({
+    workspaceId: "workspace_birchwood",
+    slug: "iris-note",
+    title: "Iris note",
+    folder: "",
+    tags: [],
+    altTitles: [],
+    props: {},
+    pinned: false,
+    locked: false,
+    deletedAt: null,
+    deletedBy: null,
+    versions: [
+      {
+        version: 1,
+        title: "Iris note",
+        body: "First words.",
+        author: { type: "person", id: "usr_iris" },
+        at: TEST_NOW.toISOString(),
+        note: null,
+      },
+    ],
+  });
+  return server;
+}
+
+describe("a live wiki page", () => {
+  test("someone else's publish keeps the open editor: the same document, still focused", async () => {
+    const app = await renderApp({ path: `${WIKI}/press-checklist`, signedInAs: "usr_ana", wikiSocket: live });
+    await waitFor(() => expect(status()).toBe("Version 2 published"));
+    const editor = await liveEditor("Text of Press checklist");
+    editor.focus();
+    // Jonas publishes: the page has a new version and the server says so on the socket.
+    const page = app.server.wiki.pages[0];
+    page?.versions.push({
+      ...(page.versions.at(-1) as NonNullable<typeof page>["versions"][number]),
+      version: 3,
+      author: { type: "person", id: "usr_jonas" },
+    });
+    await act(async () =>
+      socket().pushStateless("wiki/workspace_birchwood/press-checklist", { type: "published", version: 3 }),
+    );
+    await waitFor(() => expect(status()).toBe("Version 3 published"));
+    expect(screen.getByRole("textbox", { name: "Text of Press checklist" })).toBe(editor);
+    expect(editor.isConnected).toBe(true);
+  });
+
+  test("a dropped connection keeps the editor and lets edits wait: offline, then live again", async () => {
+    await renderApp({ path: `${WIKI}/press-checklist`, signedInAs: "usr_ana", wikiSocket: live });
+    await waitFor(() => expect(status()).toBe("Version 2 published"));
+    const editor = await liveEditor("Text of Press checklist");
+    FakeCollabSocket.autoOpen = false;
+    await act(async () => socket().serverClose(1006));
+    await waitFor(() => expect(status()).toBe("Offline: changes wait to sync"));
+    expect(screen.getByRole("textbox", { name: "Text of Press checklist" })).toBe(editor);
+    expect(editor.getAttribute("contenteditable")).toBe("true");
+    // The retry starts: still offline to the person, never flickering back to "Connecting…".
+    await waitFor(() => expect(FakeCollabSocket.instances.length).toBeGreaterThanOrEqual(2), {
+      timeout: 3000,
+    });
+    expect(status()).toBe("Offline: changes wait to sync");
+    FakeCollabSocket.autoOpen = true;
+  });
+
+  test("a conflict on a page someone may not write shows no publish or discard", async () => {
+    FakeCollabSocket.nextScope = "readonly";
+    await renderApp({ path: `${WIKI}/holidays`, signedInAs: "usr_iris", wikiSocket: live });
+    await screen.findByRole("heading", { level: 1, name: "Holidays" });
+    await waitFor(() => expect(FakeCollabSocket.instances).toHaveLength(1));
+    await act(async () =>
+      socket().pushStateless("wiki/workspace_birchwood/holidays", { type: "conflict", version: 2 }),
+    );
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText("Someone published a newer version")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Publish over version 2" }) === null).toBe(true);
+    expect(screen.queryByRole("button", { name: "Discard my draft" }) === null).toBe(true);
+  });
+
+  test("a lock while the page is open (4409) takes every write control away", async () => {
+    const server = withIrisPage();
+    await renderApp({ path: `${WIKI}/iris-note`, signedInAs: "usr_iris", wikiSocket: live, server });
+    await waitFor(() => expect(status()).toBe("Version 1 published"));
+    expect(screen.getByRole("textbox", { name: "Page title" })).toBeDefined();
+    const page = server.wiki.pages.find((each) => each.slug === "iris-note");
+    if (page !== undefined) page.locked = true;
+    FakeCollabSocket.nextScope = "readonly";
+    await act(async () => socket().serverClose(4409, "reconnect-read-only"));
+    expect(await screen.findByRole("heading", { level: 1, name: "Iris note" })).toBeDefined();
+    expect(screen.queryByRole("textbox", { name: "Page title" }) === null).toBe(true);
+    expect(screen.queryByRole("button", { name: "Add a property" }) === null).toBe(true);
+    expect(screen.getByRole("textbox", { name: "Text of Iris note" }).getAttribute("contenteditable")).toBe(
+      "false",
+    );
+    await waitFor(() => expect(screen.getByText("Locked")).toBeDefined());
+  });
+
+  test("a revoked read (4403) stops reconnecting and takes every write control away", async () => {
+    const server = withIrisPage();
+    await renderApp({ path: `${WIKI}/iris-note`, signedInAs: "usr_iris", wikiSocket: live, server });
+    await waitFor(() => expect(status()).toBe("Version 1 published"));
+    await act(async () => socket().serverClose(4403, "access-revoked"));
+    await waitFor(() => expect(status()).toBe("Read only"));
+    expect(screen.queryByRole("textbox", { name: "Page title" }) === null).toBe(true);
+    expect(screen.queryByRole("button", { name: "Add a property" }) === null).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    expect(FakeCollabSocket.instances).toHaveLength(1);
+  });
+});

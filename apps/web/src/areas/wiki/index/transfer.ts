@@ -10,6 +10,9 @@ import { useErrorMessage } from "../../../app/screens.tsx";
 import { useMessages } from "../../../i18n/react.tsx";
 import { importBatches, useWikiRefresh } from "../shared.tsx";
 
+/** The server takes an uploaded file of up to 50 MB; a larger vault is refused before it is sent. */
+const VAULT_MAX_BYTES = 50 * 1024 * 1024;
+
 export type TransferNotice = { tone: Tone; title: string; detail?: string };
 
 /** Saves a blob as a file, through a link the browser follows once. */
@@ -31,6 +34,10 @@ export function useWikiTransfer(workspaceId: string) {
   const [notice, setNotice] = useState<TransferNotice | null>(null);
 
   const importVault = async (zip: File) => {
+    if (zip.size > VAULT_MAX_BYTES) {
+      setNotice({ tone: "danger", title: t("import.vaultTooLarge") });
+      return;
+    }
     const result = await api.importWikiVault({
       workspaceId,
       body: { file: { blob: zip, fileName: zip.name } },

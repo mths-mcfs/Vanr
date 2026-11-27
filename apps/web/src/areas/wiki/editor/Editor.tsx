@@ -204,7 +204,11 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(props, ref
     return () => {
       disposed = true;
       editorRef.current = null;
-      if (editor.status === "Created") void editor.destroy();
+      if (editor.status !== "Created") return;
+      // The Yjs binding goes first: destroyed under it, the editor's state is gone while the binding
+      // still answers the document's updates.
+      if (live !== null) editor.action((ctx) => ctx.get(collabServiceCtx).disconnect());
+      void editor.destroy();
     };
   }, [source]);
 

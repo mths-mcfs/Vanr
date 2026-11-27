@@ -104,6 +104,13 @@ export function HistoryDialog({
   const from = against === "current" ? picked : Math.max(1, picked - 1);
   const to = against === "current" ? page.version : picked;
   const diff = useApiQuery("getWikiPageDiff", { workspaceId, pageId: page.slug, query: { from, to } });
+  // The first version has none before it: its whole text is shown as it was.
+  const first = from === to && against === "previous";
+  const firstBody = useApiQuery(
+    "getWikiPageVersion",
+    { workspaceId, pageId: page.slug, versionId: String(picked) },
+    { enabled: first },
+  );
   const restore = useApiMutation("restoreWikiPageVersion", {
     onSuccess: (saved) => onRestored(saved, picked),
   });
@@ -180,7 +187,12 @@ export function HistoryDialog({
                 {describe(restore.error)}
               </Callout>
             )}
-            {diff.data === undefined ? (
+            {first && firstBody.data !== undefined ? (
+              <div className="wiki-diff">
+                <p className="wiki-diff__stats">{t("history.firstVersion")}</p>
+                <pre className="wiki-diff__lines wiki-diff__whole">{firstBody.data.body}</pre>
+              </div>
+            ) : diff.data === undefined ? (
               diff.isError ? (
                 <Callout
                   tone="danger"
