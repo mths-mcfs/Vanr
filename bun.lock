@@ -65,6 +65,7 @@
         "@tanstack/react-router": "1.170.46",
         "@vanr/client": "workspace:*",
         "@vanr/contract": "workspace:*",
+        "@vanr/engine": "workspace:*",
         "@vanr/ui": "workspace:*",
         "lucide-react": "1.64.0",
         "react": "19.3.1",
