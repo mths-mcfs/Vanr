@@ -41,7 +41,6 @@ test("upload a file, then a new version of it", async ({ page, t, seedUser, sign
     history.getByRole("button", { name: new RegExp(t("files", "preview.versionShort", { version: 1 })) }),
   ).toBeVisible();
 
-  // The older version is still there to read.
   await history
     .getByRole("button", { name: new RegExp(t("files", "preview.versionShort", { version: 1 })) })
     .click();
@@ -75,7 +74,6 @@ test("search: find a document by a word inside it and open it", async ({
 
   await page.goto(`/workspace/${user.workspace.id}`);
   await expect(page.getByRole("heading", { level: 1, name: user.workspace.name })).toBeVisible();
-  // The frame's shortcut opens the search.
   await page.keyboard.press("Control+k");
   await expect(page.getByRole("heading", { level: 1, name: t("files", "search.title") })).toBeVisible();
   const field = page.getByRole("searchbox", { name: t("files", "search.field") });

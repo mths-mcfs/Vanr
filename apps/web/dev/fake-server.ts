@@ -211,7 +211,6 @@ export class FakeServer {
   readonly closed: { workspaceId: string; code: number | undefined }[] = [];
   /** How many sockets browsers asked for, accepted or not. */
   socketsAsked = 0;
-  /** The Drive: files, versions, the trash and upload sessions. */
   readonly files: FakeFiles;
   /** Bases: tables, views, rows and relations. */
   readonly bases: FakeBases;
@@ -296,7 +295,6 @@ export class FakeServer {
     this.enroll("workspace_nightshift", "usr_jonas", "owner");
     this.enroll("workspace_nightshift", "usr_ana", "member");
     this.approvals.set("workspace_birchwood", ["usr_ana", "usr_ana"]);
-    // A channel for the files that came from one, and the Drive.
     this.state.channels.push({
       id: "ch_design",
       workspaceId: "workspace_birchwood",

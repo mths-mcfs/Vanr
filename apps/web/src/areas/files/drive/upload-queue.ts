@@ -37,7 +37,6 @@ export const fileKey = (workspaceId: string, file: File, target: UploadTarget = 
 
 const Saved = z.record(z.string(), z.string());
 
-/** The queue's next state after an event: a pure function, so the order of events is easy to test. */
 export type QueueEvent =
   | { type: "add"; items: UploadItem[] }
   | { type: "patch"; id: string; patch: Partial<Omit<UploadItem, "id" | "file">> }
