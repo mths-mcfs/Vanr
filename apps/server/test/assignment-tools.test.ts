@@ -1280,4 +1280,26 @@ describe("commands on the agent's runner", () => {
     },
     SERVER_TEST_MS,
   );
+
+  test(
+    "a key combination that ends in Enter or Space is checked like the key alone",
+    async () => {
+      const t = await team(undefined, true);
+      const r = await run(t, null);
+      for (const key of ["Control+Enter", "Shift+Space"]) {
+        const out = await r.call("browser_press", { key });
+        expect(out.isError).toBe(false);
+      }
+      // Each one asked the runner what it hits, and sent the element's fingerprint with the key.
+      expect(requests(t.fake.runner, "browser.inspect")).toHaveLength(2);
+      expect(requests(t.fake.runner, "browser.act").map((f) => [f.args.key, f.args.expect])).toEqual([
+        ["Control+Enter", "fp"],
+        ["Shift+Space", "fp"],
+      ]);
+      // Tab doesn't act like a click: no check.
+      await r.call("browser_press", { key: "Tab" });
+      expect(requests(t.fake.runner, "browser.inspect")).toHaveLength(2);
+    },
+    SERVER_TEST_MS,
+  );
 });

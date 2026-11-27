@@ -928,7 +928,12 @@ interface Aim {
 }
 
 /** A key that can act as a click or a submit; the others (Tab, arrows) skip the check. */
-const aimed = (a: Aim) => a.action !== "press" || a.key === "Enter" || a.key === " " || a.key === "Space";
+const aimed = (a: Aim) => {
+  if (a.action !== "press") return true;
+  // A combination ends in the key that acts (Control+Enter submits like Enter), as consequenceOf reads it.
+  const key = a.key?.split("+").at(-1);
+  return key === "Enter" || key === " " || key === "Space";
+};
 
 /** Asks the runner, without acting, what the action will hit. It stays out of the log: nothing happened. */
 async function inspect(ctx: ToolContext, runner: RunnerRow, a: Aim): Promise<BrowserInspectResult> {
