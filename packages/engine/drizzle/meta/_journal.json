@@ -15,6 +15,13 @@
       "when": 1794682610245,
       "tag": "0001_bases_relations",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794716813875,
+      "tag": "0002_wiki_annotations",
+      "breakpoints": true
     }
   ]
 }

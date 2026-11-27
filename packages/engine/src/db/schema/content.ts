@@ -22,6 +22,26 @@ export interface Actor {
   id: string;
 }
 
+/** Who reads a restricted page: whoever reads a channel, or a list of principals. */
+export type WikiAccess = { kind: "channel"; channelId: string } | { kind: "private"; principals: string[] };
+
+/** A quoted passage of a page (W3C TextQuoteSelector): the text and a little of what comes before and after. */
+export interface WikiAnchor {
+  quote: string;
+  prefix: string;
+  suffix: string;
+  /** Where the quote started in the text the comment was made on (picks among identical contexts). */
+  position?: number;
+}
+
+/** One change of a proposal, accepted or rejected on its own. */
+export interface WikiHunk {
+  id: string;
+  oldStr: string;
+  newStr: string;
+  status: "pending" | "accepted" | "rejected" | "stale";
+}
+
 const workspace = () =>
   text("workspace_id")
     .notNull()
@@ -160,6 +180,16 @@ export const knowledgePages = pgTable(
     props: jsonb("props").$type<Props>().notNull().default({}),
     /** Other titles of the page: they also resolve [[links]]. */
     aliases: jsonb("aliases").$type<string[]>().notNull().default([]),
+    /**
+     * Who reads it. Null: the whole workspace. `channel`: whoever reads the channel (an agent only as a
+     * member). `private`: only these (`user:<id>` and `agent:<id>`). It holds everywhere: lists, search,
+     * links, graph, the live editor and agents.
+     */
+    access: jsonb("access").$type<WikiAccess>(),
+    /** How an agent changes the page: directly or through a proposal a person reviews. */
+    agentEdits: text("agent_edits", { enum: ["direct", "propose"] })
+      .notNull()
+      .default("direct"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
     /** In the trash: hidden from lists, links and search; deleted for good at `expungeAt`. */
@@ -266,6 +296,80 @@ export const wikiAttachments = pgTable(
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.pathKey] })],
 );
+
+/**
+ * A page's annotations: a comment anchored on a passage (replies in `parentId`) and a proposal, whose
+ * changes are accepted or rejected one by one. A comment may ask an agent to act on it (`agentId`,
+ * with the request's message in `messageId`).
+ */
+export const pageAnnotations = pgTable(
+  "page_annotations",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: workspace(),
+    pageId: text("page_id")
+      .notNull()
+      .references(() => knowledgePages.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: ["comment", "proposal"] }).notNull(),
+    /** A reply: the comment it answers (comments only). */
+    parentId: text("parent_id"),
+    author: jsonb("author").$type<Actor & { actingFor?: string }>().notNull(),
+    /** A comment: its text. A proposal: the agent's note. */
+    body: text("body").notNull().default(""),
+    anchor: jsonb("anchor").$type<WikiAnchor>(),
+    hunks: jsonb("hunks").$type<WikiHunk[]>().notNull().default([]),
+    /** The page version the proposal's changes were checked against (the latest when it was made). */
+    parentVersion: integer("parent_version"),
+    /** A comment: `open` or `resolved`. A proposal: `pending` until no change is pending, then `done`. */
+    status: text("status", { enum: ["open", "resolved", "pending", "done"] }).notNull(),
+    /** "Act on this comment": the agent asked and the request's message. */
+    agentId: text("agent_id"),
+    messageId: text("message_id"),
+    /** Who resolved the thread or decided the proposal's last change, and when. */
+    handledBy: jsonb("handled_by").$type<Actor>(),
+    handledAt: ts("handled_at"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index("page_annotations_page_idx").on(t.pageId, t.createdAt)],
+);
+
+/**
+ * What happened in the wiki, in order. Reading joins it with the page and hides what the reader doesn't
+ * read; a page deleted for good leaves its rows without `pageId` (and out of every reading).
+ */
+export const wikiChangeLog = pgTable(
+  "wiki_change_log",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: workspace(),
+    pageId: text("page_id").references(() => knowledgePages.id, { onDelete: "set null" }),
+    action: text("action", {
+      enum: ["create", "update", "rename", "move", "trash", "restore", "proposal", "comment"],
+    }).notNull(),
+    title: text("title").notNull(),
+    author: jsonb("author").$type<Actor & { actingFor?: string }>().notNull(),
+    /** The saved version (update), the old title (rename), the new folder (move). */
+    detail: text("detail"),
+    at: ts("at").notNull().defaultNow(),
+  },
+  (t) => [index("wiki_change_log_workspace_at_idx").on(t.workspaceId, t.at)],
+);
+
+/**
+ * The workspace's last wiki check: the contradictions a model found between linked pages (orphans and
+ * broken links are computed when read, for the reader). `checked` holds the pairs already asked.
+ */
+export const wikiChecks = pgTable("wiki_checks", {
+  workspaceId: text("workspace_id")
+    .primaryKey()
+    .references(() => workspaces.id, { onDelete: "cascade" }),
+  findings: jsonb("findings").$type<unknown[]>().notNull().default([]),
+  /** Pairs of pages the model already checked (key = ids and versions): never paid twice. */
+  checked: jsonb("checked").$type<Record<string, string>>().notNull().default({}),
+  testModel: boolean("test_model").notNull().default(false),
+  ranAt: ts("ran_at").notNull(),
+});
 
 /** Reads per reader (agent or person): how many and when the last one was. */
 export const wikiPageViews = pgTable(

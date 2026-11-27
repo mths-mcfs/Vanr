@@ -57,6 +57,7 @@ import {
 } from "../bases/write";
 import type { AppEnv, Ctx, WorkspaceMember } from "../context";
 import { HttpError, notFound, param, readJson } from "../http";
+import { viewerOf } from "../wiki";
 import { requireMember, WORKSPACE } from "../workspace-scope";
 
 const { dbDatabases, dbTables } = schema;
@@ -105,7 +106,7 @@ export function registerBases(app: Hono<AppEnv>) {
       .where(eq(dbDatabases.workspaceId, me.workspaceId))
       .orderBy(desc(dbDatabases.updatedAt))
       .limit(500);
-    return c.json({ bases: await toSummaries(db, rows) });
+    return c.json({ bases: await toSummaries(db, rows, viewerOf(me)) });
   });
 
   app.post(B, async (c) => {

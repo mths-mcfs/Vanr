@@ -22,13 +22,23 @@ import {
   trashFile,
   versionOf,
 } from "./drive";
-import { forbidden, HttpError } from "./http";
+import { forbidden, HttpError, notFound } from "./http";
 import { columnsOf, type IssueChange, updateIssue } from "./issues";
 import { anchorOf, nextRunFor, triggerOf } from "./routines";
 import { unindex } from "./search-index";
 import { refreshPage, savePage } from "./wiki";
+import { canReadPage } from "./wiki-access";
 
-const { reversibleActions, files, knowledgePages, pageRevisions, issues, issueTimeline, routines } = schema;
+const {
+  reversibleActions,
+  files,
+  knowledgePages,
+  pageAnnotations,
+  pageRevisions,
+  issues,
+  issueTimeline,
+  routines,
+} = schema;
 
 const changed = (message: string) => new HttpError(409, "action.changed_since", message);
 const gone = (message: string) => new HttpError(409, "action.gone", message);
@@ -122,6 +132,15 @@ const deletedPage = z.object({
   body: z.string(),
   aliases: z.array(z.string()).default([]),
   props: z.record(z.string(), propValue).default({}),
+  // Who reads it and how agents change it: a restricted page comes back restricted, never public.
+  access: z
+    .union([
+      z.object({ kind: z.literal("private"), principals: z.array(z.string()) }),
+      z.object({ kind: z.literal("channel"), channelId: z.string() }),
+    ])
+    .nullable()
+    .default(null),
+  agentEdits: z.enum(["direct", "propose"]).default("direct"),
   createdAt: z.string(),
 });
 
@@ -129,12 +148,20 @@ const deletedPage = z.object({
  * The page's row, locked until the undo commits. FOR NO KEY UPDATE like the wiki's own writes (wiki.ts
  * `pageLock`); the undo of a creation takes FOR UPDATE, the delete's lock.
  */
-async function lockedPage(deps: AppDeps, row: ActionRow, strength: "no key update" | "update") {
+async function lockedPage(
+  deps: AppDeps,
+  row: ActionRow,
+  actorUserId: string,
+  strength: "no key update" | "update",
+) {
   const [page] = await deps.db
     .select()
     .from(knowledgePages)
     .where(and(eq(knowledgePages.id, row.target.id), eq(knowledgePages.workspaceId, row.workspaceId)))
     .for(strength);
+  // Read on the locked row: a page restricted away from the person answers like one that doesn't exist.
+  if (page && !(await canReadPage(deps.db, { workspaceId: row.workspaceId, userId: actorUserId }, page)))
+    throw notFound("Page not found");
   if (!page || page.deletedAt) throw gone("The page no longer exists");
   return page;
 }
@@ -146,7 +173,7 @@ async function copyPageVersion(
   expect: number,
   from: number,
 ) {
-  const page = await lockedPage(deps, row, "no key update");
+  const page = await lockedPage(deps, row, actorUserId, "no key update");
   if (page.version !== expect) throw changed("Someone saved a newer version");
   const [old] = await deps.db
     .select()
@@ -265,10 +292,18 @@ export const CONTENT_UNDOERS: Record<
     },
   },
   wiki_written: {
-    async undo(deps, row) {
-      const page = await lockedPage(deps, row, "update");
+    async undo(deps, row, actorUserId) {
+      const page = await lockedPage(deps, row, actorUserId, "update");
       if (page.version !== 1) throw changed("Someone edited the page");
       if (page.locked) throw new HttpError(403, "wiki.page_locked", "This page is locked");
+      // Comments and proposals don't change the version, and the delete would take them along (the
+      // cascade) with no way back through redo: a page someone annotated stays.
+      const [annotated] = await deps.db
+        .select({ id: pageAnnotations.id })
+        .from(pageAnnotations)
+        .where(eq(pageAnnotations.pageId, page.id))
+        .limit(1);
+      if (annotated) throw changed("Someone commented on the page");
       const deleted: z.input<typeof deletedPage> = {
         slug: page.slug,
         title: page.title,
@@ -277,6 +312,8 @@ export const CONTENT_UNDOERS: Record<
         body: page.body,
         aliases: page.aliases,
         props: page.props,
+        access: page.access ?? null,
+        agentEdits: page.agentEdits,
         createdAt: page.createdAt.toISOString(),
       };
       // Deleted for good (versions, links and draft go by the cascade) and out of the search in the same commit.
@@ -286,10 +323,14 @@ export const CONTENT_UNDOERS: Record<
       // The open editors close once the delete is committed.
       return (after) => after.wikiLive.pageClosed(page);
     },
-    async redo(deps, row) {
+    async redo(deps, row, actorUserId) {
       const saved = deletedPage.safeParse(row.params.deleted);
       if (!saved.success) throw changed("Nothing to redo");
       const p = saved.data;
+      // The page comes back with the audience it had: whoever no longer reads it can't bring it back.
+      const viewer = { workspaceId: row.workspaceId, userId: actorUserId };
+      if (!(await canReadPage(deps.db, viewer, { workspaceId: row.workspaceId, access: p.access })))
+        throw notFound("Page not found");
       const author = { type: "agent" as const, id: row.agentId };
       const at = deps.now();
       try {
@@ -304,6 +345,8 @@ export const CONTENT_UNDOERS: Record<
             body: p.body,
             aliases: p.aliases,
             props: p.props,
+            access: p.access,
+            agentEdits: p.agentEdits,
             version: 1,
             updatedBy: author,
             createdAt: new Date(p.createdAt),

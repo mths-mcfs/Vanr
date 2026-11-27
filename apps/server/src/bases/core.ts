@@ -24,6 +24,7 @@ import { textFacets } from "@vanr/engine/search-query";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { AppDeps, WorkspaceMember } from "../context";
 import { forbidden, notFound } from "../http";
+import { readablePagesSql, type WikiViewer } from "../wiki-access";
 
 const { dbDatabases, dbTables, dbRows, dbViews, members, users, agents, knowledgePages } = schema;
 
@@ -170,7 +171,8 @@ function pageOf(pages: { id: string; slug: string; title: string }[], id: string
   return p ? { slug: p.slug, title: p.title } : null;
 }
 
-export async function toSummaries(db: Db, rows: DatabaseRow[]): Promise<BaseSummary[]> {
+/** `viewer` decides the page each database sits on: a restricted page they don't read shows as none. */
+export async function toSummaries(db: Db, rows: DatabaseRow[], viewer: WikiViewer): Promise<BaseSummary[]> {
   if (!rows.length) return [];
   const tables = await db
     .select({ id: dbTables.id, databaseId: dbTables.databaseId })
@@ -190,7 +192,7 @@ export async function toSummaries(db: Db, rows: DatabaseRow[]): Promise<BaseSumm
     ? await db
         .select({ id: knowledgePages.id, slug: knowledgePages.slug, title: knowledgePages.title })
         .from(knowledgePages)
-        .where(inArray(knowledgePages.id, pageIds))
+        .where(and(inArray(knowledgePages.id, pageIds), readablePagesSql(viewer)))
     : [];
   const byDb = new Map<string, number>();
   for (const t of tables) byDb.set(t.databaseId, (byDb.get(t.databaseId) ?? 0) + (counts.get(t.id) ?? 0));
@@ -218,7 +220,8 @@ export async function toBase(db: Db, row: DatabaseRow, me: WorkspaceMember | nul
   const linked = linkedIds.length
     ? await db.select().from(dbTables).where(inArray(dbTables.id, linkedIds))
     : [];
-  const [summary] = await toSummaries(db, [row]);
+  const viewer = me ? { workspaceId: me.workspaceId, userId: me.userId } : { workspaceId: row.workspaceId };
+  const [summary] = await toSummaries(db, [row], viewer);
   if (!summary) throw notFound("Database not found");
   const tables = [...own, ...linked];
   return {

@@ -60,6 +60,12 @@ describe("rewriteLinks", () => {
 });
 
 describe("resolveTarget", () => {
+  test("an alternate title also answers under the page's folder", () => {
+    const pages = [{ slug: "database", title: "Postgres", folder: "Architecture", aliases: ["Database"] }];
+    expect(resolveTarget("Architecture/Database", pages)?.slug).toBe("database");
+    expect(resolveTarget("Elsewhere/Database", pages)).toBeUndefined();
+  });
+
   const page = (slug: string, title: string, folder = "", aliases: string[] = []) => ({
     slug,
     title,
@@ -92,6 +98,15 @@ describe("resolveTarget", () => {
       expect(resolveTarget("Meeting", shuffled)?.slug).toBe("meeting");
     }
     expect(slugify("Réunion Agenda!")).toBe("reunion-agenda");
+  });
+
+  test("tie: a page the whole workspace reads wins over a restricted one, even with a shorter folder", () => {
+    const pages = [
+      { ...page("plan-restricted", "Plan", ""), restricted: true },
+      page("plan", "Plan", "deep/folder"),
+    ];
+    expect(resolveTarget("Plan", pages)?.slug).toBe("plan");
+    expect(resolveTarget("Plan", [pages[0] as (typeof pages)[0]])?.slug).toBe("plan-restricted");
   });
 });
 

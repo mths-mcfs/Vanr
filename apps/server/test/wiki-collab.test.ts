@@ -34,7 +34,7 @@ async function team() {
 }
 
 const docRow = async (slug: string, workspaceId: string, srv = server) => {
-  const page = await pageBySlug(srv.deps.db, workspaceId, slug);
+  const page = await pageBySlug(srv.deps.db, { workspaceId, system: true }, slug);
   const [d] = await srv.deps.db
     .select()
     .from(schema.wikiPageDocs)
@@ -208,7 +208,7 @@ describe("co-editing, presence and draft (P0-03, P0-04)", () => {
     const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Agent", body: BODY });
     const a = connect(server, ana.browser, workspaceId, `wiki/${workspaceId}/${page.slug}`);
     await a.synced;
-    const row = await pageBySlug(server.deps.db, workspaceId, page.slug);
+    const row = await pageBySlug(server.deps.db, { workspaceId, system: true }, page.slug);
     await savePage(server.deps, {
       row,
       author: { type: "agent", id: "agt_writer" },
@@ -410,6 +410,57 @@ describe("attacks on the collaboration socket", () => {
     member.close();
   });
 
+  test("attack: a restricted page rejects whoever doesn't read it; restricting with the session open drops who lost it", async () => {
+    const { workspaceId, ana, beto } = await team();
+    const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Restricted live", body: BODY });
+    const name = `wiki/${workspaceId}/${page.slug}`;
+    const member = connect(server, beto.browser, workspaceId, name);
+    await member.synced;
+    let closed = false;
+    member.provider.on("close", () => {
+      closed = true;
+    });
+    const set = await ana.api.wiki.setWikiPageAccess(workspaceId, page.slug, {
+      kind: "private",
+      userIds: [],
+      agentIds: [],
+    });
+    await until(() => closed);
+    member.close();
+    // Restricting changed the slug: neither the old address nor the new one opens for Beto.
+    const moved = `wiki/${workspaceId}/${set.slug}`;
+    for (const doc of [name, moved]) {
+      const again = connect(server, beto.browser, workspaceId, doc);
+      await expect(again.synced).rejects.toThrow(/auth/);
+      expect(again.doc.getXmlFragment(YFRAGMENT).length).toBe(0);
+      again.close();
+    }
+    const owner = connect(server, ana.browser, workspaceId, moved);
+    await owner.synced;
+    expect(await owner.md()).toContain("One.");
+    owner.close();
+    // Already restricted, the slug stays: taking Beto off the list drops his open connection by the access.
+    await ana.api.wiki.setWikiPageAccess(workspaceId, set.slug, {
+      kind: "private",
+      userIds: [beto.user.id],
+      agentIds: [],
+    });
+    const listed = connect(server, beto.browser, workspaceId, moved);
+    await listed.synced;
+    let dropped = false;
+    listed.provider.on("close", () => {
+      dropped = true;
+    });
+    const same = await ana.api.wiki.setWikiPageAccess(workspaceId, set.slug, {
+      kind: "private",
+      userIds: [],
+      agentIds: [],
+    });
+    expect(same.slug).toBe(set.slug);
+    await until(() => dropped);
+    listed.close();
+  });
+
   test("a giant Yjs message is rejected", async () => {
     const { workspaceId, ana, beto } = await team();
     const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Big", body: BODY });
@@ -524,7 +575,7 @@ describe("the live session without a test in the origin", () => {
 
         const second = await startTestServer({ env: { DATA_DIR: dir } });
         try {
-          const row = await pageBySlug(second.deps.db, workspaceId, page.slug);
+          const row = await pageBySlug(second.deps.db, { workspaceId, system: true }, page.slug);
           expect(row.version).toBe(2);
           expect(row.body).toBe(BODY.replace("Two.", "Two, typed just before the stop."));
           expect((await docRow(page.slug, workspaceId, second))?.dirty).toBe(false);
