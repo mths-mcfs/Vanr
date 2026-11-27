@@ -13,15 +13,16 @@ import { describe, expect, test } from "bun:test";
 import type { ActorRef } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import postgres from "postgres";
 import type { AppDeps } from "../src/context";
-import { answerRound, openDebate, stopDebate } from "../src/debates";
+import { answerRound, changeDebate, commentOn, openDebate, stopDebate } from "../src/debates";
 import { drainQueues, dueRoutines, registerFire } from "../src/routines";
 import type { RunningServer } from "../src/server";
 import { signedIn, startTestServer } from "./harness";
 import { forcedPair, instrumented, outcome } from "./lock-double";
 import { NO_POSTGRES, TEST_POSTGRES_URL, testDatabaseUrl } from "./postgres";
+import { call, seedAgent, ws } from "./route-calls";
 import { memberOf, seedWorkspace } from "./seed";
 
 const onPostgres = (name: string) => (TEST_POSTGRES_URL ? name : `${name} (skipped: ${NO_POSTGRES})`);
@@ -179,6 +180,37 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("debates and routines at once on 
     });
   }, 120_000);
 
+  test("forced: a comment waits on the debate's lock and finds the debate canceled", async () => {
+    await withServer("deb_cmt", async (server, admin, ctx) => {
+      const [a, b] = ctx.people;
+      if (!a || !b) throw new Error("no people");
+      const row = await peopleDebate(server, ctx, [a]);
+      // A: the cancel, held after its UPDATE. B: a comment that read the debate open before it.
+      const run = await forcedPair(
+        admin,
+        "debate-comment",
+        "update",
+        (side, hooks) => {
+          const deps = withDb(server.deps, hooks);
+          return side === "A"
+            ? changeDebate(deps, row.id, () => ({ status: "canceled" })).then((r) => !!r)
+            : commentOn(deps, row.id, b, { body: "late", replyTo: null }).then((r) => !!r);
+        },
+        { bKind: "select" },
+      );
+      expect(run.aPids).not.toEqual(run.bPids);
+      const comments = await server.deps.db
+        .select()
+        .from(schema.debatePosts)
+        .where(and(eq(schema.debatePosts.debateId, row.id), eq(schema.debatePosts.kind, "comment")));
+      outcome(
+        "debate-comment",
+        { a: run.a, b: run.b, comments: comments.length },
+        { a: true, b: false, comments: 0 },
+      );
+    });
+  }, 120_000);
+
   test("N turns of one debate reserving at once on its cap: exactly what fits is admitted", async () => {
     await withServer("deb_spend", async (server, _admin, ctx) => {
       const debate = await openDebate(server.deps, {
@@ -268,5 +300,57 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("debates and routines at once on 
         expect(opened).toHaveLength(1);
       }
     });
+  }, 120_000);
+});
+
+describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("accepting a debate suggestion on Postgres"), () => {
+  test("idempotent accept: two clicks at the same time open one debate", async () => {
+    const url = await testDatabaseUrl("deb_sugg");
+    const server = await startTestServer({ env: { DATABASE_URL: url } });
+    try {
+      const ana = await signedIn(server, "Ana", "ana@deb-sugg.test");
+      const { workspaceId, general } = await seedWorkspace(server, ana, "Suggestions");
+      const beto = await memberOf(server, workspaceId, "Beto", "beto@deb-sugg.test");
+      const lia = await seedAgent(server, workspaceId, ana, "lia", [general]);
+      const rui = await seedAgent(server, workspaceId, ana, "rui", [general]);
+      const [m] = await server.deps.db
+        .insert(schema.messages)
+        .values({
+          id: "msg_sug_race",
+          workspaceId,
+          channelId: general,
+          authorKind: "agent",
+          authorId: lia.id,
+          body: "How about a debate?",
+          meta: { debateSuggestion: { title: "Race", goal: "x", agentIds: [lia.id, rui.id] } },
+        })
+        .returning();
+      const path = `${ws(workspaceId)}/debate-suggestions/${m?.id ?? ""}`;
+      const results = await Promise.all([
+        ...Array.from({ length: 6 }, (_, i) =>
+          call(i % 2 ? ana : beto, "POST", `${path}/accept`, { rounds: 1 }),
+        ),
+        call(ana, "POST", `${path}/dismiss`),
+      ]);
+      await server.deps.runtime.settle();
+      const won = results.filter((r) => r.status < 300);
+      expect(won).toHaveLength(1);
+      // Every other click is told the suggestion was settled, not failed.
+      expect(results.filter((r) => r.status >= 300).map((r) => [r.status, r.body.error?.code])).toEqual(
+        Array.from({ length: results.length - 1 }, () => [409, "debate.suggestion_closed"]),
+      );
+      const opened = await server.deps.db
+        .select({ id: schema.debates.id })
+        .from(schema.debates)
+        .where(
+          and(
+            eq(schema.debates.workspaceId, workspaceId),
+            sql`${schema.debates.origin}->>'kind' = 'suggestion'`,
+          ),
+        );
+      expect(opened).toHaveLength(won[0]?.body.debate ? 1 : 0);
+    } finally {
+      await server.stop();
+    }
   }, 120_000);
 });

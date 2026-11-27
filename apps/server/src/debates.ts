@@ -184,10 +184,18 @@ export function toDebate(row: DebateRow): Debate {
   };
 }
 
+/** A post's frozen label: the pseudonym it was shown with before the table changed (see `recastPseudonyms`). */
+const frozenLabel = (post: DebatePostRow) =>
+  typeof post.meta.pseudonym === "string" ? post.meta.pseudonym : null;
+
+/** The pseudonym an agent's post shows: the frozen one, otherwise the table's current one. */
+const postLabel = (post: DebatePostRow, debate: Pick<DebateRow, "pseudonyms">) =>
+  frozenLabel(post) ?? debate.pseudonyms[post.author.id] ?? null;
+
 /** The post as it goes out: while the debate is open, an agent's post loses its author and run (the pseudonym stays). */
 export function toPost(row: DebatePostRow, debate: Pick<DebateRow, "status" | "pseudonyms">): DebatePost {
   const agentAuthor = row.author.type === "agent";
-  const pseudonym = agentAuthor ? (debate.pseudonyms[row.author.id] ?? null) : null;
+  const pseudonym = agentAuthor ? postLabel(row, debate) : null;
   const masked = agentAuthor && row.kind !== "synthesis" && isAnonymous(debate);
   return {
     id: row.id,
@@ -328,8 +336,10 @@ async function debateSpent(deps: AppDeps, row: DebateRow): Promise<number> {
 }
 
 /**
- * The votes of a round: one per participant at the table (an agent or a person with a speaker slot), by the answer's key. The member
- * is the agent's pseudonym; the person, who isn't anonymous, goes in by id.
+ * The votes of a round: one per participant at the table (an agent or a person with a speaker slot), by the answer's
+ * key. `voter` is the author's id, only for matching a participant's votes across rounds. `member` is what the
+ * summary shows: the label the agent's post was shown with, never the id, even after the agent left the table; the
+ * person, who isn't anonymous, goes in by id.
  */
 function votesOf(posts: readonly DebatePostRow[], row: DebateRow, round: number) {
   return posts.flatMap((p) => {
@@ -341,7 +351,8 @@ function votesOf(posts: readonly DebatePostRow[], row: DebateRow, round: number)
     if (!speaks) return [];
     return [
       {
-        member: row.pseudonyms[p.author.id] ?? p.author.id,
+        voter: p.author.id,
+        member: p.author.type === "agent" ? (postLabel(p, row) ?? "?") : p.author.id,
         key: claim.key,
         answer: claim.answer,
         confidence: claim.confidence,
@@ -481,14 +492,14 @@ async function lockDebate(tx: Tx, id: string): Promise<DebateRow | null> {
  * Reads the debate under its lock, lets `decide` look at that state and writes what it returns, in one
  * transaction; null (and nothing written) when `decide` says no. The event and the search go after the commit.
  */
-async function changeDebate(
+export async function changeDebate(
   deps: AppDeps,
   id: string,
-  decide: (row: DebateRow) => DebateSet | null,
+  decide: (row: DebateRow, tx: Tx) => DebateSet | null | Promise<DebateSet | null>,
 ): Promise<DebateRow | null> {
   const done = await deps.db.transaction(async (tx) => {
     const row = await lockDebate(tx, id);
-    const set = row ? decide(row) : null;
+    const set = row ? await decide(row, tx) : null;
     if (!set) return null;
     const [updated] = await tx
       .update(debates)
@@ -567,6 +578,54 @@ export async function answerRound(
   });
   if (!done) return null;
   await afterSave(deps, done.debate, done.change);
+  return { debate: done.debate, post: done.post };
+}
+
+/**
+ * A comment from outside the round's queue. It is written under the debate's lock, so it never lands after the
+ * debate closed; whoever comments joins the people who read the debate. null when the debate is closed.
+ */
+export async function commentOn(
+  deps: AppDeps,
+  debateId: string,
+  who: ActorRef,
+  input: { body: string; replyTo: string | null },
+): Promise<{ debate: DebateRow; post: DebatePostRow } | null> {
+  const done = await deps.db.transaction(async (tx) => {
+    const locked = await lockDebate(tx, debateId);
+    if (!locked || locked.status === "done" || locked.status === "canceled") return null;
+    const change: DebateSet | null =
+      who.type === "person" && !locked.userIds.includes(who.id)
+        ? { userIds: [...locked.userIds, who.id] }
+        : null;
+    const [debate] = change
+      ? await tx
+          .update(debates)
+          .set({ ...change, updatedAt: deps.now() })
+          .where(eq(debates.id, debateId))
+          .returning()
+      : [locked];
+    if (!debate) throw new Error("debate update failed");
+    const [post] = await tx
+      .insert(debatePosts)
+      .values({
+        id: newId("dpost"),
+        debateId,
+        createdAt: deps.now(),
+        author: who,
+        kind: "comment",
+        round: debate.round,
+        body: input.body,
+        replyTo: input.replyTo,
+      })
+      .returning();
+    if (!post) throw new Error("debate post insert failed");
+    return { debate, post, change };
+  });
+  if (!done) return null;
+  if (done.change) await afterSave(deps, done.debate, done.change);
+  else await reindex(deps, { kind: "debate", id: debateId });
+  await publishPost(deps, done.debate, done.post);
   return { debate: done.debate, post: done.post };
 }
 
@@ -702,8 +761,14 @@ const claimLine = (claim: DebateClaim | null) =>
     ? `answer: ${asData(claim.answer, OPTION_CHARS)}${claim.confidence !== null ? ` (confidence ${claim.confidence})` : ""}\n`
     : "";
 
-/** An agent without a pseudonym (or a removed person) never goes in by id: the id would say who spoke. */
-const nameOf = (names: Map<string, string>, author: ActorRef) => names.get(author.id) ?? "Someone";
+/**
+ * The name a post goes by in a prompt. An agent's post keeps the label it was shown with, like the posts the people
+ * read. An agent without a pseudonym (or a removed person) never goes in by id: the id would say who spoke.
+ */
+const nameOf = (names: Map<string, string>, post: DebatePostRow) => {
+  const frozen = post.author.type === "agent" ? frozenLabel(post) : null;
+  return frozen ? `Participant ${frozen}` : (names.get(post.author.id) ?? "Someone");
+};
 
 /** The whole conversation (synthesis and comments), with the names the caller passes (pseudonyms for agents). */
 export function transcript(posts: DebatePostRow[], names: Map<string, string>): string {
@@ -711,7 +776,7 @@ export function transcript(posts: DebatePostRow[], names: Map<string, string>): 
     .filter((p) => p.kind !== "out_of_budget" && p.body.trim())
     .map((p) => {
       const kind = p.kind === "comment" ? ' kind="comment"' : "";
-      return `<post round="${p.round}" from="${asData(nameOf(names, p.author), NAME_CHARS)}"${kind}>\n${claimLine(p.claimData)}${asData(p.body, POST_CHARS)}\n</post>`;
+      return `<post round="${p.round}" from="${asData(nameOf(names, p), NAME_CHARS)}"${kind}>\n${claimLine(p.claimData)}${asData(p.body, POST_CHARS)}\n</post>`;
     });
   if (!lines.length) return "(nobody has spoken yet)";
   return fitLines(lines);
@@ -749,7 +814,7 @@ export function challengeContext(
   const order = shuffled(previous, seededRng(`${row.id}:${round}:${agentId}`));
   const lines = order.map((p) => {
     const claim = p.claimData;
-    const who = p.author.type === "agent" && p.author.id === agentId ? "You" : nameOf(names, p.author);
+    const who = p.author.type === "agent" && p.author.id === agentId ? "You" : nameOf(names, p);
     const head = claim ? claimLine(claim) : "no structured answer\n";
     const evidence = claim?.evidence.length
       ? `\nEvidence: ${claim.evidence.map((e) => asData(e, OPTION_CHARS * 3)).join("; ")}`
@@ -759,7 +824,7 @@ export function challengeContext(
   const comments = posts.filter((p) => p.kind === "comment" || p.kind === "free");
   const commentLines = comments.map(
     (p) =>
-      `<post from="${asData(nameOf(names, p.author), NAME_CHARS)}" kind="comment">\n${asData(p.body, POST_CHARS)}\n</post>`,
+      `<post from="${asData(nameOf(names, p), NAME_CHARS)}" kind="comment">\n${asData(p.body, POST_CHARS)}\n</post>`,
   );
   return [
     `# Positions in round ${round - 1} (pseudonymous, in random order)\n${fitLines(lines) || "(none)"}`,
@@ -895,7 +960,7 @@ async function closeRound(deps: AppDeps, seen: DebateRow): Promise<boolean> {
     const opened = await revealHidden(tx, deps, row.id);
     const posts = await postsOf(tx, row.id);
     const keysOf = (round: number) =>
-      new Map(votesOf(posts, row, round).map((v) => [v.member, v.key] as const));
+      new Map(votesOf(posts, row, round).map((v) => [v.voter, v.key] as const));
     const ofRound = posts.filter((p) => p.round === row.round);
     const skipped = ofRound.filter((p) => p.kind === "out_of_budget");
     const current = keysOf(row.round);
@@ -1272,21 +1337,49 @@ export async function openDebate(deps: AppDeps, input: NewDebate): Promise<Debat
   return row;
 }
 
-/** A new agent at the table gets a pseudonym (without changing the ones that exist). */
-export function withPseudonym(
+/**
+ * The table's agents changed: every agent gets a new pseudonym, drawn at random from labels this debate never
+ * showed. Keeping the old ones would leave the newcomer as the only new label (or the leaver as the one that stops
+ * showing), which says who it is while the debate is still anonymous. The posts already written keep the
+ * pseudonym they were shown with (`freezePseudonyms`), so nothing published changes. Same agents: same map.
+ */
+export function recastPseudonyms(
   pseudonyms: Record<string, string>,
   agentIds: readonly string[],
+  shown: Iterable<string>,
 ): Record<string, string> {
-  const missing = [...new Set(agentIds)].filter((id) => !pseudonyms[id]);
-  if (!missing.length) return pseudonyms;
-  const used = new Set(Object.values(pseudonyms));
-  const total = used.size + missing.length;
-  const labels = Array.from({ length: Math.max(26, total) + 26 }, (_, i) =>
-    i < 26 ? String.fromCharCode(65 + i) : `${String.fromCharCode(65 + (i % 26))}${Math.floor(i / 26) + 1}`,
-  ).filter((l) => !used.has(l));
-  const letters = labels.filter((l) => l.length === 1);
-  const pool = shuffled(letters.length >= missing.length ? letters : labels, seededRng(randomId()));
-  return { ...pseudonyms, ...Object.fromEntries(missing.map((id, i) => [id, pool[i] as string])) };
+  const unique = [...new Set(agentIds)];
+  const same = unique.length === Object.keys(pseudonyms).length && unique.every((id) => pseudonyms[id]);
+  if (same) return pseudonyms;
+  const used = new Set([...shown, ...Object.values(pseudonyms)]);
+  const labels: string[] = [];
+  for (let i = 0; labels.length < unique.length; i++) {
+    const label =
+      i < 26 ? String.fromCharCode(65 + i) : `${String.fromCharCode(65 + (i % 26))}${Math.floor(i / 26) + 1}`;
+    if (!used.has(label)) labels.push(label);
+  }
+  const pool = shuffled(labels, seededRng(randomId()));
+  return Object.fromEntries(unique.map((id, i) => [id, pool[i] as string]));
+}
+
+/**
+ * Writes on each agent post of the debate the pseudonym it shows now (posts that already carry one keep it), and
+ * returns every label the debate has shown. Runs under the debate's lock, before the map changes.
+ */
+export async function freezePseudonyms(tx: Tx, row: Pick<DebateRow, "id" | "pseudonyms">): Promise<string[]> {
+  const map = JSON.stringify(row.pseudonyms);
+  await tx.execute(sql`
+    update ${debatePosts}
+    set meta = ${debatePosts.meta} || jsonb_build_object('pseudonym', ${map}::jsonb ->> (${debatePosts.author} ->> 'id'))
+    where ${debatePosts.debateId} = ${row.id}
+      and ${debatePosts.author} ->> 'type' = 'agent'
+      and not (${debatePosts.meta} ? 'pseudonym')
+      and ${map}::jsonb ? (${debatePosts.author} ->> 'id')`);
+  const shown = await tx
+    .selectDistinct({ label: sql<string | null>`${debatePosts.meta} ->> 'pseudonym'` })
+    .from(debatePosts)
+    .where(eq(debatePosts.debateId, row.id));
+  return shown.flatMap((r) => (r.label ? [r.label] : []));
 }
 
 export { turnKey };
