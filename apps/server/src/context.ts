@@ -229,3 +229,7 @@ export function requireUser(c: Ctx): SessionUser {
   if (!user) throw unauthorized();
   return user;
 }
+
+/** Whether a runtime method is there (false for an absent one until slice S6), for an entry that only sometimes reaches it. */
+export const hasRuntime = (runtime: RuntimePort, method: keyof RuntimePort): boolean =>
+  typeof Reflect.get(runtime[method], ABSENT) !== "function";

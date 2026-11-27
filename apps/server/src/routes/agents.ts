@@ -224,6 +224,33 @@ function readableRuns(db: Db, me: WorkspaceMember) {
   );
 }
 
+/**
+ * The live runs the person may see, each with its `what`: the detail's rule (`readableRun`), so a live run of a
+ * channel they don't read, of a delegation from such a channel or of a debate that hasn't revealed who spoke
+ * neither shows nor says it exists. A live run without its row yet doesn't show either.
+ */
+async function revealedRuns(
+  db: Db,
+  me: WorkspaceMember,
+  active: readonly { runId: string }[],
+): Promise<Map<string, string>> {
+  if (active.length === 0) return new Map();
+  const rows = await db
+    .select({ id: runs.id, what: runs.what })
+    .from(runs)
+    .where(
+      and(
+        readableRuns(db, me),
+        or(isNull(runs.sourceChannelId), sql`${runs.sourceChannelId} in ${readableChannelsSql(me)}`),
+        inArray(
+          runs.id,
+          active.map((a) => a.runId),
+        ),
+      ),
+    );
+  return new Map(rows.map((r) => [r.id, r.what]));
+}
+
 /** A delegation asked from a channel the person doesn't read: the run shows, the question doesn't. */
 const questionHidden = (me: WorkspaceMember) =>
   sql<boolean>`${runs.sourceChannelId} is not null and ${runs.sourceChannelId} not in ${readableChannelsSql(me)}`;
@@ -776,7 +803,9 @@ export function registerAgents(app: Hono<AppEnv>) {
       userId: me.userId,
       channelId: param(c, "channelId"),
     });
-    return c.json({ runs: runtime.activeRuns({ workspaceId: me.workspaceId, channelId: channel.id }) });
+    const active = runtime.activeRuns({ workspaceId: me.workspaceId, channelId: channel.id });
+    const shown = await revealedRuns(db, me, active);
+    return c.json({ runs: active.filter((a) => shown.has(a.runId)) });
   });
 
   // "Working now": the live runs in the conversations the person can read.
@@ -784,39 +813,22 @@ export function registerAgents(app: Hono<AppEnv>) {
     const me = requireMember(c);
     const { db, runtime } = c.get("deps");
     const active = runtime.activeRuns({ workspaceId: me.workspaceId });
-    if (active.length === 0) return c.json({ runs: [] });
-    const readable = new Set(
-      (
-        await db
-          .select({ id: channels.id })
-          .from(channels)
-          .where(sql`${channels.id} in ${readableChannelsSql(me)}`)
-      ).map((r) => r.id),
-    );
-    const what = new Map(
-      (
-        await db
-          .select({ id: runs.id, what: runs.what })
-          .from(runs)
-          .where(
-            inArray(
-              runs.id,
-              active.map((a) => a.runId),
-            ),
-          )
-      ).map((r) => [r.id, r.what]),
-    );
-    const out: WorkingRun[] = active
-      .filter((a) => readable.has(a.channelId))
-      .map((a) => ({
-        runId: a.runId,
-        agentId: a.agentId,
-        channelId: a.channelId,
-        threadId: a.threadId,
-        status: a.status,
-        startedAt: a.startedAt,
-        what: what.get(a.runId) ?? "",
-      }));
+    const shown = await revealedRuns(db, me, active);
+    const out: WorkingRun[] = active.flatMap((a) => {
+      const what = shown.get(a.runId);
+      if (what === undefined) return [];
+      return [
+        {
+          runId: a.runId,
+          agentId: a.agentId,
+          channelId: a.channelId,
+          threadId: a.threadId,
+          status: a.status,
+          startedAt: a.startedAt,
+          what,
+        },
+      ];
+    });
     return c.json({ runs: out });
   });
 

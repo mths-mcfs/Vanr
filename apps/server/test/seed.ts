@@ -1,8 +1,6 @@
-// Rows the Drive and search tests stand on. The routes that create workspaces (S4), invite members (S2)
-// and create channels (S6) come with later slices, so the tests call the functions those routes call where
-// they already exist: `createWorkspace` and `joinWorkspace` (members.ts) and `openDm` (channels.ts). A plain
-// channel has no such function yet; `seedChannel` writes the same columns the channel route writes (with its
-// creator) and nothing else. Every person is a real account (`signedIn`), and roles are `Role`.
+// Rows the Drive and search tests stand on. The tests call the functions the workspace, invitation and DM routes
+// call: `createWorkspace` and `joinWorkspace` (members.ts) and `openDm` (channels.ts). A plain channel has no such
+// function; `seedChannel` writes the same columns the channel route writes (with its creator) and nothing else. Every person is a real account (`signedIn`), and roles are `Role`.
 import type { Role } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";

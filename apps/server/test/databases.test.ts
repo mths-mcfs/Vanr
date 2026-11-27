@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { memoryPostgres } from "@vanr/engine/sqlconn";
 import { eq } from "drizzle-orm";
+import type { ChannelRow } from "../src/channels";
 import { channelInWorkspace } from "../src/channels";
 import { DATABASE_TOOLS, hasDatabases } from "../src/integrations/databases";
 import {
@@ -13,6 +14,7 @@ import {
   pgliteGuardedConnector,
   postgresOptions,
 } from "../src/integrations/sql-identity";
+import { toolsFor } from "../src/integrations/tools";
 import type { RunningServer } from "../src/server";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
 import { toolRun } from "./integration-run";
@@ -162,7 +164,7 @@ describe("databases", () => {
   test(
     "agent: policy, tables, hidden columns, read only, one statement, quota and turned-off action",
     async () => {
-      const { ana, beto, lia, ask, url } = await team();
+      const { ana, beto, lia, channel, ask, url } = await team();
       const conn = (await call(ana, "POST", url("/databases"), { ...connectInput, label: "Store" })).body
         .connection;
       expect((await call(ana, "GET", url(`/agents/${lia.id}/databases`))).body.databases).toEqual([]);
@@ -207,7 +209,7 @@ describe("databases", () => {
       expect((await call(ana, "GET", url("/databases"))).body.connections[0]?.agents).toEqual([
         { agentId: lia.id, level: "read" },
       ]);
-      expect(await hasDatabases(server.deps.db, lia.id)).toBe(true);
+      expect(await hasDatabases(toolRun(server.deps, lia, channel).ctx)).toBe(true);
 
       expect(await ask("db_list_tables", { database: "Store" })).toContain("public.customers\npublic.orders");
       const described = await ask("db_describe_table", { database: "Store", table: "customers" });
@@ -266,7 +268,7 @@ describe("databases", () => {
 
       await call(ana, "PUT", url(`/agents/${lia.id}/databases/${conn.id}`), { level: "none" });
       expect(await ask("db_list_tables", { database: "Store" })).toContain("Unknown database");
-      expect(await hasDatabases(server.deps.db, lia.id)).toBe(false);
+      expect(await hasDatabases(toolRun(server.deps, lia, channel).ctx)).toBe(false);
       await call(ana, "DELETE", url(`/databases/${conn.id}`));
       expect((await call(ana, "GET", url(`/agents/${lia.id}/databases`))).body.databases).toEqual([]);
     },
@@ -492,6 +494,13 @@ describe("the guard and the network rule on a connected database", () => {
         database: "Ruled",
       });
       expect(there.content).toContain("public.customers");
+      // The run's tool list says the same: no database tool where the rule turns them off.
+      const dbTools = async (where: ChannelRow) =>
+        (await toolsFor(server.deps, lia, { channel: where, threadId: null }))
+          .map((t) => t.name)
+          .filter((t) => t.startsWith("db_"));
+      expect(await dbTools(channel)).toEqual([]);
+      expect(await dbTools(elsewhere)).toEqual(["db_list_tables", "db_describe_table", "db_query"]);
     },
     SERVER_TEST_MS,
   );

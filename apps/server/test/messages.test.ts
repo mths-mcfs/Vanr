@@ -1,6 +1,6 @@
 // Posting and reading messages (messages.ts): the safe resend by clientId, mentions, quotes, thread replies,
-// the page cursor, what the hub tells and the search index entry each post writes. The chat route that calls
-// `postMessage` comes with S6; here the tests call it the way that route does.
+// the page cursor, what the hub tells and the search index entry each post writes. The tests call `postMessage` the
+// way the chat route does.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
@@ -41,6 +41,41 @@ async function seedAgent(workspaceId: string, owner: Person, handle: string) {
     appearance: { color: "blue", eyes: "dot", adornment: "none" },
   });
   return id;
+}
+
+/**
+ * Holds the next UPDATE of `threads` until `release` (outside any transaction, so PGlite keeps serving the other
+ * requests); `begun` resolves when it is about to run.
+ */
+function holdNextThreadUpdate(): { begun: Promise<void>; release: () => void } {
+  const db = server.deps.db;
+  const update = db.update.bind(db);
+  let started!: () => void;
+  let release!: () => void;
+  const begun = new Promise<void>((r) => {
+    started = r;
+  });
+  const until = new Promise<void>((r) => {
+    release = r;
+  });
+  db.update = ((table: Parameters<typeof update>[0]) => {
+    const builder = update(table);
+    if (table !== schema.threads) return builder;
+    db.update = update;
+    const set = builder.set.bind(builder);
+    builder.set = ((values: Parameters<typeof set>[0]) => {
+      const query = set(values);
+      const where = query.where.bind(query);
+      // The awaited promise adopts the query once released, and the query runs then.
+      query.where = ((condition: Parameters<typeof where>[0]) => {
+        started();
+        return until.then(() => where(condition));
+      }) as unknown as typeof query.where;
+      return query;
+    }) as typeof builder.set;
+    return builder;
+  }) as typeof db.update;
+  return { begun, release };
 }
 
 async function post(
@@ -199,6 +234,40 @@ describe("posting", () => {
         .from(schema.threadSubscriptions)
         .where(eq(schema.threadSubscriptions.threadId, root.message.id));
       expect(follows.map((f) => f.userId).sort()).toEqual([ana.user.id, beto.user.id, caio.user.id].sort());
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "forced: two replies at once leave the later one as the thread's last message, whichever update lands last",
+    async () => {
+      const { workspaceId, general, ana, beto } = await team();
+      const root = await post(workspaceId, general, person(ana), "the root");
+      // The first reply is written and counted, then held at its update of the thread's state.
+      const held = holdNextThreadUpdate();
+      const first = post(workspaceId, general, person(ana), "first reply", { threadId: root.message.id });
+      await held.begun;
+      const second = await post(workspaceId, general, person(beto), "second reply", {
+        threadId: root.message.id,
+      });
+      held.release();
+      await first;
+      const [thread] = await server.deps.db
+        .select({ last: schema.threads.lastMessageId })
+        .from(schema.threads)
+        .where(eq(schema.threads.id, root.message.id));
+      const replies = await listMessages(server.deps.db, {
+        channelId: general,
+        threadId: root.message.id,
+        limit: 10,
+      });
+      expect(replies.map((m) => m.body)).toEqual(["first reply", "second reply"]);
+      expect(thread?.last).toBe(second.message.id);
+      const [counted] = await server.deps.db
+        .select({ replyCount: schema.messages.replyCount })
+        .from(schema.messages)
+        .where(eq(schema.messages.id, root.message.id));
+      expect(counted?.replyCount).toBe(2);
     },
     SERVER_TEST_MS,
   );

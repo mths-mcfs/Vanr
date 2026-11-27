@@ -1,6 +1,7 @@
-// Raw HTTP calls and the rows the debate and routine route tests stand on. The agents route (S5) and the chat
-// route (S6) come with later slices, so an agent is written with the columns the agents route writes and is put in
-// a channel the way the chat route's "add member" does; everything else goes through the real routes.
+// Raw HTTP calls and the rows the route tests stand on. `seedAgent` is a minimal fixture: it writes the agent's
+// columns and its channel memberships only, not what the agents route also creates (`createdBy`, the first
+// instructions version, the `*` grant), so a test that needs those sets them itself. Everything else goes through
+// the real routes.
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import type { AgentRow } from "../src/agents";
