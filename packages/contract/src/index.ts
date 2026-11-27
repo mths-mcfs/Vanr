@@ -134,7 +134,14 @@ export type {
   SiteAccess,
   SiteRule,
 } from "./browser.ts";
-export type { CalendarEvent, CalendarProposal, CalendarRange } from "./calendar.ts";
+export type {
+  CalendarEvent,
+  CalendarEventInput,
+  CalendarEventPatch,
+  CalendarProposal,
+  CalendarRange,
+  SeriesScope,
+} from "./calendar.ts";
 export type {
   Channel,
   ChannelMember,
@@ -233,7 +240,12 @@ export type {
   Issue,
   IssueActivity,
   IssueColumn,
+  IssueColumnInput,
+  IssueColumnPatch,
+  IssueCommentInput,
   IssueCriterion,
+  IssueInput,
+  IssuePatch,
   IssuePriority,
   IssueStage,
 } from "./issues.ts";
@@ -305,7 +317,15 @@ export {
   sealSecret,
 } from "./secret-box.ts";
 export type { AgentSecret, SecretBox, SecretBrowserBinding, SecretRequest, SecretTarget } from "./secrets.ts";
-export type { Skill, SkillDetail, SkillDraft } from "./skills.ts";
+export type {
+  Skill,
+  SkillDetail,
+  SkillDraft,
+  SkillImportInput,
+  SkillInput,
+  SkillMarkdown,
+  SkillPatch,
+} from "./skills.ts";
 export type {
   WikiAccess,
   WikiAccessInput,

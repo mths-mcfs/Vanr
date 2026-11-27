@@ -5,16 +5,19 @@ import { errorBody, HttpError } from "./http";
 import { log } from "./logger";
 import { registerAccount } from "./routes/account";
 import { registerBases } from "./routes/bases";
+import { registerCalendar } from "./routes/calendar";
 import { registerControl } from "./routes/control";
 import { registerDrive } from "./routes/drive";
 import { registerDriveUploads } from "./routes/drive-upload";
 import { registerInvitations } from "./routes/invitations";
+import { registerIssues } from "./routes/issues";
 import { registerMemories } from "./routes/memories";
 import { registerNotifications } from "./routes/notifications";
 import { registerPush } from "./routes/push";
 import { registerRunnerRequests } from "./routes/runner-requests";
 import { registerRunners } from "./routes/runners";
 import { registerSearch } from "./routes/search";
+import { registerSkills } from "./routes/skills";
 import { registerThreads } from "./routes/threads";
 import { registerWaitlist } from "./routes/waitlist";
 import { registerWiki } from "./routes/wiki";
@@ -120,6 +123,7 @@ export function createApp(
   // bases below; issues S4, debates S4, routines S4, calendar S4, then the search below; connectors S6,
   // integrations S5, then the runners and their requests below; assignments S5.
   registerThreads(app);
+  registerSkills(app);
   registerMemories(app);
   registerControl(app);
   registerInvitations(app);
@@ -129,6 +133,8 @@ export function createApp(
   registerDrive(app);
   registerWiki(app);
   registerBases(app);
+  registerIssues(app);
+  registerCalendar(app);
   registerSearch(app);
   registerRunners(app);
   registerRunnerRequests(app);
