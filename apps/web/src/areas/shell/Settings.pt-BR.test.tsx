@@ -41,6 +41,6 @@ describe("em português", () => {
     await app.user.click(within(mention.closest("li") as HTMLElement).getByRole("button", { name: "Adiar" }));
     await app.user.click(await screen.findByRole("menuitem", { name: "Por uma hora" }));
     expect(await screen.findByText(/^Adiado até /)).toBeDefined();
-    await waitFor(() => expect(screen.queryByRole("button", { name: /mencionou você/ })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("button", { name: /mencionou você/ }) === null).toBe(true));
   });
 });

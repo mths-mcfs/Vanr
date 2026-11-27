@@ -65,6 +65,47 @@ describe("notification preferences", () => {
     expect(approvals.hasAttribute("disabled")).toBe(true);
   });
 
+  test("do not disturb never writes back a field that Save just changed", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
+    await app.user.click(await screen.findByRole("switch", { name: /Push to my devices/ }));
+    await app.user.click(screen.getByRole("button", { name: "Save preferences" }));
+    await screen.findByText("Preferences saved.");
+    // Straight after the save, before any refetch could land.
+    await app.user.click(screen.getByRole("button", { name: "For an hour" }));
+    await waitFor(() => expect(saved(app.server)?.dndUntil).not.toBeNull());
+    expect(saved(app.server)?.push).toBe(false);
+  });
+
+  test("an edit made while Save is on its way stays a draft", async () => {
+    const server = newServer();
+    const held = server.hold("setNotificationSettings");
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana", server });
+    await app.user.click(await screen.findByRole("switch", { name: /Push to my devices/ }));
+    await app.user.click(screen.getByRole("button", { name: "Save preferences" }));
+    await app.user.click(screen.getByRole("switch", { name: /Quiet hours every day/ }));
+    held.release();
+    await screen.findByText("Preferences saved.");
+    expect(screen.getByRole("switch", { name: /Quiet hours every day/ }).getAttribute("aria-checked")).toBe(
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "Save preferences" }).hasAttribute("disabled")).toBe(false);
+  });
+
+  test("channels that fail to load say so and can be loaded again", async () => {
+    const server = newServer();
+    server.force("listChannels", { kind: "error", status: 500, code: "internal" }, 1 + QUERY_RETRIES);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana", server });
+    const alerts = await screen.findAllByText("The channels could not be loaded, so none can be picked.");
+    expect(alerts.length).toBeGreaterThan(0);
+    const alert = alerts[0]?.closest("[role=alert]") as HTMLElement;
+    await app.user.click(within(alert).getByRole("button", { name: "Retry" }));
+    await waitFor(() =>
+      expect(screen.queryByText("The channels could not be loaded, so none can be picked.") === null).toBe(
+        true,
+      ),
+    );
+  });
+
   test("failed: a retry that works", async () => {
     const server = newServer();
     server.force(
@@ -132,6 +173,9 @@ describe("where a notice leads", () => {
     const a = { ...base, id: "a" };
     const b = { ...base, id: "b" };
     expect(joinPages([a, b], [b, { ...base, id: "c" }]).map((n) => n.id)).toEqual(["a", "b", "c"]);
+    // Two older pages that both carry the same notice.
+    const c = { ...base, id: "c" };
+    expect(joinPages([a], [c], [c, b]).map((n) => n.id)).toEqual(["a", "c", "b"]);
   });
 
   test("day groups and the later options follow the local calendar", () => {
@@ -144,6 +188,9 @@ describe("where a notice leads", () => {
     expect(hour?.at.getTime()).toBe(now + 3_600_000);
     expect(tomorrow?.at.getTime()).toBe(new Date(2026, 10, 15, 9).getTime());
     expect(monday?.at.getTime()).toBe(new Date(2026, 10, 16, 9).getTime());
+    // A day with 25 hours (clocks going back) still has its whole yesterday.
+    const afterShift = new Date(2026, 10, 2, 12).getTime();
+    expect(dayGroupOf(new Date(2026, 10, 1, 0, 30).toISOString(), afterShift)).toBe("yesterday");
     // On a Monday, "Monday" is the next one.
     expect(laterOptions(new Date(2026, 10, 16, 8).getTime())[2]?.at.getTime()).toBe(
       new Date(2026, 10, 23, 9).getTime(),

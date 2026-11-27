@@ -168,6 +168,8 @@ export default {
   "prefs.mutedHint": "A muted channel sends no push or email. Its notices still reach the inbox.",
   "prefs.mutedNone": "No channel is muted.",
   "prefs.unmute": "Unmute {channel}",
+  "prefs.channelsFailed": "The channels could not be loaded, so none can be picked.",
+  "prefs.agentsFailed": "The agents could not be loaded, so none can be picked.",
   "prefs.mute": "Mute a channel",
   "prefs.mutePick": "Pick a channel",
   "prefs.rules": "Inbox rules",
@@ -196,4 +198,5 @@ export default {
   "error.notification.snooze_past": "Pick a time in the future.",
   "error.notification.remind_past": "Pick a time in the future.",
   "error.notification.done": "This notice is already done.",
+  "error.notification.waiting": "Answer the request first: it leaves the inbox by itself.",
 } as const satisfies Catalog;

@@ -2,6 +2,7 @@
 import { describe, expect, test } from "bun:test";
 import { act, screen, within } from "@testing-library/react";
 import { chooseOption, newServer, renderApp } from "../../../../test/app.tsx";
+import { parseEmails } from "./Members.tsx";
 
 const PATH = "/workspace/workspace_birchwood/settings/members";
 const people = () => screen.getByRole("list", { name: "Members" });
@@ -18,10 +19,10 @@ describe("members", () => {
     expect(await screen.findByRole("heading", { level: 3, name: "4 members" })).toBeDefined();
     expect(row("Jonas Lind")?.textContent).toContain("@jonas · jonas@birchwood.example");
     expect(row("Jonas Lind")?.textContent).toContain("Admin");
-    expect(screen.queryByRole("form", { name: "Invite someone" })).toBeNull();
-    expect(screen.queryByRole("combobox")).toBeNull();
-    expect(screen.queryByRole("button", { name: /^Remove/ })).toBeNull();
-    expect(screen.queryByText("Open invitations")).toBeNull();
+    expect(screen.queryByRole("form", { name: "Invite someone" }) === null).toBe(true);
+    expect(screen.queryByRole("combobox") === null).toBe(true);
+    expect(screen.queryByRole("button", { name: /^Remove/ }) === null).toBe(true);
+    expect(screen.queryByText("Open invitations") === null).toBe(true);
   });
 
   test("an admin changes a member's role; owners and themselves stay as they are", async () => {
@@ -80,28 +81,59 @@ describe("members", () => {
 });
 
 describe("invitations", () => {
-  test("an admin invites by email, gets the link and sees the invitation open", async () => {
+  test("an admin invites several addresses at once; each one counts once, and each says what happened", async () => {
     const app = await renderApp({ path: PATH, signedInAs: "usr_jonas" });
     const form = await screen.findByRole("form", { name: "Invite someone" });
-    await app.user.type(within(form).getByLabelText("Email"), "pia@birchwood.example");
+    await app.user.type(
+      within(form).getByLabelText("Emails"),
+      "pia@birchwood.example, IRIS@birchwood.example;pia@birchwood.example  not-an-address",
+    );
     await chooseOption(app, within(form).getByRole("combobox", { name: "Role" }), "Admin");
-    await app.user.click(within(form).getByRole("button", { name: "Send invitation" }));
-    expect(await screen.findByText("Invitation link for pia@birchwood.example")).toBeDefined();
-    expect(screen.getByText(/^https:\/\/vanr\.test\/invite\/inv_/)).toBeDefined();
+    await app.user.click(within(form).getByRole("button", { name: "Send 3 invitations" }));
+    const results = await screen.findByRole("list", { name: "Invitations" });
+    expect(
+      within(results)
+        .getAllByRole("listitem")
+        .map((item) => item.textContent),
+    ).toEqual([
+      expect.stringMatching(/^pia@birchwood\.example: invitation sent ?https:\/\/vanr\.test\/invite\/inv_/),
+      "iris@birchwood.example: already a member",
+      "not-an-address: not an email address",
+    ]);
+    expect(screen.getByText("1 invitation sent")).toBeDefined();
+    const bulk = app.server.calls.filter((call) => call.method === "createInvitationBulk");
+    expect(bulk).toHaveLength(1);
+    expect(bulk[0]?.params.emails).toEqual([
+      "pia@birchwood.example",
+      "iris@birchwood.example",
+      "not-an-address",
+    ]);
     const pending = await screen.findByRole("list", { name: "Open invitations" });
     const invited = within(pending)
       .getAllByRole("listitem")
       .find((item) => item.textContent?.includes("pia@birchwood.example"));
     expect(invited?.textContent).toContain("Admin");
-    expect((within(form).getByLabelText("Email") as HTMLInputElement).value).toBe("");
+    expect((within(form).getByLabelText("Emails") as HTMLInputElement).value).toBe("");
   });
 
-  test("inviting someone already here is refused with the reason", async () => {
+  test("more than 100 addresses are refused before anything is sent", async () => {
     const app = await renderApp({ path: PATH, signedInAs: "usr_jonas" });
-    const form = await screen.findByRole("form", { name: "Invite someone" });
-    await app.user.type(within(form).getByLabelText("Email"), "iris@birchwood.example");
-    await app.user.click(within(form).getByRole("button", { name: "Send invitation" }));
-    expect((await screen.findByRole("alert")).textContent).toContain("This person is already a member.");
+    const field = await screen.findByLabelText("Emails");
+    const many = Array.from({ length: 101 }, (_, n) => `p${n}@x.example`).join(" ");
+    await app.user.click(field);
+    await app.user.paste(many);
+    expect(screen.getByText("That is more than 100 addresses. Send them in smaller groups.")).toBeDefined();
+    expect(screen.getByRole("button", { name: "Send 101 invitations" }).hasAttribute("disabled")).toBe(true);
+    expect(app.server.calls.some((call) => call.method === "createInvitationBulk")).toBe(false);
+  });
+
+  test("addresses split on spaces, commas and semicolons, each once and lowercased", () => {
+    expect(parseEmails(" A@x.example,b@x.example;; a@X.example\n c@x.example ")).toEqual([
+      "a@x.example",
+      "b@x.example",
+      "c@x.example",
+    ]);
+    expect(parseEmails(" , ; ")).toEqual([]);
   });
 
   test("an open invitation can be withdrawn", async () => {
@@ -120,6 +152,37 @@ describe("invitations", () => {
     );
     expect(await screen.findByText("The invitation for mel@birchwood.example was withdrawn.")).toBeDefined();
     expect(app.server.invitations.find((i) => i.token === "inv-mel-pending")?.status).toBe("revoked");
+  });
+
+  test("an admin sees no way to withdraw an invitation to be an owner; an owner does", async () => {
+    const owners = newServer();
+    const sample = owners.invitations.find((invitation) => invitation.token === "inv-mel-pending");
+    if (sample === undefined) throw new Error("no sample");
+    owners.invitations.push({
+      ...sample,
+      token: "inv-owner",
+      email: "boss@birchwood.example",
+      role: "owner",
+    });
+    await renderApp({ path: PATH, signedInAs: "usr_jonas", server: owners });
+    await screen.findByRole("list", { name: "Open invitations" });
+    expect(screen.getByText("boss@birchwood.example")).toBeDefined();
+    expect(
+      screen.queryByRole("button", { name: "Withdraw the invitation for boss@birchwood.example" }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Withdraw the invitation for mel@birchwood.example" }),
+    ).toBeDefined();
+  });
+
+  test("loading: the open invitations say they are on their way", async () => {
+    const server = newServer();
+    const held = server.hold("listInvitations");
+    await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    await screen.findByRole("list", { name: "Members" });
+    expect(within(screen.getByRole("region", { name: "Members" })).getAllByText("Loading").length).toBe(1);
+    held.release();
+    await screen.findByRole("list", { name: "Open invitations" });
   });
 
   test("the open invitations failing to load does not hide the members", async () => {

@@ -72,6 +72,7 @@ function ProfileForm({ workspaceId, person }: { workspaceId: string; person: Per
     event.preventDefault();
     if (draft === null || invalid) return;
     const timezone = value.timezone.trim();
+    const sent = draft;
     save.mutate(
       {
         workspaceId,
@@ -79,7 +80,8 @@ function ProfileForm({ workspaceId, person }: { workspaceId: string; person: Per
       },
       {
         onSuccess: async () => {
-          setDraft(null);
+          // An edit made while this was saving stays a draft.
+          setDraft((current) => (current === sent ? null : current));
           // The account menu shows the name from the session.
           if (value.name.trim() !== person.name) await session.load(true);
           outcome.done(t("profile.saved"));

@@ -2,9 +2,9 @@
 // worth knowing ("FYI") and everything, with filters. Open requests come first, the rest by day.
 // Opening a notice marks it read and goes where it came from; "done" takes it out of the inbox,
 // "snooze" hides it until a time, and "remind me" keeps it and brings it back to the top then.
-// Real time needs no code here: the notification events refetch the list and the counts through the
-// client's invalidation table.
-import { useApiMutation, useApiQuery, useVanrClient } from "@vanr/client/react";
+// Real time: the notification events refetch the first page and the counts through the client's
+// invalidation table; the older pages loaded here are patched from the same events.
+import { useApiMutation, useApiQuery, useRealtimeEvent, useVanrClient } from "@vanr/client/react";
 import type { AppNotification, NotificationCounts, NotificationFilter } from "@vanr/contract";
 import {
   Button,
@@ -182,6 +182,12 @@ function NoticeList({ workspaceId, filter }: { workspaceId: string; filter: Noti
     { method: "listNotificationCounts" as const, args: { workspaceId } },
   ];
   const readAll = useApiMutation("markNotificationAllRead", { invalidates: changed });
+  const record = (id: string, notice: AppNotification | null) =>
+    setPatches((current) => new Map(current).set(id, { notice, at: Date.now() }));
+  useRealtimeEvent("notification.hidden", (event) => record(event.payload.id, null));
+  useRealtimeEvent("notification.shown", (event) =>
+    record(event.payload.notification.id, event.payload.notification),
+  );
 
   if (first.isPending) return <ScreenLoading />;
   if (first.isError) {
@@ -195,8 +201,6 @@ function NoticeList({ workspaceId, filter }: { workspaceId: string; filter: Noti
     );
   }
 
-  const record = (id: string, notice: AppNotification | null) =>
-    setPatches((current) => new Map(current).set(id, { notice, at: Date.now() }));
   const patched = (list: readonly AppNotification[], fresh: number) =>
     list.flatMap((notice) => {
       const patch = patches.get(notice.id);
@@ -205,7 +209,6 @@ function NoticeList({ workspaceId, filter }: { workspaceId: string; filter: Noti
     });
   const items = joinPages(patched(first.data.items, first.dataUpdatedAt), patched(more?.items ?? [], 0));
   const cursor = more === null ? first.data.nextCursor : more.cursor;
-  const unread = items.some((notice) => notice.readAt === null);
 
   const loadMore = async () => {
     if (cursor === null) return;
@@ -233,7 +236,8 @@ function NoticeList({ workspaceId, filter }: { workspaceId: string; filter: Noti
         <Button
           size="sm"
           icon={<CheckCheck aria-hidden="true" />}
-          disabled={filter === "all" ? first.data.counts.unread === 0 : !unread}
+          // The server reads everything in the filter, loaded or not: only "nothing unread at all" is final.
+          disabled={first.data.counts.unread === 0}
           loading={readAll.isPending}
           onClick={() =>
             readAll.mutate(

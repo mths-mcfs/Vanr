@@ -169,6 +169,8 @@ export default {
     "Um canal silenciado não manda push nem e-mail. Os avisos dele continuam chegando na caixa.",
   "prefs.mutedNone": "Nenhum canal silenciado.",
   "prefs.unmute": "Reativar {channel}",
+  "prefs.channelsFailed": "Não foi possível carregar os canais, então nenhum pode ser escolhido.",
+  "prefs.agentsFailed": "Não foi possível carregar os agentes, então nenhum pode ser escolhido.",
   "prefs.mute": "Silenciar um canal",
   "prefs.mutePick": "Escolha um canal",
   "prefs.rules": "Regras da caixa",
@@ -197,4 +199,5 @@ export default {
   "error.notification.snooze_past": "Escolha um horário no futuro.",
   "error.notification.remind_past": "Escolha um horário no futuro.",
   "error.notification.done": "Este aviso já foi feito.",
+  "error.notification.waiting": "Responda o pedido primeiro: ele sai da caixa sozinho.",
 } as const satisfies TranslationOf<typeof en>;

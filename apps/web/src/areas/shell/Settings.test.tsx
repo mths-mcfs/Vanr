@@ -1,7 +1,7 @@
 // The settings frame and the shell's General, Profile and Storage sections, against the fake server.
 // Ana owns Birchwood, Jonas is an admin there and Íris a member.
 import { describe, expect, test } from "bun:test";
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import { QUERY_RETRIES } from "@vanr/client/react";
 import { FAKE_BUCKET_HOST } from "../../../dev/fake-server.ts";
 import { newServer, renderApp } from "../../../test/app.tsx";
@@ -29,7 +29,7 @@ describe("the settings frame", () => {
   test("a member who opens Storage by its address sees it is for admins, and no form", async () => {
     const app = await renderApp({ path: at("storage"), signedInAs: "usr_iris" });
     expect(await screen.findByText("This section is for admins")).toBeDefined();
-    expect(screen.queryByRole("radiogroup")).toBeNull();
+    expect(screen.queryByRole("radiogroup") === null).toBe(true);
     expect(app.server.calls.some((call) => call.method === "getStorage")).toBe(false);
   });
 });
@@ -42,7 +42,7 @@ describe("general settings", () => {
     expect((name as HTMLInputElement).readOnly).toBe(true);
     expect(screen.getByText("Only admins can change these settings.")).toBeDefined();
     expect(screen.getByRole("switch", { name: /Approval reviewer/ }).hasAttribute("disabled")).toBe(true);
-    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save" }) === null).toBe(true);
   });
 
   test("an admin renames the workspace; the frame follows", async () => {
@@ -54,7 +54,7 @@ describe("general settings", () => {
     expect(await screen.findByText("Workspace settings saved.")).toBeDefined();
     expect(app.server.settings.get("workspace_birchwood")?.name).toBe("Birchwood Press");
     expect(await screen.findByRole("button", { name: "Birchwood Press, workspace menu" })).toBeDefined();
-    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save" }) === null).toBe(true);
   });
 
   test("an empty name or an unknown time zone is caught before saving", async () => {
@@ -69,6 +69,29 @@ describe("general settings", () => {
     expect(screen.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
     await app.user.click(screen.getByRole("button", { name: "Discard changes" }));
     expect((screen.getByLabelText("Time zone") as HTMLInputElement).value).toBe("Europe/Lisbon");
+  });
+
+  test("an edit made while Save is on its way stays a draft", async () => {
+    const server = newServer();
+    const held = server.hold("updateSettings");
+    const app = await renderApp({ path: at("general"), signedInAs: "usr_jonas", server });
+    const name = await screen.findByLabelText("Name");
+    await app.user.type(name, " Press");
+    await app.user.click(screen.getByRole("button", { name: "Save" }));
+    await app.user.type(screen.getByLabelText("Time zone"), "x");
+    held.release();
+    await screen.findByText("Workspace settings saved.");
+    expect((screen.getByLabelText("Time zone") as HTMLInputElement).value).toBe("Europe/Lisbonx");
+  });
+
+  test("a draft never follows the person to another workspace", async () => {
+    const app = await renderApp({ path: at("general"), signedInAs: "usr_jonas" });
+    await app.user.type(await screen.findByLabelText("Name"), " Draft");
+    await act(() => app.runtime.router.navigate({ to: "/workspace/workspace_nightshift/settings/general" }));
+    await waitFor(() =>
+      expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Night Shift"),
+    );
+    expect(screen.queryByRole("button", { name: "Save" }) === null).toBe(true);
   });
 
   test("the approval reviewer is turned on at once", async () => {
@@ -163,13 +186,31 @@ describe("storage", () => {
     expect(app.server.storage.get("workspace_birchwood")?.config.kind).toBe("builtin");
   });
 
+  test("a save the bucket refuses speaks over an earlier test that passed", async () => {
+    const app = await renderApp({ path: at("storage"), signedInAs: "usr_jonas" });
+    await fill(app, `https://${FAKE_BUCKET_HOST}`);
+    await app.user.click(screen.getByRole("button", { name: "Test the bucket" }));
+    await screen.findByText("The bucket passed the test");
+    app.server.force("setStorage", {
+      kind: "error",
+      status: 400,
+      code: "storage.bucket_check_failed",
+      message: "The bucket did not pass the test",
+    });
+    await app.user.click(screen.getByRole("button", { name: "Save" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("The storage was not saved");
+    expect(alert.textContent).toContain("The bucket did not pass the test.");
+    expect(screen.queryByText("The bucket passed the test") === null).toBe(true);
+  });
+
   test("changing the form drops the last test, and one key alone is not enough", async () => {
     const app = await renderApp({ path: at("storage"), signedInAs: "usr_jonas" });
     await fill(app, `https://${FAKE_BUCKET_HOST}`);
     await app.user.click(screen.getByRole("button", { name: "Test the bucket" }));
     await screen.findByText("The bucket passed the test");
     await app.user.clear(screen.getByLabelText("Secret access key"));
-    expect(screen.queryByText("The bucket passed the test")).toBeNull();
+    expect(screen.queryByText("The bucket passed the test") === null).toBe(true);
     expect(screen.getByRole("button", { name: "Test the bucket" }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
   });

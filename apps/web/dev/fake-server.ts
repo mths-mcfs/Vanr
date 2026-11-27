@@ -330,16 +330,6 @@ export class FakeServer {
     this.enroll("workspace_birchwood", "usr_tomas", "member");
     this.enroll("workspace_nightshift", "usr_jonas", "owner");
     this.enroll("workspace_nightshift", "usr_ana", "member");
-    for (const workspace of this.state.workspaces) {
-      this.settings.set(workspace.id, {
-        name: workspace.name,
-        context: workspace.context,
-        timezone: workspace.settings.timezone,
-        agentBudgetDefaultUsd: 20,
-        approvalReviewer: false,
-        primaryCredentialId: null,
-      });
-    }
     const birchwoodPeople = ["usr_ana", "usr_jonas", "usr_iris", "usr_tomas"];
     for (const [id, channelName, isGeneral] of [
       ["ch_general", "general", true],
@@ -952,6 +942,24 @@ export class FakeServer {
     return reply(200, rest);
   }
 
+  /** A workspace's settings; one created after the seed starts from its name, context and time zone. */
+  private settingsOf(workspaceId: string): T.WorkspaceSettings | undefined {
+    const saved = this.settings.get(workspaceId);
+    if (saved !== undefined) return saved;
+    const workspace = this.state.workspaces.find((candidate) => candidate.id === workspaceId);
+    if (workspace === undefined) return undefined;
+    const fresh: T.WorkspaceSettings = {
+      name: workspace.name,
+      context: workspace.context,
+      timezone: workspace.settings.timezone,
+      agentBudgetDefaultUsd: 20,
+      approvalReviewer: false,
+      primaryCredentialId: null,
+    };
+    this.settings.set(workspaceId, fresh);
+    return fresh;
+  }
+
   private preferencesOf(workspaceId: string, userId: string): T.NotificationSettings {
     return this.notificationSettings.get(`${workspaceId}/${userId}`) ?? DEFAULT_NOTIFICATION_SETTINGS;
   }
@@ -1263,14 +1271,14 @@ export class FakeServer {
     getSettings: (params, session) => {
       const scope = this.scope(params, session);
       if ("status" in scope) return scope;
-      return reply(200, this.settings.get(scope.workspaceId));
+      return reply(200, this.settingsOf(scope.workspaceId));
     },
     updateSettings: (params, session) => {
       const scope = this.allowed(params, session, "configure");
       if ("status" in scope) return scope;
       const body = Bodies.settings.safeParse(params);
       if (!body.success) return invalid();
-      const current = this.settings.get(scope.workspaceId);
+      const current = this.settingsOf(scope.workspaceId);
       if (current === undefined) return notFound("Workspace not found");
       const next = {
         ...current,
@@ -1389,6 +1397,53 @@ export class FakeServer {
         },
         url: `https://vanr.test/invite/${invitation.token}`,
       });
+    },
+    createInvitationBulk: (params, session) => {
+      const scope = this.allowed(params, session, "manage_members");
+      if ("status" in scope) return scope;
+      const body = z
+        .object({ emails: z.array(z.string()).min(1).max(100), role: z.enum(ROLES) })
+        .safeParse(params);
+      if (!body.success) return invalid();
+      if (body.data.role === "owner" && scope.role !== "owner")
+        return envelope(403, "forbidden", "Forbidden");
+      const results: T.BatchInviteResult[] = [];
+      const seen = new Set<string>();
+      for (const raw of body.data.emails) {
+        const address = raw.trim().toLowerCase();
+        if (address === "" || seen.has(address)) continue;
+        seen.add(address);
+        if (!email.safeParse(address).success) {
+          results.push({ email: address, status: "bad_email" });
+        } else if (
+          this.state.members.some((m) => m.workspaceId === scope.workspaceId && m.email === address)
+        ) {
+          results.push({ email: address, status: "already_member" });
+        } else if (
+          this.invitations.some(
+            (invitation) =>
+              invitation.workspaceId === scope.workspaceId &&
+              invitation.email === address &&
+              this.invitationState(invitation) === "pending",
+          )
+        ) {
+          results.push({ email: address, status: "already_invited" });
+        } else {
+          const token = this.id("inv");
+          this.invitations.push({
+            token,
+            workspaceId: scope.workspaceId,
+            email: address,
+            role: body.data.role,
+            invitedBy: scope.user.id,
+            expiresAt: new Date(this.now().getTime() + 7 * DAY_MS),
+            status: "pending",
+            requestedNew: false,
+          });
+          results.push({ email: address, status: "invited", url: `https://vanr.test/invite/${token}` });
+        }
+      }
+      return reply(200, { results });
     },
     deleteInvitation: (params, session) => {
       const scope = this.allowed(params, session, "manage_members");

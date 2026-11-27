@@ -2,7 +2,7 @@
 // sees the invitations still open, changes roles and removes people; nobody changes their own role
 // here, and only an owner touches another owner.
 import { useApiMutation, useApiQuery } from "@vanr/client/react";
-import type { Member, Role } from "@vanr/contract";
+import type { BatchInviteResult, Member, Role } from "@vanr/contract";
 import {
   Avatar,
   Button,
@@ -40,30 +40,45 @@ function useGivableRoles(): readonly Role[] {
   return may("manage_owners") ? ["member", "admin", "owner"] : ["member", "admin"];
 }
 
+/** The most addresses one invitation round takes (the server's limit). */
+export const INVITE_MAX = 100;
+
+/** The addresses typed, split on spaces, commas or semicolons, lowercased and each one once. */
+export function parseEmails(text: string): string[] {
+  const seen = new Set<string>();
+  for (const part of text.split(/[\s,;]+/)) {
+    const address = part.trim().toLowerCase();
+    if (address !== "") seen.add(address);
+  }
+  return [...seen];
+}
+
 function InviteForm() {
   const t = useMessages("settings");
   const { workspaceId } = useWorkspaceAccess();
   const roles = useGivableRoles();
   const outcome = useOutcome();
   const describe = useErrorMessage("settings");
-  const [email, setEmail] = useState("");
+  const [text, setText] = useState("");
   const [role, setRole] = useState<Role>("member");
-  const [link, setLink] = useState<{ email: string; url: string } | null>(null);
-  const invite = useApiMutation("createInvitation", {
+  const [results, setResults] = useState<readonly BatchInviteResult[] | null>(null);
+  const invite = useApiMutation("createInvitationBulk", {
     invalidates: () => [{ method: "listInvitations", args: { workspaceId } }],
   });
-  const address = email.trim();
+  const emails = parseEmails(text);
+  const tooMany = emails.length > INVITE_MAX;
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    if (address === "") return;
+    if (emails.length === 0 || tooMany) return;
     invite.mutate(
-      { workspaceId, body: { email: address, role } },
+      { workspaceId, body: { emails, role } },
       {
-        onSuccess: (result) => {
-          setLink({ email: address, url: result.url });
-          setEmail("");
-          outcome.done(t("members.invited", { email: address }));
+        onSuccess: (answer) => {
+          setResults(answer);
+          setText("");
+          const sent = answer.filter((result) => result.status === "invited").length;
+          if (sent > 0) outcome.done(t("members.invited", { count: sent }));
         },
       },
     );
@@ -73,13 +88,17 @@ function InviteForm() {
     <Surface variant="card" className="section-card">
       <h3 className="page__heading">{t("members.inviteTitle")}</h3>
       <form className="invite-form" onSubmit={submit} aria-label={t("members.inviteTitle")}>
-        <Field label={t("members.email")}>
+        <Field
+          label={t("members.emails")}
+          hint={t("members.emailsHint", { max: INVITE_MAX })}
+          error={tooMany ? t("members.tooMany", { max: INVITE_MAX }) : undefined}
+        >
           <Input
-            type="email"
-            value={email}
-            required
+            value={text}
             autoComplete="off"
-            onChange={(event) => setEmail(event.target.value)}
+            spellCheck={false}
+            inputMode="email"
+            onChange={(event) => setText(event.target.value)}
           />
         </Field>
         <Field label={t("members.role")}>
@@ -91,8 +110,13 @@ function InviteForm() {
             ))}
           </Select>
         </Field>
-        <Button type="submit" variant="primary" loading={invite.isPending} disabled={address === ""}>
-          {t("members.invite")}
+        <Button
+          type="submit"
+          variant="primary"
+          loading={invite.isPending}
+          disabled={emails.length === 0 || tooMany}
+        >
+          {t("members.invite", { count: Math.max(emails.length, 1) })}
         </Button>
       </form>
       {invite.isError && (
@@ -100,26 +124,45 @@ function InviteForm() {
           {describe(invite.error)}
         </Callout>
       )}
-      {link !== null && !invite.isError && (
-        <Callout
-          tone="success"
-          title={t("members.linkTitle", { email: link.email })}
-          actions={
-            <Button
-              size="sm"
-              icon={<Copy aria-hidden="true" />}
-              onClick={() =>
-                void navigator.clipboard?.writeText(link.url).then(() => outcome.done(t("members.copied")))
-              }
-            >
-              {t("members.copy")}
-            </Button>
-          }
-        >
-          <code className="invite-link">{link.url}</code>
-        </Callout>
-      )}
+      {results !== null && !invite.isError && <InviteResults results={results} />}
     </Surface>
+  );
+}
+
+/** What happened to each address: the link of each invitation sent, or why none was. */
+function InviteResults({ results }: { results: readonly BatchInviteResult[] }) {
+  const t = useMessages("settings");
+  const outcome = useOutcome();
+  const sent = results.filter((result) => result.status === "invited");
+  return (
+    <Callout
+      tone={sent.length === results.length ? "success" : "warning"}
+      title={t("members.resultTitle", { count: sent.length })}
+    >
+      <ul className="invite-results" aria-label={t("members.results")}>
+        {results.map((result) => (
+          <li key={result.email}>
+            <span>{t(`members.result.${result.status}`, { email: result.email })}</span>
+            {result.url !== undefined && (
+              <span className="invite-results__link">
+                <code className="invite-link">{result.url}</code>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  icon={<Copy aria-hidden="true" />}
+                  aria-label={t("members.copyFor", { email: result.email })}
+                  onClick={() =>
+                    void navigator.clipboard
+                      ?.writeText(result.url ?? "")
+                      .then(() => outcome.done(t("members.copied")))
+                  }
+                />
+              </span>
+            )}
+          </li>
+        ))}
+      </ul>
+    </Callout>
   );
 }
 
@@ -246,14 +289,14 @@ function MemberList({ manage }: { manage: boolean }) {
 
 function PendingInvitations() {
   const t = useMessages("settings");
-  const { workspaceId } = useWorkspaceAccess();
+  const { workspaceId, may } = useWorkspaceAccess();
   const outcome = useOutcome();
   const invitations = useApiQuery("listInvitations", { workspaceId });
   const revoke = useApiMutation("deleteInvitation", {
     invalidates: () => [{ method: "listInvitations", args: { workspaceId } }],
   });
 
-  if (invitations.isPending) return null;
+  if (invitations.isPending) return <SectionLoading />;
   if (invitations.isError) {
     return (
       <SectionError
@@ -280,20 +323,26 @@ function PendingInvitations() {
                 <span className="listing__name">{who}</span>
               </span>
               <Chip>{t(`role.${invitation.role}`)}</Chip>
-              <Button
-                size="sm"
-                variant="ghost"
-                aria-label={t("members.revokeOf", { who })}
-                loading={revoke.isPending && revoke.variables?.invitationId === invitation.id}
-                onClick={() =>
-                  revoke.mutate(
-                    { workspaceId, invitationId: invitation.id },
-                    { onSuccess: () => outcome.done(t("members.revoked", { who })), onError: outcome.failed },
-                  )
-                }
-              >
-                {t("members.revoke")}
-              </Button>
+              {/* The server's rule: only an owner withdraws an invitation to be an owner. */}
+              {(invitation.role !== "owner" || may("manage_owners")) && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  aria-label={t("members.revokeOf", { who })}
+                  loading={revoke.isPending && revoke.variables?.invitationId === invitation.id}
+                  onClick={() =>
+                    revoke.mutate(
+                      { workspaceId, invitationId: invitation.id },
+                      {
+                        onSuccess: () => outcome.done(t("members.revoked", { who })),
+                        onError: outcome.failed,
+                      },
+                    )
+                  }
+                >
+                  {t("members.revoke")}
+                </Button>
+              )}
             </li>
           );
         })}

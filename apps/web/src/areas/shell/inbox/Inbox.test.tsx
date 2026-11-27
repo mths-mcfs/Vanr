@@ -61,7 +61,7 @@ describe("the inbox", () => {
     await app.user.click(within(rowOf(/wrote to you/)).getByRole("button", { name: "Snooze" }));
     await app.user.click(await screen.findByRole("menuitem", { name: "Until tomorrow, 9:00" }));
     expect(await screen.findByText(/^Snoozed until /)).toBeDefined();
-    await waitFor(() => expect(screen.queryByRole("button", { name: /wrote to you/ })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("button", { name: /wrote to you/ }) === null).toBe(true));
     expect(notice(app.server, "ntf_dm")?.mutedUntil).not.toBeNull();
   });
 
@@ -72,7 +72,9 @@ describe("the inbox", () => {
     expect(await screen.findByText("Pinned: it stays past the three months.")).toBeDefined();
     expect(notice(app.server, "ntf_reaction")?.savedAt).not.toBeNull();
     await app.user.click(within(rowOf(/Tomás Eriksen reacted/)).getByRole("button", { name: "Done" }));
-    await waitFor(() => expect(screen.queryByRole("button", { name: /Tomás Eriksen reacted/ })).toBeNull());
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /Tomás Eriksen reacted/ }) === null).toBe(true),
+    );
     expect(notice(app.server, "ntf_reaction")?.doneAt).not.toBeNull();
   });
 
@@ -133,7 +135,7 @@ describe("the inbox", () => {
     expect(before).toBe(50);
     await app.user.click(screen.getByRole("button", { name: "Show older notices" }));
     await waitFor(() => expect(notices()).toHaveLength(64));
-    expect(screen.queryByRole("button", { name: "Show older notices" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Show older notices" }) === null).toBe(true);
   });
 
   test("a link from a push or an email opens the notice's source", async () => {
@@ -152,5 +154,61 @@ describe("the inbox", () => {
     const { workspaceId: _w, userId: _u, ...shown } = fresh;
     app.server.emit("workspace_birchwood", { type: "notification.shown", notification: shown });
     expect(await screen.findByText("One more thing")).toBeDefined();
+  });
+
+  /** An FYI inbox of 60 read reports and, on the second page, one unread one. */
+  const twoPages = () => {
+    const server = newServer();
+    const sample = server.notifications.find((candidate) => candidate.id === "ntf_routine");
+    if (sample === undefined) throw new Error("no sample");
+    server.notifications = server.notifications.filter((candidate) => candidate.tab !== "fyi");
+    for (let n = 0; n < 60; n += 1) {
+      const updatedAt = new Date(Date.parse(sample.updatedAt) - n * 60_000).toISOString();
+      server.notifications.push({
+        ...sample,
+        id: `ntf_report_${n}`,
+        updatedAt,
+        readAt: n === 55 ? null : updatedAt,
+        latest: { title: `Report ${n}` },
+      });
+    }
+    return server;
+  };
+
+  test("Mark these read works when the only unread notice is on a page not loaded yet", async () => {
+    const server = twoPages();
+    const app = await renderApp({ path: `${PATH}?filter=fyi`, signedInAs: "usr_ana", server });
+    await screen.findByText("Report 0");
+    expect(screen.queryByRole("button", { name: /^Unread:/ }) === null).toBe(true);
+    const mark = screen.getByRole("button", { name: "Mark these read" });
+    expect(mark.hasAttribute("disabled")).toBe(false);
+    await app.user.click(mark);
+    await waitFor(() => expect(notice(server, "ntf_report_55")?.readAt).not.toBeNull());
+  });
+
+  test("a notice hidden in real time leaves an older page too", async () => {
+    const server = twoPages();
+    const app = await renderApp({ path: `${PATH}?filter=fyi`, signedInAs: "usr_ana", server });
+    await screen.findByText("Report 0");
+    await app.user.click(screen.getByRole("button", { name: "Show older notices" }));
+    expect(await screen.findByText("Report 57")).toBeDefined();
+    server.notifications = server.notifications.filter((candidate) => candidate.id !== "ntf_report_57");
+    server.emit("workspace_birchwood", { type: "notification.hidden", id: "ntf_report_57" });
+    await waitFor(() => expect(screen.queryByText("Report 57") === null).toBe(true));
+    expect(screen.getByText("Report 58")).toBeDefined();
+  });
+
+  test("a refused Done says why, in the interface language", async () => {
+    const server = newServer();
+    server.force("completeNotification", {
+      kind: "error",
+      status: 409,
+      code: "notification.waiting",
+      message: "Answer the request first; it leaves the inbox by itself",
+    });
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana", server, languages: ["pt-BR"] });
+    const dm = await screen.findByRole("button", { name: /escreveu para você/ });
+    await app.user.click(within(dm.closest("li") as HTMLElement).getByRole("button", { name: "Feito" }));
+    expect(await screen.findByText("Responda o pedido primeiro: ele sai da caixa sozinho.")).toBeDefined();
   });
 });

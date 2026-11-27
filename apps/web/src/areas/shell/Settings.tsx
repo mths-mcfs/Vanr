@@ -93,8 +93,9 @@ export function SettingsScreen() {
             {t(`settings.${section}`)}
           </h2>
           {allowed ? (
+            // Keyed by workspace: a draft or a pending confirmation never carries over to another one.
             <Suspense fallback={null}>
-              <SectionBody section={section} />
+              <SectionBody key={`${workspaceId}/${section}`} section={section} />
             </Suspense>
           ) : (
             <EmptyState

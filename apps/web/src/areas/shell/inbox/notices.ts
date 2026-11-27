@@ -39,8 +39,6 @@ export function destinationOf(notice: AppNotification, workspaceId: string): Des
 export type DayGroup = "today" | "yesterday" | "week" | "older";
 export const DAY_GROUPS: readonly DayGroup[] = ["today", "yesterday", "week", "older"];
 
-const DAY_MS = 86_400_000;
-
 /** Local midnight of the day `at` falls on. */
 function startOfDay(at: number): Date {
   const day = new Date(at);
@@ -48,13 +46,19 @@ function startOfDay(at: number): Date {
   return day;
 }
 
+/** Local midnight `days` calendar days from the day `at` falls on (a 23- or 25-hour day counts as one). */
+function dayStart(at: number, days: number): number {
+  const day = startOfDay(at);
+  day.setDate(day.getDate() + days);
+  return day.getTime();
+}
+
 /** The day group a notice falls in, by when it last changed, in the browser's time zone. */
 export function dayGroupOf(iso: string, now: number): DayGroup {
-  const today = startOfDay(now).getTime();
   const at = Date.parse(iso);
-  if (at >= today) return "today";
-  if (at >= today - DAY_MS) return "yesterday";
-  if (at >= today - 6 * DAY_MS) return "week";
+  if (at >= dayStart(now, 0)) return "today";
+  if (at >= dayStart(now, -1)) return "yesterday";
+  if (at >= dayStart(now, -6)) return "week";
   return "older";
 }
 
@@ -84,11 +88,12 @@ export const ALL_FILTERS = ["all", "mentions", "waiting", "unread", "reactions"]
 export const tabOf = (filter: NotificationFilter): Tab =>
   filter === "action_needed" || filter === "fyi" ? filter : "all";
 
-/** Pages joined in order; a notice that moved from one page to the next appears once. */
-export function joinPages(
-  first: readonly AppNotification[],
-  more: readonly AppNotification[],
-): AppNotification[] {
-  const seen = new Set(first.map((notice) => notice.id));
-  return [...first, ...more.filter((notice) => !seen.has(notice.id))];
+/** Pages joined in order; a notice that moved between pages, or came twice, appears once. */
+export function joinPages(...pages: readonly (readonly AppNotification[])[]): AppNotification[] {
+  const seen = new Set<string>();
+  return pages.flat().filter((notice) => {
+    if (seen.has(notice.id)) return false;
+    seen.add(notice.id);
+    return true;
+  });
 }

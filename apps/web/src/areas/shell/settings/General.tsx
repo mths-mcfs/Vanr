@@ -78,11 +78,13 @@ function WorkspaceForm({
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (draft === null || nameError !== undefined || timezoneError !== undefined) return;
+    const sent = draft;
     save.mutate(
       { workspaceId, body: { ...draft, name: draft.name.trim() } },
       {
         onSuccess: async () => {
-          setDraft(null);
+          // An edit made while this was saving stays a draft.
+          setDraft((current) => (current === sent ? null : current));
           // The frame shows the workspace's name from the session.
           if (draft.name.trim() !== saved.name) await session.load(true);
           outcome.done(t("general.saved"));

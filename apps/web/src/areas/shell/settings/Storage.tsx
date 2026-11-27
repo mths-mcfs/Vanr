@@ -92,7 +92,8 @@ function StorageForm({ workspaceId, current }: { workspaceId: string; current: S
     // A changed form makes the last test say nothing about it.
     setTest(null);
     runTest.reset();
-    save.reset();
+    // A save on its way keeps its state: its answer still has to arrive and say how it went.
+    if (!save.isPending) save.reset();
   };
   const bucketLength = form.bucket.trim().length;
   const bucketError =
@@ -112,13 +113,15 @@ function StorageForm({ workspaceId, current }: { workspaceId: string; current: S
     ...(form.accessKeyId.trim() !== "" && { accessKeyId: form.accessKeyId.trim() }),
     ...(form.secretAccessKey.trim() !== "" && { secretAccessKey: form.secretAccessKey.trim() }),
   });
-  // A save the bucket refused carries the steps of the server's own test.
-  const refusedSteps =
-    isApiError(save.error) && save.error.rawCode === "storage.bucket_check_failed"
-      ? StepFailures.safeParse(save.error.params).data?.steps
-      : undefined;
-  const shownTest: StorageTestResult | null =
-    test ?? (refusedSteps === undefined ? null : { ok: false, steps: refusedSteps.map(stepOf) });
+  // A save the bucket refused carries the steps of the server's own test, and speaks over an earlier
+  // test that passed (without steps, the error below says why).
+  const refused = isApiError(save.error) && save.error.rawCode === "storage.bucket_check_failed";
+  const refusedSteps = refused ? StepFailures.safeParse(save.error?.params).data?.steps : undefined;
+  const shownTest: StorageTestResult | null = !refused
+    ? test
+    : refusedSteps === undefined
+      ? null
+      : { ok: false, steps: refusedSteps.map(stepOf) };
   const unchanged = chosen === current.kind && (chosen === "builtin" || draft === null);
 
   return (
@@ -130,7 +133,7 @@ function StorageForm({ workspaceId, current }: { workspaceId: string; current: S
             value={chosen}
             onValueChange={(value) => {
               setKind(value === "s3" ? "s3" : "builtin");
-              save.reset();
+              if (!save.isPending) save.reset();
             }}
           >
             <Radio value="builtin" label={t("storage.kind.builtin")} hint={t("storage.kind.builtinHint")} />
@@ -244,19 +247,22 @@ function StorageForm({ workspaceId, current }: { workspaceId: string; current: S
             variant="primary"
             loading={save.isPending}
             disabled={chosen === "s3" ? !ready : unchanged}
-            onClick={() =>
+            onClick={() => {
+              const sent = { draft, kind };
               save.mutate(
                 { workspaceId, body: chosen === "s3" ? { kind: "s3", s3: input() } : { kind: "builtin" } },
                 {
                   onSuccess: () => {
-                    setDraft(null);
-                    setKind(null);
+                    // What was changed while this was saving stays a draft.
+                    const untouched = (current: unknown, at: unknown) => (current === at ? null : current);
+                    setDraft((current) => untouched(current, sent.draft) as Form | null);
+                    setKind((current) => untouched(current, sent.kind) as Kind | null);
                     setTest(null);
                     outcome.done(t(chosen === "s3" ? "storage.savedBucket" : "storage.savedBuiltin"));
                   },
                 },
-              )
-            }
+              );
+            }}
           >
             {t("action.save")}
           </Button>

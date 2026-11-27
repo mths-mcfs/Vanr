@@ -2,7 +2,7 @@
 // go, and what a member who may not change anything sees.
 import { expect, test } from "./fixtures.ts";
 
-test("an owner invites someone and sees the link and the open invitation", async ({
+test("an owner invites several people at once; a repeated address counts once", async ({
   page,
   t,
   seedUser,
@@ -12,21 +12,27 @@ test("an owner invites someone and sees the link and the open invitation", async
   await signIn(owner);
   await page.goto(`/workspace/${owner.workspace.id}/settings/members`);
   const form = page.getByRole("form", { name: t("settings", "members.inviteTitle") });
-  const email = `pia-${Date.now().toString(36)}@people.example`;
-  await form.getByLabel(t("settings", "members.email")).fill(email);
+  const stamp = Date.now().toString(36);
+  const pia = `pia-${stamp}@people.example`;
+  const rui = `rui-${stamp}@people.example`;
+  await form.getByLabel(t("settings", "members.emails")).fill(`${pia}, ${rui}; ${pia.toUpperCase()}`);
   await form.getByRole("combobox", { name: t("settings", "members.role") }).click();
   await page.getByRole("option", { name: t("settings", "role.admin") }).click();
-  await form.getByRole("button", { name: t("settings", "members.invite") }).click();
+  await form.getByRole("button", { name: t("settings", "members.invite", { count: 2 }) }).click();
 
-  await expect(page.getByText(t("settings", "members.linkTitle", { email }))).toBeVisible();
-  await expect(page.getByText(/\/invite\//)).toBeVisible();
+  const results = page.getByRole("list", { name: t("settings", "members.results"), exact: true });
+  await expect(results.getByRole("listitem")).toHaveCount(2);
+  await expect(results.getByText(t("settings", "members.result.invited", { email: pia }))).toBeVisible();
+  await expect(results.getByText(t("settings", "members.result.invited", { email: rui }))).toBeVisible();
+  await expect(results.getByText(/\/invite\//)).toHaveCount(2);
   const pending = page.getByRole("list", { name: t("settings", "members.pending") });
-  const invited = pending.getByRole("listitem").filter({ hasText: email });
-  await expect(invited).toContainText(t("settings", "role.admin"));
+  await expect(pending.getByRole("listitem").filter({ hasText: pia })).toContainText(
+    t("settings", "role.admin"),
+  );
 
-  // It is still open after a reload: the server has it.
+  // Still open after a reload: the server has them.
   await page.reload();
-  await expect(pending.getByRole("listitem").filter({ hasText: email })).toBeVisible();
+  await expect(pending.getByRole("listitem").filter({ hasText: rui })).toBeVisible();
 });
 
 test("an owner changes a member's role, and it holds after a reload", async ({

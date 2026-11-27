@@ -10,7 +10,7 @@ import type {
 } from "@vanr/contract";
 import { Button, Callout, Checkbox, Chip, Field, Input, Select, SelectItem, Surface, Switch } from "@vanr/ui";
 import { Plus, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AppLink, useRouteParams } from "../../../app/navigation.tsx";
 import { ScreenError, ScreenLoading, useDocumentTitle, useErrorMessage } from "../../../app/screens.tsx";
 import { useLocale, useMessages } from "../../../i18n/react.tsx";
@@ -75,6 +75,7 @@ export function PreferencesScreen() {
 function PreferencesForm({ workspaceId, saved }: { workspaceId: string; saved: NotificationSettings }) {
   const t = useMessages("inbox");
   const shell = useMessages("shell");
+  const common = useMessages("common");
   const { locale } = useLocale();
   const clock = useClock();
   const outcome = useOutcome("inbox");
@@ -89,6 +90,14 @@ function PreferencesForm({ workspaceId, saved }: { workspaceId: string; saved: N
   const save = useApiMutation("setNotificationSettings", { invalidates });
   const quiet = useApiMutation("setNotificationSettings", { invalidates });
 
+  // The last settings the server confirmed: a refetch, or the answer of this page's own save.
+  // Do not disturb sends these with its one change, so it never writes back a field it did not touch.
+  const confirmed = useRef(saved);
+  useEffect(() => {
+    confirmed.current = saved;
+  }, [saved]);
+  const busy = save.isPending || quiet.isPending;
+
   const s = draft ?? saved;
   const set = (patch: Partial<NotificationSettings>) => setDraft({ ...s, ...patch });
   const dirty = draft !== null && JSON.stringify(draft) !== JSON.stringify(saved);
@@ -96,6 +105,20 @@ function PreferencesForm({ workspaceId, saved }: { workspaceId: string; saved: N
   const timezone =
     people.data?.find((person) => person.userId === me?.user.id)?.timezone ?? workspace.data?.timezone;
   const memberOf = (channels.data ?? []).filter((channel) => channel.isMember);
+  const failedList = (title: string, retry: () => void) => (
+    <Callout
+      tone="danger"
+      role="alert"
+      title={title}
+      actions={
+        <Button size="sm" onClick={retry}>
+          {common("action.retry")}
+        </Button>
+      }
+    />
+  );
+  const channelsFailed =
+    channels.isError && failedList(t("prefs.channelsFailed"), () => void channels.refetch());
   const channelName = (id: string) => {
     const found = channels.data?.find((channel) => channel.id === id);
     return found === undefined ? id : `#${found.name}`;
@@ -117,10 +140,11 @@ function PreferencesForm({ workspaceId, saved }: { workspaceId: string; saved: N
   const setDnd = (until: Date | null) => {
     const dndUntil = until === null ? null : until.toISOString();
     quiet.mutate(
-      { workspaceId, body: { ...saved, dndUntil } },
+      { workspaceId, body: { ...confirmed.current, dndUntil } },
       {
         onSuccess: (next) => {
-          if (draft !== null) setDraft({ ...draft, dndUntil: next.dndUntil });
+          confirmed.current = next;
+          setDraft((current) => (current === null ? null : { ...current, dndUntil: next.dndUntil }));
           outcome.done(
             until === null ? t("prefs.dndOffDone") : t("prefs.dndOnDone", { time: time(dndUntil ?? "") }),
           );
@@ -191,15 +215,16 @@ function PreferencesForm({ workspaceId, saved }: { workspaceId: string; saved: N
           <Button
             size="sm"
             loading={quiet.isPending}
+            disabled={save.isPending}
             onClick={() => setDnd(new Date(clock.now() + 3_600_000))}
           >
             {t("prefs.dndHour")}
           </Button>
-          <Button size="sm" disabled={quiet.isPending} onClick={() => setDnd(morning)}>
+          <Button size="sm" disabled={busy} onClick={() => setDnd(morning)}>
             {t("prefs.dndMorning")}
           </Button>
           {dndOn && (
-            <Button size="sm" variant="ghost" disabled={quiet.isPending} onClick={() => setDnd(null)}>
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => setDnd(null)}>
               {t("prefs.dndStop")}
             </Button>
           )}
@@ -300,6 +325,7 @@ function PreferencesForm({ workspaceId, saved }: { workspaceId: string; saved: N
             ))}
           </ul>
         )}
+        {channelsFailed}
         <Field label={t("prefs.mute")}>
           <Select
             value=""
@@ -323,6 +349,8 @@ function PreferencesForm({ workspaceId, saved }: { workspaceId: string; saved: N
           {t("prefs.rules")}
         </h2>
         <p className="page__muted">{t("prefs.rulesHint")}</p>
+        {channelsFailed}
+        {agents.isError && failedList(t("prefs.agentsFailed"), () => void agents.refetch())}
         {s.rules.length === 0 ? (
           <p className="page__muted">{t("prefs.rulesNone")}</p>
         ) : (
@@ -424,20 +452,23 @@ function PreferencesForm({ workspaceId, saved }: { workspaceId: string; saved: N
         )}
         <Button
           variant="primary"
-          disabled={!dirty}
+          disabled={!dirty || quiet.isPending}
           loading={save.isPending}
-          onClick={() =>
+          onClick={() => {
+            const sent = draft;
             save.mutate(
               // The emails follow the interface language.
               { workspaceId, body: { ...s, locale } },
               {
-                onSuccess: () => {
-                  setDraft(null);
+                onSuccess: (next) => {
+                  confirmed.current = next;
+                  // An edit made while this was saving stays a draft.
+                  setDraft((current) => (current === sent ? null : current));
                   outcome.done(t("prefs.saved"));
                 },
               },
-            )
-          }
+            );
+          }}
         >
           {t("prefs.save")}
         </Button>

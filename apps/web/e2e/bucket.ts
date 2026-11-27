@@ -15,32 +15,39 @@ export interface Bucket {
 }
 
 export async function startBucket(): Promise<Bucket> {
-  const child = spawn("bun", [ENTRY], { stdio: ["ignore", "pipe", "inherit"] });
-  const first = await new Promise<string>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`the bucket did not start in ${START_MS} ms`)), START_MS);
-    let text = "";
-    child.once("exit", (code) => {
-      clearTimeout(timer);
-      reject(new Error(`the bucket exited before it started (${code})`));
-    });
-    child.stdout?.on("data", (chunk: Buffer) => {
-      text += chunk.toString("utf8");
-      const line = text.split("\n")[0];
-      if (text.includes("\n") && line !== undefined) {
-        clearTimeout(timer);
-        resolve(line);
-      }
-    });
-  });
-  const { endpoint, bucket } = JSON.parse(first) as { endpoint: string; bucket: string };
-  return {
-    endpoint,
-    name: bucket,
-    async stop() {
-      if (child.exitCode !== null || child.signalCode !== null) return;
-      const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
-      child.kill("SIGTERM");
-      await exited;
-    },
+  // stdin stays open while this process lives; the child leaves when it closes (see bucket-main.ts),
+  // so a worker that dies without its teardown leaves no bucket behind.
+  const child = spawn("bun", [ENTRY], { stdio: ["pipe", "pipe", "inherit"] });
+  const stop = async () => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    child.kill("SIGTERM");
+    await exited;
   };
+  try {
+    const first = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`the bucket did not start in ${START_MS} ms`)),
+        START_MS,
+      );
+      let text = "";
+      child.once("exit", (code) => {
+        clearTimeout(timer);
+        reject(new Error(`the bucket exited before it started (${code})`));
+      });
+      child.stdout?.on("data", (chunk: Buffer) => {
+        text += chunk.toString("utf8");
+        const line = text.split("\n")[0];
+        if (text.includes("\n") && line !== undefined) {
+          clearTimeout(timer);
+          resolve(line);
+        }
+      });
+    });
+    const { endpoint, bucket } = JSON.parse(first) as { endpoint: string; bucket: string };
+    return { endpoint, name: bucket, stop };
+  } catch (error) {
+    await stop();
+    throw error;
+  }
 }
