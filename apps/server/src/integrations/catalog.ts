@@ -78,7 +78,7 @@ export const BUILTIN_AREAS = {
   calendar: { read: ["list_events", "find_available_time"], write: ["propose_calendar_event"] },
   wiki: {
     read: ["open_wiki_page"],
-    write: ["add_wiki_page", "update_wiki_page", "link_to_wiki"],
+    write: ["add_wiki_page", "update_wiki_page", "link_to_wiki", "propose_wiki_edit"],
   },
   skills: { read: ["use_skill", "open_skill_file"], write: [] },
   schedule: {
