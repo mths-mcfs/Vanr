@@ -300,7 +300,7 @@ describe("conversation tools", () => {
     expect(t.actions.map((a) => a.kind)).toEqual(["reminder_created"]);
   });
 
-  test("use_skill comes in parts with the files at the end; a disabled or foreign skill is refused", async () => {
+  test("use_skill comes in parts with the files at the end; a disabled or foreign skill is rejected", async () => {
     const t = await setup("skills");
     const skill = async (workspaceId: string, name: string, enabled: boolean) => {
       const id = newId("skill");
@@ -412,7 +412,7 @@ describe("conversation tools", () => {
     expect(asked).toHaveLength(1);
   });
 
-  test("propose_context_change creates a pending proposal with its card; the same text is refused", async () => {
+  test("propose_context_change creates a pending proposal with its card; the same text is rejected", async () => {
     const t = await setup("propose");
     await server.deps.db
       .update(schema.workspaces)
@@ -425,8 +425,8 @@ describe("conversation tools", () => {
     });
     expect(same).toEqual({ content: "The proposed text is the same as the current one", isError: true });
     const out = await run(t.ctx(), "propose_context_change", {
-      context: "We bake and deliver.",
-      title: "Add delivery",
+      context: "We bake and sell online.",
+      title: "Add online sales",
       why: "Clients ask for it",
     });
     expect(out.content).toEndWith("A person will review it; it changes nothing until accepted.");
@@ -434,12 +434,12 @@ describe("conversation tools", () => {
     expect(row).toMatchObject({
       targetKind: "workspace_context",
       before: "We bake.",
-      after: "We bake and deliver.",
+      after: "We bake and sell online.",
       status: "pending",
       recipientAgentId: null,
     });
     expect(row?.messageId).toBeString();
-    expect(t.cards).toEqual([{ body: "Add delivery", meta: { proposalId: row?.id } }]);
+    expect(t.cards).toEqual([{ body: "Add online sales", meta: { proposalId: row?.id } }]);
     const [ws] = await server.deps.db
       .select({ context: schema.workspaces.context })
       .from(schema.workspaces)
@@ -450,7 +450,7 @@ describe("conversation tools", () => {
 
 describe("outside effects in a routine execution run once", () => {
   /** A K2 tool to an outside destination that counts its runs; `fail` decides how a run ends. */
-  function outbound(fail: { mode: "none" | "crash" | "refuse" }) {
+  function outbound(fail: { mode: "none" | "crash" | "reject" }) {
     const state = { ran: 0 };
     const tool = define({
       name: "send_out",
@@ -463,7 +463,7 @@ describe("outside effects in a routine execution run once", () => {
       async run(_ctx, input) {
         state.ran++;
         if (fail.mode === "crash") throw new Error("connection reset");
-        if (fail.mode === "refuse") throw new ToolInputError("Partner is closed");
+        if (fail.mode === "reject") throw new ToolInputError("Partner is closed");
         return `sent ${input.text}`;
       },
     }) as ToolDef<unknown>;
@@ -508,7 +508,7 @@ describe("outside effects in a routine execution run once", () => {
 
   test("a crash midway is never repeated blindly; a refusal before sending lets the retry send", async () => {
     const t = await setup("crash");
-    const fail: { mode: "none" | "crash" | "refuse" } = { mode: "crash" };
+    const fail: { mode: "none" | "crash" | "reject" } = { mode: "crash" };
     const { state, tool } = outbound(fail);
     const effectKey = newId("rx");
     await expect(runTool(t.ctx({ effectKey }), [tool], "send_out", { text: "a" })).rejects.toThrow(
@@ -522,7 +522,7 @@ describe("outside effects in a routine execution run once", () => {
     );
     expect(state.ran).toBe(1);
 
-    fail.mode = "refuse";
+    fail.mode = "reject";
     const key2 = newId("rx");
     expect(await runTool(t.ctx({ effectKey: key2 }), [tool], "send_out", { text: "a" })).toEqual({
       content: "Partner is closed",
