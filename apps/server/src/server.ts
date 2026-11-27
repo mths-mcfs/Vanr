@@ -6,6 +6,8 @@ import { createSealer } from "@vanr/engine/seal";
 import { postgresConnector, type SqlConnector } from "@vanr/engine/sqlconn";
 import { count } from "drizzle-orm";
 import { createApp } from "./app";
+import { createEngine } from "./assignments/motor";
+import type { Verifier } from "./assignments/verify";
 import { createAuth, type SignupDecision } from "./auth";
 import { resumeRecalcs, stopRecalcs } from "./bases/write";
 import type { Config } from "./config";
@@ -74,6 +76,15 @@ interface StartOptions {
   /** The live wiki: the quiet before the draft publishes itself (default 5 min) and the autosave debounce. */
   wikiIdlePublishMs?: number;
   wikiDebounceMs?: number;
+  /** The assignment engine; by default DBOS on Postgres and the in-memory loop on PGlite. */
+  engine?: "dbos" | "local";
+  /** Tests: the assignments' verifier in place of the model's. */
+  assignmentVerifier?: Verifier;
+  /**
+   * Tests: the agent runtime the server runs on, made from the port it would have (whose absent methods throw
+   * `not_available`). Until slice S6 brings the real one, this is how a test gives the assignment engine a runtime.
+   */
+  runtime?: (port: RuntimePort) => RuntimePort;
 }
 
 /** The boot's steps that touch the outside: the instance lock, the database and the VAPID keys. */
@@ -349,10 +360,19 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     // Push goes only to known push service hosts (push.ts), without redirects: it doesn't go through
     // guardedFetch, which would resolve DNS to check for a private network.
     push: webPushSender(await steps.loadVapid(effective), opts.fetchExternal ?? fetch),
-    runtime: runtimePort(background),
+    runtime: opts.runtime ? opts.runtime(runtimePort(background)) : runtimePort(background),
     testModelFor: (workspaceId) => testModelCheck(deps, workspaceId, opts.forceFakeModels === true),
     wikiLive: collab.live,
-    // S5 (assignments/motor, assignments/verify) adds `assignmentEngine` and `assignmentVerifier`.
+    assignmentEngine: createEngine(
+      () => deps,
+      opts.engine ?? (effective.db.kind === "postgres" ? "dbos" : "local"),
+      {
+        url: effective.db.kind === "postgres" ? effective.db.url : null,
+        version: effective.durable.version,
+        poolSize: effective.durable.poolSize,
+      },
+    ),
+    ...(opts.assignmentVerifier ? { assignmentVerifier: opts.assignmentVerifier } : {}),
   };
   // Here, in this order: the undo of stopRecalcs (S2, bases/write) and of the assignment engine's stop
   // (S5); the provider lookup (S6); runtime.start (S6), the engine's start (S5) and resumeRecalcs (S2),
@@ -408,6 +428,10 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   });
   // The formula recalculations: halted before the database closes, then the ones a crash or a deploy left
   // halfway resume in the background.
+  // The assignment engine resumes over the runs a crash left on the air (after runtime.start, slice S6). Its stop
+  // is registered first: the start launches DBOS on Postgres. Without the runtime it doesn't start.
+  undo.push(() => deps.assignmentEngine.stop());
+  await deps.assignmentEngine.start();
   undo.push(() => stopRecalcs(deps));
   await resumeRecalcs(deps);
   const app = createApp(deps, { firstUser, signupQueue: signupLimits });

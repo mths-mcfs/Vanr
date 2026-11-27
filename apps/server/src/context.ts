@@ -8,6 +8,8 @@ import type { SqlConnector } from "@vanr/engine/sqlconn";
 import type { BudgetScope, UsageLedger, UsageSource } from "@vanr/engine/usage";
 import type { Context } from "hono";
 import type { AgentRow } from "./agents";
+import type { AssignmentEngine } from "./assignments/motor";
+import type { Verifier } from "./assignments/verify";
 import type { Auth } from "./auth";
 import type { ChannelRow } from "./channels";
 import type { Config } from "./config";
@@ -23,8 +25,8 @@ import type { ApprovalOutcome, RevisedApproval } from "./runtime/tools";
 import type { WikiLive } from "./wiki-collab";
 
 /**
- * Everything the routes need. Each slice of the server adds what it uses: S5 adds `assignmentEngine` and `assignmentVerifier` (assignments/motor,
- * assignments/verify). The runtime is already here as a port; S6 puts the real one behind it.
+ * Everything the routes need. Each slice of the server adds what it uses. The runtime is already here as a port;
+ * S6 puts the real one behind it.
  */
 export interface AppDeps {
   config: Config;
@@ -66,6 +68,10 @@ export interface AppDeps {
   testModelFor: (
     workspaceId: string,
   ) => Promise<(agent: Pick<AgentRow, "credentialId" | "harnessKind">) => boolean>;
+  /** The loop of each open assignment (assignments/motor): on Postgres a DBOS workflow, on PGlite in memory. */
+  assignmentEngine: AssignmentEngine;
+  /** Tests: the verifier in place of the model's (a clean-context agent through `runtime.complete`). */
+  assignmentVerifier?: Verifier;
 }
 
 /** What `RuntimePort.complete` asks for: a text from an agent outside a conversation. */
