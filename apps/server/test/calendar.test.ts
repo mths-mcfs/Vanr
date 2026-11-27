@@ -499,13 +499,28 @@ describe("calendar", () => {
       expect(part.rule?.times).toEqual(["02:30"]);
       await update(ana, workspaceId, part.id, { scope: "all", title: "Early, again", rule: part.rule });
       expect(await starts()).toEqual(before);
-      // A new start for the part gives it its own time again.
+      // So does a changed rule (here an end date), on the part and on a new continuation from it.
+      const until = { ...part.rule, until: "2027-03-20T00:00:00Z" };
+      await update(ana, workspaceId, part.id, { scope: "all", rule: until });
+      expect(await starts()).toEqual(before);
+      await update(ana, workspaceId, part.id, {
+        scope: "following",
+        instanceStart: "2027-03-15T06:30:00Z",
+        title: "Early, last",
+        rule: until,
+      });
+      // The rule sent is the person's (its count runs from the 15th); its days stay at 02:30 local.
+      const later = (await starts()).slice(2);
+      expect(later[0]).toBe("2027-03-15T06:30:00.000Z");
+      expect(later.every((at) => at.endsWith("T06:30:00.000Z"))).toBe(true);
+      // A new start for the part gives it its own time again; the continuation made from it keeps its own.
       await update(ana, workspaceId, part.id, { scope: "all", start: "2027-03-14T13:00:00Z" });
       expect(await starts()).toEqual([
         "2027-03-13T07:30:00.000Z",
         "2027-03-14T13:00:00.000Z",
-        "2027-03-15T13:00:00.000Z",
-        "2027-03-16T13:00:00.000Z",
+        "2027-03-15T06:30:00.000Z",
+        "2027-03-16T06:30:00.000Z",
+        "2027-03-17T06:30:00.000Z",
       ]);
       await remove(ana, workspaceId, dst.id, { scope: "all" });
     },

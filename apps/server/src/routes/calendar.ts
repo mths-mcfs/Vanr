@@ -145,17 +145,6 @@ async function requireEditorOfParts(tx: Tx, where: SQL | undefined, me: Workspac
 
 const withoutTimes = ({ times: _t, ...rule }: RecurrenceRule): RecurrenceRule => rule;
 
-/** The same rule, whatever the order of its keys and with absent and undefined fields alike. */
-const sameKeys = (a: RecurrenceRule, b: RecurrenceRule) => {
-  const flat = (r: RecurrenceRule) =>
-    JSON.stringify(
-      Object.entries(r)
-        .filter(([, v]) => v !== undefined)
-        .sort(([x], [y]) => x.localeCompare(y)),
-    );
-  return flat(a) === flat(b);
-};
-
 /** Is the occurrence in the series (and not taken out of it)? */
 function checkOccurrence(row: EventRow, instanceStart: string | undefined): Date {
   if (!instanceStart) throw new HttpError(400, "calendar.occurrence_required", "Say which occurrence");
@@ -283,16 +272,13 @@ export async function editEvent(
       ...withoutTimes(rule),
       ...(patch.timezone !== undefined ? { timezone: patch.timezone } : {}),
     });
-    // A client sends a rule back as it read it, without the local time the server keeps (`clientRule` drops
-    // it): the same rule, with no new start or time zone, keeps it.
-    const keptTimes = series?.times;
-    const resent =
-      patch.rule &&
-      keptTimes &&
-      !retimed &&
-      sameKeys(patch.rule, withoutTimes({ ...series, start: undefined }))
-        ? { ...patch.rule, times: keptTimes }
-        : patch.rule;
+    // A rule from the client never carries the local time the server keeps (`clientRule` drops it). While the
+    // start and the time zone stay (the event's and the rule's), a new rule keeps that time: only the server sets it.
+    const keepTimes = (rule: RecurrenceRule | null | undefined, times: string[] | undefined) =>
+      rule && times?.length && !retimed && rule.timezone === (series?.timezone || row.timezone)
+        ? { ...rule, times }
+        : rule;
+    const resent = keepTimes(patch.rule, series?.times);
     const ruleChange =
       resent !== undefined
         ? { rule: resent }
@@ -404,7 +390,11 @@ export async function editEvent(
         ? series
         : { ...series, times };
     const nextRule =
-      patch.rule !== undefined ? patch.rule : series.count ? { ...kept, count: series.count - before } : kept;
+      patch.rule !== undefined
+        ? keepTimes(patch.rule, kept.times)
+        : series.count
+          ? { ...kept, count: series.count - before }
+          : kept;
     const [following] = await tx
       .insert(calendarEntries)
       .values({
