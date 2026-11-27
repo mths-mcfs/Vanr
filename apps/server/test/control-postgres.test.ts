@@ -291,7 +291,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("undo at the same time on Postgre
         { type: "outbox", id },
         { outboxId: id },
       );
-      // A is the undo, held right after locking the queued item (the select on the outbox, after the action's). With the
+      // A is the undo, held right after locking the queued item (its `select "id" ... for update`, not the access check's read of the payload). With the
       // lock the sweep's claim waits, then finds it canceled; without it, the sweep claims and posts it, and the
       // undo that got there first finds it gone out.
       const run = await forcedPair(
@@ -304,7 +304,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("undo at the same time on Postgre
             : instrumented(server.deps.db, hooks)
                 .transaction((tx) => deliverDue({ ...server.deps, db: tx, now: () => sendAt }))
                 .then((sent) => `B:${sent}`),
-        { match: 'from "outbox"', bKind: "update" },
+        { match: 'select "id" from "outbox"', bKind: "update" },
       );
       expect(run.aPids[0]).not.toBe(run.bPids[0]);
       const [row] = await server.deps.db.select().from(outbox).where(eq(outbox.id, id));
