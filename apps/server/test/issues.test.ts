@@ -8,8 +8,10 @@ import type { Issue, IssueActivity, IssueColumn } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { and, eq } from "drizzle-orm";
+import { channelInWorkspace } from "../src/channels";
 import { createFile } from "../src/drive";
 import { columnsOf, createIssue } from "../src/issues";
+import { postMessage } from "../src/messages";
 import { BOARD_POSITION_MAX, COMMENT_FILES_MAX, ISSUE_LIST_LIMIT } from "../src/routes/issues";
 import type { RunningServer } from "../src/server";
 import {
@@ -712,14 +714,41 @@ describe("asking an agent", () => {
   test(
     "a boot that fails before it settles the fallen runs' work leaves those runs to the next boot",
     async () => {
-      const { workspaceId, ana } = await team();
+      const { workspaceId, general, ana } = await team();
       const lia = await seedAgent(workspaceId, ana, `lia${n}`);
       const issue = await ok<Issue>(
-        call(ana, workspaceId, "POST", "/issues", { title: "[[slow:500]] Count the stock" }),
+        call(ana, workspaceId, "POST", "/issues", { title: "Count the stock" }),
         201,
       );
-      await ok<Issue>(call(ana, workspaceId, "POST", `/issues/${issue.id}/ask-agent`, { agentId: lia }));
-      await running(workspaceId, ana, lia);
+      // The request and the run the server fell in the middle of: in the database, with no worker behind it.
+      const channel = await channelInWorkspace(server.deps.db, workspaceId, general);
+      if (!channel) throw new Error("no channel");
+      const { message } = await postMessage(server.deps, {
+        workspaceId,
+        channel,
+        author: { type: "person", id: ana.user.id },
+        body: `#${issue.number} Count the stock`,
+        clientId: newId("c"),
+        meta: { workedIssue: { issueId: issue.id, number: issue.number } },
+      });
+      const runId = newId("run");
+      await server.deps.db.insert(schema.runs).values({
+        id: runId,
+        workspaceId,
+        agentId: lia,
+        channelId: general,
+        sourceMessageId: message.id,
+        status: "running",
+        what: "Count the stock",
+        model: "claude-haiku-5-5",
+      });
+      await server.deps.db
+        .insert(schema.messageDispatches)
+        .values({ messageId: message.id, agentId: lia, state: "claimed", runId });
+      await server.deps.db
+        .update(schema.issues)
+        .set({ work: { state: "working", reason: null, runId: null, messageId: message.id } })
+        .where(eq(schema.issues.id, issue.id));
       // The server comes back with the run in the middle, and the first boot falls on the issue's write.
       const real = server.deps.db;
       server.deps.db = new Proxy(real, {

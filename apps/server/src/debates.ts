@@ -927,8 +927,11 @@ async function step(deps: AppDeps, debateId: string): Promise<boolean> {
     if (row.phase !== "debating" && !(await saveDebate(deps, row, { phase: "debating" }, expect)))
       return true;
     // The round is parallel: each agent answers without seeing the others of this round.
-    const moved = await Promise.all(agentTurns.map((a) => agentTurn(deps, row, a.id)));
-    return moved.every(Boolean);
+    // Every turn ends before the step does, a failed one too: no turn of this debate outlives its step.
+    const moved = await Promise.allSettled(agentTurns.map((a) => agentTurn(deps, row, a.id)));
+    const failed = moved.find((m) => m.status === "rejected");
+    if (failed) throw failed.reason;
+    return moved.every((m) => m.status === "fulfilled" && m.value);
   }
   if (row.phase === "human_turn") return false;
   return !(await saveDebate(deps, row, { phase: "human_turn" }, expect));
@@ -1000,6 +1003,7 @@ async function agentTurn(deps: AppDeps, row: DebateRow, agentId: string): Promis
     await leaveRound(deps, row, who);
     return true;
   }
+  const posts = await postsOf(db, row.id);
   const key = `debate-turn:${row.id}:${row.round}:${agent.id}`;
   const got = await claim(db, {
     key,
@@ -1009,7 +1013,6 @@ async function agentTurn(deps: AppDeps, row: DebateRow, agentId: string): Promis
     now: deps.now(),
   });
   if (got === "held") return false;
-  const posts = await postsOf(db, row.id);
   const result =
     "done" in got ? recordedTurn(got.done) : await callTurn(deps, row, agent, posts, key, got.token);
   if (!result.ok && result.code !== "budget") {

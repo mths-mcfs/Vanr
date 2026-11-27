@@ -505,12 +505,16 @@ export function registerChat(app: Hono<AppEnv>) {
       channelId: param(c, "channelId"),
     });
     // The person's part of the post, after its own effects: the join (a public channel, only once the post was
-    // accepted) and the routing. A routing failure doesn't fail the post.
+    // accepted) and the routing. A routing failure doesn't fail the post; it leaves it unsettled for a resend.
     const then: PostEffects = async (message) => {
       if (!isMember) await joinChannel(deps.db, channel.id, me.userId);
-      await deps.runtime
-        .onPersonMessage({ workspaceId: me.workspaceId, channel, message })
-        .catch((err) => log.error("runtime.route_failed", { messageId: message.id, err }));
+      try {
+        await deps.runtime.onPersonMessage({ workspaceId: me.workspaceId, channel, message });
+        return true;
+      } catch (err) {
+        log.error("runtime.route_failed", { messageId: message.id, err });
+        return false;
+      }
     };
     // A resend of a post already accepted answers it as it is, whatever changed in the channel since; what the
     // first request left undone (it failed after the post was written) runs now, the join and the routing too.

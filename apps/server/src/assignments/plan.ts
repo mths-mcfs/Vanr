@@ -218,7 +218,23 @@ export async function writePlan(
       } else {
         if (input.mode === "append" && raw.id && byId.has(raw.id)) continue;
         if (raw.judged) {
-          const target = raw.fixes ? byId.get(raw.fixes) : undefined;
+          // The item's own row, locked: a retry (touchItem) moves its epoch without the assignment's lock.
+          const [target] = raw.fixes
+            ? await tx
+                .select({
+                  status: assignmentPlanItems.status,
+                  epoch: assignmentPlanItems.epoch,
+                  checks: assignmentPlanItems.checks,
+                })
+                .from(assignmentPlanItems)
+                .where(
+                  and(
+                    eq(assignmentPlanItems.assignmentId, assignmentId),
+                    eq(assignmentPlanItems.id, raw.fixes),
+                  ),
+                )
+                .for("update")
+            : [];
           if (
             target?.status !== "done" ||
             target.epoch !== raw.judged.epoch ||

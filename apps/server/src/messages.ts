@@ -327,9 +327,10 @@ export interface PostMessageInput {
 
 /**
  * The caller's part of a post, run after the post's own effects. A resend of the clientId runs it again while
- * the post isn't settled (a first request that failed before or inside it); once it resolves, the post is.
+ * the post isn't settled (a first request that failed before or inside it); once it resolves, the post is, unless
+ * it resolves false (a part that failed without failing the request, like a person's routing).
  */
-export type PostEffects = (message: Message) => Promise<void>;
+export type PostEffects = (message: Message) => Promise<boolean | undefined>;
 
 export interface PostedMessage {
   message: Message;
@@ -431,11 +432,12 @@ export async function postMessage(deps: AppDeps, input: PostMessageInput): Promi
 }
 
 /** Posts settling in this process now: a resend that comes meanwhile leaves them to the request that posted. */
-const settling = new Set<string>();
+const settling = new Map<string, Promise<void>>();
 
 /**
  * A resend of a post already written: what the first request left undone runs now (it failed, or the server fell
- * in the middle), unless that request is still at it. Returns the message as it is.
+ * in the middle). A request still at it is waited for, and its failure leaves the work to this one. Returns the
+ * message as it is.
  */
 export async function resumePost(
   deps: AppDeps,
@@ -443,39 +445,52 @@ export async function resumePost(
   channel: ChannelRow,
   then?: PostEffects,
 ): Promise<Message> {
-  if (row.effectsPending && !settling.has(row.id)) {
+  await settling.get(row.id)?.catch(() => {});
+  if (row.effectsPending) {
     const root = row.threadId ? await messageInWorkspace(deps.db, row.workspaceId, row.threadId) : null;
-    await settlePost(deps, row, toMessage(row), channel, root, then);
+    await settlePost(deps, row, toMessage(row), channel, root, then, row.createdAt);
   }
   return hydrateOne(deps.db, row);
 }
 
 /**
- * The post's effects, then the caller's; the post is settled once they all ran. Each one is safe to run again on a
- * resend except the notices, whose count a resend after a failure past them can raise once more.
+ * The post's effects, then the caller's; the post is settled once they all ran. One settle per post at a time: a
+ * resend joins the one under way, and a resend's settle reads the mark again first (another may have just
+ * finished). Each effect is safe to run again except the notices, whose count a resend after a failure past them
+ * can raise once more. `at` is the reply's time for the thread (the post's own, on a resend).
  */
-async function settlePost(
+function settlePost(
   deps: AppDeps,
   row: MessageRow,
   message: Message,
   channel: ChannelRow,
   root: MessageRow | null,
   then: PostEffects | undefined,
-) {
-  if (settling.has(row.id)) return;
-  settling.add(row.id);
-  try {
+  resent: Date | null = null,
+): Promise<void> {
+  const running = settling.get(row.id);
+  if (running) return running;
+  const work = (async () => {
+    if (resent) {
+      const [mark] = await deps.db
+        .select({ pending: messages.effectsPending })
+        .from(messages)
+        .where(eq(messages.id, row.id));
+      if (!mark?.pending) return;
+    }
     const author = { type: row.authorKind, id: row.authorId };
     await reindex(deps, { kind: "message", id: row.id });
     deps.hub.toChannel(channel.id, { type: "message.posted", message });
     if (!row.threadId) await announceUnread(deps, channel.id, author);
-    if (root) await touchThread(deps, { root, reply: row, author });
+    if (root) await touchThread(deps, { root, reply: row, author, at: resent ?? deps.now() });
     await notifyForMessage(deps, { row, channel, author });
-    await then?.(message);
+    if ((await then?.(message)) === false) return;
     await deps.db.update(messages).set({ effectsPending: false }).where(eq(messages.id, row.id));
-  } finally {
-    settling.delete(row.id);
-  }
+  })().finally(() => {
+    if (settling.get(row.id) === work) settling.delete(row.id);
+  });
+  settling.set(row.id, work);
+  return work;
 }
 
 /**
@@ -546,10 +561,12 @@ async function countReply(tx: Tx, root: MessageRow, at: Date) {
 }
 
 /** The thread's state for a new reply: every step is safe to run again (a resend that settles the reply). */
-async function touchThread(deps: AppDeps, input: { root: MessageRow; reply: MessageRow; author: ActorRef }) {
+async function touchThread(
+  deps: AppDeps,
+  input: { root: MessageRow; reply: MessageRow; author: ActorRef; at: Date },
+) {
   const { db } = deps;
-  const { root, reply, author } = input;
-  const at = deps.now();
+  const { root, reply, author, at } = input;
   const atSql = sql`${at.toISOString()}::timestamptz`;
   await ensureThread(db, { root, by: author, at });
   // One statement each, and only forward: two replies at once leave the later one (in the page's order, created

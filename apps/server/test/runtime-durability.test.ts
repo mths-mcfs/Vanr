@@ -249,8 +249,9 @@ describe("one conversation, one admission", () => {
         {
           nextRuns: next.length,
           answered: ids.map((id) => rows.find((d) => d.messageId === id)?.state ?? null),
+          sameRun: ids.map((id) => rows.find((d) => d.messageId === id)?.runId === next[0]),
         },
-        { nextRuns: 1, answered: ["handled", "handled"] },
+        { nextRuns: 1, answered: ["handled", "handled"], sameRun: [true, true] },
       );
       expect((await server.deps.db.select().from(runs).where(eq(runs.channelId, dm))).length).toBe(2);
     },
@@ -282,8 +283,12 @@ describe("one conversation, one admission", () => {
       });
       if (!started.ok) throw new Error(`not started: ${started.code}`);
       await thinking.entered;
-      const late = await say("and one more thing");
-      thinking.open();
+      let late: Awaited<ReturnType<typeof say>>;
+      try {
+        late = await say("and one more thing");
+      } finally {
+        thinking.open();
+      }
       await started.done;
       await settle(server);
       const [first] = await server.deps.db.select().from(runs).where(eq(runs.id, started.runId));
@@ -302,6 +307,7 @@ describe("the server stopping", () => {
       const model = heldModel();
       const server = await startTestServer({ modelProvider: model.provider });
       const hub = watchHub(server);
+      const release = gate();
       try {
         const { say } = await dmTeam(server);
         const thinking = model.hold("before-the-stop");
@@ -309,7 +315,6 @@ describe("the server stopping", () => {
         await thinking.entered;
         // The run holds in its end (it is ending: its last turn is past), and a message comes for the next run.
         const ending = gate();
-        const release = gate();
         const restore = onWrite(server, "update", runs, (q, row) =>
           row.status === "done"
             ? wrapQuery(q, async () => {
@@ -341,7 +346,11 @@ describe("the server stopping", () => {
           .where(eq(runs.sourceMessageId, waiting.body.id));
         expect(next?.status ?? "none").not.toBe("running");
         expect(next?.status ?? "none").not.toBe("done");
+        // What no next run took isn't left claimed by nobody: it is handled as failed with the run that ended.
+        const [d] = await dispatchesOf(server, [waiting.body.id]);
+        expect([d?.state, d?.status]).toEqual(["handled", "failed"]);
       } finally {
+        release.open();
         hub.restore();
         await server.stop();
       }
@@ -355,8 +364,20 @@ describe("durable effects", () => {
   let ana: Person;
   let workspaceId = "";
   let general = "";
+  let routingDown = false;
   beforeAll(async () => {
-    server = await startTestServer();
+    server = await startTestServer({
+      runtime: (port) => ({
+        ...port,
+        async onPersonMessage(input) {
+          if (routingDown) {
+            routingDown = false;
+            throw new Error("routing down");
+          }
+          return port.onPersonMessage(input);
+        },
+      }),
+    });
     ana = await signedIn(server, "Ana", email("ana"));
     ({ workspaceId, general } = await seedWorkspace(server, ana, "Effects"));
   }, SERVER_TEST_MS);
@@ -500,6 +521,24 @@ describe("durable effects", () => {
       expect(again.status).toBe(200);
       await settle(server);
       const [d] = await dispatchesOf(server, [again.body.id]);
+      expect([d?.agentId, d?.state, d?.status]).toEqual([lia.id, "handled", "answered"]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a person's post whose routing failed answers 201 and stays unsettled: the resend routes it",
+    async () => {
+      const { lia, say } = await dmTeam(server);
+      routingDown = true;
+      const first = await say("is the oven on?", "route-down");
+      expect(first.status).toBe(201);
+      const [row] = await server.deps.db.select().from(messages).where(eq(messages.id, first.body.id));
+      expect(row?.effectsPending).toBe(true);
+      const again = await say("is the oven on?", "route-down");
+      expect(again.status).toBe(200);
+      await settle(server);
+      const [d] = await dispatchesOf(server, [first.body.id]);
       expect([d?.agentId, d?.state, d?.status]).toEqual([lia.id, "handled", "answered"]);
     },
     SERVER_TEST_MS,

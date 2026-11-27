@@ -428,6 +428,8 @@ export class AgentRuntime implements RuntimePort {
   /** Waits until every run and the background work ended (tests and shutdown). */
   async settle(): Promise<void> {
     do {
+      // An admission under way may still write a run or a claim (it never waits for a run to end).
+      await Promise.allSettled([...this.admissions.values()]);
       await Promise.allSettled([...this.live.values()].map((l) => l.done));
       await this.background.settle();
     } while (this.live.size > 0);
@@ -987,6 +989,8 @@ export class AgentRuntime implements RuntimePort {
     const key = `${agent.id}:${channel.id}:${threadId ?? "-"}`;
     for (;;) {
       const entry = await this.admit(key, async () => {
+        // A later attempt went while this one waited for the admission.
+        if (stale()) return { kind: "fenced" as const };
         const running = this.liveOf(key);
         if (!running) {
           if (apiBudgetGates(agent) && (await this.budgetCheck(agent)) === "exhausted")
@@ -1009,12 +1013,17 @@ export class AgentRuntime implements RuntimePort {
         if (fence && (await this.defers(running, trigger)))
           return { kind: "wait" as const, done: running.done };
         if (fence) running.fence = fence;
-        const took = (await this.steer(running, trigger)) ?? running.runId;
+        // A fenced attempt the run put off during its write isn't left for the next run: it waits that run out
+        // and comes back, as above.
+        const steered = await this.steer(running, trigger, !fence);
+        if (steered === null && fence) return { kind: "wait" as const, done: running.done };
+        const took = steered ?? running.runId;
         const into = this.live.get(took);
         if (fence && into) into.fence = fence;
         return { kind: "joined" as const, took, done: into?.done ?? running.done };
       });
-      if (entry.kind === "budget" || entry.kind === "busy") return { ok: false, code: entry.kind };
+      if (entry.kind === "budget" || entry.kind === "busy" || entry.kind === "fenced")
+        return { ok: false, code: entry.kind };
       if (entry.kind === "wait") {
         await entry.done;
         if (stale()) return { ok: false, code: "fenced" };
@@ -1138,7 +1147,7 @@ export class AgentRuntime implements RuntimePort {
    * waits for the next run). Called only inside the conversation's admission (`admit`): the run's end takes it out
    * and starts the next run under the same admission, so `live.after` is still read after this.
    */
-  private async steer(live: Live, row: MessageRow): Promise<string | null> {
+  private async steer(live: Live, row: MessageRow, keep = true): Promise<string | null> {
     const { db } = this.deps;
     const stop = isStopRequest(row.body);
     if (!(await this.defers(live, row))) {
@@ -1153,8 +1162,9 @@ export class AgentRuntime implements RuntimePort {
       // Its last turn looked at the inbox during the write, or it was stopped: a "stop" for it is done with.
       if (stop) await this.markHandled(live, [row.id], "canceled");
     }
-    // "stop" for a run that is already ending changes nothing; anything else becomes the next run.
-    if (!(ending(live) && stop)) live.after.push(row);
+    // "stop" for a run that is already ending changes nothing; anything else becomes the next run (unless the
+    // caller takes it back: `keep` false).
+    if (keep && !(ending(live) && stop)) live.after.push(row);
     return null;
   }
 
@@ -1292,13 +1302,27 @@ export class AgentRuntime implements RuntimePort {
         }
       }
       const [next, ...rest] = live.after;
-      if (!next || this.stopped) return;
+      if (!next) return;
+      let taken = 0;
       try {
         await this.startRun({ ...live, trigger: next, replyMeta: undefined, limits: undefined });
+        taken = 1;
         const nextLive = this.liveOf(live.key);
-        for (const row of rest) if (nextLive) await this.steer(nextLive, row);
+        if (!nextLive) return;
+        for (const row of rest) {
+          await this.steer(nextLive, row);
+          taken++;
+        }
       } catch (err) {
-        log.error("runtime.followup_failed", { runId, err });
+        if (!(err instanceof RuntimeStopping)) log.error("runtime.followup_failed", { runId, err });
+        // What no next run took is left as a fall leaves it: handled with this run as failed, its work blocked.
+        const left = live.after.slice(taken).map((m) => m.id);
+        await this.markHandled(live, left, "failed");
+        await settleIssueWork(this.deps.db, live.workspaceId, left, {
+          state: "blocked",
+          reason: "interrupted",
+          runId: live.runId,
+        });
       }
     });
   }

@@ -24,6 +24,7 @@ import {
   startTestServer,
   TestSocket,
 } from "./harness";
+import { gate, wrapQuery } from "./lock-double";
 import { addToChannel, call, seedAgent, ws } from "./route-calls";
 import { memberOf, type Person, seedChannel, seedWorkspace } from "./seed";
 
@@ -242,7 +243,7 @@ describe("a conversation with an agent", () => {
   );
 
   test(
-    "forced: a double submit while the first post is still routing gives the same message and routes once",
+    "forced: a double submit while the first post is still routing waits for it, gives the same message and routes once",
     async () => {
       const { w, general, ana, lia } = await team();
       let entered!: () => void;
@@ -268,7 +269,27 @@ describe("a conversation with an agent", () => {
             throw new Error("the first post ended without reaching the runtime");
           }),
         ]);
-        second = await post(ana, w, general, `@${lia.handle} once`, "dup-1");
+        // The resend waits for the first send, still routing: it is let go once the resend looked its post up.
+        const looked = gate();
+        const real = server.deps.db;
+        server.deps.db = new Proxy(real, {
+          get(target, prop) {
+            const value = Reflect.get(target, prop, target);
+            if (prop !== "select") return typeof value === "function" ? value.bind(target) : value;
+            return (...args: Parameters<typeof real.select>) =>
+              wrapQuery(target.select(...args), async (q) => {
+                if (q.toSQL().sql.includes('"client_id"')) looked.open();
+              });
+          },
+        });
+        const resend = post(ana, w, general, `@${lia.handle} once`, "dup-1");
+        try {
+          await looked.opened;
+        } finally {
+          server.deps.db = real;
+        }
+        release();
+        second = await resend;
       } finally {
         runtime.before = undefined;
         release();
