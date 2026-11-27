@@ -10,7 +10,7 @@ import { newId } from "@vanr/engine/ids";
 import { eq } from "drizzle-orm";
 import { createFile } from "../src/drive";
 import { columnsOf, createIssue } from "../src/issues";
-import { COMMENT_FILES_MAX, ISSUE_LIST_LIMIT } from "../src/routes/issues";
+import { BOARD_POSITION_MAX, COMMENT_FILES_MAX, ISSUE_LIST_LIMIT } from "../src/routes/issues";
 import type { RunningServer } from "../src/server";
 import { Browser, body, SERVER_TEST_MS, settle, signedIn, startTestServer, TestSocket } from "./harness";
 import { memberOf, type Person, seedChannel, seedWorkspace } from "./seed";
@@ -317,6 +317,23 @@ describe("issues", () => {
         call(ana, workspaceId, "GET", `/issues/${issue.id}/activity`),
       );
       expect(again.activity.filter((a) => a.event === "criterion_done")).toHaveLength(4);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("board positions", () => {
+  test(
+    "a position past the bound is refused, so moved cards never round onto one another",
+    async () => {
+      const { workspaceId, ana } = await team();
+      const issue = await ok<{ id: string; number: number }>(
+        call(ana, workspaceId, "POST", "/issues", { title: "Far" }),
+        201,
+      );
+      const far = await call(ana, workspaceId, "PATCH", `/issues/${issue.id}`, { boardPosition: 2 ** 53 });
+      expect(far.status).toBe(400);
+      await ok(call(ana, workspaceId, "PATCH", `/issues/${issue.id}`, { boardPosition: BOARD_POSITION_MAX }));
     },
     SERVER_TEST_MS,
   );

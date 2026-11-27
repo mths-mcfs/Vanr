@@ -259,6 +259,82 @@ jobs:
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_DROP_LOCKS: "1"
+      # A split and an edit of every part one after the other, and two such edits without a deadlock.
+      - run: bun test apps/server/test/calendar-postgres.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      - name: The forced calendar lock test fails without the locks
+        run: |
+          set +e
+          bun test apps/server/test/calendar-postgres.test.ts --test-name-pattern forced > forced-calendar.log 2>&1
+          status=$?
+          cat forced-calendar.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the forced calendar lock tests passed without the locks"
+            exit 1
+          fi
+          for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -aqF "$broken" forced-calendar.log; then
+              echo "::error::the forced calendar lock tests broke ($broken) instead of failing on their outcome"
+              exit 1
+            fi
+          done
+          set -- calendar-split-all
+          for label in "$@"; do
+            if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" forced-calendar.log; then
+              echo "::error::the forced $label test did not fail on its outcome without the locks"
+              exit 1
+            fi
+          done
+          failed=$(grep -a '^(fail) ' forced-calendar.log | sed -E 's/^\(fail\) //; s/ \[[0-9.]+m?s\]$//' | sort -u)
+          if printf '%s\n' "$failed" | grep -qv forced; then
+            echo "::error::a test outside the forced ones failed without the locks: $failed"
+            exit 1
+          fi
+          count=$(printf '%s\n' "$failed" | grep -c .)
+          if [ "$count" -ne "$#" ]; then
+            echo "::error::$count distinct forced tests failed without the locks, expected $#"
+            exit 1
+          fi
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_DROP_LOCKS: "1"
+      - name: The ordered calendar lock test fails without the family's ordered lock
+        run: |
+          set +e
+          bun test apps/server/test/calendar-postgres.test.ts --test-name-pattern ordered > ordered-calendar.log 2>&1
+          status=$?
+          cat ordered-calendar.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the ordered calendar lock tests passed without the ordered lock"
+            exit 1
+          fi
+          for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -aqF "$broken" ordered-calendar.log; then
+              echo "::error::the ordered calendar lock tests broke ($broken) instead of failing on their outcome"
+              exit 1
+            fi
+          done
+          set -- calendar-family-order
+          for label in "$@"; do
+            if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" ordered-calendar.log; then
+              echo "::error::the ordered $label test did not fail on its outcome without the ordered lock"
+              exit 1
+            fi
+          done
+          failed=$(grep -a '^(fail) ' ordered-calendar.log | sed -E 's/^\(fail\) //; s/ \[[0-9.]+m?s\]$//' | sort -u)
+          if printf '%s\n' "$failed" | grep -qv ordered; then
+            echo "::error::a test outside the ordered ones failed without the ordered lock: $failed"
+            exit 1
+          fi
+          count=$(printf '%s\n' "$failed" | grep -c .)
+          if [ "$count" -ne "$#" ]; then
+            echo "::error::$count distinct ordered tests failed without the ordered lock, expected $#"
+            exit 1
+          fi
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_DROP_ORDERED_LOCKS: "1"
       # Every answer of a round kept once and an answer that meets the stop finds the queue closed (the debate's row
       # lock); one routine execution per fire, scheduled time and queued run, with callers on several connections.
       - run: bun test apps/server/test/debates-postgres.test.ts

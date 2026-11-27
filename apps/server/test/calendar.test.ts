@@ -437,6 +437,37 @@ describe("calendar", () => {
       ]);
       await remove(ana, workspaceId, five.id, { scope: "all" });
 
+      // A part moved before the original: "this and the following" from its first occurrence is every
+      // occurrence after it in time, the original's too, for an edit and for a delete.
+      const late = await create(ana, workspaceId, {
+        title: "Original",
+        start: "2027-04-08T12:00:00Z",
+        end: "2027-04-08T13:00:00Z",
+        timezone: "UTC",
+        rule: { freq: "daily", count: 5, timezone: "UTC" },
+      });
+      const early = await update(ana, workspaceId, late.id, {
+        scope: "following",
+        instanceStart: "2027-04-10T12:00:00Z",
+        start: "2027-04-05T12:00:00Z",
+        end: "2027-04-05T13:00:00Z",
+        title: "Part",
+      });
+      await update(ana, workspaceId, early.id, {
+        scope: "following",
+        instanceStart: "2027-04-05T12:00:00Z",
+        title: "New",
+      });
+      expect(await listed("2027-04-05T00:00:00Z", "2027-04-14T00:00:00Z")).toEqual([
+        ["2027-04-05T12:00:00.000Z", "New"],
+        ["2027-04-06T12:00:00.000Z", "New"],
+        ["2027-04-07T12:00:00.000Z", "New"],
+        ["2027-04-08T12:00:00.000Z", "New"],
+        ["2027-04-09T12:00:00.000Z", "New"],
+      ]);
+      await remove(ana, workspaceId, early.id, { scope: "following", instanceStart: "2027-04-05T12:00:00Z" });
+      expect(await listed("2027-04-05T00:00:00Z", "2027-04-14T00:00:00Z")).toEqual([]);
+
       // 02:30 in New York: on 2027-03-14 that time doesn't exist and the occurrence moves to 03:00 EDT.
       // Splitting there keeps 02:30 for the days after. The rule's own `times` from a client are ignored.
       const tz = "America/New_York";
@@ -607,6 +638,59 @@ describe("calendar", () => {
 });
 
 describe("time zones and limits", () => {
+  test(
+    "the range: proposals that start after it stay out, no shared cache; all-day bounds; the rule's own start is dropped",
+    async () => {
+      const { workspaceId, ana } = await team();
+      const lia = await seedAgent(workspaceId, ana, "lia");
+      const proposal = (title: string, start: string, end: string) => ({
+        id: newId("prop"),
+        workspaceId,
+        agentId: lia,
+        title,
+        start: new Date(start),
+        end: new Date(end),
+        participants: [{ type: "person" as const, id: ana.user.id }],
+      });
+      await server.deps.db
+        .insert(schema.calendarProposals)
+        .values([
+          proposal("Crossing in", "2026-11-17T23:00:00Z", "2026-11-18T01:00:00Z"),
+          proposal("Inside", "2026-11-20T10:00:00Z", "2026-11-20T11:00:00Z"),
+          proposal("Later", "2026-11-25T10:00:00Z", "2026-11-25T11:00:00Z"),
+        ]);
+      const q = new URLSearchParams({ from: "2026-11-18T00:00:00Z", to: "2026-11-22T00:00:00Z" });
+      const res = await ana.browser.json(`/api/v1/workspaces/${workspaceId}/calendar?${q}`, "GET");
+      expect(res.headers.get("cache-control")).toBe("private, no-store");
+      const got: CalendarRange = await body(res);
+      expect(got.proposals.map((p) => p.title).sort()).toEqual(["Crossing in", "Inside"]);
+
+      // An all-day event from 10:00 to 11:00 the same day would end at midnight, before it starts.
+      const sameDay = await call(ana, workspaceId, "POST", "/calendar/events", {
+        title: "Off",
+        allDay: true,
+        timezone: "UTC",
+        start: "2026-11-20T10:00:00Z",
+        end: "2026-11-20T11:00:00Z",
+      });
+      expect([sameDay.status, sameDay.json.error.code]).toEqual([400, "calendar.all_day_span"]);
+      const day = await create(ana, workspaceId, {
+        title: "Off",
+        allDay: true,
+        timezone: "UTC",
+        start: "2026-11-20T00:00:00Z",
+        end: "2026-11-21T00:00:00Z",
+        rule: { freq: "weekly", timezone: "UTC", start: "2030-01-01T00:00:00Z" },
+      });
+      expect(day.rule?.start).toBeUndefined();
+      const shrunk = await call(ana, workspaceId, "PATCH", `/calendar/events/${day.id}`, {
+        end: "2026-11-20T12:00:00Z",
+      });
+      expect([shrunk.status, shrunk.json.error.code]).toEqual([400, "calendar.all_day_span"]);
+    },
+    SERVER_TEST_MS,
+  );
+
   test(
     "a daily 09:00 in New York stays at 09:00 local across the end of daylight saving",
     async () => {

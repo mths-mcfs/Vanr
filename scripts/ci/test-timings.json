@@ -59,6 +59,7 @@
     "apps/server/test/bases-relations.test.ts": 13846,
     "apps/server/test/bases.test.ts": 45000,
     "apps/server/test/boot.test.ts": 14225,
+    "apps/server/test/calendar-postgres.test.ts": 22,
     "apps/server/test/calendar.test.ts": 1712,
     "apps/server/test/concurrency-postgres.test.ts": 330,
     "apps/server/test/config.test.ts": 5,

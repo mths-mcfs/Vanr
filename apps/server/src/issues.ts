@@ -681,7 +681,11 @@ export async function addComment(
     await tx.update(issues).set({ updatedAt: at }).where(eq(issues.id, row.id));
     return inserted;
   });
-  await notifyComment(deps, row, by, input.text);
+  // The comment is saved: a failed notice is logged, not answered as a failure the client would retry (and
+  // post the comment twice).
+  await notifyComment(deps, row, by, input.text).catch((err) =>
+    log.error("issue.comment_notify_failed", { issueId: row.id, err }),
+  );
   return toActivity(act);
 }
 

@@ -37,17 +37,25 @@ const field = (data: Record<string, unknown>, key: string) => {
 };
 
 /** The run's steps as text: the request, what the agent said and each tool with a short result. */
-async function transcript(db: Db, runId: string, what: string): Promise<{ text: string; tools: string[] }> {
+async function transcript(
+  db: Db,
+  runId: string,
+  what: string,
+): Promise<{ text: string; tools: string[]; steps: number }> {
   const steps = await db
     .select()
     .from(runEvents)
     .where(eq(runEvents.runId, runId))
     .orderBy(asc(runEvents.seq));
   const tools: string[] = [];
+  let worked = 0;
   const out = [`Request: ${what}`];
   for (const s of steps) {
-    if (s.kind === "text") out.push(`Agent: ${field(s.data, "text")}`);
-    else if (s.kind === "tool_call") {
+    if (s.kind === "text") {
+      worked++;
+      out.push(`Agent: ${field(s.data, "text")}`);
+    } else if (s.kind === "tool_call") {
+      worked++;
       const name = field(s.data, "name");
       tools.push(name);
       out.push(`Tool call ${name}: ${JSON.stringify(s.data.input ?? {})}`);
@@ -56,7 +64,7 @@ async function transcript(db: Db, runId: string, what: string): Promise<{ text: 
   let text = out.join("\n");
   while (new TextEncoder().encode(text).length > TRANSCRIPT_MAX_BYTES)
     text = text.slice(0, Math.floor(text.length * 0.9));
-  return { text, tools: [...new Set(tools)] };
+  return { text, tools: [...new Set(tools)], steps: worked };
 }
 
 /** The run happened in a private channel or a DM (directly or through a delegation): the skill would show it to the workspace. */
@@ -93,8 +101,9 @@ export async function draftSkillFromRun(
   const run = await readableRun(me.workspaceId, me.userId, runId, deps.db);
   if (run.status !== "done") throw new HttpError(409, "skill_draft.run_not_done", "The run has not finished");
   const agent = await agentInWorkspace(deps.db, me.workspaceId, run.agentId);
-  const { text, tools } = await transcript(deps.db, run.id, run.what);
-  if (tools.length === 0 && !text.includes("Agent:"))
+  // Whether the run did anything comes from its events, never from the request's text.
+  const { text, tools, steps } = await transcript(deps.db, run.id, run.what);
+  if (steps === 0)
     throw new HttpError(409, "skill_draft.empty", "This run has no steps to turn into a skill");
   const res = await deps.runtime.complete({
     agent,

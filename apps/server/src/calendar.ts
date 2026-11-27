@@ -13,7 +13,7 @@ export type EventRow = typeof calendarEntries.$inferSelect;
 export type ProposalRow = typeof calendarProposals.$inferSelect;
 
 const pad = (n: number) => String(n).padStart(2, "0");
-const localDate = (at: Date, tz: string) => {
+export const localDate = (at: Date, tz: string) => {
   const p = localParts(at, tz);
   return `${p.y}-${pad(p.m)}-${pad(p.d)}`;
 };

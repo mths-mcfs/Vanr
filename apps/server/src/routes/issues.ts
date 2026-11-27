@@ -72,12 +72,16 @@ export const createIssueBody = z
   })
   .strict() satisfies z.ZodType<IssueInput>;
 
+/** The largest board position a client may write. */
+export const BOARD_POSITION_MAX = 2 ** 40;
+
 export const updateIssueBody = z
   .object({
     title: z.string().trim().min(1).max(300).optional(),
     description: z.string().max(50_000).optional(),
     columnId: z.string().min(1).max(64).optional(),
-    boardPosition: z.number().finite().optional(),
+    // Bounded far below 2^53, so the positions the board adds after the last one stay distinct.
+    boardPosition: z.number().min(-BOARD_POSITION_MAX).max(BOARD_POSITION_MAX).optional(),
     assignee: actorSchema.nullable().optional(),
     priority: z.enum(PRIORITIES).optional(),
     dueDate: dueDate.optional(),

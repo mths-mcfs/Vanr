@@ -12,7 +12,7 @@ import { can } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { isTimezone, occurrences } from "@vanr/engine/recurrence";
-import { and, eq, gte, inArray, isNull, lte, ne, notInArray, or, type SQL } from "drizzle-orm";
+import { and, asc, eq, gte, inArray, isNull, lt, lte, ne, notInArray, or, type SQL } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
 import {
@@ -23,6 +23,7 @@ import {
   eventsInRange,
   expand,
   isPersonIn,
+  localDate,
   publishDeleted,
   publishEvent,
   ruleOf,
@@ -54,8 +55,11 @@ export const MAX_RANGE_DAYS = 400;
 /** Times of one routine listed in a range at most. */
 export const ROUTINE_TIMES_MAX = 200;
 
-/** The time of day comes from the event: a rule from the client never carries `times` (see `seriesRule`). */
-const clientRule = ruleSchema.transform(({ times: _t, ...rule }): RecurrenceRule => rule);
+/**
+ * The time of day and the anchor come from the event: a rule from the client never carries `times` or `start`
+ * (see `seriesRule`), so the rule an event returns is the one its occurrences follow.
+ */
+const clientRule = ruleSchema.transform(({ times: _t, start: _s, ...rule }): RecurrenceRule => rule);
 const actor = z.object({ type: z.enum(["person", "agent"]), id: z.string().min(1).max(64) }).strict();
 const eventFields = {
   title: z.string().trim().min(1).max(200),
@@ -102,6 +106,12 @@ function checkTimes(start: Date, end: Date) {
     throw new HttpError(400, "calendar.end_before_start", "The event must end after it starts");
 }
 
+/** An all-day event ends on a later local day than it starts (midnight to midnight in its time zone). */
+function checkAllDay(allDay: boolean, start: Date, end: Date, timezone: string) {
+  if (allDay && localDate(end, timezone) <= localDate(start, timezone))
+    throw new HttpError(400, "calendar.all_day_span", "An all-day event ends on a later day than it starts");
+}
+
 function checkSeriesRule(rule: RecurrenceRule | null | undefined, timezone: string) {
   if (rule) checkRule({ ...rule, timezone: rule.timezone || timezone });
 }
@@ -140,6 +150,27 @@ function checkOccurrence(row: EventRow, instanceStart: string | undefined): Date
   const found = expand(row, at, new Date(at.getTime() + 1)).some((e) => e.start === at.toISOString());
   if (!found) throw notFound("Occurrence not found");
   return at;
+}
+
+/**
+ * Locks every part of the event's family (the root and the rows pointing to it) in id order, before any other
+ * lock of the write. Every write to a series takes it first and in that one order, so two writes from different
+ * parts never hold one part each and wait for the other, and a split and an edit or delete of the whole family
+ * run one after the other.
+ */
+async function lockFamily(tx: Tx, row: EventRow) {
+  const root = row.seriesId ?? row.id;
+  await tx
+    .select({ id: calendarEntries.id })
+    .from(calendarEntries)
+    .where(
+      and(
+        eq(calendarEntries.workspaceId, row.workspaceId),
+        or(eq(calendarEntries.id, root), eq(calendarEntries.seriesId, root)),
+      ),
+    )
+    .orderBy(asc(calendarEntries.id))
+    .for("update");
 }
 
 /**
@@ -185,6 +216,242 @@ function routineTimes(r: RoutineRow, from: Date, to: Date): { times: Date[]; tar
     return { times: at >= from && at < to ? [at] : [], target };
   }
   return { times: [], target };
+}
+
+/**
+ * Changes an event or the part of its series `scope` names, in one transaction that takes the family's lock
+ * first. `visible` is the event as the person sees it, already checked as theirs to edit.
+ */
+export async function editEvent(
+  deps: AppDeps,
+  me: WorkspaceMember,
+  visible: EventRow,
+  input: z.infer<typeof updateEventBody>,
+): Promise<{ saved: EventRow[]; reply: EventRow }> {
+  const { scope = "all", instanceStart, ...patch } = input;
+  if (patch.timezone !== undefined && !isTimezone(patch.timezone))
+    throw new HttpError(400, "rule.timezone", "Unknown time zone");
+  if (patch.participants) await checkParticipants(deps, me.workspaceId, patch.participants);
+  const at = deps.now();
+  return deps.db.transaction(async (tx) => {
+    await lockFamily(tx, visible);
+    const row = await lockedEvent(tx, visible);
+    // The right is checked again on the locked row: a participant removed meanwhile no longer edits.
+    requireEditor(row, me);
+    const timezone = patch.timezone ?? row.timezone;
+    if (patch.rule) checkSeriesRule(patch.rule, timezone);
+    const duration = row.end.getTime() - row.start.getTime();
+    const fields = (base: { start: Date; end: Date }) => {
+      const start = patch.start ? new Date(patch.start) : base.start;
+      const end = patch.end
+        ? new Date(patch.end)
+        : patch.start
+          ? new Date(start.getTime() + (base.end.getTime() - base.start.getTime()))
+          : base.end;
+      checkTimes(start, end);
+      checkAllDay(patch.allDay ?? row.allDay, start, end, timezone);
+      return {
+        title: patch.title ?? row.title,
+        start,
+        end,
+        allDay: patch.allDay ?? row.allDay,
+        timezone,
+        participants: patch.participants ?? row.participants,
+        location: patch.location !== undefined ? patch.location : row.location,
+        description: patch.description !== undefined ? patch.description : row.description,
+        updatedAt: at,
+      };
+    };
+    const series = ruleOf(row);
+    // A new start or time zone gives the series its time of day again: a kept local time no longer applies.
+    const retimed = patch.start !== undefined || patch.timezone !== undefined;
+    const ruleChange =
+      patch.rule !== undefined
+        ? { rule: patch.rule }
+        : series?.times && retimed
+          ? { rule: withoutTimes(series) }
+          : {};
+    // What is the same across the family follows an edit of "all" or "this and the following" to the other
+    // parts it reaches; the times stay with each part.
+    const shared = {
+      ...(patch.title !== undefined ? { title: patch.title } : {}),
+      ...(patch.participants !== undefined ? { participants: patch.participants } : {}),
+      ...(patch.location !== undefined ? { location: patch.location } : {}),
+      ...(patch.description !== undefined ? { description: patch.description } : {}),
+    };
+    const root = row.seriesId ?? row.id;
+    const shareWith = async (parts: SQL | undefined) => {
+      if (Object.keys(shared).length === 0) return [];
+      await requireEditorOfParts(tx, parts, me);
+      return tx
+        .update(calendarEntries)
+        .set({ ...shared, updatedAt: at })
+        .where(parts)
+        .returning();
+    };
+    const whole = async () => {
+      const [updated] = await tx
+        .update(calendarEntries)
+        .set({ ...fields(row), ...ruleChange })
+        .where(eq(calendarEntries.id, row.id))
+        .returning();
+      if (!updated) throw notFound("Event not found");
+      return { saved: [updated], reply: updated };
+    };
+    if (!series) return whole();
+    if (scope === "all") {
+      // "All" is the whole family: the parts "this and the following" made and the occurrences edited on their
+      // own point to the root.
+      const others = await shareWith(
+        and(
+          eq(calendarEntries.workspaceId, row.workspaceId),
+          or(eq(calendarEntries.seriesId, root), eq(calendarEntries.id, root)),
+          ne(calendarEntries.id, row.id),
+        ),
+      );
+      const edited = await whole();
+      return { saved: [...edited.saved, ...others], reply: edited.reply };
+    }
+
+    const occ = checkOccurrence(row, instanceStart);
+    const base = { start: occ, end: new Date(occ.getTime() + duration) };
+    if (scope === "this") {
+      // The occurrence becomes an event of its own and leaves the series. It points to the family's root (not
+      // to the part it left), like the parts: so "all" and "this and the following" reach it too.
+      const [single] = await tx
+        .insert(calendarEntries)
+        .values({
+          id: newId("evt"),
+          workspaceId: row.workspaceId,
+          ...fields(base),
+          rule: null,
+          seriesId: row.seriesId ?? row.id,
+          createdBy: row.createdBy,
+          createdAt: at,
+        })
+        .returning();
+      const [trimmed] = await tx
+        .update(calendarEntries)
+        .set({ exdates: [...row.exdates, occ.toISOString()], updatedAt: at })
+        .where(eq(calendarEntries.id, row.id))
+        .returning();
+      if (!single || !trimmed) throw notFound("Event not found");
+      return { saved: [trimmed, single], reply: single };
+    }
+
+    // "This and the following": the old series ends before the occurrence and another starts from it. The
+    // parts already split off after it are in the following too.
+    const later = await shareWith(
+      and(
+        eq(calendarEntries.workspaceId, row.workspaceId),
+        or(eq(calendarEntries.seriesId, root), eq(calendarEntries.id, root)),
+        gte(calendarEntries.start, occ),
+        ne(calendarEntries.id, row.id),
+      ),
+    );
+    if (occ.getTime() === row.start.getTime()) {
+      const edited = await whole();
+      return { saved: [...edited.saved, ...later], reply: edited.reply };
+    }
+    const [ended] = await tx
+      .update(calendarEntries)
+      .set({
+        rule: { ...series, until: new Date(occ.getTime() - 1).toISOString() },
+        exdates: row.exdates.filter((x) => x < occ.toISOString()),
+        updatedAt: at,
+      })
+      .where(eq(calendarEntries.id, row.id))
+      .returning();
+    // A series with a count keeps its total: the continuation gets only the occurrences left after the ones
+    // before the split (the ones taken out count too, as they did in the series). A new rule is the person's.
+    const before = series.count
+      ? occurrences(eventRule(row) ?? series, { from: row.start, to: occ, limit: series.count }).length
+      : 0;
+    // The continuation starts at the occurrence; when that one fell in a daylight saving gap (its clock time
+    // differs from the series'), the rule keeps the series' local time so the later ones don't move.
+    const times = wallTimes(row);
+    const kept = retimed
+      ? withoutTimes(series)
+      : times.length === 1 && times[0] === clockTime(occ, series.timezone || row.timezone)
+        ? series
+        : { ...series, times };
+    const nextRule =
+      patch.rule !== undefined ? patch.rule : series.count ? { ...kept, count: series.count - before } : kept;
+    const [following] = await tx
+      .insert(calendarEntries)
+      .values({
+        id: newId("evt"),
+        workspaceId: row.workspaceId,
+        ...fields(base),
+        rule: nextRule,
+        exdates: row.exdates.filter((x) => x >= occ.toISOString()),
+        seriesId: row.seriesId ?? row.id,
+        createdBy: row.createdBy,
+        createdAt: at,
+      })
+      .returning();
+    if (!ended || !following) throw notFound("Event not found");
+    return { saved: [ended, following, ...later], reply: following };
+  });
+}
+
+/** Deletes an event or the part of its series `scope` names, under the family's lock like `editEvent`. */
+export async function deleteEvent(
+  deps: AppDeps,
+  me: WorkspaceMember,
+  visible: EventRow,
+  { scope = "all", instanceStart }: { scope?: "this" | "following" | "all"; instanceStart?: string },
+): Promise<{ row: EventRow; scope: string; occurrence: string | null }> {
+  const at = deps.now();
+  return deps.db.transaction(async (tx) => {
+    await lockFamily(tx, visible);
+    const row = await lockedEvent(tx, visible);
+    // The right is checked again on the locked row: a participant removed meanwhile no longer edits.
+    requireEditor(row, me);
+    const series = ruleOf(row);
+    // The parts "this and the following" made point to the original in seriesId: the family is the root and
+    // everything pointing to it, from whichever part is asked.
+    const root = row.seriesId ?? row.id;
+    // Without a rule it is a single event or an occurrence edited on its own: only it goes.
+    if (!series) {
+      await tx.delete(calendarEntries).where(eq(calendarEntries.id, row.id));
+      return { row, scope: "all", occurrence: null };
+    }
+    if (scope === "all") {
+      const family = and(
+        eq(calendarEntries.workspaceId, row.workspaceId),
+        or(eq(calendarEntries.seriesId, root), eq(calendarEntries.id, root)),
+      );
+      await requireEditorOfParts(tx, family, me);
+      await tx.delete(calendarEntries).where(family);
+      return { row, scope: "all", occurrence: null };
+    }
+    const occ = checkOccurrence(row, instanceStart);
+    // The rest of the family from the occurrence on, by time: the root too, when a part moved before it.
+    const later = and(
+      eq(calendarEntries.workspaceId, row.workspaceId),
+      or(eq(calendarEntries.seriesId, root), eq(calendarEntries.id, root)),
+      gte(calendarEntries.start, occ),
+      ne(calendarEntries.id, row.id),
+    );
+    if (scope === "following") await requireEditorOfParts(tx, later, me);
+    if (scope === "this") {
+      await tx
+        .update(calendarEntries)
+        .set({ exdates: [...row.exdates, occ.toISOString()], updatedAt: at })
+        .where(eq(calendarEntries.id, row.id));
+    } else if (occ.getTime() === row.start.getTime()) {
+      await tx.delete(calendarEntries).where(eq(calendarEntries.id, row.id));
+      await tx.delete(calendarEntries).where(later);
+    } else {
+      await tx
+        .update(calendarEntries)
+        .set({ rule: { ...series, until: new Date(occ.getTime() - 1).toISOString() }, updatedAt: at })
+        .where(eq(calendarEntries.id, row.id));
+      await tx.delete(calendarEntries).where(later);
+    }
+    return { row, scope, occurrence: occ.toISOString() };
+  });
 }
 
 export function registerCalendar(app: Hono<AppEnv>) {
@@ -245,6 +512,7 @@ export function registerCalendar(app: Hono<AppEnv>) {
           eq(calendarProposals.workspaceId, me.workspaceId),
           eq(calendarProposals.status, "pending"),
           gte(calendarProposals.end, from),
+          lt(calendarProposals.start, to),
         ),
       );
     const body: CalendarRange = {
@@ -253,7 +521,7 @@ export function registerCalendar(app: Hono<AppEnv>) {
       dueItems: due.map((d) => ({ issueId: d.id, number: d.number, title: d.title, date: d.date ?? "" })),
       proposals: proposals.filter((p) => isPersonIn(p.participants, me.userId)).map(toProposal),
     };
-    return c.json(body);
+    return c.json(body, 200, { "cache-control": "private, no-store" });
   });
 
   app.post(`${WORKSPACE}/calendar/events`, async (c) => {
@@ -265,6 +533,7 @@ export function registerCalendar(app: Hono<AppEnv>) {
     const start = new Date(input.start);
     const end = new Date(input.end);
     checkTimes(start, end);
+    checkAllDay(input.allDay ?? false, start, end, timezone);
     checkSeriesRule(input.rule, timezone);
     await checkParticipants(deps, me.workspaceId, input.participants ?? []);
     const at = deps.now();
@@ -297,171 +566,7 @@ export function registerCalendar(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const visible = await eventFor(deps.db, me, param(c, "eventId"));
     requireEditor(visible, me);
-    const { scope = "all", instanceStart, ...patch } = await readJson(c, updateEventBody);
-    if (patch.timezone !== undefined && !isTimezone(patch.timezone))
-      throw new HttpError(400, "rule.timezone", "Unknown time zone");
-    if (patch.participants) await checkParticipants(deps, me.workspaceId, patch.participants);
-    const at = deps.now();
-    const { saved, reply } = await deps.db.transaction(async (tx) => {
-      const row = await lockedEvent(tx, visible);
-      const timezone = patch.timezone ?? row.timezone;
-      if (patch.rule) checkSeriesRule(patch.rule, timezone);
-      const duration = row.end.getTime() - row.start.getTime();
-      const fields = (base: { start: Date; end: Date }) => {
-        const start = patch.start ? new Date(patch.start) : base.start;
-        const end = patch.end
-          ? new Date(patch.end)
-          : patch.start
-            ? new Date(start.getTime() + (base.end.getTime() - base.start.getTime()))
-            : base.end;
-        checkTimes(start, end);
-        return {
-          title: patch.title ?? row.title,
-          start,
-          end,
-          allDay: patch.allDay ?? row.allDay,
-          timezone,
-          participants: patch.participants ?? row.participants,
-          location: patch.location !== undefined ? patch.location : row.location,
-          description: patch.description !== undefined ? patch.description : row.description,
-          updatedAt: at,
-        };
-      };
-      const series = ruleOf(row);
-      // A new start or time zone gives the series its time of day again: a kept local time no longer applies.
-      const retimed = patch.start !== undefined || patch.timezone !== undefined;
-      const ruleChange =
-        patch.rule !== undefined
-          ? { rule: patch.rule }
-          : series?.times && retimed
-            ? { rule: withoutTimes(series) }
-            : {};
-      // What is the same across the family follows an edit of "all" or "this and the following" to the other
-      // parts it reaches; the times stay with each part.
-      const shared = {
-        ...(patch.title !== undefined ? { title: patch.title } : {}),
-        ...(patch.participants !== undefined ? { participants: patch.participants } : {}),
-        ...(patch.location !== undefined ? { location: patch.location } : {}),
-        ...(patch.description !== undefined ? { description: patch.description } : {}),
-      };
-      const root = row.seriesId ?? row.id;
-      const shareWith = async (parts: SQL | undefined) => {
-        if (Object.keys(shared).length === 0) return [];
-        await requireEditorOfParts(tx, parts, me);
-        return tx
-          .update(calendarEntries)
-          .set({ ...shared, updatedAt: at })
-          .where(parts)
-          .returning();
-      };
-      const whole = async () => {
-        const [updated] = await tx
-          .update(calendarEntries)
-          .set({ ...fields(row), ...ruleChange })
-          .where(eq(calendarEntries.id, row.id))
-          .returning();
-        if (!updated) throw notFound("Event not found");
-        return { saved: [updated], reply: updated };
-      };
-      if (!series) return whole();
-      if (scope === "all") {
-        // "All" is the whole family: the parts "this and the following" made and the occurrences edited on their
-        // own point to the root.
-        const others = await shareWith(
-          and(
-            eq(calendarEntries.workspaceId, row.workspaceId),
-            or(eq(calendarEntries.seriesId, root), eq(calendarEntries.id, root)),
-            ne(calendarEntries.id, row.id),
-          ),
-        );
-        const edited = await whole();
-        return { saved: [...edited.saved, ...others], reply: edited.reply };
-      }
-
-      const occ = checkOccurrence(row, instanceStart);
-      const base = { start: occ, end: new Date(occ.getTime() + duration) };
-      if (scope === "this") {
-        // The occurrence becomes an event of its own and leaves the series. It points to the family's root (not
-        // to the part it left), like the parts: so "all" and "this and the following" reach it too.
-        const [single] = await tx
-          .insert(calendarEntries)
-          .values({
-            id: newId("evt"),
-            workspaceId: row.workspaceId,
-            ...fields(base),
-            rule: null,
-            seriesId: row.seriesId ?? row.id,
-            createdBy: row.createdBy,
-            createdAt: at,
-          })
-          .returning();
-        const [trimmed] = await tx
-          .update(calendarEntries)
-          .set({ exdates: [...row.exdates, occ.toISOString()], updatedAt: at })
-          .where(eq(calendarEntries.id, row.id))
-          .returning();
-        if (!single || !trimmed) throw notFound("Event not found");
-        return { saved: [trimmed, single], reply: single };
-      }
-
-      // "This and the following": the old series ends before the occurrence and another starts from it. The
-      // parts already split off after it are in the following too.
-      const later = await shareWith(
-        and(
-          eq(calendarEntries.workspaceId, row.workspaceId),
-          eq(calendarEntries.seriesId, root),
-          gte(calendarEntries.start, occ),
-          ne(calendarEntries.id, row.id),
-        ),
-      );
-      if (occ.getTime() === row.start.getTime()) {
-        const edited = await whole();
-        return { saved: [...edited.saved, ...later], reply: edited.reply };
-      }
-      const [ended] = await tx
-        .update(calendarEntries)
-        .set({
-          rule: { ...series, until: new Date(occ.getTime() - 1).toISOString() },
-          exdates: row.exdates.filter((x) => x < occ.toISOString()),
-          updatedAt: at,
-        })
-        .where(eq(calendarEntries.id, row.id))
-        .returning();
-      // A series with a count keeps its total: the continuation gets only the occurrences left after the ones
-      // before the split (the ones taken out count too, as they did in the series). A new rule is the person's.
-      const before = series.count
-        ? occurrences(eventRule(row) ?? series, { from: row.start, to: occ, limit: series.count }).length
-        : 0;
-      // The continuation starts at the occurrence; when that one fell in a daylight saving gap (its clock time
-      // differs from the series'), the rule keeps the series' local time so the later ones don't move.
-      const times = wallTimes(row);
-      const kept = retimed
-        ? withoutTimes(series)
-        : times.length === 1 && times[0] === clockTime(occ, series.timezone || row.timezone)
-          ? series
-          : { ...series, times };
-      const nextRule =
-        patch.rule !== undefined
-          ? patch.rule
-          : series.count
-            ? { ...kept, count: series.count - before }
-            : kept;
-      const [following] = await tx
-        .insert(calendarEntries)
-        .values({
-          id: newId("evt"),
-          workspaceId: row.workspaceId,
-          ...fields(base),
-          rule: nextRule,
-          exdates: row.exdates.filter((x) => x >= occ.toISOString()),
-          seriesId: row.seriesId ?? row.id,
-          createdBy: row.createdBy,
-          createdAt: at,
-        })
-        .returning();
-      if (!ended || !following) throw notFound("Event not found");
-      return { saved: [ended, following, ...later], reply: following };
-    });
+    const { saved, reply } = await editEvent(deps, me, visible, await readJson(c, updateEventBody));
     for (const row of saved) publishEvent(deps, row);
     return c.json(toEvent(reply));
   });
@@ -471,52 +576,7 @@ export function registerCalendar(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const visible = await eventFor(deps.db, me, param(c, "eventId"));
     requireEditor(visible, me);
-    const { scope = "all", instanceStart } = readQuery(c, z.object(scopeFields));
-    const at = deps.now();
-    const removed = await deps.db.transaction(async (tx) => {
-      const row = await lockedEvent(tx, visible);
-      const series = ruleOf(row);
-      // The parts "this and the following" made point to the original in seriesId: the family is the root and
-      // everything pointing to it, from whichever part is asked.
-      const root = row.seriesId ?? row.id;
-      // Without a rule it is a single event or an occurrence edited on its own: only it goes.
-      if (!series) {
-        await tx.delete(calendarEntries).where(eq(calendarEntries.id, row.id));
-        return { row, scope: "all", occurrence: null };
-      }
-      if (scope === "all") {
-        const family = and(
-          eq(calendarEntries.workspaceId, row.workspaceId),
-          or(eq(calendarEntries.seriesId, root), eq(calendarEntries.id, root)),
-        );
-        await requireEditorOfParts(tx, family, me);
-        await tx.delete(calendarEntries).where(family);
-        return { row, scope: "all", occurrence: null };
-      }
-      const occ = checkOccurrence(row, instanceStart);
-      const later = and(
-        eq(calendarEntries.workspaceId, row.workspaceId),
-        eq(calendarEntries.seriesId, root),
-        gte(calendarEntries.start, occ),
-      );
-      if (scope === "following") await requireEditorOfParts(tx, later, me);
-      if (scope === "this") {
-        await tx
-          .update(calendarEntries)
-          .set({ exdates: [...row.exdates, occ.toISOString()], updatedAt: at })
-          .where(eq(calendarEntries.id, row.id));
-      } else if (occ.getTime() === row.start.getTime()) {
-        await tx.delete(calendarEntries).where(eq(calendarEntries.id, row.id));
-        await tx.delete(calendarEntries).where(later);
-      } else {
-        await tx
-          .update(calendarEntries)
-          .set({ rule: { ...series, until: new Date(occ.getTime() - 1).toISOString() }, updatedAt: at })
-          .where(eq(calendarEntries.id, row.id));
-        await tx.delete(calendarEntries).where(later);
-      }
-      return { row, scope, occurrence: occ.toISOString() };
-    });
+    const removed = await deleteEvent(deps, me, visible, readQuery(c, z.object(scopeFields)));
     publishDeleted(deps, removed.row, removed.scope, removed.occurrence);
     return c.body(null, 204);
   });
