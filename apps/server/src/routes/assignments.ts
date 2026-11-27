@@ -1006,13 +1006,13 @@ export function registerAssignments(app: Hono<AppEnv>) {
     publishAssignment(deps, row, "review");
     await resetTurns(deps, row.id);
     deps.assignmentEngine.wake(row.id);
-    if (row.status === "active")
-      await tellIfPossible(
-        deps,
-        row,
-        me.userId,
-        action === "approve" ? `✓ ${next.title}${note ? `: ${note}` : ""}` : `✎ ${next.title}: ${note}`,
-      );
+    await tellIfPossible(
+      deps,
+      row.id,
+      me.userId,
+      action === "approve" ? `✓ ${next.title}${note ? `: ${note}` : ""}` : `✎ ${next.title}: ${note}`,
+      (fresh) => fresh.status === "active",
+    );
     return c.json(toReview(next));
   });
 
@@ -1090,7 +1090,6 @@ export function registerAssignments(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const { row } = await actOn(deps, me, param(c, "assignmentId"));
     const status = action === "accept" ? ("accepted" as const) : ("declined" as const);
-    const tells = status === "accepted" && !isClosed(row) && row.status !== "paused";
     // A suggestion is a message of the assignment's thread: its id is the message's.
     const messageId = param(c, "suggestionId");
     const { suggestion, authorId } = await answerSuggestion(deps, {
@@ -1101,9 +1100,15 @@ export function registerAssignments(app: Hono<AppEnv>) {
       status,
     });
     publishAssignment(deps, row, "suggestion", { messageId, suggestion });
-    if (tells) {
+    if (status === "accepted") {
       const names = await nameMap(deps.db, [authorId]);
-      await tellIfPossible(deps, row, me.userId, `${names.get(authorId) ?? ""}: ${suggestion.text}`);
+      await tellIfPossible(
+        deps,
+        row.id,
+        me.userId,
+        `${names.get(authorId) ?? ""}: ${suggestion.text}`,
+        (fresh) => !isClosed(fresh) && fresh.status !== "paused",
+      );
     }
     return c.json({ messageId, status });
   });

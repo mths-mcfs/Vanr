@@ -14,6 +14,7 @@ import { and, eq } from "drizzle-orm";
 import { type AssignmentRow, moveAssignment } from "../src/assignments/core";
 import { createAssignment } from "../src/assignments/engine";
 import { workIdOf } from "../src/assignments/keys";
+import { tellIfPossible } from "../src/assignments/lifecycle";
 import { act, decide, snapshotOf, stepNext } from "../src/assignments/motor";
 import { planOf, writePlan } from "../src/assignments/plan";
 import type { Verifier } from "../src/assignments/verify";
@@ -535,6 +536,39 @@ describe("removing an item", () => {
         ["p1-fix2", "dropped"],
         ["p2", "todo"],
       ]);
+      await close(row.id);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("telling the executor after a person's answer", () => {
+  test(
+    "it reads the assignment after the answer: paused meanwhile, nothing is told; active, the agent hears it once",
+    async () => {
+      const { row, agentId } = await active("Tell", ["Paint"]);
+      const said = async () =>
+        (await server.deps.db.select().from(messages).where(eq(messages.threadId, row.threadId))).filter(
+          (m) => m.authorKind === "person" && m.body.endsWith("go ahead"),
+        );
+      // The route read it active; a pause landed before the tell.
+      await moveAssignment(server.deps, row, ["active"], { status: "paused" }, "status");
+      expect(
+        await tellIfPossible(server.deps, row.id, ana.user.id, "go ahead", (r) => r.status === "active"),
+      ).toBe(false);
+      expect(await said()).toEqual([]);
+      await moveAssignment(server.deps, await reload(row.id), ["paused"], { status: "active" }, "status");
+      expect(
+        await tellIfPossible(server.deps, row.id, ana.user.id, "go ahead", (r) => r.status === "active"),
+      ).toBe(true);
+      await server.deps.runtime.settle();
+      const told = await said();
+      expect(told).toHaveLength(1);
+      const reached = await server.deps.db
+        .select()
+        .from(messageDispatches)
+        .where(eq(messageDispatches.messageId, told[0]?.id ?? ""));
+      expect(reached.map((d) => d.agentId)).toEqual([agentId]);
       await close(row.id);
     },
     SERVER_TEST_MS,

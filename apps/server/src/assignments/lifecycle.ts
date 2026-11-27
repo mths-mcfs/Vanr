@@ -409,11 +409,27 @@ export async function tell(
   }
 }
 
-/** `tell` where the person's answer already counts: a runner that can't take it (offline) doesn't fail the answer. */
-export async function tellIfPossible(deps: AppDeps, row: AssignmentRow, userId: string, text: string) {
-  await tell(deps, row, userId, text).catch((err) => {
+/**
+ * `tell` after a person's answer that already counts. Whether to tell comes from the assignment as it is after the
+ * answer (`when`), not from a read taken before it. A runner that can't take it (offline) doesn't fail the answer;
+ * the miss is logged. Returns whether it was told.
+ */
+export async function tellIfPossible(
+  deps: AppDeps,
+  assignmentId: string,
+  userId: string,
+  text: string,
+  when: (row: AssignmentRow) => boolean,
+): Promise<boolean> {
+  const [fresh] = await deps.db.select().from(assignments).where(eq(assignments.id, assignmentId));
+  if (!fresh || !when(fresh)) return false;
+  try {
+    return (await tell(deps, fresh, userId, text)).delivered;
+  } catch (err) {
     if (!(err instanceof HttpError)) throw err;
-  });
+    log.warn("assignment.tell_failed", { assignmentId, code: err.code });
+    return false;
+  }
 }
 
 /**

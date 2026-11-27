@@ -249,7 +249,9 @@ async function onRunner<O extends RunnerOp, T>(
           : known
             ? `${known} (${err.message})`
             : `${err.code}: ${err.message}`;
-      throw new RunnerToolError(text, err.code);
+      const out = new RunnerToolError(text, err.code);
+      out.reached = err.reached;
+      throw out;
     }
     throw err;
   }
