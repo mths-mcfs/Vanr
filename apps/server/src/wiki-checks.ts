@@ -8,8 +8,7 @@
 // when the reader reads both pages. With the test model (no key), only pairs whose text carries
 // [[reply:...]] are asked: the fake provider would otherwise just repeat the request.
 //
-// Running it: the route ("run now", at most once a minute) and, with the runtime slice, a daily tick per
-// workspace. Either way `checkWorkspace` claims the workspace's turn in one statement first, so two runs
+// Running it: the route ("run now", at most once a minute); a daily tick per workspace is not on yet. Either way `checkWorkspace` claims the workspace's turn in one statement first, so two runs
 // that land together check once.
 import type { WikiCheckFinding, WikiCheckReport } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
@@ -25,7 +24,7 @@ import { targetsFor } from "./wiki-links";
 const { wikiChecks, pageLinks, knowledgePages } = schema;
 
 export const CHECK_MODEL = "claude-haiku-5-5";
-/** How often the tick checks a workspace's wiki (the tick comes with the runtime slice). */
+/** How often a daily tick would check a workspace's wiki (no tick runs it yet). */
 export const CHECK_EVERY_MS = 24 * 3600_000;
 /** "Run now": at most once a minute per workspace (the check calls the model). */
 export const CHECK_NOW_GAP_MS = 60_000;
@@ -203,8 +202,7 @@ export async function claimCheck(deps: AppDeps, workspaceId: string, gapMs: numb
 
 /**
  * Checks a workspace's wiki if its turn is free (`gapMs` since the last check): false when another run has
- * it. The model is looked up first, before the claim writes anything: until the runtime slice the lookup
- * is absent and the call ends with `not_available` and no write. The run is the server's background work,
+ * it. The model is looked up first, before the claim writes anything. The run is the server's background work,
  * so stopping the server waits for it before the database closes.
  */
 export async function checkWorkspace(

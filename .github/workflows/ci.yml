@@ -175,6 +175,10 @@ jobs:
       - run: bun test apps/server/test/chat-postgres.test.ts
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # The agent's and the channel's month caps under runs at once: only the reservations that fit go through.
+      - run: bun test apps/server/test/ceiling-postgres.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
       # Each queued send goes out once and is canceled or sent, never both, with passes on several connections at
       # once. Each guard is one conditional UPDATE (no lock to take out).
       - run: bun test apps/server/test/outbox-postgres.test.ts
@@ -848,7 +852,7 @@ jobs:
       - run: bun test apps/server/test/assignment-engine-postgres.test.ts
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
-      - name: The forced assignment work test fails without the lock
+      - name: The forced assignment work and validation tests fail without the lock
         run: |
           set +e
           bun test apps/server/test/assignment-engine-postgres.test.ts --test-name-pattern forced > forced-work.log 2>&1
@@ -864,7 +868,7 @@ jobs:
               exit 1
             fi
           done
-          set -- work-claim
+          set -- work-claim validate-claim
           for label in "$@"; do
             if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" forced-work.log; then
               echo "::error::the forced $label test did not fail on its outcome without the lock"
@@ -883,6 +887,35 @@ jobs:
           fi
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_DROP_LOCKS: "1"
+      # The runtime's fence on an assignment item's attempts (in memory, so PGlite shows it): without it a late
+      # attempt's turn goes into the run a later attempt holds.
+      - name: The forced assignment fence test fails without the fence
+        run: |
+          set +e
+          bun test apps/server/test/assignment-recovery.test.ts --test-name-pattern forced > forced-fence.log 2>&1
+          status=$?
+          cat forced-fence.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the forced assignment fence test passed without the fence"
+            exit 1
+          fi
+          for broken in CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -aqF "$broken" forced-fence.log; then
+              echo "::error::the forced assignment fence test broke ($broken) instead of failing on its outcome"
+              exit 1
+            fi
+          done
+          if ! grep -aqF "LOCK_OUTCOME_MISMATCH(run-fence)" forced-fence.log; then
+            echo "::error::the forced run-fence test did not fail on its outcome without the fence"
+            exit 1
+          fi
+          failed=$(grep -a '^(fail) ' forced-fence.log | sed -E 's/^\(fail\) //; s/ \[[0-9.]+m?s\]$//' | sort -u)
+          if printf '%s\n' "$failed" | grep -qv forced; then
+            echo "::error::a test outside the forced ones failed without the fence: $failed"
+            exit 1
+          fi
+        env:
           VANR_TEST_DROP_LOCKS: "1"
       # The agent's assignment and runner tools: reports at once all land in the notes, and requests for a
       # person in the browser at once make one.

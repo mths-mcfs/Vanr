@@ -1,12 +1,13 @@
 // The assignment engine (assignments/motor.ts) and what moves an assignment (assignments/engine.ts): the pure
 // decision, the loop that takes an assignment through its states to done, and a crash in the middle of a step
-// that resumes without sending the step twice. The loop reaches the agent runtime (slice S6) in every step, so
-// without it the engine doesn't start; here the server runs on `agentRuntime`, the port as the engine sees it
-// with no agent run on the air unless a test starts one through `runFor`. The runner is a fake one speaking the
+// that resumes without sending the step twice. The loop reaches the agent runtime in every step: here the server
+// runs on `agentRuntime`, the port as the engine sees it with no agent run on the air unless a test starts one
+// through `runFor` (one test runs on the real runtime). The runner is a fake one speaking the
 // protocol (protocol-runner.ts) and the verifier is scripted. The routes that create, start and accept an
 // assignment come with slice S5; the tests call the functions those routes call.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { type Db, schema } from "@vanr/engine/db";
+import { newId } from "@vanr/engine/ids";
 import { and, eq } from "drizzle-orm";
 import { type AssignmentRow, moveAssignment } from "../src/assignments/core";
 import { createAssignment, jobEnded, settleJob } from "../src/assignments/engine";
@@ -16,16 +17,18 @@ import {
   act,
   createEngine,
   decide,
-  runtimeReady,
   type Snapshot,
   snapshotOf,
+  stepNext,
 } from "../src/assignments/motor";
 import { planOf, writePlan } from "../src/assignments/plan";
 import { proofsOf } from "../src/assignments/proofs";
 import type { Verifier } from "../src/assignments/verify";
+import type { AppDeps } from "../src/context";
 import type { RunningServer } from "../src/server";
 import { agentRuntime, pairRunner, passing, seedAgent } from "./assignment-kit";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
+import { wrapQuery } from "./lock-double";
 import type { ProtocolRunner } from "./protocol-runner";
 import { type Person, seedWorkspace } from "./seed";
 
@@ -46,6 +49,10 @@ const base: Snapshot = {
   person: { decisions: [], others: 0, submission: false },
   lastActivity: null,
   emitted: [],
+  unannounced: false,
+  announceAt: null,
+  unsettled: [],
+  stray: false,
 };
 const item = (id: string, over: Partial<Snapshot["items"][number]> = {}): Snapshot["items"][number] => ({
   id,
@@ -62,6 +69,20 @@ const item = (id: string, over: Partial<Snapshot["items"][number]> = {}): Snapsh
 
 describe("decide (pure)", () => {
   const now = new Date("2026-10-22T12:00:00Z");
+  test("a card still within its creator's grace: the wait wakes when the grace runs out", () => {
+    const at = new Date(now.getTime() + 60_000);
+    const working = { ...base, items: [item("p1")], busy: true, announceAt: at };
+    expect(decide(working, now)).toMatchObject({ type: "wait", reason: "working", until: at.toISOString() });
+    expect(decide({ ...base, status: "paused", announceAt: at }, now)).toEqual({
+      type: "wait",
+      reason: "paused",
+      until: at.toISOString(),
+    });
+    // The grace ran out while the snapshot was read: the wait still wakes then, not hours later.
+    const past = new Date(now.getTime() - 1000);
+    expect(decide({ ...working, announceAt: past }, now)).toMatchObject({ until: past.toISOString() });
+  });
+
   test("closed ends; proposed and paused wait; dead work is reaped before anything else", () => {
     expect(decide({ ...base, status: "done" }, now)).toEqual({ type: "end" });
     expect(decide({ ...base, status: "proposed" }, now)).toMatchObject({ type: "wait", reason: "proposed" });
@@ -159,7 +180,7 @@ describe("decide (pure)", () => {
   });
 });
 
-describe("without the agent runtime", () => {
+describe("on the real agent runtime", () => {
   let server: RunningServer;
   beforeAll(async () => {
     server = await startTestServer();
@@ -167,9 +188,8 @@ describe("without the agent runtime", () => {
   afterAll(() => server.stop(), SERVER_TEST_MS);
 
   test(
-    "the engine doesn't start: an active assignment stays as it is and nothing reaches the runtime",
+    "an active assignment advances one step: the engine sends the agent its turn and the agent's run answers it",
     async () => {
-      expect(runtimeReady(server.deps)).toBe(false);
       const ana = await signedIn(server, "Ana", "ana@engine-off.test");
       const { workspaceId, general } = await seedWorkspace(server, ana, "Off");
       const agentId = await seedAgent(server.deps.db, workspaceId, ana, null);
@@ -200,9 +220,13 @@ describe("without the agent runtime", () => {
         .select()
         .from(assignmentWork)
         .where(eq(assignmentWork.assignmentId, row.id));
-      expect(work).toEqual([]);
-      const [after] = await server.deps.db.select().from(assignments).where(eq(assignments.id, row.id));
-      expect([after?.status, after?.waitReason]).toEqual(["active", null]);
+      expect(work.length).toBeGreaterThan(0);
+      const [first] = work;
+      // The turn went out as a message of the assignment's thread and the agent's run on it ended.
+      const turns = await server.deps.db.select().from(schema.runs).where(eq(schema.runs.agentId, agentId));
+      expect(turns.length).toBeGreaterThan(0);
+      expect(turns.every((r) => r.status === "done")).toBe(true);
+      expect(first?.refId && turns.some((r) => r.id === first.refId)).toBe(true);
     },
     SERVER_TEST_MS,
   );
@@ -455,16 +479,22 @@ describe("the engine on its loop", () => {
           { id: "p2", title: "Two", criteria: "two" },
         ],
       });
-      // Paused straight in the database: the loop only waits; the test calls the step by hand.
+      // Active straight in the database, with nothing waking it: no loop runs it; the test calls the step by hand.
       await server.deps.db
         .update(assignments)
-        .set({ status: "paused", startedAt: server.deps.now() })
+        .set({ status: "active", startedAt: server.deps.now() })
         .where(eq(assignments.id, row.id));
       const turnsBefore = runtime.turns.length;
       await act(server.deps, row.id, { type: "work", itemId: "p1", n: 1 });
       await act(server.deps, row.id, { type: "work", itemId: "p1", n: 1 });
       expect(runtime.turns.length).toBe(turnsBefore + 1);
       const run = runtime.turns.at(-1)?.runId ?? "";
+      // The run's end wakes the assignment's loop: a timer far off keeps it waiting, so only the steps called
+      // here send anything.
+      await server.deps.db
+        .update(assignments)
+        .set({ wakeAt: new Date(Date.now() + 3600_000) })
+        .where(eq(assignments.id, row.id));
       runtime.finish(run);
       await server.deps.runtime.settle();
       await act(server.deps, row.id, { type: "work", itemId: "p1", n: 1 });
@@ -515,7 +545,7 @@ describe("the engine on its loop", () => {
       });
       await server.deps.db
         .update(assignments)
-        .set({ status: "paused", startedAt: server.deps.now() })
+        .set({ status: "active", startedAt: server.deps.now() })
         .where(eq(assignments.id, row.id));
       const before = runtime.turns.length;
       await Promise.all(
@@ -652,7 +682,7 @@ describe("the engine on its loop", () => {
     });
     await server.deps.db
       .update(assignments)
-      .set({ status: "paused", startedAt: server.deps.now() })
+      .set({ status: "active", startedAt: server.deps.now() })
       .where(eq(assignments.id, row.id));
     return reload(row.id);
   }
@@ -796,7 +826,7 @@ describe("the engine on its loop", () => {
   test(
     "a verdict on an item the person removed during the check is not applied and makes no fix",
     async () => {
-      const row = await onRunner("Removed", ["Build"]);
+      const row = await idleOnRunner("Removed", ["Build"]);
       const p1 = and(
         eq(schema.assignmentPlanItems.assignmentId, row.id),
         eq(schema.assignmentPlanItems.id, "p1"),
@@ -820,6 +850,223 @@ describe("the engine on its loop", () => {
       });
       const items = await planOf(server.deps, row.id);
       expect(items.map((i) => [i.id, i.status, i.passes, i.checks])).toEqual([["p1", "dropped", null, 0]]);
+    },
+    SERVER_TEST_MS,
+  );
+  /** On the runner and active straight in the database, with nothing waking it: the test runs the steps. */
+  async function idleOnRunner(title: string, plan: string[]) {
+    const row = await onRunner(title, plan);
+    await server.deps.db
+      .update(assignments)
+      .set({ status: "active", startedAt: server.deps.now() })
+      .where(eq(assignments.id, row.id));
+    return reload(row.id);
+  }
+  const itemOf = async (row: AssignmentRow, id: string) =>
+    (await planOf(server.deps, row.id)).find((i) => i.id === id);
+
+  test(
+    "a job's end doesn't bring back an item the person dropped meanwhile",
+    async () => {
+      const row = await idleOnRunner("Dropped meanwhile", ["Build", "Docs"]);
+      const [job] = await server.deps.db
+        .insert(runnerJobs)
+        .values({
+          id: newId("aj"),
+          workspaceId,
+          runnerId: runner.runnerId,
+          agentId: row.agentId,
+          assignmentId: row.id,
+          threadId: row.threadId,
+          channelId: row.channelId,
+          title: "Build",
+          executor: "claude_code",
+          prompt: "build",
+          planItemId: "p1",
+          status: "done",
+          result: "Built",
+          endedAt: new Date(),
+        })
+        .returning();
+      if (!job) throw new Error("no job");
+      await writePlan(server.deps, row.id, {
+        author: { type: "person", id: ana.user.id },
+        mode: "person",
+        items: [{ id: "p2", title: "Docs" }],
+      });
+      await jobEnded(server.deps, job);
+      expect((await itemOf(row, "p1"))?.status).toBe("dropped");
+      // Nor does its history say the job did it.
+      const events = await server.deps.db
+        .select({ kind: schema.assignmentEvents.kind })
+        .from(schema.assignmentEvents)
+        .where(eq(schema.assignmentEvents.assignmentId, row.id));
+      expect(events.map((e) => e.kind)).toContain("job_done");
+      expect(events.map((e) => e.kind)).not.toContain("item_done");
+      await server.deps.db.update(assignments).set({ status: "canceled" }).where(eq(assignments.id, row.id));
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "an attempt that reaches its send after the item was done starts no job on the runner",
+    async () => {
+      const row = await idleOnRunner("Done meanwhile", ["Build"]);
+      const action = await stepNext(server.deps, row.id);
+      expect(action).toEqual({ type: "work", itemId: "p1", n: 1 });
+      // The item is done right after the claim (on the claim's item_started event), before the last check.
+      let fired = false;
+      const db = new Proxy(server.deps.db, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop, target);
+          if (prop !== "insert") return typeof value === "function" ? value.bind(target) : value;
+          return (table: typeof schema.assignmentEvents) => {
+            const builder = target.insert(table);
+            if (table !== schema.assignmentEvents || fired) return builder;
+            return wrapQuery(builder, async () => {
+              fired = true;
+              await server.deps.db
+                .update(schema.assignmentPlanItems)
+                .set({ status: "done" })
+                .where(
+                  and(
+                    eq(schema.assignmentPlanItems.assignmentId, row.id),
+                    eq(schema.assignmentPlanItems.id, "p1"),
+                  ),
+                );
+            });
+          };
+        },
+      });
+      await act({ ...server.deps, db }, row.id, action);
+      expect(fired).toBe(true);
+      const jobId = jobIdOf(workIdOf(row.id, "p1", 1));
+      expect(starts.get(jobId)).toBeUndefined();
+      expect(await server.deps.db.select().from(runnerJobs).where(eq(runnerJobs.id, jobId))).toEqual([]);
+      const [w] = await server.deps.db
+        .select()
+        .from(assignmentWork)
+        .where(eq(assignmentWork.id, workIdOf(row.id, "p1", 1)));
+      expect([w?.status, w?.outcome]).toEqual(["ended", "canceled"]);
+      await server.deps.db.update(assignments).set({ status: "canceled" }).where(eq(assignments.id, row.id));
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "an attempt reaped while it was starting its job: the job it started is canceled, not left running",
+    async () => {
+      const row = await idleOnRunner("Reaped while starting", ["Build"]);
+      const workId = workIdOf(row.id, "p1", 1);
+      const jobId = jobIdOf(workId);
+      const otherId = newId("aj");
+      const hub = server.deps.runners;
+      let reaped = false;
+      // Another loop reaps the attempt while this one writes the assignment files to the runner.
+      const slow: AppDeps = {
+        ...server.deps,
+        runners: Object.assign(Object.create(hub), {
+          call: async (...args: Parameters<typeof hub.call>) => {
+            if (!reaped && args[1] === "write") {
+              reaped = true;
+              await act(server.deps, row.id, { type: "reap", workId });
+              // Another job of the assignment, on another runner: the cleanup is only this attempt's job.
+              await server.deps.db.insert(runnerJobs).values({
+                id: otherId,
+                workspaceId,
+                runnerId: "rnr_gone",
+                agentId: row.agentId,
+                assignmentId: row.id,
+                threadId: row.threadId,
+                channelId: row.channelId,
+                title: "A person's job",
+                executor: "claude_code",
+                prompt: "other",
+                status: "running",
+              });
+            }
+            return hub.call(...args);
+          },
+        }),
+      };
+      await act(slow, row.id, { type: "work", itemId: "p1", n: 1 });
+      expect(reaped).toBe(true);
+      await jobSent(row, "p1");
+      await runner.next(
+        (f) => f.type === "request" && f.op === "job.cancel" && f.args.jobId === jobId,
+        15_000,
+      );
+      const [w] = await server.deps.db.select().from(assignmentWork).where(eq(assignmentWork.id, workId));
+      expect([w?.status, w?.outcome, w?.refId]).toEqual(["ended", "interrupted", null]);
+      const [other] = await server.deps.db.select().from(runnerJobs).where(eq(runnerJobs.id, otherId));
+      expect(other?.status).toBe("running");
+      await server.deps.db.update(runnerJobs).set({ status: "canceled" }).where(eq(runnerJobs.id, otherId));
+      await server.deps.db.update(assignments).set({ status: "canceled" }).where(eq(assignments.id, row.id));
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a refusal that lands after the item was edited doesn't take back a turn of the new epoch",
+    async () => {
+      const row = await idleOnRunner("Edited meanwhile", ["Build"]);
+      const hub = server.deps.runners;
+      // Between the claim and the refusal: the owner edits the item (new epoch, turns cleared) and the new epoch's
+      // own attempt already counted its turn.
+      let edited = false;
+      const db = new Proxy(server.deps.db, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop, target);
+          if (prop !== "select") return typeof value === "function" ? value.bind(target) : value;
+          return (...args: Parameters<typeof target.select>) =>
+            wrapQuery(target.select(...args), async (q) => {
+              if (edited || !String(q.toSQL?.().sql ?? "").includes('from "runner_jobs"')) return;
+              edited = true;
+              await writePlan(server.deps, row.id, {
+                author: { type: "person", id: ana.user.id },
+                mode: "person",
+                items: [{ id: "p1", title: "Build it again" }],
+              });
+              await server.deps.db
+                .update(schema.assignmentPlanItems)
+                .set({ turns: 1 })
+                .where(
+                  and(
+                    eq(schema.assignmentPlanItems.assignmentId, row.id),
+                    eq(schema.assignmentPlanItems.id, "p1"),
+                  ),
+                );
+            });
+        },
+      });
+      const offline: AppDeps = {
+        ...server.deps,
+        db,
+        runners: Object.assign(Object.create(hub), { isOnline: () => false }),
+      };
+      await act(offline, row.id, { type: "work", itemId: "p1", n: 1 });
+      expect(edited).toBe(true);
+      const p1 = await itemOf(row, "p1");
+      expect([p1?.epoch, p1?.turns]).toEqual([1, 1]);
+      await server.deps.db.update(assignments).set({ status: "canceled" }).where(eq(assignments.id, row.id));
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "starts refused because the runner is offline don't use up the item's turns",
+    async () => {
+      const row = await idleOnRunner("Offline", ["Build"]);
+      const hub = server.deps.runners;
+      const offline: AppDeps = {
+        ...server.deps,
+        runners: Object.assign(Object.create(hub), { isOnline: () => false }),
+      };
+      for (let n = 1; n <= 5; n++) await act(offline, row.id, { type: "work", itemId: "p1", n });
+      expect((await itemOf(row, "p1"))?.turns).toBe(0);
+      // The item isn't stuck: with the runner back, the next attempt goes.
+      expect(await stepNext(server.deps, row.id)).toMatchObject({ type: "work", itemId: "p1" });
+      await server.deps.db.update(assignments).set({ status: "canceled" }).where(eq(assignments.id, row.id));
     },
     SERVER_TEST_MS,
   );

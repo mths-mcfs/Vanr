@@ -11,6 +11,7 @@ import { moveAssignment } from "../src/assignments/core";
 import { createAssignment } from "../src/assignments/engine";
 import { jobIdOf, workIdOf } from "../src/assignments/keys";
 import { act, workflowIdOf } from "../src/assignments/motor";
+import type { Verifier } from "../src/assignments/verify";
 import type { AppDeps } from "../src/context";
 import type { RunningServer } from "../src/server";
 import { agentRuntime, pairRunner, passing, seedAgent } from "./assignment-kit";
@@ -146,10 +147,10 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("the assignment engine on Postgre
         commandPolicy: "always",
         plan: ["Walls"],
       });
-      // Paused straight in the database: the workflow only waits; the test runs the two steps by hand.
+      // Active straight in the database, with nothing waking it: no workflow runs it; the test runs the two steps by hand.
       await server.deps.db
         .update(assignments)
-        .set({ status: "paused", startedAt: server.deps.now() })
+        .set({ status: "active", startedAt: server.deps.now() })
         .where(eq(assignments.id, row.id));
       const before = runtime.turns.length;
       const step = { type: "work" as const, itemId: "p1", n: 1 };
@@ -172,6 +173,71 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("the assignment engine on Postgre
       expect(work?.refId).toBe(runtime.turns.at(-1)?.runId ?? "");
       for (const t of runtime.turns.slice(before)) runtime.finish(t.runId);
       await server.deps.runtime.settle();
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "forced: a second step on the same validation round waits on the assignment's lock, so the verifier is called once",
+    async () => {
+      const agentId = await seedAgent(server.deps.db, workspaceId, ana, null);
+      const row = await createAssignment(server.deps, {
+        workspaceId,
+        agentId,
+        agentHandle: "lia",
+        channelId: general,
+        ownerId: ana.user.id,
+        title: "Check",
+        goal: "Check",
+        executor: "agent",
+        runnerId: null,
+        commandPolicy: "always",
+        plan: ["Docs"],
+      });
+      await server.deps.db
+        .update(assignments)
+        .set({ status: "active", startedAt: server.deps.now() })
+        .where(eq(assignments.id, row.id));
+      await server.deps.db
+        .update(assignmentPlanItems)
+        .set({ status: "done", summary: "wrote them" })
+        .where(and(eq(assignmentPlanItems.assignmentId, row.id), eq(assignmentPlanItems.id, "p1")));
+      // The first call waits for the other step: until that one also calls (no lock) or ends (it found the claim
+      // held), so without the lock both steps are past the claim before either writes a verdict.
+      let calls = 0;
+      let other!: () => void;
+      const otherMoved = new Promise<void>((r) => {
+        other = r;
+      });
+      const counting: Verifier = async (_deps, _row, items) => {
+        calls++;
+        if (calls === 1) await otherMoved;
+        else other();
+        return {
+          ok: true,
+          runId: null,
+          verdicts: items.map((i) => ({ id: i.item.id, passes: true, reason: "ok" })),
+        };
+      };
+      const step = { type: "validate" as const, itemIds: ["p1"], round: 1 };
+      try {
+        await forcedPair(
+          admin,
+          "validate-claim",
+          "select",
+          (_side, hooks) =>
+            act({ ...withDb(hooks), assignmentVerifier: counting }, row.id, step).finally(() => other()),
+          { match: "effect_keys" },
+        );
+      } finally {
+        other();
+      }
+      const [p1] = await server.deps.db
+        .select()
+        .from(assignmentPlanItems)
+        .where(and(eq(assignmentPlanItems.assignmentId, row.id), eq(assignmentPlanItems.id, "p1")));
+      outcome("validate-claim", { calls, checks: p1?.checks }, { calls: 1, checks: 1 });
+      await server.deps.db.update(assignments).set({ status: "canceled" }).where(eq(assignments.id, row.id));
     },
     SERVER_TEST_MS,
   );

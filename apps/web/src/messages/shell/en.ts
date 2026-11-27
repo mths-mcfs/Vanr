@@ -98,4 +98,6 @@ export default {
   "settings.access": "Access",
   "settings.usage": "Usage",
   "settings.sections": "Sections",
+  "settings.locked.title": "This section is for admins",
+  "settings.locked.body": "Ask an admin of this workspace if something here needs to change.",
 } as const satisfies Catalog;

@@ -53,8 +53,7 @@ function providerOrFail(lookup: ModelProvider | { error: string }): ModelProvide
 
 export async function askSources(deps: AppDeps, me: WorkspaceMember, q: string): Promise<AskAnswer> {
   // Who answers: the same resolver as the agents' (the workspace's default key, else the platform's, else
-  // the test model outside production). It is looked up at the entry, before the question counts: until
-  // the runtime slice (S6) the resolver is absent and the route answers `not_available` without a write.
+  // the test model outside production). It is looked up at the entry, before the question counts.
   const lookup = await deps.runtime.providerForWorkspace(me.workspaceId);
   takeAsk(me, deps.now().getTime());
   const hits = await searchAs(deps, me, q, {

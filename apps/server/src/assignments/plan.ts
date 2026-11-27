@@ -11,7 +11,7 @@
 import type { AssignmentActorRef, AssignmentPlanItem } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { planItemWorkState } from "@vanr/engine/work-state";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { AppDeps } from "../context";
 import { HttpError } from "../http";
 import { itemStuck } from "./state";
@@ -286,6 +286,19 @@ export async function writePlan(
         } else order.push({ row: old, next: old });
       }
     }
+    // A removed item takes its fix items with it, done or not: no fix is left without the item it fixes.
+    const gone = new Set(order.flatMap((o) => (o.next.status === "dropped" ? [o.next.id] : [])));
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const o of order) {
+        if (o.next.kind !== "fix" || !o.next.fixes || !gone.has(o.next.fixes) || o.next.status === "dropped")
+          continue;
+        o.next = { ...o.next, status: "dropped", updatedBy: input.author, updatedAt: at };
+        gone.add(o.next.id);
+        if (!removed.includes(o.next.id)) removed.push(o.next.id);
+        grew = true;
+      }
+    }
     if (order.filter((o) => o.next.status !== "dropped").length > MAX_PLAN_ITEMS)
       throw new HttpError(400, "assignment.plan_too_long", `A plan has at most ${MAX_PLAN_ITEMS} items`);
 
@@ -362,6 +375,8 @@ export async function touchItem(
   > & {
     turnsPlus?: number;
   },
+  /** Only an item in one of these statuses changes (the state read before may be stale). */
+  from?: readonly PlanItemRow["status"][],
 ): Promise<PlanItemRow | null> {
   const { turnsPlus, ...rest } = set;
   const [row] = await deps.db
@@ -371,7 +386,13 @@ export async function touchItem(
       ...(turnsPlus ? { turns: sql`${assignmentPlanItems.turns} + ${turnsPlus}` } : {}),
       updatedAt: deps.now(),
     })
-    .where(and(eq(assignmentPlanItems.assignmentId, assignmentId), eq(assignmentPlanItems.id, itemId)))
+    .where(
+      and(
+        eq(assignmentPlanItems.assignmentId, assignmentId),
+        eq(assignmentPlanItems.id, itemId),
+        from ? inArray(assignmentPlanItems.status, [...from]) : undefined,
+      ),
+    )
     .returning();
   return row ?? null;
 }

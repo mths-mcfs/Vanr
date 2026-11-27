@@ -1,8 +1,7 @@
 // The control center over raw HTTP: approvals, "always allow" rules, proposals, questions and undo. The rows a run
-// writes (an approval, a proposal, a question, the receipt of an action) come from the agent runtime (S6) and its
-// tools; here the test writes the same rows the tools write, and everything after that goes through the routes.
-// Deciding an approval, editing it and answering a question wake the waiting run: until the runtime is there those
-// routes answer `not_available`, and the tests prove that nothing was written. The clock is injected.
+// writes (an approval, a proposal, a question, the receipt of an action) come from the agent runtime and its tools;
+// here the test writes the same rows the tools write, and everything after that goes through the routes, so no run
+// waits on them (control-runs.test.ts drives the same routes through a live run). The clock is injected.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
@@ -214,7 +213,7 @@ describe("approvals", () => {
   );
 
   test(
-    "approve, reject and edit: who may, the hash, remembering and the runtime; nothing is written before the runtime",
+    "approve, reject and edit: who may, the hash, remembering; with no run waiting the request closes as gone",
     async () => {
       const t = await team();
       const row = await seedApproval(t);
@@ -250,17 +249,19 @@ describe("approvals", () => {
       );
       expect((await edit(row.id, { input: "x", payloadHash: "hash-1" })).status).toBe(400);
 
-      // Everything right: the run that waits is the runtime's, which isn't there yet. Nothing is written.
+      // Everything right, but no run waits on it (the run that asked ended): the edit changes nothing, and a
+      // decision closes the request as canceled without remembering anything.
       const before = await approvalOf(row.id);
-      for (const res of [
-        await approve(t.beto, { payloadHash: "hash-1", remember: true }),
-        await t.beto.browser.json(t.url(`/approvals/${row.id}/reject`), "POST", { reason: "no" }),
-        await edit(row.id, { input: { body: "Shorter" }, payloadHash: "hash-1" }),
-      ]) {
-        expect(res.status).toBe(503);
-        expect(await code(res)).toBe("not_available");
-      }
+      const edited = await edit(row.id, { input: { body: "Shorter" }, payloadHash: "hash-1" });
+      expect([edited.status, await code(edited)]).toEqual([409, "approval.gone"]);
       expect(await approvalOf(row.id)).toEqual(before);
+      const approved = await approve(t.beto, { payloadHash: "hash-1", remember: true });
+      expect([approved.status, await code(approved)]).toEqual([409, "approval.gone"]);
+      expect(await approvalOf(row.id)).toMatchObject({ status: "canceled", deciderUserId: null });
+      const rejected = await t.beto.browser.json(t.url(`/approvals/${row.id}/reject`), "POST", {
+        reason: "no",
+      });
+      expect(await code(rejected)).toBe("approval.already_resolved");
       const rules = await body(await t.beto.browser.fetch(t.url("/approval-rules")));
       expect(rules.rules).toEqual([]);
 
@@ -733,7 +734,7 @@ describe("proposals", () => {
 
 describe("questions", () => {
   test(
-    "only the person asked answers, from the choices, while open; a right answer waits for the runtime and writes nothing",
+    "only the person asked answers, from the choices, while open; a right answer closes the question once",
     async () => {
       const t = await team();
       const seedQuestion = async (over: Partial<typeof questions.$inferInsert> = {}) => {
@@ -768,10 +769,15 @@ describe("questions", () => {
       expect((await answer(t.carla, { choice: "Monthly" }, hidden.id)).status).toBe(404);
 
       const res = await answer(t.carla, { choice: "Monthly" });
-      expect(res.status).toBe(503);
-      expect(await code(res)).toBe("not_available");
+      expect(res.status).toBe(200);
+      expect(await body(res)).toMatchObject({ id: q.id, status: "answered", answer: "Monthly" });
       const [after] = await server.deps.db.select().from(questions).where(eq(questions.id, q.id));
-      expect(after).toMatchObject({ status: "open", answer: null, responderUserId: null });
+      expect(after).toMatchObject({
+        status: "answered",
+        answer: "Monthly",
+        responderUserId: t.carla.user.id,
+      });
+      expect(await code(await answer(t.carla, { choice: "Weekly" }))).toBe("question.closed");
     },
     SERVER_TEST_MS,
   );

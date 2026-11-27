@@ -1,7 +1,5 @@
-// Memory consolidation without the runtime: the job asks the runtime for the proposal (`complete`), which the
-// server doesn't have until slice S6, so starting one is rejected before anything is written. Applying,
-// discarding, listing and cleaning the model's proposal work on their own, over a consolidation saved the way
-// the job saves it.
+// Memory consolidation: the job asks the runtime for the proposal (`complete`). Applying, discarding, listing and
+// cleaning the model's proposal, over a consolidation the job saved or one saved the way the job saves it.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
@@ -132,19 +130,20 @@ const failure = async (p: Promise<unknown>) => {
 };
 
 describe("starting", () => {
-  test("starting a consolidation is rejected with not_available before anything is written", async () => {
+  test("starting a consolidation asks the runtime for the proposal, which comes back ready to review", async () => {
     const agent = await newAgent("lia");
     await remember(agent, "The office opens at 9.");
     await remember(agent, "the office opens at 9.");
-    const err = await startConsolidation(server.deps, me, agent).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(HttpError);
-    expect(err).toMatchObject({ status: 503, code: "not_available", params: { method: "complete" } });
-    expect(
-      await server.deps.db
-        .select()
-        .from(memoryConsolidations)
-        .where(eq(memoryConsolidations.agentId, agent.id)),
-    ).toEqual([]);
+    const row = await startConsolidation(server.deps, me, agent);
+    await server.deps.runtime.settle();
+    const [ready] = await consolidationsOf(server.deps.db, agent);
+    expect(ready).toMatchObject({ id: row.id, status: "ready" });
+    expect(ready?.items.length).toBeGreaterThan(0);
+    const [run] = await server.deps.db
+      .select()
+      .from(schema.runs)
+      .where(eq(schema.runs.id, ready?.runId ?? ""));
+    expect([run?.status, run?.agentId]).toEqual(["done", agent.id]);
   });
 
   test("a rejected completion fails the job and allows another consolidation to start", async () => {

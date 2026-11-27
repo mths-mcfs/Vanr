@@ -98,4 +98,6 @@ export default {
   "settings.access": "Acesso",
   "settings.usage": "Uso",
   "settings.sections": "Seções",
+  "settings.locked.title": "Esta seção é para admins",
+  "settings.locked.body": "Peça a um admin deste espaço de trabalho se algo aqui precisar mudar.",
 } satisfies TranslationOf<typeof en>;

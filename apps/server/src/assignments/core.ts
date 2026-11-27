@@ -17,7 +17,7 @@ import { assignmentWorkState } from "@vanr/engine/work-state";
 import { and, count, eq, gt, inArray } from "drizzle-orm";
 import type { AgentRow } from "../agents";
 import { canReadChannel, channelInWorkspace } from "../channels";
-import { type AppDeps, requireRuntime, type WorkspaceMember } from "../context";
+import type { AppDeps, WorkspaceMember } from "../context";
 import { HttpError } from "../http";
 import { postMessage } from "../messages";
 import { canUseRunner } from "../runners/runners";
@@ -537,7 +537,7 @@ export async function nameMap(db: Db, ids: string[]): Promise<Map<string, string
 
 /**
  * A person's message in the assignment's thread, which the agent receives (start, resume, ask for changes).
- * The runtime hands it to the agent after it is saved, so without the runtime nothing is written.
+ * The runtime hands it to the agent after it is saved.
  */
 export async function personSays(
   deps: AppDeps,
@@ -546,7 +546,6 @@ export async function personSays(
   text: string,
   meta: Record<string, unknown> = {},
 ) {
-  requireRuntime(deps.runtime, "onPersonMessage");
   const channel = await channelInWorkspace(deps.db, row.workspaceId, row.channelId);
   if (!channel) throw notFoundAssignment();
   const agent = await agentOf(deps.db, row);
@@ -569,6 +568,8 @@ export async function agentSays(
   row: AssignmentRow,
   text: string,
   meta: Record<string, unknown>,
+  /** A fixed client id makes the post idempotent: posting it again returns the same message. */
+  clientId: string = newId("am"),
 ) {
   const channel = await channelInWorkspace(deps.db, row.workspaceId, row.channelId);
   if (!channel) throw notFoundAssignment();
@@ -577,7 +578,7 @@ export async function agentSays(
     channel,
     author: { type: "agent", id: row.agentId },
     body: text,
-    clientId: newId("am"),
+    clientId,
     threadId: row.threadId,
     meta,
   });

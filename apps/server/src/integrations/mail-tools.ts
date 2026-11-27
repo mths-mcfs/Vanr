@@ -12,7 +12,6 @@ import type { Preview } from "@vanr/engine/effects";
 import { randomId } from "@vanr/engine/ids";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
-import { requireRuntime } from "../context";
 import { queueSend } from "../outbox";
 import { linksIn } from "../runtime/preview";
 import { define, type ToolContext, type ToolDef, ToolInputError, type ToolPlan } from "../runtime/tools";
@@ -236,7 +235,6 @@ async function outgoing(
   card: { action: "send" | "reply" | "forward"; title: string; payload: Record<string, unknown> },
 ): Promise<ToolPlan> {
   // A send is queued by the outbox, whose wake-up is the runtime's: rejected here, before any approval is asked.
-  requireRuntime(ctx.deps.runtime, "wakeAt");
   const all = [...mail.to, ...mail.cc];
   const { fresh } = classifyRecipients(all, {
     workspaceDomains: await workspaceDomains(ctx.deps.db, ctx.workspaceId),

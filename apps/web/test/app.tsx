@@ -6,7 +6,7 @@
 // Nothing here waits for real time: the clock is manual (`app.clock.advance(ms)`) and a slow
 // answer is a held one (`app.server.hold("signIn")`).
 import { createMemoryHistory, RouterProvider } from "@tanstack/react-router";
-import { act, render } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ManualClock } from "@vanr/client/testing";
 import { type CookieJar, FakeServer, newJar, type SeedName } from "../dev/fake-server.ts";
@@ -113,4 +113,12 @@ export async function setViewportWidth(width: number): Promise<void> {
   await act(async () => {
     resize({ width, height: 844 });
   });
+}
+
+/** Picks an option of a select (a combobox): opens it from the keyboard, then clicks the option. */
+export async function chooseOption(app: App, combobox: HTMLElement, option: string): Promise<void> {
+  await act(async () => {
+    combobox.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+  });
+  await app.user.click(await screen.findByRole("option", { name: option }));
 }

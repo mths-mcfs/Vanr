@@ -15,7 +15,7 @@ import type { Hono } from "hono";
 import { z } from "zod";
 import { agentInWorkspace } from "../agents";
 import { channelInWorkspace, openDm, writableChannel } from "../channels";
-import { type AppDeps, type AppEnv, type Ctx, requireRuntime, type WorkspaceMember } from "../context";
+import type { AppDeps, AppEnv, Ctx, WorkspaceMember } from "../context";
 import { fileFor } from "../drive";
 import { notFound, param, readJson, readQuery } from "../http";
 import {
@@ -30,6 +30,7 @@ import {
   publishColumns,
   STAGES,
   setCriterion,
+  settleIssueWork,
   toActivity,
   toColumn,
   toIssue,
@@ -166,7 +167,6 @@ export function registerIssues(app: Hono<AppEnv>) {
     const input = await readJson(c, createIssueBody);
     // Before creating: if the agent can't start, the issue isn't left halfway.
     if (input.assignee?.type === "agent") {
-      requireRuntime(deps.runtime, "onPersonMessage");
       await checkAgentAssignee(deps, me.workspaceId, input.assignee, me.userId);
     }
     if (input.channelId)
@@ -234,7 +234,6 @@ export function registerIssues(app: Hono<AppEnv>) {
   app.post(`${WORKSPACE}/issues/:issueId/ask-agent`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
-    requireRuntime(deps.runtime, "onPersonMessage");
     const row = await issueOf(c, me);
     const { agentId } = await readJson(c, z.object({ agentId: z.string().min(1).max(64) }).strict());
     return c.json(await toIssue(deps.db, await askAgent(deps, me, row.id, agentId)));
@@ -311,13 +310,22 @@ async function askAgent(deps: AppDeps, me: WorkspaceMember, issueId: string, age
     meta: { workedIssue: { issueId: row.id, number: updated.number } },
   });
   // The work belongs to this message: only the run that serves it (or its block) takes it out of "working".
-  const [withWork] = await db
+  await db
     .update(issues)
     .set({ work: { state: "working", reason: null, runId: null, messageId: message.id } })
-    .where(eq(issues.id, row.id))
-    .returning();
-  await deps.runtime
-    .onPersonMessage({ workspaceId: me.workspaceId, channel, message })
-    .catch((err) => log.error("runtime.route_failed", { messageId: message.id, err }));
-  return withWork ?? updated;
+    .where(eq(issues.id, row.id));
+  try {
+    await deps.runtime.onPersonMessage({ workspaceId: me.workspaceId, channel, message });
+  } catch (err) {
+    // Nothing will serve the request: the issue doesn't stay "working" with no run behind it.
+    log.error("runtime.route_failed", { messageId: message.id, err });
+    await settleIssueWork(db, me.workspaceId, [message.id], {
+      state: "blocked",
+      reason: "interrupted",
+      runId: null,
+    });
+  }
+  // Read again: the routing (or its failure) may already have settled the work (blocked: out of budget, not in
+  // the channel, interrupted).
+  return issueById(db, me.workspaceId, row.id);
 }

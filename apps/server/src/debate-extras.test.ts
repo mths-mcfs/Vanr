@@ -1,6 +1,5 @@
 // The modules around the debate: the cost estimate (an upper bound of what the turns reserve), who sees a debate's
-// run (hidden while the debate is anonymous) and the accuracy benchmark (its simulated panel reads the real prompts;
-// running it needs the runtime, so until slice S6 it is rejected at its entry).
+// run (hidden while the debate is anonymous) and the accuracy benchmark (its simulated panel reads the real prompts).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
@@ -177,22 +176,54 @@ describe("a run in a channel the person can't read", () => {
 
 describe("the accuracy benchmark", () => {
   test(
-    "running it is rejected with not_available before any debate is opened",
+    "part A: the three methods paired on the same item; when nobody changes position, the debate ties the vote",
     async () => {
-      const before = await server.deps.db.select({ id: schema.debates.id }).from(schema.debates);
-      await expect(
-        runAccuracyBenchmark(server.deps, {
-          workspaceId,
-          initiatedBy: ana.user.id,
-          agentIds: [agent.id],
-          items: arithmeticItems(2),
-        }),
-      ).rejects.toMatchObject({ status: 503, code: "not_available", params: { method: "complete" } });
-      expect(await server.deps.db.select({ id: schema.debates.id }).from(schema.debates)).toHaveLength(
-        before.length,
-      );
+      const sim = await startTestServer({ modelProvider: simulatedPanel({ accuracy: 0.6, conformity: 0 }) });
+      try {
+        const owner = await signedIn(sim, "Ana", "ana@bench.test");
+        const { workspaceId: bench } = await seedWorkspace(sim, owner, "Harness");
+        const ids: string[] = [];
+        for (const handle of ["h1", "h2", "h3"]) {
+          const [row] = await sim.deps.db
+            .insert(schema.agents)
+            .values({
+              id: newId("agt"),
+              workspaceId: bench,
+              name: handle.toUpperCase(),
+              handle,
+              role: "support",
+              instructions: "-",
+              model: "claude-haiku-5-5",
+              ownerUserId: owner.user.id,
+              appearance: { color: "blue", eyes: "dot", adornment: "none" },
+            })
+            .returning();
+          if (!row) throw new Error("no agent");
+          ids.push(row.id);
+        }
+        const r = await runAccuracyBenchmark(sim.deps, {
+          workspaceId: bench,
+          initiatedBy: owner.user.id,
+          agentIds: ids,
+          items: arithmeticItems(24, "test"),
+          roundLimit: 1,
+        });
+        expect(r.n).toBe(24);
+        // Nobody changes (conformity 0): the last round is round 0, so the debate ties the vote item by item.
+        expect(r.debateVsVote).toMatchObject({ diff: 0, discordant: 0 });
+        expect(r.recommendedDefault).toBe("vote");
+        expect(r.accuracy.single).toBeGreaterThan(0.2);
+        expect(r.accuracy.single).toBeLessThan(0.95);
+        for (const i of r.items) {
+          expect(i.tokens.single).toBeGreaterThan(0);
+          expect(i.tokens.vote).toBeGreaterThanOrEqual(i.tokens.single);
+          expect(i.tokens.debate).toBeGreaterThanOrEqual(i.tokens.vote);
+        }
+      } finally {
+        await sim.stop();
+      }
     },
-    SERVER_TEST_MS,
+    2 * SERVER_TEST_MS,
   );
 
   test("the items are reproducible by the seed and the report pairs the methods", () => {
