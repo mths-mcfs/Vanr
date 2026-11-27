@@ -3,11 +3,19 @@
 // ~/.cache/vanr/socat, like the pgvector of the test Postgres. Without bubblewrap or a way to find
 // socat, `realSandbox()` returns the `unavailable` state and the test checks the rejection.
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { which } from "../jobs";
-import { type CommandSandbox, openSandbox } from "../sandbox";
+import { type CommandSandbox, defaultPolicyContext, openSandbox, type PolicyContext } from "../sandbox";
 
 const CACHE = join(homedir(), ".cache/vanr/socat");
 
@@ -42,4 +50,19 @@ export function testSocat(): string | null {
 /** This process's real sandbox (on, or `unavailable` with the reason). */
 export function realSandbox(): Promise<CommandSandbox> {
   return openSandbox({ disabled: false, socatPath: testSocat() });
+}
+
+/**
+ * A policy whose person is made up and signed in to both CLIs with a login file, so a test with the
+ * sandbox on never depends on (nor touches) the login of whoever runs the tests.
+ */
+export function signedInPolicy(runnerHome: string, personHome: string): PolicyContext {
+  for (const [folder, file] of [
+    [".claude", ".credentials.json"],
+    [".codex", "auth.json"],
+  ] as const) {
+    mkdirSync(join(personHome, folder), { recursive: true });
+    writeFileSync(join(personHome, folder, file), "TEST-LOGIN");
+  }
+  return { ...defaultPolicyContext(runnerHome), home: personHome, cliDirs: {} };
 }

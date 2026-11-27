@@ -127,3 +127,59 @@ export const dbViews = pgTable(
   },
   (t) => [index("db_views_database_idx").on(t.databaseId), index("db_views_table_idx").on(t.tableId)],
 );
+
+/**
+ * Rows of a source that changed and whose dependents (rows of other sources linked to them by a relation,
+ * with a rollup or a formula) aren't marked for recalculation yet. It goes in the same transaction as the
+ * change and leaves when the dependents are stale: a crash between the two loses nothing (the start resumes).
+ */
+export const dbCalcDirty = pgTable(
+  "db_calc_dirty",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: workspace(),
+    tableId: text("table_id").notNull(),
+    rowIds: jsonb("row_ids").$type<string[]>().notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("db_calc_dirty_table_idx").on(t.tableId, t.createdAt)],
+);
+
+/**
+ * An agent's job per cell: `queued` → `running` → `review` (waits for someone to approve) or `done`;
+ * `failed` keeps the reason. One live job per cell. The table comes before its runner: nothing writes it yet.
+ */
+export const dbCellJobs = pgTable(
+  "db_cell_jobs",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: workspace(),
+    tableId: text("table_id")
+      .notNull()
+      .references(() => dbTables.id, { onDelete: "cascade" }),
+    rowId: text("row_id")
+      .notNull()
+      .references(() => dbRows.id, { onDelete: "cascade" }),
+    propId: text("prop_id").notNull(),
+    agentId: text("agent_id").notNull(),
+    status: text("status", { enum: ["queued", "running", "review", "done", "failed", "canceled"] }).notNull(),
+    /** The proposed value (in the property's shape), until it is written or approved. */
+    result: jsonb("result"),
+    error: text("error"),
+    /** What the request to the model cost, in micro-dollars. */
+    costMicros: integer("cost_micros").notNull().default(0),
+    attempts: integer("attempts").notNull().default(0),
+    requester: jsonb("requester").$type<Actor>().notNull(),
+    /** The row version read to build the request: if the row changed, the answer doesn't write over it. */
+    rowVersion: integer("row_version").notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("db_cell_jobs_live_uq")
+      .on(t.rowId, t.propId)
+      .where(sql`status in ('queued', 'running', 'review')`),
+    index("db_cell_jobs_queue_idx").on(t.status, t.createdAt),
+    index("db_cell_jobs_table_idx").on(t.tableId, t.propId, t.createdAt),
+  ],
+);

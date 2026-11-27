@@ -9,11 +9,17 @@ import { createSealer } from "@vanr/engine/seal";
 import { and, eq, sql } from "drizzle-orm";
 import { channelInWorkspace } from "../src/channels";
 import type { AppDeps, WorkspaceMember } from "../src/context";
-import type { ToolContext } from "../src/forward-types";
 import { connectImap, setAgentMailbox } from "../src/integrations/mail";
 import { reserveUsage } from "../src/integrations/usage";
 import { postMessage } from "../src/messages";
-import { cancelQueued, DELIVER_BATCH, deliverDue, type OutboxRow, queueSend } from "../src/outbox";
+import {
+  cancelQueued,
+  DELIVER_BATCH,
+  deliverDue,
+  type OutboxRow,
+  type OutboxRun,
+  queueSend,
+} from "../src/outbox";
 import type { RunningServer } from "../src/server";
 import { type FakeMailServer, startFakeMail } from "./fake-mail";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
@@ -75,7 +81,7 @@ async function team() {
     clientId: null,
   });
   /** The run's context, as runtime/tools builds it: the action is recorded on the agent's answer. */
-  const ctx = (deps: AppDeps = server.deps): ToolContext => ({
+  const ctx = (deps: AppDeps = server.deps): OutboxRun => ({
     deps,
     workspaceId,
     agent: { id: agentId },
@@ -178,7 +184,7 @@ describe("a queued send and its receipt", () => {
     "a receipt that can't be written leaves nothing queued: retrying doesn't send twice",
     async () => {
       const t = await team();
-      const failing: ToolContext = {
+      const failing: OutboxRun = {
         ...t.ctx(withWakeAt([])),
         recordAction: async (action, tx) => {
           await t.ctx().recordAction(action, tx);

@@ -8,7 +8,7 @@
 import { type Db, schema } from "@vanr/engine/db";
 import { REVIEW_BREAKER } from "@vanr/engine/effects";
 import { and, desc, eq, gt, gte, isNull, lte, or } from "drizzle-orm";
-import type { ReviewRequest } from "../forward-types";
+import type { ReviewRequest } from "./tools";
 
 const { messages, gateDecisions } = schema;
 

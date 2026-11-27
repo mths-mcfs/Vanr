@@ -34,6 +34,8 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup
       - run: bun run typecheck
+      # The component gallery is the visual proof sheet for @vanr/ui; it must keep building.
+      - run: bun run --cwd packages/ui gallery:build
 
   test:
     runs-on: ubuntu-latest
@@ -53,6 +55,21 @@ jobs:
         env:
           SHARD: ${{ matrix.shard }}
           SHARDS: ${{ strategy.job-total }}
+
+  web:
+    # The web app: its tests run with a DOM, from its own folder (bunfig.toml there), and the
+    # production build must keep working. The root test job leaves apps/web out.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - run: bun test
+        working-directory: apps/web
+      - run: bun run build
+        working-directory: apps/web
 
   postgres:
     # The migration against a real Postgres (with pgvector, as in production); PGlite covers the rest.
@@ -77,7 +94,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
-      - run: bun test packages/engine/src/db/catalog.test.ts --test-name-pattern Postgres
+      - run: bun test packages/engine/src/db/catalog.test.ts packages/engine/src/sqlconn.test.ts --test-name-pattern Postgres
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
       # Search with the vector leg (pgvector), each index in a database of its own.
@@ -220,7 +237,7 @@ jobs:
               exit 1
             fi
           done
-          set -- issue-number issue-move issue-place consolidation-apply
+          set -- issue-number issue-move issue-place consolidation-apply issue-criterion issue-column-add skill-from-run
           for label in "$@"; do
             if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" forced-issues.log; then
               echo "::error::the forced $label test did not fail on its outcome without the lock"
@@ -242,6 +259,193 @@ jobs:
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_DROP_LOCKS: "1"
+      # A workspace's last owner: two owners demoting each other or leaving at once leave one owner.
+      - run: bun test apps/server/test/workspaces-postgres.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      - name: The forced owner lock tests fail without the lock
+        run: |
+          set +e
+          bun test apps/server/test/workspaces-postgres.test.ts --test-name-pattern forced > forced-owners.log 2>&1
+          status=$?
+          cat forced-owners.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the forced owner lock tests passed without the lock"
+            exit 1
+          fi
+          for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -aqF "$broken" forced-owners.log; then
+              echo "::error::the forced owner lock tests broke ($broken) instead of failing on their outcome"
+              exit 1
+            fi
+          done
+          set -- owner-demote owner-leave
+          for label in "$@"; do
+            if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" forced-owners.log; then
+              echo "::error::the forced $label test did not fail on its outcome without the lock"
+              exit 1
+            fi
+          done
+          # Every failure is a forced test, and as many distinct tests failed as there are labels (bun prints
+          # each failure twice on the GitHub runner, so names are counted, not lines).
+          failed=$(grep -a '^(fail) ' forced-owners.log | sed -E 's/^\(fail\) //; s/ \[[0-9.]+m?s\]$//' | sort -u)
+          if printf '%s\n' "$failed" | grep -qv forced; then
+            echo "::error::a test outside the forced ones failed without the lock: $failed"
+            exit 1
+          fi
+          count=$(printf '%s\n' "$failed" | grep -c .)
+          if [ "$count" -ne "$#" ]; then
+            echo "::error::$count distinct forced tests failed without the lock, expected $#"
+            exit 1
+          fi
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_DROP_LOCKS: "1"
+      # Undo against another undo, a person's edit and the send: one result each, nothing a person wrote lost (the
+      # action's row lock and the content's or queued item's row lock in the undo's transaction).
+      - run: bun test apps/server/test/control-postgres.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      - name: The forced undo lock tests fail without the locks
+        run: |
+          set +e
+          bun test apps/server/test/control-postgres.test.ts --test-name-pattern forced > forced-undo.log 2>&1
+          status=$?
+          cat forced-undo.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the forced undo lock tests passed without the locks"
+            exit 1
+          fi
+          for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -aqF "$broken" forced-undo.log; then
+              echo "::error::the forced undo lock tests broke ($broken) instead of failing on their outcome"
+              exit 1
+            fi
+          done
+          set -- undo-twice undo-vs-edit undo-vs-send
+          for label in "$@"; do
+            if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" forced-undo.log; then
+              echo "::error::the forced $label test did not fail on its outcome without the lock"
+              exit 1
+            fi
+          done
+          failed=$(grep -a '^(fail) ' forced-undo.log | sed -E 's/^\(fail\) //; s/ \[[0-9.]+m?s\]$//' | sort -u)
+          if printf '%s\n' "$failed" | grep -qv forced; then
+            echo "::error::a test outside the forced ones failed without the locks: $failed"
+            exit 1
+          fi
+          count=$(printf '%s\n' "$failed" | grep -c .)
+          if [ "$count" -ne "$#" ]; then
+            echo "::error::$count distinct forced tests failed without the locks, expected $#"
+            exit 1
+          fi
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_DROP_LOCKS: "1"
+      # PGlite runs one transaction at a time, so only here does a missing lock on the action's row show: the
+      # mutant leaves out that one lock in the source and the forced undo-twice test must fail on its outcome.
+      - name: The forced undo-twice test fails without the action's lock alone
+        run: |
+          set +e
+          bun test --preload ./apps/server/test/drop-action-lock.ts apps/server/test/control-postgres.test.ts --test-name-pattern "forced: the second undo" > action-lock.log 2>&1
+          status=$?
+          cat action-lock.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the forced undo-twice test passed without the action's lock"
+            exit 1
+          fi
+          if ! grep -aqF "drop-action-lock: the undo's action lock is left out" action-lock.log; then
+            echo "::error::the mutant was not applied"
+            exit 1
+          fi
+          for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -aqF "$broken" action-lock.log; then
+              echo "::error::the forced undo-twice test broke ($broken) instead of failing on its outcome"
+              exit 1
+            fi
+          done
+          if ! grep -aqF "LOCK_OUTCOME_MISMATCH(undo-twice)" action-lock.log; then
+            echo "::error::the forced undo-twice test did not fail on its outcome without the action's lock"
+            exit 1
+          fi
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # A split and an edit of every part one after the other, and two such edits without a deadlock.
+      - run: bun test apps/server/test/calendar-postgres.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      - name: The forced calendar lock test fails without the locks
+        run: |
+          set +e
+          bun test apps/server/test/calendar-postgres.test.ts --test-name-pattern forced > forced-calendar.log 2>&1
+          status=$?
+          cat forced-calendar.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the forced calendar lock tests passed without the locks"
+            exit 1
+          fi
+          for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -aqF "$broken" forced-calendar.log; then
+              echo "::error::the forced calendar lock tests broke ($broken) instead of failing on their outcome"
+              exit 1
+            fi
+          done
+          set -- calendar-split-all
+          for label in "$@"; do
+            if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" forced-calendar.log; then
+              echo "::error::the forced $label test did not fail on its outcome without the locks"
+              exit 1
+            fi
+          done
+          failed=$(grep -a '^(fail) ' forced-calendar.log | sed -E 's/^\(fail\) //; s/ \[[0-9.]+m?s\]$//' | sort -u)
+          if printf '%s\n' "$failed" | grep -qv forced; then
+            echo "::error::a test outside the forced ones failed without the locks: $failed"
+            exit 1
+          fi
+          count=$(printf '%s\n' "$failed" | grep -c .)
+          if [ "$count" -ne "$#" ]; then
+            echo "::error::$count distinct forced tests failed without the locks, expected $#"
+            exit 1
+          fi
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_DROP_LOCKS: "1"
+      - name: The ordered calendar lock test fails without the family's ordered lock
+        run: |
+          set +e
+          bun test apps/server/test/calendar-postgres.test.ts --test-name-pattern ordered > ordered-calendar.log 2>&1
+          status=$?
+          cat ordered-calendar.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the ordered calendar lock tests passed without the ordered lock"
+            exit 1
+          fi
+          for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -aqF "$broken" ordered-calendar.log; then
+              echo "::error::the ordered calendar lock tests broke ($broken) instead of failing on their outcome"
+              exit 1
+            fi
+          done
+          set -- calendar-family-order
+          for label in "$@"; do
+            if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" ordered-calendar.log; then
+              echo "::error::the ordered $label test did not fail on its outcome without the ordered lock"
+              exit 1
+            fi
+          done
+          failed=$(grep -a '^(fail) ' ordered-calendar.log | sed -E 's/^\(fail\) //; s/ \[[0-9.]+m?s\]$//' | sort -u)
+          if printf '%s\n' "$failed" | grep -qv ordered; then
+            echo "::error::a test outside the ordered ones failed without the ordered lock: $failed"
+            exit 1
+          fi
+          count=$(printf '%s\n' "$failed" | grep -c .)
+          if [ "$count" -ne "$#" ]; then
+            echo "::error::$count distinct ordered tests failed without the ordered lock, expected $#"
+            exit 1
+          fi
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_DROP_ORDERED_LOCKS: "1"
       # Every answer of a round kept once and an answer that meets the stop finds the queue closed (the debate's row
       # lock); one routine execution per fire, scheduled time and queued run, with callers on several connections.
       - run: bun test apps/server/test/debates-postgres.test.ts
@@ -423,10 +627,51 @@ jobs:
           grep -q ' 3 fail' <<< "$none"
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # Relation and rollup on Postgres: the propagation between linked sources never waits for a lock.
+      - run: bun test apps/server/test/bases-relations-postgres.test.ts --test-name-pattern "on Postgres"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # The forced interleavings of the relations with one of the propagation's locks swapped for a double
+      # (VANR_TEST_BASES_LINKS): `late` takes the dependent rows before their source, `wait` waits for a held
+      # dependent row. Each run must FAIL, and only for its own interleaving: every "(fail)" line names that
+      # test, one distinct test fails, and the failure is the wait it proves (`Expected: false`).
+      - name: The bases links tests fail with the rows locked before the source and with a waiting row lock
+        run: |
+          check() {
+            mode="$1"; label="$2"
+            set +e
+            out=$(VANR_TEST_BASES_LINKS="$mode" bun test apps/server/test/bases-relations-postgres.test.ts --test-name-pattern "forced interleaving: links" 2>&1)
+            status=$?
+            set -e
+            echo "$out"
+            if [ "$status" -eq 0 ]; then
+              echo "::error::the bases links tests passed with VANR_TEST_BASES_LINKS=$mode"
+              exit 1
+            fi
+            fails=$(grep -a '^(fail)' <<< "$out" | sed 's/ \[[0-9.]*m\?s\]$//' | sort -u)
+            if [ -z "$fails" ] || grep -av "forced interleaving: links: $label" <<< "$fails" | grep -aq .; then
+              echo "::error::VANR_TEST_BASES_LINKS=$mode failed a test other than \"$label\": $fails"
+              exit 1
+            fi
+            if [ "$(wc -l <<< "$fails")" -ne 1 ]; then
+              echo "::error::VANR_TEST_BASES_LINKS=$mode: expected one failing test, got: $fails"
+              exit 1
+            fi
+            grep -aq 'Expected: false' <<< "$out"
+          }
+          check late "a source another write holds"
+          check wait "a dependent row another transaction holds"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # The identity check of the functions a connected database's query may call, each case in a database of its own.
+      - run: bun test apps/server/test/sql-guard-identity.test.ts --test-name-pattern Postgres
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
       # The wiki on a real Postgres: saves on the same parent version; a member's save, move or trash that
       # comes while a lock holds the page waits for the page's row lock and is rejected; two saves that link
       # to each other both commit. The next two runs swap the row lock in the test (no lock, then the old FOR
-      # UPDATE) and must fail by the result, so the first run can't pass without the lock it has.
+      # UPDATE) and must fail by the result, so the first run can't pass without the lock it has. The
+      # attachment test (in the first run too) is run again without the membership lock and must fail.
       - run: bun test apps/server/test/wiki.test.ts --test-name-pattern "on Postgres"
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
@@ -458,6 +703,19 @@ jobs:
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_WIKI_FOR_UPDATE: "1"
+      - name: The wiki attachment test lets a removal through without the membership lock
+        run: |
+          if out=$(bun test apps/server/test/wiki.test.ts --test-name-pattern "wiki attachments on Postgres" 2>&1); then
+            echo "$out"
+            echo "::error::the wiki attachment test passed without the membership lock"
+            exit 1
+          fi
+          echo "$out"
+          # It must fail for the race (the removal committed before the attachment), not for anything else.
+          grep -q '"the removal ended before the attachment"' <<< "$out"
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_WIKI_MEMBER_UNLOCKED: "1"
 
   sandbox:
     # The runner's real sandbox (bubblewrap + socat): the attack tests of the isolation of the agent's
@@ -481,7 +739,7 @@ jobs:
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
-      - run: bun test apps/runner/src/sandbox.test.ts --reporter=junit --reporter-outfile=sandbox-junit.xml
+      - run: bun test apps/runner/src/sandbox.test.ts apps/runner/src/cli-state.test.ts apps/runner/src/net-mode.test.ts --reporter=junit --reporter-outfile=sandbox-junit.xml
         env:
           # Makes the test fail if any real srt test would be skipped.
           VANR_SANDBOX_REQUIRED: "1"
@@ -566,7 +824,7 @@ jobs:
 
   ci-ok:
     if: always()
-    needs: [lint, typecheck, test, postgres, sandbox, workflows, secrets]
+    needs: [lint, typecheck, test, web, postgres, sandbox, workflows, secrets]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -574,6 +832,6 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup
-      - run: bun scripts/ci/gate.ts lint typecheck test postgres sandbox workflows secrets
+      - run: bun scripts/ci/gate.ts lint typecheck test web postgres sandbox workflows secrets
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}

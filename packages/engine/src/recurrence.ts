@@ -182,6 +182,10 @@ function dayMatches(rule: RecurrenceRule, day: number, anchorDay: number): boole
   const byMonthDay = rule.byMonthDay?.length ? rule.byMonthDay : null;
   const byMonth = rule.byMonth?.length ? rule.byMonth : null;
   if (byMonth && !byMonth.includes(date.m)) return false;
+  const dim = daysInMonth(date.y, date.m);
+  const monthDayMatches = (d: number) =>
+    !byMonthDay || byMonthDay.some((md) => (md > 0 ? md === d : dim + md + 1 === d));
+  if (!monthDayMatches(date.d)) return false;
   switch (rule.freq) {
     case "daily":
       if ((day - anchorDay) % interval !== 0) return false;
@@ -200,21 +204,20 @@ function dayMatches(rule: RecurrenceRule, day: number, anchorDay: number): boole
         if ((date.y - anchor.y) % interval !== 0) return false;
         if (!byMonth && date.m !== anchor.m) return false;
       }
-      const dim = daysInMonth(date.y, date.m);
-      if (weekdays) {
-        if (!weekdays.includes(wd)) return false;
-        if (!rule.bySetPos?.length) return true;
-        // bySetPos: position of this day among the month's days that match weekdays (1 = first, -1 = last).
-        const same: number[] = [];
-        for (let dd = 1; dd <= dim; dd++) {
-          const n = dayNumber({ y: date.y, m: date.m, d: dd });
-          if (weekdays.includes(WEEKDAYS[weekdayIndex(n)] as Weekday)) same.push(dd);
-        }
-        const pos = same.indexOf(date.d);
-        return rule.bySetPos.some((p) => (p > 0 ? pos === p - 1 : pos === same.length + p));
+      const matches = (d: number) =>
+        monthDayMatches(d) &&
+        (weekdays
+          ? weekdays.includes(WEEKDAYS[weekdayIndex(dayNumber({ ...date, d }))] as Weekday)
+          : !!byMonthDay || d === anchor.d);
+      if (!matches(date.d)) return false;
+      if (!rule.bySetPos?.length) return true;
+      // Position among the month's days that satisfy every calendar filter.
+      const same: number[] = [];
+      for (let d = 1; d <= dim; d++) {
+        if (matches(d)) same.push(d);
       }
-      const days = byMonthDay ?? [anchor.d];
-      return days.some((md) => (md > 0 ? md === date.d : dim + md + 1 === date.d));
+      const pos = same.indexOf(date.d);
+      return rule.bySetPos.some((p) => (p > 0 ? pos === p - 1 : pos === same.length + p));
     }
     default:
       return false;

@@ -243,6 +243,9 @@ describe("size limits, rejected before anything is written", () => {
       expect(patched).toMatchObject({ text, sha256: contentSha256(text) });
       const stored = await ok<{ memories: Memory[] }>(call(t.ana, t.workspaceId, "GET", "/memories/mine"));
       expect(stored.memories.find((m) => m.id === file.id)?.text).toBe(text);
+      // One person's store is never kept by a browser or proxy cache.
+      const mine = await t.ana.browser.fetch(`/api/v1/workspaces/${t.workspaceId}/memories/mine`);
+      expect(mine.headers.get("cache-control")).toBe("no-store");
       const note = await noteOf(t, t.lia);
       expect(
         (

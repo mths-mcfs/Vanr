@@ -1,5 +1,6 @@
 // Reading and building email messages (RFC 5322 + MIME): enough for the agent to read the text of a
 // message and reply. HTML becomes plain text; attachments only show up by name.
+import { HttpError } from "../http";
 
 export interface ParsedMail {
   messageId: string | null;
@@ -130,7 +131,7 @@ function textOf(
     return { plain, html };
   }
   if (/attachment/i.test(disposition) || (filename && !/^text\//i.test(type))) {
-    attachments.push(decodeWords(filename ?? "anexo"));
+    attachments.push(attachmentName(filename));
     return { plain: null, html: null };
   }
   const charset = param(type, "charset") ?? "utf-8";
@@ -138,6 +139,17 @@ function textOf(
   if (/^text\/html/i.test(type)) return { plain: null, html: decoded };
   if (/^text\//i.test(type)) return { plain: decoded, html: null };
   return { plain: null, html: null };
+}
+
+/**
+ * An attachment's name as the sender wrote it, reduced to its last path part: the name comes from outside, and
+ * whoever saves the file uses it (`../../etc/passwd` becomes `passwd`). Control characters go away.
+ */
+export function attachmentName(raw: string | null | undefined): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what is removed
+  const decoded = decodeWords(raw ?? "").replace(/[\u0000-\u001f\u007f]/g, "");
+  const base = decoded.split(/[/\\]/).pop()?.trim() ?? "";
+  return base && base !== "." && base !== ".." ? base : "anexo";
 }
 
 /** Only the addresses of a From/To/Cc header. */
@@ -169,6 +181,15 @@ export function parseMail(raw: string): ParsedMail {
   };
 }
 
+/**
+ * A header value can't carry CR, LF or NUL: a line break starts a header of its own (a hidden Bcc), so the
+ * value is rejected, not cleaned: whoever sent it has a bug or is attacking.
+ */
+export function assertHeaderValue(field: string, value: string) {
+  if (/[\r\n]/.test(value) || value.includes("\0"))
+    throw new HttpError(400, "invalid_mail_header", `The ${field} field has a line break`, { field });
+}
+
 const encodeWord = (s: string) =>
   /^[\x20-\x7e]*$/.test(s) ? s : `=?UTF-8?B?${Buffer.from(s, "utf8").toString("base64")}?=`;
 
@@ -184,12 +205,19 @@ export function buildMail(input: {
   inReplyTo?: string | null;
   references?: string | null;
 }): string {
+  assertHeaderValue("from", input.from);
+  for (const a of input.to) assertHeaderValue("to", a);
+  for (const a of input.cc ?? []) assertHeaderValue("cc", a);
+  assertHeaderValue("subject", input.subject);
+  assertHeaderValue("message-id", input.messageId);
+  if (input.inReplyTo) assertHeaderValue("in-reply-to", input.inReplyTo);
+  if (input.references) assertHeaderValue("references", input.references);
   const body = Buffer.from(input.text, "utf8").toString("base64").replace(/.{76}/g, "$&\r\n");
   const lines = [
     `From: ${input.from}`,
     `To: ${input.to.join(", ")}`,
     ...(input.cc?.length ? [`Cc: ${input.cc.join(", ")}`] : []),
-    `Subject: ${encodeWord(input.subject.replace(/[\r\n]+/g, " "))}`,
+    `Subject: ${encodeWord(input.subject)}`,
     `Date: ${input.date.toUTCString().replace("GMT", "+0000")}`,
     `Message-ID: ${input.messageId}`,
     ...(input.inReplyTo ? [`In-Reply-To: ${input.inReplyTo}`] : []),

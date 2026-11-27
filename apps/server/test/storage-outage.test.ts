@@ -7,7 +7,7 @@ import { schema } from "@vanr/engine/db";
 import { eq } from "drizzle-orm";
 import { purgeTrash } from "../src/drive";
 import { extractPending } from "../src/drive-extract";
-import { saveStorage } from "../src/integrations/storage";
+import { bucketDeadlines, saveStorage } from "../src/integrations/storage";
 import type { RunningServer } from "../src/server";
 import { type FakeS3, startFakeS3 } from "./fake-s3";
 import { makePng } from "./files";
@@ -123,6 +123,29 @@ describe("a bucket that fails, route by route", () => {
       "in the bucket",
     );
   });
+
+  test("a stalled bucket body is cancelled when the stream deadline expires", async () => {
+    const { workspaceId, ana } = await team();
+    const file = await uploaded(ana, workspaceId, "x".repeat(1_000_000), "stalled.txt");
+    const cancelled = Promise.withResolvers<void>();
+    const stalled = new ReadableStream({
+      start(c) {
+        c.enqueue(new Uint8Array(65536));
+      },
+      cancel: () => cancelled.resolve(),
+    });
+    failing(objectGet, () => new Response(stalled, { headers: { "content-length": "1000000" } }));
+    const previous = bucketDeadlines.pieceMs;
+    bucketDeadlines.pieceMs = 100;
+    try {
+      const res = await ana.browser.fetch(`${W(workspaceId)}/files/${file.id}/blob`);
+      await res.arrayBuffer().catch(() => {});
+      await cancelled.promise;
+    } finally {
+      bucketDeadlines.pieceMs = previous;
+      s3.override = null;
+    }
+  }, 10_000);
 
   test("the blob after the first byte: the connection ends (the status was already sent)", async () => {
     const { workspaceId, ana } = await team();

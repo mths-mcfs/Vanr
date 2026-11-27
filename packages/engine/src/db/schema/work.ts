@@ -207,7 +207,7 @@ export const routineExecutions = pgTable(
     // "Queue one": at most one execution waiting for the previous one (retries are not counted).
     uniqueIndex("routine_executions_queued_uq")
       .on(t.routineId)
-      .where(sql`status = 'queued' and trigger <> 'retry'`),
+      .where(sql`status = 'queued' and trigger is distinct from 'retry'`),
     index("routine_executions_queue_idx").on(t.notBefore).where(sql`status = 'queued'`),
   ],
 );

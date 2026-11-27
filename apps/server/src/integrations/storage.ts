@@ -17,7 +17,7 @@ import { z } from "zod";
 import type { AppDeps } from "../context";
 import { HttpError, notFound } from "../http";
 import { log } from "../logger";
-import { checkServerUrl } from "./net";
+import { checkServerUrl, type NetPolicy } from "./net";
 import { client, type S3Settings, s3Blobs, testS3 } from "./s3";
 
 const { workspaceStorage, files, fileVersions } = schema;
@@ -70,7 +70,14 @@ async function resolveInput(
   workspaceId: string,
   input: S3Input,
 ): Promise<{ cfg: S3ConfigRow; keys: S3Keys }> {
-  const endpoint = (await checkServerUrl(input.endpoint, deps.config.integrations.allowPrivateNetworks))
+  const endpoint = (
+    await checkServerUrl(
+      input.endpoint,
+      deps.config.integrations.allowPrivateNetworks,
+      undefined,
+      deps.config.integrations.allowPlaintext,
+    )
+  )
     .toString()
     .replace(/\/$/, "");
   const cfg: S3ConfigRow = {
@@ -103,11 +110,13 @@ export async function testStorage(
 const envOf = (deps: AppDeps): BucketEnv => ({
   track: (work, what) => deps.runtime.track(work, what),
   now: deps.now,
+  allowPrivateNetworks: deps.config.integrations.allowPrivateNetworks,
+  allowPlaintext: deps.config.integrations.allowPlaintext,
 });
 
 /** The connection test, through the same bucket wrapper as every call (the probe's write has the short deadline). */
 const probe = (deps: AppDeps, cfg: S3ConfigRow, keys: S3Keys) =>
-  testS3(settingsOf(cfg, keys), randomId(10), remoteStore(cfg, keys, envOf(deps), "call"));
+  testS3(randomId(10), remoteStore(cfg, keys, envOf(deps), "call"));
 
 /** Saves: S3 only after it passes the test. Going back to "builtin" keeps the S3 (the files stay there). */
 export async function saveStorage(
@@ -242,7 +251,8 @@ export class DestinationChanged extends HttpError {
  * A 403 is never "not found".
  */
 function classify(what: string, key: string, err: unknown): HttpError {
-  if (err instanceof HttpError) return err;
+  if (err instanceof HttpError && !["blocked_host", "unreachable", "invalid_url"].includes(err.code))
+    return err;
   const code = typeof err === "object" && err !== null && "code" in err ? err.code : undefined;
   if (code === "NoSuchKey") return notFound("This version has no file");
   log.warn("storage.bucket_failed", { err, what, key });
@@ -268,9 +278,18 @@ class BucketDeadline extends Error {
  * Where the server's bucket calls run: `track` keeps late work as background work (the server's stop waits
  * for it, so nothing runs after the database closes) and `now` is the injected clock.
  */
+/** The network rule of the bucket calls (integrations/net.ts). */
+const policyOf = (env: BucketEnv): NetPolicy => ({
+  allowPrivate: env.allowPrivateNetworks,
+  allowPlaintext: env.allowPlaintext,
+});
+
 export interface BucketEnv {
   track: (work: Promise<unknown>, what: string) => void;
   now: () => Date;
+  allowPrivateNetworks: boolean;
+  /** Connections without TLS (see `NetPolicy` in integrations/net.ts). */
+  allowPlaintext: boolean;
 }
 
 /**
@@ -347,6 +366,7 @@ function guardedBody(inner: globalThis.Blob, key: string): globalThis.Blob {
             if (done) controller.close();
             else controller.enqueue(value);
           } catch (err) {
+            void reader.cancel(err).catch(() => {});
             controller.error(classify("read", key, err));
           }
         },
@@ -374,12 +394,15 @@ const s3ErrorCode = z.object({ code: z.string() });
  * doesn't recognize (InvalidAccessKeyId, SignatureDoesNotMatch...), 5xx, the network or the deadline are a
  * bucket that can't be reached.
  */
-async function bucketIsThere(settings: S3Settings, key: string): Promise<boolean> {
+async function bucketIsThere(settings: S3Settings, key: string, env: BucketEnv): Promise<boolean> {
   try {
     await within(
       "check the bucket",
       bucketDeadlines.callMs,
-      client(settings).list({ maxKeys: 1, prefix: settings.prefix }),
+      client(settings, policyOf(env)).list({
+        maxKeys: 1,
+        prefix: settings.prefix,
+      }),
     );
     return true;
   } catch (err) {
@@ -398,7 +421,7 @@ function remoteStore(
   writeDeadline: "write" | "call" = "write",
 ): RemoteStore {
   const settings = settingsOf(cfg, keys);
-  const inner = s3Blobs(settings);
+  const inner = s3Blobs(settings, policyOf(env));
   const destination = `${cfg.endpoint}|${cfg.bucket}|${settings.prefix}`;
   /**
    * The object is missing (its HEAD answered 404): a 404 without a body can't tell a missing object from a
@@ -409,7 +432,7 @@ function remoteStore(
     const now = env.now().getTime();
     const kept = bucketChecks.get(destination);
     const fresh = kept && now >= kept.at && now - kept.at < BUCKET_CHECK_MS;
-    const present = fresh ? kept.present : await bucketIsThere(settings, key);
+    const present = fresh ? kept.present : await bucketIsThere(settings, key, env);
     if (!fresh) bucketChecks.set(destination, { present, at: now });
     if (!present) throw new StorageUnavailable();
     return null;
@@ -508,8 +531,8 @@ export function routedBlobs(
   const route = async (key: string) => {
     const workspaceId = WORKSPACE_KEY.exec(key)?.[1];
     if (!workspaceId) return null;
-    const { db, authSecret, track, now } = ctx();
-    return routeOf(db, authSecret, { track, now }, workspaceId);
+    const { db, authSecret, track, now, allowPrivateNetworks, allowPlaintext } = ctx();
+    return routeOf(db, authSecret, { track, now, allowPrivateNetworks, allowPlaintext }, workspaceId);
   };
   /**
    * Reads where the file should be and then in the other place. A bucket that fails doesn't stop the read
@@ -542,7 +565,7 @@ export function routedBlobs(
       unconfirmed.set(key, target);
     },
     get: (key): Promise<Blob | null> => read(key, (store) => store.get(key)),
-    open: (key) => read(key, (store) => store.open(key)),
+    open: async (key) => (await base.open(key)) ?? read(key, (store) => store.open(key)),
     async delete(key) {
       const r = await route(key);
       await base.delete(key);

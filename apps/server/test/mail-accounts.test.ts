@@ -15,6 +15,7 @@ import {
   foldersOf,
   sentOutOf,
   transmitMail,
+  updateMailAccount,
 } from "../src/integrations/mail";
 import type { RunningServer } from "../src/server";
 import { type FakeMailServer, startFakeMail } from "./fake-mail";
@@ -362,6 +363,69 @@ describe("outside text in errors and logs", () => {
       const log = await logged(() => connectComposio(server.deps, me, { provider: "gmail" }));
       expect(log).toContain("mail.composio_failed");
       expect(log.includes("composio-key")).toBe(false);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+/** The same server under another network rule (the installation's two switches). */
+const under = (allowPrivateNetworks: boolean, allowPlaintext: boolean) => ({
+  ...server.deps,
+  config: {
+    ...server.deps.config,
+    integrations: { ...server.deps.config.integrations, allowPrivateNetworks, allowPlaintext },
+  },
+});
+
+describe("the network rule on mail accounts", () => {
+  test(
+    "with the local network allowed and plain text off, a loopback account is tried over TLS",
+    async () => {
+      const first: number[] = [];
+      const listener = createServer((socket: Socket) => {
+        socket.once("data", (chunk: Buffer) => {
+          first.push(chunk[0] ?? -1);
+          socket.destroy();
+        });
+      });
+      await new Promise<void>((r) => listener.listen(0, "localhost", () => r()));
+      const address = listener.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      try {
+        const err = await connectImap(under(true, false), me, {
+          address: "tls@mail.test",
+          preset: "other",
+          imapHost: "localhost",
+          imapPort: port,
+          smtpHost: "localhost",
+          smtpPort: port,
+          password: "tls-test-password",
+        }).catch((e: unknown) => e);
+        expect(err).toMatchObject({ code: "mail.unreachable" });
+        // 0x16: the first byte of a TLS handshake record (the ClientHello).
+        expect(first).toEqual([0x16]);
+      } finally {
+        await new Promise<void>((r) => listener.close(() => r()));
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a kept account the rule now refuses reports the mail code and the reason, on use and on edit",
+    async () => {
+      const row = await connectImap(server.deps, me, imapInput(mail.password, "rule@mail.test"));
+      await expect(foldersOf(under(false, true), row)).rejects.toMatchObject({ code: "mail.blocked_host" });
+      // The account was kept without TLS (loopback, plain text allowed then); plain text is off now.
+      await expect(foldersOf(under(true, false), row)).rejects.toMatchObject({
+        code: "mail.tls_required",
+        message: "This installation only connects to servers over TLS",
+      });
+      await expect(
+        updateMailAccount(under(true, false), row, { password: mail.password }),
+      ).rejects.toMatchObject({
+        code: "mail.tls_required",
+      });
     },
     SERVER_TEST_MS,
   );

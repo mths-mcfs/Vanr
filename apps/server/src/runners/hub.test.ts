@@ -85,6 +85,24 @@ const failure = async (p: Promise<unknown>) => {
 };
 
 describe("runner hub", () => {
+  test("cancellation before or immediately after call never reaches the runner", async () => {
+    const r = await runner("canceled");
+    try {
+      for (const immediate of [false, true]) {
+        const abort = new AbortController();
+        if (!immediate) abort.abort();
+        const call = failure(
+          hub.call("canceled", "write", { path: "x", content: "x" }, { signal: abort.signal, timeoutMs: 20 }),
+        );
+        abort.abort();
+        expect(await call).toMatchObject({ code: "canceled" });
+      }
+      expect(r.frames).toEqual([]);
+    } finally {
+      r.ws.close();
+    }
+  });
+
   test("a call goes out as a request and resolves with the runner's result; output streams to the caller", async () => {
     const r = await runner("r1");
     const chunks: string[] = [];
@@ -342,6 +360,55 @@ describe("runner hub", () => {
     hub.closeAll();
     expect(await stopping).toEqual({ code: "offline", message: "The server is stopping" });
     expect(listeners()).toBe(0);
+  });
+
+  test("canceling an agent rejects its queued calls before a released slot can send them", async () => {
+    const r = await runner("queue-cancel");
+    const opts = { agent: { id: "moved", handle: "lia" }, timeoutMs: 2000 };
+    const calls = Array.from({ length: MAX_INFLIGHT + 1 }, () =>
+      failure(hub.call("queue-cancel", "list", { path: "." }, opts)),
+    );
+    await r.until(MAX_INFLIGHT);
+    hub.cancelPending("queue-cancel", "moved");
+    expect((await Promise.all(calls)).map((e) => e.code)).toEqual(Array(MAX_INFLIGHT + 1).fill("canceled"));
+    const fresh = hub.call(
+      "queue-cancel",
+      "list",
+      { path: "new" },
+      { agent: { id: "other", handle: "ivy" } },
+    );
+    await r.until(MAX_INFLIGHT * 2 + 1);
+    const requests = r.frames.filter((f) => f.type === "request");
+    expect(requests).toHaveLength(MAX_INFLIGHT + 1);
+    expect(requests.at(-1)?.args).toEqual({ path: "new" });
+    hub.onResult(socketOf("queue-cancel"), { id: requests.at(-1)?.id ?? "", ok: true, data: "ok" });
+    expect(await fresh).toBe("ok");
+    r.ws.close();
+    await r.closed;
+  });
+
+  test("access reduction preserves its in-flight result while canceling old calls and the queue", async () => {
+    const r = await runner("access-reduce");
+    const reduction = hub
+      .call("access-reduce", "access.reduce", { disableTool: "commands" })
+      .catch((err) => err);
+    const calls = Array.from({ length: MAX_INFLIGHT - 1 }, () =>
+      failure(hub.call("access-reduce", "list", { path: "." })),
+    );
+    await r.until(MAX_INFLIGHT);
+    // Even another management operation that has not started must lose its old authorization.
+    calls.push(failure(hub.call("access-reduce", "access.reduce", { disableTool: "browser" })));
+    hub.cancelPending("access-reduce", undefined, "access.reduce");
+    expect((await Promise.all(calls)).map((err) => err.code)).toEqual(Array(MAX_INFLIGHT).fill("canceled"));
+    await r.until(MAX_INFLIGHT * 2 - 1);
+    expect(r.frames.filter((f) => f.type === "request")).toHaveLength(MAX_INFLIGHT);
+    const management = r.frames.find((f) => f.type === "request" && f.op === "access.reduce");
+    expect(management).toBeDefined();
+    expect(r.frames.some((f) => f.type === "cancel" && f.id === management?.id)).toBe(false);
+    hub.onResult(socketOf("access-reduce"), { id: management?.id ?? "", ok: true, data: { reduced: true } });
+    expect(await reduction).toEqual({ reduced: true });
+    r.ws.close();
+    await r.closed;
   });
 
   test("closeAll closes every runner connection", async () => {

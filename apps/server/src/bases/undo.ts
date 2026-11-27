@@ -7,7 +7,7 @@ import type { Props } from "@vanr/engine/props";
 import { and, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import type { AppDeps } from "../context";
-import type { ActionRow, Undoer } from "../forward-types";
+import type { ActionRow, Undoer } from "../control";
 import { HttpError } from "../http";
 import type { TableRow, Tx } from "./core";
 import { rewriteRows } from "./write";

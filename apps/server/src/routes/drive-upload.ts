@@ -306,26 +306,19 @@ export function registerDriveUploads(app: Hono<AppEnv>) {
             row: await fileFor(deps.db, me.workspaceId, row.fileId, me$(me)),
             author: me$(me),
             parentVersion: row.parentVersion ?? undefined,
+            upload: claimed,
             note: row.note,
             file,
           })
         : await createFile(deps, {
             workspaceId: me.workspaceId,
+            upload: claimed,
             title: row.title ?? row.fileName,
             author: me$(me),
             note: row.note,
             file,
             ...(await placement(deps, me, row.channelId ?? undefined, row.threadId ?? undefined)),
           });
-      await deps.db
-        .update(uploadSessions)
-        .set({
-          status: "done",
-          resultFileId: saved.row.id,
-          resultVersion: saved.version.version,
-          updatedAt: deps.now(),
-        })
-        .where(eq(uploadSessions.id, id));
       await rm(stagingPath(deps, id), { force: true });
       return c.json(toFileDetail(saved.row, saved.version, me));
     } catch (err) {
@@ -333,7 +326,13 @@ export function registerDriveUploads(app: Hono<AppEnv>) {
       await deps.db
         .update(uploadSessions)
         .set({ status: "open", updatedAt: deps.now() })
-        .where(and(eq(uploadSessions.id, id), eq(uploadSessions.status, "completing")));
+        .where(
+          and(
+            eq(uploadSessions.id, id),
+            eq(uploadSessions.status, "completing"),
+            eq(uploadSessions.updatedAt, claimed.updatedAt),
+          ),
+        );
       if (!(err instanceof HttpError)) log.warn("drive.upload_complete_failed", { uploadId: id, err });
       throw err;
     }

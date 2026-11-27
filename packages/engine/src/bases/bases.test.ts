@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { PropDef } from "../props";
+import { applyProps, type PropDef, parsePropText } from "../props";
 import { CsvError, inferColumns, matchHeader, parseCsv, protectCell, toCsv, uniqueNames } from "./csv";
 import { isPosition, keyBetween, keysBetween, PositionError } from "./position";
 import {
@@ -205,6 +205,20 @@ describe("filter (oracle)", () => {
     expect(checkFilter({ prop: "t", op: "empty", value: 3 } as Filter, DEFS)).toEqual([]);
   });
 
+  test("a relation filter takes row ids, which are not options; a missing option is still rejected", () => {
+    const rel: PropDef = { id: "r", name: "Tasks", type: "relation", relation: { tableId: "dbt_x" } };
+    for (const op of ["has", "has_not"])
+      expect(checkFilter({ prop: "r", op, value: "dbr_1" }, [rel])).toEqual([]);
+    for (const op of ["has_any", "has_all"])
+      expect(checkFilter({ prop: "r", op, value: ["dbr_1"] }, [rel])).toEqual([]);
+    expect(pruneFilter({ prop: "r", op: "has", value: "dbr_1" }, [rel])).toEqual({
+      prop: "r",
+      op: "has",
+      value: "dbr_1",
+    });
+    expect(checkFilter({ prop: "m", op: "has", value: "zz" }, DEFS)).toEqual(["bad_value:m:has"]);
+  });
+
   test("pruneFilter removes only the conditions the current schema rejects", () => {
     const f: Filter = {
       and: [
@@ -229,14 +243,14 @@ describe("filter (oracle)", () => {
       filter: { prop: "n", op: "gt", value: 1 },
       quickFilters: [{ prop: "s", value: "done" }, { prop: "m" }, { prop: "t", op: "empty" }],
     });
-    expect(effectiveFilter(cfg)).toEqual({
+    expect(effectiveFilter(cfg, DEFS)).toEqual({
       and: [
         { prop: "n", op: "gt", value: 1 },
         { prop: "s", op: "eq", value: "done" },
         { prop: "t", op: "empty" },
       ],
     });
-    expect(effectiveFilter({})).toBeNull();
+    expect(effectiveFilter({}, DEFS)).toBeNull();
   });
 
   test("view config rejects an unknown key", () => {
@@ -398,4 +412,15 @@ describe("CSV formula protection behind leading whitespace", () => {
     }
     expect({ checked, failures: failures.slice(0, 5) }).toEqual({ checked: 20_000, failures: [] });
   });
+});
+
+test("CSV inference only calls a column a date when its values can be applied", () => {
+  for (const value of ["2026-11-01 10:00", "2026-11-01T10:00", "2026-02-30", "2026-11-01T10:00:00Z"]) {
+    const col = inferColumns(["Title", "When"], [["A", value]], () => "o")[1];
+    expect(col?.type).toBe(value.endsWith("Z") ? "date" : "text");
+    const def: PropDef = { id: "d", name: "When", type: col?.type ?? "text" };
+    const parsed = parsePropText(def, value);
+    expect(applyProps([def], {}, { d: parsed }).ok).toBe(true);
+    if (def.type === "text") expect(parsed).toBe(value);
+  }
 });

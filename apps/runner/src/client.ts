@@ -54,7 +54,7 @@ import {
   serialize,
 } from "./outbound";
 import { type CommandSandbox, defaultPolicyContext, openSandbox, type PolicyContext } from "./sandbox";
-import { SecretStore } from "./secrets";
+import { maskSecrets, SecretStore } from "./secrets";
 import { runningBundle, UpdateError, update } from "./update";
 
 export type ExitReason = "stopped" | "updated" | RejectReason;
@@ -111,6 +111,9 @@ const sessionAnswer = z.object({
   credential: z.string().optional(),
   error: z.object({ code: z.string().optional(), message: z.string().optional() }).optional(),
 });
+
+/** The only frames a connection takes before its welcome. */
+const PRE_WELCOME: ReadonlySet<ServerFrame["type"]> = new Set(["welcome", "ping", "rejected"]);
 
 export class RunnerClient {
   private config: RunnerConfig;
@@ -174,7 +177,6 @@ export class RunnerClient {
     // Until the sandbox opens, nothing runs: the off one rejects `wrap` and the `unavailable` state does too.
     this.sandbox = {
       status: () => ({ state: "unavailable", engine: null, reason: "Starting" }),
-      setMode: () => {},
       wrap: async () => {
         throw new RunnerError("sandbox_not_ready", "The sandbox is starting");
       },
@@ -245,8 +247,13 @@ export class RunnerClient {
     if (s.state === "off") this.log("sandbox turned off in this environment: commands run without isolation");
   }
 
+  /**
+   * Every line the runner logs goes out masked with the secrets it knows (a path, a command, a server or
+   * system message can carry a value); not knowing them yet, the line goes as the runner wrote it.
+   */
   private log(line: string) {
-    this.opts.log?.(line);
+    const state = this.maskState;
+    this.opts.log?.(state?.kind === "known" ? maskSecrets(line, state.all) : line);
   }
 
   get runnerId() {
@@ -394,7 +401,7 @@ export class RunnerClient {
     if (res.status === 401) return { reject: "invalid_token", message };
     if (res.status === 403 || code === "runner.revoked") return { reject: "revoked", message };
     if (!res.ok || !body.session || !body.credential) throw new Error(message);
-    this.saveConfig({ ...this.config, token: body.credential });
+    this.saveConfig({ token: body.credential });
     return { session: body.session };
   }
 
@@ -447,16 +454,32 @@ export class RunnerClient {
         features: this.browser ? [BROWSER_GUARD_FEATURE] : [],
       });
     };
+    // Until the welcome of THIS connection the server has not proven who it is: only the welcome, a ping and a
+    // rejection are taken; any other frame ends the connection without running anything.
+    let welcomed = false;
     ws.onmessage = (ev) => {
+      // A socket that is no longer the current one (a reconnection replaced it) runs nothing.
+      if (this.ws !== ws) return;
       this.armWatchdog();
-      let frame: ServerFrame;
+      let frame: ServerFrame | null = null;
       try {
         frame = serverFrame.parse(JSON.parse(String(ev.data)));
       } catch {
+        frame = null;
+      }
+      if (!welcomed && !(frame && PRE_WELCOME.has(frame.type))) {
+        this.log(
+          `the server sent ${frame ? frame.type : "an unknown frame"} before the welcome; reconnecting`,
+        );
+        ws.close(4001, "frame before welcome");
+        return;
+      }
+      if (!frame) {
         this.log("ignored a frame the runner does not understand");
         return;
       }
-      void this.onFrame(frame);
+      if (frame.type === "welcome") welcomed = true;
+      void this.onFrame(frame).catch((err) => this.log(`frame failed: ${String(err)}`));
     };
     ws.onclose = () => {
       if (this.ws !== ws) return;
@@ -489,7 +512,7 @@ export class RunnerClient {
         await this.secrets.unlock(frame.storeKey, frame.runnerId);
         this.hadWelcome = true;
         await this.refreshMasks();
-        if (frame.name !== this.config.name) this.saveConfig({ ...this.config, name: frame.name });
+        if (frame.name !== this.config.name) this.saveConfig({ name: frame.name });
         this.log(`connected as ${frame.name}`);
         this.jobs.redeliver();
         // A hello sent without the CLI states (before any mask): they go now.
@@ -535,7 +558,9 @@ export class RunnerClient {
 
   private async onRequest(frame: Extract<ServerFrame, { type: "request" }>) {
     const { id, op } = frame;
-    if (!(op in opArgs)) return this.fail(id, { code: "bad_request", message: `Unknown op ${op}` });
+    if (!Object.hasOwn(opArgs, op))
+      return this.fail(id, { code: "bad_request", message: `Unknown op ${op}` });
+    if (this.updating) return this.fail(id, { code: "internal", message: "Updating; retry shortly" });
     if (this.inflight.has(id))
       return this.fail(id, { code: "bad_request", message: "Request id already in use" });
     if (this.inflight.size >= MAX_INFLIGHT) return this.fail(id, { code: "internal", message: "busy" });
@@ -827,9 +852,10 @@ export class RunnerClient {
     writePrivate(join(this.opts.home, "agents.json"), JSON.stringify(agents));
   }
 
-  private saveConfig(next: RunnerConfig) {
-    this.config = next;
-    writeConfig(this.opts.home, next);
+  private saveConfig(patch: Partial<RunnerConfig>) {
+    this.reloadConfig();
+    this.config = { ...(readConfig(this.opts.home) ?? this.config), ...patch };
+    writeConfig(this.opts.home, this.config);
     this.mtime = configMtime(this.opts.home);
   }
 
@@ -839,6 +865,7 @@ export class RunnerClient {
       | { removeFolder: { path: string; agentId?: string } }
       | { disableTool: keyof RunnerAccess["tools"] },
   ): RunnerAccess {
+    this.reloadConfig();
     const access = structuredClone(this.config.access);
     if ("disableTool" in input) access.tools[input.disableTool] = false;
     else {
@@ -851,7 +878,7 @@ export class RunnerClient {
         return f.agents.length === 0 || agents.length === 0 ? [] : [{ ...f, agents }];
       });
     }
-    this.saveConfig({ ...this.config, access });
+    this.saveConfig({ access });
     this.send({ type: "access.changed", access });
     return access;
   }

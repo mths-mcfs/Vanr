@@ -129,6 +129,8 @@ export function remoteProvider(
       // The harness only reaches its own CLI's domain; the mode goes along because the runner has a single proxy.
       const canceled = () => new RunnerCallError("canceled", "Canceled before the turn ended");
       if (req.signal.aborted) throw canceled();
+      // The access is taken before the policy read: a revoke during it still cancels the turn.
+      const authorized = deps.runners.authorization(harness.runner.id, input.agent.id);
       const network = await networkPolicyFor(deps, harness.runner.workspaceId, input.agent.id);
       void deps.runners
         .call<"harness.turn", unknown>(
@@ -148,6 +150,7 @@ export function remoteProvider(
             agent: input.agent,
             timeoutMs: HARNESS_TURN_SECONDS * 1000 + 60_000,
             signal: req.signal,
+            authorized,
             onHarnessEvent: (event) => push({ type: "text", text: event.text }),
             onHarnessTool: input.invoke,
           },

@@ -2,6 +2,8 @@
 // PowerPoint slides, Excel sheets and plain text become markdown per page. An outside file is
 // hostile: the zip is read as a stream counting the bytes that come out (a zip bomb stops at the limit, even with
 // a size that lies in the header), and the total text has a cap.
+
+import { posix } from "node:path";
 import { isTextual, officeKind } from "@vanr/engine/file-type";
 import { Unzip, UnzipInflate } from "fflate";
 
@@ -70,7 +72,10 @@ export function readZip(
     file.start();
   };
   try {
-    uz.push(bytes, true);
+    // DEFLATE can expand roughly 1032 bytes per input byte. Bound each synchronous inflate.
+    const step = Math.max(1, Math.min(1024, Math.floor(Math.min(limits.entryBytes, limits.zipBytes) / 1032)));
+    for (let at = 0; at < bytes.length && !failure; at += step)
+      uz.push(bytes.subarray(at, at + step), at + step >= bytes.length);
   } catch (err) {
     if (!failure) throw new ExtractError(`invalid zip: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -154,48 +159,91 @@ function docx(files: Map<string, Uint8Array>): Page[] {
   return lines.length ? [{ page: 1, markdown: lines.join("\n\n") }] : [];
 }
 
-/** PowerPoint: one slide per page, in the order of the file number. */
+const attr = (attrs: string, name: string) =>
+  unescapeXml(new RegExp(`(?:^|\\s)${name}="([^"]*)"`).exec(attrs)?.[1] ?? "");
+
+/** Resolve document order and names through the package relationships. */
+function officeParts(files: Map<string, Uint8Array>, manifest: string, tag: string) {
+  const dir = posix.dirname(manifest);
+  const rels = new Map(
+    [...elements(decode(files.get(`${dir}/_rels/${posix.basename(manifest)}.rels`)), "Relationship")]
+      .filter((e) => attr(e.attrs, "TargetMode") !== "External")
+      .map((e) => [attr(e.attrs, "Id"), attr(e.attrs, "Target")]),
+  );
+  return [...elements(decode(files.get(manifest)), tag)].map((e, i) => {
+    const target = rels.get(attr(e.attrs, "r:id")) ?? "";
+    return {
+      name: posix.normalize(target.startsWith("/") ? target.slice(1) : `${dir}/${target}`),
+      title: attr(e.attrs, "name"),
+      page: i + 1,
+    };
+  });
+}
+
+/** PowerPoint: one slide per page, in presentation order. */
 function pptx(files: Map<string, Uint8Array>): Page[] {
-  const slides = [...files.keys()]
-    .map((name) => ({ name, n: Number(/^ppt\/slides\/slide(\d+)\.xml$/.exec(name)?.[1]) }))
-    .filter((s) => Number.isFinite(s.n))
-    .sort((a, b) => a.n - b.n);
   const pages: Page[] = [];
-  for (const s of slides) {
+  for (const s of officeParts(files, "ppt/presentation.xml", "p:sldId")) {
     const xml = decode(files.get(s.name));
     const paras = [...elements(xml, "a:p")].map((e) => runs(e.body, "a:t").trim()).filter(Boolean);
-    if (paras.length) pages.push({ page: s.n, markdown: paras.join("\n") });
+    if (paras.length) pages.push({ page: s.page, markdown: paras.join("\n") });
   }
   return pages;
 }
 
 /** Excel: one sheet per page, rows separated by tabs (values and shared strings). */
-function xlsx(files: Map<string, Uint8Array>): Page[] {
+function xlsx(files: Map<string, Uint8Array>, left: number): Page[] {
   const shared = [...elements(decode(files.get("xl/sharedStrings.xml")), "si")].map((e) => runs(e.body, "t"));
-  const names = [...elements(decode(files.get("xl/workbook.xml")), "sheet")].map((e) =>
-    unescapeXml(/\bname="([^"]*)"/.exec(e.attrs)?.[1] ?? ""),
-  );
-  const sheets = [...files.keys()]
-    .map((name) => ({ name, n: Number(/^xl\/worksheets\/sheet(\d+)\.xml$/.exec(name)?.[1]) }))
-    .filter((s) => Number.isFinite(s.n))
-    .sort((a, b) => a.n - b.n);
   const pages: Page[] = [];
-  for (const s of sheets) {
+  for (const s of officeParts(files, "xl/workbook.xml", "sheet")) {
+    if (left <= 0) break;
     const xml = decode(files.get(s.name));
+    const heading = s.title ? `## ${s.title.slice(0, left)}\n\n`.slice(0, left) : "";
     const rows: string[] = [];
+    let size = heading.length;
     for (const row of elements(xml, "row")) {
+      const room = Math.max(0, left - size - (rows.length ? 1 : 0));
       const cells: string[] = [];
+      let columns = 0;
+      let hasText = false;
       for (const { attrs, body } of elements(row.body, "c")) {
+        const reference = attr(attrs, "r");
+        const column = /^([A-Z]{1,3})[1-9][0-9]*$/i.exec(reference)?.[1];
+        if (reference && !column) throw new ExtractError("invalid XLSX cell reference");
+        const at = column
+          ? [...column.toUpperCase()].reduce((n, c) => n * 26 + c.charCodeAt(0) - 64, 0) - 1
+          : columns;
+        if (at >= 16_384) throw new ExtractError("XLSX column exceeds XFD");
+        columns = Math.max(columns, at + 1);
         const v = elements(body, "v").next().value?.body;
-        if (/\bt="s"/.test(attrs)) cells.push(shared[Number(v)] ?? "");
-        else if (/\bt="inlineStr"/.test(attrs)) cells.push(runs(body, "t"));
-        else cells.push(v === undefined ? "" : unescapeXml(v));
+        const value = /\bt="s"/.test(attrs)
+          ? (shared[Number(v)] ?? "")
+          : /\bt="inlineStr"/.test(attrs)
+            ? runs(body, "t")
+            : v === undefined
+              ? ""
+              : unescapeXml(v);
+        if (value.trim()) hasText = true;
+        // Columns beyond the visible prefix must not expand the array.
+        if (at < room) cells[at] = value;
       }
-      if (cells.some((x) => x.trim())) rows.push(cells.join("\t"));
+      if (!hasText) continue;
+      let line = "";
+      let previous = 0;
+      cells.forEach((value, at) => {
+        if (line.length >= room) return;
+        line += "\t".repeat(Math.min(at - previous, room - line.length));
+        line += value.slice(0, room - line.length);
+        previous = at;
+      });
+      line += "\t".repeat(Math.min(columns - 1 - previous, room - line.length));
+      rows.push(line);
+      size += line.length + (rows.length > 1 ? 1 : 0);
+      if (size >= left) break;
     }
     if (rows.length) {
-      const title = names[s.n - 1];
-      pages.push({ page: s.n, markdown: `${title ? `## ${title}\n\n` : ""}${rows.join("\n")}` });
+      pages.push({ page: s.page, markdown: heading + rows.join("\n") });
+      left -= size;
     }
   }
   return pages;
@@ -203,9 +251,15 @@ function xlsx(files: Map<string, Uint8Array>): Page[] {
 
 const OFFICE_ENTRIES: Record<"docx" | "xlsx" | "pptx", (name: string) => boolean> = {
   docx: (n) => n === "word/document.xml",
-  pptx: (n) => /^ppt\/slides\/slide\d+\.xml$/.test(n),
+  pptx: (n) =>
+    n === "ppt/presentation.xml" ||
+    n === "ppt/_rels/presentation.xml.rels" ||
+    /^ppt\/slides\/slide\d+\.xml$/.test(n),
   xlsx: (n) =>
-    n === "xl/sharedStrings.xml" || n === "xl/workbook.xml" || /^xl\/worksheets\/sheet\d+\.xml$/.test(n),
+    n === "xl/sharedStrings.xml" ||
+    n === "xl/workbook.xml" ||
+    n === "xl/_rels/workbook.xml.rels" ||
+    /^xl\/worksheets\/sheet\d+\.xml$/.test(n),
 };
 
 async function pdf(bytes: Uint8Array): Promise<Page[]> {
@@ -242,7 +296,7 @@ export async function extractPages(
     const kind = officeKind(type);
     if (kind) {
       const files = readZip(bytes, OFFICE_ENTRIES[kind], limits);
-      pages = kind === "docx" ? docx(files) : kind === "pptx" ? pptx(files) : xlsx(files);
+      pages = kind === "docx" ? docx(files) : kind === "pptx" ? pptx(files) : xlsx(files, limits.textChars);
     }
   }
   return capped(pages, limits.textChars);

@@ -1,7 +1,15 @@
 // Bases: the routes under /bases (/databases is the workspace's external databases). Everything is inside
 // the workspace; a source and a row only show through the database that owns them or a view linked to them
 // (core.tableIn). Every member reads and writes a base; deleting one is for its creator or an admin.
-import type { ActorRef } from "@vanr/contract";
+import type {
+  ActorRef,
+  BaseAggregateResult,
+  BaseBulkResult,
+  BaseQueryResult,
+  BaseRowDetail,
+  BaseSummariesResult,
+} from "@vanr/contract";
+import { CHART_AGGS } from "@vanr/engine/bases/summary";
 import {
   effectiveFilter,
   filterSchema,
@@ -15,7 +23,9 @@ import { and, desc, eq } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import { type ZodType, z } from "zod";
 import {
+  type DatabaseRow,
   databaseById,
+  linkedTitles,
   MAX_BODY,
   publishBase,
   requireDeleter,
@@ -28,14 +38,16 @@ import {
   toView,
 } from "../bases/core";
 import { createFromCsv, databaseFromFile, exportCsv, importCsv } from "../bases/io";
-import { queryRows } from "../bases/query";
+import { aggregateRows, MAX_SUMMARIES, queryRows, summarizeRows } from "../bases/query";
 import {
+  bulkRows,
   createDatabase,
   createRow,
   createView,
   deleteDatabase,
   deleteRows,
   deleteView,
+  MAX_BULK_ROWS,
   refreshVolatile,
   saveSchema,
   touchDatabase,
@@ -55,10 +67,12 @@ const icon = z.string().max(40).nullable();
 const id = z.string().min(1).max(100);
 /** A CSV in the JSON body: up to 10 MB of text (the reader rejects more than that). */
 const csv = z.string().min(1).max(10_000_000);
+/** The body that carries a CSV: its 10 MB of text and the JSON around it, past the default JSON limit. */
+export const CSV_BODY_LIMIT = 10 * 1024 * 1024 + 64 * 1024;
 
 // A NUL or half a surrogate pair doesn't go into Postgres (the insert and the LIKE would give a 500): the edge rejects it.
-async function readBody<S extends ZodType>(c: Context, schema: S): Promise<z.infer<S>> {
-  const body = await readJson(c, schema);
+async function readBody<S extends ZodType>(c: Context, schema: S, limit?: number): Promise<z.infer<S>> {
+  const body = await readJson(c, schema, limit);
   if (!isStorable(body))
     throw new HttpError(400, "base.invalid_text", "Text with a NUL or a broken character");
   return body;
@@ -71,6 +85,14 @@ function idOf(c: Context, name: string): string {
 
 async function database(c: Ctx, me: WorkspaceMember) {
   return databaseById(c.get("deps").db, me.workspaceId, idOf(c, "baseId"));
+}
+
+/** The settings of the view `viewId` of the database (none: an empty one); the view has to show this source. */
+async function viewConfigOf(c: Ctx, row: DatabaseRow, tableId: string, viewId?: string): Promise<ViewConfig> {
+  if (!viewId) return {};
+  const view = await viewIn(c.get("deps").db, row, viewId);
+  if (view.tableId !== tableId) throw new HttpError(400, "base.view_table", "This view shows another table");
+  return view.config;
 }
 
 export function registerBases(app: Hono<AppEnv>) {
@@ -108,7 +130,7 @@ export function registerBases(app: Hono<AppEnv>) {
   app.post(`${B}/import`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
-    const input = await readBody(c, z.object({ title, csv }).strict());
+    const input = await readBody(c, z.object({ title, csv }).strict(), CSV_BODY_LIMIT);
     const row = await createFromCsv(deps, me.workspaceId, input.title, input.csv, me$(me));
     return c.json(await toBase(deps.db, row, me), 201);
   });
@@ -178,6 +200,7 @@ export function registerBases(app: Hono<AppEnv>) {
         .object({
           viewId: id.optional(),
           filter: filterSchema.nullable().optional(),
+          within: filterSchema.nullable().optional(),
           sorts: z.array(sortSchema).max(10).optional(),
           groupBy: z.object({ prop: id, hideEmpty: z.boolean().optional() }).strict().nullable().optional(),
           search: z.string().max(200).optional(),
@@ -187,14 +210,8 @@ export function registerBases(app: Hono<AppEnv>) {
         .strict(),
     );
     table = await refreshVolatile(deps, table);
-    let cfg: ViewConfig = {};
-    if (q.viewId) {
-      const view = await viewIn(deps.db, row, q.viewId);
-      if (view.tableId !== table.id)
-        throw new HttpError(400, "base.view_table", "This view shows another table");
-      cfg = view.config;
-    }
-    const filter = q.filter !== undefined ? q.filter : effectiveFilter(cfg);
+    const cfg = await viewConfigOf(c, row, table.id, q.viewId);
+    const filter = q.filter !== undefined ? q.filter : effectiveFilter(cfg, table.defs);
     const page = await queryRows(
       deps.db,
       table,
@@ -203,6 +220,7 @@ export function registerBases(app: Hono<AppEnv>) {
         sorts: q.sorts ?? cfg.sorts,
         groupBy: q.groupBy !== undefined ? q.groupBy : (cfg.groupBy ?? null),
         search: q.search,
+        within: q.within ?? null,
         limit: q.limit,
         cursor: q.cursor,
       },
@@ -213,7 +231,83 @@ export function registerBases(app: Hono<AppEnv>) {
       total: page.total,
       nextCursor: page.nextCursor,
       ...(page.groups ? { groups: page.groups } : {}),
-    });
+      linked: await linkedTitles(deps.db, table, page.rows),
+    } satisfies BaseQueryResult);
+  });
+
+  /** The narrowing the footer's summary and the chart share with the query. */
+  const narrowing = {
+    viewId: id.optional(),
+    filter: filterSchema.nullable().optional(),
+    within: filterSchema.nullable().optional(),
+    search: z.string().max(200).optional(),
+  };
+
+  app.post(`${B}/:baseId/tables/:tableId/summaries`, async (c) => {
+    const me = requireMember(c);
+    const deps = c.get("deps");
+    const row = await database(c, me);
+    let table = await tableIn(deps.db, me.workspaceId, row.id, idOf(c, "tableId"));
+    const q = await readBody(
+      c,
+      z
+        .object({
+          ...narrowing,
+          summaries: z
+            .record(id, z.string().max(30))
+            .refine((r) => Object.keys(r).length <= MAX_SUMMARIES)
+            .optional(),
+        })
+        .strict(),
+    );
+    table = await refreshVolatile(deps, table);
+    const cfg = await viewConfigOf(c, row, table.id, q.viewId);
+    const values = await summarizeRows(
+      deps.db,
+      table,
+      {
+        filter: q.filter !== undefined ? q.filter : effectiveFilter(cfg, table.defs),
+        ...(q.search ? { search: q.search } : {}),
+        within: q.within ?? null,
+        summaries: q.summaries ?? cfg.summaries ?? {},
+      },
+      { now: deps.now().getTime(), me: me$(me) },
+    );
+    return c.json({ values } satisfies BaseSummariesResult);
+  });
+
+  app.post(`${B}/:baseId/tables/:tableId/aggregate`, async (c) => {
+    const me = requireMember(c);
+    const deps = c.get("deps");
+    const row = await database(c, me);
+    let table = await tableIn(deps.db, me.workspaceId, row.id, idOf(c, "tableId"));
+    const q = await readBody(
+      c,
+      z
+        .object({
+          ...narrowing,
+          x: id.nullable().optional(),
+          y: id.nullable().optional(),
+          agg: z.enum(CHART_AGGS).optional(),
+        })
+        .strict(),
+    );
+    table = await refreshVolatile(deps, table);
+    const cfg = await viewConfigOf(c, row, table.id, q.viewId);
+    const result = await aggregateRows(
+      deps.db,
+      table,
+      {
+        filter: q.filter !== undefined ? q.filter : effectiveFilter(cfg, table.defs),
+        ...(q.search ? { search: q.search } : {}),
+        within: q.within ?? null,
+        x: q.x !== undefined ? q.x : (cfg.chart?.x ?? null),
+        y: q.y !== undefined ? q.y : (cfg.chart?.y ?? null),
+        agg: q.agg ?? cfg.chart?.agg ?? "count",
+      },
+      { now: deps.now().getTime(), me: me$(me) },
+    );
+    return c.json(result satisfies BaseAggregateResult);
   });
 
   const rowInput = {
@@ -234,12 +328,38 @@ export function registerBases(app: Hono<AppEnv>) {
     return c.json(toRow(created, table.databaseId), 201);
   });
 
+  app.post(`${B}/:baseId/tables/:tableId/rows/bulk`, async (c) => {
+    const me = requireMember(c);
+    const deps = c.get("deps");
+    const row = await database(c, me);
+    const table = await tableIn(deps.db, me.workspaceId, row.id, idOf(c, "tableId"));
+    const op = z
+      .object({
+        rowId: id.optional(),
+        parentVersion: z.number().int().min(1).optional(),
+        props: rowInput.props,
+        text: z.record(z.string().max(64), z.string().max(100_000)).optional(),
+      })
+      .strict();
+    const input = await readBody(c, z.object({ ops: z.array(op).min(1).max(MAX_BULK_ROWS) }).strict());
+    const out = await bulkRows(deps, table, input.ops, me$(me));
+    await touchDatabase(deps.db, table.databaseId, deps.now());
+    return c.json({
+      rows: out.rows.map((r) => toRow(r, table.databaseId)),
+      skipped: out.skipped,
+    } satisfies BaseBulkResult);
+  });
+
   app.get(`${B}/:baseId/rows/:rowId`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
     const db = await database(c, me);
     const { row, table } = await rowIn(deps.db, me.workspaceId, db.id, idOf(c, "rowId"));
-    return c.json({ ...toRow(row, table.databaseId), body: row.body ?? "" });
+    return c.json({
+      ...toRow(row, table.databaseId),
+      body: row.body ?? "",
+      linked: await linkedTitles(deps.db, table, [row]),
+    } satisfies BaseRowDetail);
   });
 
   app.patch(`${B}/:baseId/rows/:rowId`, async (c) => {
@@ -326,7 +446,7 @@ export function registerBases(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const row = await database(c, me);
     const table = await tableIn(deps.db, me.workspaceId, row.id, idOf(c, "tableId"));
-    const input = await readBody(c, z.object({ csv }).strict());
+    const input = await readBody(c, z.object({ csv }).strict(), CSV_BODY_LIMIT);
     const r = await importCsv(deps, table, input.csv, me$(me));
     return c.json({
       created: r.created,

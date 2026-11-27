@@ -50,15 +50,13 @@ test(
 );
 
 test(
-  "a lock left by a process that no longer exists is taken over",
+  "a lock left by a process that no longer exists rejects the open and stays untouched",
   async () => {
     const dir = dataDir();
     // Above any real pid limit (4194304 on Linux), so no live process has it.
     writeFileSync(lockOf(dir), "999999999");
-    const opened = await openDb({ kind: "pglite", dataDir: dir });
-    expect(readFileSync(lockOf(dir), "utf8")).toBe(String(process.pid));
-    await opened.close();
-    expect(existsSync(lockOf(dir))).toBe(false);
+    await expect(openDb({ kind: "pglite", dataDir: dir })).rejects.toThrow("unreleased lock");
+    expect(readFileSync(lockOf(dir), "utf8")).toBe("999999999");
   },
   SLOW,
 );
@@ -68,7 +66,7 @@ test(
   async () => {
     const dir = dataDir();
     writeFileSync(lockOf(dir), String(process.ppid));
-    await expect(openDb({ kind: "pglite", dataDir: dir })).rejects.toThrow(`process ${process.ppid}`);
+    await expect(openDb({ kind: "pglite", dataDir: dir })).rejects.toThrow("already open");
     expect(readFileSync(lockOf(dir), "utf8")).toBe(String(process.ppid));
   },
   SLOW,

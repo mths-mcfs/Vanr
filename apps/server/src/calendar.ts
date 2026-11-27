@@ -3,7 +3,7 @@
 // rows; an occurrence changed on its own becomes a separate event and leaves the series through `exdates`.
 import type { ActorRef, CalendarEvent, CalendarProposal, RecurrenceRule } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
-import { localParts, occurrences } from "@vanr/engine/recurrence";
+import { localParts, occurrences, zonedTime } from "@vanr/engine/recurrence";
 import { and, eq, gte, lt, or, sql } from "drizzle-orm";
 import type { AppDeps, WorkspaceMember } from "./context";
 import { notFound } from "./http";
@@ -13,25 +13,83 @@ export type EventRow = typeof calendarEntries.$inferSelect;
 export type ProposalRow = typeof calendarProposals.$inferSelect;
 
 const pad = (n: number) => String(n).padStart(2, "0");
-const localDate = (at: Date, tz: string) => {
+export const localDate = (at: Date, tz: string) => {
   const p = localParts(at, tz);
   return `${p.y}-${pad(p.m)}-${pad(p.d)}`;
 };
 
 export const ruleOf = (row: EventRow) => (row.rule as RecurrenceRule | null) ?? null;
 
-/** The series rule anchored at the event's start (the time comes from the event itself). */
-function seriesRule(row: EventRow): RecurrenceRule | null {
+/**
+ * The series rule anchored at the event's start. The time of day comes from the event itself, unless the rule
+ * keeps one: only the server writes `times`, on a part split off a series, to keep the series' local time when
+ * the part's first occurrence fell in a daylight saving gap.
+ */
+export function seriesRule(row: EventRow): RecurrenceRule | null {
   const rule = ruleOf(row);
   if (!rule) return null;
-  const { times: _t, ...rest } = rule;
-  return { ...rest, timezone: rule.timezone || row.timezone, start: row.start.toISOString() };
+  return { ...rule, timezone: rule.timezone || row.timezone, start: row.start.toISOString() };
 }
 
+/** The local clock time of an instant, as `times` holds it ("HH:MM"). */
+export function clockTime(at: Date, tz: string): string {
+  const p = localParts(at, tz);
+  return `${String(p.hh).padStart(2, "0")}:${String(p.mm).padStart(2, "0")}`;
+}
+
+/** A rule that repeats within a day: its occurrences step from the start, and `times` doesn't apply. */
+export const isSubDaily = (rule: RecurrenceRule) => rule.freq === "minutely" || rule.freq === "hourly";
+
+/**
+ * Do kept `times` still describe a rule that starts at `start`? Only for a daily or longer rule, and only when
+ * one of them laid on the start's local day lands on the start itself (the case of a daylight saving gap,
+ * where 02:30 moves to 03:00): otherwise the start's own clock time is the series' time.
+ */
+export function timesFit(rule: RecurrenceRule, times: string[], start: Date, tz: string): boolean {
+  if (isSubDaily(rule)) return false;
+  const day = localParts(start, tz);
+  return times.some((t) => {
+    const [hh, mm] = t.split(":").map(Number);
+    return zonedTime(day, hh ?? 0, mm ?? 0, tz).getTime() === start.getTime();
+  });
+}
+
+/** The local time of day of the series' occurrences. */
+export function wallTimes(row: EventRow): string[] {
+  const rule = seriesRule(row);
+  return rule?.times?.length ? rule.times : [clockTime(row.start, rule?.timezone ?? row.timezone)];
+}
+
+const daySpan = (row: EventRow) =>
+  (Date.parse(localDate(row.end, row.timezone)) - Date.parse(localDate(row.start, row.timezone))) /
+  86_400_000;
+
+/**
+ * The end of an event that starts at `start` and keeps the length of `base`: the same whole local days for an
+ * all-day one (a day is 23 or 25 hours across a daylight saving change), the same duration otherwise. The days
+ * of `base` are counted in `spanTz` (the zone it was in), the end is laid out in `tz`.
+ */
+export function endAfterMove(
+  base: { start: Date; end: Date },
+  start: Date,
+  allDay: boolean,
+  tz: string,
+  spanTz = tz,
+): Date {
+  if (!allDay) return new Date(start.getTime() + base.end.getTime() - base.start.getTime());
+  const days =
+    (Date.parse(localDate(base.end, spanTz)) - Date.parse(localDate(base.start, spanTz))) / 86_400_000;
+  return shiftDays(start, days, tz);
+}
+const shiftDays = (at: Date, days: number, tz: string) => {
+  const p = localParts(at, tz);
+  return zonedTime({ y: p.y, m: p.m, d: p.d + days }, 0, 0, tz);
+};
+export const eventEnd = (row: EventRow, start: Date) => endAfterMove(row, start, row.allDay, row.timezone);
+
 export function toEvent(row: EventRow, occurrence?: Date): CalendarEvent {
-  const duration = row.end.getTime() - row.start.getTime();
   const start = occurrence ?? row.start;
-  const end = new Date(start.getTime() + duration);
+  const end = eventEnd(row, start);
   const rule = ruleOf(row);
   return {
     id: row.id,
@@ -60,8 +118,11 @@ export function expand(row: EventRow, from: Date, to: Date): CalendarEvent[] {
   const rule = seriesRule(row);
   if (!rule) return row.end > from && row.start < to ? [toEvent(row)] : [];
   const skip = new Set(row.exdates);
-  return occurrences(rule, { from: new Date(from.getTime() - duration), to, limit: 500 })
-    .filter((at) => !skip.has(at.toISOString()) && at.getTime() + duration > from.getTime())
+  const since = row.allDay
+    ? shiftDays(from, -daySpan(row), row.timezone)
+    : new Date(from.getTime() - duration);
+  return occurrences(rule, { from: since, to, limit: 500 })
+    .filter((at) => !skip.has(at.toISOString()) && eventEnd(row, at) > from)
     .map((at) => toEvent(row, at));
 }
 
@@ -132,11 +193,18 @@ export function publishEvent(deps: AppDeps, row: EventRow) {
   else for (const u of users) deps.hub.toUser(row.workspaceId, u, event);
 }
 
-export function publishDeleted(deps: AppDeps, row: EventRow, scope: string, instanceStart: string | null) {
+/** The removal goes to everyone who saw `row` or one of the other parts it took with it (`gone`). */
+export function publishDeleted(
+  deps: AppDeps,
+  row: EventRow,
+  scope: string,
+  instanceStart: string | null,
+  gone: EventRow[] = [],
+) {
   const event = { type: "calendar_event.removed", eventId: row.id, scope, instanceStart };
-  const users = audience(row);
-  if (!users) deps.hub.toWorkspace(row.workspaceId, event);
-  else for (const u of users) deps.hub.toUser(row.workspaceId, u, event);
+  const lists = [row, ...gone].map(audience);
+  if (lists.some((l) => l === null)) deps.hub.toWorkspace(row.workspaceId, event);
+  else for (const u of new Set(lists.flatMap((l) => l ?? []))) deps.hub.toUser(row.workspaceId, u, event);
 }
 
 export const isPersonIn = (list: ActorRef[], userId: string) =>

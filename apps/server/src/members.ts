@@ -1,9 +1,10 @@
-import type { Member, Person, Role } from "@vanr/contract";
+import { can, type Member, type Person, type Role } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { handleFrom, uniqueHandle } from "@vanr/engine/text";
-import { and, eq } from "drizzle-orm";
+import { and, count, eq, inArray, ne } from "drizzle-orm";
 import { isUniqueViolation } from "./db-errors";
+import { conflict, forbidden, HttpError, notFound } from "./http";
 
 const { members, users, workspaces, channels, channelMemberships } = schema;
 
@@ -156,4 +157,84 @@ export function toPerson(
     lastOnlineAt: seen?.toISOString() ?? null,
     memberSince: r.memberSince.toISOString(),
   };
+}
+
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/**
+ * Role changes and removals of one workspace run one at a time: each locks the workspace row first and only then
+ * reads the roles it decides on, so two owners demoting each other or leaving at once can't leave it without one.
+ */
+async function lockedRoles(tx: Tx, workspaceId: string, actorId: string, target: string) {
+  await tx.select({ id: workspaces.id }).from(workspaces).where(eq(workspaces.id, workspaceId)).for("update");
+  const rows = await tx
+    .select({ userId: members.userId, role: members.role })
+    .from(members)
+    .where(and(eq(members.workspaceId, workspaceId), inArray(members.userId, [actorId, target])));
+  const actor = rows.find((r) => r.userId === actorId)?.role;
+  const current = rows.find((r) => r.userId === target)?.role;
+  if (!actor) throw new HttpError(404, "not_found", "Workspace not found");
+  if (!current) throw notFound("Member not found");
+  return { actor, current };
+}
+
+/** Makes sure the workspace keeps at least one owner after `userId` stops being one. */
+async function assertAnotherOwner(tx: Tx, workspaceId: string, userId: string) {
+  const [row] = await tx
+    .select({ n: count() })
+    .from(members)
+    .where(and(eq(members.workspaceId, workspaceId), eq(members.role, "owner"), ne(members.userId, userId)));
+  if ((row?.n ?? 0) === 0) throw conflict("last_owner", "The workspace needs at least one owner");
+}
+
+/** Role: nobody changes their own; touching an owner (from or to) needs manage_owners. */
+export async function changeRole(
+  db: Db,
+  input: { workspaceId: string; actorId: string; target: string; role: Role },
+) {
+  const { workspaceId, actorId, target, role } = input;
+  if (target === actorId) throw forbidden("You can't change your own role");
+  await db.transaction(async (tx) => {
+    const { actor, current } = await lockedRoles(tx, workspaceId, actorId, target);
+    if (!can(actor, "manage_members")) throw forbidden();
+    if ((current === "owner" || role === "owner") && !can(actor, "manage_owners")) {
+      throw forbidden("Only owners can promote or demote owners");
+    }
+    if (current === "owner" && role !== "owner") await assertAnotherOwner(tx, workspaceId, target);
+    await tx
+      .update(members)
+      .set({ role })
+      .where(and(eq(members.workspaceId, workspaceId), eq(members.userId, target)));
+  });
+}
+
+/**
+ * Remove: manage_members removes others; anyone can leave. An owner leaves only if another owner stays. The
+ * person also leaves the workspace's channels.
+ */
+export async function removeMember(db: Db, input: { workspaceId: string; actorId: string; target: string }) {
+  const { workspaceId, actorId, target } = input;
+  const self = target === actorId;
+  await db.transaction(async (tx) => {
+    const { actor, current } = await lockedRoles(tx, workspaceId, actorId, target);
+    if (!self && !can(actor, "manage_members")) throw forbidden();
+    if (current === "owner") {
+      if (!self && !can(actor, "manage_owners")) throw forbidden("Only owners can remove owners");
+      await assertAnotherOwner(tx, workspaceId, target);
+    }
+    await tx.delete(members).where(and(eq(members.workspaceId, workspaceId), eq(members.userId, target)));
+    const workspaceChannels = tx
+      .select({ id: channels.id })
+      .from(channels)
+      .where(eq(channels.workspaceId, workspaceId));
+    await tx
+      .delete(channelMemberships)
+      .where(
+        and(
+          eq(channelMemberships.memberType, "person"),
+          eq(channelMemberships.memberId, target),
+          inArray(channelMemberships.channelId, workspaceChannels),
+        ),
+      );
+  });
 }

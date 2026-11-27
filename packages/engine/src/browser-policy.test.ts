@@ -146,6 +146,18 @@ const el = (over: Partial<ElementFacts> = {}): ElementFacts => ({
   ...over,
 });
 
+test("modified Enter and Space retain purchase and form consequences", () => {
+  const form = { method: "post", action: "https://loja.test/pedido", search: false };
+  for (const key of ["Shift+Enter", "Control+Enter", "Shift+Space"]) {
+    expect(consequenceOf(el({ label: "Confirmar pagamento", submits: true, form }), "press", key)).toBe(
+      "purchase",
+    );
+    expect(consequenceOf(el({ label: "OK", submits: true, form }), "press", key)).toBe("submit");
+    if (key.endsWith("Enter"))
+      expect(consequenceOf(el({ tag: "input", editable: true, form }), "press", key)).toBe("submit");
+  }
+});
+
 test("consequential action: purchase, publish, delete and form submit escalate; search and navigation do not", () => {
   const post = { method: "post", action: "https://loja.test/pedido", search: false };
   const get = { method: "get", action: "https://loja.test/busca", search: true };

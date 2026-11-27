@@ -1,5 +1,5 @@
-// Connection to a customer's database (the databases integration). Read-only: every query runs in a
-// READ ONLY transaction with a statement timeout. Real Postgres through postgres.js; PGlite in tests.
+// Connection to a customer's database (the databases integration). Queries run in a READ ONLY
+// transaction. Postgres enforces statement_timeout; PGlite in tests stores it but does not enforce it.
 import { isIP } from "node:net";
 import type { PGlite } from "@electric-sql/pglite";
 import postgres from "postgres";
@@ -10,6 +10,7 @@ export interface SqlResult {
 }
 
 export interface ReadOnlySession {
+  /** One SELECT/VALUES/TABLE/WITH query usable as a subquery, without a terminating semicolon. */
   query(text: string): Promise<SqlResult>;
 }
 
@@ -33,6 +34,12 @@ export type SqlConnector = (target: SqlTarget) => Promise<SqlConnection>;
 
 /** Statement timeout for the current transaction, never below 100 ms. */
 const timeoutSql = (ms: number) => `set local statement_timeout = ${Math.max(100, Math.floor(ms))}`;
+
+/**
+ * The server parses input as a subquery, excluding transaction/session commands without a SQL parser
+ * here. The caller must also use the extended protocol, so input cannot escape into a second command.
+ */
+const readQuery = (text: string) => `select * from (\n${text}\n) as read_only_query`;
 
 /** Real Postgres. One connection per use; the caller closes it. */
 export const postgresConnector: SqlConnector = async (t) => {
@@ -61,7 +68,8 @@ export const postgresConnector: SqlConnector = async (t) => {
       await tx.unsafe(timeoutSql(timeoutMs));
       result = await fn({
         async query(text) {
-          const rows = await tx.unsafe(text);
+          // A tagged query uses the extended protocol even with no parameters or prepared statements.
+          const rows = await tx`${tx.unsafe(readQuery(text))}`;
           return { fields: rows.columns?.map((c) => c.name) ?? [], rows: [...rows] };
         },
       });
@@ -80,7 +88,7 @@ export function pgliteConnector(pg: PGlite): SqlConnector {
         await tx.exec(timeoutSql(timeoutMs));
         return fn({
           async query(text) {
-            const res = await tx.query<Record<string, unknown>>(text);
+            const res = await tx.query<Record<string, unknown>>(readQuery(text));
             return { fields: res.fields.map((f) => f.name), rows: res.rows };
           },
         });

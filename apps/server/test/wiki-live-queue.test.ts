@@ -5,7 +5,7 @@
 // timer, and every write changes the shared document only after its transaction committed.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import * as Y from "yjs";
 import { log } from "../src/logger";
 import type { RunningServer } from "../src/server";
@@ -18,6 +18,7 @@ import { apiError, wikiApi } from "./wiki-api";
 import {
   authMessage,
   connect,
+  holdNextTransaction,
   paragraphUpdate,
   rawSocket,
   unloaded,
@@ -56,46 +57,6 @@ async function storedDraft(srv: RunningServer, workspaceId: string, slug: string
   Y.applyUpdate(doc, new Uint8Array(Buffer.from(d.state, "base64")));
   const md = await wikiMarkdown();
   return { ...d, text: md.serialize(md.fromYDoc(doc)) };
-}
-
-/**
- * Holds the server's next database transaction until `release`: `before` it starts, or `after` its callback
- * ran (still open, before the commit), or `committed` (after the commit, before the caller goes on).
- */
-function holdNextTransaction(srv: RunningServer, when: "before" | "after" | "committed") {
-  const { db } = srv.deps;
-  const original = db.transaction.bind(db);
-  let begun!: () => void;
-  let release!: () => void;
-  const started = new Promise<void>((r) => {
-    begun = r;
-  });
-  const gate = new Promise<void>((r) => {
-    release = r;
-  });
-  db.transaction = (async (fn: Parameters<typeof original>[0], ...rest: unknown[]) => {
-    db.transaction = original;
-    if (when === "before") {
-      begun();
-      await gate;
-      return original(fn, ...(rest as []));
-    }
-    if (when === "after")
-      return original(
-        async (tx) => {
-          const result = await fn(tx);
-          begun();
-          await gate;
-          return result;
-        },
-        ...(rest as []),
-      );
-    const result = await original(fn, ...(rest as []));
-    begun();
-    await gate;
-    return result;
-  }) as typeof original;
-  return { started, release, restore: () => (db.transaction = original) };
 }
 
 /** The next `count` transactions fail the way Postgres aborts a deadlock (SQLSTATE 40P01). */
@@ -138,8 +99,14 @@ function captureTimers(delays: readonly number[]) {
 }
 
 describe("the page's queue", () => {
-  for (const when of ["before", "committed"] as const)
-    test(`an edit that arrives while a discard holds the page (${when} its commit) waits, then lands on the reverted document`, async () => {
+  test.each([
+    ["before", "append"],
+    ["committed", "append"],
+    ["before", "removed paragraph"],
+    ["committed", "removed paragraph"],
+  ] as const)(
+    "a concurrent edit waits for discard (%s its commit, %s), then is applied or explicitly rejected",
+    async (when, edit) => {
       const { workspaceId, ana, beto } = await team();
       const page = await ana.api.wiki.createWikiPage(workspaceId, {
         title: `Discard ${when}`,
@@ -149,25 +116,83 @@ describe("the page's queue", () => {
       const a = connect(server, ana.browser, workspaceId, name);
       const b = connect(server, beto.browser, workspaceId, name);
       await Promise.all([a.synced, b.synced]);
-      await a.edit(() => "Old shared draft.\n");
+      await a.edit(() => "Original.\n\nOld shared draft.\n");
       await until(() => !a.provider.hasUnsyncedChanges);
       await until(async () => (await b.md()).includes("Old shared"));
       const hold = holdNextTransaction(server, when);
       const discarding = ana.api.wiki.deleteWikiPageDraft(workspaceId, page.slug);
       await hold.started;
       const acks = b.syncStatus.length;
-      await b.edit((md) => `${md.trimEnd()}\n\nNEW EDIT DURING THE DISCARD.\n`);
+      await b.edit((md) =>
+        edit === "append"
+          ? `${md.trimEnd()}\n\nNEW EDIT DURING THE DISCARD.\n`
+          : md.replace("Old shared draft.", "NEW EDIT DURING THE DISCARD."),
+      );
       // Not acknowledged while the discard holds the page: it isn't applied yet.
       expect(b.syncStatus.length).toBe(acks);
       hold.release();
       await discarding;
       await until(() => b.syncStatus.length > acks);
-      expect(b.syncStatus.at(-1)).toBe(true);
-      await until(async () => (await a.md()).includes("NEW EDIT DURING THE DISCARD."));
+      expect(b.syncStatus.at(-1)).toBe(edit === "append");
+      if (edit === "append") await until(async () => (await a.md()).includes("NEW EDIT DURING THE DISCARD."));
+      else {
+        await until(() => b.closeCodes.includes(4412));
+        expect(await a.md()).not.toContain("NEW EDIT DURING THE DISCARD.");
+      }
       expect(await a.md()).not.toContain("Old shared draft.");
       a.close();
       b.close();
+    },
+  );
+
+  test("a discard queued behind a publish restores the version that publish committed", async () => {
+    const { workspaceId, ana } = await team();
+    const page = await ana.api.wiki.createWikiPage(workspaceId, {
+      title: "Queued discard",
+      body: "Original.\n",
     });
+    const a = connect(server, ana.browser, workspaceId, docName(workspaceId, page.slug));
+    await a.synced;
+    await a.edit(() => "Published edit.\n");
+    await until(() => !a.provider.hasUnsyncedChanges);
+    const row = await pageBySlug(server.deps.db, workspaceId, page.slug);
+    const hold = holdNextTransaction(server, "before");
+    const publishing = ana.api.wiki.publishWikiPageDraft(workspaceId, page.slug);
+    await hold.started;
+    const discarding = server.deps.wikiLive.discard(row, { type: "person", id: ana.user.id }, true);
+    hold.release();
+    await publishing;
+    await discarding;
+    expect(await a.md()).toBe("Published edit.\n");
+    expect(await storedDraft(server, workspaceId, page.slug)).toMatchObject({
+      parentVersion: 2,
+      dirty: false,
+      text: "Published edit.\n",
+    });
+    a.close();
+  });
+
+  test("a removed member cannot discard an unlocked page's shared draft", async () => {
+    const { workspaceId, ana, beto } = await team();
+    const page = await ana.api.wiki.createWikiPage(workspaceId, {
+      title: "Removed discard",
+      body: "Original.\n",
+    });
+    const a = connect(server, ana.browser, workspaceId, docName(workspaceId, page.slug));
+    await a.synced;
+    await a.edit(() => "Shared work.\n");
+    await until(() => !a.provider.hasUnsyncedChanges);
+    const hold = holdNextTransaction(server, "before");
+    const discarding = apiError(beto.api.wiki.deleteWikiPageDraft(workspaceId, page.slug));
+    await hold.started;
+    await server.deps.db
+      .delete(schema.members)
+      .where(and(eq(schema.members.workspaceId, workspaceId), eq(schema.members.userId, beto.user.id)));
+    hold.release();
+    expect((await discarding).status).toBe(403);
+    expect(await a.md()).toBe("Shared work.\n");
+    a.close();
+  });
 
   test("a publish cleans the draft only if nothing came in since its snapshot: a later edit stays dirty and is published next", async () => {
     const { workspaceId, ana } = await team();
@@ -329,7 +354,19 @@ describe("deadlocks and the automatic retries", () => {
           async () =>
             (await storedDraft(quick, workspaceId, page.slug))?.text.includes("second try") ?? false,
         );
+        deadlockNext(quick, 1);
+        await a.edit(() => "Discarded edit.\n");
+        await until(() => timers.caught.some((t) => t.ms === RETRY_MS[0]));
+        await ana.api.wiki.deleteWikiPageDraft(workspaceId, page.slug);
         a.close();
+        await unloaded(quick);
+        timers.fire(RETRY_MS[0]);
+        await quick.deps.wikiLive.settled();
+        expect(await storedDraft(quick, workspaceId, page.slug)).toMatchObject({
+          dirty: false,
+          editors: [],
+          text: "Original.\n",
+        });
       } finally {
         timers.restore();
         await quick.stop();
@@ -508,35 +545,119 @@ describe("a write changes the shared document only after its transaction committ
     a.close();
   });
 
-  test("an idle publish the lock rejects leaves the draft to publish: the admin's publish does", async () => {
-    const { workspaceId, ana, beto } = await team();
-    const page = await ana.api.wiki.createWikiPage(workspaceId, {
-      title: "Idle reject",
-      body: "Original.\n",
-    });
-    const name = docName(workspaceId, page.slug);
-    const timers = captureTimers([IDLE_MS]);
-    try {
-      const a = connect(server, ana.browser, workspaceId, name);
-      const b = connect(server, beto.browser, workspaceId, name);
-      await Promise.all([a.synced, b.synced]);
-      // Only the member edits: the idle publish's lock is decided by him.
-      await b.edit(() => "By the member.\n");
-      await until(() => !b.provider.hasUnsyncedChanges);
-      await until(() => timers.caught.some((t) => t.ms === IDLE_MS));
-      await ana.api.wiki.lockWikiPage(workspaceId, page.slug, true);
-      timers.fire(IDLE_MS);
-      await server.deps.wikiLive.settled();
-      expect((await ana.api.wiki.getWikiPage(workspaceId, page.slug)).version).toBe(1);
-      expect(await ana.api.wiki.publishWikiPageDraft(workspaceId, page.slug)).toMatchObject({
-        version: 2,
-        body: "By the member.\n",
-      });
-      a.close();
-      b.close();
-      await unloaded(server);
-    } finally {
-      timers.restore();
-    }
-  });
+  test.each([
+    ["different", "member"],
+    ["identical", "member"],
+    ["different", "admin"],
+    ["identical", "admin"],
+    ["different", "demoted"],
+    ["identical", "demoted"],
+    ["different", "removed"],
+    ["identical", "removed"],
+  ] as const)(
+    "a locked automatic publish uses only the last editor's current role (%s text, %s)",
+    async (text, last) => {
+      const quick = await startTestServer({ wikiDebounceMs: 20, wikiIdlePublishMs: IDLE_MS });
+      const timers = captureTimers([IDLE_MS]);
+      try {
+        const { workspaceId, ana, beto } = await team(quick);
+        const { db } = quick.deps;
+        const membership = and(
+          eq(schema.members.workspaceId, workspaceId),
+          eq(schema.members.userId, beto.user.id),
+        );
+        if (last !== "member") await db.update(schema.members).set({ role: "admin" }).where(membership);
+        const page = await ana.api.wiki.createWikiPage(workspaceId, {
+          title: "Last editor",
+          body: "Original.\n",
+        });
+        const name = docName(workspaceId, page.slug);
+        const a = connect(quick, ana.browser, workspaceId, name);
+        const b = connect(quick, beto.browser, workspaceId, name);
+        try {
+          await Promise.all([a.synced, b.synced]);
+          await a.edit(() => "By the earlier admin.\n");
+          await until(async () => (await b.md()) === "By the earlier admin.\n");
+          const target = text === "identical" ? "Original.\n" : "By the last editor.\n";
+          await b.edit(() => target);
+          await until(() => !b.provider.hasUnsyncedChanges);
+          await until(async () => {
+            const draft = await storedDraft(quick, workspaceId, page.slug);
+            return draft?.dirty === true && draft.text === target;
+          });
+          await quick.deps.wikiLive.settled();
+          const editors = [
+            { type: "person", id: ana.user.id },
+            { type: "person", id: beto.user.id },
+          ];
+          expect(await storedDraft(quick, workspaceId, page.slug)).toMatchObject({ dirty: true, editors });
+          await ana.api.wiki.lockWikiPage(workspaceId, page.slug, true);
+          await quick.deps.wikiLive.settled();
+
+          if (last === "demoted" || last === "removed") {
+            // Change the last editor's role after publishing starts, before its write transaction reads it.
+            const hold = holdNextTransaction(quick, "before");
+            try {
+              timers.fire(IDLE_MS);
+              await hold.started;
+              if (last === "demoted")
+                await db.update(schema.members).set({ role: "member" }).where(membership);
+              else await db.delete(schema.members).where(membership);
+            } finally {
+              hold.release();
+              hold.restore();
+            }
+          } else timers.fire(IDLE_MS);
+          await quick.deps.wikiLive.settled();
+
+          const allowed = last === "admin";
+          const version = allowed && text === "different" ? 2 : 1;
+          const published = await ana.api.wiki.getWikiPage(workspaceId, page.slug);
+          expect(published).toMatchObject({ version, body: allowed ? target : "Original.\n" });
+          expect(await storedDraft(quick, workspaceId, page.slug)).toMatchObject({
+            dirty: !allowed,
+            parentVersion: version,
+            text: target,
+            editors: allowed ? [] : editors,
+          });
+          if (allowed && text === "different")
+            expect(published.history[0]?.author).toEqual({ type: "person", id: beto.user.id });
+          a.close();
+          b.close();
+          await unloaded(quick);
+          if (!allowed) {
+            // Session end and a later session without edits must keep the same saved draft and last editor.
+            const again = connect(quick, ana.browser, workspaceId, name);
+            try {
+              await again.synced;
+              expect(await again.md()).toBe(target);
+            } finally {
+              again.close();
+            }
+            await unloaded(quick);
+            expect((await ana.api.wiki.getWikiPage(workspaceId, page.slug)).version).toBe(1);
+            expect(await storedDraft(quick, workspaceId, page.slug)).toMatchObject({
+              dirty: true,
+              parentVersion: 1,
+              text: target,
+              editors,
+            });
+            // The explicit publisher's role still decides an explicit publication.
+            expect(await ana.api.wiki.publishWikiPageDraft(workspaceId, page.slug)).toMatchObject({
+              version: text === "different" ? 2 : 1,
+              body: target,
+              draft: { dirty: false, editors: [] },
+            });
+          }
+        } finally {
+          a.close();
+          b.close();
+        }
+      } finally {
+        timers.restore();
+        await quick.stop();
+      }
+    },
+    SERVER_TEST_MS * 2,
+  );
 });

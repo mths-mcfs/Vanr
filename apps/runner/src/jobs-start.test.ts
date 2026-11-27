@@ -1,12 +1,14 @@
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Access, RunnerError } from "./access";
 import type { CliWatch } from "./cli";
 import { type JobEvent, Jobs } from "./jobs";
-import { defaultPolicyContext, sandboxOff } from "./sandbox";
+import { sandboxOff } from "./sandbox";
 import type { SecretStore } from "./secrets";
+import { signedInPolicy } from "./testing/sandbox";
 
 // Two `job.start` arriving in the same tick: the id and the slot are taken before the first await, so the
 // job runs once and the cap is never exceeded; a start that fails gives both back.
@@ -44,7 +46,7 @@ function setup(opts: { max: number; failSecrets?: () => boolean; waitSecrets?: (
     },
     bins: { claude: "claude", codex: "codex" },
     sandbox: sandboxOff(),
-    policy: defaultPolicyContext(home),
+    policy: signedInPolicy(home, join(home, "person")),
   });
   const untilDone = (count: number) =>
     new Promise<void>((resolve) => {
@@ -124,4 +126,50 @@ test("a job canceled while it prepares runs nothing, ends as canceled and gives 
   await jobs.start(agent, shell("job_00000002", mark));
   await untilDone(2);
   expect(readFileSync(mark, "utf8")).toBe("ran");
+});
+
+test("sandbox failure removes the job's git snapshot", async () => {
+  const { jobs } = setup({ max: 1 });
+  const opts = Reflect.get(jobs, "opts");
+  opts.access.access.tools.claude = true;
+  opts.cli = { requireSubscription() {} };
+  opts.sandbox = {
+    status: () => ({ state: "on" }),
+    wrap: async () => {
+      throw new RunnerError("sandbox_not_ready", "no sandbox");
+    },
+  };
+  const root = opts.access.agentRoot(agent);
+  execFileSync("git", ["init", "-q"], { cwd: root });
+  writeFileSync(join(root, "document.txt"), "snapshot-copy");
+  await expect(
+    jobs.start(agent, { jobId: "job_snapshot", executor: "claude_code", title: "t", prompt: "hi" }),
+  ).rejects.toMatchObject({ code: "sandbox_not_ready" });
+  expect(existsSync(join(opts.home, "jobs", "job_snapshot", "snapshot.git"))).toBe(false);
+  expect(jobs.runningCount()).toBe(0);
+});
+
+test("Node survives a prompt write to a CLI that exits without reading stdin", async () => {
+  const home = mkdtempSync(join(dir, "epipe-"));
+  const entry = join(home, "entry.ts");
+  writeFileSync(
+    entry,
+    `import { Jobs } from ${JSON.stringify(new URL("./jobs.ts", import.meta.url).pathname)};
+import { Access } from ${JSON.stringify(new URL("./access.ts", import.meta.url).pathname)};
+import { sandboxOff, defaultPolicyContext } from ${JSON.stringify(new URL("./sandbox.ts", import.meta.url).pathname)};
+const home = ${JSON.stringify(home)}, done = Promise.withResolvers(); let released = false;
+const jobs = new Jobs({ home, access: new Access(() => ({access:{folders:[],tools:{claude:true}}, workDir:home+'/work',paused:false})),
+secrets:{secretFiles:()=>[], materialize:async()=>({env:{},masks:[],release(){released=true;}})}, cli:{requireSubscription(){}},
+sandbox:sandboxOff(),policy:defaultPolicyContext(home),bins:{claude:'/bin/false'}, maxConcurrent:()=>1,maxSeconds:()=>5,
+send(e){if(e.type==='job.done') done.resolve(e.job);return true;}});
+await jobs.start(${JSON.stringify(agent)}, {jobId:'job_epipe',executor:'claude_code',title:'t',prompt:'漢'.repeat(100000)});
+const result=await done.promise; console.log(JSON.stringify({status:result.status,released,running:jobs.runningCount()}));`,
+  );
+  const out = await Bun.build({ entrypoints: [entry], target: "node", format: "esm" });
+  expect(out.success).toBe(true);
+  const bundle = join(home, "test.mjs");
+  writeFileSync(bundle, (await out.outputs[0]?.text()) ?? "");
+  const result = spawnSync(Bun.which("node") ?? "node", [bundle], { encoding: "utf8", timeout: 15000 });
+  expect(result.status).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({ status: "failed", released: true, running: 0 });
 });

@@ -9,7 +9,7 @@ const bool = z
 const EnvSchema = z.object({
   PORT: z.coerce.number().int().nonnegative().default(4400),
   PUBLIC_URL: z.string().url().optional(),
-  /** Public domain Railway sets; it becomes PUBLIC_URL when that is missing. */
+  /** Public domain Railway sets; outside production it becomes PUBLIC_URL when that is missing. */
   RAILWAY_PUBLIC_DOMAIN: z.string().optional(),
   DATABASE_URL: z.string().optional(),
   DATA_DIR: z.string().default(".data"),
@@ -41,6 +41,10 @@ const EnvSchema = z.object({
   NODE_ENV: z.string().optional(),
   /** Integrations may talk to local network addresses (default: only in the selfhost edition). */
   ALLOW_PRIVATE_NETWORKS: bool,
+  /** Integrations may connect without TLS (http://, IMAP/SMTP in plain text). Default: only outside production. */
+  ALLOW_PLAINTEXT_INTEGRATIONS: bool,
+  /** Better Auth's rate limits on sign-in, sign-up, password reset and verification. Default: in production. */
+  AUTH_RATE_LIMIT: bool,
   GITHUB_APP_ID: z.string().optional(),
   GITHUB_APP_SLUG: z.string().optional(),
   /** PEM of the GitHub App key; a literal `\n` becomes a line break. */
@@ -88,6 +92,8 @@ export interface Config {
   db: { kind: "postgres"; url: string } | { kind: "pglite"; dataDir: string | null };
   dataDir: string;
   authSecret: string;
+  /** Better Auth's rate limits (see `AUTH_RATE_LIMITS` in auth.ts). */
+  authRateLimit: boolean;
   signupOpen: boolean;
   social: {
     github: { clientId: string; clientSecret: string } | null;
@@ -125,6 +131,8 @@ export interface Config {
   runnerSigning: { seed: string; publicKey: string } | null;
   integrations: {
     allowPrivateNetworks: boolean;
+    /** Connections without TLS (see `NetPolicy` in integrations/net.ts). */
+    allowPlaintext: boolean;
     githubApp: {
       appId: string;
       slug: string;
@@ -169,6 +177,11 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   const dataDir = e.DATA_DIR;
   const production = e.NODE_ENV === "production";
   if (production && !e.BETTER_AUTH_SECRET) throw new Error("BETTER_AUTH_SECRET is required in production");
+  // The session cookie is only `Secure` on an https base URL: production needs PUBLIC_URL, and https.
+  if (production && !e.PUBLIC_URL)
+    throw new Error("PUBLIC_URL is required in production (the https:// address people open)");
+  if (production && new URL(e.PUBLIC_URL ?? "").protocol !== "https:")
+    throw new Error("PUBLIC_URL must be an https:// address in production");
   const pair = (id?: string, secret?: string) =>
     id && secret ? { clientId: id, clientSecret: secret } : null;
   let mail: Config["mail"];
@@ -213,7 +226,8 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
       : { kind: "pglite", dataDir: dataDir === "memory" ? null : `${dataDir}/db` },
     dataDir,
     authSecret: e.BETTER_AUTH_SECRET ?? DEV_SECRET,
-    signupOpen: e.SIGNUP_OPEN ?? true,
+    authRateLimit: e.AUTH_RATE_LIMIT ?? production,
+    signupOpen: e.SIGNUP_OPEN ?? false,
     social: {
       github: pair(e.GITHUB_CLIENT_ID, e.GITHUB_CLIENT_SECRET),
       google: pair(e.GOOGLE_CLIENT_ID, e.GOOGLE_CLIENT_SECRET),
@@ -242,6 +256,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
       : null,
     integrations: {
       allowPrivateNetworks: e.ALLOW_PRIVATE_NETWORKS ?? e.EDITION === "selfhost",
+      allowPlaintext: e.ALLOW_PLAINTEXT_INTEGRATIONS ?? !production,
       githubApp:
         e.GITHUB_APP_ID && e.GITHUB_APP_SLUG && e.GITHUB_APP_PRIVATE_KEY
           ? {

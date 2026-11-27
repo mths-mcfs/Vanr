@@ -112,7 +112,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("routine fires and edits at once 
                 .then(() => "paused")
             : startRoutineRun(deps, fired).then((r) => r.status);
         },
-        "select",
+        { bKind: "select" },
       );
       expect(run.aPids).not.toEqual(run.bPids);
       await server.deps.runtime.settle();

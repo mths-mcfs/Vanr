@@ -1,6 +1,8 @@
 // Public surface of @vanr/contract: the API contract types shared by the server, the engine, the runner
 // and clients, plus the secret box used to hand secrets to an agent's environment.
 
+export type { AgentBody, AgentExtra, AgentMouth } from "./agent-appearance.ts";
+export { AGENT_BODIES, AGENT_EXTRAS, AGENT_MOUTHS } from "./agent-appearance.ts";
 export type {
   AgentDraft,
   AgentEval,
@@ -32,20 +34,32 @@ export type {
   Reminder,
   Team,
   TeamAgent,
+  UndoAllResult,
 } from "./agents.ts";
 export type {
+  AcceptProposalInput,
   AgentQuestion,
+  AnswerInput,
   Approval,
+  ApprovalFilter,
+  ApprovalList,
   ApprovalRule,
+  ApprovalRuleList,
+  ApprovalStats,
+  ApprovalStatsRow,
   ApprovalStatus,
   ApprovalTrailEntry,
+  ApproveInput,
   BlockedReason,
+  EditApprovalInput,
   EffectClass,
   EffectPreview,
   GateReason,
   Proposal,
+  ProposalList,
   ProposalTarget,
   ProposalTrailEntry,
+  RejectInput,
   RiskReason,
 } from "./approvals.ts";
 export type {
@@ -81,18 +95,31 @@ export type {
 } from "./assignments.ts";
 export type {
   Base,
+  BaseAggregateInput,
+  BaseAggregateResult,
+  BaseBulkOp,
+  BaseBulkResult,
+  BaseChartAgg,
   BaseFilter,
   BaseFilterCondition,
   BaseFilterValue,
   BaseFormulaError,
   BaseFormulaResultType,
+  BaseLinkedRow,
   BasePropDef,
   BasePropOption,
   BasePropType,
+  BaseQueryResult,
+  BaseRelationTarget,
   BaseRelativeDate,
+  BaseRollupFn,
   BaseRow,
+  BaseRowDetail,
   BaseSort,
+  BaseSummariesInput,
+  BaseSummariesResult,
   BaseSummary,
+  BaseSummaryFn,
   BaseTable,
   BaseView,
   BaseViewConfig,
@@ -107,7 +134,14 @@ export type {
   SiteAccess,
   SiteRule,
 } from "./browser.ts";
-export type { CalendarEvent, CalendarProposal, CalendarRange } from "./calendar.ts";
+export type {
+  CalendarEvent,
+  CalendarEventInput,
+  CalendarEventPatch,
+  CalendarProposal,
+  CalendarRange,
+  SeriesScope,
+} from "./calendar.ts";
 export type {
   Channel,
   ChannelMember,
@@ -217,7 +251,12 @@ export type {
   Issue,
   IssueActivity,
   IssueColumn,
+  IssueColumnInput,
+  IssueColumnPatch,
+  IssueCommentInput,
   IssueCriterion,
+  IssueInput,
+  IssuePatch,
   IssuePriority,
   IssueStage,
 } from "./issues.ts";
@@ -296,7 +335,15 @@ export {
   sealSecret,
 } from "./secret-box.ts";
 export type { AgentSecret, SecretBox, SecretBrowserBinding, SecretRequest, SecretTarget } from "./secrets.ts";
-export type { Skill, SkillDetail, SkillDraft } from "./skills.ts";
+export type {
+  Skill,
+  SkillDetail,
+  SkillDraft,
+  SkillImportInput,
+  SkillInput,
+  SkillMarkdown,
+  SkillPatch,
+} from "./skills.ts";
 export type {
   WikiAttachment,
   WikiDiff,

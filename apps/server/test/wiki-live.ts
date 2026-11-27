@@ -189,3 +189,43 @@ export function paragraphUpdate(text: string): Uint8Array {
   doc.getXmlFragment(YFRAGMENT).push([para]);
   return Y.encodeStateAsUpdate(doc);
 }
+
+/**
+ * Holds the server's next database transaction until `release`: `before` it starts, or `after` its callback
+ * ran (still open, before the commit), or `committed` (after the commit, before the caller goes on).
+ */
+export function holdNextTransaction(srv: RunningServer, when: "before" | "after" | "committed") {
+  const { db } = srv.deps;
+  const original = db.transaction.bind(db);
+  let begun!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>((r) => {
+    begun = r;
+  });
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  db.transaction = (async (fn: Parameters<typeof original>[0], ...rest: unknown[]) => {
+    db.transaction = original;
+    if (when === "before") {
+      begun();
+      await gate;
+      return original(fn, ...(rest as []));
+    }
+    if (when === "after")
+      return original(
+        async (tx) => {
+          const result = await fn(tx);
+          begun();
+          await gate;
+          return result;
+        },
+        ...(rest as []),
+      );
+    const result = await original(fn, ...(rest as []));
+    begun();
+    await gate;
+    return result;
+  }) as typeof original;
+  return { started, release, restore: () => (db.transaction = original) };
+}

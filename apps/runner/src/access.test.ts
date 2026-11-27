@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RunnerAccess } from "@vanr/contract";
@@ -47,4 +47,26 @@ test("a plain folder and a symlink to a plain folder are valid; swapping the fol
   symlinkSync("/etc", swapped);
   expect(() => access.resolve(agent, "/etc/passwd")).toThrow(/not in a folder/);
   expect(() => access.resolve(agent, join(swapped, "passwd"))).toThrow(/not in a folder/);
+});
+
+test("agent identities and symlink roots cannot escape the work folder", () => {
+  const access = accessWith([]);
+  for (const bad of [
+    { ...agent, handle: "../outside" },
+    { ...agent, id: "../../12345678" },
+  ])
+    expect(() => access.agentRoot(bad)).toThrow();
+  const outside = join(dir, "outside");
+  mkdirSync(outside);
+  symlinkSync(outside, join(ctx.workDir, "escape-12345678"));
+  expect(() => access.agentRoot({ ...agent, handle: "escape" })).toThrow();
+});
+
+test("a broken symlink is rejected before authorizing a write", () => {
+  const access = accessWith([]);
+  const root = access.agentRoot(agent);
+  const target = join(dir, ".bashrc");
+  symlinkSync(target, join(root, "dangling"));
+  expect(() => access.resolve(agent, "dangling")).toThrow();
+  expect(existsSync(target)).toBe(false);
 });

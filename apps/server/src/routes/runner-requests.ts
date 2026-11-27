@@ -12,7 +12,7 @@ import {
 } from "@vanr/engine/browser-policy";
 import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, lte, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
 import { type AgentRow, agentInWorkspace, requireAgentEditor } from "../agents";
@@ -29,8 +29,10 @@ import {
 import { RunnerCallError } from "../runners/hub";
 import { withPlanOwner } from "../runners/plans";
 import {
+  expireRunnerRequests,
   INTERVENTION_TTL_MS,
   type InterventionRow,
+  interventionSession,
   moveIntervention,
   publishIntervention,
   publishSecret,
@@ -78,13 +80,18 @@ async function interventionIn(
   me: WorkspaceMember,
   id: string,
 ): Promise<{ row: InterventionRow; agent: AgentRow }> {
-  const [row] = await deps.db
+  let [row] = await deps.db
     .select()
     .from(browserInterventions)
     .where(and(eq(browserInterventions.id, id), eq(browserInterventions.workspaceId, me.workspaceId)));
   if (!row) throw notFound("Browser request not found");
   const agent = await agentInWorkspace(deps.db, me.workspaceId, row.agentId);
   if (!canTalkTo(await withPlanOwner(deps.db, agent), me.userId)) throw notFound("Browser request not found");
+  if ((row.status === "pending" || row.status === "active") && row.expiresAt <= deps.now()) {
+    await expireRunnerRequests(deps, agent.id);
+    [row] = await deps.db.select().from(browserInterventions).where(eq(browserInterventions.id, id));
+    if (!row) throw notFound("Browser request not found");
+  }
   return { row, agent };
 }
 
@@ -118,6 +125,7 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
         and(eq(secretPrompts.id, param(c, "secretRequestId")), eq(secretPrompts.workspaceId, me.workspaceId)),
       );
     if (!row) throw notFound("Secret request not found");
+    const authorized = deps.runners.authorization(row.runnerId, row.agentId);
     const agent = await agentInWorkspace(deps.db, me.workspaceId, row.agentId);
     if (!canTalkTo(await withPlanOwner(deps.db, agent), me.userId))
       throw notFound("Secret request not found");
@@ -144,19 +152,39 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
       eq(runnerSecrets.name, row.name),
     );
     const won = await deps.db.transaction(async (tx) => {
+      const [runner] = await tx.select().from(runners).where(eq(runners.id, row.runnerId)).for("share");
+      const [current] = await tx.select().from(agents).where(eq(agents.id, agent.id)).for("share");
+      if (
+        !runner ||
+        runner.removedAt ||
+        runner.revokedAt ||
+        current?.environmentId !== row.runnerId ||
+        !authorized()
+      )
+        throw secretClosed("canceled");
       const [taken] = await tx
         .update(secretPrompts)
         .set({ status: "delivered", fulfilledAt: at, decidedBy: me.userId })
-        .where(and(eq(secretPrompts.id, row.id), eq(secretPrompts.status, "pending")))
+        .where(
+          and(
+            eq(secretPrompts.id, row.id),
+            eq(secretPrompts.status, "pending"),
+            gt(secretPrompts.expiresAt, deps.now()),
+          ),
+        )
         .returning();
       if (!taken) return null;
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`secret:${row.runnerId}:${agent.id}:${row.name}`}, 0))`,
+      );
       const [previous] = await tx.select().from(runnerSecrets).where(key);
+      const revision = new Date(Math.max(at.getTime(), (previous?.updatedAt.getTime() ?? 0) + 1));
       const values = {
         target: row.target,
         filePath: row.filePath,
         browser: row.browser,
         deliveredBy: me.userId,
-        updatedAt: at,
+        updatedAt: revision,
       };
       await tx
         .insert(runnerSecrets)
@@ -171,7 +199,7 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
           target: [runnerSecrets.agentId, runnerSecrets.runnerId, runnerSecrets.name],
           set: values,
         });
-      return { next: taken, previous: previous ?? null };
+      return { next: taken, previous: previous ?? null, revision };
     });
     if (!won) {
       const [now] = await deps.db
@@ -180,7 +208,7 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
         .where(eq(secretPrompts.id, row.id));
       throw secretClosed(now?.status ?? "pending");
     }
-    const { next, previous } = won;
+    const { next, previous, revision } = won;
     try {
       await deps.runners.call(
         row.runnerId,
@@ -193,7 +221,7 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
           browser: row.browser ?? null,
           box,
         },
-        { agent: { id: agent.id, handle: agent.handle }, timeoutMs: 20_000 },
+        { agent: { id: agent.id, handle: agent.handle }, timeoutMs: 20_000, authorized },
       );
     } catch (err) {
       // The runner didn't store it: the request can be answered again. When the runner answered with an error
@@ -201,15 +229,25 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
       // answer in time, the connection dropped on the way) the value may be on the disk, so the row stays and
       // the secret can still be listed and deleted.
       const notStored = err instanceof RunnerCallError && !UNSURE.has(err.code);
-      await deps.db.transaction(async (tx) => {
-        await tx
+      const reopened = await deps.db.transaction(async (tx) => {
+        const [runner] = await tx.select().from(runners).where(eq(runners.id, row.runnerId)).for("share");
+        const [current] = await tx.select().from(agents).where(eq(agents.id, agent.id)).for("share");
+        const status =
+          current?.environmentId === row.runnerId && runner && !runner.revokedAt && !runner.removedAt
+            ? "pending"
+            : "canceled";
+        const [reopened] = await tx
           .update(secretPrompts)
-          .set({ status: "pending", fulfilledAt: null, decidedBy: null })
-          .where(and(eq(secretPrompts.id, row.id), eq(secretPrompts.status, "delivered")));
-        if (!notStored) return;
-        if (previous) await tx.update(runnerSecrets).set(previous).where(key);
-        else await tx.delete(runnerSecrets).where(key);
+          .set({ status, fulfilledAt: null, decidedBy: null })
+          .where(and(eq(secretPrompts.id, row.id), eq(secretPrompts.status, "delivered")))
+          .returning();
+        if (!notStored) return reopened;
+        const ownRevision = and(key, eq(runnerSecrets.updatedAt, revision));
+        if (previous) await tx.update(runnerSecrets).set(previous).where(ownRevision);
+        else await tx.delete(runnerSecrets).where(ownRevision);
+        return reopened;
       });
+      if (reopened?.status === "canceled") await publishSecret(deps, reopened, "secret_request.updated");
       runnerError(err);
     }
     await publishSecret(deps, next, "secret_request.updated");
@@ -452,7 +490,7 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
       }),
     );
     const rows = await listSteps(deps.db, agent.id, q);
-    return c.json({ steps: rows.map(toBrowserLogEntry) });
+    return c.json({ entries: rows.map(toBrowserLogEntry) });
   });
 
   app.get(`${WORKSPACE}/agents/:agentId/browser/log/:entryId/shot`, async (c) => {
@@ -503,15 +541,26 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
     const { row } = await interventionIn(deps, me, param(c, "interventionId"));
     if (row.targetUserId && row.targetUserId !== me.userId)
       throw forbidden("This request is for someone else");
-    if (row.status === "active" && row.controllingUserId === me.userId) return c.json(toIntervention(row));
+    if (
+      row.status === "active" &&
+      row.controllingUserId === me.userId &&
+      interventionSession(deps, row.id) === c.get("sessionId")
+    )
+      return c.json(toIntervention(row));
     // Someone else took over first: the same code as who tries through the runner, not "finished".
     if (row.status === "active") throw inControl();
     if (row.status !== "pending") throw closed();
     if (!deps.runners.isOnline(row.runnerId)) throw conflict("runner.offline", "The runner is offline");
-    const next = await moveIntervention(deps, row.id, ["pending"], {
-      status: "active",
-      controllingUserId: me.userId,
-    });
+    const next = await moveIntervention(
+      deps,
+      row.id,
+      ["pending"],
+      {
+        status: "active",
+        controllingUserId: me.userId,
+      },
+      { sessionId: c.get("sessionId") ?? undefined },
+    );
     if (!next) {
       const [now] = await deps.db
         .select()
@@ -537,11 +586,17 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
         row.controllingUserId === me.userId ||
         (!row.controllingUserId && (!row.targetUserId || row.targetUserId === me.userId));
       if (!mine) throw forbidden("Someone else has control");
-      const next = await moveIntervention(deps, row.id, ["pending", "active"], {
-        status,
-        note: note ?? null,
-        handledAt: deps.now(),
-      });
+      const next = await moveIntervention(
+        deps,
+        row.id,
+        [row.status],
+        {
+          status,
+          note: note ?? null,
+          handledAt: deps.now(),
+        },
+        row.status === "active" ? { controller: me.userId } : {},
+      );
       if (!next) throw closed();
       return c.json(toIntervention(next));
     });
@@ -587,8 +642,39 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
       : [];
     // At most one open intervention per agent: reading the open one and taking it (or opening a new one) is
     // one step, under the agent's lock, so two people taking over at once leave one of them in control.
+    const expired: InterventionRow[] = [];
     const outcome = await deps.db.transaction(async (tx) => {
       await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`intervention:${agent.id}`}, 0))`);
+      const [session] = await tx
+        .select({ id: schema.sessions.id })
+        .from(schema.sessions)
+        .where(
+          and(eq(schema.sessions.id, c.get("sessionId") ?? ""), gt(schema.sessions.expiresAt, deps.now())),
+        )
+        .for("share");
+      if (!session) throw closed();
+      const [currentRunner] = await tx.select().from(runners).where(eq(runners.id, runner.id)).for("share");
+      const [current] = await tx.select().from(agents).where(eq(agents.id, agent.id)).for("share");
+      if (
+        !currentRunner ||
+        currentRunner.revokedAt ||
+        currentRunner.removedAt ||
+        current?.environmentId !== runner.id
+      )
+        throw closed();
+      expired.push(
+        ...(await tx
+          .update(browserInterventions)
+          .set({ status: "expired", handledAt: deps.now() })
+          .where(
+            and(
+              eq(browserInterventions.agentId, agent.id),
+              inArray(browserInterventions.status, ["pending", "active"]),
+              lte(browserInterventions.expiresAt, deps.now()),
+            ),
+          )
+          .returning()),
+      );
       const [open] = await tx
         .select()
         .from(browserInterventions)
@@ -600,11 +686,20 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
         );
       if (open?.status === "active") return { kind: "open" as const, row: open };
       if (open) {
+        if (open.targetUserId && open.targetUserId !== me.userId)
+          throw forbidden("This request is for someone else");
         const [taken] = await tx
           .update(browserInterventions)
           .set({ status: "active", controllingUserId: me.userId })
-          .where(and(eq(browserInterventions.id, open.id), eq(browserInterventions.status, "pending")))
+          .where(
+            and(
+              eq(browserInterventions.id, open.id),
+              eq(browserInterventions.status, "pending"),
+              gt(browserInterventions.expiresAt, deps.now()),
+            ),
+          )
           .returning();
+        if (taken) interventionSession(deps, taken.id, c.get("sessionId") ?? undefined);
         return taken ? { kind: "changed" as const, row: taken } : { kind: "closed" as const };
       }
       const now = deps.now();
@@ -627,11 +722,17 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
         })
         .returning();
       if (!created) throw new Error("intervention insert failed");
+      interventionSession(deps, created.id, c.get("sessionId") ?? undefined);
       return { kind: "changed" as const, row: created };
     });
+    for (const row of expired) await publishIntervention(deps, row);
     if (outcome.kind === "closed") throw closed();
     if (outcome.kind === "open") {
-      if (outcome.row.controllingUserId === me.userId) return c.json(toIntervention(outcome.row));
+      if (
+        outcome.row.controllingUserId === me.userId &&
+        interventionSession(deps, outcome.row.id) === c.get("sessionId")
+      )
+        return c.json(toIntervention(outcome.row));
       throw inControl();
     }
     const row = outcome.row;
