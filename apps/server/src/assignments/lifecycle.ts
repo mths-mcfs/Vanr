@@ -456,12 +456,13 @@ export async function transferAssignment(
 ): Promise<AssignmentRow> {
   // In the assignment's job queue: a job start in progress either lands first (and is seen running here) or
   // reads the new owner and runner after.
-  const next = await withAssignmentJobs(row.id, () => transferNow(deps, me, row, input));
+  const next = await withAssignmentJobs(row.id, () => transferOnLockedRow(deps, me, row, input));
   publishAssignment(deps, next, "participants");
   return next;
 }
 
-function transferNow(
+/** The hand-over's write, on the assignment's row locked: the owner, runner and executor checked again there. */
+export function transferOnLockedRow(
   deps: AppDeps,
   me: WorkspaceMember,
   row: AssignmentRow,

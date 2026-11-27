@@ -18,7 +18,7 @@ import {
   finishAssignment,
   patchAssignment,
   requestSubmissionChanges,
-  transferAssignment,
+  transferOnLockedRow,
 } from "../src/assignments/lifecycle";
 import type { AppDeps, WorkspaceMember } from "../src/context";
 import { HttpError } from "../src/http";
@@ -360,6 +360,8 @@ describe("answering a submission on Postgres", () => {
   );
 
   test.skipIf(!TEST_POSTGRES_URL)(
+    // The route also queues the hand-over behind the assignment's job starts (in memory, one process); the
+    // forced pair drives the write under the row lock that holds across connections.
     onPostgres("forced: two hand-overs at once: the second finds the assignment changed"),
     async () => {
       await withServer("asg_transfer", async (server, admin, ctx) => {
@@ -370,7 +372,7 @@ describe("answering a submission on Postgres", () => {
           "select",
           (side, hooks) =>
             ended(
-              transferAssignment(withDb(server.deps, hooks), ctx.ana, row, {
+              transferOnLockedRow(withDb(server.deps, hooks), ctx.ana, row, {
                 userId: side === "A" ? ctx.betoId : ctx.caioId,
                 runnerId: null,
               }),
