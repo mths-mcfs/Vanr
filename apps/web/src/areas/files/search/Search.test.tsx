@@ -35,13 +35,15 @@ describe("the search", () => {
     expect(await screen.findByText("Nothing matches “zebra”")).toBeDefined();
   });
 
-  test("a kind filter asks the server for that kind only", async () => {
+  test("a kind filter shows that kind only, from its own query", async () => {
     const app = await renderApp({ path: `${PATH}?q=plan`, signedInAs: "usr_ana" });
     await screen.findByRole("link", { name: "Release plan" });
+    const before = app.server.calls.length;
     await app.user.click(screen.getByRole("button", { name: "Messages" }));
     expect(await screen.findByText("Nothing matches “plan”")).toBeDefined();
-    const last = app.server.calls.filter((call) => call.method === "getSearch").at(-1);
-    expect(last?.params.kinds).toBe("message");
+    // The kind's own query was already asked for "everything", so it may come from the cache.
+    const after = app.server.calls.slice(before).filter((call) => call.method === "getSearch");
+    expect(after.every((call) => call.params.kinds === "message")).toBe(true);
   });
 
   test("the operators' help puts an example into the query", async () => {
@@ -53,7 +55,8 @@ describe("the search", () => {
 
   test("failed: says so, with a retry that works", async () => {
     const server = newServer();
-    server.force("getSearch", { kind: "error", status: 500, code: "internal" }, 1 + QUERY_RETRIES);
+    // Every kind is asked on its own, each with its retries.
+    server.force("getSearch", { kind: "error", status: 500, code: "internal" }, 5 * (1 + QUERY_RETRIES));
     const app = await renderApp({ path: `${PATH}?q=ink`, signedInAs: "usr_ana", server });
     const alert = await within(screen.getByRole("main")).findByRole("alert");
     expect(alert.textContent).toContain("The search did not go through");
@@ -108,5 +111,21 @@ describe("the search, past the happy path", () => {
     await app.user.click(screen.getByRole("button", { name: "Search operators" }));
     await app.user.click(screen.getByRole("button", { name: "Add has:link" }));
     expect((field() as HTMLInputElement).value).toBe(long);
+  });
+});
+
+describe("everything at once", () => {
+  test("each kind is asked on its own, so one kind never takes every place", async () => {
+    const app = await renderApp({ path: `${PATH}?q=ink`, signedInAs: "usr_ana" });
+    await screen.findByRole("list", { name: "Results" });
+    const asked = app.server.calls
+      .filter((call) => call.method === "getSearch")
+      .map((call) => call.params.kinds);
+    expect(new Set(asked)).toEqual(new Set(["message", "file", "wiki", "issue", "debate"]));
+    expect(
+      app.server.calls
+        .filter((call) => call.method === "getSearch")
+        .every((call) => call.params.limit === "30"),
+    ).toBe(true);
   });
 });

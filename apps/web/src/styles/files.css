@@ -988,8 +988,8 @@
       grid-template-columns: minmax(0, 1fr) auto;
     }
 
-    /* On a phone a file's line keeps its name and what it is; a deleted one keeps its days left. */
-    .files__row > .files__meta:not(.files__ear):not(.files__days) {
+    /* On a phone a file's line keeps its name and what it is; a deleted one its days left and who restores it. */
+    .files__row > .files__meta:not(.files__ear):not(.files__days):not(.files__who) {
       display: none;
     }
 

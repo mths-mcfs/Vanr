@@ -37,6 +37,7 @@ export default {
   "drive.none.clear": "Clear filters",
   "drive.list": "Files",
   "drive.kindVersion": "{kind}, version {version}",
+  "drive.inContentFailed": "The search inside files did not go through",
   "drive.inContent": "Found inside files",
 
   "trash.title": "Trash",
@@ -85,7 +86,7 @@ export default {
 
   "extract.working": "Reading the text",
   "extract.ready": { one: "Text read from {count} page", other: "Text read from {count} pages" },
-  "extract.failed": "The text could not be read: {reason}",
+  "extract.failed": "The text could not be read.",
 
   "upload.title": "Uploads",
   "upload.clear": "Clear finished",
@@ -110,6 +111,8 @@ export default {
   "search.ask": "Ask",
   "search.operators": "Search operators",
   "search.operatorsLead": "Narrow a search by adding any of these to it:",
+  "search.example.phrase": '"exact phrase"',
+  "search.example.exclude": "-word",
   "search.addOperator": "Add {operator}",
   "search.filters": "Show results of",
   "search.kinds.all": "Everything",

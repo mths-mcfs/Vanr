@@ -2,6 +2,7 @@
 // a document edited while someone else saved, the trash and the restore.
 import { describe, expect, test } from "bun:test";
 import { act, screen, waitFor, within } from "@testing-library/react";
+import { QUERY_RETRIES } from "@vanr/client/react";
 import { newServer, renderApp } from "../../../../test/app.tsx";
 
 const PATH = "/workspace/workspace_birchwood/files";
@@ -84,17 +85,19 @@ describe("a file's preview", () => {
     const app = await renderApp({ path: `${PATH}?file=fil_plan`, signedInAs: "usr_ana" });
     const open = await dialog("Release plan");
     await app.user.click(within(open).getByRole("button", { name: "Move to trash" }));
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("dialog") === null).toBe(true));
     expect(app.address()).toBe(PATH);
     await waitFor(() =>
-      expect(within(screen.getByRole("list", { name: "Files" })).queryByText("Release plan")).toBeNull(),
+      expect(within(screen.getByRole("list", { name: "Files" })).queryByText("Release plan") === null).toBe(
+        true,
+      ),
     );
     await app.user.click(screen.getByRole("button", { name: "Trash" }));
     const trash = await screen.findByRole("list", { name: "Deleted files" });
     const row = within(trash).getByText("Release plan").closest("li");
     expect(row?.textContent).toContain("30 days left");
     await app.user.click(within(trash).getByRole("button", { name: "Restore Release plan" }));
-    await waitFor(() => expect(within(trash).queryByText("Release plan")).toBeNull());
+    await waitFor(() => expect(within(trash).queryByText("Release plan") === null).toBe(true));
     await app.user.click(screen.getByRole("button", { name: "Back to files" }));
     expect(
       await within(await screen.findByRole("list", { name: "Files" })).findByText("Release plan"),
@@ -147,7 +150,7 @@ describe("a file's preview, past the happy path", () => {
     const huge = new File([new Uint8Array(1)], "field-notes.txt", { type: "text/plain" });
     Object.defineProperty(huge, "size", { value: 1024 * 1024 * 1024 + 1 });
     await app.user.upload(within(open).getByTestId("files-new-version"), huge);
-    expect((await within(open).findByRole("alert")).textContent).toContain("Files are limited to 1 GB.");
+    expect(await within(open).findByText("Files are limited to 1 GB.")).toBeDefined();
     expect(app.server.calls.some((call) => call.method === "createFileUpload")).toBe(false);
   });
 
@@ -159,5 +162,80 @@ describe("a file's preview, past the happy path", () => {
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("The file could not be restored");
     expect(alert.textContent).toContain("You don't have permission to do that.");
+  });
+});
+
+describe("a file's preview when things go wrong meanwhile", () => {
+  test("an interrupted new version goes on from where it stopped when the same file is picked again", async () => {
+    const server = newServer();
+    server.files.partSize = 4;
+    const first = await renderApp({ path: `${PATH}?file=fil_notes`, signedInAs: "usr_ana", server });
+    const open = await dialog("field-notes.txt");
+    const held = server.hold("replaceFileUpload");
+    const file = new File([new Uint8Array(8)], "field-notes.txt", { type: "text/plain", lastModified: 1 });
+    await first.user.upload(within(open).getByTestId("files-new-version"), file);
+    await waitFor(() => expect(server.files.uploads).toHaveLength(1));
+    first.unmount();
+    held.release();
+    const again = await renderApp({
+      path: `${PATH}?file=fil_notes`,
+      signedInAs: "usr_ana",
+      server,
+      store: first.runtime.store,
+    });
+    const reopened = await dialog("field-notes.txt");
+    await again.user.upload(within(reopened).getByTestId("files-new-version"), file);
+    await waitFor(() =>
+      expect(within(reopened).getByTestId("files-version").textContent).toBe("Version 2 of 2"),
+    );
+    expect(server.calls.filter((call) => call.method === "createFileUpload")).toHaveLength(1);
+  });
+
+  test("after a conflict, text typed while the newest version is asked for stays", async () => {
+    const server = newServer();
+    const app = await renderApp({ path: `${PATH}?file=fil_plan`, signedInAs: "usr_ana", server });
+    const open = await dialog("Release plan");
+    await app.user.click(within(open).getByRole("button", { name: "Edit" }));
+    const field = within(open).getByRole("textbox", { name: "Document text" }) as HTMLTextAreaElement;
+    await app.user.clear(field);
+    await app.user.type(field, "Mine");
+    server.files.files
+      .find((file) => file.id === "fil_plan")
+      ?.versions.push({
+        version: 3,
+        content: { kind: "document", markdown: "Theirs" },
+        author: { type: "person", id: "usr_jonas" },
+        createdAt: new Date().toISOString(),
+        note: null,
+      });
+    const asked = server.delay("getFile");
+    await app.user.click(within(open).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(field.readOnly).toBe(false));
+    await app.user.type(field, " and more");
+    asked.release();
+    await within(open).findByRole("button", { name: "Save over version 3" });
+    expect(field.value).toBe("Mine and more");
+  });
+
+  test("a history that could not be loaded has a retry", async () => {
+    const server = newServer();
+    server.force("listFileVersions", { kind: "error", status: 500, code: "internal" }, 1 + QUERY_RETRIES);
+    const app = await renderApp({ path: `${PATH}?file=fil_plan`, signedInAs: "usr_ana", server });
+    const open = await dialog("Release plan");
+    const alert = await within(open).findByRole("alert");
+    await app.user.click(within(alert).getByRole("button", { name: "Retry" }));
+    expect(await within(open).findByRole("list", { name: "History" })).toBeDefined();
+  });
+
+  test("the open trash drops a file restored in another session", async () => {
+    const app = await renderApp({ path: `${PATH}?trash=1`, signedInAs: "usr_ana" });
+    const trash = await screen.findByRole("list", { name: "Deleted files" });
+    await waitFor(() => expect(app.server.openSockets().length).toBe(1));
+    await act(async () => {
+      const old = app.server.files.files.find((file) => file.id === "fil_old");
+      if (old) old.deletedAt = null;
+      app.server.emit("workspace_birchwood", { type: "file.updated", fileId: "fil_old", channelId: null });
+    });
+    await waitFor(() => expect(within(trash).queryByText("Old flyer") === null).toBe(true));
   });
 });

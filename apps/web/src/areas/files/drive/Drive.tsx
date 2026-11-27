@@ -4,13 +4,13 @@
 // is also asked again on open and once a minute.
 import { useApiQuery } from "@vanr/client/react";
 import type { File as DriveFile, FileKind } from "@vanr/contract";
-import { Button, Chip, EmptyState, Icon, Input } from "@vanr/ui";
+import { Button, Callout, Chip, EmptyState, Icon, Input } from "@vanr/ui";
 import { FilePlus, LayoutGrid, List, Trash2, Upload } from "lucide-react";
 import { type DragEvent, useCallback, useDeferredValue, useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import { useRuntime } from "../../../app/context.tsx";
 import { useGo, useRouteParams, useSearch } from "../../../app/navigation.tsx";
-import { ScreenError, ScreenLoading, useDocumentTitle } from "../../../app/screens.tsx";
+import { ScreenError, ScreenLoading, useDocumentTitle, useErrorMessage } from "../../../app/screens.tsx";
 import { useMessages } from "../../../i18n/react.tsx";
 import { readStored, STORAGE_KEYS, writeStored } from "../../../platform/storage.ts";
 import {
@@ -190,6 +190,17 @@ function FileList({
     setKind(null);
     setWho("all");
   };
+
+  // A channel file's events only reach the channel's subscribers: when the list (asked again on open
+  // and every minute) no longer has the open file, the preview asks again too and finds it gone.
+  const refetch = useRefetch();
+  const openFile = address.file;
+  useEffect(() => {
+    if (openFile === undefined || q !== "" || list.data === undefined || list.isPlaceholderData) return;
+    if (!list.data.some((file) => file.id === openFile)) {
+      void refetch([{ method: "getFile", args: { workspaceId, fileId: openFile } }]);
+    }
+  }, [list.data, list.isPlaceholderData, openFile, q, refetch, workspaceId]);
 
   // With the preview open, the arrows move to the file beside it, in the list's order.
   useEffect(() => {
@@ -383,7 +394,25 @@ function ContentHits({
   open: (next: DriveAddress) => void;
 }) {
   const t = useMessages("files");
+  const common = useMessages("common");
+  const describe = useErrorMessage("files");
   const hits = useApiQuery("getSearch", { workspaceId, query: { q, kinds: ["file"], limit: CONTENT_HITS } });
+  if (hits.isError) {
+    return (
+      <Callout
+        tone="danger"
+        role="alert"
+        title={t("drive.inContentFailed")}
+        actions={
+          <Button size="sm" onClick={() => void hits.refetch()}>
+            {common("action.retry")}
+          </Button>
+        }
+      >
+        {describe(hits.error)}
+      </Callout>
+    );
+  }
   const list = hits.data ?? [];
   if (list.length === 0) return null;
   return (

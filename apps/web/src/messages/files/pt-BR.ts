@@ -39,6 +39,7 @@ export default {
   "drive.none.clear": "Limpar filtros",
   "drive.list": "Arquivos",
   "drive.kindVersion": "{kind}, versão {version}",
+  "drive.inContentFailed": "A busca dentro dos arquivos não foi concluída",
   "drive.inContent": "Encontrado dentro dos arquivos",
 
   "trash.title": "Lixeira",
@@ -87,7 +88,7 @@ export default {
 
   "extract.working": "Lendo o texto",
   "extract.ready": { one: "Texto lido de {count} página", other: "Texto lido de {count} páginas" },
-  "extract.failed": "Não foi possível ler o texto: {reason}",
+  "extract.failed": "Não foi possível ler o texto.",
 
   "upload.title": "Envios",
   "upload.clear": "Limpar concluídos",
@@ -113,6 +114,8 @@ export default {
   "search.ask": "Perguntar",
   "search.operators": "Operadores de busca",
   "search.operatorsLead": "Refine a busca acrescentando qualquer um destes:",
+  "search.example.phrase": '"frase exata"',
+  "search.example.exclude": "-palavra",
   "search.addOperator": "Acrescentar {operator}",
   "search.filters": "Mostrar resultados de",
   "search.kinds.all": "Tudo",

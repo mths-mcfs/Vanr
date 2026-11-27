@@ -2,8 +2,10 @@
 // its page), wiki pages, issues and debates. The server reads the operators (`from:`, `in:`, `has:`,
 // `is:`, `before:`, `after:`, quotes and `-`). "Ask" answers in parts, each pointing at numbered
 // sources. The query lives in the address, so a search can be shared and the back button works.
+
+import { useQueries } from "@tanstack/react-query";
 import { isApiError } from "@vanr/client";
-import { useApiMutation, useApiQuery } from "@vanr/client/react";
+import { queryKey, shouldRetry, useApiMutation, useApiQuery, useVanrClient } from "@vanr/client/react";
 import type { AskAnswer, SearchHit, SearchKind } from "@vanr/contract";
 import { Button, Callout, Chip, EmptyState, Icon, Input } from "@vanr/ui";
 import { Sparkles } from "lucide-react";
@@ -26,16 +28,8 @@ export const SEARCH_KINDS = [
   "debate",
 ] as const satisfies readonly SearchKind[];
 
-/** Examples of each operator, put into the query by the help. */
-const OPERATORS = [
-  "from:@ana",
-  "in:#general",
-  "has:link",
-  "is:thread",
-  "after:2026-10-01",
-  '"exact phrase"',
-  "-word",
-];
+/** Examples of each operator, put into the query by the help; a phrase and an excluded word come from the catalog. */
+const OPERATORS = ["from:@ana", "in:#general", "has:link", "is:thread", "after:2026-10-01"];
 
 const SearchAddress = z.object({ q: z.string().max(TITLE_MAX).optional(), ask: z.literal("1").optional() });
 type SearchAddress = z.infer<typeof SearchAddress>;
@@ -125,7 +119,7 @@ export function SearchScreen() {
         <div className="files__operators">
           <p className="page__muted">{t("search.operatorsLead")}</p>
           <ul aria-label={t("search.operators")}>
-            {OPERATORS.map((operator) => (
+            {[...OPERATORS, t("search.example.phrase"), t("search.example.exclude")].map((operator) => (
               <li key={operator}>
                 <button
                   type="button"
@@ -175,24 +169,31 @@ function Results({ workspaceId, q, kind }: { workspaceId: string; q: string; kin
   const name = useActorName(workspaceId);
   const when = useRelativeTime();
   const channels = useApiQuery("listChannels", { workspaceId });
-  const results = useApiQuery(
-    "getSearch",
-    { workspaceId, query: { q, limit: PER_KIND, ...(kind !== null && { kinds: [kind] }) } },
-    { enabled: q.length >= MIN_QUERY, placeholderData: (previous) => previous },
-  );
+  // The server's limit counts every kind together, so "everything" asks once per kind: each kind keeps
+  // its own best PER_KIND, as the cap notice says.
+  const client = useVanrClient();
+  const kinds = kind === null ? SEARCH_KINDS : [kind];
+  const queries = useQueries({
+    queries: kinds.map((each) => {
+      const args = { workspaceId, query: { q, limit: PER_KIND, kinds: [each] } };
+      return {
+        queryKey: queryKey(client, "getSearch", args),
+        queryFn: ({ signal }: { signal: AbortSignal }) => client.call("getSearch", args, { signal }),
+        enabled: q.length >= MIN_QUERY,
+        placeholderData: (previous: SearchHit[] | undefined) => previous,
+        retry: shouldRetry,
+      };
+    }),
+  });
+  const failed = queries.find((each) => each.isError && each.data === undefined);
+  const pending = queries.some((each) => each.isPending);
+  const retry = () => void Promise.all(queries.map((each) => each.refetch()));
   if (q.length < MIN_QUERY) return <EmptyState className="page__narrow" title={t("search.typeMore")} />;
-  if (results.isError && results.data === undefined) {
-    return (
-      <ScreenError
-        title={t("search.failed")}
-        error={results.error}
-        onRetry={() => void results.refetch()}
-        namespace="files"
-      />
-    );
+  if (failed !== undefined) {
+    return <ScreenError title={t("search.failed")} error={failed.error} onRetry={retry} namespace="files" />;
   }
-  if (results.isPending) return <ScreenLoading />;
-  const hits = results.data;
+  if (pending) return <ScreenLoading />;
+  const hits = queries.flatMap((each) => each.data ?? []);
   if (hits.length === 0) return <EmptyState className="page__narrow" title={t("search.none", { q })} />;
   const capped = SEARCH_KINDS.some((each) => hits.filter((hit) => hit.kind === each).length >= PER_KIND);
   const channelName = (hit: SearchHit) => {
