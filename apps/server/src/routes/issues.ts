@@ -15,7 +15,7 @@ import type { Hono } from "hono";
 import { z } from "zod";
 import { agentInWorkspace } from "../agents";
 import { channelInWorkspace, openDm, writableChannel } from "../channels";
-import { type AppDeps, type AppEnv, type Ctx, requireRuntime, type WorkspaceMember } from "../context";
+import { type AppDeps, type AppEnv, type Ctx, type WorkspaceMember } from "../context";
 import { fileFor } from "../drive";
 import { notFound, param, readJson, readQuery } from "../http";
 import {
@@ -166,7 +166,6 @@ export function registerIssues(app: Hono<AppEnv>) {
     const input = await readJson(c, createIssueBody);
     // Before creating: if the agent can't start, the issue isn't left halfway.
     if (input.assignee?.type === "agent") {
-      requireRuntime(deps.runtime, "onPersonMessage");
       await checkAgentAssignee(deps, me.workspaceId, input.assignee, me.userId);
     }
     if (input.channelId)
@@ -234,7 +233,6 @@ export function registerIssues(app: Hono<AppEnv>) {
   app.post(`${WORKSPACE}/issues/:issueId/ask-agent`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
-    requireRuntime(deps.runtime, "onPersonMessage");
     const row = await issueOf(c, me);
     const { agentId } = await readJson(c, z.object({ agentId: z.string().min(1).max(64) }).strict());
     return c.json(await toIssue(deps.db, await askAgent(deps, me, row.id, agentId)));

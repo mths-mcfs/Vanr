@@ -5,7 +5,7 @@ import { newId } from "@vanr/engine/ids";
 import { and, eq } from "drizzle-orm";
 import type { Verifier } from "../src/assignments/verify";
 import type { RuntimePort } from "../src/context";
-import type { RunEnd } from "../src/forward-types";
+import type { RunEnd } from "../src/runtime/runtime";
 import type { RunningServer } from "../src/server";
 import { body } from "./harness";
 import { connectProtocolRunner, mintSession, type ProtocolRunner } from "./protocol-runner";

@@ -14,7 +14,7 @@ import { type Db, schema } from "@vanr/engine/db";
 import { MODELS } from "@vanr/engine/models/catalog";
 import { and, eq, inArray } from "drizzle-orm";
 import type { AgentRow } from "../agents";
-import { type AppDeps, requireRuntime, type WorkspaceMember } from "../context";
+import { type AppDeps, type WorkspaceMember } from "../context";
 import { badRequest, conflict, HttpError } from "../http";
 import { log } from "../logger";
 import { closeNotificationGroups, closeNotifications } from "../notifications";
@@ -73,15 +73,6 @@ export const editsAgent = (me: WorkspaceMember, agent: AgentRow) =>
 export function requireManager(me: WorkspaceMember, row: AssignmentRow) {
   if (!managesAssignment(me, row))
     throw new HttpError(403, "assignment.forbidden", "Only the owner can change this assignment");
-}
-
-/**
- * Stopping the agent's run in the thread (pause, stop, close) needs the agent runtime (slice S6): without it the
- * route is rejected before any write.
- */
-export function requireRunStop(deps: AppDeps) {
-  requireRuntime(deps.runtime, "activeRun");
-  requireRuntime(deps.runtime, "cancel");
 }
 
 /**
@@ -396,14 +387,6 @@ export async function settingsOf(
   };
 }
 
-/**
- * Whether telling the executor reaches the agent runtime: the agent hears it through the thread (slice S6). A
- * route checks it at its entry, before writing what made it tell.
- */
-export function requireTell(deps: AppDeps, row: AssignmentRow) {
-  if (row.executor === "agent") requireRuntime(deps.runtime, "onPersonMessage");
-}
-
 /** Tells the executor what the person wants: the agent through the thread; Claude Code/Codex in a resumed job. */
 export async function tell(
   deps: AppDeps,
@@ -437,7 +420,7 @@ export async function tellIfPossible(deps: AppDeps, row: AssignmentRow, userId: 
  * Closes the assignment (done or canceled) once, even with two clicks or two people. In one transaction on the
  * locked row: accepts the given submission (or every pending one when done), supersedes the rest, expires the
  * commands that waited and moves the status. Then it stops the agent and the jobs, copies to the wiki if asked
- * and tells. The caller checked `requireRunStop` before.
+ * and tells.
  */
 export async function finishAssignment(
   deps: AppDeps,

@@ -15,7 +15,7 @@ import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { AgentRow } from "./agents";
 import { agentCanPost } from "./channels";
-import { type AppDeps, requireRuntime } from "./context";
+import { type AppDeps } from "./context";
 import { HttpError } from "./http";
 import { mailboxesOf, sentOutOf, transmitMail } from "./integrations/mail";
 import { actionMode } from "./integrations/mail-rules";
@@ -72,11 +72,10 @@ export interface OutboxRun {
 /**
  * Queues the send and records the undoable action that goes in the receipt. The email can only be undone until
  * it goes out; the post, once out, can still be retracted (the usual undo). The send is woken by the runtime at
- * `sendAt`: without it (until slice S6) the call is rejected before anything is written.
+ * `sendAt`.
  */
 export async function queueSend(ctx: OutboxRun, item: Item & { title: string }): Promise<OutboxRow> {
   const { db, now, config, runtime } = ctx.deps;
-  requireRuntime(runtime, "wakeAt");
   const at = now();
   const sendAt = new Date(at.getTime() + config.undoSendMs);
   const payload: Record<string, unknown> = { ...item.payload };

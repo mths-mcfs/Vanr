@@ -12,7 +12,7 @@ import { newId } from "@vanr/engine/ids";
 import { PRODUCT } from "@vanr/product";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { type AgentRow, workspaceBudgetDefaults } from "./agents";
-import { type AppDeps, requireRuntime } from "./context";
+import { type AppDeps } from "./context";
 import { isUniqueViolation } from "./db-errors";
 import { conflict } from "./http";
 
@@ -100,14 +100,12 @@ export async function evalSystem(db: Db, agent: AgentRow, instructions: string):
 
 /**
  * Opens the run (one per agent) and runs the cases in the background. Each case asks the runtime for a text
- * (`complete`): until the runtime slice (S6) it isn't there, and the run is rejected here with `not_available`,
- * before anything is written.
+ * (`complete`).
  */
 export async function startEval(
   deps: AppDeps,
   input: { agent: AgentRow; userId: string; after: string; proposalId: string | null },
 ): Promise<EvalRow> {
-  requireRuntime(deps.runtime, "complete");
   const { db } = deps;
   const cases = await db
     .select()

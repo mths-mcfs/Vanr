@@ -18,7 +18,7 @@ import { z } from "zod";
 import { type AgentRow, agentInWorkspace, agentNames } from "../agents";
 import { assignmentPostMeta, assignmentRouting } from "../assignments/tools";
 import { type ChannelRow, canReadChannel, openDm, readableChannel, writableChannel } from "../channels";
-import { type AppDeps, type AppEnv, type Ctx, hasRuntime, requireRuntime } from "../context";
+import { type AppDeps, type AppEnv, type Ctx } from "../context";
 import { isUniqueViolation } from "../db-errors";
 import { fileFor } from "../drive";
 import { badRequest, conflict, forbidden, notFound, param, readJson, readQuery } from "../http";
@@ -586,19 +586,6 @@ export function registerChat(app: Hono<AppEnv>) {
       return c.json(await hydrateOne(deps.db, resent), 200);
     }
     const assignment = await assignmentPostMeta(deps, me, input.threadId, body);
-    // Without the agent runtime (slice S6) a post an agent would answer is rejected before it is written: it would
-    // stay unanswered with no sign why. A post no agent answers goes out as usual.
-    const routes = hasRuntime(deps.runtime, "onPersonMessage");
-    if (
-      !routes &&
-      (await agentWouldAnswer(deps, channel, {
-        authorId: me.userId,
-        body,
-        threadId: input.threadId ?? null,
-        meta: assignment,
-      }))
-    )
-      requireRuntime(deps.runtime, "onPersonMessage");
     // An attachment is a file of this channel (or of the whole workspace): whoever reads the message can open it.
     const attached: FileRef[] = [];
     for (const id of new Set(input.attachments ?? [])) {
@@ -623,7 +610,7 @@ export function registerChat(app: Hono<AppEnv>) {
     });
     if (!isMember) await joinChannel(deps.db, channel.id, me.userId);
     // A resend of the same clientId doesn't route again. A routing failure doesn't fail the post.
-    if (created && routes) {
+    if (created) {
       await deps.runtime
         .onPersonMessage({ workspaceId: me.workspaceId, channel, message })
         .catch((err) => log.error("runtime.route_failed", { messageId: message.id, err }));
@@ -729,8 +716,6 @@ export function registerChat(app: Hono<AppEnv>) {
       const agent = await agentInWorkspace(db, me.workspaceId, target.agentId);
       if (agent.archivedAt) throw notFound("Agent not found");
       await requireCanTalk(db, agent, me.userId);
-      // The agent answers every message of its DM: without the runtime (slice S6) the DM isn't opened at all.
-      requireRuntime(c.get("deps").runtime, "onPersonMessage");
       other = { type: "agent", id: agent.id };
     } else {
       const [person] = await db

@@ -10,7 +10,7 @@ import { z } from "zod";
 import { jsonFrom } from "./agent-lab";
 import { changeMemory, createMemory, type MemoryRow, storeWhere } from "./agent-memory";
 import type { AgentRow } from "./agents";
-import { type AppDeps, requireRuntime, type WorkspaceMember } from "./context";
+import { type AppDeps, type WorkspaceMember } from "./context";
 import { isUniqueViolation } from "./db-errors";
 import { conflict, notFound } from "./http";
 
@@ -173,7 +173,6 @@ async function readStore(db: Db, agent: AgentRow): Promise<{ read: MemoryRow[]; 
  * without it, the start is rejected before anything is written.
  */
 export async function startConsolidation(deps: AppDeps, me: WorkspaceMember, agent: AgentRow) {
-  requireRuntime(deps.runtime, "complete");
   const { read, total } = await readStore(deps.db, agent);
   if (read.length < 2)
     throw conflict("memory_consolidation.too_small", "There is nothing to consolidate yet");

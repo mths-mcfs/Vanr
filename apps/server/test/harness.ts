@@ -1,4 +1,5 @@
 import type { Me } from "@vanr/contract";
+import type { ModelProvider } from "@vanr/engine/models/types";
 import type { Verifier } from "../src/assignments/verify";
 import { loadConfig } from "../src/config";
 import type { RuntimePort } from "../src/context";
@@ -6,9 +7,6 @@ import type { GuardedConnector } from "../src/integrations/sql-identity";
 import { type BootSteps, type RunningServer, startServer } from "../src/server";
 import type { SignupQueueLimits } from "../src/signup-queue";
 
-// Later slices add here what they unlock: the real Postgres option (`postgres`, S2), the model provider
-// option (S6) and the typed API client (`apiFor`, `apiError`, `memberOf`, `toolResults`, with the client
-// package).
 
 export interface TestServerOptions {
   /** Shorter limits for the closed sign-up queue. */
@@ -33,6 +31,8 @@ export interface TestServerOptions {
   assignmentVerifier?: Verifier;
   /** The agent runtime, made from the server's port (see `StartOptions.runtime`). */
   runtime?: (port: RuntimePort) => RuntimePort;
+  /** Every agent uses this provider (scripted or simulated) in place of the fake one. */
+  modelProvider?: ModelProvider;
 }
 
 /**
@@ -72,6 +72,9 @@ export async function startTestServer(opts: TestServerOptions = {}): Promise<Run
     engine: opts.engine ?? "local",
     assignmentVerifier: opts.assignmentVerifier,
     runtime: opts.runtime,
+    modelProvider: opts.modelProvider,
+    // The runtime's sweep runs only where a test calls `tick()`.
+    tickEveryMs: 0,
     // The file services' cycle runs only where a test asks for it: the production period (60 s of real time)
     // would fire in the middle of a long file, over whatever rows the earlier tests left.
     fileServicesMs: opts.fileServicesMs ?? FILE_SERVICES_OFF_MS,

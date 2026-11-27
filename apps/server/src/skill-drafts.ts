@@ -7,7 +7,7 @@ import { asc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { jsonFrom } from "./agent-lab";
 import { agentInWorkspace } from "./agents";
-import { type AppDeps, requireRuntime, type WorkspaceMember } from "./context";
+import { type AppDeps, type WorkspaceMember } from "./context";
 import { HttpError } from "./http";
 import { readableRun } from "./run-access";
 
@@ -97,7 +97,6 @@ export async function draftSkillFromRun(
   me: WorkspaceMember,
   runId: string,
 ): Promise<SkillDraft> {
-  requireRuntime(deps.runtime, "complete");
   const run = await readableRun(me.workspaceId, me.userId, runId, deps.db);
   if (run.status !== "done") throw new HttpError(409, "skill_draft.run_not_done", "The run has not finished");
   const agent = await agentInWorkspace(deps.db, me.workspaceId, run.agentId);

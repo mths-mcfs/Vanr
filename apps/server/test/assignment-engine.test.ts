@@ -16,7 +16,6 @@ import {
   act,
   createEngine,
   decide,
-  runtimeReady,
   type Snapshot,
   snapshotOf,
 } from "../src/assignments/motor";
@@ -159,7 +158,7 @@ describe("decide (pure)", () => {
   });
 });
 
-describe("without the agent runtime", () => {
+describe("on the real agent runtime", () => {
   let server: RunningServer;
   beforeAll(async () => {
     server = await startTestServer();
@@ -167,9 +166,8 @@ describe("without the agent runtime", () => {
   afterAll(() => server.stop(), SERVER_TEST_MS);
 
   test(
-    "the engine doesn't start: an active assignment stays as it is and nothing reaches the runtime",
+    "an active assignment advances one step: the engine sends the agent its turn and the agent's run answers it",
     async () => {
-      expect(runtimeReady(server.deps)).toBe(false);
       const ana = await signedIn(server, "Ana", "ana@engine-off.test");
       const { workspaceId, general } = await seedWorkspace(server, ana, "Off");
       const agentId = await seedAgent(server.deps.db, workspaceId, ana, null);
@@ -200,9 +198,16 @@ describe("without the agent runtime", () => {
         .select()
         .from(assignmentWork)
         .where(eq(assignmentWork.assignmentId, row.id));
-      expect(work).toEqual([]);
-      const [after] = await server.deps.db.select().from(assignments).where(eq(assignments.id, row.id));
-      expect([after?.status, after?.waitReason]).toEqual(["active", null]);
+      expect(work.length).toBeGreaterThan(0);
+      const [first] = work;
+      // The turn went out as a message of the assignment's thread and the agent's run on it ended.
+      const turns = await server.deps.db
+        .select()
+        .from(schema.runs)
+        .where(eq(schema.runs.agentId, agentId));
+      expect(turns.length).toBeGreaterThan(0);
+      expect(turns.every((r) => r.status === "done")).toBe(true);
+      expect(first?.refId && turns.some((r) => r.id === first.refId)).toBe(true);
     },
     SERVER_TEST_MS,
   );

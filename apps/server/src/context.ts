@@ -13,7 +13,7 @@ import type { Auth } from "./auth";
 import type { ChannelRow } from "./channels";
 import type { Config } from "./config";
 import type { QuestionRow } from "./control";
-import type { RunEnd, RunLimits } from "./forward-types";
+import type { RunEnd, RunLimits } from "./runtime/runtime";
 import { unauthorized } from "./http";
 import type { GuardedConnector } from "./integrations/sql-identity";
 import type { Mailer } from "./mailer";
@@ -24,10 +24,7 @@ import type { RunnerHub } from "./runners/hub";
 import type { ApprovalOutcome, RevisedApproval } from "./runtime/tools";
 import type { WikiLive } from "./wiki-collab";
 
-/**
- * Everything the routes need. Each slice of the server adds what it uses. The runtime is already here as a port;
- * S6 puts the real one behind it.
- */
+/** Everything the routes need. */
 export interface AppDeps {
   config: Config;
   db: Db;
@@ -111,31 +108,25 @@ export type CompleteResult =
       scope?: BudgetScope["kind"];
     };
 
-/**
- * The agent runtime as the modules outside runtime/ call it: exactly the methods they call in the origin.
- * Slice S6 (runtime/runtime) implements all of it. Until then the server answers `track` and `settle` with
- * the background work (runtime/background.ts) and every other method throws `not_available`; a route whose
- * flow can reach one of those is rejected at its entry, before any write. Each method says who calls it and
- * the slice that brings the caller in.
- */
+/** The agent runtime (runtime/runtime) as the modules outside runtime/ call it. Each method says who calls it. */
 export interface RuntimePort {
   /**
    * Background work that `settle` also waits for; its error is logged and breaks nothing. Callers:
-   * the notification queue (S1b), agent-lab (S2), debates, routines and memory-consolidation (S3), mail-trigger
-   * and routes/routines (S4), the assignment engine (S5).
+   * the notification queue, agent-lab, debates, routines and memory-consolidation, mail-trigger
+   * and routes/routines, the assignment engine.
    */
   track(work: Promise<unknown>, what: string): void;
-  /** Waits until every run and every background work ended (tests and shutdown). Caller: the debate harness (S4). */
+  /** Waits until every run and every background work ended (tests and shutdown). Caller: the debate harness. */
   settle(): Promise<void>;
   /**
    * Asks an agent for a text outside a conversation (a debate turn, a synthesis, a routine that writes a
-   * file), reserving on the caps first. Callers: agent-lab (S2), debates, routines, memory-consolidation and
-   * the assignment verifier (S3), agent-builder and skill-drafts (S4).
+   * file), reserving on the caps first. Callers: agent-lab, debates, routines, memory-consolidation and
+   * the assignment verifier, agent-builder and skill-drafts.
    */
   complete(input: CompleteInput): Promise<CompleteResult>;
   /**
    * Runs the agent for one message without a mention (a scheduled routine); a message for a conversation
-   * the agent is already running in goes into that run. Callers: routines (S3), the assignment engine (S5).
+   * the agent is already running in goes into that run. Callers: routines, the assignment engine.
    */
   runFor(input: {
     agent: AgentRow;
@@ -148,55 +139,44 @@ export interface RuntimePort {
     | { ok: true; runId: string; done: Promise<void> }
     | { ok: false; code: "budget" | "personal_plan" | "busy" }
   >;
-  /** The agent's active run in that conversation. Callers: assignments/engine and the assignment engine (S5). */
+  /** The agent's active run in that conversation. Callers: assignments/engine and the assignment engine. */
   activeRun(agentId: string, channelId: string, threadId: string | null): string | null;
-  /** Live runs of the workspace (or of one channel). Caller: routes/agents (S5). */
+  /** Live runs of the workspace (or of one channel). Caller: routes/agents. */
   activeRuns(filter: { workspaceId: string; channelId?: string }): ActiveRun[];
-  /** Where a live run is. Caller: the assignment engine (S5). */
+  /** Where a live run is. Caller: the assignment engine. */
   liveRun(runId: string): { workspaceId: string; channelId: string } | null;
-  /** Who may stop a live run: whoever started it and the agent's owner. Caller: routes/agents (S5). */
+  /** Who may stop a live run: whoever started it and the agent's owner. Caller: routes/agents. */
   liveInfo(runId: string): { triggerAuthorId: string; ownerUserId: string } | null;
-  /** Stops the run; false when it had already ended. Callers: assignments/engine, the assignment engine and routes/agents (S5). */
+  /** Stops the run; false when it had already ended. Callers: assignments/engine, the assignment engine and routes/agents. */
   cancel(runId: string, actorUserId: string | null): boolean;
-  /** Tells the end of every run (after its status is saved). Caller: the assignment engine (S5). */
+  /** Tells the end of every run (after its status is saved). Caller: the assignment engine. */
   onRunEnd(listener: (end: RunEnd) => void): void;
-  /** Called after a person posts; doesn't wait for the runs. Caller: assignments/core (S3). */
+  /** Called after a person posts; doesn't wait for the runs. Caller: assignments/core. */
   onPersonMessage(input: { workspaceId: string; channel: ChannelRow; message: Message }): Promise<void>;
-  /** The workspace's provider (its default credential or the platform's), before the agent exists. Caller: agent-builder (S4). */
+  /** The workspace's provider (its default credential or the platform's), before the agent exists. Caller: agent-builder. */
   providerForWorkspace(workspaceId: string): Promise<ModelProvider | { error: string }>;
-  /** Whether the agent is in a run now. Caller: routes/agents (S5). */
+  /** Whether the agent is in a run now. Caller: routes/agents. */
   isBusy(agentId: string): boolean;
-  /** The agents in a run now. Caller: routes/agents (S5). */
+  /** The agents in a run now. Caller: routes/agents. */
   busyAgents(): Set<string>;
-  /** Whether a run waits on this approval. Caller: routes/control (S5). */
+  /** Whether a run waits on this approval. Caller: routes/control. */
   awaitsApproval(approvalId: string): boolean;
-  /** The route decided: wakes the waiting run; false when no run waits. Caller: routes/control (S5). */
+  /** The route decided: wakes the waiting run; false when no run waits. Caller: routes/control. */
   resolveApproval(approvalId: string, outcome: ApprovalOutcome): boolean;
   /**
    * The person edited the approval before deciding: the run validates and returns the new effect, or the
-   * error the route answers as 400; null when no run waits. Caller: routes/control (S5).
+   * error the route answers as 400; null when no run waits. Caller: routes/control.
    */
   reviseApproval(
     approvalId: string,
     edits: Record<string, unknown>,
   ): Promise<RevisedApproval | { error: string } | null>;
-  /** Answers an open question and wakes the run; null when it was no longer open. Caller: routes/control (S5). */
+  /** Answers an open question and wakes the run; null when it was no longer open. Caller: routes/control. */
   answerQuestion(questionId: string, answer: string, actorUserId: string): Promise<QuestionRow | null>;
-  /** Delivers the send queue at `at` without waiting for the next sweep. Caller: outbox (S3). */
+  /** Delivers the send queue at `at` without waiting for the next sweep. Caller: outbox. */
   wakeAt(at: Date): void;
 }
 
-/** Marks a runtime method that isn't there yet (the port in server.ts until slice S6); it holds the thrower. */
-export const ABSENT = Symbol("runtime.absent");
-
-/**
- * Rejects at an entry, before any write, when a runtime method the flow will reach isn't there yet: the absent
- * method throws `not_available` itself. With the real runtime (S6) it does nothing.
- */
-export function requireRuntime(runtime: RuntimePort, method: keyof RuntimePort): void {
-  const absent: unknown = Reflect.get(runtime[method], ABSENT);
-  if (typeof absent === "function") absent();
-}
 
 export interface SessionUser {
   id: string;
@@ -229,7 +209,3 @@ export function requireUser(c: Ctx): SessionUser {
   if (!user) throw unauthorized();
   return user;
 }
-
-/** Whether a runtime method is there (false for an absent one until slice S6), for an entry that only sometimes reaches it. */
-export const hasRuntime = (runtime: RuntimePort, method: keyof RuntimePort): boolean =>
-  typeof Reflect.get(runtime[method], ABSENT) !== "function";

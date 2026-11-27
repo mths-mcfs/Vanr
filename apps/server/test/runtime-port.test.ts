@@ -1,10 +1,7 @@
-// The runtime port before slice S6: background work is real (and stopping the server waits for it), the
-// questions about live runs answer that none is live, and every other method is a declared absence that throws
-// `not_available` with its name.
+// The runtime port as the server hands it out: background work (stopping the server waits for it), the questions
+// about live runs with none on the air, and the bound port a test spreads to replace one method.
 import { describe, expect, test } from "bun:test";
 import { sql } from "drizzle-orm";
-import type { RuntimePort } from "../src/context";
-import { NotAvailable } from "../src/server";
 import { SERVER_TEST_MS, settle, startTestServer } from "./harness";
 
 describe("runtime port", () => {
@@ -48,7 +45,7 @@ describe("runtime port", () => {
   );
 
   test(
-    "without the runtime no run is live: nobody is busy, no run is active and none can be found to stop",
+    "with no run on the air nobody is busy, no run is active and none can be found to stop",
     async () => {
       const server = await startTestServer();
       try {
@@ -58,6 +55,15 @@ describe("runtime port", () => {
         expect(rt.activeRuns({ workspaceId: "w" })).toEqual([]);
         expect(rt.activeRuns({ workspaceId: "w", channelId: "c" })).toEqual([]);
         expect(rt.liveInfo("run_x")).toBeNull();
+        expect(rt.liveRun("run_x")).toBeNull();
+        expect(rt.activeRun("agt_x", "chn_x", null)).toBeNull();
+        expect(rt.cancel("run_x", null)).toBe(false);
+        expect(rt.awaitsApproval("apv_x")).toBe(false);
+        expect(rt.resolveApproval("apv_x", { id: "apv_x", decision: "expired", reason: null, byName: null })).toBe(
+          false,
+        );
+        expect(await rt.reviseApproval("apv_x", {})).toBeNull();
+        expect(await rt.answerQuestion("q_x", "yes", "usr_x")).toBeNull();
       } finally {
         await server.stop();
       }
@@ -66,36 +72,30 @@ describe("runtime port", () => {
   );
 
   test(
-    "every method the runtime slice brings throws not_available with its own name",
+    "a test that spreads the port and replaces one method keeps every other method working",
     async () => {
-      const server = await startTestServer();
+      let ended = 0;
+      const server = await startTestServer({
+        runtime: (port) => ({ ...port, isBusy: () => true }),
+      });
       try {
         const rt = server.deps.runtime;
-        const absent: [keyof RuntimePort, () => unknown][] = [
-          ["complete", () => rt.complete({} as never)],
-          ["runFor", () => rt.runFor({} as never)],
-          ["activeRun", () => rt.activeRun("a", "c", null)],
-          ["liveRun", () => rt.liveRun("r")],
-          ["cancel", () => rt.cancel("r", null)],
-          ["onRunEnd", () => rt.onRunEnd(() => {})],
-          ["onPersonMessage", () => rt.onPersonMessage({} as never)],
-          ["providerForWorkspace", () => rt.providerForWorkspace("w")],
-          ["awaitsApproval", () => rt.awaitsApproval("ap")],
-          ["resolveApproval", () => rt.resolveApproval("ap", {} as never)],
-          ["reviseApproval", () => rt.reviseApproval("ap", {})],
-          ["answerQuestion", () => rt.answerQuestion("q", "a", "u")],
-          ["wakeAt", () => rt.wakeAt(new Date())],
-        ];
-        for (const [method, call] of absent) {
-          let thrown: unknown = null;
-          try {
-            call();
-          } catch (err) {
-            thrown = err;
-          }
-          expect(thrown).toBeInstanceOf(NotAvailable);
-          expect(thrown).toMatchObject({ status: 503, code: "not_available", method, params: { method } });
-        }
+        expect(rt.isBusy("agt_x")).toBe(true);
+        expect([...rt.busyAgents()]).toEqual([]);
+        rt.onRunEnd(() => {
+          ended++;
+        });
+        const provider = await rt.providerForWorkspace("wsp_missing");
+        expect("error" in provider ? provider.error : provider.kind).toBe("fake");
+        let done = false;
+        rt.track(
+          Bun.sleep(10).then(() => {
+            done = true;
+          }),
+          "test.spread",
+        );
+        await rt.settle();
+        expect([done, ended]).toEqual([true, 0]);
       } finally {
         await server.stop();
       }

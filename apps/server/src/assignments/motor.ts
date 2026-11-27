@@ -18,7 +18,7 @@ import type { AssignmentLimitKind, AssignmentUsage, AssignmentWaitReason } from 
 import { schema } from "@vanr/engine/db";
 import { and, eq, gt, inArray, max, ne, sql } from "drizzle-orm";
 import { channelInWorkspace } from "../channels";
-import { type AppDeps, type RuntimePort, requireRuntime } from "../context";
+import { type AppDeps, type RuntimePort } from "../context";
 import { launchDurable } from "../durable";
 import { HttpError } from "../http";
 import { log } from "../logger";
@@ -965,40 +965,13 @@ export async function stepAct(deps: AppDeps, assignmentId: string, a: EngineActi
 
 export interface AssignmentEngine {
   readonly kind: "dbos" | "local";
-  /**
-   * Boot: starts the engine and makes sure each open assignment has its loop. Without the agent runtime (slice
-   * S6) it doesn't start: the open assignments wait in the database and the boot with the runtime picks them up.
-   */
+  /** Boot: starts the engine and makes sure each open assignment has its loop. */
   start(): Promise<void>;
   stop(): Promise<void>;
   /** Wakes the assignment's loop (creates it if it doesn't exist yet). Doesn't throw; nothing before `start`. */
   wake(assignmentId: string): void;
   /** Tests: waits until no step runs and no agent run is on the air. */
   idle(): Promise<void>;
-}
-
-/** The runtime methods the loop reaches: the snapshot, a pause, an agent's turn and the end of runs. */
-const LOOP_NEEDS: readonly (keyof RuntimePort)[] = [
-  "activeRun",
-  "liveRun",
-  "cancel",
-  "runFor",
-  "onRunEnd",
-  "busyAgents",
-];
-
-/**
- * Whether the loop can run on this runtime: every method it reaches is there, and `complete` too when the
- * verifier is the model's. It checks before any write, without calling a method.
- */
-export function runtimeReady(deps: Pick<AppDeps, "runtime" | "assignmentVerifier">): boolean {
-  const needs = deps.assignmentVerifier ? LOOP_NEEDS : [...LOOP_NEEDS, "complete" as const];
-  try {
-    for (const m of needs) requireRuntime(deps.runtime, m);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 const LIVE_STATUSES = ["active", "paused", "wrapping_up"] as const;
@@ -1110,10 +1083,6 @@ export class LocalEngine implements AssignmentEngine {
 
   async start(): Promise<void> {
     const deps = this.getDeps();
-    if (!runtimeReady(deps)) {
-      log.info("assignment.engine_waiting_for_runtime", { kind: this.kind });
-      return;
-    }
     this.started = true;
     watchRuns(this.getDeps, this);
     await recoverPlans(deps);
@@ -1214,10 +1183,6 @@ export class DbosEngine implements AssignmentEngine {
 
   async start(): Promise<void> {
     const deps = this.getDeps();
-    if (!runtimeReady(deps)) {
-      log.info("assignment.engine_waiting_for_runtime", { kind: this.kind });
-      return;
-    }
     assignmentWorkflow();
     durableDeps = this.getDeps;
     watchRuns(this.getDeps, this);

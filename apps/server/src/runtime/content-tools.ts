@@ -10,7 +10,7 @@ import { and, asc, desc, eq, ilike, isNull, or } from "drizzle-orm";
 import { z } from "zod";
 import { eventsInRange, expand } from "../calendar";
 import { channelInWorkspace } from "../channels";
-import { type RuntimePort, requireRuntime, type WorkspaceMember } from "../context";
+import { type RuntimePort, type WorkspaceMember } from "../context";
 import {
   agentCanSeeDebate,
   canSeeDebate,
@@ -54,16 +54,6 @@ const requester = (ctx: ToolContext): ActorRef | null =>
 export async function domain<T>(work: Promise<T>): Promise<T> {
   try {
     return await work;
-  } catch (err) {
-    if (err instanceof HttpError) throw new ToolInputError(err.message);
-    throw err;
-  }
-}
-
-/** The flow reaches the runtime's `method`: rejected before any write while the runtime isn't there. */
-function needsRuntime(ctx: ToolContext, method: keyof RuntimePort) {
-  try {
-    requireRuntime(ctx.deps.runtime, method);
   } catch (err) {
     if (err instanceof HttpError) throw new ToolInputError(err.message);
     throw err;
@@ -1019,8 +1009,6 @@ const openDebateTool = defineStored({
       });
       return "Posted the suggestion; the person can open it.";
     }
-    // The agents' turns are model calls: without the runtime nothing is written, not even the debate.
-    needsRuntime(ctx, "complete");
     const debate = await domain(
       openDebate(ctx.deps, {
         workspaceId: ctx.workspaceId,

@@ -6,10 +6,6 @@
 // `visibleDebateById` (`canSeeDebate`); for everyone else the debate doesn't exist (404). While a debate is open its
 // agents speak under pseudonyms: every answer here goes out through `toDebate`, `toPost` and `toDetail`, which mask
 // the author (and the run) of an agent's post, and no error says who wrote what.
-//
-// An agent's turn and the synthesis ask the runtime for a text (`complete`): until slice S6 the debate's advance stops
-// at that step before writing anything and the debate waits there (debates.ts). Everything a person does here works
-// without it.
 import { createHash } from "node:crypto";
 import type {
   AcceptedDebateSuggestion,

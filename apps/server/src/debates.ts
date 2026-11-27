@@ -45,7 +45,7 @@ import { and, asc, eq, inArray, isNull, lte, or, type SQL, sql } from "drizzle-o
 import { z } from "zod";
 import { type AgentRow, agentBudgetScope } from "./agents";
 import { canReadChannel, channelInWorkspace, isChannelMember, readableChannelsSql } from "./channels";
-import { type AppDeps, requireRuntime } from "./context";
+import { type AppDeps } from "./context";
 import { notFound } from "./http";
 import { closeNotifications, notify } from "./notifications";
 import { fireRoutineEvent } from "./routines";
@@ -899,7 +899,7 @@ export function synthesisPrompt(lead: Pick<AgentRow, "name">, row: PromptDebate,
   };
 }
 
-/** The agents among `ids` that aren't archived (an archived one leaves the queue without the runtime). */
+/** The agents among `ids` that aren't archived. */
 async function liveAgents(db: Db, ids: readonly string[]): Promise<AgentRow[]> {
   if (!ids.length) return [];
   return db
@@ -923,16 +923,6 @@ async function step(deps: AppDeps, debateId: string): Promise<boolean> {
 
   const agentTurns = row.pendingSpeakers.filter((s) => s.type === "agent");
   if (agentTurns.length) {
-    // An agent's turn is a model call: without the runtime the advance stops here, before writing anything.
-    if (
-      (
-        await liveAgents(
-          db,
-          agentTurns.map((a) => a.id),
-        )
-      ).length
-    )
-      requireRuntime(deps.runtime, "complete");
     if (row.phase !== "debating" && !(await saveDebate(deps, row, { phase: "debating" }, expect)))
       return true;
     // The round is parallel: each agent answers without seeing the others of this round.
@@ -1084,8 +1074,6 @@ async function synthesize(deps: AppDeps, row: DebateRow) {
   const { db } = deps;
   const leadId = leadOf(row);
   const [lead] = leadId ? await liveAgents(db, [leadId]) : [];
-  // The lead agent writes with a model call: without the runtime the advance stops here, before the posts open.
-  if (lead) requireRuntime(deps.runtime, "complete");
   await publishRevealed(deps, row, await revealHidden(db, deps, row.id));
   const posts = await postsOf(db, row.id);
   let structured: DivergenceSynthesis;
@@ -1202,7 +1190,7 @@ export async function stopDebate(
 /**
  * Resuming at boot: the rounds move in memory (`loops`), so a restart in the middle of a debate left the open
  * debate stopped forever. Puts every open debate in motion again; the step finds out by itself where it was
- * (missing turns, people, synthesis). The runtime's start calls it (slice S6).
+ * (missing turns, people, synthesis). The runtime's start calls it.
  */
 export async function resumeDebates(deps: AppDeps): Promise<number> {
   const open = await deps.db.select({ id: debates.id }).from(debates).where(eq(debates.status, "open"));
@@ -1210,7 +1198,7 @@ export async function resumeDebates(deps: AppDeps): Promise<number> {
   return open.length;
 }
 
-/** A deadline that passed ends the debate and goes to the synthesis (the runtime's tick, slice S6). */
+/** A deadline that passed ends the debate and goes to the synthesis (the runtime's tick). */
 export async function debateDeadlines(deps: AppDeps) {
   const due = await deps.db
     .select()

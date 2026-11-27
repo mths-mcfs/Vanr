@@ -16,7 +16,7 @@ import { asc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { jsonFrom } from "./agent-lab";
 import { AGENT_ROLES, type AgentRow, isAgentRole } from "./agents";
-import { type AppDeps, requireRuntime, type WorkspaceMember } from "./context";
+import { type AppDeps, type WorkspaceMember } from "./context";
 import { proposalsView, proposalTrail, publishProposal } from "./control";
 import { forbidden, HttpError } from "./http";
 import { takenHandles } from "./members";
@@ -190,7 +190,6 @@ export async function draftNewAgent(
   me: WorkspaceMember,
   description: string,
 ): Promise<AgentDraft> {
-  requireRuntime(deps.runtime, "providerForWorkspace");
   const at = deps.now();
   takeDraftSlot(me.userId, at);
   const provider = await deps.runtime.providerForWorkspace(me.workspaceId);
@@ -264,7 +263,6 @@ export async function proposeFromDescription(
     (agent.ownerUserId !== me.userId && !can(me.role, "manage_agents"))
   )
     throw forbidden("Only the agent's owner changes it");
-  requireRuntime(deps.runtime, "complete");
   takeDraftSlot(me.userId, deps.now());
   const workspaceSkills = await workspaceSkillsOf(deps, me.workspaceId);
   const res = await deps.runtime.complete({
