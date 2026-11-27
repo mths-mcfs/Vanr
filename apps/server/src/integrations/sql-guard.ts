@@ -175,9 +175,64 @@ function lex(sql: string, standardStrings: boolean): Token[] | null {
  */
 export const foldName = (name: string) => name.replace(/[A-Z]+/g, (m) => m.toLowerCase());
 
+/** Postgres keywords that are not unreserved (reserved, type or function names, column names): bare, they don't read as a name. */
+const KEYWORDS = new Set([
+  ...["all", "analyse", "analyze", "and", "any", "array", "as", "asc", "asymmetric", "both", "case", "cast"],
+  ...[
+    "check",
+    "collate",
+    "column",
+    "constraint",
+    "create",
+    "current_catalog",
+    "current_date",
+    "current_role",
+  ],
+  ...["current_time", "current_timestamp", "current_user", "default", "deferrable", "desc", "distinct", "do"],
+  ...["else", "end", "except", "false", "fetch", "for", "foreign", "from", "grant", "group", "having", "in"],
+  ...["initially", "intersect", "into", "lateral", "leading", "limit", "localtime", "localtimestamp", "not"],
+  ...[
+    "null",
+    "offset",
+    "on",
+    "only",
+    "or",
+    "order",
+    "placing",
+    "primary",
+    "references",
+    "returning",
+    "select",
+  ],
+  ...["session_user", "some", "symmetric", "system_user", "table", "then", "to", "trailing", "true", "union"],
+  ...["unique", "user", "using", "variadic", "when", "where", "window", "with"],
+  ...["authorization", "binary", "collation", "concurrently", "cross", "current_schema", "freeze", "full"],
+  ...["ilike", "inner", "is", "isnull", "join", "left", "like", "natural", "notnull", "outer", "overlaps"],
+  ...["right", "similar", "tablesample", "verbose"],
+  ...["between", "bigint", "bit", "boolean", "char", "character", "coalesce", "dec", "decimal", "exists"],
+  ...[
+    "extract",
+    "float",
+    "greatest",
+    "grouping",
+    "inout",
+    "int",
+    "integer",
+    "interval",
+    "json",
+    "json_array",
+  ],
+  ...["json_arrayagg", "json_exists", "json_object", "json_objectagg", "json_query", "json_scalar"],
+  ...["json_serialize", "json_table", "json_value", "least", "merge_action", "national", "nchar", "none"],
+  ...["normalize", "nullif", "numeric", "out", "overlay", "position", "precision", "real", "row", "setof"],
+  ...["smallint", "substring", "time", "timestamp", "treat", "trim", "values", "varchar", "xmlattributes"],
+  ...["xmlconcat", "xmlelement", "xmlexists", "xmlforest", "xmlnamespaces", "xmlparse", "xmlpi", "xmlroot"],
+  ...["xmlserialize", "xmltable"],
+]);
+
 /** A name as SQL reads it back: bare when Postgres would print it bare (`quote_ident`), quoted otherwise. */
 export const quoteName = (name: string) =>
-  /^[a-z_][a-z0-9_]*$/.test(name) ? name : `"${name.replace(/"/g, '""')}"`;
+  /^[a-z_][a-z0-9_]*$/.test(name) && !KEYWORDS.has(name) ? name : `"${name.replace(/"/g, '""')}"`;
 
 const UNQUOTED_PART = /^[A-Za-z_\u0080-￿][A-Za-z0-9_$\u0080-￿]*$/;
 const encoder = new TextEncoder();
