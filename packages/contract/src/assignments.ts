@@ -295,3 +295,70 @@ export interface AssignmentProof {
 
 /** The six work states. */
 export type WorkStateName = "blocked_on_you" | "done" | "due" | "failed" | "running" | "stopped";
+
+/** Body of `createAssignment`. */
+export interface AssignmentInput {
+  agentId: string;
+  channelId: string;
+  commandPolicy?: CommandPolicy;
+  executor?: AssignmentExecutor;
+  goal: string;
+  runnerId?: string;
+  /** A root message of the channel that becomes the assignment's thread. */
+  threadId?: string;
+  title?: string;
+}
+
+/** Body of `updateAssignment`. A limit set to null has no cap; one left out keeps its value. */
+export interface AssignmentPatch {
+  dueAt?: string | null;
+  limits?: { dollars?: number | null; minutes?: number | null; steps?: number | null };
+  resumeJobs?: boolean;
+}
+
+/** Body of `closeAssignment`. */
+export interface AssignmentCloseInput {
+  copyToWiki?: boolean;
+  note?: string;
+  outcome: "canceled" | "done";
+}
+
+/** Body of `transferAssignment`. Lending keeps the current runner on the assignment for the new owner. */
+export interface AssignmentTransferInput {
+  lendRunner?: boolean;
+  userId: string;
+}
+
+/** Body of `setAssignmentRunner`. "" clears the folder; leaving it out keeps the current one. */
+export interface AssignmentRunnerInput {
+  checkoutPath?: string;
+  runnerId: string;
+}
+
+/** Body of `setAssignmentRuntime`. */
+export interface AssignmentHarnessInput {
+  harness: AssignmentExecutor;
+  model?: string;
+}
+
+/** One item of a person's plan edit; without `id` it is a new item. */
+export interface AssignmentPlanItemInput {
+  criteria?: string;
+  id?: string;
+  milestone?: string | null;
+  status?: "dropped" | "todo";
+  title: string;
+}
+
+/** Body of `setAssignmentPlan`: the whole plan, against the version it was read at. */
+export interface AssignmentPlanInput {
+  items: AssignmentPlanItemInput[];
+  note?: string;
+  parentVersion: number;
+}
+
+/** Body of `retryAssignmentCommand`: commands of a job to allow from now on, and the job to resume. */
+export interface AssignmentCommandRetryInput {
+  commands: string[];
+  jobId: string;
+}

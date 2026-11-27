@@ -65,23 +65,29 @@ export async function assignmentOfThread(db: Db, threadId: string): Promise<Assi
   return row ?? null;
 }
 
-/** The viewer's role: owner, participant, or read-only (who reads the channel). null = doesn't see the assignment. */
+/**
+ * The viewer's role: owner, participant, or read-only (who reads the channel). null = doesn't see the assignment.
+ * A participant who can't read the channel (left the private channel, or never was in it) doesn't see it either:
+ * the assignment's plan and decisions stay with the channel's members.
+ */
 export async function roleOf(
   db: Db,
   me: { workspaceId: string; userId: string },
   row: AssignmentRow,
 ): Promise<AssignmentRole | null> {
+  if (row.workspaceId !== me.workspaceId) return null;
   if (row.ownerId === me.userId) return "owner";
+  if (
+    !(await canReadChannel(db, { workspaceId: me.workspaceId, userId: me.userId, channelId: row.channelId }))
+  )
+    return null;
   const [p] = await db
     .select({ role: assignmentParticipants.role })
     .from(assignmentParticipants)
     .where(
       and(eq(assignmentParticipants.assignmentId, row.id), eq(assignmentParticipants.userId, me.userId)),
     );
-  if (p) return p.role;
-  if (await canReadChannel(db, { workspaceId: me.workspaceId, userId: me.userId, channelId: row.channelId }))
-    return "view";
-  return null;
+  return p?.role ?? "view";
 }
 
 export const canActRole = (role: AssignmentRole | null) => role === "owner" || role === "decide";
@@ -113,7 +119,10 @@ export function requireOpen(row: AssignmentRow) {
  * as long as the assignment's owner may use that runner. Only a runner paired to the assignment's workspace and
  * neither removed nor revoked: an id that points at another workspace's runner finds none.
  */
-export async function runnerOfAssignment(db: Db, row: AssignmentRow) {
+export async function runnerOfAssignment(
+  db: Db,
+  row: Pick<AssignmentRow, "runnerId" | "agentId" | "workspaceId" | "ownerId">,
+) {
   const inWorkspace = (id: string) =>
     db
       .select()
