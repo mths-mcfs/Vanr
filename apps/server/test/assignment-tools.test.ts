@@ -527,12 +527,19 @@ describe("commands on the agent's runner", () => {
         expect(out.isError).toBe(true);
       }
 
-      // The assignment's runner is the other workspace's: the job doesn't start there.
+      // The assignment's runner is the other workspace's (creating one like that is refused, so the row is
+      // written as an older one could be): the job doesn't start there.
       await server.deps.db
         .update(agents)
         .set({ environmentId: t.fake.runnerId })
         .where(eq(agents.id, t.lia.id));
-      const row = await assignmentOf(t, { runnerId: theirs.runnerId });
+      const created = await assignmentOf(t);
+      const [row] = await server.deps.db
+        .update(assignments)
+        .set({ runnerId: theirs.runnerId })
+        .where(eq(assignments.id, created.id))
+        .returning();
+      if (!row) throw new Error("assignment gone");
       const job = await (await run(t, row.threadId)).call("start_job", {
         title: "Fix",
         prompt: "Fix the test",
