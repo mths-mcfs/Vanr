@@ -42,6 +42,7 @@ export default {
     one: "{count} arquivo não pôde ser importado.",
     other: "{count} arquivos não puderam ser importados.",
   },
+  "import.vaultAlone": "Importe um cofre sozinho: escolha um .zip e nada mais.",
   "import.failed": "A importação parou",
   "export.action": "Exportar em .zip",
   "export.failed": "Não foi possível exportar a wiki",
@@ -114,6 +115,8 @@ export default {
     "A versão {version} saiu enquanto este rascunho estava aberto. Suas alterações continuam aqui.",
   "draft.publishOver": "Publicar por cima da versão {version}",
   "draft.publishFailed": "Não foi possível publicar o rascunho. Ele continua aqui.",
+  "draft.stillSyncing":
+    "Ainda há alterações sincronizando, então nada foi publicado. Tente de novo em instantes.",
   "draft.saveFailed": "Não foi possível salvar o rascunho. Ele continua aqui.",
 
   "slash.label": "Transformar em",
@@ -141,6 +144,7 @@ export default {
   "props.none": "Vazio",
   "props.addPerson": "Adicionar pessoa ou agente",
   "props.files": { one: "{count} arquivo", other: "{count} arquivos" },
+  "props.newOption": "Nova opção de {name}",
   "props.addProperty": "Adicionar propriedade",
   "props.newProperty": "Nova propriedade…",
   "props.newName": "Nome da propriedade",
@@ -167,6 +171,7 @@ export default {
   "side.state.missing": "sem página",
   "side.state.trashed": "na lixeira",
   "side.state.broken_anchor": "título sumiu",
+  "side.failed": "Não foi possível carregar os links",
   "side.reads": "Quem lê",
   "side.readCount": { one: "Lida {count} vez", other: "Lida {count} vezes" },
 

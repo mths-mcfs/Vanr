@@ -174,9 +174,13 @@ export function useLive(
   return { live, status, unsynced, peers, ready, readOnly, touched, clearTouched: () => setTouched(false) };
 }
 
-/** Waits up to about three seconds for the changes still on their way, before a publish reads them. */
-export async function settle(live: Live | null): Promise<void> {
+/**
+ * Waits up to about three seconds for the changes still on their way, before a publish reads them.
+ * False when some are still on their way: publishing then would leave them out.
+ */
+export async function settle(live: Live | null): Promise<boolean> {
   for (let attempt = 0; attempt < 50 && live?.provider.hasUnsyncedChanges === true; attempt++) {
     await new Promise((resolve) => setTimeout(resolve, 60));
   }
+  return live?.provider.hasUnsyncedChanges !== true;
 }

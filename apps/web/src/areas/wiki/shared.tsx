@@ -138,10 +138,17 @@ export type ImportFile = { path: string; text: string };
 const IMPORT_FILES_MAX = 500;
 const IMPORT_PATH_MAX = 500;
 const IMPORT_FILE_MAX = BODY_MAX + 10_000;
-const IMPORT_BATCH_CHARS = 20_000_000;
+/**
+ * What one call may weigh as the JSON the client sends, in bytes: the server takes up to 32 MiB a
+ * request, and this leaves room for the rest of the body.
+ */
+const IMPORT_BATCH_BYTES = 24_000_000;
+const encoder = new TextEncoder();
+/** A note's weight in the call: its JSON, escapes and all, in UTF-8. */
+const weight = (file: ImportFile) => encoder.encode(JSON.stringify(file)).length + 1;
 
 /**
- * Cuts the notes into calls the server accepts (up to 500 files and 20 million characters each). A
+ * Cuts the notes into calls the server accepts (up to 500 files and 24 MB of JSON each). A
  * note past one file's limit, or with a path past 500 characters, is left out in `tooLarge` (one
  * would fail its whole batch); what is not Markdown counts in `skipped`.
  */
@@ -164,16 +171,14 @@ export function importBatches(files: readonly ImportFile[]): {
       tooLarge.push(file.path);
       continue;
     }
-    if (
-      current.length === IMPORT_FILES_MAX ||
-      (current.length > 0 && size + file.text.length > IMPORT_BATCH_CHARS)
-    ) {
+    const bytes = weight(file);
+    if (current.length === IMPORT_FILES_MAX || (current.length > 0 && size + bytes > IMPORT_BATCH_BYTES)) {
       batches.push(current);
       current = [];
       size = 0;
     }
     current.push(file);
-    size += file.text.length;
+    size += bytes;
   }
   if (current.length > 0) batches.push(current);
   return { batches, tooLarge, skipped };

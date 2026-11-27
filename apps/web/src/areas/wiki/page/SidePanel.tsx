@@ -3,7 +3,7 @@
 // leave it (marked when the page is missing, in the trash or the anchor is gone), and who reads it.
 import { useApiQuery } from "@vanr/client/react";
 import type { WikiPage } from "@vanr/contract";
-import { Skeleton } from "@vanr/ui";
+import { Button, Callout, Skeleton } from "@vanr/ui";
 import { AppLink } from "../../../app/navigation.tsx";
 import { useMessages } from "../../../i18n/react.tsx";
 import { plainSnippet } from "../shared.tsx";
@@ -22,13 +22,25 @@ export function SidePanel({
   onCreate: (target: string) => void;
 }) {
   const t = useMessages("wiki");
+  const common = useMessages("common");
   // The panel follows the published version: asked again when a new one is out.
   const panel = useApiQuery("getWikiPagePanel", { workspaceId, pageId: page.slug });
   const readers = page.reads.agents.flatMap((id) => agentName(id) ?? []);
 
   return (
     <aside className="wiki-side" aria-label={t("side.label")}>
-      {panel.data === undefined ? (
+      {panel.data === undefined && panel.isError ? (
+        <Callout
+          tone="danger"
+          role="alert"
+          title={t("side.failed")}
+          actions={
+            <Button size="sm" onClick={() => void panel.refetch()}>
+              {common("action.retry")}
+            </Button>
+          }
+        />
+      ) : panel.data === undefined ? (
         <div aria-busy="true">
           <Skeleton />
           <Skeleton />

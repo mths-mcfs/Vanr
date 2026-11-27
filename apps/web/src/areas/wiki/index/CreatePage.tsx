@@ -30,7 +30,7 @@ export function CreatePageDialog({
     onSuccess: (page) => onCreated(page.slug),
   });
   const submit = () => {
-    if (title.trim() === "") return;
+    if (title.trim() === "" || create.isPending) return;
     create.mutate({
       workspaceId,
       body: { title: title.trim(), body, ...(folder.trim() !== "" && { folder: folder.trim() }) },
@@ -48,9 +48,10 @@ export function CreatePageDialog({
             </Button>
             <Button
               variant="primary"
+              type="submit"
+              form="wiki-create-page"
               disabled={title.trim() === ""}
               loading={create.isPending}
-              onClick={submit}
             >
               {t("create.submit")}
             </Button>
@@ -58,10 +59,19 @@ export function CreatePageDialog({
         }
       >
         <form
+          id="wiki-create-page"
           className="wiki-form"
           onSubmit={(event) => {
             event.preventDefault();
             submit();
+          }}
+          // Enter in the title or the folder creates the page: the form has two text fields and its
+          // button sits in the dialog's footer, so the browser would not submit on its own.
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && event.target instanceof HTMLInputElement) {
+              event.preventDefault();
+              submit();
+            }
           }}
         >
           <Field label={t("create.pageTitle")} required>
