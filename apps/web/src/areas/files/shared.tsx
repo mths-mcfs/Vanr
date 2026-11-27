@@ -122,10 +122,12 @@ export function Marked({ text, query }: { text: string; query: string }) {
     <>
       {highlightParts(text, query).map((part, index) =>
         part.hit ? (
+          // biome-ignore lint/suspicious/noArrayIndexKey: the parts of one text never move.
           <mark key={index} className="files-mark">
             {part.text}
           </mark>
         ) : (
+          // biome-ignore lint/suspicious/noArrayIndexKey: the parts of one text never move.
           <span key={index}>{part.text}</span>
         ),
       )}

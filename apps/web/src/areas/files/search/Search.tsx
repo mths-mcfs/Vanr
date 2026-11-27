@@ -338,6 +338,7 @@ function AskCard({
       ) : (
         <p className="files__answer-text">
           {answer.blocks.map((block, index) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: the parts of one answer never move.
             <span key={index}>
               {block.text}
               {block.sources.map((n) => (

@@ -19,6 +19,7 @@ export function useBlobUrl(args: ArgsOf<"getFileBlob">): string | undefined {
   const client = useVanrClient();
   const [url, setUrl] = useState<string>();
   const key = JSON.stringify(args);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `key` stands for `args`, a new object on every render.
   useEffect(() => {
     const controller = new AbortController();
     let made: string | undefined;
@@ -171,6 +172,7 @@ export function FileBody({
             <thead>
               <tr>
                 {content.columns.map((column, index) => (
+                  // biome-ignore lint/suspicious/noArrayIndexKey: the columns of one version never move.
                   <th key={index} scope="col">
                     {column}
                   </th>
@@ -179,8 +181,10 @@ export function FileBody({
             </thead>
             <tbody>
               {content.rows.map((row, index) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: the rows of one version never move.
                 <tr key={index}>
                   {row.map((cell, column) => (
+                    // biome-ignore lint/suspicious/noArrayIndexKey: the cells of one version never move.
                     <td key={column}>{cell}</td>
                   ))}
                 </tr>
