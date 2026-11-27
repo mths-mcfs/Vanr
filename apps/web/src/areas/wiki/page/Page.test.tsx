@@ -70,6 +70,17 @@ describe("a wiki page", () => {
     expect(app.server.calls.filter((call) => call.method === "updateWikiPageMeta")).toHaveLength(2);
   });
 
+  test("two tags added one after the other both stay, the second waiting for the first to save", async () => {
+    const app = await renderApp({ path: PAGE, signedInAs: "usr_ana" });
+    await title();
+    const held = app.server.hold("updateWikiPageMeta");
+    const field = screen.getByRole("textbox", { name: "Add to Tags" });
+    await app.user.type(field, "ink{Enter}");
+    await app.user.type(field, "safety{Enter}");
+    held.release();
+    await waitFor(() => expect(app.server.wiki.pages[0]?.tags).toEqual(["print", "daily", "ink", "safety"]));
+  });
+
   test("the history compares versions and restores an older one as a new version", async () => {
     const app = await renderApp({ path: PAGE, signedInAs: "usr_ana" });
     await title();

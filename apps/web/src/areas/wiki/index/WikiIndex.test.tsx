@@ -86,7 +86,10 @@ describe("the wiki index", () => {
     await app.user.click(within(dialog).getByRole("button", { name: "Create page" }));
     await app.user.click(within(dialog).getByRole("button", { name: "Cancel" }));
     held.release();
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // The create and what follows it are over before the address is read.
+    await waitFor(() => expect(app.server.wiki.pages.some((page) => page.title === "Late page")).toBe(true));
+    await waitFor(() => expect(app.runtime.queryClient.isMutating()).toBe(0));
+    await waitFor(() => expect(app.runtime.queryClient.isFetching()).toBe(0));
     expect(app.address()).toBe(PATH);
   });
 
