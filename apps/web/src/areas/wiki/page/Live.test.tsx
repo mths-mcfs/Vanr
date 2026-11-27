@@ -80,7 +80,7 @@ describe("a live wiki page", () => {
       socket().pushStateless("wiki/workspace_birchwood/press-checklist", { type: "published", version: 3 }),
     );
     await waitFor(() => expect(status()).toBe("Version 3 published"));
-    expect(screen.getByRole("textbox", { name: "Text of Press checklist" })).toBe(editor);
+    expect(screen.getByRole("textbox", { name: "Text of Press checklist" }) === editor).toBe(true);
     expect(editor.isConnected).toBe(true);
   });
 
@@ -91,7 +91,7 @@ describe("a live wiki page", () => {
     FakeCollabSocket.autoOpen = false;
     await act(async () => socket().serverClose(1006));
     await waitFor(() => expect(status()).toBe("Offline: changes wait to sync"));
-    expect(screen.getByRole("textbox", { name: "Text of Press checklist" })).toBe(editor);
+    expect(screen.getByRole("textbox", { name: "Text of Press checklist" }) === editor).toBe(true);
     expect(editor.getAttribute("contenteditable")).toBe("true");
     // The retry starts: still offline to the person, never flickering back to "Connecting…".
     await waitFor(() => expect(FakeCollabSocket.instances.length).toBeGreaterThanOrEqual(2), {
