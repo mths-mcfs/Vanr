@@ -222,6 +222,59 @@ test("comment on a passage across formatting: the person is told instead of leav
   await expect(page.getByRole("textbox", { name: t("wiki", "comments.new") })).toHaveCount(0);
 });
 
+test("comment on a passage while another comment is still sending: the new one stays open", async ({
+  page,
+  t,
+  seedUser,
+  signIn,
+  apiAs,
+}) => {
+  const owner = await seedUser({ workspace: "Harbour Café" });
+  const title = "Opening checklist";
+  const slug = await createPage(await apiAs(owner), owner, {
+    title,
+    body: "Doors open at nine. Bring the keys.",
+  });
+  await signIn(owner);
+  await page.goto(`/workspace/${owner.workspace.id}/wiki/${slug}`);
+  await expect(
+    page.getByRole("status").filter({ hasText: t("wiki", "draft.published", { version: 1 }) }),
+  ).toBeVisible();
+  const editor = page.getByRole("textbox", { name: t("wiki", "page.editor", { title }) });
+  const pick = async (passage: string) => {
+    await editor.click();
+    await editor.evaluate((element, passage) => {
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+        const at = node.textContent?.indexOf(passage) ?? -1;
+        if (at >= 0) {
+          window.getSelection()?.setBaseAndExtent(node, at, node, at + passage.length);
+          return;
+        }
+      }
+    }, passage);
+    await page.getByRole("button", { name: t("wiki", "comments.onSelection") }).click();
+  };
+  // The first comment answers slowly, as on a slow connection.
+  await page.route(/\/comments$/, async (route) => {
+    if (route.request().method() === "POST") await new Promise((resolve) => setTimeout(resolve, 1500));
+    await route.continue();
+  });
+  const composer = page.getByRole("textbox", { name: t("wiki", "comments.new") });
+
+  await pick("open at nine");
+  await composer.fill("Nine on weekdays.");
+  await page.getByRole("button", { name: t("wiki", "comments.send"), exact: true }).click();
+  await page.getByRole("button", { name: t("wiki", "comments.cancel") }).click();
+  await pick("the keys");
+  await composer.fill("Both sets.");
+
+  const comments = page.getByRole("list", { name: t("wiki", "comments.list") });
+  await expect(comments.getByText("Nine on weekdays.")).toBeVisible();
+  await page.waitForTimeout(300);
+  await expect(composer).toHaveValue("Both sets.");
+});
+
 // An agent proposes the change through its `propose_wiki_edit` tool, driven by the fake model's
 // directive in a direct message, and the harness runtime runs the tool.
 test("accept a proposal: an agent's change lands on the page as a new version", async ({

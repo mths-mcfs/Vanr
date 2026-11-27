@@ -88,6 +88,40 @@ describe("access, comments and proposals", () => {
     }
   }, 15000);
 
+  test("while who reads the page is being saved, its text can't be edited and the dialog stays open", async () => {
+    FakeCollabSocket.instances = [];
+    FakeCollabSocket.nextScope = "read-write";
+    FakeCollabSocket.autoOpen = true;
+    FakeCollabSocket.failHandshake = false;
+    const app = await renderApp({
+      path: `${WIKI}/ink-suppliers`,
+      signedInAs: "usr_ana",
+      wikiSocket: FakeCollabSocket as unknown as new (url: string) => WebSocket,
+    });
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Version 1 published"));
+    // Taken before the dialog opens: it hides the rest of the page from the accessibility tree.
+    let text: HTMLElement | undefined;
+    await waitFor(() => {
+      text = screen.getByRole("textbox", { name: "Text of Ink suppliers" });
+      expect(text.getAttribute("contenteditable")).toBe("true");
+    });
+    await app.user.click(screen.getByRole("button", { name: "Page actions" }));
+    await app.user.click(await screen.findByRole("menuitem", { name: "Who reads it…" }));
+    const dialog = await screen.findByRole("dialog", { name: "Who reads Ink suppliers" });
+    await app.user.click(within(dialog).getByRole("radio", { name: /Only some people and agents/ }));
+    const held = app.server.hold("setWikiPageAccess");
+    await app.user.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(app.server.calls.filter((call) => call.method === "setWikiPageAccess")).toHaveLength(1),
+    );
+    await waitFor(() => expect(text?.getAttribute("contenteditable")).toBe("false"));
+    expect(within(dialog).getByRole("button", { name: "Cancel" }).hasAttribute("disabled")).toBe(true);
+    held.release();
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Who reads Ink suppliers" }) === null).toBe(true),
+    );
+  });
+
   test("after a revoked read who reads the page can no longer be changed from it", async () => {
     FakeCollabSocket.instances = [];
     FakeCollabSocket.nextScope = "read-write";
@@ -211,6 +245,24 @@ describe("access, comments and proposals", () => {
     await app.user.click(within(list).getByRole("button", { name: "Comment" }));
     expect(await screen.findByRole("alert")).toBeDefined();
     expect(box.value).toBe("The blue one.");
+  });
+
+  test("a reply on its way can't be changed until it is sent, so nothing typed then is lost", async () => {
+    const server = withThreads(1);
+    const app = await renderApp({ path: PAGE, signedInAs: "usr_ana", server });
+    const list = await within(await side()).findByRole("list", { name: "Comments" });
+    await app.user.click(within(list).getByRole("button", { name: "Reply" }));
+    const box = within(list).getByRole("textbox", { name: "Reply to Jonas Lind" }) as HTMLTextAreaElement;
+    await app.user.type(box, "The blue one.");
+    const held = app.server.hold("createWikiPageComment");
+    await app.user.click(within(list).getByRole("button", { name: "Comment" }));
+    await waitFor(() => expect(box.readOnly).toBe(true));
+    await app.user.type(box, " And the red.");
+    expect(box.value).toBe("The blue one.");
+    held.release();
+    await waitFor(() =>
+      expect(within(list).queryByRole("textbox", { name: "Reply to Jonas Lind" }) === null).toBe(true),
+    );
   });
 
   test("a reply sent on one thread does not close the reply being written on another", async () => {

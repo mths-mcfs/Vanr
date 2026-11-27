@@ -92,6 +92,8 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
   const [history, setHistory] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [sharing, setSharing] = useState(false);
+  // Who reads the page is being saved: restricting moves it to a new address and closes this live document.
+  const [restricting, setRestricting] = useState(false);
   const [picked, setPicked] = useState<Picked | null>(null);
   const [anchor, setAnchor] = useState<WikiAnchor | null>(null);
   const editor = useRef<EditorHandle>(null);
@@ -253,8 +255,8 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
   const mayDelete = !denied && (admin || (!p.locked && createdIt && !live.readOnly));
   // Offline, the live document still takes edits: they wait in it and sync on reconnect.
   // One rule for every write control: the page says this person may edit it, and the live document has
-  // not said otherwise since (a lock seen live, a revoked read).
-  const canWrite = p.editable && live.status !== "denied" && !live.readOnly;
+  // not said otherwise since (a lock seen live, a revoked read), and no change of who reads it is on its way.
+  const canWrite = p.editable && live.status !== "denied" && !live.readOnly && !restricting;
   const editable = canWrite && source?.kind === "live";
   mayWrite.current = canWrite;
   const dirty = live.touched || p.draft?.dirty === true;
@@ -664,6 +666,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
           page={p}
           userId={userId}
           beforeSave={() => settle(live.live)}
+          onBusy={setRestricting}
           onClose={() => setSharing(false)}
           onSaved={(saved) => {
             setSharing(false);

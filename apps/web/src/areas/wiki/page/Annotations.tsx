@@ -8,7 +8,7 @@ import type { WikiAnchor, WikiComment, WikiPage, WikiProposal } from "@vanr/cont
 import { can } from "@vanr/contract";
 import { Button, Callout, Icon, Textarea } from "@vanr/ui";
 import { Check, MessageSquare, RotateCcw, Trash2, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useErrorMessage } from "../../../app/screens.tsx";
 import { useMessages } from "../../../i18n/react.tsx";
 import { useRelativeTime } from "../../../i18n/relative-time.tsx";
@@ -35,19 +35,29 @@ function Composer({
   label: string;
   submit: string;
   busy: boolean;
-  /** Sends the text; `sent` empties the field, so a failed send keeps what was written. */
+  /**
+   * Sends the text; `sent` empties the field, so a failed send keeps what was written. The field can't
+   * be changed while its text is on the way, so nothing typed then is lost when the form closes.
+   */
   onSubmit: (body: string, sent: () => void) => void;
   onCancel?: () => void;
 }) {
   const t = useMessages("wiki");
   const [body, setBody] = useState("");
+  // This form's text is the one on its way (`busy` is the page's, shared by every form).
+  const [sending, setSending] = useState(false);
+  useEffect(() => {
+    if (!busy) setSending(false);
+  }, [busy]);
   return (
     <form
       className="wiki-notes__composer"
       onSubmit={(event) => {
         event.preventDefault();
-        if (body.trim() === "") return;
-        onSubmit(body.trim(), () => setBody(""));
+        const text = body.trim();
+        if (text === "") return;
+        setSending(true);
+        onSubmit(text, () => setBody(""));
       }}
     >
       <Textarea
@@ -55,6 +65,7 @@ function Composer({
         rows={3}
         value={body}
         maxLength={COMMENT_MAX}
+        readOnly={busy && sending}
         onChange={(event) => setBody(event.target.value)}
       />
       <div className="wiki-notes__actions">
@@ -81,6 +92,8 @@ export function Annotations({ workspaceId, page, draft, onDraftDone, onDecided }
   const notes = useApiQuery("getWikiPageAnnotations", { workspaceId, pageId: page.slug });
   const refetch = [{ method: "getWikiPageAnnotations" as const, args: { workspaceId, pageId: page.slug } }];
   const comment = useApiMutation("createWikiPageComment", { invalidates: () => refetch });
+  const draftNow = useRef(draft);
+  draftNow.current = draft;
   const resolve = useApiMutation("resolveWikiAnnotation", { invalidates: () => refetch });
   const reopen = useApiMutation("reopenWikiAnnotation", { invalidates: () => refetch });
   const remove = useApiMutation("deleteWikiAnnotation", { invalidates: () => refetch });
@@ -214,7 +227,7 @@ export function Annotations({ workspaceId, page, draft, onDraftDone, onDecided }
           </Callout>
         )}
         {draft !== null && (
-          <div className="wiki-notes__thread">
+          <div className="wiki-notes__thread" key={`${draft.position ?? ""}:${draft.quote}`}>
             <blockquote className="wiki-notes__quote">{draft.quote}</blockquote>
             <Composer
               label={t("comments.new")}
@@ -227,7 +240,8 @@ export function Annotations({ workspaceId, page, draft, onDraftDone, onDecided }
                   {
                     onSuccess: () => {
                       sent();
-                      onDraftDone();
+                      // Another passage picked meanwhile keeps its own comment open.
+                      if (draftNow.current === draft) onDraftDone();
                     },
                   },
                 )

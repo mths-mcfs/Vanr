@@ -14,7 +14,7 @@ import {
   Select,
   SelectItem,
 } from "@vanr/ui";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useErrorMessage } from "../../../app/screens.tsx";
 import { useMessages } from "../../../i18n/react.tsx";
 
@@ -27,6 +27,7 @@ export function AccessDialog({
   onClose,
   onSaved,
   beforeSave,
+  onBusy,
 }: {
   workspaceId: string;
   page: WikiPage;
@@ -38,6 +39,11 @@ export function AccessDialog({
    * which closes this live document. False when they did not all reach the server.
    */
   beforeSave: () => Promise<boolean>;
+  /**
+   * Whether saving is under way, from the wait for the live draft until the answer: the page keeps its
+   * editor read only meanwhile, so no change is made on a live document about to close.
+   */
+  onBusy: (busy: boolean) => void;
 }) {
   const t = useMessages("wiki");
   const common = useMessages("common");
@@ -57,6 +63,11 @@ export function AccessDialog({
   const save = useApiMutation("setWikiPageAccess", { onSuccess: onSaved });
   const [waiting, setWaiting] = useState(false);
   const [unsent, setUnsent] = useState(false);
+  const busy = waiting || save.isPending;
+  useEffect(() => {
+    onBusy(busy);
+    return () => onBusy(false);
+  }, [busy, onBusy]);
   const toggle = (list: string[], id: string, on: boolean) =>
     on ? [...new Set([...list, id])] : list.filter((each) => each !== id);
 
@@ -74,20 +85,20 @@ export function AccessDialog({
           : { kind: "channel", channelId };
 
   return (
-    <Dialog open onOpenChange={(open) => !open && onClose()}>
+    <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
       <DialogContent
         title={t("access.title", { title: page.title })}
         description={t("access.lead")}
         closeLabel={common("action.close")}
         footer={
           <>
-            <Button variant="ghost" onClick={onClose}>
+            <Button variant="ghost" disabled={busy} onClick={onClose}>
               {common("action.cancel")}
             </Button>
             <Button
               variant="primary"
               disabled={access === undefined}
-              loading={save.isPending || waiting}
+              loading={busy}
               onClick={() => {
                 if (access === undefined) return;
                 setWaiting(true);
