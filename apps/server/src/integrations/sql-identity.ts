@@ -127,10 +127,15 @@ async function customCode(
 
   // 4. A customer function or operator an allowed relation depends on: the rules of a view (and of the views
   //    under it) and the row security policies. The plan shows a view's calls only after inlining or folding.
+  //    The policy keeps `schema.table` lowercased and unquoted, so `to_regclass` would miss "Sales Report" or
+  //    "Orders": every relation whose lowercased name matches is looked up, as the plan check compares them.
   const [dep] = await session.rows(
     `with recursive rel(oid) as (
-         select pg_catalog.to_regclass(t)::pg_catalog.oid from pg_catalog.unnest($1::pg_catalog.text[]) as t
-          where pg_catalog.to_regclass(t) is not null
+         select c.oid
+           from pg_catalog.pg_class c
+           join pg_catalog.pg_namespace n on n.oid operator(pg_catalog.=) c.relnamespace
+          where (pg_catalog.lower(n.nspname) operator(pg_catalog.||) '.' operator(pg_catalog.||) pg_catalog.lower(c.relname))
+                operator(pg_catalog.=) any ($1::pg_catalog.text[])
          union
          select d.refobjid
            from rel

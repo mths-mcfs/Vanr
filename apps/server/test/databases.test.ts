@@ -517,6 +517,52 @@ describe("the guard and the network rule on a connected database", () => {
   );
 });
 
+describe("catalog names the policy keeps lowercased", () => {
+  test(
+    "a table named with a space and capitals is queried through the agent, and a view by such a name still has its code checked",
+    async () => {
+      await pg.exec(
+        `create table "Sales Report" (region text); insert into "Sales Report" values ('north');`,
+      );
+      try {
+        const { ana, lia, ask, url, workspaceId, general } = await team();
+        const conn = (await call(ana, "POST", url("/databases"), { ...connectInput, label: "Mixed" })).body
+          .connection;
+        const link = await call(ana, "PUT", url(`/agents/${lia.id}/databases/${conn.id}`), { level: "read" });
+        expect(link.body.policy.tables).toContain("public.sales report");
+        expect(await ask("db_query", { database: "Mixed", sql: 'select region from "Sales Report"' })).toBe(
+          "1 row(s)\nregion\nnorth",
+        );
+        expect(
+          await ask("db_query", { database: "Mixed", sql: "select name from customers order by id" }),
+        ).toContain("2 row(s)");
+
+        // A view by such a name whose rule calls customer code: the lookup finds it and the query is rejected
+        // before planning (an allowed relation with customer code rejects every query, as for any view).
+        await pg.exec(`
+          create function public.leak(t text) returns text language plpgsql as $$
+            begin raise exception 'customer function ran'; end $$;
+          create view "Sales View" as select region, public.leak(region) as l from "Sales Report";
+        `);
+        const kai = await seedAgent(server, workspaceId, ana, `kai${n}`, [general]);
+        await call(ana, "PUT", url(`/agents/${kai.id}/databases/${conn.id}`), { level: "read" });
+        const channel = await channelInWorkspace(server.deps.db, workspaceId, general);
+        if (!channel) throw new Error("no channel");
+        const viewed = await toolRun(server.deps, kai, channel).run(DATABASE_TOOLS, "db_query", {
+          database: "Mixed",
+          sql: 'select region from "Sales View"',
+        });
+        expect(viewed.content).toBe("The function public.leak (used by an allowed relation) is not allowed.");
+      } finally {
+        await pg.exec(
+          `drop view if exists "Sales View"; drop function if exists public.leak(text); drop table "Sales Report";`,
+        );
+      }
+    },
+    SERVER_TEST_MS,
+  );
+});
+
 describe("the Postgres connection's options", () => {
   const target = {
     host: "db.example.test",

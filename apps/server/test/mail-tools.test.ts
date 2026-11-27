@@ -691,6 +691,55 @@ describe("the mailbox's policy holds on every path", () => {
   );
 });
 
+describe("moving to the trash is deleting", () => {
+  test(
+    "mail_organize to the trash follows mail_delete's rule: refused in the plan without 'can delete', else a person decides",
+    async () => {
+      clear();
+      const { lia, ana, url, connect, runOf } = await team();
+      const account = (await connect()).body.account;
+      await call(ana, "PUT", url(`/agents/${lia.id}/mail/${account.id}`), {
+        level: "read_write",
+        deletable: false,
+      });
+      const uid = mail.deliver("INBOX", incoming("joao@client.test", "Keep", "Keep me"));
+      const r = await runOf({ decide: () => "approved" });
+      const refused = await r.ask("mail_organize", { account: mail.user, uid, moveTo: "Trash" });
+      expect([refused.isError, refused.content]).toEqual([true, `You can't delete in ${mail.user}.`]);
+      expect(r.approvals).toEqual([]);
+      expect(mail.folders.get("INBOX")?.messages.map((m) => m.uid)).toEqual([uid]);
+      expect(mail.folders.get("Trash")?.messages ?? []).toEqual([]);
+      // Any other folder is still an ordinary move, with no person.
+      expect((await r.ask("mail_organize", { account: mail.user, uid, moveTo: "Archive" })).content).toBe(
+        "Done.",
+      );
+      expect(r.approvals).toEqual([]);
+      const archived = Number(mail.folders.get("Archive")?.messages.at(-1)?.uid);
+
+      await call(ana, "PUT", url(`/agents/${lia.id}/mail/${account.id}`), {
+        level: "read_write",
+        deletable: true,
+      });
+      const asked = await runOf({ decide: () => "approved" });
+      expect(
+        (
+          await asked.ask("mail_organize", {
+            account: mail.user,
+            folder: "Archive",
+            uid: archived,
+            moveTo: "Trash",
+          })
+        ).content,
+      ).toBe("Done.");
+      expect(asked.approvals.map((a) => [a.tool, a.effect, a.gateReason, a.card.scope])).toEqual([
+        ["mail_organize", "K3", "irreversible", `mail:${account.id}:delete`],
+      ]);
+      expect(mail.folders.get("Trash")?.messages.length).toBe(1);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
 describe("whose mailbox and which channel", () => {
   test(
     "only the agent's own mailbox of its workspace; a channel rule turns it off, leaves it read-only or makes writes ask",

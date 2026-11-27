@@ -434,12 +434,29 @@ const mailOrganize = define({
     moveTo: FOLDER.optional(),
   }),
   async plan(ctx, input) {
-    return askedBy(await pick(ctx, input.account, "organize"));
+    const b = await pick(ctx, input.account, "organize");
+    if (!input.moveTo) return askedBy(b);
+    folderAllowed(b.box.policy, input.moveTo);
+    const moveTo = input.moveTo;
+    const trash = await withImap(ctx.deps, b.account, (imap) => folderByRole(imap, "trash", "Trash"));
+    if (moveTo !== trash) return askedBy(b);
+    // Moving to the trash is deleting: mail_delete's rule ("can delete", a person always decides) and its scope.
+    assertDeletable(b);
+    return {
+      effect: "K3",
+      policy: "ask",
+      preview: { title: `Delete message ${input.uid} from ${input.folder}`, body: `Move to ${trash}` },
+      card: {
+        scope: `mail:${b.account.id}:delete`,
+        params: { account: b.account.address, folder: input.folder, uid: input.uid },
+      },
+    };
   },
   async run(ctx, input) {
     const b = await pick(ctx, input.account, "organize");
     if (input.moveTo) folderAllowed(b.box.policy, input.moveTo);
     await withImap(ctx.deps, b.account, async (imap) => {
+      if (input.moveTo && input.moveTo === (await folderByRole(imap, "trash", "Trash"))) assertDeletable(b);
       await readOne(imap, b.box.policy, input.folder, input.uid, ctx.deps.now(), true);
       if (input.markRead) await imap.addFlags(input.uid, "\\Seen");
       if (input.flag) await imap.addFlags(input.uid, "\\Flagged");
@@ -448,6 +465,11 @@ const mailOrganize = define({
     return "Done.";
   },
 });
+
+/** Deleting (or moving to the trash) needs "can delete" on the mailbox and the action not turned off. */
+function assertDeletable(b: Box) {
+  if (modeOf(b, "delete") === "off") throw new ToolInputError(`You can't delete in ${b.account.address}.`);
+}
 
 const sendInput = z.object({
   account,
