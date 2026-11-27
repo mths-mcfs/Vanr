@@ -674,6 +674,52 @@ describe("anonymity when an agent leaves", () => {
   );
 });
 
+describe("an answer when closing its notice fails", () => {
+  test(
+    "the answer is saved and the debate still moves on: the round closes and goes to the synthesis",
+    async () => {
+      const { workspaceId, base, open, ana, beto, lia } = await team();
+      const t = await open(ana, {
+        title: "Notice",
+        goal: "Close it?",
+        agentIds: [lia.id],
+        rounds: 3,
+        speakers: [{ type: "person", id: beto.user.id }],
+      });
+      await settle();
+      expect((await debateById(server.deps.db, workspaceId, t.id)).round).toBe(0);
+      // The next write to the notifications fails, once.
+      const db = server.deps.db;
+      let failed = false;
+      server.deps.db = new Proxy(db, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop, target);
+          if (prop !== "update") return typeof value === "function" ? value.bind(target) : value;
+          return (table: unknown) => {
+            if (table === schema.notifications && !failed) {
+              failed = true;
+              throw new Error("notifications down");
+            }
+            return target.update(table as typeof schema.notifications);
+          };
+        },
+      });
+      try {
+        const res = await call(beto, "POST", `${base}/${t.id}/posts`, { body: "mine", answer: "yes" });
+        expect(res.status).toBe(500);
+      } finally {
+        server.deps.db = db;
+      }
+      expect(failed).toBe(true);
+      await settle();
+      // The only voter answered: the round closed and the debate went on to its synthesis.
+      const row = await debateById(server.deps.db, workspaceId, t.id);
+      expect([row.round, row.phase, row.endReason]).toEqual([0, "concluding", "unanimous"]);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
 describe("debate estimate", () => {
   test(
     "a vote (rounds=0) can be priced, like it can be opened: one turn per agent, cheaper than one more round",

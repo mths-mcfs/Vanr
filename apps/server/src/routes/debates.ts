@@ -488,8 +488,13 @@ export function registerDebates(app: Hono<AppEnv>) {
       extend ? { roundLimit: row.roundLimit + 1 } : {},
     );
     if (!answered) throw turnChanged();
-    await closeNotifications(deps, me.workspaceId, turnKey(row.id), me.userId);
-    scheduleAdvance(deps, row.id);
+    // The answer is saved: the debate moves on even if closing the notice fails (the step's own notice for
+    // this person is only created after the close, never closed by it).
+    try {
+      await closeNotifications(deps, me.workspaceId, turnKey(row.id), me.userId);
+    } finally {
+      scheduleAdvance(deps, row.id);
+    }
     return c.json<DebatePost>(toPost(answered.post, answered.debate), 201);
   });
 
@@ -500,8 +505,11 @@ export function registerDebates(app: Hono<AppEnv>) {
     if (!isMyTurn(row, me.userId)) throw conflict("debate.out_of_turn", "It isn't your round to answer");
     const saved = await leaveRound(deps, row, person(me));
     if (!saved) throw turnChanged();
-    await closeNotifications(deps, me.workspaceId, turnKey(row.id), me.userId);
-    scheduleAdvance(deps, row.id);
+    try {
+      await closeNotifications(deps, me.workspaceId, turnKey(row.id), me.userId);
+    } finally {
+      scheduleAdvance(deps, row.id);
+    }
     return c.json<DebateDetail>(await toDetail(deps, saved));
   });
 
@@ -602,8 +610,11 @@ export function registerDebates(app: Hono<AppEnv>) {
       };
     });
     // Whoever left the table loses the turn's notice with it.
-    for (const id of unseat) await closeNotifications(deps, me.workspaceId, turnKey(row.id), id);
-    if (saved.status === "open") scheduleAdvance(deps, row.id);
+    try {
+      for (const id of unseat) await closeNotifications(deps, me.workspaceId, turnKey(row.id), id);
+    } finally {
+      if (saved.status === "open") scheduleAdvance(deps, row.id);
+    }
     return c.json<DebateDetail>(await toDetail(deps, saved));
   });
 

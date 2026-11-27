@@ -163,7 +163,8 @@ export function addresses(value: string | undefined): string[] {
   if (!value) return [];
   const out: string[] = [];
   // Without quoted strings and comments, a comma only separates mailboxes.
-  const bare = value.replace(/"(?:[^"\\]|\\.)*"/g, " ").replace(/\([^()]*\)/g, " ");
+  // An angle address is kept whole (its local part may be quoted: `<"ana"@client.test>`).
+  const bare = value.replace(/<[^>]*>|"(?:[^"\\]|\\.)*"|\([^()]*\)/g, (m) => (m.startsWith("<") ? m : " "));
   for (const mailbox of bare.split(",")) {
     // In `name <addr>` the address ends the mailbox: a display name can't add one after it.
     const angle = [...mailbox.matchAll(/<([^>]*)>/g)].at(-1);
