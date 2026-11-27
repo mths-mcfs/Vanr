@@ -1,6 +1,7 @@
 // The live view of the agent's browser. Who watches gets 1 frame per second; who took the control through an
 // active intervention gets 15 and sends mouse and keyboard. The runner only streams while someone watches; the
-// last one to leave ends the stream a moment later.
+// last one to leave ends the stream a moment later. Both directions are rate limited here: frames past the
+// stream's rate are dropped before they fan out to the watchers, and so is input past `INPUT_RATE`.
 
 import type { RunnerAccess } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
@@ -17,6 +18,27 @@ const { agents, runners } = schema;
 const WATCH_FPS = 1;
 const CONTROL_FPS = 15;
 const UNWATCH_GRACE_MS = 1500;
+/** Input messages a socket may send per second to the stream it controls (each one up to 100 events). */
+const INPUT_RATE = 30;
+
+/** A token bucket: `rate` tokens a second, at most `burst` kept. */
+interface Bucket {
+  tokens: number;
+  at: number;
+}
+
+const bucket = (burst: number, at: number): Bucket => ({ tokens: burst, at });
+
+function take(b: Bucket, now: number, rate: number, burst: number): boolean {
+  b.tokens = Math.min(burst, b.tokens + (Math.max(0, now - b.at) / 1000) * rate);
+  b.at = now;
+  if (b.tokens < 1) return false;
+  b.tokens -= 1;
+  return true;
+}
+
+/** Frames a stream forwards per second: its rate, with one frame of slack for the network's jitter. */
+const frameBurst = (fps: number) => fps + 1;
 
 interface Stream {
   runnerId: string;
@@ -31,6 +53,16 @@ interface Stream {
    * that stands still gets this one, or they would have no image.
    */
   lastFrame: Record<string, unknown> | null;
+  /** The runner's frames: a runner sending faster than the stream's rate doesn't flood the watchers. */
+  frames: Bucket;
+  /**
+   * The newest frame dropped by the rate, sent once the rate allows: the page may stand still after it, and the
+   * watchers would keep an older image.
+   */
+  held: LiveFrame | null;
+  heldTimer: ReturnType<typeof setTimeout> | null;
+  /** Each controlling socket's input. */
+  inputs: WeakMap<BrowserSocket, Bucket>;
 }
 
 const streams = new Map<string, Stream>();
@@ -88,6 +120,10 @@ export async function liveViewSubscribe(deps: AppDeps, ws: BrowserSocket, agentI
       seq: 0,
       stopTimer: null,
       lastFrame: null,
+      frames: bucket(frameBurst(WATCH_FPS), deps.now().getTime()),
+      held: null,
+      heldTimer: null,
+      inputs: new WeakMap(),
     };
     streams.set(agentId, s);
   }
@@ -108,6 +144,7 @@ export function liveViewUnsubscribe(deps: AppDeps, ws: BrowserSocket, agentId: s
   if (s.watchers.size > 0 || s.stopTimer) return;
   s.stopTimer = setTimeout(() => {
     if (s.watchers.size > 0) return;
+    dropHeld(s);
     streams.delete(agentId);
     void deps.runners
       .call(s.runnerId, "live_view.stop", {}, { agent: { id: agentId, handle: "" }, timeoutMs: 10_000 })
@@ -129,6 +166,8 @@ export async function refreshStream(deps: AppDeps, agentId: string) {
   for (const w of s.watchers) send(w, st);
   if (fps === s.fps) return;
   s.fps = fps;
+  // A new stream (or a new rate) starts with a full budget.
+  s.frames = bucket(frameBurst(fps), deps.now().getTime());
   const [agent] = await deps.db.select({ handle: agents.handle }).from(agents).where(eq(agents.id, agentId));
   try {
     const policy = await policyFor(deps, agentId, s.runnerId, fps === CONTROL_FPS ? "person" : "agent");
@@ -160,6 +199,13 @@ export async function liveViewInput(
     interventionSession(deps, intervention.id) !== ws.data.sessionId
   )
     return send(ws, { type: "error", code: "not_in_control", agentId });
+  const now = deps.now().getTime();
+  let b = s.inputs.get(ws);
+  if (!b) {
+    b = bucket(INPUT_RATE, now);
+    s.inputs.set(ws, b);
+  }
+  if (!take(b, now, INPUT_RATE, INPUT_RATE)) return send(ws, { type: "error", code: "rate_limit", agentId });
   // Only who has the control gets here. The runner already has the rule with the person driving, from the
   // driver notice (`pushPolicy`); input that reaches it after they hand back doesn't count.
   void deps.runners
@@ -172,13 +218,9 @@ export async function liveViewInput(
     .catch(() => {});
 }
 
-export function onLiveViewFrame(
-  _deps: AppDeps,
-  runnerId: string,
-  frame: { agentId: string; data: string; width: number; height: number; url?: string },
-) {
-  const s = streams.get(frame.agentId);
-  if (!s || s.runnerId !== runnerId) return;
+type LiveFrame = { agentId: string; data: string; width: number; height: number; url?: string };
+
+function emitFrame(s: Stream, frame: LiveFrame) {
   s.seq += 1;
   const out = {
     type: "live_view.frame",
@@ -191,6 +233,31 @@ export function onLiveViewFrame(
   for (const w of s.watchers) send(w, out);
 }
 
+function dropHeld(s: Stream) {
+  if (s.heldTimer) clearTimeout(s.heldTimer);
+  s.heldTimer = null;
+  s.held = null;
+}
+
+export function onLiveViewFrame(deps: AppDeps, runnerId: string, frame: LiveFrame) {
+  const s = streams.get(frame.agentId);
+  if (!s || s.runnerId !== runnerId) return;
+  const fps = s.fps || WATCH_FPS;
+  if (take(s.frames, deps.now().getTime(), fps, frameBurst(fps))) {
+    dropHeld(s);
+    return emitFrame(s, frame);
+  }
+  s.held = frame;
+  if (s.heldTimer) return;
+  const wait = Math.ceil(((1 - s.frames.tokens) / fps) * 1000);
+  s.heldTimer = setTimeout(() => {
+    s.heldTimer = null;
+    const held = s.held;
+    if (!held || streams.get(held.agentId) !== s) return;
+    onLiveViewFrame(deps, runnerId, held);
+  }, wait);
+}
+
 export function onLiveViewStreamEnded(
   _deps: AppDeps,
   runnerId: string,
@@ -200,6 +267,7 @@ export function onLiveViewStreamEnded(
   if (!s || s.runnerId !== runnerId) return;
   s.fps = 0;
   s.lastFrame = null;
+  dropHeld(s);
   for (const w of s.watchers)
     send(w, { type: "live_view.ended", agentId: frame.agentId, reason: frame.reason });
 }
@@ -209,7 +277,10 @@ export function onLiveViewStreamEnded(
  * The runners' connections close right after (RunnerHub.closeAll), which ends their streams.
  */
 export function dropAllLiveViews() {
-  for (const s of streams.values()) if (s.stopTimer) clearTimeout(s.stopTimer);
+  for (const s of streams.values()) {
+    if (s.stopTimer) clearTimeout(s.stopTimer);
+    dropHeld(s);
+  }
   streams.clear();
 }
 
@@ -218,6 +289,7 @@ export function endLiveView(deps: AppDeps, agentId: string) {
   const s = streams.get(agentId);
   if (!s) return;
   if (s.stopTimer) clearTimeout(s.stopTimer);
+  dropHeld(s);
   streams.delete(agentId);
   for (const w of s.watchers) send(w, { type: "live_view.ended", agentId, reason: "closed" });
   if (deps.runners.isOnline(s.runnerId))
@@ -237,6 +309,7 @@ export function resetLiveViewsOf(runnerId: string) {
     if (s.runnerId === runnerId) {
       if (s.fps !== 0) s.fps = null;
       s.lastFrame = null;
+      dropHeld(s);
     }
 }
 

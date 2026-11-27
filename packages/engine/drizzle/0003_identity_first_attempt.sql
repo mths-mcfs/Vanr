@@ -1,0 +1,4 @@
+ALTER TABLE "notification_deliveries" ADD COLUMN "first_attempt_at" timestamp with time zone;--> statement-breakpoint
+-- A delivery that already went to the provider before this column existed keeps its window from its creation.
+UPDATE "notification_deliveries" SET "first_attempt_at" = "created_at" WHERE "attempts" > 0 AND "status" IN ('pending', 'sending');--> statement-breakpoint
+CREATE UNIQUE INDEX "connections_agent_connector_uq" ON "connections" USING btree ("agent_id","connector") WHERE "connections"."agent_id" is not null and "connections"."revoked_at" is null and "connections"."status" <> 'pending';

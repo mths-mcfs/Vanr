@@ -13,9 +13,10 @@ import { schema } from "@vanr/engine/db";
 import { newId, randomId } from "@vanr/engine/ids";
 import { createSealer, type Sealer } from "@vanr/engine/seal";
 import { PRODUCT } from "@vanr/product";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { AppDeps, WorkspaceMember } from "../context";
+import { isUniqueViolation } from "../db-errors";
 import { HttpError, notFound } from "../http";
 import { log } from "../logger";
 import type { ConnectionRow } from "./access";
@@ -38,7 +39,7 @@ import {
 } from "./oauth";
 import { outsideText } from "./outside-text";
 
-const { connections, oauthStates, agentGrants, messages, members } = schema;
+const { agentChannelAccess, agentGrants, agents, connections, oauthStates, messages, members } = schema;
 type StoredTool = schema.StoredTool;
 type ToolAccessLevel = schema.ToolAccessLevel;
 type StateRow = typeof oauthStates.$inferSelect;
@@ -128,6 +129,18 @@ function rowSecrets(deps: AppDeps, row: { secret: string | null }): string[] {
   }
 }
 
+/**
+ * The connection's credential as kept now, for redaction: a call may have refreshed the token since the row was
+ * read, and a service may echo whichever one it got.
+ */
+export async function connectionSecrets(deps: AppDeps, row: ConnectionRow): Promise<string[]> {
+  const [current] = await deps.db
+    .select({ secret: connections.secret })
+    .from(connections)
+    .where(eq(connections.id, row.id));
+  return [...rowSecrets(deps, row), ...(current ? rowSecrets(deps, current) : [])];
+}
+
 /** The server couldn't be used: its own words, without the credential we sent it. */
 const unreachable = (err: unknown, secrets: readonly string[]) =>
   new HttpError(400, "connector.unreachable", outsideText(err, secrets) || "Server unreachable");
@@ -183,8 +196,9 @@ export type TakenState =
 /**
  * Takes the state of a callback. It is spent on the first use (the delete returns it once, whatever comes
  * next) and only counts for the same person in the same session, before it expires and while that person can
- * still configure the workspace that started it: a removed member, a lowered role or another session gets the
- * state error.
+ * still do what started it: configure the workspace, or, for an agent's own account, edit that agent (as the
+ * routes that start those trips require). A removed member, a lowered role or another session gets the state
+ * error.
  */
 export async function takeState(
   deps: AppDeps,
@@ -207,8 +221,25 @@ export async function takeState(
     .select({ role: members.role })
     .from(members)
     .where(and(eq(members.workspaceId, st.workspaceId), eq(members.userId, viewer.userId)));
-  if (!m || !can(m.role, "configure")) return { ok: false, row: st };
+  if (!m) return { ok: false, row: st };
+  // An agent's own account needs whoever edits that agent; anything else of the workspace needs `configure`.
+  const own = await ownAccountAgent(deps, st);
+  const allowed = own
+    ? can(m.role, "manage_agents") || own.ownerUserId === viewer.userId
+    : can(m.role, "configure");
+  if (!allowed) return { ok: false, row: st };
   return { ok: true, row: st, payload };
+}
+
+/** The agent whose own account the state's target is, or null for a workspace connection or another kind. */
+async function ownAccountAgent(deps: AppDeps, st: StateRow): Promise<{ ownerUserId: string | null } | null> {
+  if (st.kind !== "connector" || !st.targetId) return null;
+  const [target] = await deps.db
+    .select({ ownerUserId: agents.ownerUserId })
+    .from(connections)
+    .innerJoin(agents, eq(agents.id, connections.agentId))
+    .where(and(eq(connections.id, st.targetId), eq(connections.workspaceId, st.workspaceId)));
+  return target ?? null;
 }
 
 /** A server address under the installation's network rule (the local network and plain text switches). */
@@ -324,13 +355,20 @@ async function liveSecret(deps: AppDeps, row: ConnectionRow): Promise<ConnSecret
 export async function mcpFor(deps: AppDeps, row: ConnectionRow): Promise<McpClient> {
   if (!row.serverUrl) throw new McpError("Connection has no server address");
   const secret = await liveSecret(deps, row);
-  return new McpClient({
+  const client = new McpClient({
     url: row.serverUrl,
     fetch: deps.fetchExternal,
     policy: netPolicy(deps.config.integrations),
     headers: headersFor(secret),
   });
+  sentBy.set(client, secretsOf(secret));
+  return client;
 }
+
+/** The credential each client sends (a token refreshed for it included), for redaction. */
+const sentBy = new WeakMap<McpClient, string[]>();
+export const secretsSentBy = (client: McpClient | undefined): string[] =>
+  (client && sentBy.get(client)) || [];
 
 /** The service rejected the kept credential: the connection shows as "Reconnect". */
 export async function markNeedsReconnect(deps: AppDeps, connectionId: string): Promise<void> {
@@ -717,7 +755,8 @@ export async function finishOAuth(
       error: outsideText(err, [s.clientSecret, s.verifier, query.code, ...received]),
     });
     await dropPending();
-    return back("connector_error=token");
+    // The agent got its own account on this service by another route meanwhile (one per service).
+    return back(isUniqueViolation(err) ? "connector_error=exists" : "connector_error=token");
   }
   return back(`connected=${encodeURIComponent(row.custom ? `custom:${row.id}` : row.connector)}`);
 }
@@ -880,13 +919,19 @@ export async function saveCustomTools(
   return updated ?? row;
 }
 
-/** Revokes and takes it away from the agents. */
-export async function disconnect(deps: AppDeps, row: ConnectionRow) {
+/** Revokes and takes it away from the agents (their grants and channel rules on it). */
+export const disconnect = (deps: AppDeps, row: ConnectionRow) => disconnectAll(deps, [row]);
+
+/** Revokes several connections at once: all of them change, or none does. */
+export async function disconnectAll(deps: AppDeps, rows: readonly ConnectionRow[]) {
+  const ids = rows.map((r) => r.id);
+  if (ids.length === 0) return;
   await deps.db.transaction(async (tx) => {
     await tx
       .update(connections)
       .set({ revokedAt: deps.now(), secret: null, updatedAt: deps.now() })
-      .where(eq(connections.id, row.id));
-    await tx.delete(agentGrants).where(eq(agentGrants.connectionId, row.id));
+      .where(inArray(connections.id, ids));
+    await tx.delete(agentGrants).where(inArray(agentGrants.connectionId, ids));
+    await tx.delete(agentChannelAccess).where(inArray(agentChannelAccess.connectionId, ids));
   });
 }

@@ -22,6 +22,13 @@
       "when": 1794716813875,
       "tag": "0002_wiki_annotations",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1795810289457,
+      "tag": "0003_identity_first_attempt",
+      "breakpoints": true
     }
   ]
 }
