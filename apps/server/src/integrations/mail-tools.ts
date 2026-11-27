@@ -483,7 +483,8 @@ const mailOrganize = define({
  * none, as `folderByRole` falls back.
  */
 async function trashFolders(imap: ImapClient): Promise<string[]> {
-  const marked = (await imap.folders()).filter((f) => f.special === "trash").map((f) => f.name);
+  // `\Trash` on its own: a folder may announce it next to another role (`\Sent \Trash`).
+  const marked = (await imap.folders()).filter((f) => f.roles.includes("trash")).map((f) => f.name);
   return marked.length > 0 ? marked : ["Trash"];
 }
 

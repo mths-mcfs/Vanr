@@ -797,6 +797,35 @@ describe("which folder is a trash", () => {
   );
 
   test(
+    "a folder the server lists as both Sent and Trash is a trash: the move is refused without 'can delete'",
+    async () => {
+      clear();
+      const { lia, ana, url, connect, runOf } = await team();
+      const account = (await connect()).body.account;
+      await call(ana, "PUT", url(`/agents/${lia.id}/mail/${account.id}`), {
+        level: "read_write",
+        deletable: false,
+      });
+      const uid = mail.deliver("INBOX", incoming("joao@client.test", "Keep", "Keep me"));
+      const box = mail.folders.get("Archive");
+      const before = box?.special ?? null;
+      try {
+        if (box) box.special = "\\Sent \\Trash";
+        const r = await runOf({ decide: () => "approved" });
+        expect((await r.ask("mail_organize", { account: mail.user, uid, moveTo: "Archive" })).content).toBe(
+          `You can't delete in ${mail.user}.`,
+        );
+        expect(r.approvals).toEqual([]);
+        expect(mail.folders.get("Archive")?.messages ?? []).toEqual([]);
+        expect(mail.folders.get("INBOX")?.messages.map((m) => m.uid)).toEqual([uid]);
+      } finally {
+        if (box) box.special = before;
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "a folder that becomes a trash between the plan and the run is not moved to: the agent is told to try again",
     async () => {
       clear();
