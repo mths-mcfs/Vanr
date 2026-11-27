@@ -16,7 +16,7 @@ import { schema } from "@vanr/engine/db";
 import { and, eq, isNull, ne } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
-import { agentInWorkspace, requireAgentEditor } from "../agents";
+import { agentInWorkspace, channelViewer, requireAgentEditor } from "../agents";
 import { type AppDeps, type AppEnv, type Ctx, requireUser, type WorkspaceMember } from "../context";
 import { forbidden, notFound, param, readJson, unauthorized } from "../http";
 import {
@@ -330,9 +330,8 @@ export function registerConnectors(app: Hono<AppEnv>) {
   app.get(`${WORKSPACE}/agents/:agentId/identity`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
-    return c.json(
-      await identityOf(deps, await agentInWorkspace(deps.db, me.workspaceId, param(c, "agentId"))),
-    );
+    const agent = await agentInWorkspace(deps.db, me.workspaceId, param(c, "agentId"));
+    return c.json(await identityOf(deps, agent, channelViewer(me)));
   });
 
   app.post(`${WORKSPACE}/agents/:agentId/identity/connections`, async (c) => {
@@ -358,7 +357,7 @@ export function registerConnectors(app: Hono<AppEnv>) {
     const agent = await agentInWorkspace(deps.db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, agent);
     const input = await readJson(c, channelRules);
-    return c.json({ channels: await setChannelRules(deps, agent, input.channels) });
+    return c.json({ channels: await setChannelRules(deps, agent, input.channels, channelViewer(me)) });
   });
 
   app.get(`${WORKSPACE}/agents/:agentId/scopes`, async (c) => {

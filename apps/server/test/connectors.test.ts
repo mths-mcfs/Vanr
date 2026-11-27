@@ -16,6 +16,39 @@ const { connections, gateDecisions, runEvents, runs } = schema;
 
 const mcp = startFakeMcp();
 const keyOnly = startFakeMcp({ keyOnly: true });
+/** An MCP server that answers a tool call with an error quoting the Authorization it got. */
+const ECHOED_KEY = "echoed-secret-key-4815162342";
+const echo = Bun.serve({
+  port: 0,
+  async fetch(req) {
+    const auth = req.headers.get("authorization") ?? "";
+    const body = (await req.json()) as { id?: number; method: string };
+    if (body.id === undefined) return new Response(null, { status: 202 });
+    const reply = (result: unknown) => Response.json({ jsonrpc: "2.0", id: body.id, result });
+    if (body.method === "initialize")
+      return Response.json(
+        {
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            protocolVersion: "2025-06-18",
+            capabilities: { tools: {} },
+            serverInfo: { name: "echo", version: "1" },
+          },
+        },
+        { headers: { "mcp-session-id": "s1" } },
+      );
+    if (body.method === "tools/list")
+      return reply({
+        tools: [{ name: "ping", description: "Ping", inputSchema: { type: "object", properties: {} } }],
+      });
+    return Response.json({
+      jsonrpc: "2.0",
+      id: body.id,
+      error: { code: -32000, message: `call rejected for ${auth}` },
+    });
+  },
+});
 const CATALOG_HOSTS = ["mcp.linear.app", "mcp.notion.com", "api.githubcopilot.com"];
 
 /** Each catalog origin answers from the fake MCP server, which speaks of itself by its own origin. */
@@ -44,6 +77,7 @@ afterAll(async () => {
   await server.stop();
   mcp.stop();
   keyOnly.stop();
+  echo.stop(true);
 }, SERVER_TEST_MS);
 
 let n = 0;
@@ -641,6 +675,36 @@ describe("GitHub", () => {
       expect((await ok(call(t.beto, "GET", repos))).repositories).toEqual(["acme/site", "acme/*"]);
       expect(await status(call(t.ana, "PUT", repos, { repositories: ["no-slash"] }))).toBe(400);
       expect(await status(call(t.beto, "PUT", repos, { repositories: [] }))).toBe(403);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("a connector's error text", () => {
+  test(
+    "a server that quotes the key in its error doesn't get it into the run, its events or its error",
+    async () => {
+      const t = await team();
+      const started = await ok(
+        connectCustom(t, t.ana, {
+          serverUrl: `http://localhost:${echo.port}/mcp`,
+          apiKey: ECHOED_KEY,
+          label: "Echo",
+          nextPath: "/",
+        }),
+      );
+      const id: string = started.server.id;
+      await ok(saveTools(t, id, { label: "Echo", tools: [{ name: "ping", access: "read", label: "" }] }));
+      await ok(setAccess(t, { connectors: { [id]: true } }));
+      // The failure may have reached the service, so the run fails with the service's words, redacted.
+      await t.ask("mcp_echo__ping", {});
+      const [run] = await server.deps.db.select().from(runs).orderBy(desc(runs.createdAt)).limit(1);
+      expect(run?.error).toContain("Echo failed: call rejected for Bearer [redacted]");
+      const events = await server.deps.db
+        .select()
+        .from(runEvents)
+        .where(eq(runEvents.runId, run?.id ?? ""));
+      expect(JSON.stringify({ run, events })).not.toContain(ECHOED_KEY);
     },
     SERVER_TEST_MS,
   );

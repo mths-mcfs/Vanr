@@ -7,7 +7,6 @@ import {
   type CustomServer,
   can,
   type MessageMeta,
-  type Role,
   type SaveToolsInput,
 } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
@@ -130,6 +129,18 @@ function rowSecrets(deps: AppDeps, row: { secret: string | null }): string[] {
   }
 }
 
+/**
+ * The connection's credential as kept now, for redaction: a call may have refreshed the token since the row was
+ * read, and a service may echo whichever one it got.
+ */
+export async function connectionSecrets(deps: AppDeps, row: ConnectionRow): Promise<string[]> {
+  const [current] = await deps.db
+    .select({ secret: connections.secret })
+    .from(connections)
+    .where(eq(connections.id, row.id));
+  return [...rowSecrets(deps, row), ...(current ? rowSecrets(deps, current) : [])];
+}
+
 /** The server couldn't be used: its own words, without the credential we sent it. */
 const unreachable = (err: unknown, secrets: readonly string[]) =>
   new HttpError(400, "connector.unreachable", outsideText(err, secrets) || "Server unreachable");
@@ -211,20 +222,24 @@ export async function takeState(
     .from(members)
     .where(and(eq(members.workspaceId, st.workspaceId), eq(members.userId, viewer.userId)));
   if (!m) return { ok: false, row: st };
-  if (!can(m.role, "configure") && !(await editsTargetAgent(deps, st, m.role, viewer.userId)))
-    return { ok: false, row: st };
+  // An agent's own account needs whoever edits that agent; anything else of the workspace needs `configure`.
+  const own = await ownAccountAgent(deps, st);
+  const allowed = own
+    ? can(m.role, "manage_agents") || own.ownerUserId === viewer.userId
+    : can(m.role, "configure");
+  if (!allowed) return { ok: false, row: st };
   return { ok: true, row: st, payload };
 }
 
-/** The state's target is an agent's own account and the person edits that agent (manages agents or owns it). */
-async function editsTargetAgent(deps: AppDeps, st: StateRow, role: Role, userId: string): Promise<boolean> {
-  if (st.kind !== "connector" || !st.targetId) return false;
+/** The agent whose own account the state's target is, or null for a workspace connection or another kind. */
+async function ownAccountAgent(deps: AppDeps, st: StateRow): Promise<{ ownerUserId: string | null } | null> {
+  if (st.kind !== "connector" || !st.targetId) return null;
   const [target] = await deps.db
     .select({ ownerUserId: agents.ownerUserId })
     .from(connections)
     .innerJoin(agents, eq(agents.id, connections.agentId))
     .where(and(eq(connections.id, st.targetId), eq(connections.workspaceId, st.workspaceId)));
-  return !!target && (can(role, "manage_agents") || target.ownerUserId === userId);
+  return target ?? null;
 }
 
 /** A server address under the installation's network rule (the local network and plain text switches). */

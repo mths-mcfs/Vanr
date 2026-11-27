@@ -17,6 +17,7 @@ import {
   requestScope,
   type Starter,
 } from "../src/integrations/connectors";
+import { setChannelRules } from "../src/integrations/identity";
 import { REFRESH_MARGIN_MS } from "../src/integrations/oauth";
 import type { RunningServer } from "../src/server";
 import { type FakeMcp, startFakeMcp } from "./fake-mcp";
@@ -24,7 +25,7 @@ import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
 import { forcedPair, gate, instrumented, outcome, WAIT_MS } from "./lock-double";
 import { NO_POSTGRES, TEST_POSTGRES_URL, testDatabaseUrl } from "./postgres";
 import { seedAgent } from "./route-calls";
-import { seedWorkspace } from "./seed";
+import { seedChannel, seedWorkspace } from "./seed";
 
 const onPostgres = (name: string) => (TEST_POSTGRES_URL ? name : `${name} (skipped: ${NO_POSTGRES})`);
 
@@ -35,6 +36,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("the connection's row lock on Pos
   let admin: postgres.Sql;
   let me: Starter;
   let ana: Awaited<ReturnType<typeof signedIn>>;
+  let general: string;
 
   beforeAll(async () => {
     mcp = startFakeMcp({ expiresIn: 90, rotateRefresh: true });
@@ -46,7 +48,9 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("the connection's row lock on Pos
     });
     admin = postgres(url, { max: 1, onnotice: () => {} });
     ana = await signedIn(server, "Ana", "ana@connectors-pg.test");
-    const { workspaceId } = await seedWorkspace(server, ana, "Locks");
+    const seeded = await seedWorkspace(server, ana, "Locks");
+    const { workspaceId } = seeded;
+    general = seeded.general;
     me = { workspaceId, userId: ana.user.id, role: "owner", handle: "ana", sessionId: "s" };
   }, SERVER_TEST_MS);
   afterAll(async () => {
@@ -151,74 +155,106 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("the connection's row lock on Pos
     SERVER_TEST_MS,
   );
 
+  /**
+   * A holds right after its read of `match` under the agent's lock; B then either waits on that lock or, without
+   * it, reads the same rows and ends before A writes. Either way A goes on only after that, so the outcome tells
+   * whether the read was under the lock.
+   */
+  async function heldPair(
+    label: string,
+    match: string,
+    run: (side: "A" | "B", db: typeof server.deps.db) => Promise<unknown>,
+  ) {
+    const held = gate();
+    const release = gate();
+    const aPids = new Set<number>();
+    const bPids = new Set<number>();
+    let polling = true;
+    const a = run(
+      "A",
+      instrumented(server.deps.db, {
+        pids: aPids,
+        after: {
+          kind: "select",
+          match,
+          run: async () => {
+            held.open();
+            await release.opened;
+          },
+        },
+      }),
+    );
+    let b: Promise<unknown> | null = null;
+    let watcher: Promise<void> | null = null;
+    try {
+      // A failure of A before its hold point shows as itself, not as a wait.
+      const reached = await Promise.race([
+        held.opened.then(() => true),
+        a.then(() => false),
+        Bun.sleep(WAIT_MS).then(() => false),
+      ]);
+      if (!reached) throw new Error(`LOCK_WAIT_TIMEOUT(${label}): A ended or stalled before its hold point`);
+      b = run("B", instrumented(server.deps.db, { pids: bPids }));
+      watcher = (async () => {
+        const end = Date.now() + WAIT_MS;
+        while (polling && Date.now() < end) {
+          const pid = [...bPids][0];
+          if (pid !== undefined) {
+            const [row] = await admin<{ wait_event_type: string | null }[]>`
+              select wait_event_type from pg_stat_activity where pid = ${pid}`;
+            if (row?.wait_event_type === "Lock") return;
+          }
+          await Bun.sleep(25);
+        }
+        if (polling) throw new Error(`LOCK_WAIT_TIMEOUT(${label}): B neither waited nor ended`);
+      })();
+      await Promise.race([b, watcher]);
+      release.open();
+      await Promise.all([a, b]);
+    } finally {
+      polling = false;
+      release.open();
+      await Promise.allSettled([a, b, watcher]);
+    }
+  }
+
   test(
     "forced: two partial saves of one agent's access keep both changes",
     async () => {
       const agent = await seedAgent(server, me.workspaceId, ana, "lia");
       const deny = { connectionId: "", scope: "deny:list_items" };
       const all = { connectionId: "", scope: "*" };
-      const held = gate();
-      const release = gate();
-      const aPids = new Set<number>();
-      const bPids = new Set<number>();
-      let polling = true;
-      // A holds right after it read the agent's grants; B then either waits on the agent's lock or, without it,
-      // reads the same grants and ends before A writes.
-      const a = replaceGrants(
-        instrumented(server.deps.db, {
-          pids: aPids,
-          after: {
-            kind: "select",
-            match: '"agent_grants"',
-            run: async () => {
-              held.open();
-              await release.opened;
-            },
-          },
-        }),
-        me.workspaceId,
-        agent.id,
-        (current) => [...current, all],
+      await heldPair("access", '"agent_grants"', (side, db) =>
+        replaceGrants(db, me.workspaceId, agent.id, (current) => [...current, side === "A" ? all : deny]),
       );
-      let b: Promise<void> | null = null;
-      let watcher: Promise<void> | null = null;
-      try {
-        // A failure of A before its hold point shows as itself, not as a wait.
-        const reached = await Promise.race([
-          held.opened.then(() => true),
-          a.then(() => false),
-          Bun.sleep(WAIT_MS).then(() => false),
-        ]);
-        if (!reached) throw new Error("LOCK_WAIT_TIMEOUT(access): A ended or stalled before its hold point");
-        b = replaceGrants(
-          instrumented(server.deps.db, { pids: bPids }),
-          me.workspaceId,
-          agent.id,
-          (current) => [...current, deny],
-        );
-        watcher = (async () => {
-          const end = Date.now() + WAIT_MS;
-          while (polling && Date.now() < end) {
-            const pid = [...bPids][0];
-            if (pid !== undefined) {
-              const [row] = await admin<{ wait_event_type: string | null }[]>`
-                select wait_event_type from pg_stat_activity where pid = ${pid}`;
-              if (row?.wait_event_type === "Lock") return;
-            }
-            await Bun.sleep(25);
-          }
-          if (polling) throw new Error("LOCK_WAIT_TIMEOUT(access): B neither waited nor ended");
-        })();
-        await Promise.race([b, watcher]);
-        release.open();
-        await Promise.all([a, b]);
-      } finally {
-        polling = false;
-        release.open();
-        await Promise.allSettled([a, b, watcher]);
-      }
       const scopes = (await grantsOf(server.deps.db, agent.id)).map((g) => g.scope).sort();
       outcome("access", scopes, [all.scope, deny.scope].sort());
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "forced: two saves of one agent's channel rules leave the last one whole, never a mix",
+    async () => {
+      const agent = await seedAgent(server, me.workspaceId, ana, "rui");
+      const other = await seedChannel(server, me.workspaceId, { name: "other", members: [ana] });
+      const viewer = { userId: ana.user.id, seesAll: true };
+      const rules = {
+        A: [{ channelId: general, connectionId: "*", level: "off" as const }],
+        B: [{ channelId: other, connectionId: "*", level: "read" as const }],
+      };
+      await heldPair("channel-rules", '"agent_channel_access"', (side, db) =>
+        setChannelRules({ ...server.deps, db }, agent, rules[side], viewer),
+      );
+      const saved = await server.deps.db
+        .select({ channelId: schema.agentChannelAccess.channelId })
+        .from(schema.agentChannelAccess)
+        .where(eq(schema.agentChannelAccess.agentId, agent.id));
+      outcome(
+        "channel-rules",
+        saved.map((r) => r.channelId),
+        [other],
+      );
     },
     SERVER_TEST_MS,
   );

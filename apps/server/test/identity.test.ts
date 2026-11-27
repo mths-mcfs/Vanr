@@ -9,7 +9,7 @@ import type { RunningServer } from "../src/server";
 import { startFakeMcp } from "./fake-mcp";
 import { SERVER_TEST_MS, settle, signedIn, startTestServer, waitFor } from "./harness";
 import { type Called, call, seedAgent, ws } from "./route-calls";
-import { memberOf, type Person, seedChannel, seedWorkspace } from "./seed";
+import { memberOf, type Person, seedChannel, seedDm, seedWorkspace } from "./seed";
 
 const { connections, gateDecisions, runEvents, runs } = schema;
 
@@ -422,6 +422,56 @@ describe("permission by workspace and channel", () => {
       expect([JSON.stringify(sorted(a)), JSON.stringify(sorted(b))]).toContain(
         JSON.stringify(sorted(channels)),
       );
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("channel rules on channels hidden from the caller", () => {
+  test(
+    "a member sees and replaces only the rules on channels they may see; hidden ones, DMs and unknown ids answer alike",
+    async () => {
+      const t = await team();
+      const carlos = await memberOf(server, t.workspaceId, "Carlos", email("carlos"));
+      const board = await seedChannel(server, t.workspaceId, {
+        name: "board",
+        visibility: "private",
+        members: [t.ana],
+      });
+      const dm = await seedDm(server, t.workspaceId, t.ana, carlos);
+      // Beto, a plain member, owns Bia; Ana placed her in #board, which Beto isn't in, and turned it off there.
+      const bia = await seedAgent(server, t.workspaceId, t.beto, `bia${n}`, [t.general, board]);
+      const general = { channelId: t.general, connectionId: "*", level: "read" };
+      const boardOff = { channelId: board, connectionId: "*", level: "off" };
+      await ok(setChannels(t, t.ana, bia.id, [general, boardOff]));
+
+      // Reading: Beto doesn't see the rule on #board; Ana does.
+      expect((await identity(t, t.beto, bia.id)).channels).toEqual([general]);
+      expect((await identity(t, t.ana, bia.id)).channels).toHaveLength(2);
+
+      // Writing: Beto's save replaces what he sees and leaves Ana's rule on #board as it was.
+      const approval = { ...general, level: "approval" };
+      expect((await ok(setChannels(t, t.beto, bia.id, [approval]))).channels).toEqual([approval]);
+      const kept = (await identity(t, t.ana, bia.id)).channels as (typeof general)[];
+      expect(kept.sort((x, y) => x.channelId.localeCompare(y.channelId))).toEqual(
+        [approval, boardOff].sort((x, y) => x.channelId.localeCompare(y.channelId)),
+      );
+      expect((await ok(setChannels(t, t.beto, bia.id, []))).channels).toEqual([]);
+      expect((await identity(t, t.ana, bia.id)).channels).toEqual([boardOff]);
+
+      // A channel hidden from Beto, a DM and an id that doesn't exist answer the same.
+      const answer = async (who: Person, channelId: string) => {
+        const r = await setChannels(t, who, bia.id, [{ channelId, connectionId: "*", level: "read" }]);
+        return [r.status, r.body?.error?.code];
+      };
+      const unknown = await answer(t.beto, "ch_none");
+      expect(unknown).toEqual([400, "identity.unknown_channel"]);
+      expect(await answer(t.beto, board)).toEqual(unknown);
+      expect(await answer(t.beto, dm)).toEqual(unknown);
+      // Whoever manages agents sees every channel, but a DM is never a channel rule.
+      expect(await answer(t.ana, dm)).toEqual(unknown);
+      expect((await ok(setChannels(t, t.ana, bia.id, [boardOff]))).channels).toEqual([boardOff]);
+      expect((await identity(t, t.ana, bia.id)).channels).toEqual([boardOff]);
     },
     SERVER_TEST_MS,
   );
