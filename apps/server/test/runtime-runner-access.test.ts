@@ -7,6 +7,7 @@ import { asc, eq } from "drizzle-orm";
 import type { RunningServer } from "../src/server";
 import { pairFake, type Request } from "./fake-runner";
 import { SERVER_TEST_MS, settle, signedIn, startTestServer, waitFor } from "./harness";
+import { wrapQuery } from "./lock-double";
 import type { ProtocolRunner } from "./protocol-runner";
 import { call, seedAgent, ws } from "./route-calls";
 import { memberOf, seedWorkspace } from "./seed";
@@ -79,37 +80,68 @@ describe("the agent's runner, for whoever may use it", () => {
       expect(execs()).not.toContain(SECRET);
 
       // The run ends while Beto's message is being checked: the message isn't lost with it, it opens a run.
-      const short = await post(ana, `@${lia.handle} [[slow:150]] a short one`, "a3");
-      await waitFor(async () => server.deps.runtime.isBusy(lia.id));
+      // Two barriers: Ana's run can't end (its answer's post waits) until Beto's check is reached, and the check
+      // can't go on until Ana's run has ended.
+      const gate = () => {
+        let open!: () => void;
+        const opened = new Promise<void>((r) => {
+          open = r;
+        });
+        return { open, opened };
+      };
+      const checking = gate();
+      const checked = gate();
       const runtime = server.runtime;
       const check = runtime["mayUseRunner"].bind(runtime);
-      let reached!: () => void;
-      const checking = new Promise<void>((r) => {
-        reached = r;
-      });
-      let release!: () => void;
-      const held = new Promise<void>((r) => {
-        release = r;
-      });
       runtime["mayUseRunner"] = async (...args: Parameters<typeof check>) => {
-        reached();
-        await held;
+        checking.open();
+        await checked.opened;
         return check(...args);
       };
+      const { deps } = server;
+      const real = deps.db;
+      // Ana's answer (the agent's message of her run) is posted only once Beto's check was reached.
+      deps.db = new Proxy(real, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop, target);
+          if (prop !== "insert") return typeof value === "function" ? value.bind(target) : value;
+          return (table: typeof schema.messages) => {
+            const builder = target.insert(table);
+            if (table !== schema.messages) return builder;
+            return new Proxy(builder, {
+              get(b, p) {
+                const v = Reflect.get(b, p, b);
+                if (p !== "values") return typeof v === "function" ? v.bind(b) : v;
+                return (row: { authorKind?: string; authorId?: string }) => {
+                  const q = v.call(b, row);
+                  if (row.authorKind !== "agent" || row.authorId !== lia.id) return q;
+                  return wrapQuery(q, async () => {
+                    await checking.opened;
+                  });
+                };
+              },
+            });
+          };
+        },
+      });
       try {
+        const short = await post(ana, `@${lia.handle} a short one`, "a3");
+        await waitFor(async () => server.deps.runtime.isBusy(lia.id));
         const posting = call(beto, "POST", path, { body: `@${lia.handle} and me?`, clientId: "b3" });
-        await checking;
-        // Ana's run ends while the check waits.
+        await checking.opened;
+        // Ana's run ends (its answer goes out) while the check waits.
         await waitFor(async () => (await runOf(short))?.status === "done");
-        release();
+        checked.open();
         const late = (await posting).body.id as string;
         await settle(server);
         const lateRun = await runOf(late);
         expect(lateRun?.id).toBeDefined();
         expect(lateRun?.id).not.toBe((await runOf(short))?.id);
       } finally {
-        release();
+        checking.open();
+        checked.open();
         runtime["mayUseRunner"] = check;
+        deps.db = real;
       }
     },
     SERVER_TEST_MS,

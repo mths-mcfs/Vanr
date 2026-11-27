@@ -826,7 +826,7 @@ describe("the engine on its loop", () => {
   test(
     "a verdict on an item the person removed during the check is not applied and makes no fix",
     async () => {
-      const row = await onRunner("Removed", ["Build"]);
+      const row = await idleOnRunner("Removed", ["Build"]);
       const p1 = and(
         eq(schema.assignmentPlanItems.assignmentId, row.id),
         eq(schema.assignmentPlanItems.id, "p1"),

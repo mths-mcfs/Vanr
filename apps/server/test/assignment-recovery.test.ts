@@ -697,6 +697,42 @@ describe("two attempts of one item", () => {
   );
 
   test(
+    "an admit check that throws stops the run it was checking",
+    async () => {
+      const { row, agentId } = await active("Admit throws", ["x"]);
+      const channel = await channelInWorkspace(server.deps.db, workspaceId, general);
+      const [agent] = await server.deps.db.select().from(schema.agents).where(eq(schema.agents.id, agentId));
+      if (!channel || !agent) throw new Error("setup");
+      const { message } = await postMessage(server.deps, {
+        workspaceId,
+        channel,
+        author: { type: "person", id: ana.user.id },
+        body: "[[slow:300]] go",
+        clientId: newId("c"),
+        threadId: row.threadId,
+      });
+      const [trigger] = await server.deps.db.select().from(messages).where(eq(messages.id, message.id));
+      if (!trigger) throw new Error("no message");
+      await expect(
+        server.deps.runtime.runFor({
+          agent,
+          channel,
+          trigger,
+          fence: { key: `${row.id}:p1`, token: 1 },
+          admit: async () => {
+            throw new Error("records down");
+          },
+        }),
+      ).rejects.toThrow("records down");
+      await server.deps.runtime.settle();
+      const [run] = await server.deps.db.select().from(runs).where(eq(runs.sourceMessageId, trigger.id));
+      expect(run?.status).toBe("canceled");
+      await close(row.id);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "the fences of an item that ended, and of an assignment that ended, are forgotten",
     async () => {
       const { row, agentId } = await active("Fence end", ["x", "y"]);
@@ -1027,9 +1063,10 @@ describe("two steps on one validation", () => {
       // The first call waits until the other step is done (it found the round held).
       const other = barrier();
       let calls = 0;
+      // Only the first call waits: a second one (a regression) returns at once and fails the assertion below.
       const counting: Verifier = async (_deps, _row, items) => {
         calls++;
-        await other.wait();
+        if (calls === 1) await other.wait();
         return verdicts(items, false);
       };
       const deps = { ...server.deps, assignmentVerifier: counting };
@@ -1072,7 +1109,8 @@ describe("two steps on one validation", () => {
       const out = barrier();
       const slow: Verifier = async (_deps, _row, items) => {
         calls++;
-        await out.wait();
+        // Only round 2's call waits; a round-3 call (a regression) returns at once.
+        if (calls === 2) await out.wait();
         return verdicts(items, false);
       };
       const second = act({ ...server.deps, assignmentVerifier: slow }, row.id, { ...step, round: 2 });
@@ -1090,6 +1128,29 @@ describe("two steps on one validation", () => {
         out.open();
       }
       await second;
+      await close(row.id);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a validation decided before a pause makes no paid call",
+    async () => {
+      const { row } = await active("Paused round", ["Docs"]);
+      await doneItems(row, ["p1"]);
+      let calls = 0;
+      const counting: Verifier = async (_deps, _row, items) => {
+        calls++;
+        return verdicts(items, true);
+      };
+      expect(await stepNext(server.deps, row.id)).toEqual({ type: "validate", itemIds: ["p1"], round: 1 });
+      await server.deps.db.update(assignments).set({ status: "paused" }).where(eq(assignments.id, row.id));
+      await act({ ...server.deps, assignmentVerifier: counting }, row.id, {
+        type: "validate",
+        itemIds: ["p1"],
+        round: 1,
+      });
+      expect(calls).toBe(0);
       await close(row.id);
     },
     SERVER_TEST_MS,
@@ -1122,14 +1183,17 @@ describe("two steps on one validation", () => {
       const deps = { ...server.deps, assignmentVerifier: verifier };
       try {
         await act(deps, row.id, { type: "validate", itemIds: ["p1"], round: 1 });
-        // The first step is done; the second one's claim is still there.
+        // The first step is done: it lost the round, so it wrote nothing, and the second one's claim is still there.
         const claim = await claimOf(row.id);
         expect(claim?.status).toBe("pending");
+        expect((await planOf(server.deps, row.id)).find((i) => i.id === "p1")?.checks).toBe(0);
       } finally {
         later.open();
       }
       await next;
       expect(await claimOf(row.id)).toBeUndefined();
+      // The round is the second step's.
+      expect((await planOf(server.deps, row.id)).find((i) => i.id === "p1")?.checks).toBe(1);
       await close(row.id);
     },
     SERVER_TEST_MS,

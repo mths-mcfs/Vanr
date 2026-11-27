@@ -949,7 +949,7 @@ export class AgentRuntime implements RuntimePort {
       const took = (await this.steer(running, trigger)) ?? running.runId;
       const into = this.live.get(took);
       if (fence && into) into.fence = fence;
-      if (input.admit && !(await input.admit())) {
+      if (!(await this.admitted(input.admit, took, fence))) {
         // Gone stale while it went in (the work ended, the assignment closed): its turn in the run stops.
         this.cancel(took, null, fence);
         return { ok: false, code: "fenced" };
@@ -977,7 +977,7 @@ export class AgentRuntime implements RuntimePort {
       }
       started.fence = fence;
     }
-    if (input.admit && !(await input.admit())) {
+    if (!(await this.admitted(input.admit, runId, fence))) {
       // The run is on the air, but the work is no longer this attempt's (it ended, or the assignment closed
       // while the run was starting): it stops here.
       this.cancel(runId, null, fence);
@@ -1020,6 +1020,17 @@ export class AgentRuntime implements RuntimePort {
       reason,
       text,
     });
+  }
+
+  /** The caller's `admit` read; one that throws stops the run first (unconfirmed, it doesn't stay on the air). */
+  private async admitted(admit: (() => Promise<boolean>) | undefined, runId: string, fence?: RunFence) {
+    if (!admit) return true;
+    try {
+      return await admit();
+    } catch (err) {
+      this.cancel(runId, null, fence);
+      throw err;
+    }
   }
 
   /**

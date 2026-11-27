@@ -1047,7 +1047,13 @@ async function claimRound(
   const now = deps.now();
   const token = newId("vcl");
   return deps.db.transaction(async (tx) => {
-    await tx.select({ id: assignments.id }).from(assignments).where(eq(assignments.id, row.id)).for("update");
+    const [locked] = await tx
+      .select({ status: assignments.status })
+      .from(assignments)
+      .where(eq(assignments.id, row.id))
+      .for("update");
+    // Paused or closed since the decision: no paid call for it.
+    if (locked?.status !== "active") return "stale";
     const [held] = await tx.select().from(effectKeys).where(eq(effectKeys.key, key));
     if (held && now.getTime() - held.createdAt.getTime() < ROUND_LEASE_MS) return "held";
     const current = await tx
@@ -1109,7 +1115,15 @@ async function validate(
   if (claim === "held") return ROUND_HELD_WAIT_MS;
   if (claim === "stale") return null;
   try {
-    return await judgeRound(deps, row, itemIds, round);
+    // After the call, only the claim's holder writes: a step that outlived its lease lost the round to another.
+    const holds = async () =>
+      (
+        await deps.db
+          .select({ key: effectKeys.key })
+          .from(effectKeys)
+          .where(and(eq(effectKeys.key, key), eq(effectKeys.runId, claim.token)))
+      ).length > 0;
+    return await judgeRound(deps, row, itemIds, round, holds);
   } finally {
     // The round is judged (its checks moved on) or left unspent (a pause): either way this claim's job is done.
     // Only this acquisition's: past the lease another step may hold the key now.
@@ -1123,6 +1137,8 @@ async function judgeRound(
   row: AssignmentRow,
   itemIds: string[],
   round: number,
+  /** Whether this step still holds the round's claim (read after the call, before anything is written). */
+  holds: () => Promise<boolean>,
 ): Promise<number | null> {
   const items = await planOf(deps, row.id);
   const byId = new Map(items.map((i) => [i.id, i]));
@@ -1163,6 +1179,7 @@ async function judgeRound(
   });
   const verifier = deps.assignmentVerifier ?? modelVerifier;
   const res = await verifier(deps, row, input);
+  if (!(await holds())) return null;
   // The plan as it is after the call: a fix only for an item still done, with the round that was judged.
   const after = new Map((await planOf(deps, row.id)).map((i) => [i.id, i]));
   const unchanged = (t: PlanItemRow) => {
