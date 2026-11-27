@@ -233,7 +233,6 @@ function Loaded({
             </h1>
           ) : (
             <Input
-              // biome-ignore lint/a11y/noAutofocus: the field replaces the title the person just chose to rename.
               autoFocus
               aria-label={t("base.name")}
               value={renaming}
