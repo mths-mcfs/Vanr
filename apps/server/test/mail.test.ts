@@ -1,7 +1,6 @@
 // Ported from the origin's email tests: the routine fired by email (integrations/mail-trigger), against a real
-// IMAP server on a local port (fake-mail.ts). The check is the runtime's tick in the origin (slice S6), so the
-// tests call `pollEmailRoutines` the way the tick will. The routines open a debate (no runtime needed); a target
-// that runs the agent in a conversation is rejected at the check's entry until S6, before the mailbox is read.
+// IMAP server on a local port (fake-mail.ts). The check is the runtime's tick; the tests call `pollEmailRoutines`
+// the way the tick does. The routines open a debate, or run the agent in a channel.
 // The scenarios of the agent's mailbox tools, the account routes (routes/integrations) and Composio wait for their
 // slices (the ledger lists them).
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
@@ -396,7 +395,7 @@ describe("routine by email", () => {
   );
 
   test(
-    "a routine that would talk in a channel is rejected at the check's entry: the mailbox isn't read (no runtime)",
+    "a routine that talks in a channel: the email goes into the request as outside text and the agent answers there",
     async () => {
       const { workspaceId, general, lia, connect, ana } = await team();
       const account = await connect();
@@ -410,12 +409,24 @@ describe("routine by email", () => {
           trigger: { kind: "email", accountId: account.id, folder: "INBOX" },
         })
       ).body;
-      mail.deliver("INBOX", incoming("x@client.test", "Waits", "for the runtime"));
+      // The first check marks the position.
       await poll();
+      mail.deliver("INBOX", incoming("x@client.test", "Order 9", "Three bolts"));
       await poll();
-      expect(await executions(routine.id)).toEqual([]);
-      // Not even the first position was marked: the check that has the runtime starts from the mailbox as it is.
-      expect((await routineRow(routine.id))?.cursor).toBeNull();
+      const [run] = await executions(routine.id);
+      expect([run?.status, run?.trigger, run?.channelId]).toEqual(["ok", "email", general]);
+      const [ask] = await server.deps.db
+        .select()
+        .from(schema.messages)
+        .where(eq(schema.messages.clientId, `routine:${run?.id}`));
+      expect(ask?.body).toContain("Three bolts");
+      // Outside text: the run that reads it raises flag A with the email as its source.
+      expect(typeof ask?.meta.untrusted).toBe("string");
+      const [reply] = await server.deps.db
+        .select()
+        .from(schema.messages)
+        .where(eq(schema.messages.id, run?.messageId ?? ""));
+      expect([reply?.authorKind, reply?.authorId]).toEqual(["agent", lia.id]);
     },
     SERVER_TEST_MS,
   );

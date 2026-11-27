@@ -1,6 +1,5 @@
-// The agent lab without the runtime: a test run asks the runtime for texts (`complete`), which the server doesn't
-// have until slice S6, so starting one is rejected before anything is written; the checks, the summary, the
-// system prompt, the JSON reader and the cleanup after a crash work on their own.
+// The agent lab: a test run asks the runtime for each case's reply on both sides (`complete`); the checks, the
+// summary, the system prompt, the JSON reader and the cleanup after a crash.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
@@ -16,7 +15,6 @@ import {
   toEval,
 } from "./agent-lab";
 import type { AgentRow } from "./agents";
-import { HttpError } from "./http";
 import { createWorkspace } from "./members";
 import type { RunningServer } from "./server";
 
@@ -52,23 +50,32 @@ beforeAll(async () => {
 afterAll(() => server.stop(), SERVER_TEST_MS);
 
 describe("agent lab", () => {
-  test("starting a test run is rejected with not_available before anything is written", async () => {
+  test("a test run asks the runtime for both sides of each case and ends with the summary", async () => {
+    const caseId = newId("tc");
+    // The test model repeats the request, so the reply carries "hello" on both sides.
     await server.deps.db.insert(schema.agentTestCases).values({
-      id: newId("tc"),
+      id: caseId,
       workspaceId: agent.workspaceId,
       agentId: agent.id,
-      input: "Hi",
+      input: "Say hello",
       mustInclude: ["hello"],
       createdBy: userId,
     });
-    const err = await startEval(server.deps, { agent, userId, after: "Be brief.", proposalId: null }).catch(
-      (e: unknown) => e,
-    );
-    expect(err).toBeInstanceOf(HttpError);
-    expect(err).toMatchObject({ status: 503, code: "not_available", params: { method: "complete" } });
-    expect(
-      await server.deps.db.select().from(schema.agentEvals).where(eq(schema.agentEvals.agentId, agent.id)),
-    ).toEqual([]);
+    const row = await startEval(server.deps, { agent, userId, after: "Be brief.", proposalId: null });
+    await server.deps.runtime.settle();
+    const [done] = await server.deps.db
+      .select()
+      .from(schema.agentEvals)
+      .where(eq(schema.agentEvals.id, row.id));
+    expect(done).toMatchObject({ status: "done", error: null });
+    expect(done?.summary).toEqual({ cases: 1, beforePass: 1, afterPass: 1, regressions: 0 });
+    expect(done?.results.map((r) => [r.caseId, r.before.pass, r.after.pass])).toEqual([[caseId, true, true]]);
+    // Each side was a run of the agent on the runtime.
+    const agentRuns = await server.deps.db
+      .select()
+      .from(schema.runs)
+      .where(eq(schema.runs.agentId, agent.id));
+    expect(agentRuns.filter((r) => r.status === "done").length).toBeGreaterThanOrEqual(2);
   });
 
   test("a reply passes when every required snippet shows and no forbidden one does, ignoring case and width", () => {

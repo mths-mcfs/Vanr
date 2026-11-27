@@ -466,7 +466,7 @@ describe("conversation tools", () => {
 
 describe("outside effects in a routine execution run once", () => {
   /** A K2 tool to an outside destination that counts its runs; `fail` decides how a run ends. */
-  function outbound(fail: { mode: "none" | "crash" | "reject" }) {
+  function outbound(fail: { mode: "none" | "crash" | "reject" | "reached" }) {
     const state = { ran: 0 };
     const tool = define({
       name: "send_out",
@@ -480,6 +480,11 @@ describe("outside effects in a routine execution run once", () => {
         state.ran++;
         if (fail.mode === "crash") throw new Error("connection reset");
         if (fail.mode === "reject") throw new ToolInputError("Partner is closed");
+        if (fail.mode === "reached") {
+          const err = new ToolInputError("The partner did not answer in time");
+          err.reached = true;
+          throw err;
+        }
         return `sent ${input.text}`;
       },
     }) as ToolDef<unknown>;
@@ -503,6 +508,29 @@ describe("outside effects in a routine execution run once", () => {
     // Another payload or another execution is another effect.
     await runTool(t.ctx({ effectKey }), [tool], "send_out", { text: "b" });
     await runTool(t.ctx({ effectKey: newId("rx") }), [tool], "send_out", { text: "a" });
+    expect(state.ran).toBe(3);
+  });
+
+  test("a refusal before the send frees the key; a failure after the send keeps it, and the retry doesn't send", async () => {
+    const t = await setup("once-reached");
+    const fail: { mode: "reject" | "reached" | "none" } = { mode: "reject" };
+    const { state, tool } = outbound(fail);
+    const effectKey = newId("rx");
+    expect((await runTool(t.ctx({ effectKey }), [tool], "send_out", { text: "a" })).isError).toBe(true);
+    fail.mode = "none";
+    // Refused before anything went out: the retry may send it.
+    expect(await runTool(t.ctx({ effectKey }), [tool], "send_out", { text: "a" })).toEqual({
+      content: "sent a",
+      isError: false,
+    });
+    // The request reached the partner and failed there (a timeout after the send): it may have gone out.
+    fail.mode = "reached";
+    const late = await runTool(t.ctx({ effectKey }), [tool], "send_out", { text: "b" });
+    expect(late).toEqual({ content: "The partner did not answer in time", isError: true });
+    fail.mode = "none";
+    const retry = await runTool(t.ctx({ effectKey }), [tool], "send_out", { text: "b" });
+    expect(retry.isError).toBe(true);
+    expect(retry.content).toStartWith("Not repeated:");
     expect(state.ran).toBe(3);
   });
 

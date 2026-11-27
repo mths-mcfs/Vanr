@@ -8,20 +8,13 @@
 // the IMAP reconnects) record one execution, and a failure belongs to the routine's queue (retries with a growing
 // wait, with the same email).
 //
-// Who calls `pollEmailRoutines` is the runtime's tick (slice S6); the boot doesn't start a periodic reader here.
+// Who calls `pollEmailRoutines` is the runtime's tick; the boot doesn't start a periodic reader here.
 // The email is outside data, never instructions: it goes into the request as the fire's untrusted context.
 import { schema } from "@vanr/engine/db";
 import { and, eq, sql } from "drizzle-orm";
-import { type AppDeps, requireRuntime } from "../context";
+import type { AppDeps } from "../context";
 import { log } from "../logger";
-import {
-  fireRoutine,
-  type RoutineContext,
-  type RoutineRow,
-  runtimeFor,
-  targetOf,
-  triggerOf,
-} from "../routines";
+import { fireRoutine, type RoutineContext, type RoutineRow, triggerOf } from "../routines";
 import { quote } from "./imap";
 import { mailboxesOf, withImap } from "./mail";
 import { allowedBy } from "./mail-rules";
@@ -74,10 +67,6 @@ export const emailKey = (accountId: string, folder: string, uidValidity: number 
 async function pollOne(deps: AppDeps, row: RoutineRow): Promise<number> {
   const trigger = triggerOf(row);
   if (trigger.kind !== "email") return 0;
-  // A target that needs a runtime method absent (until S6) is rejected here, before the mailbox is read or the
-  // cursor moves: the emails stay for the check that has the runtime.
-  const method = runtimeFor(targetOf(row));
-  if (method) requireRuntime(deps.runtime, method);
   const [account] = await deps.db
     .select()
     .from(mailConnections)

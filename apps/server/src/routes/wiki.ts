@@ -982,8 +982,7 @@ export function registerWiki(app: Hono<AppEnv>) {
   app.post(`${WORKSPACE}/wiki/checks`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
-    // The model is looked up before the claim: until the runtime slice this answers `not_available`
-    // with nothing written.
+    // The model is looked up before the claim.
     const ran = await checkWorkspace(deps, me.workspaceId, {
       gapMs: CHECK_NOW_GAP_MS,
       model: () => deps.runtime.providerForWorkspace(me.workspaceId),

@@ -1,5 +1,5 @@
-// The send queue with an undo window (outbox.ts). The agent tools that queue (runtime/tools, mail-tools) and the
-// runtime's tick and timer that deliver come with S6, and the undo route that cancels with S5; here the tests call
+// The send queue with an undo window (outbox.ts). The agent tools queue (runtime/tools, mail-tools), the runtime's
+// tick and timer deliver and the undo route cancels; here the tests call
 // `queueSend`, `deliverDue` and `cancelQueued` the way those callers do, with the clock injected: the deadline
 // passes when the test moves the clock, never by waiting. The IMAP/SMTP server is the local fake.
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
@@ -104,7 +104,7 @@ async function team() {
 }
 type Team = Awaited<ReturnType<typeof team>>;
 
-/** The runtime as S6 brings it, for `wakeAt` only: it says when the send asked to be woken. */
+/** The runtime with `wakeAt` watched: it says when the send asked to be woken. */
 function withWakeAt(wakes: Date[]): AppDeps {
   return { ...server.deps, runtime: { ...server.deps.runtime, wakeAt: (at: Date) => wakes.push(at) } };
 }
@@ -130,24 +130,24 @@ const bodiesIn = async (channelId: string) =>
 
 describe("queueing", () => {
   test(
-    "without the runtime's wakeAt the send is rejected before anything is written",
+    "on the server's own runtime the send is queued and the runtime's sweep delivers it once",
     async () => {
       const t = await team();
-      const err = await queueSend(t.ctx(), {
+      const row = await queueSend(t.ctx(), {
         kind: "post",
-        payload: { channelId: t.sales, text: "too early", clientId: "c-early" },
+        payload: { channelId: t.sales, text: "on time", clientId: "c-sweep" },
         title: "#sales",
-      }).catch((e: unknown) => e);
-      expect(err).toMatchObject({ status: 503, code: "not_available", params: { method: "wakeAt" } });
-      expect(await server.deps.db.select().from(outbox).where(eq(outbox.workspaceId, t.workspaceId))).toEqual(
-        [],
-      );
-      expect(
-        await server.deps.db
-          .select()
-          .from(reversibleActions)
-          .where(eq(reversibleActions.workspaceId, t.workspaceId)),
-      ).toEqual([]);
+      });
+      expect(row.status).toBe("pending");
+      expect(await actionOf(row.id)).toBeTruthy();
+      // The tests' timer is off: the runtime's sweep delivers it once the window passed, and only once.
+      await server.runtime.tick();
+      expect((await rowOf(row.id))?.status).toBe("pending");
+      clock = new Date(clock.getTime() + WINDOW_MS + 1000);
+      await server.runtime.tick();
+      await server.runtime.tick();
+      expect((await rowOf(row.id))?.status).toBe("sent");
+      expect((await bodiesIn(t.sales)).filter((b) => b === "on time")).toHaveLength(1);
     },
     SERVER_TEST_MS,
   );
@@ -803,7 +803,7 @@ describe("stopping the server", () => {
         sendAt: clock,
       });
       const hold = holdSentWrite(own.deps);
-      // The runtime's tick tracks the pass, as S6 does.
+      // The runtime's tick tracks the pass the same way.
       own.deps.runtime.track(deliverDue({ ...own.deps, db: hold.db }), "outbox");
       await hold.begun;
       let stopped = false;

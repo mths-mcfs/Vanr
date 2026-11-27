@@ -32,6 +32,8 @@ export const MAX_TRANSITIONS = 8;
 export type RunnerSocket = ServerWebSocket<RunnerSocketData>;
 
 export class RunnerCallError extends Error {
+  /** The request reached the runner (it failed after the send): what it asked for may have happened. */
+  reached = false;
   constructor(
     readonly code: RunnerErrorCode,
     message: string,
@@ -236,6 +238,7 @@ export class RunnerHub {
     const release = await this.slot(runnerId, opts.agent?.id ?? null, opts.signal);
     const id = newId("rq");
     let onAbort = () => {};
+    let delivered = false;
     try {
       if (opts.signal?.aborted) throw canceled();
       if (!authorized()) throw new RunnerCallError("canceled", "Canceled: the access it ran under changed");
@@ -286,8 +289,12 @@ export class RunnerHub {
           clearTimeout(timer);
           this.pending.delete(id);
           reject(new RunnerCallError("offline", "The runner is offline"));
-        }
+        } else delivered = true;
       });
+    } catch (err) {
+      // A timeout, a cancel, the runner dropping or its error answer: the request had gone out.
+      if (delivered && err instanceof RunnerCallError) err.reached = true;
+      throw err;
     } finally {
       // However the call ended (result, error, deadline, runner gone, server stopping).
       opts.signal?.removeEventListener("abort", onAbort);

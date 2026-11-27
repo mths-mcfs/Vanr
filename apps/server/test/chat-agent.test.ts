@@ -1,14 +1,14 @@
-// A conversation with an agent through the chat routes, with the agent runtime of test/chat-runtime.ts (the engine's
-// fake model behind the RuntimePort): a message calls a connector tool through integrations/tools and the reply
-// streams back; a channel rule takes the connector away in that channel; another workspace's ids answer as missing
-// ones; a double submit routes once; the live runs follow the run detail's reveal rule; and without the runtime a
-// post an agent could answer is rejected before it is written.
+// A conversation with an agent through the chat routes and the agent runtime (the engine's fake model): a message
+// calls a connector tool through integrations/tools and the reply streams back; a channel rule takes the connector
+// away in that channel; another workspace's ids answer as missing ones; a double submit routes once; the live runs
+// follow the run detail's reveal rule; and the reply rule decides who answers, with a notice to the author when the
+// agent they mentioned can't.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { AgentRow } from "../src/agents";
-import { channelInWorkspace, openDm } from "../src/channels";
+import { channelInWorkspace } from "../src/channels";
 import { replaceGrants } from "../src/integrations/access";
 import { connectCustom, saveCustomTools } from "../src/integrations/connectors";
 import { postMessage } from "../src/messages";
@@ -32,7 +32,7 @@ let runtime: ChatRuntime;
 let mcp: FakeMcp;
 beforeAll(async () => {
   mcp = startFakeMcp({ keyOnly: true });
-  runtime = chatRuntime(() => server.deps);
+  runtime = chatRuntime();
   try {
     server = await startTestServer({
       env: { ALLOW_PRIVATE_NETWORKS: "true" },
@@ -112,7 +112,7 @@ describe("a conversation with an agent", () => {
       const result = await socket.event("run.tool_result");
       expect(result.event).toMatchObject({
         tool: "mcp_stock__list_items",
-        ok: true,
+        isError: false,
         runId: toolCall.event.runId,
       });
       expect(mcp.toolCalls.slice(calledBefore).map((c) => c.name)).toEqual(["list_items"]);
@@ -154,7 +154,7 @@ describe("a conversation with an agent", () => {
         (await post(ana, w, quiet, `@${lia.handle} [[tool:mcp_stock__list_items]]`, "rule-1")).status,
       ).toBe(201);
       await settle(server);
-      expect((await socket.event("run.tool_result")).event).toMatchObject({ ok: false });
+      expect((await socket.event("run.tool_result")).event).toMatchObject({ isError: true });
       expect(mcp.toolCalls.length).toBe(calledBefore);
 
       // In #general the same agent still has it.
@@ -283,6 +283,7 @@ describe("a conversation with an agent", () => {
       expect(burst.map((r) => [r.status, r.body.id])).toEqual(burst.map(() => [200, done.body.id]));
       await settle(server);
       expect(runtime.routed.slice(routedBefore)).toEqual([done.body.id]);
+      expect(await answeredBy(server, done.body.id)).toEqual([lia.id]);
     },
     SERVER_TEST_MS,
   );
@@ -359,114 +360,138 @@ describe("live runs show only where the person may see the run", () => {
   );
 });
 
-describe("without the agent runtime", () => {
-  let bare: RunningServer;
-  beforeAll(async () => {
-    bare = await startTestServer();
-  }, SERVER_TEST_MS);
-  afterAll(() => bare.stop(), SERVER_TEST_MS);
+/** The agents whose run answered this message. */
+async function answeredBy(on: RunningServer, messageId: string) {
+  const rows = await on.deps.db
+    .select({ agentId: schema.runs.agentId })
+    .from(schema.runs)
+    .where(eq(schema.runs.sourceMessageId, messageId));
+  return rows.map((r) => r.agentId);
+}
 
+describe("who answers a post", () => {
   /** Ana and Beto, Lia (who answers on mention only) in #general, and a #people channel without agents. */
   async function bareTeam() {
-    const ana = await signedIn(bare, "Ana", email("ana"));
-    const { workspaceId, general } = await seedWorkspace(bare, ana, "Bare");
-    const beto = await memberOf(bare, workspaceId, "Beto", email("beto"));
-    const people = await seedChannel(bare, workspaceId, { name: "people", members: [ana, beto] });
-    const lia = await seedAgent(bare, workspaceId, ana, `lia${n}`, [general]);
+    const ana = await signedIn(server, "Ana", email("ana"));
+    const { workspaceId, general } = await seedWorkspace(server, ana, "Bare");
+    const beto = await memberOf(server, workspaceId, "Beto", email("beto"));
+    const people = await seedChannel(server, workspaceId, { name: "people", members: [ana, beto] });
+    const lia = await seedAgent(server, workspaceId, ana, `lia${n}`, [general]);
     const w = ws(workspaceId);
     const send = (who: Person, channelId: string, body: string, extra: Record<string, unknown> = {}) =>
       call(who, "POST", `${w}/channels/${channelId}/messages`, { body, clientId: `c${++n}`, ...extra });
-    const written = async (channelId: string) =>
-      (
-        await bare.deps.db
-          .select({ body: schema.messages.body })
-          .from(schema.messages)
-          .where(eq(schema.messages.channelId, channelId))
-      ).map((r) => r.body);
-    return { workspaceId, w, general, people, ana, beto, lia, send, written };
+    /** Posts, waits for the runs, and says which agents answered it. */
+    const answered = async (
+      who: Person,
+      channelId: string,
+      body: string,
+      extra: Record<string, unknown> = {},
+    ) => {
+      const res = await send(who, channelId, body, extra);
+      expect(res.status).toBe(201);
+      await settle(server);
+      return { id: res.body.id as string, by: await answeredBy(server, res.body.id) };
+    };
+    return { workspaceId, w, general, people, ana, beto, lia, send, answered };
   }
-  const rejected = (res: { status: number; body: { error?: { code?: string } } }) =>
-    expect([res.status, res.body.error?.code]).toEqual([503, "not_available"]);
+  /** The notices the runtime sent the author about this message (an agent that won't answer, and why). */
+  const notices: { target: string; messageId: unknown; reason: unknown }[] = [];
+  beforeAll(() => {
+    server.deps.hub.onPublish((target, event) => {
+      if (event.type === "run.agent_unavailable")
+        notices.push({ target, messageId: event.messageId, reason: event.reason });
+    });
+  });
+  const noticeOf = (messageId: string) => notices.filter((x) => x.messageId === messageId);
 
   test(
-    "a post goes out unless an agent would answer it: a mention, auto answer, a DM or a thread the agent is in",
+    "a mention, auto answer, a DM or a thread the agent spoke in reach it; a mention it can't take tells the author why",
     async () => {
-      const { workspaceId, w, general, people, ana, beto, lia, send, written } = await bareTeam();
-      // Lia answers on mention only: a plain post in her channel goes out, a mention of her is rejected unwritten.
-      expect((await send(ana, general, "Quick update for the team")).status).toBe(201);
-      rejected(await send(ana, general, `@${lia.handle} are you there?`));
-      expect(await written(general)).toEqual(["Quick update for the team"]);
-      // A mention where she isn't, or by someone she doesn't talk to, reaches no agent: it goes out.
-      expect((await send(ana, people, `@${lia.handle} see this`)).status).toBe(201);
-      await bare.deps.db
+      const { workspaceId, w, general, people, ana, beto, lia, answered } = await bareTeam();
+      // Lia answers on mention only: a plain post in her channel reaches nobody, a mention of her reaches her.
+      expect((await answered(ana, general, "Quick update for the team")).by).toEqual([]);
+      expect((await answered(ana, general, `@${lia.handle} are you there?`)).by).toEqual([lia.id]);
+      // A mention where she isn't reaches no agent, and the author hears why.
+      const outside = await answered(ana, people, `@${lia.handle} see this`);
+      expect(outside.by).toEqual([]);
+      expect(noticeOf(outside.id)).toEqual([
+        { target: `user:${workspaceId}:${ana.user.id}`, messageId: outside.id, reason: "not_in_channel" },
+      ]);
+      // Someone she doesn't talk to: no run, and the notice says so.
+      await server.deps.db
         .update(schema.agents)
         .set({ visibilityMode: "owner" })
         .where(eq(schema.agents.id, lia.id));
-      expect((await send(beto, general, `@${lia.handle} take a look`)).status).toBe(201);
-      await bare.deps.db
+      const blocked = await answered(beto, general, `@${lia.handle} take a look`);
+      expect(blocked.by).toEqual([]);
+      expect(noticeOf(blocked.id).map((x) => [x.target, x.reason])).toEqual([
+        [`user:${workspaceId}:${beto.user.id}`, "audience"],
+      ]);
+      await server.deps.db
         .update(schema.agents)
         .set({ visibilityMode: "everyone" })
         .where(eq(schema.agents.id, lia.id));
 
       // A thread she already spoke in: a reply there reaches her, a reply in another thread doesn't.
-      const spoke = (await send(ana, general, "Plan for Monday")).body;
-      const quiet = (await send(ana, general, "Plan for Tuesday")).body;
-      const channel = await channelInWorkspace(bare.deps.db, workspaceId, general);
+      const spoke = (await answered(ana, general, "Plan for Monday")).id;
+      const quiet = (await answered(ana, general, "Plan for Tuesday")).id;
+      const channel = await channelInWorkspace(server.deps.db, workspaceId, general);
       if (!channel) throw new Error("no channel");
-      await postMessage(bare.deps, {
+      await postMessage(server.deps, {
         workspaceId,
         channel,
         author: { type: "agent", id: lia.id },
         body: "On it",
         clientId: null,
-        threadId: spoke.id,
+        threadId: spoke,
       });
-      rejected(await send(beto, general, "and the budget?", { threadId: spoke.id }));
-      expect((await send(beto, general, "and the room?", { threadId: quiet.id })).status).toBe(201);
+      expect((await answered(beto, general, "and the budget?", { threadId: spoke })).by).toEqual([lia.id]);
+      expect((await answered(beto, general, "and the room?", { threadId: quiet })).by).toEqual([]);
 
-      // Auto answer: every post in the channel reaches her.
-      await bare.deps.db
+      // Auto answer: every post in the channel reaches her, as one who joined on her own.
+      await server.deps.db
         .update(schema.channelMemberships)
         .set({ autoAnswer: true })
         .where(eq(schema.channelMemberships.memberId, lia.id));
-      rejected(await send(ana, general, "Anyone?"));
+      const anyone = await answered(ana, general, "Anyone?");
+      expect(anyone.by).toEqual([lia.id]);
+      // Her reply to that post (by the post's run), not just her latest message.
+      const [run] = await server.deps.db
+        .select({ id: schema.runs.id })
+        .from(schema.runs)
+        .where(eq(schema.runs.sourceMessageId, anyone.id));
+      const [joined] = await server.deps.db
+        .select({ meta: schema.messages.meta })
+        .from(schema.messages)
+        .where(and(eq(schema.messages.runId, run?.id ?? ""), eq(schema.messages.authorId, lia.id)));
+      expect(joined?.meta.joined).toBe(true);
 
-      // Her DM: it isn't opened, and a post in one opened before is rejected.
-      rejected(await call(ana, "POST", `${w}/dms`, { agentId: lia.id }));
-      const dms = await bare.deps.db
-        .select({ id: schema.channels.id })
-        .from(schema.channels)
-        .where(eq(schema.channels.kind, "dm"));
-      expect(dms).toEqual([]);
-      const dm = await openDm(bare.deps.db, {
-        workspaceId,
-        userId: ana.user.id,
-        other: { type: "agent", id: lia.id },
-      });
-      rejected(await send(ana, dm, "hello"));
+      // Her DM: every message there reaches her.
+      const dm = (await call(ana, "POST", `${w}/dms`, { agentId: lia.id })).body.channelId as string;
+      expect((await answered(ana, dm, "hello")).by).toEqual([lia.id]);
 
       // Archived, she answers nobody.
-      await bare.deps.db
+      await server.deps.db
         .update(schema.agents)
         .set({ archivedAt: new Date() })
         .where(eq(schema.agents.id, lia.id));
-      expect((await send(ana, general, `@${lia.handle} still there?`)).status).toBe(201);
+      expect((await answered(ana, general, `@${lia.handle} still there?`)).by).toEqual([]);
     },
     SERVER_TEST_MS,
   );
 
   test(
-    "a resend of an accepted post answers it after an agent joined; a bad attachment doesn't make anyone a member",
+    "a resend of an accepted post answers it and doesn't route again; a bad attachment doesn't make anyone a member",
     async () => {
       const { workspaceId, w, ana, beto, lia, send } = await bareTeam();
-      const open = await seedChannel(bare, workspaceId, { name: "open", members: [ana] });
+      const open = await seedChannel(server, workspaceId, { name: "open", members: [ana] });
       const accepted = await call(beto, "POST", `${w}/channels/${open}/messages`, {
         body: "hi all",
         clientId: "r-1",
       });
       expect(accepted.status).toBe(201);
-      await addToChannel(bare, open, { type: "agent", id: lia.id });
-      await bare.deps.db
+      await addToChannel(server, open, { type: "agent", id: lia.id });
+      await server.deps.db
         .update(schema.channelMemberships)
         .set({ autoAnswer: true })
         .where(eq(schema.channelMemberships.memberId, lia.id));
@@ -475,8 +500,10 @@ describe("without the agent runtime", () => {
         clientId: "r-1",
       });
       expect([again.status, again.body.id]).toEqual([200, accepted.body.id]);
+      await settle(server);
+      expect(await answeredBy(server, accepted.body.id)).toEqual([]);
       // A first request that failed after the post was written left Beto outside: the resend has him join.
-      await bare.deps.db
+      await server.deps.db
         .delete(schema.channelMemberships)
         .where(eq(schema.channelMemberships.memberId, beto.user.id));
       const resent = await call(beto, "POST", `${w}/channels/${open}/messages`, {
@@ -487,8 +514,8 @@ describe("without the agent runtime", () => {
       const joined = (await call(ana, "GET", `${w}/channels/${open}/members`)).body.members;
       expect(joined.map((m: { id: string }) => m.id)).toContain(beto.user.id);
 
-      const other = await seedChannel(bare, workspaceId, { name: "other", members: [ana] });
-      const caio = await memberOf(bare, workspaceId, "Caio", email("caio"));
+      const other = await seedChannel(server, workspaceId, { name: "other", members: [ana] });
+      const caio = await memberOf(server, workspaceId, "Caio", email("caio"));
       const bad = await send(caio, other, "with a file", { attachments: ["file_missing"] });
       expect(bad.status).toBe(404);
       const { members } = (await call(ana, "GET", `${w}/channels/${other}/members`)).body;
@@ -501,18 +528,20 @@ describe("without the agent runtime", () => {
   );
 
   test(
-    "a rejected post doesn't make the person join a public channel",
+    "a post in a public channel makes the person a member and the agent they mention answers it",
     async () => {
       const { workspaceId, w, ana, beto, lia } = await bareTeam();
-      const open = await seedChannel(bare, workspaceId, { name: "open", members: [ana] });
-      await addToChannel(bare, open, { type: "agent", id: lia.id });
+      const open = await seedChannel(server, workspaceId, { name: "open", members: [ana] });
+      await addToChannel(server, open, { type: "agent", id: lia.id });
       const res = await call(beto, "POST", `${w}/channels/${open}/messages`, {
         body: `@${lia.handle} hi`,
         clientId: "j-1",
       });
-      expect(res.status).toBe(503);
+      expect(res.status).toBe(201);
+      await settle(server);
+      expect(await answeredBy(server, res.body.id)).toEqual([lia.id]);
       const { members } = (await call(ana, "GET", `${w}/channels/${open}/members`)).body;
-      expect(members.map((m: { id: string }) => m.id)).not.toContain(beto.user.id);
+      expect(members.map((m: { id: string }) => m.id)).toContain(beto.user.id);
     },
     SERVER_TEST_MS,
   );

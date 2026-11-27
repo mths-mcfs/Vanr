@@ -171,4 +171,61 @@ describe("memory reviews", () => {
       .where(eq(schema.memories.id, memory.id));
     expect(kept?.text).toBe("Now");
   });
+
+  test("a queued edit of a note that had no path fails once the note got a path; a file that didn't move applies", async () => {
+    const note = await createMemory(
+      server.deps.db,
+      server.deps.now(),
+      {
+        workspaceId,
+        agentId,
+        scope: "agent",
+        path: null,
+        text: "Remembered",
+        kind: "fact",
+        source: "manual",
+        origin,
+      },
+      { author: { type: "person", id: ana.userId } },
+    );
+    const queued = await review({
+      op: "update",
+      memoryId: note.id,
+      path: null,
+      text: "Agent's version",
+      baseSha256: contentSha256("Remembered"),
+    });
+    // The note gets a path before the approval (its text unchanged).
+    await server.deps.db
+      .update(schema.memories)
+      .set({ path: "notes/now-a-file.md" })
+      .where(eq(schema.memories.id, note.id));
+    expect(await code(approveReview(server.deps, ana, queued.id))).toBe("memory_review.changed");
+    const [kept] = await server.deps.db.select().from(schema.memories).where(eq(schema.memories.id, note.id));
+    expect(kept?.text).toBe("Remembered");
+    // A file with a path that didn't move still applies.
+    const file = await createMemory(
+      server.deps.db,
+      server.deps.now(),
+      {
+        workspaceId,
+        agentId,
+        scope: "agent",
+        path: `notes/${newId("f")}.md`,
+        text: "Old",
+        kind: "fact",
+        source: "manual",
+        origin,
+      },
+      { author: { type: "person", id: ana.userId } },
+    );
+    const edit = await review({
+      op: "update",
+      memoryId: file.id,
+      path: file.path,
+      text: "New",
+      baseSha256: contentSha256("Old"),
+    });
+    expect(await code(approveReview(server.deps, ana, edit.id))).toBe("ok");
+  });
 });

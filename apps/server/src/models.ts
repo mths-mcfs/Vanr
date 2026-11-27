@@ -8,7 +8,7 @@ import type { ModelProvider } from "@vanr/engine/models/types";
 import { and, eq, isNull } from "drizzle-orm";
 import type { AgentRow } from "./agents";
 import type { AppDeps } from "./context";
-import type { ProviderLookup } from "./forward-types";
+import type { ProviderLookup } from "./runtime/runtime";
 
 const { credentials, workspaces } = schema;
 

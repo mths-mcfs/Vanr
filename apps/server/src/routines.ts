@@ -3,10 +3,7 @@
 // the Drive or to a debate.
 //
 // Executing reaches the runtime by the target: a document asks for a text (`complete`), a conversation runs the
-// agent (`runFor`); a debate only opens one (its turns wait for the runtime themselves). Without the method,
-// `startRoutineRun` is rejected at its entry, before anything is written: the fire stays recorded (`pending` or
-// `queued`) and the queue's sweep runs it once the runtime is there (slice S6). Recording a fire, the next time,
-// the queue, the retries and the recovery of an interrupted execution need no runtime.
+// agent (`runFor`); a debate only opens one (its turns are the debate's own).
 import type {
   RecurrenceRule,
   Routine,
@@ -25,16 +22,16 @@ import { and, asc, desc, eq, inArray, isNull, lt, lte, or, sql } from "drizzle-o
 import { z } from "zod";
 import type { AgentRow } from "./agents";
 import { canReadChannel, channelInWorkspace, openDm } from "./channels";
-import { type AppDeps, type RuntimePort, requireRuntime, type WorkspaceMember } from "./context";
+import type { AppDeps, WorkspaceMember } from "./context";
 import { openDebate } from "./debates";
 import { createFile } from "./drive";
-import type { RunLimits } from "./forward-types";
 import { HttpError, notFound } from "./http";
 import { addressOrDomain } from "./integrations/mail-rules";
 import { log } from "./logger";
 import { postMessage } from "./messages";
 import { notify } from "./notifications";
 import { PERSONAL_PLAN_TEXT, withPlanOwner } from "./runners/plans";
+import type { RunLimits } from "./runtime/runtime";
 
 const { routines, routineExecutions, agents, messages, runs, mailConnections } = schema;
 export type RoutineRow = typeof routines.$inferSelect;
@@ -164,13 +161,6 @@ export function targetOf(row: Pick<RoutineRow, "id" | "target">): RoutineTarget 
   const parsed = targetSchema.safeParse(row.target);
   if (!parsed.success) throw new Error(`routine ${row.id} has an invalid target`);
   return parsed.data;
-}
-
-/** The runtime method an execution reaches, by its target; a debate only opens one. */
-export function runtimeFor(target: RoutineTarget): keyof RuntimePort | null {
-  if (target.kind === "file") return "complete";
-  if (target.kind === "debate") return null;
-  return "runFor";
 }
 
 /**
@@ -474,9 +464,6 @@ async function insertFire(
 
 /** Records and runs (waits for the end). For whoever needs the result: email, tests. */
 export async function fireRoutine(deps: AppDeps, routineId: string, fire: Fire) {
-  const [routine] = await deps.db.select().from(routines).where(eq(routines.id, routineId));
-  const method = routine && runtimeFor(targetOf(routine));
-  if (method) requireRuntime(deps.runtime, method);
   const reg = await registerFire(deps, routineId, fire);
   if (reg.duplicate) return reg;
   return { run: await startRoutineRun(deps, reg.run), duplicate: false as const };
@@ -563,8 +550,6 @@ export async function startRoutineRun(deps: AppDeps, registered: ExecutionRow): 
   const { db } = deps;
   const [before] = await db.select().from(routines).where(eq(routines.id, registered.routineId));
   if (!before) return registered;
-  const method = runtimeFor(targetOf(before));
-  if (method) requireRuntime(deps.runtime, method);
   let run = registered;
   if (run.status === "pending") {
     const owned = await own(deps, run);
@@ -584,8 +569,6 @@ export async function startRoutineRun(deps: AppDeps, registered: ExecutionRow): 
       .where(eq(routines.id, mine.routineId))
       .for("no key update");
     if (!fresh) return { kind: "gone" as const };
-    const freshMethod = runtimeFor(targetOf(fresh));
-    if (freshMethod) requireRuntime(deps.runtime, freshMethod);
     const policy = policyOf(fresh);
     // A fire from before a person's pause doesn't run any more, and the key goes (the sender delivers again once
     // it is turned on). A routine whose series ended isn't paused: the fire recorded before the end (in the same
@@ -841,7 +824,7 @@ async function drainRoutine(deps: AppDeps, routineId: string): Promise<void> {
   if (next) await startRoutineRun(deps, next);
 }
 
-/** The tick (slice S6): queues that came due (retries and overlap) and executions the server left in the middle. */
+/** The runtime's tick: queues that came due (retries and overlap) and executions the server left in the middle. */
 export async function drainQueues(deps: AppDeps): Promise<number> {
   await recoverInterrupted(deps);
   // Recorded and never begun: the process fell between recording and running. The row holds the key (the
@@ -1169,7 +1152,7 @@ function countBetween(
 }
 
 /**
- * Routines that came due (the runtime's tick, slice S6). For each one, moving its next time and recording what it owes
+ * Routines that came due (the runtime's tick). For each one, moving its next time and recording what it owes
  * happen in one transaction (the compare-and-swap on `nextFireAt` keeps two instances apart): after a fall at any
  * point, either the time is still due or its fire is recorded. The time that runs is the latest one already due;
  * the older ones missed while the server was off become one `missed` record with how many and from when to when.

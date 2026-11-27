@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { diskBlobs, memoryBlobs } from "@vanr/engine/blobs";
 import { openDb, schema } from "@vanr/engine/db";
 import { PRICES } from "@vanr/engine/models/prices";
+import type { ModelProvider } from "@vanr/engine/models/types";
 import { createSealer } from "@vanr/engine/seal";
 import { count } from "drizzle-orm";
 import { createApp } from "./app";
@@ -10,17 +11,17 @@ import type { Verifier } from "./assignments/verify";
 import { createAuth, type SignupDecision } from "./auth";
 import { resumeRecalcs, stopRecalcs } from "./bases/write";
 import type { Config } from "./config";
-import { ABSENT, type AppDeps, type RuntimePort } from "./context";
+import type { AppDeps, RuntimePort } from "./context";
 import { purgeTrash } from "./drive";
 import { extractPending } from "./drive-extract";
-import { errorBody, HttpError } from "./http";
+import { errorBody } from "./http";
 import { holdInstanceLock } from "./instance-lock";
 import { guardedFetch } from "./integrations/net";
 import { type GuardedConnector, postgresGuardedConnector } from "./integrations/sql-identity";
 import { routedBlobs } from "./integrations/storage";
 import { log } from "./logger";
 import { createMailer, type Mailer } from "./mailer";
-import { testModelCheck } from "./models";
+import { createProviderLookup, testModelCheck } from "./models";
 import { loadVapid, webPushSender } from "./push";
 import {
   browserClose,
@@ -38,7 +39,7 @@ import { dropAllLiveViews } from "./runners/browser-live";
 import { RunnerHub, type RunnerSocketData } from "./runners/hub";
 import { revalidateInterventions } from "./runners/requests";
 import { runnerClose, runnerMessage, runnerOpen, runnerSocketData } from "./runners/socket";
-import { BackgroundWork } from "./runtime/background";
+import { AgentRuntime } from "./runtime/runtime";
 import { backfillSearch, createSearchIndex, searchTick } from "./search-index";
 import { FirstUserPlace, SIGNUP_QUEUE_LIMITS, type SignupQueueLimits, signupDecision } from "./signup-queue";
 import { postgresLedger } from "./usage-ledger";
@@ -81,10 +82,14 @@ interface StartOptions {
   /** Tests: the assignments' verifier in place of the model's. */
   assignmentVerifier?: Verifier;
   /**
-   * Tests: the agent runtime the server runs on, made from the port it would have (whose absent methods throw
-   * `not_available`). Until slice S6 brings the real one, this is how a test gives the assignment engine a runtime.
+   * Tests: wraps the agent runtime the server runs on (its methods bound, so a test can spread it and replace
+   * one), to script runs the assignment engine or a route waits for.
    */
   runtime?: (port: RuntimePort) => RuntimePort;
+  /** Tests: every agent uses this provider (scripted or simulated) in place of the lookup's. */
+  modelProvider?: ModelProvider;
+  /** The runtime's sweep (waits, notifications, routines, the send queue, reminders); 0 turns the timer off. */
+  tickEveryMs?: number;
 }
 
 /** The boot's steps that touch the outside: the instance lock, the database and the VAPID keys. */
@@ -101,6 +106,8 @@ export interface RunningServer {
   mailer: Mailer;
   /** Registered routes (method and path), for the coverage script. */
   routes: { method: string; path: string }[];
+  /** The agent runtime itself: tests run its sweep by hand (`tick`, their timer is off), and restart or stop it. */
+  runtime: AgentRuntime;
   stop(): Promise<void>;
 }
 
@@ -331,10 +338,13 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
       if (depsRef) await revalidateInterventions(depsRef, sessionId);
     },
   });
-  // Background work (the notification queue today); stopping waits for what is running. Slice S6
-  // (runtime/runtime) creates the AgentRuntime here instead, which takes this work over.
-  const background = new BackgroundWork();
-  undo.push(() => background.stop());
+  // The agent runtime reads the deps when it uses them (the deps also point to it). Its stop aborts the live
+  // runs and waits for them and for the background work, with the database and the runners still up.
+  const runtime = new AgentRuntime(() => deps, {
+    providerFor: (agent) => providerFor(agent),
+    tickEveryMs: opts.tickEveryMs,
+  });
+  undo.push(() => runtime.stop());
   const ledger = postgresLedger(db, PRICES);
   const deps: AppDeps = {
     config: effective,
@@ -360,7 +370,7 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     // Push goes only to known push service hosts (push.ts), without redirects: it doesn't go through
     // guardedFetch, which would resolve DNS to check for a private network.
     push: webPushSender(await steps.loadVapid(effective), opts.fetchExternal ?? fetch),
-    runtime: opts.runtime ? opts.runtime(runtimePort(background)) : runtimePort(background),
+    runtime: opts.runtime ? opts.runtime(runtime.port()) : runtime.port(),
     testModelFor: (workspaceId) => testModelCheck(deps, workspaceId, opts.forceFakeModels === true),
     wikiLive: collab.live,
     assignmentEngine: createEngine(
@@ -374,9 +384,9 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     ),
     ...(opts.assignmentVerifier ? { assignmentVerifier: opts.assignmentVerifier } : {}),
   };
-  // Here, in this order: the undo of stopRecalcs (S2, bases/write) and of the assignment engine's stop
-  // (S5); the provider lookup (S6); runtime.start (S6), the engine's start (S5) and resumeRecalcs (S2),
-  // all before the app takes requests.
+  const lookup = createProviderLookup(deps, { forceFake: opts.forceFakeModels });
+  const injected = opts.modelProvider;
+  const providerFor: typeof lookup = injected ? async () => injected : lookup;
   await revalidateBrowsers(deps);
   // A session that expires, or a membership or channel lost outside this server's routes, is caught here. It
   // comes before the recalculations so that their halt is the first step of the stop, in the same tick.
@@ -428,8 +438,10 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
   });
   // The formula recalculations: halted before the database closes, then the ones a crash or a deploy left
   // halfway resume in the background.
-  // The assignment engine resumes over the runs a crash left on the air (after runtime.start, slice S6). Its stop
-  // is registered first: the start launches DBOS on Postgres. Without the runtime it doesn't start.
+  // The runs a crash left on the air become `failed` before anything else reads them; the sweep starts here.
+  await runtime.start();
+  // The assignment engine resumes over those runs. Its stop is registered first: the start launches DBOS on
+  // Postgres.
   undo.push(() => deps.assignmentEngine.stop());
   await deps.assignmentEngine.start();
   undo.push(() => stopRecalcs(deps));
@@ -456,6 +468,7 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     deps,
     mailer,
     routes: app.routes.map((r) => ({ method: r.method, path: r.path })),
+    runtime,
     stop: () => {
       stopping ??= undoAll(undo);
       return stopping;
@@ -485,49 +498,4 @@ function readInviteCookie(headers: Headers | null): string | null {
     return INVITE_TOKEN.test(value) ? value : null;
   }
   return null;
-}
-
-/** A runtime method the server doesn't have yet (slice S6 brings the agent runtime). */
-export class NotAvailable extends HttpError {
-  constructor(readonly method: keyof RuntimePort) {
-    super(503, "not_available", `The agent runtime is not available yet (${method})`, { method });
-    this.name = "NotAvailable";
-  }
-}
-
-/**
- * The runtime port until slice S6: `track` and `settle` are the background work. The questions about live runs
- * (who is busy, which runs are live, who may stop one) have their true answer: without the runtime no run is
- * live. Every other method is declared absent (it throws `NotAvailable`, with no behavior of its own); a route
- * that can reach one is rejected at its entry, before any write.
- */
-function runtimePort(background: BackgroundWork): RuntimePort {
-  const absent = (method: keyof RuntimePort) => {
-    const fail = () => {
-      throw new NotAvailable(method);
-    };
-    // The mark lets an entry reject before any write (requireRuntime in context.ts).
-    return Object.assign(fail, { [ABSENT]: fail });
-  };
-  return {
-    track: (work, what) => background.track(work, what),
-    settle: () => background.settle(),
-    complete: absent("complete"),
-    runFor: absent("runFor"),
-    activeRun: absent("activeRun"),
-    activeRuns: () => [],
-    liveRun: absent("liveRun"),
-    liveInfo: () => null,
-    cancel: absent("cancel"),
-    onRunEnd: absent("onRunEnd"),
-    onPersonMessage: absent("onPersonMessage"),
-    providerForWorkspace: absent("providerForWorkspace"),
-    isBusy: () => false,
-    busyAgents: () => new Set(),
-    awaitsApproval: absent("awaitsApproval"),
-    resolveApproval: absent("resolveApproval"),
-    reviseApproval: absent("reviseApproval"),
-    answerQuestion: absent("answerQuestion"),
-    wakeAt: absent("wakeAt"),
-  };
 }

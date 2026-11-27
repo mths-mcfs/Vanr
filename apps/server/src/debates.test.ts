@@ -1,19 +1,20 @@
-// Debates without the runtime: an agent's turn and the lead's synthesis ask the runtime for a text (`complete`), which
-// the server doesn't have until slice S6, so the advance stops at that step before writing anything. Everything a
-// person does works on its own: opening, answering, the round closing, the deadline, the synthesis without a lead
-// agent, the routine event. An agent's answer is saved here the way the turn saves it (`answerRound`).
+// Debates: opening, answering, the round closing, the deadline, the synthesis with and without a lead agent, the
+// routine event. An agent's turn and the lead's synthesis ask the runtime for a text (`complete`), which answers
+// with the test's script (`script`): the debate calls follow it, anything else is the fake model.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { ActorRef, DebateClaim } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { answerKey } from "@vanr/engine/debate-protocol";
 import { newId } from "@vanr/engine/ids";
-import { emptyUsage } from "@vanr/engine/models/types";
+import { fakeProvider } from "@vanr/engine/models/fake";
+import { emptyUsage, ModelError, type ModelRequest } from "@vanr/engine/models/types";
 import { and, eq } from "drizzle-orm";
-import { SERVER_TEST_MS, signedIn, startTestServer } from "../test/harness";
+import { SERVER_TEST_MS, signedIn, startTestServer, waitFor } from "../test/harness";
 import { wrapQuery } from "../test/lock-double";
 import { memberOf, type Person, seedChannel, seedWorkspace } from "../test/seed";
 import type { AgentRow } from "./agents";
 import type { AppDeps } from "./context";
+import { textProvider } from "./debate-benchmark";
 import {
   agentCanSeeDebate,
   answerRound,
@@ -60,8 +61,29 @@ let bob: Person;
 let cy: Person;
 const events: { target: string; event: RealtimeEvent }[] = [];
 
+const lastText = (req: ModelRequest) =>
+  req.messages
+    .at(-1)
+    ?.content.flatMap((c) => (c.type === "text" ? [c.text] : []))
+    .join("") ?? "";
+/** An agent's turn: the argument, then the position as the debate protocol reads it. */
+const position = (answer: string) =>
+  `Because ${answer}.\n${JSON.stringify({ answer, confidence: 0.6, reason: "", evidence: [] })}`;
+/** What a debate call answers, by the agent (the system prompt's name) and whether it is the synthesis. */
+type Script = (agent: string, synthesis: boolean) => string | Promise<string>;
+const turnScript: Script = (agent) => position(agent);
+let script: Script = turnScript;
+
 beforeAll(async () => {
-  server = await startTestServer();
+  const scripted = textProvider((req) => {
+    const agent = /^You are (\S+)/.exec(req.system)?.[1] ?? "?";
+    return script(agent, /^Write the synthesis/.test(lastText(req)));
+  });
+  const fake = fakeProvider();
+  const debateCall = (req: ModelRequest) => /^(Round \d+ of|Write the synthesis)/.test(lastText(req));
+  server = await startTestServer({
+    modelProvider: { kind: "fake", stream: (req) => (debateCall(req) ? scripted : fake).stream(req) },
+  });
   ana = await signedIn(server, "Ana", "ana@debates.test");
   ({ workspaceId } = await seedWorkspace(server, ana, "Debates"));
   bob = await memberOf(server, workspaceId, "Bob", "bob@debates.test");
@@ -166,7 +188,7 @@ async function peopleDebate(
   });
 }
 
-describe("a debate between people runs without the runtime", () => {
+describe("a debate between people", () => {
   test(
     "rounds until they agree, the synthesis without a lead agent, the notices and the routine event",
     async () => {
@@ -213,11 +235,10 @@ describe("a debate between people runs without the runtime", () => {
       expect(new Set(round0.map((p) => p.createdAt.getTime())).size).toBe(1);
 
       for (const p of [ana, bob, cy]) await speak(watch.deps, opened.id, p, "42");
-      // The one failure is the advance of the debate the routine opened: its agent's turn waits for the runtime.
+      // The debate the routine opened advances on the runtime too: nothing in the background failed.
       const failures = (await watch.failures()).filter(Boolean);
       await server.deps.db.update(routines).set({ active: false }).where(eq(routines.id, routine.id));
-      expect(failures).toHaveLength(1);
-      expect(failures[0]).toMatchObject({ code: "not_available", params: { method: "complete" } });
+      expect(failures).toEqual([]);
       row = await fresh(opened.id);
       expect(row).toMatchObject({ status: "done", phase: null, endReason: "unanimous", pendingSpeakers: [] });
       const synthesis = toDetail(server.deps, row).then((d) => d.synthesis);
@@ -324,9 +345,9 @@ describe("a debate between people runs without the runtime", () => {
   );
 });
 
-describe("an agent's turn and the synthesis wait for the runtime", () => {
+describe("an agent's turn", () => {
   test(
-    "opening a debate with agents works; its advance is rejected with not_available before anything is written",
+    "opening a debate with agents runs each agent's turn on the runtime: its post and its position are saved",
     async () => {
       const a1 = await newAgent("ada");
       const watch = observed();
@@ -339,23 +360,23 @@ describe("an agent's turn and the synthesis wait for the runtime", () => {
         requesterUserId: ana.user.id,
         origin: { kind: "manual" },
       });
-      const failures = await watch.failures();
-      expect(failures).toHaveLength(1);
-      expect(failures[0]).toMatchObject({
-        status: 503,
-        code: "not_available",
-        params: { method: "complete" },
-      });
-      const row = await fresh(opened.id);
-      expect(row).toMatchObject({ status: "open", phase: "debating", round: 0, updatedAt: opened.updatedAt });
-      expect(row.pendingSpeakers).toEqual([{ type: "agent", id: a1.id }]);
-      expect(await postsOf(opened.id)).toEqual([]);
+      expect((await watch.failures()).filter(Boolean)).toEqual([]);
+      const posts = await postsOf(opened.id);
+      const turn = posts.find((p) => p.author.type === "agent" && p.round === 0);
+      expect(turn).toMatchObject({ author: { type: "agent", id: a1.id }, body: "Because ada." });
+      expect(turn?.claimData).toMatchObject({ answer: "ada", key: answerKey("ada") });
+      expect(turn?.runId).toBeTruthy();
+      const [run] = await server.deps.db
+        .select()
+        .from(schema.runs)
+        .where(eq(schema.runs.id, turn?.runId ?? ""));
+      expect([run?.status, run?.agentId, run?.debateId]).toEqual(["done", a1.id, opened.id]);
     },
     SERVER_TEST_MS,
   );
 
   test(
-    "an archived agent leaves the queue without the runtime",
+    "an archived agent leaves the queue without a turn",
     async () => {
       const gone = await newAgent("gone");
       await server.deps.db
@@ -388,6 +409,7 @@ describe("anonymity until the debate closes", () => {
       const a2 = await newAgent("anon-two");
       const watch = observed();
       const from = events.length;
+      script = (agent) => position(agent === "anon-one" ? "red" : "blue");
       const opened = await openDebate(watch.deps, {
         workspaceId,
         title: "Secret",
@@ -398,40 +420,23 @@ describe("anonymity until the debate closes", () => {
         requesterUserId: ana.user.id,
         origin: { kind: "manual" },
       });
-      await watch.failures();
-      // The agents' turns, saved the way the turn saves them.
-      for (const [agent, answer] of [
-        [a1, "red"],
-        [a2, "blue"],
-      ] as const) {
-        const done = await answerRound(
-          watch.deps,
-          await fresh(opened.id),
-          { type: "agent", id: agent.id },
-          {
-            kind: "turn",
-            body: `Because ${answer}.`,
-            claimData: claim(answer),
-            runId: `run_${agent.handle}`,
-          },
-        );
-        expect(done).not.toBeNull();
-      }
+      // The agents' turns run on the runtime; then Bob answers and the round closes.
+      expect((await watch.failures()).filter(Boolean)).toEqual([]);
       await speak(watch.deps, opened.id, bob, "red");
-      // The round closes without the runtime; the next round's agent turns are what waits for it.
-      expect((await watch.failures()).map((e) => (e as { code?: string } | null)?.code)).toContain(
-        "not_available",
-      );
+      expect((await watch.failures()).filter(Boolean)).toEqual([]);
+      script = turnScript;
       const row = await fresh(opened.id);
       expect(row).toMatchObject({ status: "open", round: 1 });
       const agentIds = [a1.id, a2.id];
       const posts = await postsOf(opened.id);
-      const agentPosts = posts.filter((p) => p.author.type === "agent");
+      const agentPosts = posts.filter((p) => p.author.type === "agent" && p.round === 0);
       expect(agentPosts).toHaveLength(2);
+      const runIds = agentPosts.flatMap((p) => (p.runId ? [p.runId] : []));
+      expect(runIds).toHaveLength(2);
 
       const leaks = (value: unknown) => {
         const text = JSON.stringify(value);
-        return agentIds.some((id) => text.includes(id)) || text.includes("run_anon");
+        return agentIds.some((id) => text.includes(id)) || runIds.some((id) => text.includes(id));
       };
       for (const p of agentPosts) {
         const out = toPost(p, row);
@@ -484,9 +489,7 @@ describe("anonymity until the debate closes", () => {
         .set({ archivedAt: new Date() })
         .where(eq(schema.agents.id, a2.id));
       await stopDebate(watch.deps, row, "concluded");
-      expect(
-        (await watch.failures()).filter((e) => e && (e as { code?: string }).code !== "not_available"),
-      ).toEqual([]);
+      expect((await watch.failures()).filter(Boolean)).toEqual([]);
       const closed = await fresh(opened.id);
       expect(closed).toMatchObject({ status: "done", endReason: "concluded" });
       const revealed = (await postsOf(opened.id)).filter(
@@ -505,6 +508,10 @@ describe("the debate's spend at once", () => {
     async () => {
       const a1 = await newAgent("spender-one");
       const a2 = await newAgent("spender-two");
+      // The agents' own turns fail at the model, so they spend nothing: only the calls below count.
+      script = () => {
+        throw new ModelError("network", "down");
+      };
       const opened = await openDebate(server.deps, {
         workspaceId,
         title: "Spend",
@@ -516,6 +523,7 @@ describe("the debate's spend at once", () => {
         spendCapPercent: 1,
       });
       await server.deps.runtime.settle();
+      script = turnScript;
       const cap = opened.spendCapUsd ?? 0;
       expect(cap).toBeGreaterThan(0);
       // The scope every turn of this debate reserves on (the same one `toDetail` reads the spend from).
@@ -713,9 +721,24 @@ describe("the deadline", () => {
   );
 
   test(
-    "with a lead agent the synthesis waits for the runtime: the debate stays concluding and the posts stay hidden",
+    "with a lead agent the debate stays concluding while the lead writes, then the synthesis lands",
     async () => {
       const lead = await newAgent("lead");
+      // The lead's turn answers; its synthesis waits for the test.
+      let writing!: () => void;
+      const started = new Promise<void>((r) => {
+        writing = r;
+      });
+      let release!: () => void;
+      const held = new Promise<void>((r) => {
+        release = r;
+      });
+      script = async (agent, synthesis) => {
+        if (!synthesis) return position(agent);
+        writing();
+        await held;
+        return "The panel picked x.";
+      };
       const watch = observed();
       const opened = await openDebate(watch.deps, {
         workspaceId,
@@ -734,14 +757,14 @@ describe("the deadline", () => {
         claimData: claim("x"),
       });
       await debateDeadlines(later(watch.deps, 60_000));
-      const failures = await watch.failures();
-      expect(failures.some((e) => (e as { code?: string } | null)?.code === "not_available")).toBe(true);
+      await started;
       expect(await fresh(opened.id)).toMatchObject({
         status: "open",
         phase: "concluding",
         endReason: "deadline",
       });
-      expect((await postsOf(opened.id)).every((p) => p.hiddenUntilRoundEnd)).toBe(true);
+      // The round's posts show as the synthesis starts, before the lead writes.
+      expect((await postsOf(opened.id)).every((p) => !p.hiddenUntilRoundEnd)).toBe(true);
       // A full batch of these must not starve an overdue human debate (also with a legacy null phase).
       const waiting = Array.from({ length: 50 }, () => ({
         ...opened,
@@ -752,12 +775,18 @@ describe("the deadline", () => {
       const human = await peopleDebate(server.deps, "after full batch", {
         deadline: opened.deadline?.toISOString(),
       });
-      await server.deps.runtime.settle();
+      await waitFor(async () => (await fresh(human.id)).phase === "human_turn");
       await server.deps.db.update(debates).set({ phase: null }).where(eq(debates.id, human.id));
       await debateDeadlines(later(server.deps, 60_000));
-      await server.deps.runtime.settle();
+      await waitFor(async () => (await fresh(human.id)).status === "done");
       expect(await fresh(human.id)).toMatchObject({ status: "done", endReason: "deadline" });
+      // The lead writes: the synthesis lands and the posts show.
       for (const row of waiting) await server.deps.db.delete(debates).where(eq(debates.id, row.id));
+      release();
+      expect((await watch.failures()).filter(Boolean)).toEqual([]);
+      await server.deps.runtime.settle();
+      script = turnScript;
+      expect(await fresh(opened.id)).toMatchObject({ status: "done", phase: null, endReason: "deadline" });
     },
     SERVER_TEST_MS,
   );

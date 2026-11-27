@@ -25,6 +25,7 @@ import {
   assignmentOfThread,
   type CommandRow,
   isClosed,
+  moveAssignment,
   publishAssignment,
   runnerOfAssignment,
   runningJobsOf,
@@ -171,17 +172,39 @@ export async function askCommand(
     })
     .returning();
   if (!cmd) throw new Error("command insert failed");
-  const card = await agentSays(deps, row, input.command, {
-    assignmentCommand: {
-      id,
-      assignmentId: row.id,
-      jobId: input.jobId ?? "",
-      tool: input.tool,
-      command: input.command,
+  return announceCommand(deps, row, cmd);
+}
+
+/**
+ * Posts a pending command's card, tells the owner and marks the card on the row. The card's client id is the
+ * command's: after a crash between the row and its card, the engine posts it again and gets the same message.
+ * The owner is told before the mark, so a crash in between tells again (the notice's count grows) instead of never.
+ */
+export async function announceCommand(
+  deps: AppDeps,
+  row: AssignmentRow,
+  cmd: CommandRow,
+): Promise<CommandRow> {
+  const card = await agentSays(
+    deps,
+    row,
+    cmd.command,
+    {
+      assignmentCommand: {
+        id: cmd.id,
+        assignmentId: row.id,
+        jobId: cmd.jobId ?? "",
+        tool: cmd.tool,
+        command: cmd.command,
+      },
     },
-  });
-  await deps.db.update(assignmentCommands).set({ messageId: card.id }).where(eq(assignmentCommands.id, id));
-  await notifyOwner(deps, row, "approval", `$ ${input.command}`, card.id);
+    `card:${cmd.id}`,
+  );
+  await notifyOwner(deps, row, "approval", `$ ${cmd.command}`, card.id);
+  await deps.db
+    .update(assignmentCommands)
+    .set({ messageId: card.id })
+    .where(and(eq(assignmentCommands.id, cmd.id), isNull(assignmentCommands.messageId)));
   publishAssignment(deps, row, "command");
   return { ...cmd, messageId: card.id };
 }
@@ -364,12 +387,13 @@ async function startAssignmentJobNow(
 }
 
 /** Cancels the assignment's jobs that still run (after a start in progress). Returns how many. */
-export function cancelJobs(deps: AppDeps, row: AssignmentRow): Promise<number> {
-  return withAssignmentJobs(row.id, () => cancelJobsNow(deps, row));
+export function cancelJobs(deps: AppDeps, row: AssignmentRow, only?: string): Promise<number> {
+  return withAssignmentJobs(row.id, () => cancelJobsNow(deps, row, only));
 }
 
-async function cancelJobsNow(deps: AppDeps, row: AssignmentRow): Promise<number> {
-  const running = await runningJobsOf(deps.db, row.id);
+/** Cancels the assignment's running jobs, or only the job `only` among them. */
+async function cancelJobsNow(deps: AppDeps, row: AssignmentRow, only?: string): Promise<number> {
+  const running = (await runningJobsOf(deps.db, row.id)).filter((j) => only === undefined || j.id === only);
   const agent = await agentOf(deps.db, row);
   for (const j of running) {
     await deps.runners
@@ -423,15 +447,43 @@ export async function createSubmission(
     })
     .returning();
   if (!submission) throw new Error("submission insert failed");
-  const card = await agentSays(deps, row, input.note.slice(0, 2000), {
-    assignmentSubmission: { assignmentId: row.id, submissionId: id },
-  });
+  return announceSubmission(deps, row, submission, true);
+}
+
+/**
+ * Moves the assignment to wrapping up, posts a pending submission's card, tells the owner and marks the card on the
+ * row, in that order: the mark is last, so a crash anywhere before it leaves a submission without a card, which
+ * the engine announces again. The card's client id is the submission's, so the repost gets the same message.
+ */
+export async function announceSubmission(
+  deps: AppDeps,
+  row: AssignmentRow,
+  submission: typeof assignmentSubmissions.$inferSelect,
+  /** Move the assignment to wrapping up (a new submission does; reposting a lost card only from active). */
+  move: boolean,
+) {
+  // Only from active (or wrapping up, a submission replacing another): a paused or closed assignment stays so.
+  const next = move
+    ? ((await moveAssignment(
+        deps,
+        row,
+        ["active", "wrapping_up"],
+        { status: "wrapping_up" },
+        "submission",
+      )) ?? row)
+    : row;
+  const card = await agentSays(
+    deps,
+    row,
+    submission.note.slice(0, 2000),
+    { assignmentSubmission: { assignmentId: row.id, submissionId: submission.id } },
+    `card:${submission.id}`,
+  );
+  await notifyOwner(deps, next, "assignment_finished", submission.note, card.id);
   await deps.db
     .update(assignmentSubmissions)
     .set({ messageId: card.id })
-    .where(eq(assignmentSubmissions.id, id));
-  const next = await updateAssignment(deps, row, { status: "wrapping_up" }, "submission");
-  await notifyOwner(deps, next, "assignment_finished", input.note, card.id);
+    .where(and(eq(assignmentSubmissions.id, submission.id), isNull(assignmentSubmissions.messageId)));
   return { submission: { ...submission, messageId: card.id }, assignment: next };
 }
 
@@ -598,12 +650,19 @@ async function processJobEnd(deps: AppDeps, jobId: string): Promise<void> {
   if (open && row.executor !== "agent" && job.planItemId) {
     // The runner as executor: ended well and with no blocked command, the item is done; otherwise it goes back.
     const done = job.status === "done" && denied.length === 0;
-    await touchItem(deps, row.id, job.planItemId, {
-      status: done ? "done" : "todo",
-      ...(done ? { summary: result.slice(0, 8000) || null, doneAt: at } : {}),
-      updatedBy: agent,
-    });
-    if (done)
+    // Only an item still being worked on: one the person dropped (or marked done) meanwhile stays as it is.
+    const moved = await touchItem(
+      deps,
+      row.id,
+      job.planItemId,
+      {
+        status: done ? "done" : "todo",
+        ...(done ? { summary: result.slice(0, 8000) || null, doneAt: at } : {}),
+        updatedBy: agent,
+      },
+      ["todo", "doing"],
+    );
+    if (done && moved)
       await assignmentEvent(deps, row, {
         kind: "item_done",
         actor: agent,
