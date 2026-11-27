@@ -355,13 +355,20 @@ async function liveSecret(deps: AppDeps, row: ConnectionRow): Promise<ConnSecret
 export async function mcpFor(deps: AppDeps, row: ConnectionRow): Promise<McpClient> {
   if (!row.serverUrl) throw new McpError("Connection has no server address");
   const secret = await liveSecret(deps, row);
-  return new McpClient({
+  const client = new McpClient({
     url: row.serverUrl,
     fetch: deps.fetchExternal,
     policy: netPolicy(deps.config.integrations),
     headers: headersFor(secret),
   });
+  sentBy.set(client, secretsOf(secret));
+  return client;
 }
+
+/** The credential each client sends (a token refreshed for it included), for redaction. */
+const sentBy = new WeakMap<McpClient, string[]>();
+export const secretsSentBy = (client: McpClient | undefined): string[] =>
+  (client && sentBy.get(client)) || [];
 
 /** The service rejected the kept credential: the connection shows as "Reconnect". */
 export async function markNeedsReconnect(deps: AppDeps, connectionId: string): Promise<void> {

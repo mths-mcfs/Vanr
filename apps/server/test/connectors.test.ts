@@ -4,7 +4,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { asc, desc, eq } from "drizzle-orm";
-import { integrationSealer } from "../src/integrations/connectors";
+import { integrationSealer, mcpFor, secretsSentBy } from "../src/integrations/connectors";
 import { argsValidator } from "../src/integrations/tools";
 import type { RunningServer } from "../src/server";
 import { startFakeMcp } from "./fake-mcp";
@@ -709,3 +709,24 @@ describe("a connector's error text", () => {
     SERVER_TEST_MS,
   );
 });
+
+test(
+  "redaction knows the credential a client sends, even when the kept one changed after it was read",
+  async () => {
+    const t = await team();
+    const id = await stock(t, "Kept");
+    const [stale] = await server.deps.db.select().from(connections).where(eq(connections.id, id));
+    if (!stale) throw new Error("no connection");
+    // Another credential lands after the row was read (a refresh, a new key): the client sends that one.
+    await server.deps.db
+      .update(connections)
+      .set({
+        secret: integrationSealer(server.deps).seal(
+          JSON.stringify({ kind: "api_key", apiKey: "sent-later" }),
+        ),
+      })
+      .where(eq(connections.id, id));
+    expect(secretsSentBy(await mcpFor(server.deps, stale))).toEqual(["sent-later"]);
+  },
+  SERVER_TEST_MS,
+);

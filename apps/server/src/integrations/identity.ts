@@ -100,21 +100,6 @@ export async function setChannelRules(
 ): Promise<ChannelAccessRule[]> {
   const unique = new Map(rules.map((r) => [`${r.channelId}|${r.connectionId}`, r]));
   const channelIds = [...new Set([...unique.values()].map((r) => r.channelId))];
-  if (channelIds.length) {
-    const found = await deps.db
-      .select({ id: channels.id })
-      .from(channels)
-      .where(
-        and(
-          eq(channels.workspaceId, agent.workspaceId),
-          inArray(channels.id, channelIds),
-          visibleAgentChannel(deps.db, viewer),
-        ),
-      );
-    const known = new Set(found.map((c) => c.id));
-    const bad = channelIds.find((id) => !known.has(id));
-    if (bad) throw new HttpError(400, "identity.unknown_channel", "Unknown channel", { channelId: bad });
-  }
   const valid = new Set([
     ALL_CONNECTIONS,
     ...(await activeConnections(deps.db, agent.workspaceId)).map((c) => c.id),
@@ -128,7 +113,23 @@ export async function setChannelRules(
   await deps.db.transaction(async (tx) => {
     // One writer per agent at a time: two saves of the same agent's rules don't mix.
     await tx.select({ id: agents.id }).from(agents).where(eq(agents.id, agent.id)).for("no key update");
-    // Read under the lock: what is replaced is what the viewer sees now, and only that.
+    // Checked and read under the lock, on one snapshot: each new rule is on a channel the viewer sees now, and
+    // what is replaced is what they see now, and only that.
+    if (channelIds.length) {
+      const found = await tx
+        .select({ id: channels.id })
+        .from(channels)
+        .where(
+          and(
+            eq(channels.workspaceId, agent.workspaceId),
+            inArray(channels.id, channelIds),
+            visibleAgentChannel(tx, viewer),
+          ),
+        );
+      const known = new Set(found.map((c) => c.id));
+      const bad = channelIds.find((id) => !known.has(id));
+      if (bad) throw new HttpError(400, "identity.unknown_channel", "Unknown channel", { channelId: bad });
+    }
     const replaced = [...new Set((await visibleRules(tx, agent, viewer)).map((r) => r.channelId))];
     if (replaced.length)
       await tx

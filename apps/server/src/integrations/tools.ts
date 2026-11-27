@@ -31,7 +31,7 @@ import {
   grantsOf,
 } from "./access";
 import { SENSITIVE_TOOL } from "./catalog";
-import { connectionSecrets, markNeedsReconnect, mcpFor, requestScope } from "./connectors";
+import { connectionSecrets, markNeedsReconnect, mcpFor, requestScope, secretsSentBy } from "./connectors";
 import { DATABASE_TOOLS, hasDatabases } from "./databases";
 import { repoRefusal } from "./github-app";
 import { mailToolsFor } from "./mail-tools";
@@ -228,13 +228,14 @@ export function connectionTools(
             clients.delete(conn.id);
             if (err instanceof McpInsufficientScope) return askScope(ctx, conn, label, err.scope);
             // The service's own words, without the credential it was sent (it may echo it back).
-            const said = err instanceof Error ? outsideText(err, await connectionSecrets(deps, now.row)) : "";
+            const secrets = [...(await connectionSecrets(deps, now.row)), ...secretsSentBy(client)];
+            const said = err instanceof Error ? outsideText(err, secrets) : "";
             const why = `${conn.label} failed: ${said || "the server did not answer"}`;
             // A credential rejected in use: the connectors screen must say "Reconnect".
             if (err instanceof McpAuthRequired) await markNeedsReconnect(deps, conn.id);
             return why;
           };
-          let client: McpClient;
+          let client: McpClient | undefined;
           try {
             client = await sessionFor(deps, clients, now.row);
             // The session opens before the call: a failure here sent nothing, so the effect key is released.

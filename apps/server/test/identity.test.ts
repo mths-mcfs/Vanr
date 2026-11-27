@@ -476,3 +476,54 @@ describe("channel rules on channels hidden from the caller", () => {
     SERVER_TEST_MS,
   );
 });
+
+describe("a channel the caller stops seeing while they save", () => {
+  test(
+    "the check runs under the agent's lock: leaving the channel just before the write turns the save away",
+    async () => {
+      const t = await team();
+      const crew = await seedChannel(server, t.workspaceId, {
+        name: "crew",
+        visibility: "private",
+        members: [t.beto],
+      });
+      const bia = await seedAgent(server, t.workspaceId, t.beto, `bia${n}`, [t.general, crew]);
+      const { deps } = server;
+      const real = deps.db;
+      let leave = true;
+      // Beto leaves #crew right as his save opens its transaction.
+      deps.db = new Proxy(real, {
+        get(target, prop) {
+          if (prop === "transaction")
+            return async (...args: Parameters<typeof real.transaction>) => {
+              if (leave) {
+                leave = false;
+                await real
+                  .delete(schema.channelMemberships)
+                  .where(
+                    and(
+                      eq(schema.channelMemberships.channelId, crew),
+                      eq(schema.channelMemberships.memberId, t.beto.user.id),
+                    ),
+                  );
+              }
+              return target.transaction(...args);
+            };
+          const value = Reflect.get(target, prop, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      try {
+        const res = setChannels(t, t.beto, bia.id, [{ channelId: crew, connectionId: "*", level: "read" }]);
+        expect([(await res).status, (await res).body?.error?.code]).toEqual([
+          400,
+          "identity.unknown_channel",
+        ]);
+      } finally {
+        deps.db = real;
+      }
+      expect((await identity(t, t.ana, bia.id)).channels).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+});
