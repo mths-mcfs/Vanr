@@ -26,7 +26,7 @@ import {
 } from "@vanr/engine/models/catalog";
 import { keyPreview } from "@vanr/engine/seal";
 import { HANDLE_RE } from "@vanr/engine/text";
-import { and, asc, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
 import { type InstructionVersionRow, initialInstructions, writeInstructions } from "../agent-memory";
@@ -189,6 +189,26 @@ async function workspaceChannelIds(db: Db, workspaceId: string, ids: string[]): 
     );
   if (rows.length !== new Set(ids).size) throw badRequest("Unknown channel", { field: "channelIds" });
   return rows.map((r) => r.id);
+}
+
+/** Of these channels, the private ones the person is not a member of. */
+function privateChannelsOutside(db: Db, userId: string, ids: string[]) {
+  return db
+    .select({ id: channels.id })
+    .from(channels)
+    .where(
+      and(
+        inArray(channels.id, ids),
+        eq(channels.visibility, "private"),
+        notInArray(
+          channels.id,
+          db
+            .select({ id: channelMemberships.channelId })
+            .from(channelMemberships)
+            .where(and(eq(channelMemberships.memberType, "person"), eq(channelMemberships.memberId, userId))),
+        ),
+      ),
+    );
 }
 
 export function toRun(row: typeof runs.$inferSelect): Run {
@@ -442,6 +462,12 @@ export function registerAgents(app: Hono<AppEnv>) {
     const wanted = new Map(input.channels.map((ch) => [ch.channelId, ch.autoAnswer]));
     await workspaceChannelIds(db, me.workspaceId, [...wanted.keys()]);
     const current = await agentChannels(db, row.id);
+    // Stricter than the source: an owner without manage_agents only adds a private channel they belong to, so
+    // they can't put their agent where they can't read. Removing one, and changing autoAnswer, stay open.
+    if (!can(me.role, "manage_agents")) {
+      const added = [...wanted.keys()].filter((id) => !current.some((ch) => ch.id === id));
+      if (added.length && (await privateChannelsOutside(db, me.userId, added)).length) throw forbidden();
+    }
     await db.transaction(async (tx) => {
       const drop = current.filter((ch) => !wanted.has(ch.id)).map((ch) => ch.id);
       if (drop.length) {

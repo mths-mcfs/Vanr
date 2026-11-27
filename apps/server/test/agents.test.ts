@@ -202,6 +202,58 @@ describe("agent registry", () => {
   );
 
   test(
+    "an owner without the role adds only private channels they belong to; an admin adds any",
+    async () => {
+      const { workspaceId, general, ana, beto, lia } = await team();
+      const carla = await memberOf(server, workspaceId, "Carla", email("carla"), "admin");
+      const put = (who: Person, channels: { channelId: string; autoAnswer: boolean }[]) =>
+        call(who, "PUT", `${agentPath(workspaceId, lia.id)}/channels`, { channels });
+      const ids = async () =>
+        (
+          await ok<{ channels: AgentChannel[] }>(
+            call(ana, "GET", `${agentPath(workspaceId, lia.id)}/channels`),
+          )
+        ).channels
+          .map((ch) => ch.id)
+          .sort();
+      await ok(call(ana, "PATCH", agentPath(workspaceId, lia.id), { ownerUserId: beto.user.id }));
+      const outside = await seedChannel(server, workspaceId, {
+        name: "board",
+        visibility: "private",
+        members: [ana],
+      });
+      const inside = await seedChannel(server, workspaceId, {
+        name: "support",
+        visibility: "private",
+        members: [ana, beto],
+      });
+      // Beto owns Lia but isn't in #board: 403, and nothing changes.
+      const denied = await put(beto, [
+        { channelId: general, autoAnswer: false },
+        { channelId: outside, autoAnswer: true },
+      ]);
+      expect([denied.status, denied.body.error.code]).toEqual([403, "forbidden"]);
+      expect(await ids()).toEqual([general]);
+      // A private channel he is in: 200.
+      await ok(
+        put(beto, [
+          { channelId: general, autoAnswer: false },
+          { channelId: inside, autoAnswer: true },
+        ]),
+      );
+      expect(await ids()).toEqual([general, inside].sort());
+      // An admin adds any channel of the workspace, #board included.
+      await ok(put(carla, [{ channelId: outside, autoAnswer: false }]));
+      expect(await ids()).toEqual([outside]);
+      // Removing one stays open to the owner, and so does changing autoAnswer on one already there.
+      await ok(put(beto, [{ channelId: outside, autoAnswer: true }]));
+      await ok(put(beto, []));
+      expect(await ids()).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "harness, models and the platform key",
     async () => {
       const { workspaceId, ana, lia } = await team();
