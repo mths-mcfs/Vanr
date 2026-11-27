@@ -91,10 +91,15 @@ async function pollOne(deps: AppDeps, row: RoutineRow): Promise<number> {
 
   const found = await withImap(deps, account, async (imap) => {
     const { uidValidity } = await imap.open(trigger.folder, true);
-    // The cursor belongs to one folder: after the routine moves to another one, UIDs and UIDVALIDITY are those of
-    // another folder (they can even repeat), so the new folder starts as a first check does. A cursor without a
-    // folder was written for the folder the routine watched then.
-    const cursor = row.cursor && (row.cursor.folder ?? trigger.folder) === trigger.folder ? row.cursor : null;
+    // The cursor belongs to one account's folder: after the routine moves to another one, UIDs and UIDVALIDITY are
+    // those of another folder (they can even repeat), so the new folder starts as a first check does. A cursor
+    // without a folder or an account was written for the one the routine watched then.
+    const cursor =
+      row.cursor &&
+      (row.cursor.folder ?? trigger.folder) === trigger.folder &&
+      (row.cursor.accountId ?? trigger.accountId) === trigger.accountId
+        ? row.cursor
+        : null;
     const all = await imap.search("ALL");
     const top = all.at(-1) ?? 0;
     if (!cursor || cursor.uidValidity !== uidValidity) return { uidValidity, end: top, messages: [] };
@@ -116,11 +121,21 @@ async function pollOne(deps: AppDeps, row: RoutineRow): Promise<number> {
     return { uidValidity, end, messages: fetched.map((m) => ({ uid: m.uid, mail: parseMail(m.raw) })) };
   });
 
+  // Only while the routine still watches this account's folder: an edit during the check moved it elsewhere, and
+  // that place starts from its own first check.
   const save = (lastUid: number) =>
     deps.db
       .update(routines)
-      .set({ cursor: { uidValidity: found.uidValidity, lastUid, folder: trigger.folder } })
-      .where(eq(routines.id, row.id));
+      .set({
+        cursor: { uidValidity: found.uidValidity, lastUid, folder: trigger.folder, accountId: account.id },
+      })
+      .where(
+        and(
+          eq(routines.id, row.id),
+          sql`${routines.trigger} ->> 'accountId' = ${account.id}`,
+          sql`${routines.trigger} ->> 'folder' = ${trigger.folder}`,
+        ),
+      );
 
   const queue: { uid: number; context: RoutineContext }[] = [];
   for (const { uid, mail } of found.messages) {

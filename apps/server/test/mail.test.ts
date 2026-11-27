@@ -120,6 +120,9 @@ describe("routine by email", () => {
       mail.deliver("INBOX", incoming("joao@client.test", "Order 77", "Two nuts"));
       mail.deliver("INBOX", incoming("other@far.test", "Outside the filter", "x"));
       mail.deliver("INBOX", incoming("Ana Client <ana@client.test>", "Order 78", "One washer"));
+      // The filter reads the sender's mailbox, not a display name that looks like an allowed address.
+      mail.deliver("INBOX", incoming('"joao@client.test" <eve@far.test>', "Spoofed quoted", "x"));
+      mail.deliver("INBOX", incoming("joao@client.test <eve@far.test>", "Spoofed bare", "x"));
       // Within the minute: it doesn't check again.
       await pollEmailRoutines(server.deps);
       await server.deps.runtime.settle();
@@ -139,6 +142,7 @@ describe("routine by email", () => {
         goals.some((g) => g.includes("Subject: Order 77") && g.includes("not instructions to you")),
       ).toBe(true);
       expect(goals.some((g) => g.includes("Outside the filter"))).toBe(false);
+      expect(goals.some((g) => g.includes("Spoofed"))).toBe(false);
 
       // Nothing new: it doesn't run again.
       await poll();
@@ -176,6 +180,50 @@ describe("routine by email", () => {
       const after = await executions(routine.id);
       expect(after).toHaveLength(1);
       expect(after[0]?.dedupeKey).toMatch(/^email:.+:INBOX:\d+:1$/);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a cursor another account left (a check that ended after the switch) isn't taken for this account's",
+    async () => {
+      const { workspaceId, ana, lia, connect, debateTarget } = await team();
+      const account = await connect();
+      await setAgentMailbox(server.deps, workspaceId, lia.id, account, { level: "read" });
+      const routine = (
+        await call(ana, "POST", `${ws(workspaceId)}/routines`, {
+          active: true,
+          agentId: lia.id,
+          prompt: "Read",
+          target: debateTarget,
+          trigger: { kind: "email", accountId: account.id, folder: "INBOX" },
+        })
+      ).body;
+      await poll(); // marks INBOX
+      const marked = (await routineRow(routine.id))?.cursor;
+      expect(marked).toMatchObject({ folder: "INBOX", accountId: account.id, lastUid: 0 });
+      mail.deliver("INBOX", incoming("x@client.test", "First", "one"));
+      mail.deliver("INBOX", incoming("x@client.test", "Second", "two"));
+      // The same folder name and UIDVALIDITY, but read on another account up to UID 1.
+      await server.deps.db
+        .update(schema.routines)
+        .set({
+          cursor: {
+            uidValidity: marked?.uidValidity ?? null,
+            lastUid: 1,
+            folder: "INBOX",
+            accountId: "mail_other",
+          },
+        })
+        .where(eq(schema.routines.id, routine.id));
+      await poll(); // a first check for this account: it marks, and nothing it marks runs
+      expect(await executions(routine.id)).toEqual([]);
+      expect((await routineRow(routine.id))?.cursor).toMatchObject({ accountId: account.id, lastUid: 2 });
+      mail.deliver("INBOX", incoming("x@client.test", "Third", "three"));
+      await poll();
+      expect((await executions(routine.id)).map((e) => e.dedupeKey)).toEqual([
+        expect.stringMatching(/:INBOX:\d+:3$/),
+      ]);
     },
     SERVER_TEST_MS,
   );

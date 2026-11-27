@@ -152,12 +152,18 @@ export function attachmentName(raw: string | null | undefined): string {
   return base && base !== "." && base !== ".." ? base : "anexo";
 }
 
-/** Only the addresses of a From/To/Cc header. */
+/**
+ * Only the addresses of a From/To/Cc header, one per mailbox. A display name (quoted or not) or a comment is text,
+ * not a mailbox: in `"ana@ok.test" <eve@bad.test>` or `ana@ok.test <eve@bad.test>` the address is eve's.
+ */
 export function addresses(value: string | undefined): string[] {
   if (!value) return [];
   const out: string[] = [];
-  for (const m of value.matchAll(/<([^>]+)>|([^\s,<>"]+@[^\s,<>"]+)/g)) {
-    const addr = (m[1] ?? m[2] ?? "").trim().toLowerCase();
+  // Without quoted strings and comments, a comma only separates mailboxes.
+  const bare = value.replace(/"(?:[^"\\]|\\.)*"/g, " ").replace(/\([^()]*\)/g, " ");
+  for (const mailbox of bare.split(",")) {
+    const angle = mailbox.match(/<([^>]*)>/);
+    const addr = (angle ? angle[1] : mailbox.match(/[^\s,;:<>"]+@[^\s,;:<>"]+/)?.[0])?.trim().toLowerCase();
     if (addr) out.push(addr);
   }
   return out;
