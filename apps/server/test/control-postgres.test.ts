@@ -151,6 +151,7 @@ async function queuedPost(server: RunningServer, ctx: Ctx, text: string, sendAt:
  */
 const SEND_UNDO_ENDS: Record<string, unknown[]> = {
   canceled: ["ok", "canceled", [], true],
+  retracted: ["ok", "sent", [true], true],
   late: ["action.changed_since", "sent", [false], false],
 };
 
@@ -235,7 +236,9 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("undo at the same time on Postgre
         deliverDue(sweep),
         deliverDue(sweep),
       ]);
-      for (const [i, it] of items.entries()) await undoAgainstSend(server, it, results[i]);
+      const kinds: unknown[] = [];
+      for (const [i, it] of items.entries()) kinds.push(await undoAgainstSend(server, it, results[i]));
+      console.log(`UNDO_SEND_TALLY ${kinds.join(",")}`);
     });
   }, 60_000);
 

@@ -873,6 +873,50 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
 
+  # TEMPORARY (#64): the undo-vs-send test looped, base vs fix. Removed before code-ready.
+  undo-send-loop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
+        env:
+          POSTGRES_DB: vanr_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d vanr_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Base test, 200 runs
+        run: |
+          set +e
+          git fetch --no-tags --depth=1 origin 20e546a37a3b111ed49f1c74ff29e7c3a43cea3c
+          git show 20e546a37a3b111ed49f1c74ff29e7c3a43cea3c:apps/server/test/control-postgres.test.ts > apps/server/test/control-postgres-base.test.ts
+          bun test apps/server/test/control-postgres-base.test.ts --test-name-pattern "undo against the send" --rerun-each 200 > base.log 2>&1
+          echo "LOOP base: exit $?, $(grep -ac '^(pass)' base.log) pass, $(grep -ac '^(fail)' base.log) fail"
+          rm apps/server/test/control-postgres-base.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      - name: Fixed test, 200 runs
+        run: |
+          set +e
+          bun test apps/server/test/control-postgres.test.ts --test-name-pattern "undo against the send" --rerun-each 200 > fix.log 2>&1
+          status=$?
+          echo "LOOP fix: exit $status, $(grep -ac '^(pass)' fix.log) pass, $(grep -ac '^(fail)' fix.log) fail"
+          grep -ao 'UNDO_SEND_TALLY [a-z,]*' fix.log | sed 's/UNDO_SEND_TALLY //' | tr ',' '\n' | sort | uniq -c | sed 's/^/LOOP fix ends: /'
+          echo "LOOP fix: runs with a retracted end: $(grep -ao 'UNDO_SEND_TALLY [a-z,]*' fix.log | grep -c retracted)"
+          exit $status
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+
   ci-ok:
     if: always()
     needs: [lint, typecheck, test, web, postgres, sandbox, workflows, secrets]
