@@ -35,6 +35,7 @@ import {
   type AgentRow,
   agentChannels,
   agentInWorkspace,
+  channelViewer,
   monthStart,
   requireAgentEditor,
   requireCredential,
@@ -364,7 +365,7 @@ export function registerAgents(app: Hono<AppEnv>) {
     const row = await agentInWorkspace(db, me.workspaceId, param(c, "agentId"));
     return c.json(
       await toAgentDetail(db, row, {
-        viewerId: me.userId,
+        viewer: channelViewer(me),
         busy: runtime.isBusy(row.id),
         testModel: (await c.get("deps").testModelFor(me.workspaceId))(row),
         now: now(),
@@ -442,7 +443,7 @@ export function registerAgents(app: Hono<AppEnv>) {
     const me = requireMember(c);
     const { db } = c.get("deps");
     const row = await agentInWorkspace(db, me.workspaceId, param(c, "agentId"));
-    return c.json({ channels: await agentChannels(db, row.id) });
+    return c.json({ channels: await agentChannels(db, row.id, channelViewer(me)) });
   });
 
   // Replaces the whole channel list (DMs stay out) and the autoAnswer of each one.
@@ -461,15 +462,18 @@ export function registerAgents(app: Hono<AppEnv>) {
     );
     const wanted = new Map(input.channels.map((ch) => [ch.channelId, ch.autoAnswer]));
     await workspaceChannelIds(db, me.workspaceId, [...wanted.keys()]);
-    const current = await agentChannels(db, row.id);
-    // Stricter than the source: an owner without manage_agents only adds a private channel they belong to, so
-    // they can't put their agent where they can't read. Removing one, and changing autoAnswer, stay open.
-    if (!can(me.role, "manage_agents")) {
-      const added = [...wanted.keys()].filter((id) => !current.some((ch) => ch.id === id));
-      if (added.length && (await privateChannelsOutside(db, me.userId, added)).length) throw forbidden();
-    }
+    const viewer = channelViewer(me);
     await db.transaction(async (tx) => {
-      const drop = current.filter((ch) => !wanted.has(ch.id)).map((ch) => ch.id);
+      // The links are read under the agent's lock, in the same transaction as the writes: what counts as added is
+      // decided on the list the writes act on. A private channel the person doesn't read stays as it is.
+      await tx.select({ id: agents.id }).from(agents).where(eq(agents.id, row.id)).for("update");
+      const visible = new Set((await agentChannels(tx, row.id, viewer)).map((ch) => ch.id));
+      const added = [...wanted.keys()].filter((id) => !visible.has(id));
+      // Stricter than the source: an owner without manage_agents only adds a private channel they belong to, so
+      // they can't put their agent where they can't read. Removing one, and changing autoAnswer, stay open.
+      if (!viewer.seesAll && added.length && (await privateChannelsOutside(tx, me.userId, added)).length)
+        throw forbidden();
+      const drop = [...visible].filter((id) => !wanted.has(id));
       if (drop.length) {
         await tx
           .delete(channelMemberships)
@@ -482,6 +486,20 @@ export function registerAgents(app: Hono<AppEnv>) {
           );
       }
       for (const [channelId, autoAnswer] of wanted) {
+        // A link that was there only changes its autoAnswer: one removed in the meantime is not brought back.
+        if (visible.has(channelId)) {
+          await tx
+            .update(channelMemberships)
+            .set({ autoAnswer })
+            .where(
+              and(
+                eq(channelMemberships.channelId, channelId),
+                eq(channelMemberships.memberType, "agent"),
+                eq(channelMemberships.memberId, row.id),
+              ),
+            );
+          continue;
+        }
         await tx
           .insert(channelMemberships)
           .values({ channelId, memberType: "agent", memberId: row.id, autoAnswer })
@@ -495,7 +513,7 @@ export function registerAgents(app: Hono<AppEnv>) {
           });
       }
     });
-    return c.json({ channels: await agentChannels(db, row.id) });
+    return c.json({ channels: await agentChannels(db, row.id, viewer) });
   });
 
   app.get(`${WORKSPACE}/agents/:agentId/runtime`, async (c) => {
@@ -522,9 +540,17 @@ export function registerAgents(app: Hono<AppEnv>) {
         })
         .strict(),
     );
+    const remote = input.harness !== "model";
+    // As in PATCH: the owner without manage_agents doesn't change the harness or the model (the fallback stays
+    // theirs), or /runtime would be a way around the edit's rule.
+    if (!can(me.role, "manage_agents")) {
+      const modelChanged =
+        input.model !== undefined &&
+        (remote ? (input.model || null) !== row.harnessModel : input.model !== row.model);
+      if (input.harness !== row.harnessKind || modelChanged) throw forbidden();
+    }
     const view = await harnessView(deps, row, me.userId);
     const option = view.options.find((o) => o.kind === input.harness);
-    const remote = input.harness !== "model";
     // Choosing again the harness already saved asks for nothing (e.g. only changing the model).
     if (remote && input.harness !== row.harnessKind && !option?.available) {
       throw conflict("harness.unavailable", "This harness is not available on the agent's environment", {

@@ -190,7 +190,22 @@ export async function usageSince(db: Db, workspaceId: string, since: Date) {
   return new Map(rows.map((r) => [r.agentId, { calls: r.calls, costUsd: Number(r.cost ?? 0) }]));
 }
 
-export async function agentChannels(db: Db, agentId: string) {
+/** Who looks at an agent's channels: whoever manages agents sees every one, anyone else only those they read. */
+export interface ChannelViewer {
+  userId: string;
+  seesAll: boolean;
+}
+
+export const channelViewer = (me: WorkspaceMember): ChannelViewer => ({
+  userId: me.userId,
+  seesAll: can(me.role, "manage_agents"),
+});
+
+/**
+ * The agent's channels (DMs stay out). Given a viewer who doesn't manage agents, a private channel they are not
+ * a member of is left out: its id would name a channel whose runs answer them 404.
+ */
+export async function agentChannels(db: Db, agentId: string, viewer?: ChannelViewer) {
   return db
     .select({ id: channelMemberships.channelId, autoAnswer: channelMemberships.autoAnswer })
     .from(channelMemberships)
@@ -201,6 +216,23 @@ export async function agentChannels(db: Db, agentId: string) {
         eq(channelMemberships.memberId, agentId),
         eq(channels.kind, "channel"),
         isNull(channels.archivedAt),
+        viewer && !viewer.seesAll
+          ? or(
+              eq(channels.visibility, "public"),
+              inArray(
+                channels.id,
+                db
+                  .select({ id: channelMemberships.channelId })
+                  .from(channelMemberships)
+                  .where(
+                    and(
+                      eq(channelMemberships.memberType, "person"),
+                      eq(channelMemberships.memberId, viewer.userId),
+                    ),
+                  ),
+              ),
+            )
+          : undefined,
       ),
     );
 }
@@ -208,19 +240,19 @@ export async function agentChannels(db: Db, agentId: string) {
 export async function toAgentDetail(
   db: Db,
   row: AgentRow,
-  input: { viewerId: string; busy: boolean; testModel: boolean; now: Date },
+  input: { viewer: ChannelViewer; busy: boolean; testModel: boolean; now: Date },
 ): Promise<AgentDetail> {
   const workspace = await workspaceBudgetDefaults(db, row.workspaceId);
   const usage = (await monthUsage(db, [row.id], input.now)).get(row.id) ?? { runs: 0, tokens: 0, costUsd: 0 };
   const budget = budgetOf(row, workspace.defaultBudget);
   return {
-    ...toAgent(await withPlanOwner(db, row), input.viewerId, input.busy, input.testModel),
+    ...toAgent(await withPlanOwner(db, row), input.viewer.userId, input.busy, input.testModel),
     budgetSpentPct: budget > 0 ? Math.min(999, Math.round((usage.costUsd / budget) * 100)) : 100,
     budgetPerMonthUsd: budget,
     inheritedBudgetUsd: workspace.defaultBudget,
     budgetInherited: row.budgetPerMonthUsd === null,
     credentialId: row.credentialId,
-    channels: await agentChannels(db, row.id),
+    channels: await agentChannels(db, row.id, input.viewer),
     queuedApprovals: (
       await db
         .select({ id: schema.approvals.id })

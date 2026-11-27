@@ -6,13 +6,14 @@
 // the chat routes; see the ledger.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Agent, AgentAppearance, AgentChannel, AgentDetail, Member } from "@vanr/contract";
-import { schema } from "@vanr/engine/db";
+import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { loadConfig } from "../src/config";
 import { createProviderLookup, testModelCheck } from "../src/models";
 import type { RunningServer } from "../src/server";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
+import { wrapQuery } from "./lock-double";
 import { call, ws } from "./route-calls";
 import { memberOf, type Person, seedChannel } from "./seed";
 
@@ -70,6 +71,39 @@ async function team(opts: { budget?: number } = {}) {
     201,
   );
   return { workspaceId, general, ana, beto, lia };
+}
+
+/**
+ * The database for one save: the first transaction runs `between` right after its read of the agent's links (a
+ * select over channel_memberships) resolves, before anything else. PGlite runs one transaction at a time, so the
+ * other person's write goes through the same transaction, at the point it would have committed.
+ */
+function afterLinksRead(db: Db, between: (tx: Db) => Promise<unknown>): Db {
+  let armed = true;
+  return new Proxy(db, {
+    get(target, prop) {
+      if (prop !== "transaction") return Reflect.get(target, prop, target);
+      return (fn: (tx: Db) => Promise<unknown>) =>
+        target.transaction(async (tx) => {
+          if (!armed) return fn(tx);
+          armed = false;
+          let fired = false;
+          const proxied = new Proxy(tx, {
+            get(t, p) {
+              const value = Reflect.get(t, p, t);
+              if (p !== "select") return typeof value === "function" ? value.bind(t) : value;
+              return (...args: unknown[]) =>
+                wrapQuery(value.apply(t, args), async (query: { toSQL(): { sql: string } }) => {
+                  if (fired || !query.toSQL().sql.includes('"channel_memberships"')) return;
+                  fired = true;
+                  await between(tx as unknown as Db);
+                });
+            },
+          });
+          return fn(proxied as unknown as Db);
+        });
+    },
+  });
 }
 
 const agentPath = (workspaceId: string, agentId: string) => `${ws(workspaceId)}/agents/${agentId}`;
@@ -242,13 +276,150 @@ describe("agent registry", () => {
         ]),
       );
       expect(await ids()).toEqual([general, inside].sort());
+      // Removing one stays open to the owner.
+      await ok(put(beto, [{ channelId: general, autoAnswer: false }]));
+      expect(await ids()).toEqual([general]);
       // An admin adds any channel of the workspace, #board included.
-      await ok(put(carla, [{ channelId: outside, autoAnswer: false }]));
-      expect(await ids()).toEqual([outside]);
-      // Removing one stays open to the owner, and so does changing autoAnswer on one already there.
-      await ok(put(beto, [{ channelId: outside, autoAnswer: true }]));
-      await ok(put(beto, []));
-      expect(await ids()).toEqual([]);
+      await ok(
+        put(carla, [
+          { channelId: general, autoAnswer: false },
+          { channelId: outside, autoAnswer: false },
+        ]),
+      );
+      expect(await ids()).toEqual([general, outside].sort());
+      // Beto doesn't see #board: touching it is an addition (403), and a save of what he sees keeps it.
+      expect((await put(beto, [{ channelId: outside, autoAnswer: true }])).status).toBe(403);
+      await ok(put(beto, [{ channelId: general, autoAnswer: true }]));
+      expect(await ids()).toEqual([general, outside].sort());
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a link removed between the save's read and its write is not brought back",
+    async () => {
+      const { workspaceId, general, ana, beto, lia } = await team();
+      await ok(call(ana, "PATCH", agentPath(workspaceId, lia.id), { ownerUserId: beto.user.id }));
+      const support = await seedChannel(server, workspaceId, {
+        name: "support",
+        visibility: "private",
+        members: [ana, beto],
+      });
+      await ok(
+        call(ana, "PUT", `${agentPath(workspaceId, lia.id)}/channels`, {
+          channels: [
+            { channelId: general, autoAnswer: false },
+            { channelId: support, autoAnswer: false },
+          ],
+        }),
+      );
+      // The admin removes Lia from #support right after Beto's save read the links, before it writes.
+      const db = server.deps.db;
+      server.deps.db = afterLinksRead(db, (tx) =>
+        tx
+          .delete(schema.channelMemberships)
+          .where(
+            and(
+              eq(schema.channelMemberships.channelId, support),
+              eq(schema.channelMemberships.memberType, "agent"),
+              eq(schema.channelMemberships.memberId, lia.id),
+            ),
+          ),
+      );
+      try {
+        const saved = await call(beto, "PUT", `${agentPath(workspaceId, lia.id)}/channels`, {
+          channels: [
+            { channelId: general, autoAnswer: true },
+            { channelId: support, autoAnswer: true },
+          ],
+        });
+        expect(saved.status).toBe(200);
+      } finally {
+        server.deps.db = db;
+      }
+      const links = await db
+        .select()
+        .from(schema.channelMemberships)
+        .where(
+          and(
+            eq(schema.channelMemberships.memberType, "agent"),
+            eq(schema.channelMemberships.memberId, lia.id),
+          ),
+        );
+      expect(links.map((l) => [l.channelId, l.autoAnswer])).toEqual([[general, true]]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a private channel the viewer doesn't read is left out of the agent's channels, and a save keeps it",
+    async () => {
+      const { workspaceId, general, ana, beto, lia } = await team();
+      const board = await seedChannel(server, workspaceId, {
+        name: "board",
+        visibility: "private",
+        members: [ana],
+      });
+      await ok(
+        call(ana, "PUT", `${agentPath(workspaceId, lia.id)}/channels`, {
+          channels: [
+            { channelId: general, autoAnswer: false },
+            { channelId: board, autoAnswer: false },
+          ],
+        }),
+      );
+      const seen = async (who: Person) => ({
+        list: (
+          await ok<{ channels: AgentChannel[] }>(
+            call(who, "GET", `${agentPath(workspaceId, lia.id)}/channels`),
+          )
+        ).channels
+          .map((ch) => ch.id)
+          .sort(),
+        detail: (await ok<AgentDetail>(call(who, "GET", agentPath(workspaceId, lia.id)))).channels
+          .map((ch) => ch.id)
+          .sort(),
+      });
+      expect(await seen(beto)).toEqual({ list: [general], detail: [general] });
+      // Whoever manages agents sees every link.
+      expect(await seen(ana)).toEqual({ list: [general, board].sort(), detail: [general, board].sort() });
+      // Beto, now the owner, saves the list he sees: #board stays.
+      await ok(call(ana, "PATCH", agentPath(workspaceId, lia.id), { ownerUserId: beto.user.id }));
+      const saved = await ok<{ channels: AgentChannel[] }>(
+        call(beto, "PUT", `${agentPath(workspaceId, lia.id)}/channels`, {
+          channels: [{ channelId: general, autoAnswer: true }],
+        }),
+      );
+      expect(saved.channels).toEqual([{ id: general, autoAnswer: true }]);
+      expect((await seen(ana)).list).toEqual([general, board].sort());
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "an owner without the role changes neither the model nor the harness through /runtime; an admin does",
+    async () => {
+      const { workspaceId, ana, beto, lia } = await team();
+      const carla = await memberOf(server, workspaceId, "Carla", email("carla"), "admin");
+      await ok(call(ana, "PATCH", agentPath(workspaceId, lia.id), { ownerUserId: beto.user.id }));
+      const runtime = `${agentPath(workspaceId, lia.id)}/runtime`;
+      const model = async () => (await ok<Agent>(call(ana, "GET", agentPath(workspaceId, lia.id)))).model;
+      const denied = await call(beto, "PUT", runtime, { harness: "model", model: "claude-sonnet-5-5" });
+      expect([denied.status, denied.body.error.code]).toEqual([403, "forbidden"]);
+      expect(
+        (await call(beto, "PUT", runtime, { harness: "claude_code", agreeToPlanTerms: true })).status,
+      ).toBe(403);
+      expect(await model()).toBe("claude-haiku-5-5");
+      // The fallback, and the model it already has, stay open to him.
+      await ok(call(beto, "PUT", runtime, { harness: "model", model: "claude-haiku-5-5", fallback: false }));
+      expect(
+        (
+          await ok<{ resolvedModel: string }>(
+            call(carla, "PUT", runtime, { harness: "model", model: "claude-sonnet-5-5" }),
+          )
+        ).resolvedModel,
+      ).toBe("claude-sonnet-5-5");
+      expect(await model()).toBe("claude-sonnet-5-5");
     },
     SERVER_TEST_MS,
   );
@@ -542,7 +713,8 @@ describe("access", () => {
       ];
       for (const [method, path, payload] of probes) {
         const res = await call(eva, method, path, payload);
-        expect([method, path, res.status]).toEqual([method, path, 404]);
+        // The route is there (the app's fallback answers route_not_found): the 404 is the access rule's.
+        expect([method, path, res.status, res.body.error.code]).toEqual([method, path, 404, "not_found"]);
       }
       // Through her own workspace, the agent's id is not found either.
       const mine = agentPath(theirs.workspace.id, lia.id);
@@ -554,7 +726,8 @@ describe("access", () => {
         ["POST", `${mine}/builder`, { description: "x" }],
       ] as [string, string, unknown?][]) {
         const res = await call(eva, method, path, payload);
-        expect([method, path, res.status]).toEqual([method, path, 404]);
+        // The route is there (the app's fallback answers route_not_found): the 404 is the access rule's.
+        expect([method, path, res.status, res.body.error.code]).toEqual([method, path, 404, "not_found"]);
       }
       // Nothing changed.
       const after = await ok<Agent>(call(ana, "GET", here));
