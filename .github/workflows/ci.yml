@@ -952,6 +952,12 @@ jobs:
             echo "::error::a test outside the forced ones failed without the admission: $failed"
             exit 1
           fi
+          # As many distinct tests failed as there are labels (bun prints a failure twice).
+          count=$(printf '%s\n' "$failed" | grep -c .)
+          if [ "$count" -ne "$#" ]; then
+            echo "::error::$count distinct forced tests failed without the admission, expected $#"
+            exit 1
+          fi
       # The agent's assignment and runner tools: reports at once all land in the notes, and requests for a
       # person in the browser at once make one.
       - run: bun test apps/server/test/agent-tools-postgres.test.ts
