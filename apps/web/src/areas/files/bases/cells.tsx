@@ -372,6 +372,7 @@ function useChoices(
   const [rows, setRows] = useState<{ items: Choice[]; linked: Record<string, BaseLinkedRow> } | null>(null);
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `attempt` asks again after a failure.
   useEffect(() => {
     if (def.type !== "relation" || target === undefined) return;
     const controller = new AbortController();
