@@ -608,21 +608,27 @@ const scheduleReminder = define({
     const at = new Date(input.at);
     if (at.getTime() <= ctx.deps.now().getTime()) throw new ToolInputError("The time is in the past");
     const id = newId("rem");
-    await ctx.deps.db.insert(reminders).values({
-      id,
-      workspaceId: ctx.workspaceId,
-      agentId: ctx.agent.id,
-      channelId: ctx.channel.id,
-      threadId: ctx.threadId,
-      text: input.text,
-      at,
-      createdByType: "agent",
-      createdById: ctx.agent.id,
-    });
-    await ctx.recordAction({
-      kind: "reminder_created",
-      target: { type: "reminder", id, title: input.text },
-      params: { at: at.toISOString() },
+    // The reminder and its receipt together: a receipt that fails leaves no reminder behind.
+    await ctx.deps.db.transaction(async (tx) => {
+      await tx.insert(reminders).values({
+        id,
+        workspaceId: ctx.workspaceId,
+        agentId: ctx.agent.id,
+        channelId: ctx.channel.id,
+        threadId: ctx.threadId,
+        text: input.text,
+        at,
+        createdByType: "agent",
+        createdById: ctx.agent.id,
+      });
+      await ctx.recordAction(
+        {
+          kind: "reminder_created",
+          target: { type: "reminder", id, title: input.text },
+          params: { at: at.toISOString() },
+        },
+        tx,
+      );
     });
     return `Reminder ${id} scheduled for ${at.toISOString()}.`;
   },
@@ -1105,7 +1111,8 @@ export async function runTool(
   }
   const once = await claimEffect(ctx, tool.name, plan, input);
   if (once && "result" in once) {
-    if (approvalId) await ctx.settleApproval(approvalId, { ok: false, text: once.result.content });
+    if (approvalId)
+      await ctx.settleApproval(approvalId, { ok: !once.result.isError, text: once.result.content });
     return once.result;
   }
   let res: RanTool;
@@ -1129,8 +1136,7 @@ export async function runTool(
       if (approvalId) await ctx.settleApproval(approvalId, { ok: false, text: "Failed while running" });
       throw err;
     }
-    // Rejected before doing anything: nothing went out, the next attempt may do it.
-    if (once) await ctx.deps.db.delete(effectKeys).where(eq(effectKeys.key, once.key));
+    // Rejected before doing anything: nothing went out, so the key goes below and the next attempt may do it.
     res = { content: err.message, isError: true };
   }
   if (once && !res.isError) await settleEffect(ctx, once.key, "done", res);

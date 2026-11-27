@@ -300,6 +300,22 @@ describe("conversation tools", () => {
     expect(t.actions.map((a) => a.kind)).toEqual(["reminder_created"]);
   });
 
+  test("a reminder whose receipt fails is not kept", async () => {
+    const t = await setup("reminder-receipt");
+    const ctx = t.ctx({
+      async recordAction() {
+        throw new Error("receipt write failed");
+      },
+    });
+    const at = new Date(Date.now() + 3600_000).toISOString();
+    await expect(run(ctx, "schedule_reminder", { text: "Call Acme", at })).rejects.toThrow(
+      "receipt write failed",
+    );
+    expect(await server.deps.db.select().from(reminders).where(eq(reminders.agentId, t.agent.id))).toEqual(
+      [],
+    );
+  });
+
   test("use_skill comes in parts with the files at the end; a disabled or foreign skill is rejected", async () => {
     const t = await setup("skills");
     const skill = async (workspaceId: string, name: string, enabled: boolean) => {
@@ -488,6 +504,54 @@ describe("outside effects in a routine execution run once", () => {
     await runTool(t.ctx({ effectKey }), [tool], "send_out", { text: "b" });
     await runTool(t.ctx({ effectKey: newId("rx") }), [tool], "send_out", { text: "a" });
     expect(state.ran).toBe(3);
+  });
+
+  test("an approved retry that finds the effect done settles its approval as done, not failed", async () => {
+    const t = await setup("once-approved");
+    const sent: string[] = [];
+    const tool = define({
+      name: "send_out",
+      description: "",
+      effect: "K2",
+      input: z.object({ text: z.string() }),
+      async plan(_ctx, input) {
+        return {
+          destination: { kind: "external", allowed: true, target: "partner" },
+          policy: "ask",
+          payload: input,
+        };
+      },
+      async run(_ctx, input) {
+        sent.push(input.text);
+        return `sent ${input.text}`;
+      },
+    }) as ToolDef<unknown>;
+    const settled: { id: string; ok: boolean }[] = [];
+    const effectKey = newId("rx");
+    const ctx = () =>
+      t.ctx({
+        effectKey,
+        async requestApproval(req) {
+          return {
+            id: `apv${settled.length + 1}`,
+            decision: "approved",
+            reason: null,
+            byName: "Ana",
+            payloadHash: req.payloadHash,
+          };
+        },
+        async settleApproval(id, result) {
+          settled.push({ id, ok: result.ok });
+        },
+      });
+    await runTool(ctx(), [tool], "send_out", { text: "a" });
+    const again = await runTool(ctx(), [tool], "send_out", { text: "a" });
+    expect(again.isError).toBe(false);
+    expect(sent).toEqual(["a"]);
+    expect(settled).toEqual([
+      { id: "apv1", ok: true },
+      { id: "apv2", ok: true },
+    ]);
   });
 
   test("N attempts at once of the same execution send once", async () => {

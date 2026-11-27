@@ -189,30 +189,33 @@ export function registerWorkspaces(app: Hono<AppEnv>) {
       }),
     );
     const { db, now } = c.get("deps");
-    if (input.name !== undefined) {
-      await db.update(users).set({ name: input.name, updatedAt: now() }).where(eq(users.id, me.userId));
-    }
-    if (input.handle !== undefined && input.handle !== me.handle) {
-      const taken = await takenHandles(db, me.workspaceId);
-      if (taken.has(input.handle))
-        throw conflict("handle.taken", "This handle is taken", { handle: input.handle });
-      try {
-        await db
-          .update(members)
-          .set({ handle: input.handle })
-          .where(and(eq(members.workspaceId, me.workspaceId), eq(members.userId, me.userId)));
-      } catch (err) {
-        if (isUniqueViolation(err))
-          throw conflict("handle.taken", "This handle is taken", { handle: input.handle });
-        throw err;
+    // All or nothing: a taken handle leaves the name and the time zone as they were.
+    await db.transaction(async (tx) => {
+      if (input.name !== undefined) {
+        await tx.update(users).set({ name: input.name, updatedAt: now() }).where(eq(users.id, me.userId));
       }
-    }
-    if (input.timezone !== undefined) {
-      await db
-        .update(members)
-        .set({ timezone: input.timezone })
-        .where(and(eq(members.workspaceId, me.workspaceId), eq(members.userId, me.userId)));
-    }
+      if (input.handle !== undefined && input.handle !== me.handle) {
+        const taken = await takenHandles(tx, me.workspaceId);
+        if (taken.has(input.handle))
+          throw conflict("handle.taken", "This handle is taken", { handle: input.handle });
+        try {
+          await tx
+            .update(members)
+            .set({ handle: input.handle })
+            .where(and(eq(members.workspaceId, me.workspaceId), eq(members.userId, me.userId)));
+        } catch (err) {
+          if (isUniqueViolation(err))
+            throw conflict("handle.taken", "This handle is taken", { handle: input.handle });
+          throw err;
+        }
+      }
+      if (input.timezone !== undefined) {
+        await tx
+          .update(members)
+          .set({ timezone: input.timezone })
+          .where(and(eq(members.workspaceId, me.workspaceId), eq(members.userId, me.userId)));
+      }
+    });
     const [row] = await memberRows(db, me.workspaceId, me.userId);
     if (!row) throw notFound("Member not found");
     return c.json(

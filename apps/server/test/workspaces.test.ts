@@ -925,6 +925,26 @@ describe("workspace route rules", () => {
     expect((await call(dora.browser, "GET", ws(id))).body).toMatchObject({ name: "Steady", context: "Calm" });
   });
 
+  test("updateMe is all or nothing: a taken handle leaves the name and the time zone as they were", async () => {
+    const eli = await signedIn(server, "Eli", "eli@space.test");
+    const id = (await create(eli.browser, { name: "Handles" })).workspace.id;
+    const link = (await call(eli.browser, "POST", `${ws(id)}/invite-links`)).body;
+    const fred = await signedIn(server, "Fred", "fred@space.test");
+    await accept(fred.browser, tokenOf(link.url));
+    const taken = await call(fred.browser, "PATCH", `${ws(id)}/me`, {
+      name: "Frederick",
+      handle: "eli",
+      timezone: "Europe/Lisbon",
+    });
+    expect([taken.status, taken.body.error.code]).toEqual([409, "handle.taken"]);
+    const people = (await call(fred.browser, "GET", `${ws(id)}/people`)).body.people;
+    expect(people.find((p: { userId: string }) => p.userId === fred.user.id)).toMatchObject({
+      name: "Fred",
+      handle: "fred",
+      timezone: null,
+    });
+  });
+
   test("creating a workspace validates the body before any write", async () => {
     const cris = await signedIn(server, "Cris", "cris@space.test");
     for (const payload of [
