@@ -8,7 +8,7 @@ import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { dueAt, silenceUntil, wantsChannel } from "@vanr/engine/notify-rules";
 import { PRODUCT } from "@vanr/product";
-import { and, eq, inArray, lt, ne, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, ne, sql } from "drizzle-orm";
 import { canReadChannel } from "./channels";
 import type { AppDeps } from "./context";
 import { log } from "./logger";
@@ -31,13 +31,11 @@ const STUCK_MS = 5 * 60_000;
 const MAX_ATTEMPTS = 3;
 /**
  * A new attempt of an email goes out only while the provider still keeps its idempotency key (Resend keeps
- * it 24 hours): past this age the attempt could send a second email, so the delivery ends failed with
- * `email_outcome_unknown` instead. An email a day late is worth less than the risk of sending it twice. The
- * age counts from the delivery's `createdAt`, an upper bound of the first attempt (the exact time of the
- * first attempt needs a column, for when the schema opens): after a very long postponement (quiet hours, do
- * not disturb) a retry of a first attempt that failed in a retryable way is dropped, and the person goes
- * without that email (the notification stays in the app). The first attempt is never rejected for its age.
- * The hour of margin covers the backoff between attempts and the clocks.
+ * it 24 hours from the first attempt): past this age the attempt could send a second email, so the delivery
+ * ends failed with `email_outcome_unknown` instead. An email a day late is worth less than the risk of sending
+ * it twice. The age counts from `firstAttemptAt`, written before the first call to the provider, so a long
+ * postponement (quiet hours, do not disturb) before it doesn't count. The first attempt is never rejected for
+ * its age. The hour of margin covers the backoff between attempts and the clocks.
  */
 const EMAIL_RETRY_MAX_AGE_MS = 23 * 3600_000;
 /** A subscription that fails this many times in a row (other than 404/410) is removed. */
@@ -346,8 +344,7 @@ async function sendEmail(
   n: Pick<AppNotification, "reason" | "latest" | "source">,
   d: Delivery,
 ): Promise<Outcome> {
-  // `attempts` already counts this one (the claim adds it; a postponement gives it back).
-  if (d.attempts > 1 && deps.now().getTime() - d.createdAt.getTime() >= EMAIL_RETRY_MAX_AGE_MS)
+  if (d.firstAttemptAt && deps.now().getTime() - d.firstAttemptAt.getTime() >= EMAIL_RETRY_MAX_AGE_MS)
     return { status: "failed", note: "email_outcome_unknown" };
   const [user] = await deps.db.select({ email: users.email }).from(users).where(eq(users.id, row.userId));
   if (!user) return { status: "skipped", note: "no_user" };
@@ -365,6 +362,12 @@ async function sendEmail(
     settingsLink,
     n,
   });
+  // Written before the provider is called: an attempt it accepted and whose answer was lost still counts.
+  if (!d.firstAttemptAt)
+    await deps.db
+      .update(notificationDeliveries)
+      .set({ firstAttemptAt: deps.now() })
+      .where(and(eq(notificationDeliveries.id, d.id), isNull(notificationDeliveries.firstAttemptAt)));
   const sent = await deps.mailer.send({
     to: user.email,
     subject: mail.subject,
