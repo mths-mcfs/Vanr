@@ -169,6 +169,94 @@ function lex(sql: string, standardStrings: boolean): Token[] | null {
   return tokens;
 }
 
+/**
+ * What Postgres does to an unquoted name in a UTF-8 database (`downcase_identifier`): only ASCII letters fold.
+ * JavaScript's `toLowerCase` folds `É` too, and then names no catalog entry.
+ */
+export const foldName = (name: string) => name.replace(/[A-Z]+/g, (m) => m.toLowerCase());
+
+/** A name as SQL reads it back: bare when Postgres would print it bare (`quote_ident`), quoted otherwise. */
+export const quoteName = (name: string) =>
+  /^[a-z_][a-z0-9_]*$/.test(name) ? name : `"${name.replace(/"/g, '""')}"`;
+
+const UNQUOTED_PART = /^[A-Za-z_\u0080-￿][A-Za-z0-9_$\u0080-￿]*$/;
+const encoder = new TextEncoder();
+
+/**
+ * The parts of a dotted name as SQL resolves it: an unquoted part folds (`foldName`), a quoted one keeps its case,
+ * spaces and dots. Null when malformed, or when a part is longer than Postgres keeps a name (63 bytes).
+ */
+function nameParts(text: string): string[] | null {
+  const parts: string[] = [];
+  let i = 0;
+  for (;;) {
+    let part: string;
+    if (text[i] === '"') {
+      let j = i + 1;
+      part = "";
+      for (;;) {
+        if (j >= text.length) return null;
+        if (text[j] === '"') {
+          if (text[j + 1] !== '"') break;
+          j++;
+        }
+        part += text[j];
+        j++;
+      }
+      i = j + 1;
+    } else {
+      const end = text.indexOf(".", i);
+      const raw = text.slice(i, end < 0 ? text.length : end);
+      if (!UNQUOTED_PART.test(raw)) return null;
+      part = foldName(raw);
+      i += raw.length;
+    }
+    if (!part || encoder.encode(part).length > 63) return null;
+    parts.push(part);
+    if (i === text.length) return parts;
+    if (text[i] !== ".") return null;
+    i++;
+  }
+}
+
+/** A relation by its exact catalog identity. */
+export interface Relation {
+  schema: string;
+  name: string;
+}
+
+/** `schema.name`, each part quoted as SQL needs: one text per relation, and the text an agent can query. */
+export const relationText = (r: Relation) => `${quoteName(r.schema)}.${quoteName(r.name)}`;
+
+/** `table` or `schema.table` as SQL resolves it (public when the schema is missing), or null. */
+export function parseRelation(text: string): Relation | null {
+  const parts = nameParts(text.trim());
+  if (!parts || parts.length > 2) return null;
+  const [schema, name] = parts.length === 1 ? ["public", parts[0]] : parts;
+  return schema && name ? { schema, name } : null;
+}
+
+/** `table.column` or `schema.table.column` as SQL resolves it, or null. */
+export function parseColumn(text: string): (Relation & { column: string }) | null {
+  const parts = nameParts(text.trim());
+  if (!parts || parts.length < 2 || parts.length > 3) return null;
+  const column = parts.pop();
+  const [schema, name] = parts.length === 1 ? ["public", parts[0]] : parts;
+  return schema && name && column ? { schema, name, column } : null;
+}
+
+/** The policy's text for a relation typed in the form: `public."Customers"`, `public.customers`; null if malformed. */
+export function relationKey(text: string): string | null {
+  const r = parseRelation(text);
+  return r && relationText(r);
+}
+
+/** The policy's text for a masked column: always `schema.table.column`; null if malformed. */
+export function columnKey(text: string): string | null {
+  const c = parseColumn(text);
+  return c && `${relationText(c)}.${quoteName(c.column)}`;
+}
+
 /** Characters an operator name is made of (Postgres' `Op` in scan.l). */
 const OPERATOR_CHAR = /[+\-*/<>=~!@#%^&|`?]/;
 
@@ -198,7 +286,7 @@ function unicodeEscape(text: string): string {
 }
 
 /**
- * The names a statement could call and the operators it writes: unquoted identifiers folded to lower case,
+ * The names a statement could call and the operators it writes: unquoted identifiers folded as Postgres does,
  * quoted identifiers decoded and operators split as in Postgres. Literals and comments don't count. For the
  * catalog lookup of the customer's code (`sql-identity.ts`), done before the statement is planned.
  */
@@ -225,7 +313,7 @@ export function lexWords(sql: string): { words: string[]; operators: string[] } 
       continue;
     }
     flush();
-    if (t.kind === "word") words.push(text.toLowerCase());
+    if (t.kind === "word") words.push(foldName(text));
     else if (t.kind === "quoted") {
       const unicode = /^[uU]&/.test(text);
       let name = text.slice(unicode ? 3 : 1, -1).replace(/""/g, '"');
@@ -344,9 +432,6 @@ const planNode: z.ZodType<PlanNode> = z.lazy(() =>
 const explainRoot = z.object({ Plan: planNode }).catchall(z.unknown());
 const explainOutput = z.union([z.array(explainRoot).min(1), explainRoot]);
 
-/** Normalizes `table` and `schema.table` to `schema.table` (public when missing). */
-export const qualified = (name: string) => (name.includes(".") ? name : `public.${name}`).toLowerCase();
-
 /**
  * Functions that read outside the allowed tables, by family: the system ones (`pg_*`: files, other
  * sessions, configuration), the ones that run SQL passed as text (`ts_stat`, `ts_rewrite`,
@@ -438,8 +523,7 @@ const NOT_A_CALL = new Set([
 function disallowedCall(text: string): string | null {
   const tokens = lex(text, true);
   if (!tokens) return "unreadable expression";
-  const word = (t: Token | undefined) =>
-    t?.kind === "word" ? text.slice(t.start, t.end).toLowerCase() : null;
+  const word = (t: Token | undefined) => (t?.kind === "word" ? foldName(text.slice(t.start, t.end)) : null);
   const isPunct = (t: Token | undefined, c: string) => t?.kind === "punct" && text[t.start] === c;
   const castAt = (j: number) =>
     (isPunct(tokens[j - 1], ":") && isPunct(tokens[j - 2], ":")) || word(tokens[j - 1]) === "as";
@@ -473,7 +557,7 @@ function disallowedCall(text: string): string | null {
 
 /** In FROM (Function Scan), only set-returning functions that work on what they receive. */
 const SAFE_SET_FUNCTION =
-  /^(generate_series|generate_subscripts|unnest|string_to_table|regexp_matches|regexp_split_to_table|jsonb_path_query|jsonb?_(?:array_elements(?:_text)?|each(?:_text)?|object_keys|to_record(?:set)?|populate_record(?:set)?))$/i;
+  /^(generate_series|generate_subscripts|unnest|string_to_table|regexp_matches|regexp_split_to_table|jsonb_path_query|jsonb?_(?:array_elements(?:_text)?|each(?:_text)?|object_keys|to_record(?:set)?|populate_record(?:set)?))$/;
 
 /** Node fields that are metadata, not expressions: index names and aliases do not count as reads. */
 const META_KEYS = new Set([
@@ -510,6 +594,9 @@ function expressions(node: PlanNode): string[] {
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+/** A name as the plan prints it, bare or quoted (with its quotes doubled), in its exact case. */
+const nameRe = (name: string) => `(?:${escapeRe(name)}|"${escapeRe(name.replace(/"/g, '""'))}")`;
+
 /**
  * Checks the plan against the policy: no writes, only allowed tables, no hidden column
  * read (not even the whole row of a table that has a hidden column) and no function
@@ -528,14 +615,14 @@ export function checkPlan(
   if (!parsed.success) return { reason: "write" };
   const root = Array.isArray(parsed.data) ? parsed.data[0] : parsed.data;
   if (!root) return { reason: "write" };
-  const allowed = new Set(policy.tables.map(qualified));
+  // Compared exactly, as Postgres does: `customers` and `"Customers"` are two relations.
+  const allowed = new Set(policy.tables.map(relationKey));
   const hiddenByTable = new Map<string, string[]>();
-  for (const col of policy.maskedColumns) {
-    const parts = col.toLowerCase().split(".");
-    const column = parts.pop();
-    if (!column || parts.length === 0) continue;
-    const table = qualified(parts.join("."));
-    hiddenByTable.set(table, [...(hiddenByTable.get(table) ?? []), column]);
+  for (const text of policy.maskedColumns) {
+    const col = parseColumn(text);
+    if (!col) continue;
+    const table = relationText(col);
+    hiddenByTable.set(table, [...(hiddenByTable.get(table) ?? []), col.column]);
   }
 
   const nodes: PlanNode[] = [];
@@ -566,9 +653,9 @@ export function checkPlan(
     }
     const rel = node["Relation Name"];
     if (!rel) continue;
-    const table = qualified(`${node.Schema ?? "public"}.${rel}`);
+    const table = relationText({ schema: node.Schema ?? "public", name: rel });
     if (!allowed.has(table)) return { reason: "table", table };
-    const alias = (node.Alias ?? rel).toLowerCase();
+    const alias = node.Alias ?? rel;
     for (const column of hiddenByTable.get(table) ?? []) {
       byAlias.set(alias, [...(byAlias.get(alias) ?? []), { table, column }]);
       bare.set(column, table);
@@ -579,19 +666,19 @@ export function checkPlan(
   // 2nd pass: does any expression read a hidden column?
   const checks: { re: RegExp; column: string }[] = [];
   for (const [alias, cols] of byAlias) {
-    const a = escapeRe(alias);
-    checks.push({ re: new RegExp(`(^|[^\\w.])"?${a}"?\\.\\*`, "i"), column: `${cols[0]?.table}.*` });
+    const a = nameRe(alias);
+    checks.push({ re: new RegExp(`(^|[^\\w.])${a}\\.\\*`), column: `${cols[0]?.table}.*` });
     for (const { table, column } of cols) {
       checks.push({
-        re: new RegExp(`(^|[^\\w.])"?${a}"?\\.("?)${escapeRe(column)}\\2(?![\\w(])`, "i"),
-        column: `${table}.${column}`,
+        re: new RegExp(`(^|[^\\w.])${a}\\.${nameRe(column)}(?![\\w(])`),
+        column: `${table}.${quoteName(column)}`,
       });
     }
   }
   for (const [column, table] of bare) {
     checks.push({
-      re: new RegExp(`(^|[^\\w."])("?)${escapeRe(column)}\\2(?![\\w(.])`, "i"),
-      column: `${table}.${column}`,
+      re: new RegExp(`(^|[^\\w."])${nameRe(column)}(?![\\w(.])`),
+      column: `${table}.${quoteName(column)}`,
     });
   }
   for (const node of nodes) {

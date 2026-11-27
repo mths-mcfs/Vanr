@@ -10,7 +10,14 @@
 import { isIP } from "node:net";
 import type { SqlTarget } from "@vanr/engine/sqlconn";
 import postgres from "postgres";
-import { checkPlan, type GuardFailure, guardStatement, lexWords, qualified } from "./sql-guard";
+import {
+  checkPlan,
+  type GuardFailure,
+  guardStatement,
+  lexWords,
+  parseRelation,
+  type Relation,
+} from "./sql-guard";
 
 /** What the guarded run needs from ONE read-only transaction on the customer's database. */
 export interface GuardedSession {
@@ -52,12 +59,16 @@ const IMPLIED_FUNCTIONS: Record<string, readonly string[]> = {
 /** Operators a query uses without writing them: comparisons (IN, BETWEEN, ORDER BY, joins) and LIKE. */
 const IMPLIED_OPERATORS = ["=", "<>", "<", ">", "<=", ">=", "~~", "~~*", "!~~", "!~~*", "~", "!~", "||"];
 
+/** The policy's relations by exact catalog identity; an entry that doesn't parse names nothing. */
+const allowedRelations = (policy: Pick<QueryPolicy, "tables">): Relation[] =>
+  policy.tables.map(parseRelation).filter((r) => r !== null);
+
 /**
  * The search_path of the check and of the execution: pg_catalog first, then the schemas of the allowed tables,
  * pg_temp last. The database's own search_path (or the role's) never decides what a name resolves to.
  */
 export function fixedSearchPath(policy: Pick<QueryPolicy, "tables">): string {
-  const schemas = [...new Set(policy.tables.map((t) => qualified(t).split(".")[0] ?? "public"))];
+  const schemas = [...new Set(allowedRelations(policy).map((r) => r.schema))];
   const quote = (s: string) => `"${s.replace(/"/g, '""')}"`;
   return [
     "pg_catalog",
@@ -127,15 +138,19 @@ async function customCode(
 
   // 4. A customer function or operator an allowed relation depends on: the rules of a view (and of the views
   //    under it) and the row security policies. The plan shows a view's calls only after inlining or folding.
-  //    The policy keeps `schema.table` lowercased and unquoted, so `to_regclass` would miss "Sales Report" or
-  //    "Orders": every relation whose lowercased name matches is looked up, as the plan check compares them.
+  //    Each relation is found by its exact schema and name, compared byte for byte as the plan check compares
+  //    them: no folding, so "Sales View" never stands for "sales view" and `Étage` is not looked up as `étage`.
+  const relations = allowedRelations(policy);
   const [dep] = await session.rows(
     `with recursive rel(oid) as (
          select c.oid
-           from pg_catalog.pg_class c
-           join pg_catalog.pg_namespace n on n.oid operator(pg_catalog.=) c.relnamespace
-          where (pg_catalog.lower(n.nspname) operator(pg_catalog.||) '.' operator(pg_catalog.||) pg_catalog.lower(c.relname))
-                operator(pg_catalog.=) any ($1::pg_catalog.text[])
+           from rows from (pg_catalog.unnest($1::pg_catalog.text[]), pg_catalog.unnest($2::pg_catalog.text[]))
+                  as allowed(schema, name)
+           join pg_catalog.pg_namespace n
+             on n.nspname::pg_catalog.text operator(pg_catalog.=) allowed.schema collate pg_catalog."C"
+           join pg_catalog.pg_class c
+             on c.relnamespace operator(pg_catalog.=) n.oid
+            and c.relname::pg_catalog.text operator(pg_catalog.=) allowed.name collate pg_catalog."C"
          union
          select d.refobjid
            from rel
@@ -164,10 +179,10 @@ async function customCode(
                   where op.oid operator(pg_catalog.=) d.refobjid)
             end)
        join pg_catalog.pg_namespace n on n.oid operator(pg_catalog.=) f.pronamespace
-      where n.nspname operator(pg_catalog.<>) all ($2::pg_catalog.text[])
+      where n.nspname operator(pg_catalog.<>) all ($3::pg_catalog.text[])
       order by 1, 2
       limit 1`,
-    [policy.tables.map(qualified), NATIVE_SCHEMAS],
+    [relations.map((r) => r.schema), relations.map((r) => r.name), NATIVE_SCHEMAS],
   );
   if (dep) return `${dep.schema}.${dep.name} (used by an allowed relation)`;
   return null;

@@ -171,10 +171,25 @@ describe("databases", () => {
       ).toBe(403);
       const link = await call(ana, "PUT", url(`/agents/${lia.id}/databases/${conn.id}`), {
         level: "read",
-        policy: { tables: ["customers", "public.orders", "Suppliers"], queriesPerDay: 4 },
+        policy: { tables: ["customers", "PUBLIC.Orders", '"Suppliers"'], queriesPerDay: 4 },
       });
+      // A name SQL would not read as one table or column is refused, not stored as something else.
+      for (const policy of [
+        { tables: ['"customers'] },
+        { tables: ["my-table"] },
+        { tables: ["a.b.c"] },
+        { tables: ['""'] },
+        { tables: ["public."] },
+        { maskedColumns: ["ssn"] },
+        { maskedColumns: ['customers."ssn'] },
+      ])
+        expect(
+          (await call(ana, "PUT", url(`/agents/${lia.id}/databases/${conn.id}`), { level: "read", policy }))
+            .status,
+        ).toBe(400);
+      // Read as SQL reads them: unquoted names fold, a quoted one keeps its capital.
       expect(link.body.policy).toEqual({
-        tables: ["public.customers", "public.orders", "public.suppliers"],
+        tables: ["public.customers", "public.orders", 'public."Suppliers"'],
         maskedColumns: ["public.customers.ssn"],
         queriesPerDay: 4,
         timeoutSeconds: 30,
@@ -193,8 +208,13 @@ describe("databases", () => {
       const described = await ask("db_describe_table", { database: "Store", table: "customers" });
       expect(described).toContain("name");
       expect(described).not.toContain("ssn");
-      // A table with a capital letter in its name: the policy keeps it in lowercase, and describing finds it alike.
-      expect(await ask("db_describe_table", { database: "Store", table: "Suppliers" })).toContain("company");
+      // A table with a capital letter in its name is named as in SQL, quoted.
+      expect(await ask("db_describe_table", { database: "Store", table: '"Suppliers"' })).toContain(
+        "company",
+      );
+      expect(await ask("db_describe_table", { database: "Store", table: "Suppliers" })).toContain(
+        "The table public.suppliers is not available to you.",
+      );
 
       const rows = await ask("db_query", {
         database: "Store",
@@ -517,21 +537,38 @@ describe("the guard and the network rule on a connected database", () => {
   );
 });
 
-describe("catalog names the policy keeps lowercased", () => {
+describe("catalog names the policy keeps exactly", () => {
   test(
     "a table named with a space and capitals is queried through the agent, and a view by such a name still has its code checked",
     async () => {
       await pg.exec(
-        `create table "Sales Report" (region text); insert into "Sales Report" values ('north');`,
+        `create table "Sales Report" (region text, "API_Key" text); insert into "Sales Report" values ('north', 'k-1');`,
       );
       try {
         const { ana, lia, ask, url, workspaceId, general } = await team();
         const conn = (await call(ana, "POST", url("/databases"), { ...connectInput, label: "Mixed" })).body
           .connection;
+        expect(conn.hiddenSuggestion).toEqual(['public."Sales Report"."API_Key"', "public.customers.ssn"]);
+        // The first policy, from the catalog: each name exactly as the database keeps it.
         const link = await call(ana, "PUT", url(`/agents/${lia.id}/databases/${conn.id}`), { level: "read" });
-        expect(link.body.policy.tables).toContain("public.sales report");
+        expect(link.body.policy).toMatchObject({
+          tables: [
+            'public."Sales Report"',
+            'public."Suppliers"',
+            "public.customers",
+            "public.orders",
+            "public.secrets",
+          ],
+          maskedColumns: ['public."Sales Report"."API_Key"', "public.customers.ssn"],
+        });
         expect(await ask("db_query", { database: "Mixed", sql: 'select region from "Sales Report"' })).toBe(
           "1 row(s)\nregion\nnorth",
+        );
+        expect(
+          await ask("db_query", { database: "Mixed", sql: 'select "API_Key" from "Sales Report"' }),
+        ).toContain('The column public."Sales Report"."API_Key" is hidden.');
+        expect(await ask("db_describe_table", { database: "Mixed", table: 'public."Sales Report"' })).toBe(
+          "region\ttext",
         );
         expect(
           await ask("db_query", { database: "Mixed", sql: "select name from customers order by id" }),

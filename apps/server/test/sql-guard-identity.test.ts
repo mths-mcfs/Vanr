@@ -197,6 +197,84 @@ for (const kind of ["PGlite", "Postgres"] as const) {
     },
   );
 
+  run(
+    `${kind}: a table that differs only in case is another relation, for the allowed tables and the masks`,
+    async () => {
+      const setup = `create table "Customers" (id int, ssn text, secret text); insert into "Customers" values (2, 'other-ssn', 'other table');`;
+      await withDatabase(kind, setup, async (q) => {
+        // #73: allowing customers does not open "Customers".
+        expect(await q('select * from "Customers"')).toEqual({
+          failure: { reason: "table", table: 'public."Customers"' },
+        });
+        expect(await q("select name from customers")).toEqual({
+          result: { fields: ["name"], rows: [{ name: "Alice" }] },
+        });
+
+        const both = { tables: ["customers", '"Customers"'], maskedColumns: ["customers.ssn"] };
+        expect(await q('select ssn from "Customers"', both)).toEqual({
+          result: { fields: ["ssn"], rows: [{ ssn: "other-ssn" }] },
+        });
+        expect(await q("select ssn from customers", both)).toEqual({
+          failure: { reason: "column", column: "public.customers.ssn" },
+        });
+        // Both in one plan: the mask on customers.ssn is not a mask on "Customers".ssn.
+        expect(
+          await q('select "Customers".ssn, customers.name from "Customers" join customers on true', both),
+        ).toEqual({ result: { fields: ["ssn", "name"], rows: [{ ssn: "other-ssn", name: "Alice" }] } });
+
+        const reverse = { tables: ["customers", 'public."Customers"'], maskedColumns: ['"Customers".ssn'] };
+        expect(await q("select ssn from customers", reverse)).toEqual({
+          result: { fields: ["ssn"], rows: [{ ssn: "999-00-1111" }] },
+        });
+        expect(await q('select ssn from "Customers"', reverse)).toEqual({
+          failure: { reason: "column", column: 'public."Customers".ssn' },
+        });
+        expect(await q('select c.ssn from "Customers" c join customers d on true', reverse)).toEqual({
+          failure: { reason: "column", column: 'public."Customers".ssn' },
+        });
+      });
+    },
+  );
+
+  run(
+    `${kind}: "Sales View" and "sales view" are two relations, and only the allowed one's code is looked up`,
+    async () => {
+      const setup = `
+      ${evil("public.leak_view()", "text", "immutable")}
+      create view "Sales View" as select id, name from customers;
+      create view "sales view" as select id, leak_view() as tag from customers;
+    `;
+      await withDatabase(kind, setup, async (q) => {
+        const upper = { ...policy, tables: [...policy.tables, '"Sales View"'] };
+        expect(await q('select id from "Sales View"', upper)).toEqual({
+          result: { fields: ["id"], rows: [{ id: 7 }] },
+        });
+        const lower = { ...policy, tables: [...policy.tables, '"sales view"'] };
+        expect(await q('select id from "Sales View"', lower)).toEqual({
+          failure: { reason: "function", name: "public.leak_view (used by an allowed relation)" },
+        });
+      });
+    },
+  );
+
+  run(`${kind}: a non-ASCII name folds as Postgres folds it, in the policy and in the query`, async () => {
+    // Unquoted, Postgres folds only ASCII letters: Étage stays Étage, where JavaScript would write étage.
+    const setup = `
+      ${evil("public.leak_floor()", "text", "immutable")}
+      create view Étage as select id, leak_floor() as tag from customers;
+      ${evil('public."Étiq"()', "text", "immutable")}
+    `;
+    await withDatabase(kind, setup, async (q) => {
+      const withView = { ...policy, tables: [...policy.tables, "Étage"] };
+      expect(await q("select id from Étage", withView)).toEqual({
+        failure: { reason: "function", name: "public.leak_floor (used by an allowed relation)" },
+      });
+      expect(await q("select Étiq() from customers")).toEqual({
+        failure: { reason: "function", name: "public.Étiq()" },
+      });
+    });
+  });
+
   run.each(["select name+-1 from customers", "select name++1 from customers", "select 'x'::text+-1"])(
     `${kind}: adjacent signs cannot hide a customer operator before planning: %s`,
     async (sql) => {
