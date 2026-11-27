@@ -112,7 +112,8 @@ export function HistoryDialog({
     { enabled: first },
   );
   const restore = useApiMutation("restoreWikiPageVersion", {
-    onSuccess: (saved) => onRestored(saved, picked),
+    // The version the request sent, not the one picked now: the person may have moved on meanwhile.
+    onSuccess: (saved, args) => onRestored(saved, Number(args.versionId)),
   });
 
   return (

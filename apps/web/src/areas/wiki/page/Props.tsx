@@ -19,7 +19,7 @@ import {
   SelectItem,
 } from "@vanr/ui";
 import { Plus, X } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useRef, useState } from "react";
 import { useLocale, useMessages } from "../../../i18n/react.tsx";
 import { FOLDER_MAX, parseList, TAG_LENGTH, TAGS_MAX, useActorName } from "../shared.tsx";
 
@@ -88,6 +88,8 @@ function InlineText({
       onChange={(event) => setDraft(event.target.value)}
       onBlur={commit}
       onKeyDown={(event) => {
+        // The Enter that ends an input method's composition only picks the text.
+        if (event.nativeEvent.isComposing) return;
         if (event.key === "Enter") {
           event.preventDefault();
           commit();
@@ -151,6 +153,7 @@ function WordList({
           onChange={(event) => setDraft(event.target.value)}
           onBlur={add}
           onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing) return;
             if (event.key === "Enter" || event.key === ",") {
               event.preventDefault();
               add();
@@ -165,6 +168,9 @@ function WordList({
 }
 
 export function PropsBar({ workspaceId, page, defs, editable, busy, onMeta, onMove, onDefs }: Props) {
+  // A write that waits on another (a definition, then the value) asks again whether editing is still allowed.
+  const mayEdit = useRef(editable);
+  mayEdit.current = editable;
   const t = useMessages("wiki");
   const { locale } = useLocale();
   const name = useActorName(workspaceId);
@@ -225,7 +231,17 @@ export function PropsBar({ workspaceId, page, defs, editable, busy, onMeta, onMo
             editable={editable}
             value={start.slice(0, 10)}
             // A time stored with the date (from the API or an import) stays when only the day changes.
-            onSave={(next) => setValue(def, next === "" ? null : { start: `${next}${start.slice(10)}` })}
+            onSave={(next) =>
+              setValue(
+                def,
+                next === ""
+                  ? null
+                  : {
+                      ...(typeof value === "object" && value !== null ? value : {}),
+                      start: `${next}${start.slice(10)}`,
+                    },
+              )
+            }
           />
         );
       }
@@ -268,7 +284,7 @@ export function PropsBar({ workspaceId, page, defs, editable, busy, onMeta, onMo
                   const options = [...(def.options ?? []), option];
                   void onDefs(defs.map((each) => (each.id === def.id ? { ...def, options } : each))).then(
                     (saved) => {
-                      if (saved) setValue(def, option.id);
+                      if (saved && mayEdit.current) setValue(def, option.id);
                     },
                   );
                 }}
@@ -301,7 +317,7 @@ export function PropsBar({ workspaceId, page, defs, editable, busy, onMeta, onMo
                   !(await onDefs(defs.map((each) => (each.id === def.id ? { ...def, options } : each))))
                 )
                   return;
-                await onMeta({ props: { [def.id]: ids } });
+                if (mayEdit.current) await onMeta({ props: { [def.id]: ids } });
               };
               void save();
             }}

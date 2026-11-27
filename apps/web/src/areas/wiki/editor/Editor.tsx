@@ -31,7 +31,11 @@ import { filterSlash, fold, type SlashItem } from "./slash.ts";
 
 export type LinkCandidate = { slug: string; title: string; folder: string; altTitles: readonly string[] };
 
-export type EditorHandle = { scrollToHeading: (index: number) => void; focus: () => void };
+export type EditorHandle = {
+  /** Scrolls to the heading with this text (the open document's own); false when there is none. */
+  scrollToHeading: (text: string) => boolean;
+  focus: () => void;
+};
 
 export type EditorSource = { kind: "live"; live: Live } | { kind: "static"; body: string };
 
@@ -42,6 +46,8 @@ type Props = {
   label: string;
   pages: readonly LinkCandidate[];
   hooks: Omit<EditorHooks, "trigger" | "menuKey" | "links">;
+  /** The editor is made and holds its document. */
+  onReady?: () => void;
 };
 
 type MenuItem =
@@ -116,7 +122,7 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(props, ref
     create: (title) => latest.current.hooks.create(title),
     openFile: (fileId) => latest.current.hooks.openFile(fileId),
     imageUrl: (fileId) => latest.current.hooks.imageUrl(fileId),
-    href: (resolved, target) => latest.current.hooks.href(resolved, target),
+    href: (resolved, target, anchor) => latest.current.hooks.href(resolved, target, anchor),
     links: new Set(),
     trigger: (next) =>
       setTrigger((current) =>
@@ -194,13 +200,17 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(props, ref
         return;
       }
       editorRef.current = editor;
-      if (live === null) return;
+      if (live === null) {
+        latest.current.onReady?.();
+        return;
+      }
       editor.action((ctx) => {
         const service = ctx.get(collabServiceCtx);
         service.bindDoc(live.doc).setOptions({ yCursorOpts: { cursorBuilder: caret } });
         if (live.provider.awareness !== null) service.setAwareness(live.provider.awareness);
         service.connect();
       });
+      latest.current.onReady?.();
     });
     return () => {
       disposed = true;
@@ -226,23 +236,25 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(props, ref
   }, [props.pages, props.hooks.resolve]);
 
   useImperativeHandle(ref, () => ({
-    scrollToHeading(index) {
+    scrollToHeading(text) {
+      const wanted = text.trim().toLowerCase();
+      let found = false;
       editorRef.current?.action((ctx) => {
         const view = ctx.get(editorViewCtx);
-        let seen = -1;
         let at: number | null = null;
         view.state.doc.descendants((node, position) => {
           if (at !== null) return false;
-          if (node.type.name === "heading") {
-            seen += 1;
-            if (seen === index) at = position;
-          }
+          if (node.type.name === "heading" && node.textContent.trim().toLowerCase() === wanted) at = position;
           return true;
         });
         if (at === null) return;
         const dom = view.nodeDOM(at);
-        if (dom instanceof HTMLElement) dom.scrollIntoView({ block: "start", behavior: "smooth" });
+        if (dom instanceof HTMLElement) {
+          dom.scrollIntoView({ block: "start", behavior: "smooth" });
+          found = true;
+        }
       });
+      return found;
     },
     focus() {
       editorRef.current?.action((ctx) => ctx.get(editorViewCtx).focus());

@@ -30,7 +30,8 @@ import {
   Undo2,
 } from "lucide-react";
 import { useCallback, useMemo, useRef, useState } from "react";
-import { AppLink, useGo, useRouteParams } from "../../../app/navigation.tsx";
+import { z } from "zod";
+import { AppLink, useGo, useRouteParams, useSearch } from "../../../app/navigation.tsx";
 import { ScreenError, ScreenLoading, useDocumentTitle, useErrorMessage } from "../../../app/screens.tsx";
 import { useMessages } from "../../../i18n/react.tsx";
 import { useRelativeTime } from "../../../i18n/relative-time.tsx";
@@ -46,6 +47,9 @@ import { SidePanel } from "./SidePanel.tsx";
 const IMAGE = /\.(png|jpe?g|gif|webp|svg|avif)$/i;
 /** A target with a file extension other than Markdown names an attachment. */
 const ATTACHMENT = /\.[a-z0-9]{2,5}$/i;
+/** `?at=Heading`: the heading a link to this page points at, scrolled to once the editor is ready. */
+const PageAddress = z.object({ at: z.string().max(400).optional() });
+const NO_ANCHOR: z.infer<typeof PageAddress> = {};
 
 export function WikiPageScreen() {
   const { workspaceId, pageId } = useRouteParams("wikiPage");
@@ -73,11 +77,15 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
   const agents = useApiQuery("listAgents", { workspaceId });
   const [conflict, setConflict] = useState<number | null>(null);
   const [failure, setFailure] = useState<unknown>(null);
-  const [busy, setBusy] = useState<Busy>(null);
+  // The actions on their way, each on its own: one ending never clears another's progress.
+  const [busy, setBusy] = useState<ReadonlySet<Exclude<Busy, null>>>(new Set());
   const [title, setTitle] = useState<string | null>(null);
   const [history, setHistory] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const editor = useRef<EditorHandle>(null);
+  const pending = useRef(new Set<Exclude<Busy, null>>());
+  const { at } = useSearch(PageAddress, NO_ANCHOR);
+  const reachedAnchor = useRef(false);
   const p = page.data;
   useDocumentTitle(p?.title ?? t("index.title"));
 
@@ -131,20 +139,28 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
     () => ({
       resolve,
       create,
-      open: (to: string) => void go("wikiPage", { workspaceId, pageId: to }),
+      open: (to: string, anchor: string | null) => {
+        // A heading of this page is a scroll; of another page, it waits for that page's editor.
+        if (to === slug && anchor !== null && editor.current?.scrollToHeading(anchor) === true) return;
+        void go("wikiPage", { workspaceId, pageId: to }, anchor === null ? {} : { search: { at: anchor } });
+      },
       openFile: (fileId: string) => void go("files", { workspaceId }, { search: { file: fileId } }),
       imageUrl: async (fileId: string) => {
         const download = await api.getFileBlob({ workspaceId, fileId, query: {} });
         return URL.createObjectURL(await download.blob());
       },
-      href: (resolved: ResolvedLink, target: string) =>
+      href: (resolved: ResolvedLink, target: string, anchor: string | null) =>
         resolved.kind === "page"
-          ? href("wikiPage", { workspaceId, pageId: resolved.slug })
+          ? href(
+              "wikiPage",
+              { workspaceId, pageId: resolved.slug },
+              anchor === null ? undefined : { at: anchor },
+            )
           : resolved.kind === "file"
             ? href("files", { workspaceId }, { file: resolved.fileId })
             : href("wiki", { workspaceId }, { new: target }),
     }),
-    [api, create, go, resolve, workspaceId],
+    [api, create, go, resolve, slug, workspaceId],
   );
   // Each source keeps its identity while its document is the same: a new object would make the editor
   // again, losing the cursor and the undo history (a pin or a status change gives a new page object).
@@ -200,7 +216,10 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
 
   /** Runs one action of the page at a time, shows its failure, and reads the wiki again after it. */
   const run = async (what: Exclude<Busy, null>, action: () => Promise<void>): Promise<boolean> => {
-    setBusy(what);
+    // The same action twice at once would send it twice.
+    if (pending.current.has(what)) return false;
+    pending.current.add(what);
+    setBusy(new Set(pending.current));
     setFailure(null);
     try {
       await action();
@@ -209,7 +228,8 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
       setFailure(error);
       return false;
     } finally {
-      setBusy(null);
+      pending.current.delete(what);
+      setBusy(new Set(pending.current));
       await refresh();
     }
   };
@@ -265,12 +285,34 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
         });
       } catch (error) {
         if (!(isApiError(error) && error.status === 409)) throw error;
-        // Someone saved in between: once more, on the version that is current now.
-        const fresh = await page.refetch();
+        // Someone saved in between: once more, on the version that is current now. A list is sent whole,
+        // so what this person added and removed is applied to the fresh list, never the old one.
+        const fresh = (await page.refetch()).data;
+        if (fresh === undefined) throw error;
+        const rebase = (
+          before: readonly string[],
+          after: readonly string[] | undefined,
+          now: readonly string[],
+        ) => {
+          if (after === undefined) return undefined;
+          const added = after.filter((each) => !before.includes(each));
+          const removed = before.filter((each) => !after.includes(each));
+          return [
+            ...now.filter((each) => !removed.includes(each)),
+            ...added.filter((each) => !now.includes(each)),
+          ];
+        };
+        const tags = rebase(p.tags, write.tags, fresh.tags);
+        const altTitles = rebase(p.altTitles, write.altTitles, fresh.altTitles);
         await api.updateWikiPageMeta({
           workspaceId,
           pageId: slug,
-          body: { parentVersion: fresh.data?.version ?? p.version, ...write },
+          body: {
+            parentVersion: fresh.version,
+            ...write,
+            ...(tags !== undefined && { tags }),
+            ...(altTitles !== undefined && { altTitles }),
+          },
         });
       }
     });
@@ -340,7 +382,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
           <Button
             variant="primary"
             icon={<Icon icon={Check} />}
-            loading={busy === "publish"}
+            loading={busy.has("publish")}
             onClick={() => void publish()}
           >
             {t("draft.publish")}
@@ -407,6 +449,8 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
                 else setTitle(null);
               }}
               onKeyDown={(event) => {
+                // The Enter that ends an input method's composition only picks the text.
+                if (event.nativeEvent.isComposing) return;
                 if (event.key === "Enter") {
                   event.preventDefault();
                   editor.current?.focus();
@@ -422,7 +466,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
               page={p}
               defs={schema.data.defs}
               editable={canWrite}
-              busy={busy === "meta"}
+              busy={busy.has("meta")}
               onMeta={writeMeta}
               onMove={(folder) =>
                 run("move", async () => {
@@ -452,7 +496,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
                       <Button
                         size="sm"
                         variant="ghost"
-                        loading={busy === "discard"}
+                        loading={busy.has("discard")}
                         onClick={() => void discard()}
                       >
                         {t("draft.discardMine")}
@@ -460,7 +504,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
                       <Button
                         size="sm"
                         variant="primary"
-                        loading={busy === "publish"}
+                        loading={busy.has("publish")}
                         onClick={() => void publish(true)}
                       >
                         {t("draft.publishOver", { version: conflict })}
@@ -491,6 +535,10 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
                 label={t("page.editor", { title: p.title })}
                 pages={pages}
                 hooks={hooks}
+                onReady={() => {
+                  if (at !== undefined && !reachedAnchor.current)
+                    reachedAnchor.current = editor.current?.scrollToHeading(at) ?? false;
+                }}
               />
             )
           )}
@@ -499,7 +547,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
           workspaceId={workspaceId}
           page={p}
           agentName={agentName}
-          onHeading={(index) => editor.current?.scrollToHeading(index)}
+          onHeading={(text) => editor.current?.scrollToHeading(text)}
           onCreate={create}
         />
       </div>
@@ -524,7 +572,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
         description={t("page.deleteBody")}
         confirmLabel={t("page.delete")}
         cancelLabel={common("action.cancel")}
-        confirming={busy === "delete"}
+        confirming={busy.has("delete")}
         onConfirm={() =>
           void run("delete", async () => {
             await api.deleteWikiPage({ workspaceId, pageId: slug });
