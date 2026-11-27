@@ -219,6 +219,38 @@ describe("F4-3.3-P0-06: signed webhook, the webhook-id as the dedupe key, the se
   );
 
   test(
+    "a hook request never reads the session: a browser's cookie on it neither identifies nor renews anything",
+    async () => {
+      const { ana, base, r, path } = await hookTeam();
+      await call(ana, "POST", `${base}/${r.id}/webhook-secret`);
+      const sessionOf = async () =>
+        (
+          await server.deps.db.select().from(schema.sessions).where(eq(schema.sessions.userId, ana.user.id))
+        )[0];
+      // A session two days old: the next request that reads it renews it (the control below proves it).
+      const aged = async () => {
+        const at = new Date(Date.now() - 2 * 24 * HOUR);
+        await server.deps.db
+          .update(schema.sessions)
+          .set({ updatedAt: at, expiresAt: new Date(at.getTime() + 7 * 24 * HOUR) })
+          .where(eq(schema.sessions.userId, ana.user.id));
+        return sessionOf();
+      };
+      const cookie = [...ana.browser.cookies].map(([k, v]) => `${k}=${v}`).join("; ");
+      const before = await aged();
+      const hook = await send(path, "{}", { cookie, origin: "https://elsewhere.test" });
+      expect([hook.status, await codeOf(hook)]).toEqual([401, "webhook.unsigned"]);
+      expect(await sessionOf()).toEqual(before);
+      await settle();
+      expect(await runsOf(r.id)).toHaveLength(0);
+      // The control: the same cookie on an app route renews the aged session.
+      expect((await ana.browser.fetch("/api/v1/me")).status).toBe(200);
+      expect((await sessionOf())?.expiresAt.getTime()).toBeGreaterThan(before?.expiresAt.getTime() ?? 0);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "the secret never shows in the routine's JSON and stays sealed in the database",
     async () => {
       const { workspaceId, ana, base, r } = await hookTeam();

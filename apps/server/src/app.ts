@@ -112,8 +112,10 @@ export function createApp(
     await next();
   });
 
-  // Better Auth's session (cookie). App routes that require a login call requireUser.
+  // Better Auth's session (cookie). App routes that require a login call requireUser. A signed webhook never
+  // reads it: the cookie a browser attaches to a cross-site request neither identifies nor renews anything there.
   app.use("/api/v1/*", async (c, next) => {
+    if (SIGNED_HOOK.test(c.req.path)) return next();
     const session = await deps.auth.api.getSession({ headers: c.req.raw.headers });
     if (session) {
       c.set("sessionId", session.session.id);
