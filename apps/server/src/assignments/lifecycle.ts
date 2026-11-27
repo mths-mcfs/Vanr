@@ -153,6 +153,7 @@ export async function patchAssignment(
     resumeJobs?: boolean;
     limits?: { dollars?: number | null; minutes?: number | null; steps?: number | null };
     dueAt?: string | null;
+    commandPolicy?: AssignmentRow["commandPolicy"];
   },
 ): Promise<AssignmentRow> {
   const next = await deps.db.transaction(async (tx) => {
@@ -176,6 +177,7 @@ export async function patchAssignment(
       .update(assignments)
       .set({
         ...(input.resumeJobs !== undefined ? { resumeJobs: input.resumeJobs } : {}),
+        ...(input.commandPolicy !== undefined ? { commandPolicy: input.commandPolicy } : {}),
         ...(limits ? { limits } : {}),
         ...(input.dueAt !== undefined ? { dueAt: input.dueAt ? new Date(input.dueAt) : null } : {}),
         updatedAt: deps.now(),

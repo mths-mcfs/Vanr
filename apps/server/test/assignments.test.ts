@@ -1440,6 +1440,12 @@ describe("the transitions on their own", () => {
           code: "assignment.forbidden",
         },
       );
+      await expect(patchAssignment(server.deps, beto, row, { commandPolicy: "never" })).rejects.toMatchObject(
+        {
+          status: 403,
+          code: "assignment.forbidden",
+        },
+      );
       await finishAssignment(server.deps, me, row, { outcome: "canceled", wiki: false });
       await expect(requestSubmissionChanges(server.deps, me, row, sub, "More")).rejects.toMatchObject({
         status: 409,

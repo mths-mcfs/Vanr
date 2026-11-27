@@ -49,7 +49,6 @@ import {
   toDecision,
   toReview,
   toSubmission,
-  updateAssignment,
   viewAssignment,
   visibleAssignments,
   waitingFor,
@@ -729,7 +728,8 @@ export function registerAssignments(app: Hono<AppEnv>) {
     const { row } = await viewAssignment(deps, me, param(c, "assignmentId"));
     requireManager(me, row);
     const { commandPolicy } = await readJson(c, z.object({ commandPolicy: policyEnum }).strict());
-    await updateAssignment(deps, row, { commandPolicy }, "settings");
+    // Who manages is checked again on the locked row, as for the other settings.
+    await patchAssignment(deps, me, row, { commandPolicy });
     return c.json({ commandPolicy });
   });
 
