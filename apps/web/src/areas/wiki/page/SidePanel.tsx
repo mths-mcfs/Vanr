@@ -30,6 +30,12 @@ export function SidePanel({
   // The panel follows the published version: asked again when a new one is out.
   const panel = useApiQuery("getWikiPagePanel", { workspaceId, pageId: page.slug });
   const readers = page.reads.agents.flatMap((id) => agentName(id) ?? []);
+  // The server lists a link once per time it appears: here each destination and anchor shows once.
+  const outgoing = [
+    ...new Map(
+      (panel.data?.outgoing ?? []).map((link) => [`${link.target}#${link.anchor ?? ""}`, link]),
+    ).values(),
+  ];
 
   return (
     <aside className="wiki-side" aria-label={t("side.label")}>
@@ -112,13 +118,13 @@ export function SidePanel({
           )}
           <section className="wiki-side__section" aria-labelledby="wiki-outgoing">
             <h2 id="wiki-outgoing" className="wiki-side__heading">
-              {t("side.outgoing", { count: panel.data.outgoing.length })}
+              {t("side.outgoing", { count: outgoing.length })}
             </h2>
-            {panel.data.outgoing.length === 0 ? (
+            {outgoing.length === 0 ? (
               <p className="wiki-side__empty">{t("side.noOutgoing")}</p>
             ) : (
               <ul className="wiki-side__refs">
-                {panel.data.outgoing.map((link) => (
+                {outgoing.map((link) => (
                   <li key={`${link.target}#${link.anchor ?? ""}`}>
                     {link.page === null ? (
                       <button

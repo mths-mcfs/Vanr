@@ -826,6 +826,14 @@
     border-radius: var(--vr-radius-2);
   }
 
+  .wiki-diff__whole {
+    margin: 0;
+    padding: var(--vr-space-2);
+    font-family: var(--vr-font-mono);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
   .wiki-diff__line {
     padding: 0 var(--vr-space-2);
     white-space: pre-wrap;

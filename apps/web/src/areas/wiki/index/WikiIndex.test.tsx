@@ -164,6 +164,64 @@ describe("the wiki index", () => {
     expect(screen.queryByText("Only for the founders.") === null).toBe(true);
   });
 
+  test("a link path as long as the server allows (200-character folder and title) opens the form", async () => {
+    const folder = "f".repeat(200);
+    const name = "t".repeat(200);
+    await renderApp({
+      path: `${PATH}?new=${encodeURIComponent(`${folder}/${name}`)}`,
+      signedInAs: "usr_ana",
+    });
+    const dialog = await screen.findByRole("dialog", { name: "New page" });
+    expect((within(dialog).getByLabelText(/Title/) as HTMLInputElement).value).toBe(name);
+    expect((within(dialog).getByLabelText(/Folder/) as HTMLInputElement).value).toBe(folder);
+  });
+
+  test("a vault over 50 MB is refused before it is sent", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
+    await tree();
+    const zip = new File(["zip"], "vault.zip", { type: "application/zip" });
+    Object.defineProperty(zip, "size", { value: 50 * 1024 * 1024 + 1 });
+    fireEvent.change(screen.getByTestId("wiki-import"), { target: { files: [zip] } });
+    expect(
+      await screen.findByText("This vault is larger than 50 MB. Split it into smaller zips."),
+    ).toBeDefined();
+    expect(app.server.calls.some((call) => call.method === "importWikiVault")).toBe(false);
+  });
+
+  test("a new search says it is on its way while the last results stay", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
+    await tree();
+    const search = screen.getByRole("searchbox", { name: "Search pages" });
+    fireEvent.change(search, { target: { value: "porto" } });
+    await waitFor(async () => expect(await treePages()).toEqual(["Ink suppliers"]));
+    const held = app.server.hold("getWikiSearch");
+    fireEvent.change(search, { target: { value: "press" } });
+    expect(await screen.findByText("Searching…")).toBeDefined();
+    expect(await treePages()).toEqual(["Ink suppliers"]);
+    held.release();
+  });
+
+  test("a wiki error reads in the interface language, not the server's English", async () => {
+    const server = newServer();
+    server.force(
+      "getWikiSearch",
+      {
+        kind: "error",
+        status: 400,
+        code: "wiki.invalid_text",
+        message: "Text can't contain a NUL character",
+      },
+      50,
+    );
+    await renderApp({ path: PATH, signedInAs: "usr_ana", server, languages: ["pt-BR"] });
+    fireEvent.change(await screen.findByRole("searchbox", { name: "Buscar páginas" }), {
+      target: { value: "press" },
+    });
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("O texto tem um caractere que não pode ser salvo.");
+    expect(alert.textContent).not.toContain("NUL");
+  });
+
   test("someone who did not make a trashed page is told who can restore it", async () => {
     const app = await renderApp({ path: PATH, signedInAs: "usr_iris" });
     await tree();

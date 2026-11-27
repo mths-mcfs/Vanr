@@ -424,7 +424,7 @@ export class FakeWiki {
       }),
       updateWikiPageMeta: writable((scope, page, params) => {
         if (params.parentVersion !== page.versions.at(-1)?.version)
-          return fail(409, "wiki.page_changed", "Someone saved a newer version", {
+          return fail(409, "wiki.stale_draft", "Someone saved a newer version", {
             currentVersion: page.versions.at(-1)?.version,
           });
         const tags = words(params.tags);
@@ -537,9 +537,15 @@ export class FakeWiki {
         const from = page.versions.find((v) => v.version === Number(params.versionId));
         if (from === undefined) return notFound();
         if (params.parentVersion !== page.versions.at(-1)?.version)
-          return fail(409, "wiki.page_changed", "Someone saved a newer version");
+          return fail(409, "wiki.stale_draft", "Someone saved a newer version");
         this.save(page, scope.user, { body: from.body }, `restored version ${from.version}`);
         return reply(200, this.detail(page, scope));
+      }),
+      getWikiPageVersion: onPage((_scope, page, params) => {
+        const version = page.versions.find((each) => each.version === Number(params.versionId));
+        return version === undefined
+          ? notFound()
+          : reply(200, { version: version.version, body: version.body });
       }),
       getWikiPagePanel: onPage((_scope, page) => {
         const body = page.versions.at(-1)?.body ?? "";

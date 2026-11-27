@@ -2,7 +2,7 @@
 // shows its published text): the header and side panel, renaming in place, properties, the version
 // history and a restore, pin, lock and the trash by who may, and the missing and failed states.
 import { describe, expect, test } from "bun:test";
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import { newServer, renderApp } from "../../../../test/app.tsx";
 
 const WIKI = "/workspace/workspace_birchwood/wiki";
@@ -55,7 +55,7 @@ describe("a wiki page", () => {
   test("a tag added on the page is saved, once more on the fresh version when someone saved in between", async () => {
     const app = await renderApp({ path: PAGE, signedInAs: "usr_ana" });
     await title();
-    app.server.force("updateWikiPageMeta", { kind: "error", status: 409, code: "wiki.page_changed" }, 1);
+    app.server.force("updateWikiPageMeta", { kind: "error", status: 409, code: "wiki.stale_draft" }, 1);
     await app.user.type(screen.getByRole("textbox", { name: "Add to Tags" }), "ink{Enter}");
     await waitFor(() => {
       const tags = screen.getByRole("list", { name: "Tags" });
@@ -128,6 +128,30 @@ describe("a wiki page", () => {
     await waitFor(() => expect(app.server.wiki.pages[0]?.props.prop_stage).toBe(review));
   });
 
+  test("a select property made on the page starts empty and takes its first option there", async () => {
+    const app = await renderApp({ path: PAGE, signedInAs: "usr_ana" });
+    await title();
+    await app.user.click(screen.getByRole("button", { name: "Add a property" }));
+    await app.user.click(await screen.findByRole("menuitem", { name: "New property…" }));
+    await app.user.type(screen.getByRole("textbox", { name: "Property name" }), "Topic");
+    await app.user.click(screen.getByRole("combobox", { name: "Property type" }));
+    await app.user.click(await screen.findByRole("option", { name: "Select" }));
+    await app.user.click(screen.getByRole("button", { name: "Add" }));
+    await app.user.type(await screen.findByRole("textbox", { name: "New option for Topic" }), "Inks{Enter}");
+    const defs = () => app.server.wiki.defs.get("workspace_birchwood")?.defs ?? [];
+    await waitFor(() =>
+      expect(
+        defs()
+          .find((def) => def.name === "Topic")
+          ?.options?.map((o) => o.name),
+      ).toEqual(["Inks"]),
+    );
+    const topic = defs().find((def) => def.name === "Topic");
+    await waitFor(() =>
+      expect(app.server.wiki.pages[0]?.props[topic?.id ?? ""]).toBe(topic?.options?.[0]?.id),
+    );
+  });
+
   test("the side panel says when its links failed, and tries again", async () => {
     const server = newServer();
     server.force("getWikiPagePanel", { kind: "error", status: 500, code: "internal" }, 50);
@@ -156,6 +180,82 @@ describe("a wiki page", () => {
     await waitFor(() =>
       expect(within(tree).queryByRole("link", { name: /Press checklist/ }) === null).toBe(true),
     );
+  });
+
+  test("an embedded image whose attachment loads after the editor turns from a link into the image", async () => {
+    const server = newServer();
+    const checklist = server.wiki.pages[0];
+    if (checklist !== undefined) {
+      const last = checklist.versions.at(-1);
+      if (last !== undefined) last.body = "![[img.png]]";
+    }
+    const original = server.fetch.bind(server);
+    let release = () => {};
+    const held = new Promise<void>((done) => {
+      release = done;
+    });
+    server.fetch = (jar) => {
+      const fetch = original(jar);
+      return async (url, options) => {
+        const path = new URL(String(url), "https://vanr.test").pathname;
+        if (path.endsWith("/wiki/attachments")) {
+          await held;
+          return Response.json({
+            attachments: [{ path: "img.png", fileId: "file_img", contentType: "image/png" }],
+          });
+        }
+        if (path.endsWith("/files/file_img/blob"))
+          return new Response(new Uint8Array([1]), { headers: { "Content-Type": "image/png" } });
+        return fetch(url, options);
+      };
+    };
+    await renderApp({ path: PAGE, signedInAs: "usr_ana", server });
+    const editor = await screen.findByRole("textbox", { name: "Text of Press checklist" });
+    const link = await within(editor).findByRole("link", { name: "img.png" });
+    expect(link.getAttribute("data-missing")).toBe("true");
+    await act(async () => release());
+    expect(await within(editor).findByRole("img", { name: "img.png" })).toBeDefined();
+    expect(within(editor).queryByRole("link", { name: "img.png" }) === null).toBe(true);
+  });
+
+  test("Escape throws away a tag being typed: leaving the field after it saves nothing", async () => {
+    const app = await renderApp({ path: PAGE, signedInAs: "usr_ana" });
+    const tags = (await screen.findByRole("textbox", { name: "Add to Tags" })) as HTMLInputElement;
+    await app.user.type(tags, "do-not-save{Escape}{Tab}");
+    expect(tags.value).toBe("");
+    expect(app.server.calls.some((call) => call.method === "updateWikiPageMeta")).toBe(false);
+  });
+
+  test("a page linked twice shows once among the links out", async () => {
+    const server = newServer();
+    const last = server.wiki.pages[0]?.versions.at(-1);
+    if (last !== undefined) last.body = "[[Ink suppliers]] and again [[Ink suppliers]]";
+    await renderApp({ path: PAGE, signedInAs: "usr_ana", server });
+    const side = await screen.findByRole("complementary", { name: "About this page" });
+    const out = await within(side).findByRole("region", { name: "1 link out" });
+    expect(within(out).getAllByRole("link", { name: "Ink suppliers" })).toHaveLength(1);
+  });
+
+  test("the history shows the first version's whole text, not an empty comparison", async () => {
+    const app = await renderApp({ path: PAGE, signedInAs: "usr_ana" });
+    await title();
+    await app.user.click(within(await actions(app)).getByRole("menuitem", { name: "Version history" }));
+    const dialog = await screen.findByRole("dialog", { name: "History of Press checklist" });
+    await app.user.click(within(dialog).getByRole("button", { name: /Version 1/ }));
+    expect(await within(dialog).findByText("The first version, as it was written:")).toBeDefined();
+    expect(within(dialog).getByText(/Clean the rollers\./)).toBeDefined();
+    expect(within(dialog).queryByText(/same version/) === null).toBe(true);
+  });
+
+  test("who an agent wrote a page for may move it to the trash, as the server allows", async () => {
+    const server = newServer();
+    const ink = server.wiki.pages.find((each) => each.slug === "ink-suppliers");
+    const first = ink?.versions[0];
+    if (first !== undefined)
+      first.author = { type: "agent", id: "agt_scout", actingFor: "usr_iris" } as typeof first.author;
+    const app = await renderApp({ path: `${WIKI}/ink-suppliers`, signedInAs: "usr_iris", server });
+    await title();
+    expect(within(await actions(app)).getByRole("menuitem", { name: "Move to trash" })).toBeDefined();
   });
 
   test("a page that is not there offers to create it", async () => {

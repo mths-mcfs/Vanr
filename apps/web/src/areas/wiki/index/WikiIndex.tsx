@@ -223,7 +223,7 @@ function WikiIndex({ workspaceId }: { workspaceId: string }) {
             >
               {describe(found.error)}
             </Callout>
-          ) : needle !== "" && found.isFetching && found.data === undefined ? (
+          ) : needle !== "" && found.isFetching ? (
             <p className="page__muted" role="status">
               <Spinner /> {t("index.searching")}
             </p>

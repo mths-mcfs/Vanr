@@ -33,6 +33,10 @@ export type RenderOptions = {
   store?: KeyValueStore;
   tabStore?: KeyValueStore;
   jar?: CookieJar;
+  /** The live wiki page's socket; left out, one that never opens (test/live-socket.ts has a live one). */
+  wikiSocket?: new (
+    url: string,
+  ) => WebSocket;
 };
 
 /** The app's runtime over the fake server, without rendering it: for tests of one piece. */
@@ -54,7 +58,7 @@ export function newTestRuntime(options: RenderOptions) {
       baseUrl: "https://vanr.test",
       createSocket: server.socketFactory(jar),
       random: () => 0,
-      wikiSocket: IdleWikiSocket as unknown as new (url: string) => WebSocket,
+      wikiSocket: options.wikiSocket ?? (IdleWikiSocket as unknown as new (url: string) => WebSocket),
     },
     clock,
     languages: options.languages ?? ["en-US"],
