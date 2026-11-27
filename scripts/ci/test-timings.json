@@ -55,6 +55,8 @@
     "apps/server/test/agent-builder.test.ts": 1897,
     "apps/server/test/assignment-budget.test.ts": 1582,
     "apps/server/test/assignment-core.test.ts": 5553,
+    "apps/server/test/assignment-engine-postgres.test.ts": 300,
+    "apps/server/test/assignment-engine.test.ts": 7000,
     "apps/server/test/base.test.ts": 8770,
     "apps/server/test/bases-postgres.test.ts": 600,
     "apps/server/test/bases-relations-postgres.test.ts": 600,
