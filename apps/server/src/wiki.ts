@@ -12,7 +12,7 @@ import type { AppDeps, WorkspaceMember } from "./context";
 import { pgCode } from "./db-errors";
 import { forbidden, HttpError, notFound } from "./http";
 import { reindex, unindex } from "./search-index";
-import { accessView, canReadPage, readablePagesSql, type WikiViewer } from "./wiki-access";
+import { accessView, canReadPage, readablePagesSql, type WikiAccess, type WikiViewer } from "./wiki-access";
 import { logChange } from "./wiki-changes";
 import { checkLinks, inboundFor, namesOf, reresolveLinks, syncLinks } from "./wiki-links";
 
@@ -309,6 +309,8 @@ export interface NewPage {
   author: Author;
   sourceType?: "obsidian";
   note?: string | null;
+  /** Who reads the new page; absent, the whole workspace. A restricted page gets an unguessable slug. */
+  access?: WikiAccess | null;
 }
 
 export async function createPage(
@@ -350,7 +352,8 @@ export async function createPages(
 }
 
 async function insertPage(tx: Tx, input: NewPage, at: Date): Promise<WikiRow> {
-  const slug = await freeSlug(tx, input.workspaceId, input.title);
+  const access = input.access ?? null;
+  const slug = access ? restrictedSlug(input.title) : await freeSlug(tx, input.workspaceId, input.title);
   const id = newId("wiki");
   const body = input.body ?? "";
   const [created] = await tx
@@ -367,6 +370,7 @@ async function insertPage(tx: Tx, input: NewPage, at: Date): Promise<WikiRow> {
       body,
       version: 1,
       sourceType: input.sourceType ?? null,
+      access,
       updatedBy: input.author,
       createdAt: at,
       updatedAt: at,

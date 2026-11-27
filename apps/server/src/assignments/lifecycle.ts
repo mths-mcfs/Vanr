@@ -1,0 +1,365 @@
+// What the assignment routes share: closing (done or canceled), answering a submission with changes, telling the
+// executor what a person wants, and the views of the harness, the settings and the people. A transition that
+// reads the assignment's state and writes it (closing, asking for changes) runs in one transaction with the
+// assignment's row locked, so two people at once (or a double click) end in one outcome.
+import type {
+  AssignmentExecutor,
+  AssignmentHarness,
+  AssignmentJoinRequest,
+  AssignmentParticipants,
+  AssignmentSettings,
+} from "@vanr/contract";
+import { can } from "@vanr/contract";
+import { type Db, schema } from "@vanr/engine/db";
+import { MODELS } from "@vanr/engine/models/catalog";
+import { and, eq } from "drizzle-orm";
+import type { AgentRow } from "../agents";
+import { type AppDeps, requireRuntime, type WorkspaceMember } from "../context";
+import { badRequest, conflict, HttpError } from "../http";
+import { closeNotificationGroups, closeNotifications } from "../notifications";
+import { canUsePlan, EXECUTOR_MODELS, executorModelOk, executorProblem } from "../runners/plans";
+import type { RunnerRow } from "../runners/runners";
+import {
+  type AssignmentRow,
+  agentOf,
+  isClosed,
+  managesAssignment,
+  nameMap,
+  personSays,
+  publishAssignment,
+  runnerOfAssignment,
+  runningJobsOf,
+  updateAssignment,
+} from "./core";
+import { cancelJobs, copyToWiki, rulesOf, startAssignmentJob, stopAgentRun } from "./engine";
+import { assignmentEvent } from "./events";
+import { writePlan } from "./plan";
+
+const {
+  assignments,
+  assignmentParticipants,
+  assignmentJoinRequests,
+  assignmentCommands,
+  assignmentCommandStats,
+  assignmentSubmissions,
+} = schema;
+
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+export const person = (me: { userId: string }) => ({ type: "person" as const, id: me.userId });
+
+export const closedError = () => new HttpError(409, "assignment.closed", "This assignment is closed");
+const submissionClosed = () =>
+  conflict("assignment.submission_closed", "This submission was already answered");
+
+/** The assignment's row, locked until the transaction ends: whoever moves it next waits for this one. */
+async function lockAssignment(tx: Tx, id: string): Promise<AssignmentRow> {
+  const [row] = await tx.select().from(assignments).where(eq(assignments.id, id)).for("update");
+  if (!row || isClosed(row)) throw closedError();
+  return row;
+}
+
+/** Who edits the agent's defaults: who manages agents or the agent's owner. */
+export const editsAgent = (me: WorkspaceMember, agent: AgentRow) =>
+  can(me.role, "manage_agents") || agent.ownerUserId === me.userId;
+
+export function requireManager(me: WorkspaceMember, row: AssignmentRow) {
+  if (!managesAssignment(me, row))
+    throw new HttpError(403, "assignment.forbidden", "Only the owner can change this assignment");
+}
+
+/**
+ * Stopping the agent's run in the thread (pause, stop, close) needs the agent runtime (slice S6): without it the
+ * route is refused before any write.
+ */
+export function requireRunStop(deps: AppDeps) {
+  requireRuntime(deps.runtime, "activeRun");
+  requireRuntime(deps.runtime, "cancel");
+}
+
+/**
+ * The executor runs on the runner, the tool is on, the CLI is logged in to a plan and the person (the
+ * assignment's owner) may use that plan: who paired it.
+ */
+export function executorAvailable(
+  runner: RunnerRow | null,
+  executor: "claude_code" | "codex",
+  userId: string,
+): runner is RunnerRow {
+  return !!runner && executorProblem(runner, executor) === null && canUsePlan(userId, runner);
+}
+
+const EXECUTOR_LABEL = { claude_code: "Claude Code", codex: "Codex" } as const;
+
+/** 409 when the executor can't run this assignment on that runner, with the reason. */
+export function requireExecutor(runner: RunnerRow | null, executor: "claude_code" | "codex", userId: string) {
+  if (!runner) throw conflict("assignment.needs_environment", "Pick a runner for this assignment");
+  if (!executorAvailable(runner, executor, userId))
+    throw conflict(
+      "assignment.executor_unavailable",
+      `${EXECUTOR_LABEL[executor]} is not available on that runner`,
+      {
+        reason: executorProblem(runner, executor) ?? "personal_plan",
+      },
+    );
+}
+
+/** The assignment's runner is ready for a job (what starting asks for). */
+export async function environmentReady(deps: AppDeps, row: AssignmentRow) {
+  const runner = await runnerOfAssignment(deps.db, row);
+  if (!runner) throw conflict("assignment.needs_environment", "Pick a runner for this assignment");
+  if (!deps.runners.isOnline(runner.id)) throw conflict("runner.offline", "The runner is offline");
+  if (!canUsePlan(row.ownerId, runner))
+    throw conflict("assignment.personal_plan", "That runner's plan is personal to who paired it");
+}
+
+export async function participantsOf(deps: AppDeps, row: AssignmentRow): Promise<AssignmentParticipants> {
+  const list = await deps.db
+    .select()
+    .from(assignmentParticipants)
+    .where(eq(assignmentParticipants.assignmentId, row.id))
+    .orderBy(assignmentParticipants.createdAt);
+  const names = await nameMap(deps.db, [row.ownerId, ...list.map((p) => p.userId)]);
+  return {
+    owner: { userId: row.ownerId, name: names.get(row.ownerId) ?? "" },
+    participants: list.map((p) => ({ userId: p.userId, name: names.get(p.userId) ?? "", role: p.role })),
+  };
+}
+
+export async function joinRequestsOf(deps: AppDeps, assignmentId: string): Promise<AssignmentJoinRequest[]> {
+  const rows = await deps.db
+    .select()
+    .from(assignmentJoinRequests)
+    .where(eq(assignmentJoinRequests.assignmentId, assignmentId))
+    .orderBy(assignmentJoinRequests.createdAt);
+  const names = await nameMap(
+    deps.db,
+    rows.map((r) => r.userId),
+  );
+  return rows.map((r) => ({
+    userId: r.userId,
+    name: names.get(r.userId) ?? "",
+    role: r.role,
+    status: r.status,
+    createdAt: r.createdAt.toISOString(),
+  }));
+}
+
+export async function harnessOf(
+  deps: AppDeps,
+  me: WorkspaceMember,
+  row: AssignmentRow,
+): Promise<AssignmentHarness> {
+  const agent = await agentOf(deps.db, row);
+  const runner = await runnerOfAssignment(deps.db, row);
+  const options: AssignmentHarness["options"] = [
+    {
+      kind: "agent",
+      models: MODELS.map((m) => ({
+        value: m.id,
+        label: m.label,
+        ...(m.recommended ? { recommended: true } : {}),
+      })),
+    },
+  ];
+  for (const kind of ["claude_code", "codex"] as const)
+    if (executorAvailable(runner, kind, row.ownerId)) options.push({ kind, models: EXECUTOR_MODELS[kind] });
+  return {
+    options,
+    effectiveHarness: row.executor,
+    resolvedModel: row.model ?? (row.executor === "agent" ? agent.model : ""),
+    modelAdjustable: managesAssignment(me, row),
+  };
+}
+
+/** Changes the executor (and the model). An executor on the runner needs the runner with it. */
+export async function setHarness(
+  deps: AppDeps,
+  row: AssignmentRow,
+  harness: AssignmentExecutor,
+  model?: string,
+) {
+  if ((await runningJobsOf(deps.db, row.id)).length > 0)
+    throw conflict("assignment.job_running", "Wait for the running job or stop it first");
+  if (harness !== "agent") requireExecutor(await runnerOfAssignment(deps.db, row), harness, row.ownerId);
+  if (model) {
+    const ok = harness === "agent" ? MODELS.some((m) => m.id === model) : executorModelOk(harness, model);
+    if (!ok) throw badRequest("Unknown model for this harness", { field: "model" });
+  }
+  return updateAssignment(deps, row, { executor: harness, model: model || null }, "settings");
+}
+
+export async function settingsOf(
+  deps: AppDeps,
+  me: WorkspaceMember,
+  row: AssignmentRow,
+): Promise<AssignmentSettings> {
+  const rules = await rulesOf(deps, row.id);
+  const names = await nameMap(
+    deps.db,
+    rules.map((r) => r.by),
+  );
+  const [stats] = await deps.db
+    .select()
+    .from(assignmentCommandStats)
+    .where(eq(assignmentCommandStats.assignmentId, row.id));
+  const agent = await agentOf(deps.db, row);
+  return {
+    rules: rules.map((r) => ({
+      id: r.id,
+      rule: r.rule,
+      by: names.get(r.by) ?? "",
+      createdAt: r.createdAt.toISOString(),
+    })),
+    stats: { auto: stats?.auto ?? 0, asked: stats?.asked ?? 0, blocked: stats?.blocked ?? 0 },
+    agentBaseline: { commandPolicy: agent.assignmentCommandPolicy, adjustable: editsAgent(me, agent) },
+  };
+}
+
+/**
+ * Whether telling the executor reaches the agent runtime: the agent hears it through the thread (slice S6). A
+ * route checks it at its entry, before writing what made it tell.
+ */
+export function requireTell(deps: AppDeps, row: AssignmentRow) {
+  if (row.executor === "agent") requireRuntime(deps.runtime, "onPersonMessage");
+}
+
+/** Tells the executor what the person wants: the agent through the thread; Claude Code/Codex in a resumed job. */
+export async function tell(
+  deps: AppDeps,
+  row: AssignmentRow,
+  userId: string,
+  text: string,
+): Promise<{ delivered: boolean; jobId?: string }> {
+  if (row.executor === "agent") {
+    await personSays(deps, row, userId, text);
+    return { delivered: true };
+  }
+  if ((await runningJobsOf(deps.db, row.id)).length > 0) return { delivered: false };
+  try {
+    const job = await startAssignmentJob(deps, row, { extra: text });
+    return { delivered: true, jobId: job.id };
+  } catch (err) {
+    // Another message opened the job meanwhile: this one waits, as if the job were already running.
+    if (err instanceof HttpError && err.code === "assignment.job_running") return { delivered: false };
+    throw err;
+  }
+}
+
+/** `tell` where the person's answer already counts: a refused delivery (runner offline) is not the answer's failure. */
+export async function tellIfPossible(deps: AppDeps, row: AssignmentRow, userId: string, text: string) {
+  await tell(deps, row, userId, text).catch((err) => {
+    if (!(err instanceof HttpError)) throw err;
+  });
+}
+
+/**
+ * Closes the assignment (done or canceled) once, even with two clicks or two people. In one transaction on the
+ * locked row: accepts the given submission (or every pending one when done), supersedes the rest, expires the
+ * commands that waited and moves the status. Then it stops the agent and the jobs, copies to the wiki if asked
+ * and tells. The caller checked `requireRunStop` before.
+ */
+export async function finishAssignment(
+  deps: AppDeps,
+  me: WorkspaceMember,
+  row: AssignmentRow,
+  input: { outcome: "done" | "canceled"; wiki: boolean; note?: string; submissionId?: string },
+): Promise<AssignmentRow> {
+  const now = deps.now();
+  let next = await deps.db.transaction(async (tx) => {
+    const fresh = await lockAssignment(tx, row.id);
+    const pending = and(
+      eq(assignmentSubmissions.assignmentId, row.id),
+      eq(assignmentSubmissions.status, "pending"),
+    );
+    const accept = { status: "accepted" as const, decidedBy: me.userId, decidedAt: now };
+    if (input.submissionId) {
+      const [accepted] = await tx
+        .update(assignmentSubmissions)
+        .set(accept)
+        .where(and(pending, eq(assignmentSubmissions.id, input.submissionId)))
+        .returning();
+      if (!accepted) throw submissionClosed();
+    } else if (input.outcome === "done") await tx.update(assignmentSubmissions).set(accept).where(pending);
+    await tx.update(assignmentSubmissions).set({ status: "superseded" }).where(pending);
+    await tx
+      .update(assignmentCommands)
+      .set({ state: "expired" })
+      .where(and(eq(assignmentCommands.assignmentId, row.id), eq(assignmentCommands.state, "pending")));
+    const findings = input.note
+      ? [...fresh.findings, { text: input.note, at: now.toISOString() }].slice(-100)
+      : fresh.findings;
+    const [moved] = await tx
+      .update(assignments)
+      .set({ status: input.outcome, outcome: input.outcome, closedAt: now, findings, updatedAt: now })
+      .where(eq(assignments.id, row.id))
+      .returning();
+    if (!moved) throw closedError();
+    return moved;
+  });
+  publishAssignment(deps, next, "status");
+  stopAgentRun(deps, next, me.userId);
+  await cancelJobs(deps, next);
+  if (input.wiki) {
+    await copyToWiki(deps, next, me.userId);
+    next = (await deps.db.select().from(assignments).where(eq(assignments.id, row.id)))[0] ?? next;
+  }
+  await closeNotificationGroups(deps, row.workspaceId, `assignment:${row.id}:`);
+  await assignmentEvent(deps, next, { kind: "closed", actor: person(me), data: { outcome: input.outcome } });
+  deps.assignmentEngine.wake(row.id);
+  return next;
+}
+
+/**
+ * The person asks for changes on a pending submission: on the locked row, the submission is answered and the
+ * assignment goes back to work; the request becomes a person's plan item that the engine works on and the
+ * verifier checks.
+ */
+export async function requestSubmissionChanges(
+  deps: AppDeps,
+  me: WorkspaceMember,
+  row: AssignmentRow,
+  submissionId: string,
+  note: string,
+): Promise<AssignmentRow> {
+  const now = deps.now();
+  const { answered, next } = await deps.db.transaction(async (tx) => {
+    await lockAssignment(tx, row.id);
+    const [answered] = await tx
+      .update(assignmentSubmissions)
+      .set({ status: "changes_requested", changesNote: note, decidedBy: me.userId, decidedAt: now })
+      .where(
+        and(
+          eq(assignmentSubmissions.id, submissionId),
+          eq(assignmentSubmissions.assignmentId, row.id),
+          eq(assignmentSubmissions.status, "pending"),
+        ),
+      )
+      .returning();
+    if (!answered) throw submissionClosed();
+    const [next] = await tx
+      .update(assignments)
+      .set({ status: "active", pausedAt: null, updatedAt: now })
+      .where(eq(assignments.id, row.id))
+      .returning();
+    if (!next) throw closedError();
+    return { answered, next };
+  });
+  publishAssignment(deps, next, "submission");
+  await closeNotifications(deps, row.workspaceId, `assignment:${row.id}:assignment_finished`);
+  const w = await writePlan(deps, row.id, {
+    author: person(me),
+    mode: "append",
+    items: [
+      { id: `change-${answered.id.slice(-8)}`, title: note.slice(0, 300), criteria: note, kind: "change" },
+    ],
+    note: "changes requested",
+  });
+  await assignmentEvent(deps, next, {
+    kind: "plan_edited",
+    actor: person(me),
+    data: { version: w.version, added: w.added, removed: [], edited: [], submissionId: answered.id },
+  });
+  deps.assignmentEngine.wake(row.id);
+  return next;
+}

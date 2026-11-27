@@ -3,6 +3,7 @@
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { and, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { agentInWorkspace } from "../agents";
 import { channelInWorkspace } from "../channels";
 import type { AppDeps } from "../context";
 import { HttpError } from "../http";
@@ -12,9 +13,10 @@ import { closeNotifications, notify } from "../notifications";
 import { RunnerCallError } from "../runners/hub";
 import { onJobDone, startJob } from "../runners/jobs";
 import { canUsePlan } from "../runners/plans";
-import { type JobRow, toJob } from "../runners/runners";
+import { type JobRow, runnerInWorkspace, toJob } from "../runners/runners";
 import { type ToolContext, ToolInputError } from "../runtime/tools";
 import { createPage, savePage } from "../wiki";
+import { audienceWithin, type WikiAccess } from "../wiki-access";
 import {
   type AssignmentRow,
   agentOf,
@@ -435,16 +437,25 @@ export async function createSubmission(
 
 // ---- wiki ----
 
+/**
+ * Copies the assignment's files to a wiki page. A private channel's assignment goes to a page only the channel's
+ * readers read (the page follows the channel's members from then on); a public one's to the workspace. The
+ * page of an earlier copy is reused only while its readers are within that audience: one someone opened up
+ * (or a public channel's copy after the channel went private) gets a new restricted page instead.
+ */
 export async function copyToWiki(deps: AppDeps, row: AssignmentRow, actorUserId: string): Promise<string> {
   const files = await assignmentFiles(deps, row);
   const body = files.map((f) => f.content.trim()).join("\n\n---\n\n");
   const author = { type: "person" as const, id: actorUserId };
+  const channel = await channelInWorkspace(deps.db, row.workspaceId, row.channelId);
+  const access: WikiAccess | null =
+    channel?.visibility === "public" ? null : { kind: "channel", channelId: row.channelId };
   if (row.wikiPageId) {
     const [page] = await deps.db
       .select()
       .from(knowledgePages)
       .where(and(eq(knowledgePages.id, row.wikiPageId), isNull(knowledgePages.deletedAt)));
-    if (page) {
+    if (page && audienceWithin(page.access, access)) {
       await savePage(deps, { row: page, author, canBypassLock: false, body, note: "assignment" });
       return page.id;
     }
@@ -457,6 +468,7 @@ export async function copyToWiki(deps: AppDeps, row: AssignmentRow, actorUserId:
     tags: ["assignment"],
     author,
     note: "assignment",
+    access,
   });
   await deps.db.update(assignments).set({ wikiPageId: page.id }).where(eq(assignments.id, row.id));
   return page.id;
@@ -699,13 +711,10 @@ export interface NewAssignment {
 export async function createAssignment(deps: AppDeps, input: NewAssignment): Promise<AssignmentRow> {
   const id = newId("asg");
   const channel = await channelOf(deps, input.workspaceId, input.channelId);
+  // The agent and the runner are the workspace's: another workspace's id is a 404, never a link to it.
+  await agentInWorkspace(deps.db, input.workspaceId, input.agentId);
   const runnerName = input.runnerId
-    ? ((
-        await deps.db
-          .select({ name: schema.runners.name })
-          .from(schema.runners)
-          .where(eq(schema.runners.id, input.runnerId))
-      )[0]?.name ?? null)
+    ? (await runnerInWorkspace(deps.db, input.workspaceId, input.runnerId)).name
     : null;
   const { message } = await postMessage(deps, {
     workspaceId: input.workspaceId,

@@ -4,6 +4,7 @@ import type { AppDeps, AppEnv } from "./context";
 import { errorBody, HttpError } from "./http";
 import { log } from "./logger";
 import { registerAccount } from "./routes/account";
+import { registerAssignments } from "./routes/assignments";
 import { registerBases } from "./routes/bases";
 import { registerCalendar } from "./routes/calendar";
 import { registerControl } from "./routes/control";
@@ -154,6 +155,7 @@ export function createApp(
   registerIntegrations(app);
   registerRunners(app);
   registerRunnerRequests(app);
+  registerAssignments(app);
 
   app.all("/api/*", (c) =>
     c.json(errorBody("route_not_found", `No route for ${c.req.method} ${c.req.path}`), 404),
