@@ -14,7 +14,7 @@ import type { CompleteInput, CompleteResult } from "../src/context";
 import type { RunningServer } from "../src/server";
 import { SERVER_TEST_MS, settle, signedIn, startTestServer } from "./harness";
 import { type Called, call, ws } from "./route-calls";
-import { memberOf, type Person } from "./seed";
+import { memberOf } from "./seed";
 
 let server: RunningServer;
 /** The runtime's answer for one call: by the instructions in the system prompt, as the origin's scripted model. */

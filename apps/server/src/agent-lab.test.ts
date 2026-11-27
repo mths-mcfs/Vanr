@@ -15,7 +15,6 @@ import {
   toEval,
 } from "./agent-lab";
 import type { AgentRow } from "./agents";
-import { HttpError } from "./http";
 import { createWorkspace } from "./members";
 import type { RunningServer } from "./server";
 

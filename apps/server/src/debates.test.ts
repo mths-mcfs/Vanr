@@ -366,7 +366,10 @@ describe("an agent's turn", () => {
       expect(turn).toMatchObject({ author: { type: "agent", id: a1.id }, body: "Because ada." });
       expect(turn?.claimData).toMatchObject({ answer: "ada", key: answerKey("ada") });
       expect(turn?.runId).toBeTruthy();
-      const [run] = await server.deps.db.select().from(schema.runs).where(eq(schema.runs.id, turn?.runId ?? ""));
+      const [run] = await server.deps.db
+        .select()
+        .from(schema.runs)
+        .where(eq(schema.runs.id, turn?.runId ?? ""));
       expect([run?.status, run?.agentId, run?.debateId]).toEqual(["done", a1.id, opened.id]);
     },
     SERVER_TEST_MS,
