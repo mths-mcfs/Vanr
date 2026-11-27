@@ -128,6 +128,30 @@ describe("a wiki page", () => {
     await waitFor(() => expect(app.server.wiki.pages[0]?.props.prop_stage).toBe(review));
   });
 
+  test("a select property made on the page starts empty and takes its first option there", async () => {
+    const app = await renderApp({ path: PAGE, signedInAs: "usr_ana" });
+    await title();
+    await app.user.click(screen.getByRole("button", { name: "Add a property" }));
+    await app.user.click(await screen.findByRole("menuitem", { name: "New property…" }));
+    await app.user.type(screen.getByRole("textbox", { name: "Property name" }), "Topic");
+    await app.user.click(screen.getByRole("combobox", { name: "Property type" }));
+    await app.user.click(await screen.findByRole("option", { name: "Select" }));
+    await app.user.click(screen.getByRole("button", { name: "Add" }));
+    await app.user.type(await screen.findByRole("textbox", { name: "New option for Topic" }), "Inks{Enter}");
+    const defs = () => app.server.wiki.defs.get("workspace_birchwood")?.defs ?? [];
+    await waitFor(() =>
+      expect(
+        defs()
+          .find((def) => def.name === "Topic")
+          ?.options?.map((o) => o.name),
+      ).toEqual(["Inks"]),
+    );
+    const topic = defs().find((def) => def.name === "Topic");
+    await waitFor(() =>
+      expect(app.server.wiki.pages[0]?.props[topic?.id ?? ""]).toBe(topic?.options?.[0]?.id),
+    );
+  });
+
   test("the side panel says when its links failed, and tries again", async () => {
     const server = newServer();
     server.force("getWikiPagePanel", { kind: "error", status: 500, code: "internal" }, 50);

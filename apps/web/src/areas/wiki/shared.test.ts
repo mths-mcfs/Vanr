@@ -36,6 +36,19 @@ describe("the wiki's pieces", () => {
     ).toEqual([23, 7]);
   });
 
+  test("every batch fits the server's 32 MiB request, even with three-byte letters", () => {
+    const notes = Array.from({ length: 24 }, (_, n) => ({
+      path: `notes/note-${n}.md`,
+      text: "漢".repeat(500_000),
+    }));
+    const plan = importBatches(notes);
+    const sizes = plan.batches.map(
+      (batch) => new TextEncoder().encode(JSON.stringify({ files: batch })).length,
+    );
+    expect(plan.batches.flat()).toHaveLength(24);
+    expect(sizes.every((size) => size <= 32 * 1024 * 1024)).toBe(true);
+  });
+
   test("a link path is a folder and a title", () => {
     expect(splitPath("Guides/ Onboarding /First day")).toEqual({
       folder: "Guides/Onboarding",

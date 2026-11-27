@@ -101,6 +101,36 @@ describe("a live wiki page", () => {
     FakeCollabSocket.autoOpen = true;
   });
 
+  test("leaving a live page closes its editor cleanly: nothing throws afterwards", async () => {
+    const thrown: unknown[] = [];
+    const onError = (event: ErrorEvent) => thrown.push(event.error ?? event.message);
+    const consoleError = console.error;
+    console.error = (...args: unknown[]) => thrown.push(args[0]);
+    window.addEventListener("error", onError);
+    try {
+      const app = await renderApp({
+        path: `${WIKI}/press-checklist`,
+        signedInAs: "usr_ana",
+        wikiSocket: live,
+      });
+      await waitFor(() => expect(status()).toBe("Version 2 published"));
+      await liveEditor("Text of Press checklist");
+      await act(async () => {
+        await app.runtime.router.navigate({ to: `${WIKI}/ink-suppliers` });
+      });
+      await waitFor(() => expect(socket(0).closed).toBe(true));
+      await waitFor(() => expect(status()).toBe("Version 1 published"));
+      app.unmount();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    } finally {
+      window.removeEventListener("error", onError);
+      console.error = consoleError;
+    }
+    expect(
+      thrown.map(String).filter((text) => text.includes("MilkdownError") || text.includes("not found")),
+    ).toEqual([]);
+  });
+
   test("a conflict on a page someone may not write shows no publish or discard", async () => {
     FakeCollabSocket.nextScope = "readonly";
     await renderApp({ path: `${WIKI}/holidays`, signedInAs: "usr_iris", wikiSocket: live });
@@ -137,11 +167,22 @@ describe("a live wiki page", () => {
     const server = withIrisPage();
     await renderApp({ path: `${WIKI}/iris-note`, signedInAs: "usr_iris", wikiSocket: live, server });
     await waitFor(() => expect(status()).toBe("Version 1 published"));
+    // The live editor goes away under a document that stays: nothing may throw from it afterwards.
+    const thrown: unknown[] = [];
+    const onError = (event: ErrorEvent) => thrown.push(event.error ?? event.message);
+    const consoleError = console.error;
+    console.error = (...args: unknown[]) => thrown.push(args[0]);
+    window.addEventListener("error", onError);
     await act(async () => socket().serverClose(4403, "access-revoked"));
     await waitFor(() => expect(status()).toBe("Read only"));
     expect(screen.queryByRole("textbox", { name: "Page title" }) === null).toBe(true);
     expect(screen.queryByRole("button", { name: "Add a property" }) === null).toBe(true);
     await new Promise((resolve) => setTimeout(resolve, 1500));
+    window.removeEventListener("error", onError);
+    console.error = consoleError;
     expect(FakeCollabSocket.instances).toHaveLength(1);
+    expect(
+      thrown.map(String).filter((text) => text.includes("MilkdownError") || text.includes("not found")),
+    ).toEqual([]);
   });
 });
