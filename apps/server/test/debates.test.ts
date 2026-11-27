@@ -205,6 +205,16 @@ describe("debates", () => {
         "debate.suggestion_closed",
       );
 
+      // Accepted with another goal and table: the suggestion says what the debate opened with.
+      const c = await post("shifts");
+      const changed = (
+        await call(beto, "POST", `${sugg}/${c}/accept`, { goal: "Decide the shifts", agentIds: [rui.id] })
+      ).body;
+      expect(changed.suggestion).toMatchObject({ goal: "Decide the shifts", agentIds: [rui.id] });
+      expect(changed.debate).toMatchObject({ goal: "Decide the shifts", agentIds: [rui.id] });
+      const [cm] = await server.deps.db.select().from(schema.messages).where(eq(schema.messages.id, c));
+      expect(cm?.meta.debateSuggestion).toMatchObject({ goal: "Decide the shifts", agentIds: [rui.id] });
+
       const b = await post("menu");
       expect((await call(ana, "POST", `${sugg}/${b}/dismiss`)).body.suggestion.state).toBe("dismissed");
       socket.close();
@@ -548,6 +558,32 @@ describe("anonymity when the table changes", () => {
   );
 });
 
+describe("pseudonyms of the agents that only speak", () => {
+  test(
+    "an agent seated only as a speaker keeps its pseudonym when someone else joins the table",
+    async () => {
+      const { workspaceId, base, open, ana, caio, lia, rui } = await team();
+      const t = await open(ana, {
+        title: "Speakers",
+        goal: "Who speaks?",
+        agentIds: [lia.id],
+        speakers: [
+          { type: "agent", id: lia.id },
+          { type: "agent", id: rui.id },
+        ],
+      });
+      await settle();
+      const before = (await debateById(server.deps.db, workspaceId, t.id)).pseudonyms;
+      expect(Object.keys(before).sort()).toEqual([lia.id, rui.id].sort());
+      const joined = await call(ana, "PUT", `${base}/${t.id}/participants`, { peopleToAdd: [caio.user.id] });
+      expect(joined.status).toBe(200);
+      // Same agents at the table: the same map, and the speaker-only agent still has its label.
+      expect((await debateById(server.deps.db, workspaceId, t.id)).pseudonyms).toEqual(before);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
 describe("anonymity when an agent leaves", () => {
   test(
     "the round summary names the votes by the labels the posts showed: a removed agent's id never appears",
@@ -633,6 +669,23 @@ describe("anonymity when an agent leaves", () => {
       // The check bites: once the debate closes, the posts show their authors.
       const canceled = (await call(ana, "POST", `${base}/${t.id}/cancel`)).body;
       expect(leaked(canceled)).toEqual(expect.arrayContaining([lia.id, rui.id, eva.id]));
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("debate estimate", () => {
+  test(
+    "a vote (rounds=0) can be priced, like it can be opened: one turn per agent, cheaper than one more round",
+    async () => {
+      const { base, ana, lia, rui } = await team();
+      const price = (rounds: number) =>
+        call(ana, "GET", `${base}/estimate?agentIds=${lia.id},${rui.id}&rounds=${rounds}`);
+      const vote = await price(0);
+      const one = await price(1);
+      expect([vote.status, one.status]).toEqual([200, 200]);
+      expect(vote.body.calls).toBeLessThan(one.body.calls);
+      expect(vote.body.upToUsd).toBeLessThan(one.body.upToUsd);
     },
     SERVER_TEST_MS,
   );

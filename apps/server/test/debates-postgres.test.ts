@@ -335,11 +335,10 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("accepting a debate suggestion on
       await server.deps.runtime.settle();
       const won = results.filter((r) => r.status < 300);
       expect(won).toHaveLength(1);
-      expect(
-        results
-          .filter((r) => r.status === 409)
-          .every((r) => r.body.error.code === "debate.suggestion_closed"),
-      ).toBe(true);
+      // Every other click is told the suggestion was settled, not failed.
+      expect(results.filter((r) => r.status >= 300).map((r) => [r.status, r.body.error?.code])).toEqual(
+        Array.from({ length: results.length - 1 }, () => [409, "debate.suggestion_closed"]),
+      );
       const opened = await server.deps.db
         .select({ id: schema.debates.id })
         .from(schema.debates)

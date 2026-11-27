@@ -5,6 +5,7 @@
 // document's stay in the ledger.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
+import { newId } from "@vanr/engine/ids";
 import { eq } from "drizzle-orm";
 import { fireRoutineEvent } from "../src/routines";
 import type { RunningServer } from "../src/server";
@@ -297,6 +298,51 @@ describe("routines: who may call each route", () => {
       expect((await call(admin, "PATCH", `${base}/${mine.id}`, { name: "By admin" })).body.name).toBe(
         "By admin",
       );
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("routines: a debate's table", () => {
+  test(
+    "another person's personal-plan agent can't be put at the table of a debate the routine opens",
+    async () => {
+      const { workspaceId, general, ana, beto, lia } = await team();
+      // Rui thinks with the personal plan of Beto, who paired its runner.
+      const runnerId = newId("run");
+      await server.deps.db.insert(schema.runners).values({
+        id: runnerId,
+        workspaceId,
+        name: "beto-laptop",
+        os: "linux",
+        arch: "x64",
+        hostname: "h",
+        runnerRelease: "0.2.0",
+        tokenHash: newId("h"),
+        storeKey: "k",
+        pairedByUserId: beto.user.id,
+      });
+      const rui = await seedAgent(server, workspaceId, ana, "rui", [general]);
+      await server.deps.db
+        .update(schema.agents)
+        .set({ harnessKind: "claude_code", environmentId: runnerId })
+        .where(eq(schema.agents.id, rui.id));
+      const base = `${ws(workspaceId)}/routines`;
+      const input = (who: string[]) => ({
+        agentId: lia.id,
+        prompt: "Weigh it",
+        target: { kind: "debate", agentIds: who, roundLimit: 1 },
+        trigger: { kind: "webhook" },
+      });
+      const asAna = await call(ana, "POST", base, input([lia.id, rui.id]));
+      expect([asAna.status, asAna.body.error?.code]).toEqual([403, "agent.personal_plan"]);
+      // Moving an existing routine's table to that agent is refused the same way.
+      const mine = await call(ana, "POST", base, input([lia.id]));
+      expect(mine.status).toBe(201);
+      const moved = await call(ana, "PATCH", `${base}/${mine.body.id}`, { target: input([rui.id]).target });
+      expect([moved.status, moved.body.error?.code]).toEqual([403, "agent.personal_plan"]);
+      // Beto, who paired it, can seat it.
+      expect((await call(beto, "POST", base, input([lia.id, rui.id]))).status).toBe(201);
     },
     SERVER_TEST_MS,
   );

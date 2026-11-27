@@ -8,7 +8,7 @@ import type { RoutineInput } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { eq } from "drizzle-orm";
 import { MAX_WEBHOOK_BODY } from "../src/routes/routines";
-import { dueRoutines, fireRoutineEvent } from "../src/routines";
+import { dueRoutines, fireRoutineEvent, registerFire, SERIES_ENDED, startRoutineRun } from "../src/routines";
 import type { RunningServer } from "../src/server";
 import { signWebhook } from "../src/webhook-signature";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
@@ -315,6 +315,28 @@ describe("F4-3.3-P0-06: signed webhook, the webhook-id as the dedupe key, the se
       const res = await send(path, "{}", signed(secret, "c1", "{}"));
       expect([res.status, await codeOf(res)]).toEqual([503, "not_available"]);
       expect(await runsOf(r.id)).toHaveLength(0);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("a person's pause over the end of a series", () => {
+  test(
+    "the series' last fire, recorded but not started, doesn't run once the person pauses the routine",
+    async () => {
+      const { ana, base, create } = await team();
+      const r = await create({ trigger: hourly, active: true });
+      const at = new Date();
+      const reg = await registerFire(server.deps, r.id, { trigger: "schedule", scheduledFor: at });
+      if (reg.duplicate) throw new Error("duplicate");
+      // What the tick leaves after recording the last fire of a series.
+      await server.deps.db
+        .update(schema.routines)
+        .set({ active: false, pausedReason: SERIES_ENDED, nextFireAt: null })
+        .where(eq(schema.routines.id, r.id));
+      expect((await call(ana, "PATCH", `${base}/${r.id}`, { active: false })).status).toBe(200);
+      const run = await startRoutineRun(server.deps, reg.run);
+      expect([run.status, run.reason]).toEqual(["skipped", "paused"]);
     },
     SERVER_TEST_MS,
   );

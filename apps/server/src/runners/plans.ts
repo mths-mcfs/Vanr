@@ -86,6 +86,12 @@ export const PERSONAL_PLAN_TEXT =
 export const personalPlanError = () =>
   new HttpError(403, "agent.personal_plan", `This agent ${PERSONAL_PLAN_TEXT}`);
 
+/** A personal-plan agent only takes part in what was asked by whoever paired its runner (a debate's table). */
+export async function requirePlanOwners(db: Db, rows: AgentRow[], askedBy: string | null): Promise<void> {
+  for (const a of await withPlanOwners(db, rows))
+    if (a.planOwnerUserId !== null && a.planOwnerUserId !== askedBy) throw personalPlanError();
+}
+
 /** Blocks whoever doesn't talk to the agent: outside the audience, or another person on a personal-plan agent. */
 export async function requireCanTalk(db: Db, agent: AgentRow, userId: string): Promise<void> {
   const block = talkBlock(await withPlanOwner(db, agent), userId);

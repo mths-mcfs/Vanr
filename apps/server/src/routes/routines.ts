@@ -30,7 +30,7 @@ import { createSealer, type Sealer } from "@vanr/engine/seal";
 import { and, desc, eq } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
-import { agentInWorkspace } from "../agents";
+import { type AgentRow, agentInWorkspace } from "../agents";
 import { writableChannel } from "../channels";
 import { type AppDeps, type AppEnv, type Ctx, requireRuntime, type WorkspaceMember } from "../context";
 import {
@@ -66,7 +66,7 @@ import {
   triggerSchema,
   webhookUrl,
 } from "../routines";
-import { requireCanTalk } from "../runners/plans";
+import { requireCanTalk, requirePlanOwners } from "../runners/plans";
 import { newWebhookSecret, verifyWebhook } from "../webhook-signature";
 import { requireMember, WORKSPACE } from "../workspace-scope";
 
@@ -151,11 +151,15 @@ function nextRunToActivate(trigger: RoutineTrigger, now: Date, anchor: Date): Da
   return next;
 }
 
-/** Checks what only the server knows: the agent, the channel, the rule and the time. */
+/**
+ * Checks what only the server knows: the agent, the channel, the rule and the time. `askedBy` is whom the routine
+ * runs for (its creator): a debate it opens is asked by that person.
+ */
 async function checkInput(
   deps: AppDeps,
   me: WorkspaceMember,
   input: { agentId: string; target: RoutineTarget; trigger: RoutineTrigger },
+  askedBy: string,
 ) {
   const agent = await agentInWorkspace(deps.db, me.workspaceId, input.agentId);
   if (agent.archivedAt) throw notFound("Agent not found");
@@ -183,10 +187,13 @@ async function checkInput(
       });
   }
   if (target.kind === "debate") {
+    const table: AgentRow[] = [];
     for (const id of target.agentIds) {
       const a = await agentInWorkspace(deps.db, me.workspaceId, id);
       if (a.archivedAt) throw notFound("Agent not found");
+      table.push(a);
     }
+    await requirePlanOwners(deps.db, table, askedBy);
   }
   if (trigger.kind === "schedule") checkRule(trigger.rule);
   if (trigger.kind === "once") {
@@ -287,7 +294,7 @@ export function registerRoutines(app: Hono<AppEnv>) {
     const me = requireMember(c);
     const deps = c.get("deps");
     const input = await readJson(c, routineInput);
-    await checkInput(deps, me, input);
+    await checkInput(deps, me, input, me.userId);
     const now = deps.now();
     // It starts paused: turning it on is an explicit action (`active: true` here, or the switch later).
     const active = input.active === true;
@@ -336,7 +343,7 @@ export function registerRoutines(app: Hono<AppEnv>) {
         target: patch.target ?? targetOf(row),
         trigger: patch.trigger ?? before,
       };
-      if (patch.agentId || patch.target || patch.trigger) await checkInput(scoped, me, next);
+      if (patch.agentId || patch.target || patch.trigger) await checkInput(scoped, me, next, row.createdBy);
       const active = patch.active ?? row.active;
       const turnedOn = patch.active === true && !row.active;
       const scheduleChanged = !!patch.trigger || turnedOn;
@@ -362,7 +369,9 @@ export function registerRoutines(app: Hono<AppEnv>) {
           ...(scheduleChanged ? { nextFireAt } : {}),
           ...(patch.trigger ? { scheduleFrom: anchor } : {}),
           ...(active === false ? { nextFireAt: null } : {}),
-          ...(turnedOn ? { pausedReason: null } : {}),
+          // Turning it on, or a person's pause: no reason left over. A pause over the series' end (the last fire
+          // recorded, not yet started) is the person's, so that fire doesn't run.
+          ...(turnedOn || patch.active === false ? { pausedReason: null } : {}),
           ...(next.trigger.kind === "webhook" && !row.hookId ? { hookId: newId("hook") } : {}),
           ...(next.trigger.kind !== "webhook" ? { hookId: null, webhookSecret: null } : {}),
           // Another inbox or folder: the cursor starts again (the first check only marks the position).
@@ -461,11 +470,17 @@ export function registerRoutines(app: Hono<AppEnv>) {
     const row = await routineOf(c, me);
     const { name } = await readJson(c, duplicateBody);
     const trigger = triggerOf(row);
-    await checkInput(deps, me, {
-      agentId: row.agentId,
-      target: targetOf(row),
-      trigger: trigger.kind === "once" && new Date(trigger.at) <= deps.now() ? { kind: "webhook" } : trigger,
-    });
+    await checkInput(
+      deps,
+      me,
+      {
+        agentId: row.agentId,
+        target: targetOf(row),
+        trigger:
+          trigger.kind === "once" && new Date(trigger.at) <= deps.now() ? { kind: "webhook" } : trigger,
+      },
+      me.userId,
+    );
     const [copy] = await deps.db
       .insert(routines)
       .values({

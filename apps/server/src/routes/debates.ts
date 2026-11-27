@@ -10,6 +10,7 @@
 // An agent's turn and the synthesis ask the runtime for a text (`complete`): until slice S6 the debate's advance stops
 // at that step before writing anything and the debate waits there (debates.ts). Everything a person does here works
 // without it.
+import { createHash } from "node:crypto";
 import type {
   AcceptedDebateSuggestion,
   ActorRef,
@@ -67,7 +68,7 @@ import { conflict, forbidden, HttpError, notFound, param, readJson, readQuery } 
 import { createIssue, issueById } from "../issues";
 import { type MessageRow, messageInWorkspace } from "../messages";
 import { closeNotifications } from "../notifications";
-import { personalPlanError, withPlanOwners } from "../runners/plans";
+import { requirePlanOwners } from "../runners/plans";
 import { requireMember, WORKSPACE } from "../workspace-scope";
 
 const { debates, debatePosts, agents, members, messages, runs } = schema;
@@ -87,8 +88,7 @@ async function checkAgents(
     .from(agents)
     .where(and(eq(agents.workspaceId, workspaceId), inArray(agents.id, agentIds), isNull(agents.archivedAt)));
   if (rows.length !== new Set(agentIds).size) throw notFound("Agent not found");
-  for (const a of await withPlanOwners(deps.db, rows))
-    if (a.planOwnerUserId !== null && a.planOwnerUserId !== initiatedBy) throw personalPlanError();
+  await requirePlanOwners(deps.db, rows, initiatedBy);
 }
 
 async function checkPeople(deps: AppDeps, workspaceId: string, userIds: string[]) {
@@ -305,6 +305,10 @@ async function releaseSuggestion(deps: AppDeps, messageId: string) {
 }
 
 /** Writes the answered suggestion into the message (only its own keys) and tells the channel. */
+/** The id of the debate a suggestion opens: derived from its message, so it is the same on every accept. */
+const suggestionDebateId = (messageId: string) =>
+  `deb_${createHash("sha256").update(`debate-suggestion:${messageId}`).digest("hex").slice(0, 16)}`;
+
 async function settleSuggestion(
   deps: AppDeps,
   row: MessageRow,
@@ -313,6 +317,7 @@ async function settleSuggestion(
 ) {
   const patch = {
     title: suggestion.title,
+    goal: suggestion.goal,
     agentIds: suggestion.agentIds,
     state: suggestion.state,
     debateId: suggestion.debateId,
@@ -348,7 +353,7 @@ export function registerDebates(app: Hono<AppEnv>) {
           .string()
           .max(20 * 65)
           .default(""),
-        rounds: z.coerce.number().int().min(1).max(MAX_ROUNDS).default(3),
+        rounds: z.coerce.number().int().min(0).max(MAX_ROUNDS).default(3),
         format: z.enum(["decision", "plan"]).optional(),
       }),
     );
@@ -582,7 +587,12 @@ export function registerDebates(app: Hono<AppEnv>) {
         userIds,
         speakers,
         pendingSpeakers: fresh.pendingSpeakers.filter((s) => !gone(s)),
-        pseudonyms: recastPseudonyms(fresh.pseudonyms, agentIds, await freezePseudonyms(tx, fresh)),
+        // Every agent at the table has a pseudonym, as when it opened: the readers and the speakers.
+        pseudonyms: recastPseudonyms(
+          fresh.pseudonyms,
+          [...agentIds, ...speakers.filter((s) => s.type === "agent").map((s) => s.id)],
+          await freezePseudonyms(tx, fresh),
+        ),
         leadAgentId:
           fresh.leadAgentId && agentIds.includes(fresh.leadAgentId)
             ? fresh.leadAgentId
@@ -722,6 +732,8 @@ export function registerDebates(app: Hono<AppEnv>) {
     let debate: DebateRow;
     try {
       debate = await openDebate(deps, {
+        // One debate per suggestion: an accept retried after a failure past the insert finds the same debate.
+        id: suggestionDebateId(row.id),
         workspaceId: me.workspaceId,
         title: overrides.title ?? suggestion.title,
         goal: overrides.goal ?? suggestion.goal,
@@ -736,11 +748,14 @@ export function registerDebates(app: Hono<AppEnv>) {
       await releaseSuggestion(deps, row.id);
       throw err;
     }
+    // What the debate opened with, the overrides included.
     const accepted: DebateSuggestion = {
       ...suggestion,
       state: "accepted",
       debateId: debate.id,
       title: debate.title,
+      goal: debate.goal,
+      agentIds: debate.agentIds,
     };
     await settleSuggestion(deps, row, accepted, { debate: { debateId: debate.id, title: debate.title } });
     return c.json<AcceptedDebateSuggestion>(
