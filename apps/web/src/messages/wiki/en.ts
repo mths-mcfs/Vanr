@@ -108,6 +108,7 @@ export default {
   "access.you": "{name} (you)",
   "access.pickChannel": "Pick a channel",
   "access.save": "Save",
+  "access.stillSyncing": "Some changes are still syncing. Try again in a moment, so none is lost.",
   "access.failed": "Who reads it could not be changed",
   "access.restricted": "Restricted",
   "access.byChannel": "Only readers of #{channel}",
@@ -116,7 +117,9 @@ export default {
   "comments.title": { one: "{count} open comment", other: "{count} open comments" },
   "comments.list": "Comments",
   "comments.empty": "No comments yet. Select some text to comment on it.",
-  "comments.failed": "The comments could not be loaded.",
+  "comments.failed": "The comments and proposals could not be loaded.",
+  "comments.cantAnchor":
+    "This passage crosses formatting, so a comment can’t hold to it. Select plain text instead.",
   "comments.onSelection": "Comment on the selection",
   "comments.new": "Your comment",
   "comments.send": "Comment",

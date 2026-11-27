@@ -35,7 +35,8 @@ function Composer({
   label: string;
   submit: string;
   busy: boolean;
-  onSubmit: (body: string) => void;
+  /** Sends the text; `sent` empties the field, so a failed send keeps what was written. */
+  onSubmit: (body: string, sent: () => void) => void;
   onCancel?: () => void;
 }) {
   const t = useMessages("wiki");
@@ -46,8 +47,7 @@ function Composer({
       onSubmit={(event) => {
         event.preventDefault();
         if (body.trim() === "") return;
-        onSubmit(body.trim());
-        setBody("");
+        onSubmit(body.trim(), () => setBody(""));
       }}
     >
       <Textarea
@@ -73,6 +73,7 @@ function Composer({
 
 export function Annotations({ workspaceId, page, draft, onDraftDone, onDecided }: Props) {
   const t = useMessages("wiki");
+  const common = useMessages("common");
   const describe = useErrorMessage("wiki");
   const when = useRelativeTime();
   const name = useActorName(workspaceId);
@@ -220,10 +221,15 @@ export function Annotations({ workspaceId, page, draft, onDraftDone, onDecided }
               submit={t("comments.send")}
               busy={comment.isPending}
               onCancel={onDraftDone}
-              onSubmit={(body) =>
+              onSubmit={(body, sent) =>
                 comment.mutate(
                   { workspaceId, pageId: page.slug, body: { body, anchor: draft } },
-                  { onSuccess: onDraftDone },
+                  {
+                    onSuccess: () => {
+                      sent();
+                      onDraftDone();
+                    },
+                  },
                 )
               }
             />
@@ -231,7 +237,16 @@ export function Annotations({ workspaceId, page, draft, onDraftDone, onDecided }
         )}
         {notes.data === undefined ? (
           notes.isError ? (
-            <p className="wiki-side__empty">{t("comments.failed")}</p>
+            <Callout
+              tone="danger"
+              role="alert"
+              title={t("comments.failed")}
+              actions={
+                <Button size="sm" onClick={() => void notes.refetch()}>
+                  {common("action.retry")}
+                </Button>
+              }
+            />
           ) : null
         ) : threads.length === 0 && draft === null ? (
           <p className="wiki-side__empty">{t("comments.empty")}</p>
@@ -305,10 +320,16 @@ export function Annotations({ workspaceId, page, draft, onDraftDone, onDecided }
                     submit={t("comments.send")}
                     busy={comment.isPending}
                     onCancel={() => setReplying(null)}
-                    onSubmit={(body) =>
+                    onSubmit={(body, sent) =>
                       comment.mutate(
                         { workspaceId, pageId: page.slug, body: { body, parentId: thread.id } },
-                        { onSuccess: () => setReplying(null) },
+                        {
+                          onSuccess: () => {
+                            sent();
+                            // Only this thread's reply closes: another one opened meanwhile stays.
+                            setReplying((open) => (open === thread.id ? null : open));
+                          },
+                        },
                       )
                     }
                   />

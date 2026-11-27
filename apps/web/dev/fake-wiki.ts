@@ -602,6 +602,10 @@ export class FakeWiki {
         if (!admin(scope) && page.versions[0]?.author.id !== scope.user.id)
           return fail(403, "forbidden", "Only who created the page or an admin can change who reads it");
         const access = params.access as T.WikiAccessInput;
+        // As the server does: a page that becomes restricted gets a new address, so the old one no
+        // longer tells it exists.
+        if ((page.access ?? null) === null && access !== null)
+          page.slug = `${page.slug}-${this.host.id("r")}`;
         page.access =
           access === null
             ? null
@@ -670,7 +674,8 @@ export class FakeWiki {
           if (hunk === undefined || hunk.status !== "pending") continue;
           if (!decision.accept) hunk.status = "rejected";
           else if (body.split(hunk.oldStr).length === 2) {
-            body = body.replace(hunk.oldStr, hunk.newStr);
+            // A function keeps the new text literal (`$&` and the like are not patterns here).
+            body = body.replace(hunk.oldStr, () => hunk.newStr);
             hunk.status = "accepted";
           } else hunk.status = "stale";
         }

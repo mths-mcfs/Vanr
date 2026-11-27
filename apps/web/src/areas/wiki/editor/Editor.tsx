@@ -57,6 +57,18 @@ type Props = {
 
 export type Picked = { quote: string; before: string; after: string };
 
+/**
+ * A selection without the spaces at its ends, which go to the text around it so that the quote and its
+ * context still meet; null when only spaces were selected.
+ */
+export function trimPicked(raw: string, before: string, after: string): Picked | null {
+  const quote = raw.trim();
+  if (quote === "") return null;
+  const lead = raw.slice(0, raw.length - raw.trimStart().length);
+  const trail = raw.slice(raw.trimEnd().length);
+  return { quote, before: before + lead, after: trail + after };
+}
+
 const AROUND = 64;
 
 /** Tells the screen which passage is selected, for a comment on it. */
@@ -70,17 +82,15 @@ const pickPlugin = (onPick: () => ((picked: Picked | null) => void) | undefined)
             const report = onPick();
             if (report === undefined) return;
             const { from, to, empty } = view.state.selection;
-            const quote = empty ? "" : view.state.doc.textBetween(from, to, "\n").trim();
-            if (quote === "") {
-              report(null);
-              return;
-            }
+            const raw = empty ? "" : view.state.doc.textBetween(from, to, "\n");
             const size = view.state.doc.content.size;
-            report({
-              quote,
-              before: view.state.doc.textBetween(Math.max(0, from - AROUND), from, "\n"),
-              after: view.state.doc.textBetween(to, Math.min(size, to + AROUND), "\n"),
-            });
+            report(
+              trimPicked(
+                raw,
+                view.state.doc.textBetween(Math.max(0, from - AROUND), from, "\n"),
+                view.state.doc.textBetween(to, Math.min(size, to + AROUND), "\n"),
+              ),
+            );
           },
         }),
       }),

@@ -112,6 +112,8 @@ export default {
   "access.you": "{name} (você)",
   "access.pickChannel": "Escolha um canal",
   "access.save": "Salvar",
+  "access.stillSyncing":
+    "Ainda há alterações sincronizando. Tente de novo em instantes, para nenhuma se perder.",
   "access.failed": "Não foi possível mudar quem lê",
   "access.restricted": "Restrita",
   "access.byChannel": "Só quem lê #{channel}",
@@ -120,7 +122,9 @@ export default {
   "comments.title": { one: "{count} comentário aberto", other: "{count} comentários abertos" },
   "comments.list": "Comentários",
   "comments.empty": "Nenhum comentário ainda. Selecione um trecho para comentar.",
-  "comments.failed": "Não foi possível carregar os comentários.",
+  "comments.failed": "Não foi possível carregar os comentários e as propostas.",
+  "comments.cantAnchor":
+    "Este trecho atravessa uma formatação, então um comentário não consegue se prender a ele. Selecione texto simples.",
   "comments.onSelection": "Comentar o trecho selecionado",
   "comments.new": "Seu comentário",
   "comments.send": "Comentar",

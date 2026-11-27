@@ -49,6 +49,8 @@ export class FakeCollabSocket {
   static nextScope: "read-write" | "readonly" = "read-write";
   static failHandshake = false;
   static autoOpen = true;
+  /** Never confirms the client's changes as applied, as a server that has not caught up yet. */
+  static holdAcks = false;
 
   readonly url: string;
   readyState = 0; // CONNECTING
@@ -130,12 +132,14 @@ export class FakeCollabSocket {
         writeVarUint(out, 1); // messageYjsSyncStep2
         writeVarBytes(out, Y.encodeStateAsUpdate(this.serverDoc));
         this.emit("message", { data: new Uint8Array(out) });
+        if (FakeCollabSocket.holdAcks) return;
         const ack: number[] = [];
         writeVarString(ack, docName);
         writeVarUint(ack, 8); // SyncStatus
         writeVarUint(ack, 1); // applied = true (clears initial resetUnsyncedChanges)
         this.emit("message", { data: new Uint8Array(ack) });
       } else if (syncType === 2) {
+        if (FakeCollabSocket.holdAcks) return;
         // Update: reply SyncStatus applied = 1
         const out: number[] = [];
         writeVarString(out, docName);

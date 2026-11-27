@@ -5,11 +5,34 @@ import { describe, expect, test } from "bun:test";
 import { act, screen, waitFor, within } from "@testing-library/react";
 import { newServer, renderApp } from "../../../../test/app.tsx";
 import { FakeCollabSocket } from "../../../../test/live-socket.ts";
+import { trimPicked } from "../editor/Editor.tsx";
 import { anchorFor } from "./Annotations.tsx";
 
 const WIKI = "/workspace/workspace_birchwood/wiki";
 const PAGE = `${WIKI}/press-checklist`;
 const side = () => screen.findByRole("complementary", { name: "About this page" });
+
+/** A server whose checklist has open comment threads, by Jonas then Íris. */
+function withThreads(count: number) {
+  const server = newServer();
+  const checklist = server.wiki.pages[0];
+  const authors = ["usr_jonas", "usr_iris"];
+  if (checklist !== undefined)
+    checklist.comments = authors.slice(0, count).map((author, n) => ({
+      id: `ann_t${n}`,
+      agentId: null,
+      anchor: null,
+      anchorState: null,
+      author: { type: "person" as const, id: author },
+      body: `Question ${n + 1}`,
+      createdAt: "2026-11-14T10:00:00.000Z",
+      handledAt: null,
+      handledBy: null,
+      parentId: null,
+      status: "open" as const,
+    }));
+  return server;
+}
 
 describe("access, comments and proposals", () => {
   test("who created a page restricts it to some people; it shows as restricted, and only they keep it", async () => {
@@ -32,6 +55,38 @@ describe("access, comments and proposals", () => {
       expect(within(tree).queryByRole("link", { name: /Ink suppliers/ }) === null).toBe(true),
     );
   });
+
+  test("restricting waits for the live changes still on their way, and keeps the page as it is when they don't arrive", async () => {
+    FakeCollabSocket.instances = [];
+    FakeCollabSocket.nextScope = "read-write";
+    FakeCollabSocket.autoOpen = true;
+    FakeCollabSocket.failHandshake = false;
+    FakeCollabSocket.holdAcks = true;
+    try {
+      const app = await renderApp({
+        path: `${WIKI}/ink-suppliers`,
+        signedInAs: "usr_ana",
+        wikiSocket: FakeCollabSocket as unknown as new (url: string) => WebSocket,
+      });
+      await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Syncing changes…"));
+      await app.user.click(screen.getByRole("button", { name: "Page actions" }));
+      await app.user.click(await screen.findByRole("menuitem", { name: "Who reads it…" }));
+      const dialog = await screen.findByRole("dialog", { name: "Who reads Ink suppliers" });
+      await app.user.click(within(dialog).getByRole("radio", { name: /Only some people and agents/ }));
+      await app.user.click(within(dialog).getByRole("button", { name: "Save" }));
+      expect(
+        await within(dialog).findByText(
+          "Some changes are still syncing. Try again in a moment, so none is lost.",
+          {},
+          { timeout: 6000 },
+        ),
+      ).toBeDefined();
+      const ink = app.server.wiki.pages.find((each) => each.title === "Ink suppliers");
+      expect(ink?.access ?? null).toBe(null);
+    } finally {
+      FakeCollabSocket.holdAcks = false;
+    }
+  }, 15000);
 
   test("after a revoked read who reads the page can no longer be changed from it", async () => {
     FakeCollabSocket.instances = [];
@@ -143,6 +198,60 @@ describe("access, comments and proposals", () => {
     await waitFor(() =>
       expect(within(list).queryByText("Resolved by Ana Beatriz Souza") === null).toBe(true),
     );
+  });
+
+  test("a reply that fails to send keeps its text for another try", async () => {
+    const server = withThreads(1);
+    server.force("createWikiPageComment", { kind: "error", status: 500, code: "internal" }, 50);
+    const app = await renderApp({ path: PAGE, signedInAs: "usr_ana", server });
+    const list = await within(await side()).findByRole("list", { name: "Comments" });
+    await app.user.click(within(list).getByRole("button", { name: "Reply" }));
+    const box = within(list).getByRole("textbox", { name: "Reply to Jonas Lind" }) as HTMLTextAreaElement;
+    await app.user.type(box, "The blue one.");
+    await app.user.click(within(list).getByRole("button", { name: "Comment" }));
+    expect(await screen.findByRole("alert")).toBeDefined();
+    expect(box.value).toBe("The blue one.");
+  });
+
+  test("a reply sent on one thread does not close the reply being written on another", async () => {
+    const server = withThreads(2);
+    const app = await renderApp({ path: PAGE, signedInAs: "usr_ana", server });
+    const list = await within(await side()).findByRole("list", { name: "Comments" });
+    const [first, second] = within(list).getAllByRole("button", { name: "Reply" });
+    await app.user.click(first as HTMLElement);
+    await app.user.type(within(list).getByRole("textbox", { name: "Reply to Jonas Lind" }), "On the first.");
+    const held = app.server.hold("createWikiPageComment");
+    await app.user.click(within(list).getByRole("button", { name: "Comment" }));
+    await app.user.click(second as HTMLElement);
+    const other = within(list).getByRole("textbox", { name: "Reply to Íris Valença" }) as HTMLTextAreaElement;
+    await app.user.type(other, "Still writing.");
+    held.release();
+    await waitFor(() =>
+      expect(app.server.calls.filter((call) => call.method === "createWikiPageComment")).toHaveLength(1),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(within(list).getByRole("textbox", { name: "Reply to Íris Valença" }) === other).toBe(true);
+    expect(other.value).toBe("Still writing.");
+  });
+
+  test("comments and proposals that fail to load say so, and try again", async () => {
+    const server = newServer();
+    server.force("getWikiPageAnnotations", { kind: "error", status: 500, code: "internal" }, 50);
+    const app = await renderApp({ path: PAGE, signedInAs: "usr_ana", server });
+    const panel = await side();
+    const alert = await within(panel).findByRole("alert");
+    expect(within(alert).getByText("The comments and proposals could not be loaded.")).toBeDefined();
+    server.unforce("getWikiPageAnnotations");
+    await app.user.click(within(alert).getByRole("button", { name: "Retry" }));
+    expect(await within(panel).findByRole("region", { name: "1 proposal to review" })).toBeDefined();
+  });
+
+  test("a selection with spaces at its ends gives them to its context, so the right occurrence is found", () => {
+    const picked = trimPicked(" target ", "A target Z\n\nB", "Y");
+    expect(picked).toEqual({ quote: "target", before: "A target Z\n\nB ", after: " Y" });
+    const body = "A target Z\n\nB target Y";
+    expect(anchorFor(body, picked as NonNullable<typeof picked>).position).toBe(14);
+    expect(trimPicked("   ", "a", "b") === null).toBe(true);
   });
 
   test("a picked passage anchors where its surroundings match in the published text", () => {

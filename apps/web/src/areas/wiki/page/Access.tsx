@@ -26,12 +26,18 @@ export function AccessDialog({
   userId,
   onClose,
   onSaved,
+  beforeSave,
 }: {
   workspaceId: string;
   page: WikiPage;
   userId: string | undefined;
   onClose: () => void;
   onSaved: (page: WikiPage) => void;
+  /**
+   * Waits for the live draft's changes still on their way: restricting moves the page to a new address,
+   * which closes this live document. False when they did not all reach the server.
+   */
+  beforeSave: () => Promise<boolean>;
 }) {
   const t = useMessages("wiki");
   const common = useMessages("common");
@@ -49,6 +55,8 @@ export function AccessDialog({
   );
   const [channelId, setChannelId] = useState(current?.kind === "channel" ? current.channelId : "");
   const save = useApiMutation("setWikiPageAccess", { onSuccess: onSaved });
+  const [waiting, setWaiting] = useState(false);
+  const [unsent, setUnsent] = useState(false);
   const toggle = (list: string[], id: string, on: boolean) =>
     on ? [...new Set([...list, id])] : list.filter((each) => each !== id);
 
@@ -79,9 +87,16 @@ export function AccessDialog({
             <Button
               variant="primary"
               disabled={access === undefined}
-              loading={save.isPending}
+              loading={save.isPending || waiting}
               onClick={() => {
-                if (access !== undefined) save.mutate({ workspaceId, pageId: page.slug, body: { access } });
+                if (access === undefined) return;
+                setWaiting(true);
+                setUnsent(false);
+                void beforeSave().then((ready) => {
+                  setWaiting(false);
+                  if (ready) save.mutate({ workspaceId, pageId: page.slug, body: { access } });
+                  else setUnsent(true);
+                });
               }}
             >
               {t("access.save")}
@@ -137,6 +152,11 @@ export function AccessDialog({
                 </SelectItem>
               ))}
             </Select>
+          )}
+          {unsent && (
+            <Callout tone="warning" role="alert">
+              {t("access.stillSyncing")}
+            </Callout>
           )}
           {save.isError && (
             <Callout tone="danger" role="alert" title={t("access.failed")}>

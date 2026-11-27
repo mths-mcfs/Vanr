@@ -187,6 +187,41 @@ test("comment on a passage: the comment keeps the quoted passage", async ({
   await expect(comments.getByText(t("wiki", "comments.orphan"))).toHaveCount(0);
 });
 
+test("comment on a passage across formatting: the person is told instead of leaving a loose comment", async ({
+  page,
+  t,
+  seedUser,
+  signIn,
+  apiAs,
+}) => {
+  const owner = await seedUser({ workspace: "Harbour Café" });
+  const title = "Closing checklist";
+  const slug = await createPage(await apiAs(owner), owner, { title, body: "Bring the **spare** keys home." });
+  await signIn(owner);
+  await page.goto(`/workspace/${owner.workspace.id}/wiki/${slug}`);
+  await expect(
+    page.getByRole("status").filter({ hasText: t("wiki", "draft.published", { version: 1 }) }),
+  ).toBeVisible();
+
+  // Select "the spare keys", from the plain text into and past the bold word.
+  const editor = page.getByRole("textbox", { name: t("wiki", "page.editor", { title }) });
+  await editor.click();
+  await editor.evaluate((element) => {
+    const texts: Text[] = [];
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) texts.push(node as Text);
+    const start = texts.find((each) => each.data.includes("the "));
+    const end = texts.find((each) => each.data.includes(" keys"));
+    if (start === undefined || end === undefined) throw new Error("passage not found");
+    const from = start.data.indexOf("the ");
+    const to = end.data.indexOf(" keys") + " keys".length;
+    window.getSelection()?.setBaseAndExtent(start, from, end, to);
+  });
+  await page.getByRole("button", { name: t("wiki", "comments.onSelection") }).click();
+  await expect(page.getByRole("alert").filter({ hasText: t("wiki", "comments.cantAnchor") })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: t("wiki", "comments.new") })).toHaveCount(0);
+});
+
 // An agent proposes the change through its `propose_wiki_edit` tool, driven by the fake model's
 // directive in a direct message, and the harness runtime runs the tool.
 test("accept a proposal: an agent's change lands on the page as a new version", async ({

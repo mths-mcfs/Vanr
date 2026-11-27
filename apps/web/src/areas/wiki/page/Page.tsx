@@ -609,7 +609,12 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
               icon={<Icon icon={MessageSquarePlus} />}
               disabled={picked === null}
               onClick={() => {
-                if (picked !== null) setAnchor(anchorFor(p.body, picked));
+                if (picked === null) return;
+                // A passage across Markdown marks (bold, a link) has no exact place in the published text:
+                // it can't hold a comment there, so the person is told instead of making an orphan.
+                const found = anchorFor(p.body, picked);
+                if (found.position === undefined) setFailure(new Error(t("comments.cantAnchor")));
+                else setAnchor(found);
               }}
             >
               {t("comments.onSelection")}
@@ -658,6 +663,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
           workspaceId={workspaceId}
           page={p}
           userId={userId}
+          beforeSave={() => settle(live.live)}
           onClose={() => setSharing(false)}
           onSaved={(saved) => {
             setSharing(false);
