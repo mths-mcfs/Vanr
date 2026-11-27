@@ -35,3 +35,35 @@ export interface SkillDetail extends Skill {
   body: string;
   files: { mime: string; path: string; status: "ok" | "skipped" }[];
 }
+
+/** Body of `createSkill`. */
+export interface SkillInput {
+  autoGrantNewAgents?: boolean;
+  body: string;
+  description?: string;
+  name: string;
+  /** The run confirmed private: the whole workspace may read the skill made from it. */
+  shareFromPrivate?: boolean;
+  /** "Save this flow as a skill": the source run (whoever saves has to be able to read it). */
+  sourceRunId?: string;
+}
+
+/** Body of `updateSkill`. */
+export interface SkillPatch {
+  autoGrantNewAgents?: boolean;
+  body?: string;
+  description?: string;
+  name?: string;
+}
+
+/** Body of `importSkill`. */
+export interface SkillImportInput {
+  url: string;
+}
+
+/** Answer of `getSkillSkillMd`: the SKILL.md and the text files, as Claude Code or Codex read them. */
+export interface SkillMarkdown {
+  files: { path: string; text: string }[];
+  markdown: string;
+  name: string;
+}

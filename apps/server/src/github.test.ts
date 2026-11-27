@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { importSkill } from "./github";
+import { importSkill, parseGithubUrl } from "./github";
 
 for (const [description, expected] of [
   ["A description", "A description"],
@@ -15,7 +15,8 @@ for (const [description, expected] of [
         String(url).includes("raw.githubusercontent.com") ? new Response(md) : Response.json([]),
       { preconnect() {} },
     );
-    expect(await importSkill(fetcher, "https://github.com/test/repo/tree/main/test-skill")).toMatchObject({
+    const ref = parseGithubUrl("https://github.com/test/repo/tree/main/test-skill");
+    expect(await importSkill(fetcher, ref, null)).toMatchObject({
       name: "test-skill",
       description: expected,
       body: "Do the work.",

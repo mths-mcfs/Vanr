@@ -18,9 +18,10 @@ import { changeMemory, createMemory, memoryVersionsOf, restoreMemory } from "../
 import type { AppDeps } from "../src/context";
 import { isUniqueViolation } from "../src/db-errors";
 import { HttpError } from "../src/http";
-import { columnsOf, createIssue, updateIssue } from "../src/issues";
+import { addColumn, columnsOf, createIssue, setCriterion, updateIssue } from "../src/issues";
 import { applyConsolidation, normalizeItems } from "../src/memory-consolidation";
 import { approveReview, queueMemoryReview } from "../src/memory-reviews";
+import { saveSkill } from "../src/routes/skills";
 import type { RunningServer } from "../src/server";
 import { signedIn, startTestServer } from "./harness";
 import { forcedPair, gate, instrumented, outcome, sqlText, WAIT_MS } from "./lock-double";
@@ -400,6 +401,70 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("issues and consolidations at onc
       const want = { distinct: 3, order: ["Q", "P", "Already there"] };
       outcome("issue-place", got, want);
       expect(got).toEqual(want);
+    });
+  }, 60_000);
+
+  test("forced: the second criterion change of one issue waits on its row lock, so both criteria stay checked", async () => {
+    await withServer("iss_crit", async (server, admin, { workspaceId, userId }) => {
+      const by = { type: "person" as const, id: userId };
+      const row = await createIssue(server.deps, {
+        workspaceId,
+        title: "Two checks",
+        criteria: ["a", "b"],
+        author: by,
+      });
+      const [a, b] = row.criteria;
+      // A holds right after reading the issue under its lock. With the lock B reads the list after A's check;
+      // without it, B writes the list it read before A's change and A's check is lost.
+      const run = await forcedPair(admin, "issue-criterion", "select", (side, hooks) =>
+        setCriterion(withDb(server.deps, hooks), row, (side === "A" ? a : b)?.id ?? "", true, by),
+      );
+      expect(run.aPids[0]).not.toBe(run.bPids[0]);
+      const [now] = await server.deps.db.select().from(schema.issues).where(eq(schema.issues.id, row.id));
+      const got = now?.criteria.map((c) => c.done);
+      outcome("issue-criterion", got, [true, true]);
+      expect(got).toEqual([true, true]);
+    });
+  }, 60_000);
+
+  test("forced: the second column added waits on the columns' lock, so positions don't repeat", async () => {
+    await withServer("iss_cols", async (server, admin, { workspaceId }) => {
+      // A holds right after reading the column list under the lock. With it B reads the list with A's column;
+      // without it, both lay out the same five columns and their new ones take the same position.
+      const run = await forcedPair(admin, "issue-column-add", "select", (side, hooks) =>
+        addColumn(instrumented(server.deps.db, hooks), workspaceId, { name: side, stage: "in_progress" }),
+      );
+      expect(run.aPids[0]).not.toBe(run.bPids[0]);
+      const cols = await columnsOf(server.deps.db, workspaceId);
+      const got = { count: cols.length, distinct: new Set(cols.map((c) => c.position)).size };
+      outcome("issue-column-add", got, { count: 7, distinct: 7 });
+      expect(got).toEqual({ count: 7, distinct: 7 });
+    });
+  }, 60_000);
+
+  test("forced: the same run's draft saved twice waits on the run's lock and makes one skill", async () => {
+    await withServer("skl_run", async (server, admin, { workspaceId, userId }) => {
+      const runId = "run_forced";
+      // A holds right after looking for a skill of the run. With the lock B looks after A's insert and gets it
+      // back; without it, B finds none either and a second skill is made.
+      const run = await forcedPair(admin, "skill-from-run", "select", (side, hooks) =>
+        saveSkill(instrumented(server.deps.db, hooks), {
+          workspaceId,
+          name: `Report ${side}`,
+          description: "Weekly",
+          body: "1. Gather.",
+          sourceRunId: runId,
+          createdBy: userId,
+        }),
+      );
+      expect(run.aPids[0]).not.toBe(run.bPids[0]);
+      const rows = await server.deps.db
+        .select()
+        .from(schema.skills)
+        .where(eq(schema.skills.sourceRunId, runId));
+      const got = { skills: rows.length, created: [run.a.created, run.b.created] };
+      outcome("skill-from-run", got, { skills: 1, created: [true, false] });
+      expect(got).toEqual({ skills: 1, created: [true, false] });
     });
   }, 60_000);
 
