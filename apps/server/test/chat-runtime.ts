@@ -70,6 +70,7 @@ async function answer(deps: AppDeps, agentId: string, channel: ChannelRow, trigg
   const agent = await agentInWorkspace(deps.db, channel.workspaceId, agentId);
   const tools = await toolsFor(deps, agent, { channel, threadId: trigger.threadId });
   const run = toolRun(deps, agent, channel, {
+    threadId: trigger.threadId,
     trigger: { id: trigger.id, authorId: trigger.author.id, authorName: "" },
     personId: trigger.author.id,
   });

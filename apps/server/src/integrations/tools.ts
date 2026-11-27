@@ -64,13 +64,27 @@ function shallowArgs(schema: Record<string, unknown>) {
     : [];
   const known =
     schema.properties && typeof schema.properties === "object" ? Object.keys(schema.properties) : [];
+  // A key a `patternProperties` pattern matches isn't an extra either (a pattern JS can't read counts as matching).
+  const patterns =
+    schema.patternProperties && typeof schema.patternProperties === "object"
+      ? Object.keys(schema.patternProperties)
+      : [];
+  const byPattern = (key: string) =>
+    patterns.some((p) => {
+      try {
+        return new RegExp(p, "u").test(key);
+      } catch {
+        return true;
+      }
+    });
   return anyArgs.superRefine((args, ctx) => {
     for (const key of required)
       if (!Object.hasOwn(args, key))
         ctx.addIssue({ code: "custom", message: `Missing required argument "${key}"` });
     if (schema.additionalProperties === false)
       for (const key of Object.keys(args))
-        if (!known.includes(key)) ctx.addIssue({ code: "custom", message: `Unknown argument "${key}"` });
+        if (!known.includes(key) && !byPattern(key))
+          ctx.addIssue({ code: "custom", message: `Unknown argument "${key}"` });
   });
 }
 
@@ -148,7 +162,7 @@ export function connectionTools(
   conn: ConnectionRow,
   level: "read" | "write",
   taken: Set<string>,
-  clients: Map<string, Promise<McpClient>>,
+  clients: Map<string, McpSession>,
   denied: (tool: string) => boolean,
   channelAsk = false,
 ): ToolDef<unknown>[] {
@@ -162,6 +176,7 @@ export function connectionTools(
     if (taken.has(name) || denied(name) || denied(tool.name)) continue;
     taken.add(name);
     const label = tool.label || tool.name;
+    const asks = tool.access === "approval" || channelAsk;
     // The class comes from our rule, not from the MCP server's annotation: in the catalog `readOnlyHint` becomes
     // read access by itself, and a `delete_page` marked read-only must not run without a person.
     const effect: EffectClass = SENSITIVE_TOOL.test(tool.name) ? "K3" : tool.access === "read" ? "K0" : "K2";
@@ -192,7 +207,7 @@ export function connectionTools(
           return {
             destination: { kind: "external" as const, allowed: true, target: conn.label },
             // Asking for approval comes from the workspace (the tool's access) or from the channel (an `approval` rule).
-            ...(tool.access === "approval" || channelAsk ? { policy: "ask" as const } : {}),
+            ...(asks ? { policy: "ask" as const } : {}),
             preview: { title: `${conn.label}: ${label}`, body: JSON.stringify(input, null, 2) },
             card,
             credential,
@@ -202,23 +217,34 @@ export function connectionTools(
           repoCheck(input);
           // Stricter than the source: an approval can come long after the plan, so the call runs only while the
           // connection is still active, the tool still on, and the agent's level in this channel still covers it.
-          const live = await stillAllowed(deps, agent, ctx.channel.id, conn.id, tool.name, name);
-          let client = clients.get(conn.id);
-          if (!client) {
-            client = mcpFor(deps, live);
-            clients.set(conn.id, client);
+          const now = await stillAllowed(deps, agent, ctx.channel.id, conn.id, tool.name, name);
+          // The call was planned under this access: one that now changed its class, or now asks a person this
+          // call didn't ask, goes back to the model to be planned again.
+          if (now.access !== tool.access || (now.ask && !asks))
+            throw new ToolInputError(`${conn.label}: "${label}" changed its access. Call it again.`);
+          let client: McpClient;
+          try {
+            client = await sessionFor(deps, clients, now.row);
+          } catch (err) {
+            throw new ToolInputError(
+              `${conn.label} failed: ${err instanceof Error ? err.message : "no client"}`,
+            );
           }
           try {
-            const res = await (await client).callTool(tool.name, input);
+            const res = await client.callTool(tool.name, input);
             return { content: res.text || "(empty result)", isError: res.isError };
           } catch (err) {
             clients.delete(conn.id);
             if (err instanceof McpInsufficientScope) return askScope(ctx, conn, label, err.scope);
-            // A credential rejected in use: the connectors screen must say "Reconnect".
-            if (err instanceof McpAuthRequired) await markNeedsReconnect(deps, conn.id);
-            throw new ToolInputError(
-              `${conn.label} failed: ${err instanceof Error ? err.message : "the server did not answer"}`,
-            );
+            const why = `${conn.label} failed: ${err instanceof Error ? err.message : "the server did not answer"}`;
+            // A credential rejected in use (nothing ran): the connectors screen must say "Reconnect".
+            if (err instanceof McpAuthRequired) {
+              await markNeedsReconnect(deps, conn.id);
+              throw new ToolInputError(why);
+            }
+            // Anything else may have reached the service: not an input error, so runTool keeps the effect key and a
+            // retry doesn't repeat a write blindly.
+            throw new Error(why);
           }
         },
       }),
@@ -271,6 +297,22 @@ async function askScope(
   };
 }
 
+/** A connection's MCP client in the run, with the stored credential it was made with. */
+interface McpSession {
+  secret: string | null;
+  client: Promise<McpClient>;
+}
+
+/** The run's client for the connection, made again when its stored credential changed (a refreshed token). */
+async function sessionFor(deps: AppDeps, clients: Map<string, McpSession>, row: ConnectionRow) {
+  const kept = clients.get(row.id);
+  if (kept && kept.secret === row.secret) return kept.client;
+  const client = mcpFor(deps, row);
+  clients.set(row.id, { secret: row.secret, client });
+  client.catch(() => clients.delete(row.id));
+  return client;
+}
+
 /** The connections that apply to the agent (OAuth that hasn't come back isn't an account yet), with their service. */
 async function candidatesOf(deps: AppDeps, agent: AgentRow) {
   return [
@@ -312,22 +354,24 @@ async function stillAllowed(
   connectionId: string,
   tool: string,
   exposed: string,
-): Promise<ConnectionRow> {
+): Promise<{ row: ConnectionRow; access: schema.ToolAccessLevel; ask: boolean }> {
   const allow = allowance(await grantsOf(deps.db, agent.id));
   const rules = await channelRulesOf(deps.db, agent.workspaceId, agent.id);
   const candidates = await candidatesOf(deps, agent);
   const conn = credentialsFor(candidates, agent.id).find((c) => c.id === connectionId);
   const now = conn?.tools.find((t) => t.name === tool);
-  const level = conn && levelIn(agent, conn, candidates, allow, rules, channelId)?.level;
+  const eff = conn ? levelIn(agent, conn, candidates, allow, rules, channelId) : null;
+  const level = eff?.level;
   const on =
     now?.confirmed &&
     now.access !== "off" &&
     !allow.denied(exposed) &&
     !allow.denied(tool) &&
     (level === "write" || (level === "read" && now.access === "read"));
-  if (!conn || !on) throw new ToolInputError("This connection or tool is no longer available to the agent.");
+  if (!conn || !now || !eff || !on)
+    throw new ToolInputError("This connection or tool is no longer available to the agent.");
   const { key: _, ...row } = conn;
-  return row;
+  return { row, access: now.access, ask: eff.ask };
 }
 
 /**
@@ -345,7 +389,7 @@ export async function toolsFor(
   const allow = allowance(grants);
   const tools = AGENT_TOOLS.filter((t) => allow.builtin(t.name));
   const taken = new Set(tools.map((t) => t.name));
-  const clients = new Map<string, Promise<McpClient>>();
+  const clients = new Map<string, McpSession>();
   const rules = await channelRulesOf(deps.db, workspaceId, agent.id);
   const candidates = await candidatesOf(deps, agent);
   for (const conn of credentialsFor(candidates, agent.id)) {

@@ -35,11 +35,12 @@ test(
           ?.unreadCount;
       expect(await unread()).toBe(1);
 
-      await call(ana, "POST", `${w}/channels/${general}/messages`, {
+      const reply = await call(ana, "POST", `${w}/channels/${general}/messages`, {
         body: "in the thread",
         clientId: "u2",
         threadId: root.body.id,
       });
+      expect([reply.status, reply.body.threadId]).toEqual([201, root.body.id]);
       await expect(betoWs.event("channel.unread", 300)).rejects.toThrow("timeout");
       await expect(anaWs.event("channel.unread", 300)).rejects.toThrow("timeout");
       expect(await unread()).toBe(1);

@@ -434,7 +434,8 @@ async function announceUnread(deps: AppDeps, channelId: string, author: { type: 
       deps.hub.toUser(p.workspaceId, p.id, { type: "channel.unread", channelId });
 }
 
-async function byClientId(db: Db, channelId: string, authorId: string, clientId: string) {
+/** The message this author already posted in the channel with this clientId (a resend), if any. */
+export async function byClientId(db: Db, channelId: string, authorId: string, clientId: string) {
   const [row] = await db
     .select()
     .from(messages)

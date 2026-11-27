@@ -3,11 +3,11 @@
 // the connection and the tool are still on when the person approves. The MCP server is the local fake.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
-import { eq } from "drizzle-orm";
+import { eq, like } from "drizzle-orm";
 import type { AgentRow } from "../src/agents";
 import { type ChannelRow, channelInWorkspace } from "../src/channels";
 import { replaceGrants } from "../src/integrations/access";
-import { connectCustom, saveCustomTools } from "../src/integrations/connectors";
+import { connectCustom, integrationSealer, saveCustomTools } from "../src/integrations/connectors";
 import { argsValidator, toolsFor } from "../src/integrations/tools";
 import type { RunningServer } from "../src/server";
 import { type FakeMcp, startFakeMcp } from "./fake-mcp";
@@ -132,6 +132,13 @@ describe("a connector's tools in the run", () => {
       });
       expect([off.isError, off.content]).toEqual(gone);
 
+      // The tool back on: only the revoke stops the next call.
+      const [row] = await server.deps.db.select().from(connections).where(eq(connections.id, connectionId));
+      if (!row) throw new Error("no connection");
+      await saveCustomTools(server.deps, row, {
+        label: "Stock",
+        tools: [{ name: "create_item", access: "write", label: "Create item" }],
+      });
       const revoked = await approvedAfter(() =>
         server.deps.db
           .update(connections)
@@ -197,10 +204,103 @@ describe("a connector's tools in the run", () => {
   );
 });
 
+describe("a connector call while the run goes on", () => {
+  test(
+    "a tool whose access changed since the plan, to asking a person or to another class, goes back to the model",
+    async () => {
+      const { workspaceId, channel, agent, connectionId } = await setup();
+      await replaceGrants(server.deps.db, workspaceId, agent.id, [{ connectionId: "", scope: "*" }]);
+      const tools = await toolsFor(server.deps, agent, { channel, threadId: null });
+      const sent = mcp.toolCalls.length;
+      const [row] = await server.deps.db.select().from(connections).where(eq(connections.id, connectionId));
+      if (!row) throw new Error("no connection");
+      // The read was planned as K0, with no person; the workspace now asks for approval on it.
+      await saveCustomTools(server.deps, row, {
+        label: "Stock",
+        tools: [{ name: "list_items", access: "approval", label: "List items" }],
+      });
+      const run = toolRun(server.deps, agent, channel);
+      const out = await run.run(tools, "mcp_stock__list_items", {});
+      expect([out.isError, out.content]).toEqual([
+        true,
+        'Stock: "List items" changed its access. Call it again.',
+      ]);
+      expect(run.approvals).toEqual([]);
+      // A channel rule that starts asking now does the same to a write planned without a person.
+      await server.deps.db
+        .insert(agentChannelAccess)
+        .values({ agentId: agent.id, workspaceId, channelId: channel.id, connectionId, level: "approval" });
+      const write = await toolRun(server.deps, agent, channel).run(tools, "mcp_stock__create_item", {
+        name: "x",
+      });
+      expect(write.content).toBe('Stock: "Create item" changed its access. Call it again.');
+      expect(mcp.toolCalls.length).toBe(sent);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a credential stored again during the run is the one the next call sends",
+    async () => {
+      const { workspaceId, channel, agent, connectionId } = await setup();
+      await replaceGrants(server.deps.db, workspaceId, agent.id, [{ connectionId: "", scope: "*" }]);
+      const tools = await toolsFor(server.deps, agent, { channel, threadId: null });
+      const run = toolRun(server.deps, agent, channel);
+      expect((await run.run(tools, "mcp_stock__list_items", {})).content).toBe("bolt, nut");
+      const stale = integrationSealer(server.deps).seal(
+        JSON.stringify({ kind: "api_key", apiKey: "rotated" }),
+      );
+      await server.deps.db.update(connections).set({ secret: stale }).where(eq(connections.id, connectionId));
+      const before = mcp.calls.length;
+      const out = await run.run(tools, "mcp_stock__list_items", {});
+      expect(out.isError).toBe(true);
+      expect(mcp.calls.slice(before).map((c) => c.auth)).toContain("Bearer rotated");
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a write whose answer never came keeps its effect key: a retry doesn't send it blindly",
+    async () => {
+      const { workspaceId, channel, agent, connectionId } = await setup();
+      await replaceGrants(server.deps.db, workspaceId, agent.id, [{ connectionId: "", scope: "*" }]);
+      const tools = await toolsFor(server.deps, agent, { channel, threadId: null });
+      // The server goes away after the plan: the call may or may not have reached it.
+      const gone = startFakeMcp({ keyOnly: true });
+      const unreachable = gone.url;
+      gone.stop();
+      await server.deps.db
+        .update(connections)
+        .set({ serverUrl: unreachable })
+        .where(eq(connections.id, connectionId));
+      const run = toolRun(server.deps, agent, channel, { effectKey: `exec_${connectionId}` });
+      await expect(run.run(tools, "mcp_stock__create_item", { name: "bolt" })).rejects.toThrow(
+        "Stock failed",
+      );
+      const keys = await server.deps.db
+        .select()
+        .from(schema.effectKeys)
+        .where(like(schema.effectKeys.key, `exec_${connectionId}:%`));
+      expect(keys).toHaveLength(1);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
 describe("a connector tool's arguments", () => {
   test("a required key must be the argument's own, not one every object inherits", () => {
     const check = argsValidator({ type: "object", required: ["constructor", "toString"] });
     expect(check.safeParse({}).success).toBe(false);
     expect(check.safeParse({ constructor: 1, toString: "x" }).success).toBe(true);
+  });
+
+  test("with no extras allowed, a key a pattern matches is still allowed", () => {
+    const check = argsValidator({
+      type: "object",
+      patternProperties: { "^x_": { type: "string" } },
+      additionalProperties: false,
+    });
+    expect(check.safeParse({ x_item: "bolt" }).success).toBe(true);
+    expect(check.safeParse({ y_item: "bolt" }).success).toBe(false);
   });
 });

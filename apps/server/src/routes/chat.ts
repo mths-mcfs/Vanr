@@ -24,6 +24,7 @@ import { fileFor } from "../drive";
 import { badRequest, conflict, forbidden, notFound, param, readJson, readQuery } from "../http";
 import { log } from "../logger";
 import {
+  byClientId,
   ensureThread,
   hydrate,
   hydrateOne,
@@ -164,16 +165,32 @@ async function directoryOf(db: Db, workspaceId: string, channelId: string): Prom
   );
 }
 
-async function pinOf(db: Db, row: typeof pins.$inferSelect): Promise<MessagePin> {
-  const [m] = await db.select().from(messages).where(eq(messages.id, row.messageId));
-  if (!m) throw notFound("Message not found");
-  return {
-    channelId: row.channelId,
-    messageId: row.messageId,
-    pinnedBy: row.pinnedBy,
-    pinnedAt: row.pinnedAt.toISOString(),
-    message: await hydrateOne(db, m),
-  };
+/** The pins with their messages, hydrated in one pass, in the order given. */
+async function pinsOf(db: Db, rows: (typeof pins.$inferSelect)[]): Promise<MessagePin[]> {
+  if (rows.length === 0) return [];
+  const found = await db
+    .select()
+    .from(messages)
+    .where(
+      inArray(
+        messages.id,
+        rows.map((r) => r.messageId),
+      ),
+    );
+  const byId = new Map((await hydrate(db, found)).map((m) => [m.id, m]));
+  return rows.flatMap((row) => {
+    const message = byId.get(row.messageId);
+    if (!message) return [];
+    return [
+      {
+        channelId: row.channelId,
+        messageId: row.messageId,
+        pinnedBy: row.pinnedBy,
+        pinnedAt: row.pinnedAt.toISOString(),
+        message,
+      },
+    ];
+  });
 }
 
 /**
@@ -526,7 +543,8 @@ export function registerChat(app: Hono<AppEnv>) {
       const root = await messageInWorkspace(db, me.workspaceId, q.threadId);
       if (root && root.channelId === channel.id && root.threadId === null) rows.unshift(root);
     }
-    return c.json({ messages: await hydrate(db, rows) });
+    // Private history: no cache keeps it for another session of the same browser.
+    return c.json({ messages: await hydrate(db, rows) }, 200, { "cache-control": "private, no-store" });
   });
 
   app.post(`${WORKSPACE}/channels/:channelId/messages`, async (c) => {
@@ -545,20 +563,23 @@ export function registerChat(app: Hono<AppEnv>) {
     );
     const body = input.body.trim();
     if (!body && !input.attachments?.length) throw badRequest("Message is empty", { field: "body" });
-    // Read only: a channel that isn't readable answers 404 before the refusal below, and nobody joins a channel
-    // whose post is then rejected.
-    const { channel: readable } = await readableChannel(deps.db, {
+    // Read only: a channel that isn't readable answers 404 first, and the person joins a public channel only once
+    // the post was accepted (a post rejected below, or a bad attachment or thread, doesn't make them a member).
+    const { channel, isMember } = await readableChannel(deps.db, {
       workspaceId: me.workspaceId,
       userId: me.userId,
       channelId: param(c, "channelId"),
     });
+    // A resend of a post already accepted answers it as it is, whatever changed in the channel since.
+    const resent = await byClientId(deps.db, channel.id, me.userId, input.clientId);
+    if (resent) return c.json(await hydrateOne(deps.db, resent), 200);
     const assignment = await assignmentPostMeta(deps, me, input.threadId, body);
     // Without the agent runtime (slice S6) a post an agent would answer is rejected before it is written: it would
     // stay unanswered with no sign why. A post no agent answers goes out as usual.
     const routes = hasRuntime(deps.runtime, "onPersonMessage");
     if (
       !routes &&
-      (await agentWouldAnswer(deps, readable, {
+      (await agentWouldAnswer(deps, channel, {
         authorId: me.userId,
         body,
         threadId: input.threadId ?? null,
@@ -566,11 +587,6 @@ export function registerChat(app: Hono<AppEnv>) {
       }))
     )
       requireRuntime(deps.runtime, "onPersonMessage");
-    const channel = await writableChannel(deps.db, {
-      workspaceId: me.workspaceId,
-      userId: me.userId,
-      channelId: readable.id,
-    });
     // An attachment is a file of this channel (or of the whole workspace): whoever reads the message can open it.
     const attached: FileRef[] = [];
     for (const id of new Set(input.attachments ?? [])) {
@@ -593,6 +609,11 @@ export function registerChat(app: Hono<AppEnv>) {
         ...assignment,
       },
     });
+    if (!isMember)
+      await deps.db
+        .insert(channelMemberships)
+        .values({ channelId: channel.id, memberType: "person", memberId: me.userId })
+        .onConflictDoNothing();
     // A resend of the same clientId doesn't route again. A routing failure doesn't fail the post.
     if (created && routes) {
       await deps.runtime
@@ -756,9 +777,7 @@ export function registerChat(app: Hono<AppEnv>) {
       .from(pins)
       .where(eq(pins.channelId, channel.id))
       .orderBy(sql`${pins.pinnedAt} desc`);
-    const out: MessagePin[] = [];
-    for (const r of rows) out.push(await pinOf(db, r));
-    return c.json({ pins: out });
+    return c.json({ pins: await pinsOf(db, rows) }, 200, { "cache-control": "private, no-store" });
   });
 
   app.post(`${WORKSPACE}/channels/:channelId/pinned-messages/:messageId`, async (c) => {
@@ -780,7 +799,9 @@ export function registerChat(app: Hono<AppEnv>) {
       .from(pins)
       .where(and(eq(pins.channelId, channel.id), eq(pins.messageId, row.id)));
     if (!pin) throw notFound("Pin not found");
-    return c.json(await pinOf(db, pin));
+    const [shown] = await pinsOf(db, [pin]);
+    if (!shown) throw notFound("Message not found");
+    return c.json(shown);
   });
 
   app.delete(`${WORKSPACE}/channels/:channelId/pinned-messages/:messageId`, async (c) => {

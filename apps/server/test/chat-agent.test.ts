@@ -33,15 +33,23 @@ let mcp: FakeMcp;
 beforeAll(async () => {
   mcp = startFakeMcp({ keyOnly: true });
   runtime = chatRuntime(() => server.deps);
-  server = await startTestServer({
-    env: { ALLOW_PRIVATE_NETWORKS: "true" },
-    fetchExternal: fetch,
-    runtime: (port) => runtime.port(port),
-  });
+  try {
+    server = await startTestServer({
+      env: { ALLOW_PRIVATE_NETWORKS: "true" },
+      fetchExternal: fetch,
+      runtime: (port) => runtime.port(port),
+    });
+  } catch (err) {
+    mcp.stop();
+    throw err;
+  }
 }, SERVER_TEST_MS);
 afterAll(async () => {
-  await server.stop();
-  mcp.stop();
+  try {
+    await server?.stop();
+  } finally {
+    mcp.stop();
+  }
 }, SERVER_TEST_MS);
 
 let n = 0;
@@ -109,7 +117,10 @@ describe("a conversation with an agent", () => {
       });
       expect(mcp.toolCalls.slice(calledBefore).map((c) => c.name)).toEqual(["list_items"]);
       // The text arrives in pieces before the reply is posted, and the run ends.
-      expect(socket.frames.some((f) => isEvent(f, "run.text_delta"))).toBe(true);
+      const delta = await socket.next(
+        (f) => isEvent(f, "run.text_delta") && f.event.runId === toolCall.event.runId,
+      );
+      expect(delta.type).toBe("event");
       const authorOf = (f: RealtimeFrame) =>
         isEvent(f, "message.posted")
           ? (f.event.message as { author: { type: string; id: string } }).author
@@ -166,13 +177,14 @@ describe("a conversation with an agent", () => {
       const other = await seedWorkspace(server, outsider, "Other");
       // Ids of the first workspace under the outsider's own workspace path, and the outsider under the first one.
       const ow = ws(other.workspaceId);
+      const missingIds = (text: string) => text.replace(/(ch|msg|agt)_[a-z0-9]+/g, "$1_missing");
       const asMissing = async (path: string, method = "GET", payload?: unknown) => {
         const real = await call(outsider, method, path, payload);
         const missing = await call(
           outsider,
           method,
-          path.replace(/(ch|msg|agt)_[a-z0-9]+/g, "$1_missing"),
-          payload,
+          missingIds(path),
+          payload === undefined ? undefined : JSON.parse(missingIds(JSON.stringify(payload))),
         );
         expect([real.status, real.body?.error?.code]).toEqual([404, "not_found"]);
         expect([missing.status, missing.body]).toEqual([404, real.body]);
@@ -248,9 +260,19 @@ describe("a conversation with an agent", () => {
       };
       const routedBefore = runtime.routed.length;
       const first = post(ana, w, general, `@${lia.handle} once`, "dup-1");
-      await inRoute;
-      const second = await post(ana, w, general, `@${lia.handle} once`, "dup-1");
-      release();
+      let second: Awaited<ReturnType<typeof post>>;
+      try {
+        await Promise.race([
+          inRoute,
+          first.then(() => {
+            throw new Error("the first post ended without reaching the runtime");
+          }),
+        ]);
+        second = await post(ana, w, general, `@${lia.handle} once`, "dup-1");
+      } finally {
+        runtime.before = undefined;
+        release();
+      }
       const done = await first;
       expect([done.status, second.status]).toEqual([201, 200]);
       expect(second.body.id).toBe(done.body.id);
@@ -429,6 +451,40 @@ describe("without the agent runtime", () => {
         .set({ archivedAt: new Date() })
         .where(eq(schema.agents.id, lia.id));
       expect((await send(ana, general, `@${lia.handle} still there?`)).status).toBe(201);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a resend of an accepted post answers it after an agent joined; a bad attachment doesn't make anyone a member",
+    async () => {
+      const { workspaceId, w, ana, beto, lia, send } = await bareTeam();
+      const open = await seedChannel(bare, workspaceId, { name: "open", members: [ana] });
+      const accepted = await call(beto, "POST", `${w}/channels/${open}/messages`, {
+        body: "hi all",
+        clientId: "r-1",
+      });
+      expect(accepted.status).toBe(201);
+      await addToChannel(bare, open, { type: "agent", id: lia.id });
+      await bare.deps.db
+        .update(schema.channelMemberships)
+        .set({ autoAnswer: true })
+        .where(eq(schema.channelMemberships.memberId, lia.id));
+      const again = await call(beto, "POST", `${w}/channels/${open}/messages`, {
+        body: "hi all",
+        clientId: "r-1",
+      });
+      expect([again.status, again.body.id]).toEqual([200, accepted.body.id]);
+
+      const other = await seedChannel(bare, workspaceId, { name: "other", members: [ana] });
+      const caio = await memberOf(bare, workspaceId, "Caio", email("caio"));
+      const bad = await send(caio, other, "with a file", { attachments: ["file_missing"] });
+      expect(bad.status).toBe(404);
+      const { members } = (await call(ana, "GET", `${w}/channels/${other}/members`)).body;
+      expect(members.map((m: { id: string }) => m.id)).toEqual([ana.user.id]);
+      // The history isn't kept by a cache.
+      const page = await ana.browser.fetch(`${w}/channels/${other}/messages`);
+      expect(page.headers.get("cache-control")).toBe("private, no-store");
     },
     SERVER_TEST_MS,
   );
