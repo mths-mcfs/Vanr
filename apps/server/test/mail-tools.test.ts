@@ -1,8 +1,7 @@
 // Email end to end: an IMAP/SMTP account on a real fake server (local TCP), the account and mailbox routes, and
-// the agent's mailbox tools through runtime/tools' gate in a run built by hand (integration-run.ts) until the runtime
-// comes. Every send is queued in the outbox (its undo window and receipt) and goes out when the outbox delivers;
-// the outbox's wake-up is the runtime's, so here it is the only runtime method given, and without it a send is
-// rejected before anything is reserved, asked or queued.
+// the agent's mailbox tools through runtime/tools' gate in a run built by hand (integration-run.ts). Every send is
+// queued in the outbox (its undo window and receipt) and goes out when the outbox delivers (the runtime's sweep, or
+// `deliverDue` called by the test).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";

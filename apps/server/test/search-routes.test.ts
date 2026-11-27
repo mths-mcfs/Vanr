@@ -1,6 +1,6 @@
 // The workspace's search over HTTP: the permission in the WHERE for each kind the index accepts (a file,
 // a message, a wiki page, an issue, a debate), operators, the Cmd+K palette, the boot's backfill and "ask"
-// mode, which is rejected at its entry until the runtime slice brings the model resolver.
+// mode with the workspace's model.
 //
 // Only files have a producer in this slice (the Drive). The other kinds' producers (chat S6, wiki S4,
 // issues S4, debates S3) come with their areas; here their rows are written straight to the database and

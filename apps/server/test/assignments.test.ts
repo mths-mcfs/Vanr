@@ -2,8 +2,8 @@
 // may see and do what (another workspace's member and a reader outside the private channel get 404, a reader
 // can't act, only the owner or an admin manages), the person's plan edits, the answers (commands, decisions,
 // reviews, submissions, suggestions, join requests), the wiki copy of a private channel's assignment, two
-// people at once on the same transition, and the routes rejected before any write without the agent runtime.
-// The server runs on `agentRuntime` (the runtime as the engine sees it before slice S6) with a verifier that
+// people at once on the same transition, and telling, pausing and closing on the real agent runtime.
+// The server runs on `agentRuntime` (a scripted runtime as the engine sees it) with a verifier that
 // passes everything; the runner is a fake one speaking the protocol, paired through its owner's browser.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";

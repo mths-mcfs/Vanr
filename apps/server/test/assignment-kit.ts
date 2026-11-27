@@ -1,4 +1,4 @@
-// What the assignment engine tests stand on: the agent runtime as the engine sees it before slice S6, a
+// What the assignment engine tests stand on: a scripted agent runtime as the engine sees it, a
 // verifier that passes everything, an agent on a runner and a fake runner paired through its owner's browser.
 import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
@@ -12,7 +12,7 @@ import { connectProtocolRunner, mintSession, type ProtocolRunner } from "./proto
 import type { Person } from "./seed";
 
 /**
- * The agent runtime as the engine sees it, before slice S6: no run is on the air until `runFor` starts one,
+ * A scripted agent runtime as the engine sees it: no run is on the air until `runFor` starts one,
  * which stays live until the test ends it with `finish` (that tells every `onRunEnd` listener, as the runtime
  * does after saving the run's status).
  */

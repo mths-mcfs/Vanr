@@ -1,8 +1,8 @@
 // The assignment engine (assignments/motor.ts) and what moves an assignment (assignments/engine.ts): the pure
 // decision, the loop that takes an assignment through its states to done, and a crash in the middle of a step
-// that resumes without sending the step twice. The loop reaches the agent runtime (slice S6) in every step, so
-// without it the engine doesn't start; here the server runs on `agentRuntime`, the port as the engine sees it
-// with no agent run on the air unless a test starts one through `runFor`. The runner is a fake one speaking the
+// that resumes without sending the step twice. The loop reaches the agent runtime in every step: here the server
+// runs on `agentRuntime`, the port as the engine sees it with no agent run on the air unless a test starts one
+// through `runFor` (one test runs on the real runtime). The runner is a fake one speaking the
 // protocol (protocol-runner.ts) and the verifier is scripted. The routes that create, start and accept an
 // assignment come with slice S5; the tests call the functions those routes call.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";

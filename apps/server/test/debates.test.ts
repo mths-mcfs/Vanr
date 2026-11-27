@@ -214,7 +214,7 @@ describe("debates", () => {
         messageId: a,
         suggestion: { state: "accepted" },
       });
-      // The chat route (S6) reads the message back; here, its saved meta.
+      // The chat route reads the message back; here, its saved meta.
       const [msg] = await server.deps.db.select().from(schema.messages).where(eq(schema.messages.id, a));
       expect(msg?.meta.debate).toEqual({ debateId: res.debate.id, title: "hours" });
       expect(msg?.meta.debateSuggestion).toMatchObject({ state: "accepted", debateId: res.debate.id });
@@ -309,7 +309,7 @@ describe("the debates' debts (F2-3.2-P0-01)", () => {
       const { workspaceId, base, open, ana, beto, lia, rui } = await team();
       const t = await open(ana, { title: "Stalled", goal: "x", agentIds: [lia.id, rui.id], rounds: 1 });
       await settle();
-      // An agent that fails stalls the debate (its turn is the runtime's, S6): the state it leaves.
+      // An agent that fails stalls the debate: the state it leaves.
       await server.deps.db
         .update(schema.debates)
         .set({ status: "stalled", stallInfo: { agentId: rui.id, round: 0, reason: "failed" } })

@@ -2,7 +2,7 @@
 // (assignments/verify.ts), on the rows the assignment routes (S5) will write: who sees and acts on an
 // assignment, its API shape, the status change that only one click wins, the thread's view of it, the
 // messages it posts, and the proofs a submission carries. A person's message reaches the agent through the
-// runtime (S6): until then it is rejected before anything is written.
+// runtime.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";

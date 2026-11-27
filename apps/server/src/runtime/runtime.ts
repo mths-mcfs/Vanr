@@ -2272,7 +2272,7 @@ export class AgentRuntime implements RuntimePort {
   /**
    * The agent's spend this month against its cap: tells the owner at 80% and at the end (once a month each).
    * "exhausted" when not even one answer fits in the worst case (the whole `MAX_TOKENS` output), or when a
-   * reservation was just rejected (`refused`).
+   * reservation was just rejected (`rejected`).
    */
   private async budgetCheck(agent: AgentRow, rejected = false): Promise<"ok" | "warning" | "exhausted"> {
     const at = this.deps.now();

@@ -1,5 +1,5 @@
-// The send queue with an undo window (outbox.ts). The agent tools that queue (runtime/tools, mail-tools) and the
-// runtime's tick and timer that deliver come with S6, and the undo route that cancels with S5; here the tests call
+// The send queue with an undo window (outbox.ts). The agent tools queue (runtime/tools, mail-tools), the runtime's
+// tick and timer deliver and the undo route cancels; here the tests call
 // `queueSend`, `deliverDue` and `cancelQueued` the way those callers do, with the clock injected: the deadline
 // passes when the test moves the clock, never by waiting. The IMAP/SMTP server is the local fake.
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
@@ -803,7 +803,7 @@ describe("stopping the server", () => {
         sendAt: clock,
       });
       const hold = holdSentWrite(own.deps);
-      // The runtime's tick tracks the pass, as S6 does.
+      // The runtime's tick tracks the pass the same way.
       own.deps.runtime.track(deliverDue({ ...own.deps, db: hold.db }), "outbox");
       await hold.begun;
       let stopped = false;
