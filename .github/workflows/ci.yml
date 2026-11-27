@@ -726,6 +726,47 @@ jobs:
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_WIKI_NO_SNAPSHOT: "1"
+      # The assignment engine as a DBOS workflow, and two steps on the same work: one turn goes out (the work
+      # row's lock in the step's claim).
+      - run: bun test apps/server/test/assignment-engine-postgres.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      - name: The forced assignment work test fails without the lock
+        run: |
+          set +e
+          bun test apps/server/test/assignment-engine-postgres.test.ts --test-name-pattern forced > forced-work.log 2>&1
+          status=$?
+          cat forced-work.log
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the forced assignment work test passed without the lock"
+            exit 1
+          fi
+          for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
+            if grep -aqF "$broken" forced-work.log; then
+              echo "::error::the forced assignment work test broke ($broken) instead of failing on its outcome"
+              exit 1
+            fi
+          done
+          set -- work-claim
+          for label in "$@"; do
+            if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" forced-work.log; then
+              echo "::error::the forced $label test did not fail on its outcome without the lock"
+              exit 1
+            fi
+          done
+          failed=$(grep -a '^(fail) ' forced-work.log | sed -E 's/^\(fail\) //; s/ \[[0-9.]+m?s\]$//' | sort -u)
+          if printf '%s\n' "$failed" | grep -qv forced; then
+            echo "::error::a test outside the forced ones failed without the lock: $failed"
+            exit 1
+          fi
+          count=$(printf '%s\n' "$failed" | grep -c .)
+          if [ "$count" -ne "$#" ]; then
+            echo "::error::$count distinct forced tests failed without the lock, expected $#"
+            exit 1
+          fi
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+          VANR_TEST_DROP_LOCKS: "1"
 
   sandbox:
     # The runner's real sandbox (bubblewrap + socat): the attack tests of the isolation of the agent's
