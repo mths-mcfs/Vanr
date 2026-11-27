@@ -438,14 +438,18 @@ const mailOrganize = define({
     if (!input.moveTo) return askedBy(b);
     folderAllowed(b.box.policy, input.moveTo);
     const moveTo = input.moveTo;
-    const trash = await withImap(ctx.deps, b.account, (imap) => folderByRole(imap, "trash", "Trash"));
-    if (moveTo !== trash) return askedBy(b);
+    const trash = await withImap(ctx.deps, b.account, (imap) => trashFolders(imap));
+    if (!isTrash(trash, moveTo)) {
+      plannedTrash.delete(input);
+      return askedBy(b);
+    }
     // Moving to the trash is deleting: mail_delete's rule ("can delete", a person always decides) and its scope.
     assertDeletable(b);
+    plannedTrash.add(input);
     return {
       effect: "K3",
       policy: "ask",
-      preview: { title: `Delete message ${input.uid} from ${input.folder}`, body: `Move to ${trash}` },
+      preview: { title: `Delete message ${input.uid} from ${input.folder}`, body: `Move to ${moveTo}` },
       card: {
         scope: `mail:${b.account.id}:delete`,
         params: { account: b.account.address, folder: input.folder, uid: input.uid },
@@ -456,7 +460,15 @@ const mailOrganize = define({
     const b = await pick(ctx, input.account, "organize");
     if (input.moveTo) folderAllowed(b.box.policy, input.moveTo);
     await withImap(ctx.deps, b.account, async (imap) => {
-      if (input.moveTo && input.moveTo === (await folderByRole(imap, "trash", "Trash"))) assertDeletable(b);
+      // Classified again in the session that moves: a folder that became a trash after the plan was not approved
+      // as a delete, so the move doesn't run.
+      if (input.moveTo && isTrash(await trashFolders(imap), input.moveTo)) {
+        if (!plannedTrash.has(input))
+          throw new ToolInputError(
+            `${input.moveTo} is a trash folder now: call mail_organize again so a person approves it as a delete.`,
+          );
+        assertDeletable(b);
+      }
       await readOne(imap, b.box.policy, input.folder, input.uid, ctx.deps.now(), true);
       if (input.markRead) await imap.addFlags(input.uid, "\\Seen");
       if (input.flag) await imap.addFlags(input.uid, "\\Flagged");
@@ -465,6 +477,25 @@ const mailOrganize = define({
     return "Done.";
   },
 });
+
+/**
+ * The folders the server marks as trash (RFC 6154 `\Trash`; a server may mark several), or "Trash" when it marks
+ * none, as `folderByRole` falls back.
+ */
+async function trashFolders(imap: ImapClient): Promise<string[]> {
+  const marked = (await imap.folders()).filter((f) => f.special === "trash").map((f) => f.name);
+  return marked.length > 0 ? marked : ["Trash"];
+}
+
+/** Folder names compared as the server may: without case. */
+const isTrash = (trash: readonly string[], folder: string) =>
+  trash.some((t) => t.toLowerCase() === folder.toLowerCase());
+
+/**
+ * The mail_organize calls whose plan classified the move as a trash move (K3, a person decides). `runTool` plans
+ * and runs with the same input object, so the run knows what its own plan decided.
+ */
+const plannedTrash = new WeakSet<object>();
 
 /** Deleting (or moving to the trash) needs "can delete" on the mailbox and the action not turned off. */
 function assertDeletable(b: Box) {

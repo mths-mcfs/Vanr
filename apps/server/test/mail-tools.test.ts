@@ -85,6 +85,8 @@ async function team() {
       deps?: AppDeps;
       where?: ChannelRow;
       agent?: AgentRow;
+      /** Runs after the gate decided and before the tool runs (the gate's telemetry hook). */
+      betweenPlanAndRun?: () => void;
     } = {},
   ) => {
     const where = opts.where ?? channel;
@@ -98,6 +100,7 @@ async function team() {
     });
     const run = toolRun(opts.deps ?? withWakeAt(), agent, where, {
       decide: opts.decide,
+      ...(opts.betweenPlanAndRun ? { recordDecision: async () => opts.betweenPlanAndRun?.() } : {}),
       async recordAction(action, tx) {
         await (tx ?? server.deps.db).insert(reversibleActions).values({
           id: newId("act"),
@@ -665,7 +668,9 @@ describe("the mailbox's policy holds on every path", () => {
       });
       expect(exfil.content).toContain("Blocked: this run read content from outside (mail_folders ");
 
-      // With the list holding only INBOX, a draft can't go to Drafts nor a message to Trash.
+      // With the list holding only INBOX, a draft can't go to Drafts nor a message to Trash. Drafts ask a person on
+      // this account, so only a plan that checks the folder refuses before anyone is asked.
+      await call(ana, "PATCH", url(`/mail/accounts/${account.id}`), { confirmActions: ["draft"] });
       const fresh = await runOf({ decide: () => "approved" });
       expect(
         (
@@ -735,6 +740,93 @@ describe("moving to the trash is deleting", () => {
         ["mail_organize", "K3", "irreversible", `mail:${account.id}:delete`],
       ]);
       expect(mail.folders.get("Trash")?.messages.length).toBe(1);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("which folder is a trash", () => {
+  /** Marks `name` as a `\\Trash` folder on the fake server for the length of `fn`. */
+  async function asTrash(name: string, fn: () => Promise<void>) {
+    const box = mail.folders.get(name);
+    if (!box) throw new Error(`no folder ${name}`);
+    const before = box.special;
+    box.special = "\\Trash";
+    try {
+      await fn();
+    } finally {
+      box.special = before;
+    }
+  }
+
+  test(
+    "any folder the server marks \\Trash, matched without case, is a trash move",
+    async () => {
+      clear();
+      const { lia, ana, url, connect, runOf } = await team();
+      const account = (await connect()).body.account;
+      await call(ana, "PUT", url(`/agents/${lia.id}/mail/${account.id}`), {
+        level: "read_write",
+        deletable: false,
+      });
+      const uid = mail.deliver("INBOX", incoming("joao@client.test", "Keep", "Keep me"));
+      const r = await runOf({ decide: () => "approved" });
+      for (const moveTo of ["trash", "TRASH"])
+        expect((await r.ask("mail_organize", { account: mail.user, uid, moveTo })).content).toBe(
+          `You can't delete in ${mail.user}.`,
+        );
+      // A second \\Trash folder (RFC 6154 allows several).
+      await asTrash("Archive", async () => {
+        expect((await r.ask("mail_organize", { account: mail.user, uid, moveTo: "archive" })).content).toBe(
+          `You can't delete in ${mail.user}.`,
+        );
+        await call(ana, "PUT", url(`/agents/${lia.id}/mail/${account.id}`), {
+          level: "read_write",
+          deletable: true,
+        });
+        const asked = await runOf();
+        await asked.ask("mail_organize", { account: mail.user, uid, moveTo: "Archive" });
+        expect(asked.approvals.map((a) => [a.effect, a.card.scope])).toEqual([
+          ["K3", `mail:${account.id}:delete`],
+        ]);
+      });
+      expect(r.approvals).toEqual([]);
+      expect(mail.folders.get("INBOX")?.messages.map((m) => m.uid)).toEqual([uid]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a folder that becomes a trash between the plan and the run is not moved to: the agent is told to try again",
+    async () => {
+      clear();
+      const { lia, ana, url, connect, runOf } = await team();
+      const account = (await connect()).body.account;
+      await call(ana, "PUT", url(`/agents/${lia.id}/mail/${account.id}`), {
+        level: "read_write",
+        deletable: true,
+      });
+      const uid = mail.deliver("INBOX", incoming("joao@client.test", "Keep", "Keep me"));
+      const box = mail.folders.get("Archive");
+      const before = box?.special ?? null;
+      try {
+        // Planned as a plain move (no person); the server marks Archive as a trash before the move runs.
+        const r = await runOf({
+          betweenPlanAndRun: () => {
+            if (box) box.special = "\\Trash";
+          },
+        });
+        const out = await r.ask("mail_organize", { account: mail.user, uid, moveTo: "Archive" });
+        expect([out.isError, out.content]).toEqual([
+          true,
+          "Archive is a trash folder now: call mail_organize again so a person approves it as a delete.",
+        ]);
+        expect(r.approvals).toEqual([]);
+        expect(mail.folders.get("INBOX")?.messages.map((m) => m.uid)).toEqual([uid]);
+        expect(mail.folders.get("Archive")?.messages ?? []).toEqual([]);
+      } finally {
+        if (box) box.special = before;
+      }
     },
     SERVER_TEST_MS,
   );
