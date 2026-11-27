@@ -10,8 +10,13 @@
 // - `server` (one per worker): the real server on a fresh in-memory PGlite. `baseURL` points at it.
 // - `seedUser()`: a new account made through the API, optionally with a workspace. Each call is a
 //   new person, so a journey that signs out or changes the account never touches another one.
+//   With `joins`, the new person is invited into an existing workspace and accepts, with the role given.
 // - `signIn(user)`: puts the person's session in the page's browser context. The session is made once
 //   per person and worker, kept as a storage state file, and reused by every later `signIn`.
+// - `invite(by, { email, role })`: an invitation to `by`'s workspace, made through the API.
+// - `apiAs(user)`: an API client signed in as that person, for what a journey needs to happen
+//   elsewhere (someone else posting a message). Disposed when the test ends.
+// - `bucket`: an S3-compatible bucket on a local port (the server's own test double), for storage.
 // - `t(namespace, key, params)`: the interface text in the project's language, from the web's own
 //   catalogs. Find elements by role and accessible name built with it; add a `data-testid` only where
 //   no role fits.
@@ -24,15 +29,20 @@ import accountEn from "../src/messages/account/en.ts";
 import accountPt from "../src/messages/account/pt-BR.ts";
 import commonEn from "../src/messages/common/en.ts";
 import commonPt from "../src/messages/common/pt-BR.ts";
+import inboxEn from "../src/messages/inbox/en.ts";
+import inboxPt from "../src/messages/inbox/pt-BR.ts";
+import settingsEn from "../src/messages/settings/en.ts";
+import settingsPt from "../src/messages/settings/pt-BR.ts";
 import shellEn from "../src/messages/shell/en.ts";
 import shellPt from "../src/messages/shell/pt-BR.ts";
+import { type Bucket, startBucket } from "./bucket.ts";
 import { type RunningServer, startServer } from "./server.ts";
 
 export { expect };
 
 const CATALOGS = {
-  en: { account: accountEn, common: commonEn, shell: shellEn },
-  "pt-BR": { account: accountPt, common: commonPt, shell: shellPt },
+  en: { account: accountEn, common: commonEn, shell: shellEn, settings: settingsEn, inbox: inboxEn },
+  "pt-BR": { account: accountPt, common: commonPt, shell: shellPt, settings: settingsPt, inbox: inboxPt },
 } as const;
 type Catalogs = (typeof CATALOGS)["en"];
 export type Namespace = keyof Catalogs;
@@ -60,9 +70,19 @@ export type SeededMember = SeededUser & {
   readonly workspace: { readonly id: string; readonly name: string };
 };
 
+export type Role = "member" | "admin" | "owner";
+
 export interface SeedOptions {
   /** Also creates a workspace with this name, owned by the new person. */
   workspace?: string;
+  /** Invites the new person into `by`'s workspace with this role (member by default), and accepts. */
+  joins?: { by: SeededMember; role?: Role };
+}
+
+export interface Invitation {
+  /** The token at the end of the invitation link. */
+  readonly token: string;
+  readonly url: string;
 }
 
 /** Signed-in storage states of one worker, by email. */
@@ -71,10 +91,15 @@ type States = Map<string, string>;
 interface Fixtures {
   t: Text;
   seedUser: {
-    (options: SeedOptions & { workspace: string }): Promise<SeededMember>;
+    (
+      options: SeedOptions & ({ workspace: string } | { joins: SeedOptions["joins"] & {} }),
+    ): Promise<SeededMember>;
     (options?: SeedOptions): Promise<SeededUser>;
   };
   signIn: (user: SeededUser) => Promise<void>;
+  invite: (by: SeededMember, input: { email: string; role?: Role }) => Promise<Invitation>;
+  apiAs: (user: SeededUser) => Promise<APIRequestContext>;
+  bucket: Bucket;
 }
 
 interface WorkerFixtures {
@@ -98,6 +123,9 @@ async function ok(response: Awaited<ReturnType<APIRequestContext["post"]>>, what
   if (!response.ok()) throw new Error(`${what}: HTTP ${response.status()} ${await response.text()}`);
 }
 
+/** The token at the end of an invitation link. */
+const tokenOf = (url: string) => new URL(url).pathname.split("/").pop() ?? "";
+
 /** Whether the session in a saved storage state is still one the server knows. */
 async function sessionHolds(server: RunningServer, path: string): Promise<boolean> {
   const api = await request.newContext({ baseURL: server.url, storageState: path });
@@ -120,6 +148,44 @@ async function signInFresh(server: RunningServer, user: SeededUser): Promise<str
     const path = join(server.dir, `state-${encodeURIComponent(user.email)}.json`);
     await api.storageState({ path });
     return path;
+  } finally {
+    await api.dispose();
+  }
+}
+
+/** A storage state with a session that still counts for this person: the saved one, or a fresh sign-in. */
+async function sessionOf(server: RunningServer, states: States, user: SeededUser): Promise<string> {
+  const saved = states.get(user.email);
+  // A saved state is reused only while its session still counts: a sign-out revokes it.
+  const path =
+    saved !== undefined && (await sessionHolds(server, saved)) ? saved : await signInFresh(server, user);
+  states.set(user.email, path);
+  return path;
+}
+
+/** An API client signed in as the person. The caller disposes it. */
+async function signedIn(server: RunningServer, states: States, user: SeededUser): Promise<APIRequestContext> {
+  return request.newContext({
+    baseURL: server.url,
+    extraHTTPHeaders: { origin: server.url },
+    storageState: await sessionOf(server, states, user),
+  });
+}
+
+async function createInvitation(
+  server: RunningServer,
+  states: States,
+  by: SeededMember,
+  input: { email: string; role?: Role },
+): Promise<Invitation> {
+  const api = await signedIn(server, states, by);
+  try {
+    const answer = await api.post(`/api/v1/workspaces/${by.workspace.id}/invitations`, {
+      data: { email: input.email, role: input.role ?? "member" },
+    });
+    await ok(answer, "create invitation");
+    const { url } = (await answer.json()) as { url: string };
+    return { url, token: tokenOf(url) };
   } finally {
     await api.dispose();
   }
@@ -179,6 +245,15 @@ export const test = base.extend<Fixtures, WorkerFixtures>({
           const body = (await created.json()) as { workspace: { id: string; name: string } };
           workspace = { id: body.workspace.id, name: body.workspace.name };
         }
+        if (options.joins !== undefined) {
+          const { by, role } = options.joins;
+          const invitation = await createInvitation(server, states, by, {
+            email: user.email,
+            ...(role !== undefined && { role }),
+          });
+          await ok(await api.post(`/api/v1/invitations/${invitation.token}/accept`, { data: {} }), "accept");
+          workspace = by.workspace;
+        }
         // The sign-up already signed the person in: that session is the one signIn reuses.
         const path = join(server.dir, `state-${id}.json`);
         await api.storageState({ path });
@@ -193,15 +268,32 @@ export const test = base.extend<Fixtures, WorkerFixtures>({
 
   signIn: async ({ server, states, context }, use) => {
     await use(async (user) => {
-      const saved = states.get(user.email);
-      // A saved state is reused only while its session still counts: a sign-out revokes it.
-      const path =
-        saved !== undefined && (await sessionHolds(server, saved)) ? saved : await signInFresh(server, user);
-      states.set(user.email, path);
+      const path = await sessionOf(server, states, user);
       const state = JSON.parse(await readFile(path, "utf8")) as {
         cookies: Parameters<typeof context.addCookies>[0];
       };
       await context.addCookies(state.cookies);
     });
+  },
+
+  invite: async ({ server, states }, use) => {
+    await use((by, input) => createInvitation(server, states, by, input));
+  },
+
+  apiAs: async ({ server, states }, use) => {
+    const opened: APIRequestContext[] = [];
+    await use(async (user) => {
+      const api = await signedIn(server, states, user);
+      opened.push(api);
+      return api;
+    });
+    await Promise.all(opened.map((api) => api.dispose()));
+  },
+
+  // biome-ignore lint/correctness/noEmptyPattern: Playwright reads a fixture's dependencies from this pattern.
+  bucket: async ({}, use) => {
+    const bucket = await startBucket();
+    await use(bucket);
+    await bucket.stop();
   },
 });

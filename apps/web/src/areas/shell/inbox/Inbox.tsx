@@ -385,7 +385,7 @@ function NoticeRow({
   return (
     <li className="notice" data-unread={unread || undefined} data-waiting={notice.waiting || undefined}>
       <button type="button" className="notice__open" onClick={() => void open()}>
-        {unread && <span className="vr-visually-hidden">{t("unreadMark")}</span>}
+        {unread && <span className="vr-visually-hidden">{`${t("unreadMark")} `}</span>}
         <span className="notice__headline">{headline}</span>
       </button>
       {snippet !== undefined && snippet !== "" && <p className="notice__snippet">{snippet}</p>}

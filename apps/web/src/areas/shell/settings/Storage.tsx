@@ -30,7 +30,7 @@ type Form = Required<Pick<S3Input, "endpoint" | "region" | "bucket" | "pathAddre
  * both may stay empty (the saved pair is kept), but one alone is refused, since the server would
  * silently keep the old pair.
  */
-export function keysState(saved: boolean, form: Pick<Form, "accessKeyId" | "secretAccessKey">) {
+function keysState(saved: boolean, form: Pick<Form, "accessKeyId" | "secretAccessKey">) {
   const key = form.accessKeyId.trim() !== "";
   const secret = form.secretAccessKey.trim() !== "";
   const half = key !== secret;

@@ -38,9 +38,7 @@ const KIND_ORDER = {
   runner_connected: 16,
   reaction: 17,
 } as const satisfies Record<NotificationKind, number>;
-export const KINDS = (Object.keys(KIND_ORDER) as NotificationKind[]).sort(
-  (a, b) => KIND_ORDER[a] - KIND_ORDER[b],
-);
+const KINDS = (Object.keys(KIND_ORDER) as NotificationKind[]).sort((a, b) => KIND_ORDER[a] - KIND_ORDER[b]);
 
 /** The kinds that usually wait for an answer: by default they are the only ones that send email. */
 const WAITING_KINDS: ReadonlySet<NotificationKind> = new Set([

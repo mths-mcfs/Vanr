@@ -24,12 +24,12 @@ describe("the inbox", () => {
     await renderApp({ path: PATH, signedInAs: "usr_ana" });
     await screen.findByRole("region", { name: "Waiting on you" });
     expect(headlines("Waiting on you")).toEqual([
-      "Unread:Ledger asked for your approval",
-      "Unread:Scout has a question for you",
+      "Unread: Ledger asked for your approval",
+      "Unread: Scout has a question for you",
     ]);
     expect(headlines("Today")).toEqual([
-      "Unread:Jonas Lind mentioned you in #print-queue",
-      "Unread:Íris Valença wrote to you",
+      "Unread: Jonas Lind mentioned you in #print-queue",
+      "Unread: Íris Valença wrote to you",
     ]);
     expect(screen.getByRole("tab", { name: /Action needed/ }).textContent).toContain("4");
     expect(screen.getByRole("tab", { name: /FYI/ }).getAttribute("aria-selected")).toBe("false");
@@ -87,7 +87,7 @@ describe("the inbox", () => {
     await waitFor(() => expect(app.address()).toBe(`${PATH}?filter=mentions`));
     await waitFor(() =>
       expect(screen.getAllByRole("button", { name: /^Unread:/ }).map((b) => b.textContent)).toEqual([
-        "Unread:Jonas Lind mentioned you in #print-queue",
+        "Unread: Jonas Lind mentioned you in #print-queue",
       ]),
     );
   });
