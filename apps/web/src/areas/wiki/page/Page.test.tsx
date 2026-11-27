@@ -50,6 +50,8 @@ describe("a wiki page", () => {
       ).toBe(true),
     );
     await waitFor(() => expect(screen.getByText(/version 3/)).toBeDefined());
+    // The editor's name follows the new title.
+    expect(await screen.findByRole("textbox", { name: "Text of Morning press checklist" })).toBeDefined();
   });
 
   test("a tag added on the page is saved, once more on the fresh version when someone saved in between", async () => {
@@ -105,7 +107,7 @@ describe("a wiki page", () => {
     await within(await actions(app)).findByRole("menuitem", { name: "Pin" });
     await app.user.keyboard("{Escape}");
     expect(text.isConnected).toBe(true);
-    expect(screen.getByRole("textbox", { name: "Text of Press checklist" })).toBe(text);
+    expect(screen.getByRole("textbox", { name: "Text of Press checklist" }) === text).toBe(true);
   });
 
   test("a new option of a select property is saved on its definition, then picked", async () => {
@@ -263,7 +265,7 @@ describe("a wiki page", () => {
     expect(await within(dialog).findByText("The first version, as it was written:")).toBeDefined();
   });
 
-  test("who an agent wrote a page for may move it to the trash, as the server allows", async () => {
+  test("a page an agent wrote first is not trashed by who it wrote it for, as the server refuses", async () => {
     const server = newServer();
     const ink = server.wiki.pages.find((each) => each.slug === "ink-suppliers");
     const first = ink?.versions[0];
@@ -271,7 +273,7 @@ describe("a wiki page", () => {
       first.author = { type: "agent", id: "agt_scout", actingFor: "usr_iris" } as typeof first.author;
     const app = await renderApp({ path: `${WIKI}/ink-suppliers`, signedInAs: "usr_iris", server });
     await title();
-    expect(within(await actions(app)).getByRole("menuitem", { name: "Move to trash" })).toBeDefined();
+    expect(within(await actions(app)).queryByRole("menuitem", { name: "Move to trash" }) === null).toBe(true);
   });
 
   test("a page that is not there offers to create it", async () => {

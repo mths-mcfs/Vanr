@@ -193,9 +193,9 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
 
   const admin = can(role, "configure");
   const firstAuthor = p.history.at(-1)?.author;
-  // Who created the page, as the server counts it: their own first version, or an agent's made for them.
-  const createdIt =
-    firstAuthor?.type === "person" ? firstAuthor.id === userId : firstAuthor?.actingFor === userId;
+  // The trash is for who wrote the first version, or an admin: the server's rule (an agent's version
+  // made for someone doesn't count).
+  const createdIt = firstAuthor?.type === "person" && firstAuthor.id === userId;
   // A read the live document revoked counts at once, even before (or if never) the page reads again.
   const denied = live.status === "denied";
   const mayDelete = !denied && (admin || (!p.locked && createdIt && !live.readOnly));

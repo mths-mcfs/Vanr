@@ -191,13 +191,14 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(props, ref
         ctx.update(editorViewOptionsCtx, (options) => ({
           ...options,
           editable: () => editable.current,
-          attributes: {
+          // Read on every update, so a renamed page's editor carries the new title.
+          attributes: () => ({
             class: "wiki-prose",
             role: "textbox",
             "aria-multiline": "true",
             "aria-label": latest.current.label,
             spellcheck: "true",
-          },
+          }),
         }));
         ctx.set(block.key, {
           view: () => {
@@ -246,10 +247,11 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(props, ref
     };
   }, [source]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the label is read through `latest`; a new one asks the view to apply it.
   useEffect(() => {
     editable.current = props.editable;
     editorRef.current?.action((ctx) => ctx.get(editorViewCtx).setProps({}));
-  }, [props.editable]);
+  }, [props.editable, props.label]);
 
   // The pages changed: the [[links]] on screen resolve again (only what changed touches the DOM).
   // biome-ignore lint/correctness/useExhaustiveDependencies: the new list is the signal; `resolve` arrives through the ref.
