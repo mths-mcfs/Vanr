@@ -290,7 +290,7 @@ describe("memory consolidation for review", () => {
   );
 });
 
-describe("without the runtime", () => {
+describe("on the real runtime", () => {
   let bare: RunningServer;
   beforeAll(async () => {
     bare = await startTestServer();
@@ -298,27 +298,45 @@ describe("without the runtime", () => {
   afterAll(() => bare.stop(), SERVER_TEST_MS);
 
   test(
-    "the lab's run, the drafts, the builder, the consolidation and the skill draft are rejected at their entry",
+    "the lab's run, the drafts, the builder, the consolidation and the skill draft answer on the runtime",
     async () => {
       const { workspaceId, ana, beto, lia } = await team(bare);
       const liaLab = lab(workspaceId, lia.id);
       await ok(call(ana, "POST", `${liaLab}/test-cases`, { input: "hi" }), 201);
-      const unavailable = async (who: Person, path: string, payload?: unknown) => {
-        const res = await call(who, "POST", path, payload);
-        expect([path, res.status, res.body.error.code]).toEqual([path, 503, "not_available"]);
-      };
-      await unavailable(ana, `${liaLab}/evals`, { instructions: "x" });
-      await unavailable(ana, `${ws(workspaceId)}/agent-drafts`, { description: "A support agent" });
-      await unavailable(ana, `${liaLab}/builder`, { description: "A support agent" });
-      await unavailable(ana, `${liaLab}/memory-consolidations`);
-      await unavailable(ana, `${ws(workspaceId)}/runs/run_nope/skill-draft`);
-      // Nothing was written.
-      expect((await ok<{ evals: unknown[] }>(call(ana, "GET", `${liaLab}/evals`))).evals).toEqual([]);
-      expect(
-        (await ok<{ consolidations: unknown[] }>(call(ana, "GET", `${liaLab}/memory-consolidations`)))
-          .consolidations,
-      ).toEqual([]);
-      // Who may not ask gets 403 before that.
+      expect((await call(ana, "POST", `${liaLab}/evals`, { instructions: "x" })).status).toBe(201);
+      await bare.deps.runtime.settle();
+      const { evals } = await ok<{ evals: { status: string }[] }>(call(ana, "GET", `${liaLab}/evals`));
+      expect(evals.map((e) => e.status)).toEqual(["done"]);
+      const drafted = await ok<{ testModel: boolean }>(
+        call(ana, "POST", `${ws(workspaceId)}/agent-drafts`, { description: "A support agent" }),
+      );
+      expect(drafted.testModel).toBe(true);
+      expect((await call(ana, "POST", `${liaLab}/builder`, { description: "A support agent" })).status).toBe(
+        200,
+      );
+      for (const text of ["The office opens at 9.", "the office opens at 9."])
+        await createMemory(
+          bare.deps.db,
+          new Date(),
+          {
+            workspaceId,
+            agentId: lia.id,
+            scope: "agent",
+            path: null,
+            text,
+            untrustedSource: false,
+            origin: { by: null, name: null, channel: null, at: new Date().toISOString() },
+          },
+          { author: { type: "system" } },
+        );
+      expect((await call(ana, "POST", `${liaLab}/memory-consolidations`)).status).toBe(201);
+      await bare.deps.runtime.settle();
+      const { consolidations } = await ok<{ consolidations: { status: string }[] }>(
+        call(ana, "GET", `${liaLab}/memory-consolidations`),
+      );
+      expect(consolidations.map((x) => x.status)).toEqual(["ready"]);
+      expect((await call(ana, "POST", `${ws(workspaceId)}/runs/run_nope/skill-draft`)).status).toBe(404);
+      // Who may not ask gets 403.
       for (const path of [
         `${ws(workspaceId)}/agent-drafts`,
         `${liaLab}/builder`,

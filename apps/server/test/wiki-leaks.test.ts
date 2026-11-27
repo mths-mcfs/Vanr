@@ -16,7 +16,7 @@ import type { RunningServer } from "../src/server";
 import { createPage, pageBySlug } from "../src/wiki";
 import { createProposal } from "../src/wiki-annotations";
 import { MAX_LINKS } from "../src/wiki-links";
-import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
+import { body, SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
 import { memberOf, type Person, seedChannel, seedWorkspace } from "./seed";
 import { apiError, wikiApi } from "./wiki-api";
 import { connect, until } from "./wiki-live";
@@ -483,7 +483,7 @@ describe("mentions and the search with an answer", () => {
       q: "quokkacorp",
     });
     expect(res.status).toBe(200);
-    const answer = await res.json();
+    const answer = await body(res);
     expect(answer.sources).toEqual([]);
     expect(JSON.stringify(answer)).not.toContain("merger");
   });

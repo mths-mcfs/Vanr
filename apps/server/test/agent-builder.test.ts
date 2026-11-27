@@ -1,7 +1,6 @@
 // "Describe it and I build it" (agent-builder.ts). Drafting calls the agent runtime (the workspace's provider for a
-// new agent, a completion paid by the agent for an existing one), which comes with S6: here the entries are proven
-// to say no before taking anything, and the draft's validation (`toDraft`, where everything the model returns goes
-// through) is proven on its own, with replies a model could send.
+// new agent, a completion paid by the agent for an existing one); the draft's validation (`toDraft`, where everything
+// the model returns goes through) is proven on its own, with replies a model could send.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
@@ -137,30 +136,37 @@ describe("who may", () => {
   );
 });
 
-describe("without the runtime", () => {
+describe("on the runtime", () => {
   test(
-    "both entries answer not_available before the hourly slot or a proposal is taken",
+    "both entries draft with the test model and share the hourly slot; an existing agent's change is a proposal",
     async () => {
       const { me, agent } = await existingAgent();
-      for (let i = 0; i < DRAFTS_PER_HOUR + 2; i++) {
-        await expect(draftNewAgent(server.deps, me, "A sales helper")).rejects.toMatchObject({
-          status: 503,
-          code: "not_available",
-          params: { method: "providerForWorkspace" },
-        });
-        await expect(proposeFromDescription(server.deps, me, agent, "Answer in lists")).rejects.toMatchObject(
-          {
-            status: 503,
-            code: "not_available",
-            params: { method: "complete" },
-          },
-        );
-      }
+      const fresh = await draftNewAgent(server.deps, me, "A sales helper");
+      expect(fresh).toMatchObject({ testModel: true });
+      expect(fresh.instructions.length).toBeGreaterThan(0);
+      const changed = await proposeFromDescription(server.deps, me, agent, "Answer in lists");
+      expect(changed.draft.testModel).toBe(true);
+      // The new instructions wait as a proposal for the owner, written by the agent's own call on the runtime.
       const written = await server.deps.db
         .select()
         .from(schema.proposals)
         .where(eq(schema.proposals.workspaceId, me.workspaceId));
-      expect(written).toEqual([]);
+      expect(written.map((p) => [p.agentId, p.targetKind, p.after])).toEqual([
+        [agent.id, "agent_prompt", changed.draft.instructions],
+      ]);
+      expect(changed.proposal?.id).toBe(written[0]?.id);
+      // The hour's slots are shared by both entries: past them, both answer 429 and take nothing.
+      for (let i = 2; i < DRAFTS_PER_HOUR; i++) await draftNewAgent(server.deps, me, "Another helper");
+      await expect(draftNewAgent(server.deps, me, "One more")).rejects.toMatchObject({ status: 429 });
+      await expect(proposeFromDescription(server.deps, me, agent, "And bold")).rejects.toMatchObject({
+        status: 429,
+      });
+      expect(
+        await server.deps.db
+          .select()
+          .from(schema.proposals)
+          .where(eq(schema.proposals.workspaceId, me.workspaceId)),
+      ).toHaveLength(1);
     },
     SERVER_TEST_MS,
   );

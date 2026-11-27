@@ -7,12 +7,21 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Issue, IssueActivity, IssueColumn } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { createFile } from "../src/drive";
 import { columnsOf, createIssue } from "../src/issues";
 import { BOARD_POSITION_MAX, COMMENT_FILES_MAX, ISSUE_LIST_LIMIT } from "../src/routes/issues";
 import type { RunningServer } from "../src/server";
-import { Browser, body, SERVER_TEST_MS, settle, signedIn, startTestServer, TestSocket } from "./harness";
+import {
+  Browser,
+  body,
+  SERVER_TEST_MS,
+  settle,
+  signedIn,
+  startTestServer,
+  TestSocket,
+  waitFor,
+} from "./harness";
 import { memberOf, type Person, seedChannel, seedWorkspace } from "./seed";
 
 let server: RunningServer;
@@ -549,31 +558,211 @@ describe("comment attachments", () => {
   );
 });
 
-describe("agents and the runtime", () => {
+describe("asking an agent", () => {
+  const issueOf = (who: Person, workspaceId: string, number: number) =>
+    ok<Issue>(call(who, workspaceId, "GET", `/issues/seq/${number}`));
+  const dmWith = async (workspaceId: string, agentId: string) => {
+    const [dm] = await server.deps.db
+      .select({ id: schema.channels.id })
+      .from(schema.channels)
+      .innerJoin(schema.channelMemberships, eq(schema.channelMemberships.channelId, schema.channels.id))
+      .where(
+        and(
+          eq(schema.channels.workspaceId, workspaceId),
+          eq(schema.channels.kind, "dm"),
+          eq(schema.channelMemberships.memberId, agentId),
+        ),
+      );
+    if (!dm) throw new Error("no DM");
+    return dm.id;
+  };
+  /** Waits until the agent has a run on the air. */
+  const running = async (workspaceId: string, who: Person, agentId: string) => {
+    await waitFor(async () => {
+      const { runs } = await ok<{ runs: { agentId: string; status: string }[] }>(
+        call(who, workspaceId, "GET", "/active-runs"),
+      );
+      return runs.some((r) => r.agentId === agentId && r.status === "running");
+    });
+  };
+
   test(
-    "an agent assignee and ask-agent are rejected at their entry (no runtime yet) and leave nothing behind",
+    "the agent becomes the assignee, the issue goes in progress and the request reaches its DM",
     async () => {
       const { workspaceId, ana } = await team();
       const lia = await seedAgent(workspaceId, ana, "lia");
-      const created = await call(ana, workspaceId, "POST", "/issues", {
-        title: "Write the FAQ",
+      const issue = await ok<Issue>(
+        call(ana, workspaceId, "POST", "/issues", { title: "Write the FAQ", criteria: ["5 questions"] }),
+        201,
+      );
+      const started = await ok<Issue>(
+        call(ana, workspaceId, "POST", `/issues/${issue.id}/ask-agent`, { agentId: lia }),
+      );
+      expect(started).toMatchObject({
+        status: "in_progress",
         assignee: { type: "agent", id: lia },
+        work: { state: "working" },
       });
-      expect([created.status, created.json.error.code]).toEqual([503, "not_available"]);
-      expect((await ok<{ issues: Issue[] }>(call(ana, workspaceId, "GET", "/issues"))).issues).toEqual([]);
+      await settle(server);
+      const dm = await dmWith(workspaceId, lia);
+      const msgs = await server.deps.db
+        .select()
+        .from(schema.messages)
+        .where(eq(schema.messages.channelId, dm))
+        .orderBy(schema.messages.createdAt);
+      expect(msgs[0]?.meta.workedIssue).toEqual({ issueId: issue.id, number: issue.number });
+      expect([msgs.at(-1)?.authorKind, msgs.at(-1)?.authorId]).toEqual(["agent", lia]);
+      // The run that served the request ended: the issue leaves "working" and keeps which run it was.
+      const done = await issueOf(ana, workspaceId, issue.number);
+      expect(done.work).toMatchObject({ state: "idle", reason: null });
+      expect(done.work?.runId).toMatch(/^run_/);
+      const nope = await call(ana, workspaceId, "POST", `/issues/${issue.id}/ask-agent`, {
+        agentId: "agt_nope",
+      });
+      expect(nope.status).toBe(404);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "an agent out of budget: the issue is blocked with the reason, not working",
+    async () => {
+      const { workspaceId, ana } = await team();
+      const lia = await seedAgent(workspaceId, ana, "lia");
+      await server.deps.db
+        .update(schema.agents)
+        .set({ budgetPerMonthUsd: 0 })
+        .where(eq(schema.agents.id, lia));
       const issue = await ok<Issue>(
         call(ana, workspaceId, "POST", "/issues", { title: "Write the FAQ" }),
         201,
       );
-      const asked = await call(ana, workspaceId, "POST", `/issues/${issue.id}/ask-agent`, { agentId: lia });
-      expect([asked.status, asked.json.error.code]).toEqual([503, "not_available"]);
-      const still = await ok<Issue>(call(ana, workspaceId, "GET", `/issues/seq/${issue.number}`));
-      expect([still.assignee, still.status, still.work]).toEqual([null, "todo", null]);
-      const dms = await server.deps.db
-        .select()
-        .from(schema.channels)
-        .where(eq(schema.channels.workspaceId, workspaceId));
-      expect(dms.filter((c) => c.kind === "dm")).toEqual([]);
+      expect(
+        await ok<Issue>(call(ana, workspaceId, "POST", `/issues/${issue.id}/ask-agent`, { agentId: lia })),
+      ).toMatchObject({ work: { state: "working" } });
+      await settle(server);
+      expect((await issueOf(ana, workspaceId, issue.number)).work).toMatchObject({
+        state: "blocked",
+        reason: "budget",
+      });
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "asked work: a message mid-run, the request asked again of another agent and a server that fell",
+    async () => {
+      const { workspaceId, ana } = await team();
+      const lia = await seedAgent(workspaceId, ana, `lia${n}`);
+      const leo = await seedAgent(workspaceId, ana, `leo${n}`);
+      const workOf = async (number: number) => (await issueOf(ana, workspaceId, number)).work;
+      const ask = (id: string, agentId: string) =>
+        ok<Issue>(call(ana, workspaceId, "POST", `/issues/${id}/ask-agent`, { agentId }));
+
+      // A new message mid-run: the request was already answered and the issue leaves "working".
+      const a = await ok<Issue>(
+        call(ana, workspaceId, "POST", "/issues", { title: "[[slow:150]] Write the FAQ" }),
+        201,
+      );
+      await ask(a.id, lia);
+      await running(workspaceId, ana, lia);
+      const dm = await dmWith(workspaceId, lia);
+      await ok(
+        call(ana, workspaceId, "POST", `/channels/${dm}/messages`, {
+          body: "and the returns too",
+          clientId: "mid",
+        }),
+        201,
+      );
+      await settle(server);
+      expect(await workOf(a.number)).toMatchObject({ state: "idle", reason: null });
+
+      // Asked again of Leo while Lia still runs: the end of Lia's run doesn't close Leo's work.
+      const b = await ok<Issue>(
+        call(ana, workspaceId, "POST", "/issues", { title: "[[slow:150]] Check the prices" }),
+        201,
+      );
+      await ask(b.id, lia);
+      await running(workspaceId, ana, lia);
+      await ok(
+        call(ana, workspaceId, "PATCH", `/issues/${b.id}`, { title: "[[slow:600]] Check the prices" }),
+      );
+      await ask(b.id, leo);
+      await waitFor(async () => !server.deps.runtime.isBusy(lia));
+      expect(await workOf(b.number)).toMatchObject({ state: "working" });
+      await settle(server);
+      const [leoRun] = await server.deps.db.select().from(schema.runs).where(eq(schema.runs.agentId, leo));
+      expect(await workOf(b.number)).toEqual({ state: "idle", reason: null, runId: leoRun?.id ?? "" });
+
+      // The server comes back with the run in the middle: the issue is blocked, not working forever.
+      const c = await ok<Issue>(
+        call(ana, workspaceId, "POST", "/issues", { title: "[[slow:300]] Plan the week" }),
+        201,
+      );
+      await ask(c.id, lia);
+      await running(workspaceId, ana, lia);
+      await server.runtime.start();
+      expect(await workOf(c.number)).toMatchObject({ state: "blocked", reason: "interrupted" });
+      await settle(server);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "asked work and the server shutting down in the middle (a deploy): the issue is blocked",
+    async () => {
+      const own = await startTestServer();
+      try {
+        const ana = await signedIn(own, "Ana", email("ana"));
+        const { workspaceId } = await seedWorkspace(own, ana, "Board");
+        const lia = newId("agt");
+        await own.deps.db.insert(schema.agents).values({
+          id: lia,
+          workspaceId,
+          name: "Lia",
+          handle: "lia",
+          model: "claude-haiku-5-5",
+          ownerUserId: ana.user.id,
+          appearance: { color: "blue", eyes: "dot", adornment: "none" },
+        });
+        const path = (p: string) => `/api/v1/workspaces/${workspaceId}${p}`;
+        const issue = await body(
+          await ana.browser.json(path("/issues"), "POST", { title: "[[slow:400]] Plan the week" }),
+        );
+        await ana.browser.json(path(`/issues/${issue.id}/ask-agent`), "POST", { agentId: lia });
+        await waitFor(async () => own.deps.runtime.isBusy(lia));
+        await own.runtime.stop();
+        const [row] = await own.deps.db.select().from(schema.issues).where(eq(schema.issues.id, issue.id));
+        expect(row?.work).toMatchObject({ state: "blocked", reason: "interrupted" });
+      } finally {
+        await own.stop();
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "creating with an agent that doesn't talk to the creator is rejected without leaving the issue created",
+    async () => {
+      const { workspaceId, ana, beto } = await team();
+      const lia = await seedAgent(workspaceId, ana, "lia");
+      await server.deps.db
+        .update(schema.agents)
+        .set({ visibilityMode: "owner" })
+        .where(eq(schema.agents.id, lia));
+      const refused = await call(beto, workspaceId, "POST", "/issues", {
+        title: "Write the FAQ",
+        assignee: { type: "agent", id: lia },
+      });
+      expect(refused.status).toBe(403);
+      expect((await ok<{ issues: Issue[] }>(call(beto, workspaceId, "GET", "/issues"))).issues).toEqual([]);
+      // Whoever talks to the agent creates it and the agent starts at once.
+      const created = await ok<Issue>(
+        call(ana, workspaceId, "POST", "/issues", { title: "FAQ", assignee: { type: "agent", id: lia } }),
+        201,
+      );
+      expect(created).toMatchObject({ assignee: { type: "agent", id: lia }, work: { state: "working" } });
+      await settle(server);
     },
     SERVER_TEST_MS,
   );

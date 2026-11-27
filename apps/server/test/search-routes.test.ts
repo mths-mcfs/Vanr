@@ -302,7 +302,7 @@ describe("ask mode", () => {
       ana.browser.json(`${W(workspaceId)}/search/ask`, "POST", { q: "where is the onboarding checklist?" });
     const first = await ask();
     expect(first.status).toBe(200);
-    const answer = await first.json();
+    const answer = await body(first);
     expect(answer.testModel).toBe(true);
     expect(answer.sources.length).toBeGreaterThan(0);
     expect(answer.blocks.map((b: { text: string }) => b.text).join(" ")).toContain("onboarding checklist");

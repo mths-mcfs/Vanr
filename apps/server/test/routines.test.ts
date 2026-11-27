@@ -78,7 +78,7 @@ describe("routines", () => {
       const socket = await TestSocket.open(ana.browser, workspaceId);
       await socket.subscribe(general);
       skew += HOUR + 60_000;
-      await server.tick();
+      await server.runtime.tick();
       await settle();
       // A routine has nobody waiting: the screen doesn't open the agent's browser in the chat.
       expect((await socket.event("run.status_changed")).event.initiatedBy).toBeNull();
@@ -207,7 +207,7 @@ describe("routines", () => {
         })
       ).body;
       skew += 2 * HOUR;
-      await server.tick();
+      await server.runtime.tick();
       await settle();
       const [docRun] = (await call(ana, "GET", `${base}/${doc.id}/runs`)).body.runs;
       expect(docRun).toMatchObject({ status: "ok", summaryKey: "routines.run.file" });
