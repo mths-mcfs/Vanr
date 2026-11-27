@@ -1046,24 +1046,28 @@ describe("commands on the agent's runner", () => {
       // Caio is an admin when the status is planned and a member when it runs.
       const status = await toolOf("environment_status");
       const asCaio = await ctxOf(caio);
-      await status.plan(asCaio, {});
+      const statusPlan = await status.plan(asCaio, {});
       await server.deps.db
         .update(schema.members)
         .set({ role: "member" })
         .where(and(eq(schema.members.workspaceId, t.workspaceId), eq(schema.members.userId, caio.user.id)));
-      await expect(status.run(asCaio, {})).rejects.toThrow("may not use your runner");
+      await expect(status.run(asCaio, {}, { payload: statusPlan.payload })).rejects.toThrow(
+        "may not use your runner",
+      );
 
       // A command planned on one runner, with the agent lent another before it runs.
       const other = await pairFake(server, t.ana, t.workspaceId, { open });
       const exec = await toolOf("execute_code");
       const asAna = await ctxOf(t.ana);
       const input = { command: "deploy.sh" };
-      await exec.plan(asAna, input);
+      const execPlan = await exec.plan(asAna, input);
       await server.deps.db
         .update(agents)
         .set({ environmentId: other.runnerId })
         .where(eq(agents.id, t.lia.id));
-      await expect(exec.run(asAna, input)).rejects.toThrow("changed since this command was planned");
+      await expect(exec.run(asAna, input, { payload: execPlan.payload })).rejects.toThrow(
+        "changed since this call was planned",
+      );
       expect(requests(other.runner, "exec")).toEqual([]);
       expect(requests(t.fake.runner, "exec")).toEqual([]);
 
@@ -1184,10 +1188,12 @@ describe("commands on the agent's runner", () => {
   );
 
   test(
-    "a browser action planned on one runner isn't sent to the runner the agent was lent before it runs",
+    "a browser call planned on one runner gets an error on the runner lent before it runs, and nothing reaches either",
     async () => {
       const t = await team(undefined, true);
       const other = await pairFake(server, t.ana, t.workspaceId, { browser: true, open });
+      const lend = (runnerId: string) =>
+        server.deps.db.update(agents).set({ environmentId: runnerId }).where(eq(agents.id, t.lia.id));
       const [agent] = await server.deps.db.select().from(agents).where(eq(agents.id, t.lia.id));
       const tools = await environmentToolsFor({ deps: server.deps, agent: agent as typeof t.lia });
       const ctx = (
@@ -1201,26 +1207,76 @@ describe("commands on the agent's runner", () => {
       const calls: [string, Record<string, unknown>][] = [
         ["browser_navigate", { url: "https://shop.example/checkout" }],
         ["browser_click", { target: "#pay" }],
-        ["browser_back", {}],
+        ["browser_upload", { target: "#file", path: "report.pdf" }],
+        ["browser_close", {}],
+        ["browser_screenshot", {}],
       ];
       for (const [name, input] of calls) {
         const tool = tools.find((x) => x.name === name);
         if (!tool?.plan) throw new Error(`no ${name}`);
-        await server.deps.db
-          .update(agents)
-          .set({ environmentId: t.fake.runnerId })
-          .where(eq(agents.id, t.lia.id));
-        await tool.plan(ctx, input);
-        await server.deps.db
-          .update(agents)
-          .set({ environmentId: other.runnerId })
-          .where(eq(agents.id, t.lia.id));
-        await expect(tool.run(ctx, input)).rejects.toThrow("changed since this action was planned");
+        await lend(t.fake.runnerId);
+        const planned = await tool.plan(ctx, input);
+        await lend(other.runnerId);
+        await expect(tool.run(ctx, input, { payload: planned.payload })).rejects.toThrow(
+          "changed since this call was planned",
+        );
+        // With no plan at all (an empty input, no payload) it doesn't reach the runner either.
+        await expect(tool.run(ctx, {})).rejects.toThrow("not planned for a runner");
       }
-      for (const runner of [t.fake.runner, other.runner]) {
-        expect(requests(runner, "browser.open")).toEqual([]);
-        expect(requests(runner, "browser.act")).toEqual([]);
-      }
+      for (const runner of [t.fake.runner, other.runner])
+        for (const op of ["browser.open", "browser.act", "browser.close"])
+          expect(requests(runner, op)).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "an upload approved on one runner and planned again on the runner lent meanwhile fails the approval's hash",
+    async () => {
+      const t = await team(undefined, true);
+      const other = await pairFake(server, t.ana, t.workspaceId, { browser: true, open });
+      const r = await run(t, null);
+      let asked = 0;
+      const out = await r.call(
+        "browser_upload",
+        { target: "#file", path: "report.pdf" },
+        {
+          requestApproval: async (req) => {
+            asked++;
+            // While the person decides, Lia is lent the other runner; the element looks the same there.
+            await server.deps.db
+              .update(agents)
+              .set({ environmentId: other.runnerId })
+              .where(eq(agents.id, t.lia.id));
+            return {
+              id: "apv_u",
+              decision: "approved",
+              reason: null,
+              byName: "Ana",
+              payloadHash: req.payloadHash,
+            };
+          },
+          settleApproval: async () => {},
+        },
+      );
+      expect(asked).toBe(1);
+      expect(out.isError).toBe(true);
+      expect(out.content).toContain("no longer what was approved");
+      for (const runner of [t.fake.runner, other.runner]) expect(requests(runner, "browser.act")).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "after environment_stop, a click doesn't inspect the page on the stopped runner",
+    async () => {
+      const t = await team(undefined, true);
+      const r = await run(t, null);
+      expect((await r.call("environment_stop", {})).content).toBe("Your runner is stopped.");
+      const out = await r.call("browser_click", { target: "#pay" });
+      expect(out.content).toContain("Your runner is stopped");
+      expect(requests(t.fake.runner, "browser.inspect")).toEqual([]);
+      expect(requests(t.fake.runner, "browser.act")).toEqual([]);
     },
     SERVER_TEST_MS,
   );
