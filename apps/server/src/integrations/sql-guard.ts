@@ -237,16 +237,6 @@ export const quoteName = (name: string) =>
 const UNQUOTED_PART = /^[A-Za-z_\u0080-￿][A-Za-z0-9_$\u0080-￿]*$/;
 const encoder = new TextEncoder();
 
-/** What Postgres keeps of a longer name: its first 63 bytes, cut at a character boundary (`truncate_identifier`). */
-function truncateName(name: string): string {
-  if (encoder.encode(name).length <= 63) return name;
-  let kept = "";
-  for (const ch of name) {
-    if (encoder.encode(kept + ch).length > 63) break;
-    kept += ch;
-  }
-  return kept;
-}
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 /**
@@ -357,7 +347,8 @@ function unicodeEscape(text: string): string {
 /**
  * The names a statement could call and the operators it writes: unquoted identifiers folded as Postgres does,
  * quoted identifiers decoded and operators split as in Postgres. Literals and comments don't count. For the
- * catalog lookup of the customer's code (`sql-identity.ts`), done before the statement is planned.
+ * catalog lookup of the customer's code (`sql-identity.ts`), done before the statement is planned. Longer names
+ * are kept whole: the lookup passes them as `name[]`, which the server truncates in its own encoding.
  */
 export function lexWords(sql: string): { words: string[]; operators: string[] } {
   const tokens = lex(sql, true) ?? [];
@@ -382,7 +373,7 @@ export function lexWords(sql: string): { words: string[]; operators: string[] } 
       continue;
     }
     flush();
-    if (t.kind === "word") words.push(truncateName(foldName(text)));
+    if (t.kind === "word") words.push(foldName(text));
     else if (t.kind === "quoted") {
       const unicode = /^[uU]&/.test(text);
       let name = text.slice(unicode ? 3 : 1, -1).replace(/""/g, '"');
@@ -408,7 +399,7 @@ export function lexWords(sql: string): { words: string[]; operators: string[] } 
           );
         }
       }
-      words.push(truncateName(name));
+      words.push(name);
     }
   }
   flush();

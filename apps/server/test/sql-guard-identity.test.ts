@@ -33,7 +33,12 @@ const evil = (signature: string, returns: string, extra = "") =>
      begin raise exception 'customer function ran: %', (select v from secrets limit 1); end $$;`;
 
 type Policy = typeof policy;
-type Run = (sql: string, p?: Policy, raw?: (s: GuardedSession) => Promise<unknown>) => Promise<unknown>;
+type Run = (
+  sql: string,
+  p?: Policy,
+  raw?: (s: GuardedSession) => Promise<unknown>,
+  before?: (s: GuardedSession) => Promise<unknown>,
+) => Promise<unknown>;
 
 /** A fresh database with the fixtures plus `setup`, and a runner of guarded queries in one read-only transaction. */
 async function withDatabase(kind: "PGlite" | "Postgres", setup: string, fn: (run: Run) => Promise<void>) {
@@ -41,10 +46,11 @@ async function withDatabase(kind: "PGlite" | "Postgres", setup: string, fn: (run
     const pg = await memoryPostgres();
     try {
       await pg.exec(FIXTURES + setup);
-      await fn((sql, p = policy, raw) =>
+      await fn((sql, p = policy, raw, before) =>
         pg.transaction(async (tx) => {
           await tx.exec("set transaction read only");
           const session = pgliteGuardedSession(tx);
+          await before?.(session);
           const out = await guardedQuery(session, sql, p);
           return raw ? { out, raw: await raw(session) } : out;
         }),
@@ -57,10 +63,11 @@ async function withDatabase(kind: "PGlite" | "Postgres", setup: string, fn: (run
   const db = postgres(await testDatabaseUrl("vanr_identity"), { max: 1, onnotice: () => {}, prepare: false });
   try {
     await db.unsafe(FIXTURES + setup);
-    await fn(async (sql, p = policy, raw) => {
+    await fn(async (sql, p = policy, raw, before) => {
       let result: unknown;
       await db.begin("read only", async (tx) => {
         const session = postgresGuardedSession(tx);
+        await before?.(session);
         const out = await guardedQuery(session, sql, p);
         result = raw ? { out, raw: await raw(session) } : out;
       });
@@ -420,6 +427,50 @@ for (const kind of ["PGlite", "Postgres"] as const) {
     });
   });
 
+  run(`${kind}: a row security policy that casts to such a domain is refused before it applies`, async () => {
+    // Row security applies to a role that isn't a superuser: the tests' own role is one, so the query runs as another.
+    const role = `vanr_rls_${Math.random().toString(36).slice(2, 10)}`;
+    const setup = `
+      ${evil("public.chk(t text)", "boolean", "immutable")}
+      create domain dom as text check (chk(value));
+      create table t_rls (id int, name text);
+      insert into t_rls values (1, 'a');
+      alter table t_rls enable row level security;
+      alter table t_rls force row level security;
+      create policy p on t_rls using ((name::dom) is not null);
+      create table t_under (id int, name text);
+      alter table t_under enable row level security;
+      alter table t_under force row level security;
+      create policy p on t_under using ((name::dom) is not null);
+      create view v_over as select id from t_under;
+      create role ${role};
+      grant usage on schema public to ${role};
+      grant select on all tables in schema public to ${role};
+    `;
+    await withDatabase(kind, setup, async (q) => {
+      const asRole = (s: GuardedSession) => s.rows(`set local role ${role}`, []);
+      const by = { failure: { reason: "function", name: "public.chk (used by the type public.dom)" } };
+      const allowed = { ...policy, tables: [...policy.tables, "t_rls", "t_under", "v_over"] };
+      expect(await q("select * from t_rls", allowed, undefined, asRole)).toEqual(by);
+      // A table under an allowed view: its policy applies when the view expands.
+      expect(await q("select id from v_over", allowed, undefined, asRole)).toEqual(by);
+      // The rest of the policy still reads.
+      expect(await q("select name from customers", allowed, undefined, asRole)).toEqual({
+        result: { fields: ["name"], rows: [{ name: "Alice" }] },
+      });
+    });
+  });
+
+  run(`${kind}: a long accented name is truncated as the server truncates it`, async () => {
+    // In UTF-8, é is two bytes: Postgres keeps 31 of them in a name (62 bytes).
+    const kept = "é".repeat(31);
+    await withDatabase(kind, evil(`public."${kept}"()`, "text", "immutable"), async (q) => {
+      expect(await q(`select "${"é".repeat(40)}"()`)).toEqual({
+        failure: { reason: "function", name: `public.${kept}()` },
+      });
+    });
+  });
+
   run(`${kind}: a failed lock read still deallocates the prepared statement`, async () => {
     await withDatabase(kind, "", async (q) => {
       const failing = (session: GuardedSession): GuardedSession => ({
@@ -475,3 +526,27 @@ for (const kind of ["PGlite", "Postgres"] as const) {
     },
   );
 }
+
+// The server truncates a name in its own encoding: in LATIN1, é is one byte, so 63 of them fit, where a cut
+// measured in UTF-8 would keep 31. Only on a real Postgres: PGlite has no other encoding than UTF-8.
+test.skipIf(!TEST_POSTGRES_URL)(
+  "Postgres: a long accented name in a LATIN1 database is looked up as the server truncates it",
+  async () => {
+    const url = await testDatabaseUrl(
+      "vanr_latin1",
+      "encoding 'LATIN1' template template0 lc_collate 'C' lc_ctype 'C'",
+    );
+    const db = postgres(url, { max: 1, onnotice: () => {}, prepare: false });
+    try {
+      const kept = "é".repeat(63);
+      await db.unsafe(FIXTURES + evil(`public."${kept}"()`, "text", "immutable"));
+      let out: unknown;
+      await db.begin("read only", async (tx) => {
+        out = await guardedQuery(postgresGuardedSession(tx), `select "${"é".repeat(70)}"()`, policy);
+      });
+      expect(out).toEqual({ failure: { reason: "function", name: `public.${kept}()` } });
+    } finally {
+      await db.end({ timeout: 2 });
+    }
+  },
+);
