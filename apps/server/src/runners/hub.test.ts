@@ -169,6 +169,43 @@ describe("runner hub", () => {
     fresh.ws.close();
   });
 
+  test("only a call refused before it went out says it never reached the runner", async () => {
+    const reachedOf = async (p: Promise<unknown>) => {
+      try {
+        await p;
+      } catch (err) {
+        if (err instanceof RunnerCallError) return [err.code, err.reached];
+        throw err;
+      }
+      throw new Error("expected RunnerCallError");
+    };
+    expect(await reachedOf(hub.call("nobody", "list", { path: "." }))).toEqual(["offline", false]);
+    const aborted = new AbortController();
+    aborted.abort();
+    const r = await runner("r7");
+    expect(await reachedOf(hub.call("r7", "list", { path: "." }, { signal: aborted.signal }))).toEqual([
+      "canceled",
+      false,
+    ]);
+    // Gone out: a timeout, the runner's own error and a runner that drops may each have done it.
+    expect(await reachedOf(hub.call("r7", "list", { path: "." }, { timeoutMs: 30 }))).toEqual([
+      "timeout",
+      true,
+    ]);
+    const answered = reachedOf(hub.call("r7", "read", { path: "x" }));
+    const frames = await r.until(3);
+    hub.onResult(socketOf("r7"), {
+      id: frames[2]?.id ?? "",
+      ok: false,
+      error: { code: "internal", message: "disk" },
+    });
+    expect(await answered).toEqual(["internal", true]);
+    const dropped = reachedOf(hub.call("r7", "list", { path: "." }));
+    await r.until(4);
+    r.ws.close();
+    expect(await dropped).toEqual(["offline", true]);
+  });
+
   test("without an answer in time the call fails with timeout and the runner gets a cancel", async () => {
     const r = await runner("r5");
     const call = failure(hub.call("r5", "list", { path: "." }, { timeoutMs: 50 }));

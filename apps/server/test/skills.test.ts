@@ -9,7 +9,7 @@ import { generateKeyPairSync } from "node:crypto";
 import type { SkillDetail, SkillMarkdown } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { MAX_FILE, MAX_FILES } from "../src/github";
 import type { RunningServer } from "../src/server";
 import { draftSkillFromRun } from "../src/skill-drafts";
@@ -398,12 +398,29 @@ describe("a run's draft saved as a skill", () => {
   );
 
   test(
-    "asking for the draft is rejected at its entry while the runtime isn't there",
+    "the draft of a finished run with steps asks the runtime; the test model's draft lists the run's tools",
     async () => {
       const { workspaceId, general, ana } = await team();
       const run = await seedRun(workspaceId, ana, general);
+      await server.deps.db.insert(schema.runEvents).values([
+        {
+          runId: run,
+          seq: 0,
+          kind: "tool_call",
+          data: { toolUseId: "tu_1", name: "search", input: {}, turn: 0 },
+        },
+        { runId: run, seq: 1, kind: "text", data: { text: "Here is the report.", turn: 0 } },
+      ]);
       const me = { workspaceId, userId: ana.user.id, role: "owner" as const, handle: "ana" };
-      await expect(draftSkillFromRun(server.deps, me, run)).rejects.toMatchObject({ code: "not_available" });
+      const draft = await draftSkillFromRun(server.deps, me, run);
+      expect(draft).toMatchObject({ runId: run, testModel: true, fromPrivate: false });
+      expect(draft.body).toContain("`search`");
+      // The draft was a call of the run's agent through the runtime.
+      const [asked] = await server.deps.db
+        .select()
+        .from(schema.runs)
+        .where(and(eq(schema.runs.agentId, draft.agentId), eq(schema.runs.what, "Save flow as skill")));
+      expect(asked?.status).toBe("done");
     },
     SERVER_TEST_MS,
   );

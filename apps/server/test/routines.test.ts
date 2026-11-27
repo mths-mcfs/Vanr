@@ -1,8 +1,6 @@
-// Ported from the origin's routine tests, through routes/routines. A routine that writes a document or talks in a
-// conversation reaches the runtime (`complete`, `runFor`, slice S6): "run now" and the webhook reject it at their
-// entry with `not_available`, before the fire is recorded, and that is tested here. A routine whose target is a
-// debate only opens one, so it runs end to end. The scheduled tick is the runtime's (S6): its scenarios and the
-// document's stay in the ledger.
+// Ported from the origin's routine tests, through routes/routines: the runtime's tick runs a scheduled routine in a
+// channel and a "once" routine that writes a document; the webhook runs one in the DM and another that opens a
+// debate.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
@@ -10,11 +8,11 @@ import { eq } from "drizzle-orm";
 import { fireRoutineEvent } from "../src/routines";
 import type { RunningServer } from "../src/server";
 import { signWebhook } from "../src/webhook-signature";
-import { Browser, body, SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
+import { Browser, SERVER_TEST_MS, signedIn, startTestServer, TestSocket } from "./harness";
 import { call, seedAgent, ws } from "./route-calls";
 import { memberOf, type Person, seedChannel, seedWorkspace } from "./seed";
 
-const skew = 0;
+let skew = 0;
 const HOUR = 60 * 60_000;
 let server: RunningServer;
 beforeAll(async () => {
@@ -50,6 +48,79 @@ async function deliver(path: string, secret: string, id: string, body: string, a
 }
 
 describe("routines", () => {
+  test(
+    "a schedule in a channel: the tick runs it, the agent answers through the routine and the history records it",
+    async () => {
+      const { workspaceId, general, ana, beto, lia } = await team();
+      const base = `${ws(workspaceId)}/routines`;
+      const routine = (
+        await call(ana, "POST", base, {
+          active: true,
+          agentId: lia.id,
+          prompt: "Yesterday's sales summary",
+          target: { kind: "channel", channelId: general },
+          trigger: { kind: "schedule", rule: { freq: "hourly", timezone: "UTC" } },
+        })
+      ).body;
+      expect(routine).toMatchObject({
+        name: "Yesterday's sales summary",
+        active: true,
+        running: false,
+        lastRun: null,
+      });
+      expect(new Date(routine.nextFireAt ?? 0).getTime()).toBeGreaterThan(Date.now());
+      // Beto sees it (he reads the channel), but doesn't edit it.
+      expect(((await call(beto, "GET", base)).body.routines as { id: string }[]).map((r) => r.id)).toEqual([
+        routine.id,
+      ]);
+      expect((await call(beto, "PATCH", `${base}/${routine.id}`, { active: false })).status).toBe(403);
+
+      const socket = await TestSocket.open(ana.browser, workspaceId);
+      await socket.subscribe(general);
+      skew += HOUR + 60_000;
+      await server.runtime.tick();
+      await settle();
+      // A routine has nobody waiting: the screen doesn't open the agent's browser in the chat.
+      expect((await socket.event("run.status_changed")).event.initiatedBy).toBeNull();
+      socket.close();
+      const msgs = (await call(ana, "GET", `${ws(workspaceId)}/channels/${general}/messages`)).body
+        .messages as {
+        id: string;
+        author: { type: string; id: string };
+        body: string;
+        meta: Record<string, { routineId?: string }>;
+      }[];
+      const ask = msgs.find((m) => m.meta.routine?.routineId === routine.id);
+      expect(ask).toMatchObject({
+        author: { type: "person", id: ana.user.id },
+        body: "Yesterday's sales summary",
+      });
+      const reply = msgs.at(-1);
+      expect(reply).toMatchObject({
+        author: { type: "agent", id: lia.id },
+        meta: { fromRoutine: { routineId: routine.id } },
+      });
+      const [run] = (await call(ana, "GET", `${base}/${routine.id}/runs`)).body.runs;
+      expect(run).toMatchObject({ status: "ok", messageId: reply?.id });
+      const [after] = (await call(ana, "GET", base)).body.routines;
+      expect(after?.lastRun?.status).toBe("ok");
+      expect(new Date(after?.nextFireAt ?? 0).getTime()).toBeGreaterThan(Date.now() + skew);
+
+      // Pausing takes the next time away; edit the request and run it now.
+      expect(
+        (await call(ana, "PATCH", `${base}/${routine.id}`, { active: false })).body.nextFireAt,
+      ).toBeNull();
+      const edited = (
+        await call(ana, "PATCH", `${base}/${routine.id}`, { prompt: "This week's summary", name: "Weekly" })
+      ).body;
+      expect(edited).toMatchObject({ prompt: "This week's summary", name: "Weekly", active: false });
+      expect((await call(ana, "POST", `${base}/${routine.id}/run`, {})).body.running).toBe(true);
+      await settle();
+      expect((await call(ana, "GET", `${base}/${routine.id}/runs`)).body.runs.length).toBe(2);
+    },
+    SERVER_TEST_MS,
+  );
+
   test(
     "schedule phrases become a rule, a description and the next runs",
     async () => {
@@ -124,7 +195,33 @@ describe("routines", () => {
       });
       expect(past.body.error.code).toBe("rule.past");
 
-      // A webhook routine that talks in the DM reaches the runtime (`runFor`): rejected before it records the fire.
+      // "Once", writing a document: the tick runs it and the file is the agent's.
+      const doc = (
+        await call(ana, "POST", base, {
+          active: true,
+          name: "Report",
+          agentId: lia.id,
+          prompt: "Write the report",
+          target: { kind: "file" },
+          trigger: { kind: "once", at: new Date(Date.now() + skew + HOUR).toISOString(), timezone: "UTC" },
+        })
+      ).body;
+      skew += 2 * HOUR;
+      await server.runtime.tick();
+      await settle();
+      const [docRun] = (await call(ana, "GET", `${base}/${doc.id}/runs`)).body.runs;
+      expect(docRun).toMatchObject({ status: "ok", summaryKey: "routines.run.file" });
+      const [file] = await server.deps.db
+        .select()
+        .from(schema.files)
+        .where(eq(schema.files.id, String(docRun?.summaryVars?.fileId)));
+      expect(file?.title.startsWith("Report · ")).toBe(true);
+      expect([file?.kind, file?.createdBy]).toEqual(["document", { type: "agent", id: lia.id }]);
+      // "Once" turns itself off.
+      const listed0 = (await call(ana, "GET", base)).body.routines as { id: string; active: boolean }[];
+      expect(listed0.find((r) => r.id === doc.id)?.active).toBe(false);
+
+      // A webhook routine that talks in the DM: the payload goes with the request the agent answers.
       const hook = (
         await call(ana, "POST", base, {
           active: true,
@@ -137,17 +234,22 @@ describe("routines", () => {
       expect(hook.webhookUrl).toContain("/api/v1/hooks/routines/hook_");
       const { secret } = (await call(ana, "POST", `${base}/${hook.id}/webhook-secret`)).body;
       const path = new URL(hook.webhookUrl).pathname;
-      const barred = await deliver(path, secret, "msg_1", JSON.stringify({ order: 42 }));
-      expect(barred.status).toBe(503);
-      expect((await body(barred)).error.code).toBe("not_available");
-      expect(
-        await server.deps.db
-          .select()
-          .from(schema.routineExecutions)
-          .where(eq(schema.routineExecutions.routineId, hook.id)),
-      ).toEqual([]);
+      const delivered = await deliver(path, secret, "msg_1", JSON.stringify({ order: 42 }));
+      expect(delivered.status).toBe(202);
+      await settle();
+      const [hookRun] = await server.deps.db
+        .select()
+        .from(schema.routineExecutions)
+        .where(eq(schema.routineExecutions.routineId, hook.id));
+      expect(hookRun?.status).toBe("ok");
+      const [ask] = await server.deps.db
+        .select()
+        .from(schema.messages)
+        .where(eq(schema.messages.clientId, `routine:${hookRun?.id}`));
+      expect(ask?.body).toBe('Tell me about the order\n\n---\nWebhook payload:\n{"order":42}');
+      expect(ask?.channelId).toBe(hookRun?.channelId ?? "");
 
-      // A webhook routine that opens a debate needs no runtime: the payload goes into the debate's goal.
+      // A webhook routine that opens a debate: the payload goes into the debate's goal.
       const debateHook = (
         await call(ana, "POST", base, {
           active: true,

@@ -4,7 +4,7 @@
 // debate − vote measures only the effect of the challenge rounds (Choi et al., 2025).
 //
 // With the simulated provider (below), the number measures the plumbing and the simulation's model, not an LLM.
-// Running it needs the runtime (every turn is a `complete`): until slice S6 it is rejected at its entry.
+// Every turn is a runtime `complete`.
 //
 // Part B (the decision) is the metrics of `GET debates/metrics`: a verdict accepted and reverted, a claim that
 // changed and the blind read.
@@ -24,7 +24,7 @@ import {
   type ModelRequest,
 } from "@vanr/engine/models/types";
 import { eq, inArray } from "drizzle-orm";
-import { type AppDeps, requireRuntime } from "./context";
+import type { AppDeps } from "./context";
 import { openDebate } from "./debates";
 
 export interface BenchmarkItem {
@@ -170,7 +170,6 @@ export async function runAccuracyBenchmark(
     parallel?: number;
   },
 ): Promise<BenchmarkReport> {
-  requireRuntime(deps.runtime, "complete");
   const results: ItemResult[] = [];
   const queue = [...input.items];
   const worker = async () => {

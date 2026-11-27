@@ -1,8 +1,6 @@
-// Routines without the runtime: a document asks the runtime for a text (`complete`) and a conversation runs the agent
-// (`runFor`), which the server doesn't have until slice S6, so their execution is rejected at its entry before
-// anything is written. A routine whose target is a debate only opens one, so it runs to the end here; the fire, the
-// schedule, the queue, the overlap, the retries and the recovery of an interrupted execution work on their own. An
-// interrupted execution is saved the way the execution saves it while it runs.
+// Routines: a document asks the runtime for a text (`complete`), a conversation runs the agent (`runFor`) and a
+// debate opens one; the fire, the schedule, the queue, the overlap, the retries and the recovery of an interrupted
+// execution. An interrupted execution is saved the way the execution saves it while it runs.
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { RoutineTrigger } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
@@ -10,6 +8,7 @@ import { newId } from "@vanr/engine/ids";
 import { and, eq } from "drizzle-orm";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "../test/harness";
 import { wrapQuery } from "../test/lock-double";
+import { addToChannel } from "../test/route-calls";
 import { memberOf, type Person, seedChannel, seedWorkspace } from "../test/seed";
 import type { AgentRow } from "./agents";
 import type { AppDeps } from "./context";
@@ -28,7 +27,6 @@ import {
   type RoutineRow,
   registerFire,
   retryDelayMs,
-  runtimeFor,
   SERIES_ENDED,
   STALE_GRACE_MS,
   seriesRule,
@@ -257,31 +255,42 @@ describe("recording a fire", () => {
 
 describe("executing", () => {
   test(
-    "a document or a conversation is rejected with not_available before anything is written",
+    "a document asks the runtime for the text and a conversation runs the agent, each to the end",
     async () => {
       const channel = await seedChannel(server, workspaceId, { name: "digest", members: [ana] });
-      for (const [target, method] of [
-        [{ kind: "channel", channelId: channel }, "runFor"],
-        [{ kind: "dm" }, "runFor"],
-        [{ kind: "conversation" }, "runFor"],
-        [{ kind: "file" }, "complete"],
+      await addToChannel(server, channel, { type: "agent", id: agent.id });
+      for (const target of [
+        { kind: "channel", channelId: channel },
+        { kind: "dm" },
+        { kind: "conversation" },
+        { kind: "file" },
       ] as const) {
         const routine = await newRoutine({ target });
         const fire = { trigger: "manual" as const, key: `manual:${target.kind}` };
-        await expect(fireRoutine(server.deps, routine.id, fire)).rejects.toMatchObject({
-          code: "not_available",
-        });
-        expect(await executionsOf(routine.id)).toEqual([]);
-        const reg = await registerFire(server.deps, routine.id, fire);
-        if (reg.duplicate) throw new Error("duplicate");
-        expect(runtimeFor(target)).toBe(method);
-        await expect(startRoutineRun(server.deps, reg.run)).rejects.toMatchObject({
-          status: 503,
-          code: "not_available",
-          params: { method },
-        });
+        const fired = await fireRoutine(server.deps, routine.id, fire);
+        if (fired.duplicate) throw new Error("duplicate");
         const [after] = await executionsOf(routine.id);
-        expect(after).toEqual(reg.run);
+        expect([target.kind, after?.status]).toEqual([target.kind, "ok"]);
+        expect(after?.runId).toBeTruthy();
+        const [run] = await server.deps.db
+          .select()
+          .from(schema.runs)
+          .where(eq(schema.runs.id, after?.runId ?? ""));
+        expect([target.kind, run?.status, run?.agentId]).toEqual([target.kind, "done", agent.id]);
+        if (target.kind === "file") expect(after?.summaryKey).toBe("routines.run.file");
+        else {
+          // The agent's answer is the execution's message, posted by the agent in the routine's conversation.
+          const [reply] = await server.deps.db
+            .select()
+            .from(schema.messages)
+            .where(eq(schema.messages.id, after?.messageId ?? ""));
+          expect([reply?.authorKind, reply?.authorId, reply?.runId]).toEqual([
+            "agent",
+            agent.id,
+            after?.runId,
+          ]);
+          expect(reply?.meta.fromRoutine).toEqual({ routineId: routine.id, name: routine.name });
+        }
         expect((await routineRow(routine.id)).runningSince).toBeNull();
         await drop(routine);
       }
@@ -324,8 +333,8 @@ describe("executing", () => {
           and(eq(notifications.kind, "routine_report"), eq(notifications.groupKey, `routine:${routine.id}`)),
         );
       expect(told.map((n) => n.userId)).toEqual([ana.user.id]);
-      // The only failure in the background is the debate's agent turn, which waits for the runtime.
-      expect((await watch.failures()).map((e) => (e as { code?: string }).code)).toEqual(["not_available"]);
+      // The debate's agent turn runs on the runtime: nothing in the background failed.
+      expect(await watch.failures()).toEqual([]);
       expect(toRun(done)).toMatchObject({
         status: "ok",
         trigger: "webhook",

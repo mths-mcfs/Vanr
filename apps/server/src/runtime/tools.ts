@@ -83,6 +83,11 @@ export interface ToolContext {
   /** The person who started the run (the message's author, if a person): the origin of what the run writes. */
   personId?: string | null;
   /**
+   * The runner lent to the agent when the run started (null: none). The run's admission checked who may use
+   * that one, so the run keeps it: a runner swapped in mid-run isn't used (`runners/agent-tools.ts`).
+   */
+  runRunnerId?: string | null;
+  /**
    * Owner of the `/memories/you` store this run may use, or null: no person (routine, another agent) or
    * another person spoke in the run. Calling it pins the run to that person: from then on, a message from
    * someone else doesn't join this run and waits for its own.
@@ -293,7 +298,13 @@ export interface PlannedCall {
 
 export const define = <I>(def: ToolDef<I>): ToolDef<unknown> => def as ToolDef<unknown>;
 
-export class ToolInputError extends Error {}
+export class ToolInputError extends Error {
+  /**
+   * The call reached the outside service before it failed (a runner that timed out or dropped after the request
+   * went out): the effect may have happened, so its idempotency key stays and a retry doesn't repeat it blindly.
+   */
+  reached = false;
+}
 
 async function memoriesOf(db: Db, ids: string[]): Promise<MessageMemory[]> {
   if (ids.length === 0) return [];
@@ -1137,6 +1148,7 @@ export async function runTool(
     return once.result;
   }
   let res: RanTool;
+  let reached = false;
   try {
     const out = await tool.run(ctx, input, { payload: plan.payload });
     res =
@@ -1157,10 +1169,13 @@ export async function runTool(
       if (approvalId) await ctx.settleApproval(approvalId, { ok: false, text: "Failed while running" });
       throw err;
     }
-    // Rejected before doing anything: nothing went out, so the key goes below and the next attempt may do it.
     res = { content: err.message, isError: true };
+    reached = err.reached;
   }
   if (once && !res.isError) await settleEffect(ctx, once.key, "done", res);
+  // It reached the service and failed there: it may have gone out, so the key stays and the retry doesn't repeat it.
+  else if (once && reached) await settleEffect(ctx, once.key, "failed", null);
+  // Rejected before anything went out: the key goes, and the next attempt may do it.
   else if (once) await ctx.deps.db.delete(effectKeys).where(eq(effectKeys.key, once.key));
   // It ran (or tried): what the call read or sent out stays in the run.
   ctx.risk.record(call);

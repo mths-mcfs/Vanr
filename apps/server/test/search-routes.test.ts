@@ -1,6 +1,6 @@
 // The workspace's search over HTTP: the permission in the WHERE for each kind the index accepts (a file,
 // a message, a wiki page, an issue, a debate), operators, the Cmd+K palette, the boot's backfill and "ask"
-// mode, which is rejected at its entry until the runtime slice brings the model resolver.
+// mode with the workspace's model.
 //
 // Only files have a producer in this slice (the Drive). The other kinds' producers (chat S6, wiki S4,
 // issues S4, debates S3) come with their areas; here their rows are written straight to the database and
@@ -294,20 +294,24 @@ describe("Cmd+K palette", () => {
 });
 
 describe("ask mode", () => {
-  test("rejected at its entry with not_available until the runtime slice: no question counted, nothing in the ledger", async () => {
+  test("answers from what the person reads, citing it; the window caps the questions; the test model costs nothing", async () => {
     const { workspaceId, general, ana } = await team();
     await message(workspaceId, general, ana, "the onboarding checklist lives in the wiki");
     const ledgerBefore = await server.deps.db.select().from(schema.usageLines);
-    for (let i = 0; i < ASK_LIMIT.max + 2; i++) {
-      const res = await ana.browser.json(`${W(workspaceId)}/search/ask`, "POST", {
-        q: "where is the checklist?",
-      });
-      expect(res.status).toBe(503);
-      expect(await failure(res)).toMatchObject({
-        code: "not_available",
-        params: { method: "providerForWorkspace" },
-      });
-    }
+    const ask = () =>
+      ana.browser.json(`${W(workspaceId)}/search/ask`, "POST", { q: "where is the onboarding checklist?" });
+    const first = await ask();
+    expect(first.status).toBe(200);
+    const answer = await body(first);
+    expect(answer.testModel).toBe(true);
+    expect(answer.sources.length).toBeGreaterThan(0);
+    expect(answer.blocks.map((b: { text: string }) => b.text).join(" ")).toContain("onboarding checklist");
+    expect(answer.blocks.flatMap((b: { sources: number[] }) => b.sources)).toContain(1);
+    for (let i = 1; i < ASK_LIMIT.max; i++) expect((await ask()).status).toBe(200);
+    const capped = await ask();
+    expect(capped.status).toBe(429);
+    expect(await failure(capped)).toMatchObject({ code: "search.ask_limit", params: { max: ASK_LIMIT.max } });
+    // The test model answered: nothing goes into the ledger.
     expect(await server.deps.db.select().from(schema.usageLines)).toHaveLength(ledgerBefore.length);
     // The body is validated before anything else.
     expect((await ana.browser.json(`${W(workspaceId)}/search/ask`, "POST", { q: "x" })).status).toBe(400);

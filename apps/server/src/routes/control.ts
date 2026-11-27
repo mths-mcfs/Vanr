@@ -3,9 +3,7 @@
 // Approving and editing send the `payloadHash` of the version the person saw: if the effect changed after that
 // (another edit, another request), the route answers `approval.changed` instead of approving something else.
 //
-// Deciding an approval, editing it and answering a question wake the run that waits on them (the agent runtime):
-// until the runtime is there, those routes check who may call and what was sent, then answer `not_available`
-// before anything is written.
+// Deciding an approval, editing it and answering a question wake the run that waits on them (the agent runtime).
 import type {
   AgentAction,
   AgentQuestion,
@@ -24,7 +22,7 @@ import type { Hono } from "hono";
 import { z } from "zod";
 import { createMemory } from "../agent-memory";
 import { canReadChannel, readableChannel } from "../channels";
-import { type AppEnv, requireRuntime, type WorkspaceMember } from "../context";
+import type { AppEnv, WorkspaceMember } from "../context";
 import {
   type ActionRow,
   actionInWorkspace,
@@ -234,9 +232,6 @@ export function registerControl(app: Hono<AppEnv>) {
         if (decision === "approved") sameEffect(row, payloadHash);
         const remembers = decision === "approved" && remember === true;
         if (remembers) rememberCheck(row);
-        // The run that waits on the decision is the runtime's: without it, nothing is written.
-        requireRuntime(runtime, "awaitsApproval");
-        requireRuntime(runtime, "resolveApproval");
         const at = deps.now();
         const name = await actorName(db, me.workspaceId, { type: "person", id: me.userId });
         if (!runtime.awaitsApproval(row.id)) {
@@ -311,8 +306,6 @@ export function registerControl(app: Hono<AppEnv>) {
     sameEffect(row, body.payloadHash);
     if (row.editable.length === 0)
       throw new HttpError(400, "invalid_request", "This request can't be edited", { field: "input" });
-    requireRuntime(runtime, "reviseApproval");
-    requireRuntime(runtime, "resolveApproval");
     const revised = await runtime.reviseApproval(row.id, body.input);
     if (!revised) throw conflict("approval.gone", "The agent is no longer waiting for this");
     if ("error" in revised) throw new HttpError(400, "invalid_request", revised.error, { field: "input" });
@@ -567,8 +560,7 @@ export function registerControl(app: Hono<AppEnv>) {
       }
       answer = input.choice;
     } else answer = input.text;
-    // The run that waits on the answer is the runtime's: without it, nothing is written.
-    requireRuntime(runtime, "answerQuestion");
+    // The runtime closes the question and wakes the run that waits on it, if one still does.
     const next = await runtime.answerQuestion(row.id, answer, me.userId);
     if (!next) throw conflict("question.closed", "The question is no longer open");
     return c.json(toQuestion(next) satisfies AgentQuestion);

@@ -76,8 +76,6 @@ import {
   requestSubmissionChanges,
   requireExecutor,
   requireManager,
-  requireRunStop,
-  requireTell,
   serialized,
   setHarness,
   setRunner,
@@ -477,7 +475,6 @@ export function registerAssignments(app: Hono<AppEnv>) {
     }
     if (row.status === "proposed")
       throw conflict("assignment.not_started", "This assignment has not started");
-    requireRunStop(deps);
     stopAgentRun(deps, row, me.userId);
     const canceledJobs = action === "stop" ? await cancelJobs(deps, row) : 0;
     const moved = await moveAssignment(
@@ -503,7 +500,6 @@ export function registerAssignments(app: Hono<AppEnv>) {
     const { row } = await actOn(deps, me, param(c, "assignmentId"));
     requireOpen(row);
     const input = await readJson(c, closeBody);
-    requireRunStop(deps);
     const next = await finishAssignment(deps, me, row, {
       outcome: input.outcome,
       wiki: input.copyToWiki ?? false,
@@ -519,7 +515,6 @@ export function registerAssignments(app: Hono<AppEnv>) {
     requireOpen(row);
     if (row.status === "paused") throw conflict("assignment.paused", "Resume the assignment first");
     const { text } = await readJson(c, z.object({ text: z.string().trim().min(1).max(10_000) }).strict());
-    requireTell(deps, row);
     return c.json(await tell(deps, row, me.userId, text));
   });
 
@@ -924,7 +919,6 @@ export function registerAssignments(app: Hono<AppEnv>) {
       option !== d.chosen &&
       row.executor === "agent" &&
       row.status === "active";
-    if (changesCourse) requireTell(deps, row);
     const [next] = await deps.db
       .update(assignmentDecisions)
       .set({ status: "taken", chosen: option, selectedBy: me.userId, selectedAt: deps.now() })
@@ -990,7 +984,6 @@ export function registerAssignments(app: Hono<AppEnv>) {
     const { row } = await actOn(deps, me, param(c, "assignmentId"));
     const { note } = await readJson(c, z.object({ note: z.string().trim().max(4000).optional() }).strict());
     if (action === "changes" && !note) throw badRequest("Say what to change", { field: "note" });
-    if (row.status === "active") requireTell(deps, row);
     const [next] = await deps.db
       .update(assignmentReviews)
       .set({
@@ -1013,13 +1006,13 @@ export function registerAssignments(app: Hono<AppEnv>) {
     publishAssignment(deps, row, "review");
     await resetTurns(deps, row.id);
     deps.assignmentEngine.wake(row.id);
-    if (row.status === "active")
-      await tellIfPossible(
-        deps,
-        row,
-        me.userId,
-        action === "approve" ? `✓ ${next.title}${note ? `: ${note}` : ""}` : `✎ ${next.title}: ${note}`,
-      );
+    await tellIfPossible(
+      deps,
+      row.id,
+      me.userId,
+      action === "approve" ? `✓ ${next.title}${note ? `: ${note}` : ""}` : `✎ ${next.title}: ${note}`,
+      (fresh) => fresh.status === "active",
+    );
     return c.json(toReview(next));
   });
 
@@ -1070,7 +1063,6 @@ export function registerAssignments(app: Hono<AppEnv>) {
     requireOpen(row);
     const d = await pendingSubmission(deps, row, param(c, "submissionId"));
     const { copyToWiki } = await readJson(c, z.object({ copyToWiki: z.boolean().default(false) }).strict());
-    requireRunStop(deps);
     const next = await finishAssignment(deps, me, row, {
       outcome: "done",
       wiki: copyToWiki,
@@ -1098,8 +1090,6 @@ export function registerAssignments(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const { row } = await actOn(deps, me, param(c, "assignmentId"));
     const status = action === "accept" ? ("accepted" as const) : ("declined" as const);
-    const tells = status === "accepted" && !isClosed(row) && row.status !== "paused";
-    if (tells) requireTell(deps, row);
     // A suggestion is a message of the assignment's thread: its id is the message's.
     const messageId = param(c, "suggestionId");
     const { suggestion, authorId } = await answerSuggestion(deps, {
@@ -1110,9 +1100,15 @@ export function registerAssignments(app: Hono<AppEnv>) {
       status,
     });
     publishAssignment(deps, row, "suggestion", { messageId, suggestion });
-    if (tells) {
+    if (status === "accepted") {
       const names = await nameMap(deps.db, [authorId]);
-      await tellIfPossible(deps, row, me.userId, `${names.get(authorId) ?? ""}: ${suggestion.text}`);
+      await tellIfPossible(
+        deps,
+        row.id,
+        me.userId,
+        `${names.get(authorId) ?? ""}: ${suggestion.text}`,
+        (fresh) => !isClosed(fresh) && fresh.status !== "paused",
+      );
     }
     return c.json({ messageId, status });
   });

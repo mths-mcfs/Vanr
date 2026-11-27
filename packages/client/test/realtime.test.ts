@@ -229,9 +229,17 @@ describe("connection", () => {
 describe("events", () => {
   test("run payload consumers can read the validated event-specific fields", () => {
     const delta = parse(BROWSER_EVENTS["run.text_delta"], { agentId: "a", text: "hi" });
-    const tool = parse(BROWSER_EVENTS["run.tool_call"], { agentId: "a", callId: "c", tool: "read" });
+    const tool = parse(BROWSER_EVENTS["run.tool_call"], { agentId: "a", toolUseId: "c", tool: "read" });
     const unavailable = parse(BROWSER_EVENTS["run.agent_unavailable"], { agentId: "a", reason: "offline" });
-    expect([delta.text, tool.callId, tool.tool, unavailable.reason]).toEqual(["hi", "c", "read", "offline"]);
+    expect([delta.text, tool.toolUseId, tool.tool, unavailable.reason]).toEqual([
+      "hi",
+      "c",
+      "read",
+      "offline",
+    ]);
+    // The result keeps the call's id and whether it failed, as the runtime sends them.
+    const result = parse(BROWSER_EVENTS["run.tool_result"], { agentId: "a", toolUseId: "c", isError: true });
+    expect([result.toolUseId, result.isError]).toEqual(["c", true]);
   });
 
   test("delivers the server's direct live view frames with image and control fields", () => {

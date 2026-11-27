@@ -1,8 +1,5 @@
 // Routines: list, create, edit, pause, run now, history, duplicate, delete, understand schedule phrases ("every
 // Monday at 9am"), the webhook's secret and the public (signed) webhook that fires the routine from outside.
-//
-// "Run now" and the webhook reach the runtime by the routine's target (routines.ts, `runtimeFor`): without the
-// method (until slice S6) they are rejected at their entry with `not_available`, before the fire is recorded.
 import type {
   DescribeRuleBody,
   ParseRuleBody,
@@ -32,7 +29,7 @@ import type { Hono } from "hono";
 import { z } from "zod";
 import { type AgentRow, agentInWorkspace } from "../agents";
 import { writableChannel } from "../channels";
-import { type AppDeps, type AppEnv, type Ctx, requireRuntime, type WorkspaceMember } from "../context";
+import type { AppDeps, AppEnv, Ctx, WorkspaceMember } from "../context";
 import {
   debateEstimate,
   fileUpToUsd,
@@ -55,7 +52,6 @@ import {
   registerFire,
   routineById,
   ruleSchema,
-  runtimeFor,
   startRoutineRun,
   targetOf,
   targetSchema,
@@ -234,12 +230,6 @@ async function routineOf(c: Ctx, me: WorkspaceMember, opts: { edit?: boolean } =
   return row;
 }
 
-/** Rejects at the entry, before the fire is recorded, when the routine's target needs a runtime method absent. */
-function requireRoutineRuntime(deps: AppDeps, row: RoutineRow) {
-  const method = runtimeFor(targetOf(row));
-  if (method) requireRuntime(deps.runtime, method);
-}
-
 const defaultName = (prompt: string) => {
   const line = prompt.split("\n")[0]?.trim() ?? "";
   return line.length > 60 ? `${line.slice(0, 59)}…` : line || "Routine";
@@ -400,7 +390,6 @@ export function registerRoutines(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const row = await routineOf(c, me, { edit: true });
     const { key } = await readJson(c, runBody);
-    requireRoutineRuntime(deps, row);
     const reg = await registerFire(deps, row.id, { trigger: "manual", key: key ? `manual:${key}` : null });
     if (!reg.duplicate) deps.runtime.track(startRoutineRun(deps, reg.run), "routine.manual");
     return c.json<Routine>({ ...(await toRoutine(deps, row)), running: true });
@@ -588,7 +577,6 @@ export function registerRoutines(app: Hono<AppEnv>) {
     if (!row.active) return c.json(errorBody("routine.inactive", "This routine is paused"), 409);
     const [agent] = await deps.db.select({ id: agents.id }).from(agents).where(eq(agents.id, row.agentId));
     if (!agent) return c.json(errorBody("not_found", "Unknown webhook"), 404);
-    requireRoutineRuntime(deps, row);
     const reg = await registerFire(deps, row.id, {
       trigger: "webhook",
       key: `webhook:${check.id}`,
