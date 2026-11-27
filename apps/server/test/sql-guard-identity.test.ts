@@ -482,6 +482,20 @@ for (const kind of ["PGlite", "Postgres"] as const) {
     });
   });
 
+  run(`${kind}: a relation a row security policy reads is not opened by that policy`, async () => {
+    // Row security off: the policy is only a reference to the view, and the view holds a secret of its own.
+    const setup = `
+      create view v_private as select 'secret'::text as v;
+      create policy p on customers using (exists (select 1 from v_private));
+    `;
+    await withDatabase(kind, setup, async (q) => {
+      expect(await q("select c.id, v.v from customers c cross join v_private v")).toEqual({
+        failure: { reason: "table", table: "public.v_private" },
+      });
+      expect(await q("select id from customers")).toEqual({ result: { fields: ["id"], rows: [{ id: 7 }] } });
+    });
+  });
+
   run(`${kind}: a long accented name is truncated as the server truncates it`, async () => {
     // In UTF-8, é is two bytes: Postgres keeps 31 of them in a name (62 bytes).
     const kept = "é".repeat(31);

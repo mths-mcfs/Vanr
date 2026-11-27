@@ -90,11 +90,12 @@ export function fixedSearchPath(policy: Pick<QueryPolicy, "tables">): string {
 /**
  * `rel(oid)`: the policy's relations, found by exact schema ($1) and name ($2), compared byte for byte as the plan
  * check compares them (no folding: "Sales View" never stands for "sales view", `Étage` is not `étage`), plus every
- * relation the rules of those views and the row security policies of those relations read, views under views and
- * tables under policies included: a policy's `exists (select … from t2)` applies t2's own rules and policies too.
- * `only` narrows the policy's relations the walk starts from (a condition on `c`, the relation).
+ * relation the rules of those views reach, views under views included. With `throughPolicies`, also every relation
+ * the row security policies of those relations read: a policy's `exists (select … from t2)` applies t2's own rules
+ * and policies, so their code counts. `only` narrows the policy's relations the walk starts from (a condition on
+ * `c`, the relation).
  */
-const allowedClosure = (only = "") => `with recursive rel(oid) as (
+const allowedClosure = (only = "", throughPolicies = true) => `with recursive rel(oid) as (
          select c.oid
            from rows from (pg_catalog.unnest($1::pg_catalog.text[]), pg_catalog.unnest($2::pg_catalog.text[]))
                   as allowed(schema, name)
@@ -113,7 +114,8 @@ const allowedClosure = (only = "") => `with recursive rel(oid) as (
             and ((d.classid operator(pg_catalog.=) 'pg_catalog.pg_rewrite'::pg_catalog.regclass::pg_catalog.oid
                   and d.objid operator(pg_catalog.=) any (array(
                     select r.oid from pg_catalog.pg_rewrite r where r.ev_class operator(pg_catalog.=) rel.oid)))
-              or (d.classid operator(pg_catalog.=) 'pg_catalog.pg_policy'::pg_catalog.regclass::pg_catalog.oid
+              or (${throughPolicies}
+                  and d.classid operator(pg_catalog.=) 'pg_catalog.pg_policy'::pg_catalog.regclass::pg_catalog.oid
                   and d.objid operator(pg_catalog.=) any (array(
                     select p.oid from pg_catalog.pg_policy p where p.polrelid operator(pg_catalog.=) rel.oid))))
        )`;
@@ -136,6 +138,7 @@ const NAMED_BY_A_WORD = `and c.relname operator(pg_catalog.=) any ($3::pg_catalo
  * list is refused here, because the plan shows only the tables under it, and planning would already have run the
  * IMMUTABLE calls in it. A CTE or a function in FROM locks nothing; a view under an allowed view the query uses is
  * allowed, since its rules are checked with that view's (step 4 of `customCode`), but named on its own it is not.
+ * A relation a row security policy reads gets no pass here: one the agent may read is in its policy.
  * The system schemas are left to the plan check.
  */
 async function outsideRelation(
@@ -152,7 +155,7 @@ async function outsideRelation(
     // A savepoint, so a failed read (a timeout, a cancel) still leaves the transaction able to deallocate.
     await session.rows("savepoint vanr_guard_locks", []);
     [outside] = await session.rows(
-      `${allowedClosure(LOCKED_HERE)}
+      `${allowedClosure(LOCKED_HERE, false)}
        select n.nspname as schema, c.relname as name
          from pg_catalog.pg_locks l
          join pg_catalog.pg_class c on c.oid operator(pg_catalog.=) l.relation
