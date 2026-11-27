@@ -488,20 +488,20 @@ export function registerWiki(app: Hono<AppEnv>) {
     const row = await page(c, me);
     const input = await readWikiJson(c, z.object({ folder }).strict());
     if (row.locked && !isAdmin(me)) throw new HttpError(403, "wiki.page_locked", "This page is locked");
-    const moved = await patchPage(
-      deps,
-      row,
-      { folder: normalizeFolder(input.folder), updatedBy: me$(me) },
-      unlockedFor(me$(me)),
-    );
-    if (moved.folder !== row.folder)
-      await logChange(deps.db, {
-        page: moved,
-        action: "move",
-        author: me$(me),
-        at: deps.now(),
-        detail: moved.folder,
-      });
+    const target = normalizeFolder(input.folder);
+    const moved = await patchPage(deps, row, { folder: target, updatedBy: me$(me) }, async (tx, locked) => {
+      await unlockedFor(me$(me))(tx, locked);
+      // Logged against the locked row in the move's own transaction: only a real change of folder, and
+      // never a move without its entry.
+      if (locked.folder !== target)
+        await logChange(tx, {
+          page: locked,
+          action: "move",
+          author: me$(me),
+          at: deps.now(),
+          detail: target,
+        });
+    });
     return c.json(await pageView(c, me, moved.slug));
   });
 

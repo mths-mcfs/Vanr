@@ -524,6 +524,8 @@ jobs:
             exit 1
           fi
           echo "$out"
+          # An error outside a test (no "(fail)" line of its own) proves nothing: it fails this step.
+          if grep -aqF "Unhandled error" <<< "$out"; then echo "::error::an error outside the tests"; exit 1; fi
           # It must fail for the race (each member write was accepted), not for anything else.
           grep -q '"save 200"' <<< "$out"
           grep -q '"move 200"' <<< "$out"
@@ -573,6 +575,8 @@ jobs:
             exit 1
           fi
           echo "$out"
+          # An error outside a test (no "(fail)" line of its own) proves nothing: it fails this step.
+          if grep -aqF "Unhandled error" <<< "$out"; then echo "::error::an error outside the tests"; exit 1; fi
           # Only the forced test fails (bun prints each failure twice on the runner: count distinct names),
           # and for the race (the stale decision wrote over the other's version), not for anything else.
           fails=$(grep -a '^(fail)' <<< "$out" | sed 's/ \[[0-9.]*ms\]$//' | sort -u)
@@ -591,6 +595,8 @@ jobs:
             exit 1
           fi
           echo "$out"
+          # An error outside a test (no "(fail)" line of its own) proves nothing: it fails this step.
+          if grep -aqF "Unhandled error" <<< "$out"; then echo "::error::an error outside the tests"; exit 1; fi
           # Each of the 4 forced read tests fails, each for the leak of its own path, and nothing else fails.
           fails=$(grep -a '^(fail)' <<< "$out" | sed 's/ \[[0-9.]*ms\]$//' | sort -u)
           echo "$fails"

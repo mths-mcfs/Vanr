@@ -32,7 +32,7 @@ import { CHECK_NOW_GAP_MS, checkWorkspace, parseCheck } from "../src/wiki-checks
 import { apiError as baseError, basesApi } from "./bases-api";
 import { Browser, SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
 import { memberOf, type Person, seedChannel, seedDm, seedWorkspace } from "./seed";
-import { apiError, wikiApi } from "./wiki-api";
+import { ApiError, apiError, wikiApi } from "./wiki-api";
 import { connect, until } from "./wiki-live";
 
 let skew = 0;
@@ -620,7 +620,6 @@ describe("per-page access", () => {
 
 /** Throws the error of a fetch that must fail (for the routes the test client has no method for). */
 async function fail(res: Response): Promise<never> {
-  const { ApiError } = await import("./wiki-api");
   throw new ApiError(res.status, `http_${res.status}`, await res.text());
 }
 
@@ -920,12 +919,14 @@ describe("anchored comments", () => {
     const other = await team();
     const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Private notes", body: "x" });
     const root = await ana.api.wiki.createWikiPageComment(workspaceId, page.slug, { body: "mine" });
-    await ana.api.wiki.setWikiPageAccess(workspaceId, page.slug, restrictPrivate);
+    // Restricting draws a new slug: every call below uses it, so a 404 is the read, not a missing address.
+    const { slug } = await ana.api.wiki.setWikiPageAccess(workspaceId, page.slug, restrictPrivate);
+    expect((await ana.api.wiki.getWikiPage(workspaceId, slug)).slug).toBe(slug);
     for (const call of [
       () => beto.api.wiki.setWikiAnnotationResolution(workspaceId, root.id),
       () => beto.api.wiki.deleteWikiAnnotationResolution(workspaceId, root.id),
       () => beto.api.wiki.deleteWikiAnnotation(workspaceId, root.id),
-      () => beto.api.wiki.createWikiPageComment(workspaceId, page.slug, { body: "x", parentId: root.id }),
+      () => beto.api.wiki.createWikiPageComment(workspaceId, slug, { body: "x", parentId: root.id }),
       // Another workspace's admin with this workspace's annotation id in their path.
       () => other.ana.api.wiki.setWikiAnnotationResolution(other.workspaceId, root.id),
       () => other.ana.api.wiki.deleteWikiAnnotation(other.workspaceId, root.id),
@@ -938,11 +939,10 @@ describe("anchored comments", () => {
     const elsewhere = await beto.api.wiki.createWikiPageComment(workspaceId, otherPage.slug, {
       body: "first",
     });
-    const restricted = (await ana.api.wiki.listWikiPages(workspaceId)).find((p) => p.restricted);
     expect(
       (
         await apiError(
-          ana.api.wiki.createWikiPageComment(workspaceId, String(restricted?.slug), {
+          ana.api.wiki.createWikiPageComment(workspaceId, slug, {
             body: "x",
             parentId: elsewhere.id,
           }),
@@ -1077,6 +1077,11 @@ describe("proposals", () => {
       ana.api.wiki.decideWikiAnnotation(workspaceId, row.id, [{ hunkId: "h1", accept: true }]),
     ]);
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    // The other one is the decided-change conflict, not any error.
+    const refused = results.flatMap((r) => (r.status === "rejected" ? [r.reason] : []));
+    expect(refused.map((e) => (e instanceof ApiError ? [e.status, e.code] : String(e)))).toEqual([
+      [409, "wiki.proposal.decided"],
+    ]);
     const final = await ana.api.wiki.getWikiPage(workspaceId, page.slug);
     expect(final.body).toBe("Value: 1. Value: 1.\n");
     expect(final.version).toBe(2);
@@ -1099,26 +1104,29 @@ describe("proposals", () => {
       const body = "# Plan\n\nOne.\n\nTwo.\n\nThree.\n";
       const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Live plan", body });
       const typing = connect(server, beto.browser, workspaceId, `wiki/${workspaceId}/${page.slug}`);
-      await typing.synced;
-      await typing.edit((md) => md.replace("One.", "One, typed live."));
-      // The draft reached the server before the decision (the autosave).
-      await until(async () => {
-        const [d] = await db()
-          .select({ dirty: schema.wikiPageDocs.dirty })
-          .from(schema.wikiPageDocs)
-          .innerJoin(schema.knowledgePages, eq(schema.knowledgePages.id, schema.wikiPageDocs.pageId))
-          .where(eq(schema.knowledgePages.slug, page.slug));
-        return d?.dirty === true;
-      });
-      const { row } = await propose(workspaceId, page.slug, lia, beto, [["Three.", "Three, proposed."]]);
-      const decided = await ana.api.wiki.decideWikiAnnotation(workspaceId, row.id, [
-        { hunkId: "h1", accept: true },
-      ]);
-      expect(decided.page.body).toContain("Three, proposed.");
-      await until(async () => (await typing.md()).includes("Three, proposed."));
-      const live = await typing.md();
-      expect([live.includes("One, typed live."), live.includes("Three, proposed.")]).toEqual([true, true]);
-      typing.close();
+      try {
+        await typing.synced;
+        await typing.edit((md) => md.replace("One.", "One, typed live."));
+        // The draft reached the server before the decision (the autosave).
+        await until(async () => {
+          const [d] = await db()
+            .select({ dirty: schema.wikiPageDocs.dirty })
+            .from(schema.wikiPageDocs)
+            .innerJoin(schema.knowledgePages, eq(schema.knowledgePages.id, schema.wikiPageDocs.pageId))
+            .where(eq(schema.knowledgePages.slug, page.slug));
+          return d?.dirty === true;
+        });
+        const { row } = await propose(workspaceId, page.slug, lia, beto, [["Three.", "Three, proposed."]]);
+        const decided = await ana.api.wiki.decideWikiAnnotation(workspaceId, row.id, [
+          { hunkId: "h1", accept: true },
+        ]);
+        expect(decided.page.body).toContain("Three, proposed.");
+        await until(async () => (await typing.md()).includes("Three, proposed."));
+        const live = await typing.md();
+        expect([live.includes("One, typed live."), live.includes("Three, proposed.")]).toEqual([true, true]);
+      } finally {
+        typing.close();
+      }
     },
     SERVER_TEST_MS,
   );
@@ -1127,43 +1135,59 @@ describe("proposals", () => {
 describe("index.md and the change log", () => {
   test("the log has create, update, rename, move, trash, restore, comment and proposal, newest first", async () => {
     const { workspaceId, ana, beto, lia } = await team();
-    const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Guide", body: "First line." });
-    await ana.api.wiki.replaceWikiPage(workspaceId, page.slug, { body: "Second.", parentVersion: 1 });
-    const renamed = await ana.api.wiki.renameWikiPage(workspaceId, page.slug, "New guide");
-    await ana.api.wiki.moveWikiPage(workspaceId, renamed.slug, "Docs");
-    await ana.api.wiki.deleteWikiPage(workspaceId, renamed.slug);
-    expect((await ana.api.wiki.listWikiChanges(workspaceId))[0]).toMatchObject({
-      action: "trash",
-      slug: null,
-    });
-    await ana.api.wiki.restoreWikiTrash(workspaceId, renamed.slug);
-    await beto.api.wiki.createWikiPageComment(workspaceId, renamed.slug, { body: "ok" });
-    await propose(workspaceId, renamed.slug, lia, beto, [["Second.", "Third."]]);
-    const log = await ana.api.wiki.listWikiChanges(workspaceId);
-    expect(log.map((e) => e.action)).toEqual([
-      "proposal",
-      "comment",
-      "restore",
-      "trash",
-      "move",
-      "rename",
-      "update",
-      "create",
-    ]);
-    expect(log.find((e) => e.action === "rename")?.detail).toBe("Guide");
-    expect(log.find((e) => e.action === "move")?.detail).toBe("Docs");
-    expect(log.find((e) => e.action === "update")?.detail).toBe("2");
-    expect(log[0]).toMatchObject({
-      detail: "1 changes",
-      author: { type: "agent", id: lia, actingFor: beto.user.id },
-    });
-    // Paging by `before`.
-    const older = await ana.api.wiki.listWikiChanges(workspaceId, { before: log[3]?.at, limit: 2 });
-    expect(older.map((e) => e.action)).toEqual(["move", "rename"]);
-    // Restricting hides the page's lines from whoever doesn't read it.
-    await ana.api.wiki.setWikiPageAccess(workspaceId, renamed.slug, restrictPrivate);
-    expect(await beto.api.wiki.listWikiChanges(workspaceId)).toEqual([]);
-    expect((await apiError(ana.api.wiki.listWikiChanges(workspaceId, { limit: 300 }))).status).toBe(400);
+    // A second between actions: the order and the `before` cursor never rest on two entries in one millisecond.
+    const base = skew;
+    const tick = () => {
+      skew += 1000;
+    };
+    try {
+      const page = await ana.api.wiki.createWikiPage(workspaceId, { title: "Guide", body: "First line." });
+      tick();
+      await ana.api.wiki.replaceWikiPage(workspaceId, page.slug, { body: "Second.", parentVersion: 1 });
+      tick();
+      const renamed = await ana.api.wiki.renameWikiPage(workspaceId, page.slug, "New guide");
+      tick();
+      await ana.api.wiki.moveWikiPage(workspaceId, renamed.slug, "Docs");
+      tick();
+      await ana.api.wiki.deleteWikiPage(workspaceId, renamed.slug);
+      tick();
+      expect((await ana.api.wiki.listWikiChanges(workspaceId))[0]).toMatchObject({
+        action: "trash",
+        slug: null,
+      });
+      await ana.api.wiki.restoreWikiTrash(workspaceId, renamed.slug);
+      tick();
+      await beto.api.wiki.createWikiPageComment(workspaceId, renamed.slug, { body: "ok" });
+      tick();
+      await propose(workspaceId, renamed.slug, lia, beto, [["Second.", "Third."]]);
+      const log = await ana.api.wiki.listWikiChanges(workspaceId);
+      expect(log.map((e) => e.action)).toEqual([
+        "proposal",
+        "comment",
+        "restore",
+        "trash",
+        "move",
+        "rename",
+        "update",
+        "create",
+      ]);
+      expect(log.find((e) => e.action === "rename")?.detail).toBe("Guide");
+      expect(log.find((e) => e.action === "move")?.detail).toBe("Docs");
+      expect(log.find((e) => e.action === "update")?.detail).toBe("2");
+      expect(log[0]).toMatchObject({
+        detail: "1 changes",
+        author: { type: "agent", id: lia, actingFor: beto.user.id },
+      });
+      // Paging by `before`.
+      const older = await ana.api.wiki.listWikiChanges(workspaceId, { before: log[3]?.at, limit: 2 });
+      expect(older.map((e) => e.action)).toEqual(["move", "rename"]);
+      // Restricting hides the page's lines from whoever doesn't read it.
+      await ana.api.wiki.setWikiPageAccess(workspaceId, renamed.slug, restrictPrivate);
+      expect(await beto.api.wiki.listWikiChanges(workspaceId)).toEqual([]);
+      expect((await apiError(ana.api.wiki.listWikiChanges(workspaceId, { limit: 300 }))).status).toBe(400);
+    } finally {
+      skew = base;
+    }
   });
 
   test("index.md: by folder, with a summary line", async () => {
@@ -1364,7 +1388,18 @@ describe("the wiki check", () => {
         },
       };
       const checking = checkWorkspace(own.deps, workspaceId, { gapMs: 0, model: async () => held });
-      await asked;
+      // A check that ends before it asks the model would leave `asked` pending: either one ends the wait.
+      const first = await Promise.race([
+        asked.then(() => "asked"),
+        checking.then(
+          (r) => `ended: ${r}`,
+          (e) => `failed: ${e}`,
+        ),
+      ]);
+      if (first !== "asked") {
+        await own.stop();
+        throw new Error(`the check didn't reach the model (${first})`);
+      }
       let stopped = false;
       const stopping = own.stop().then(() => {
         stopped = true;

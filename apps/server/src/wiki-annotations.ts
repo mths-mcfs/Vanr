@@ -361,16 +361,6 @@ export async function createProposal(
     throw new HttpError(400, "wiki.proposal.invalid", `A proposal has from 1 to ${MAX_HUNKS} changes`, {
       max: MAX_HUNKS,
     });
-  if (page.locked) throw new HttpError(403, "wiki.page_locked", "This page is locked");
-  const warnings: string[] = [];
-  if (input.parentVersion !== page.version)
-    warnings.push(
-      `The page changed since version ${input.parentVersion} (now ${page.version}); the changes were checked against the latest text.`,
-    );
-  for (const [index, edit] of input.edits.entries()) {
-    const out = applyEdits(page.body, [{ oldStr: edit.oldStr, newStr: edit.newStr }]);
-    if (!out.ok) throw new HttpError(400, "wiki.proposal.invalid", editFailureMessage({ ...out, index }));
-  }
   const at = deps.now();
   const hunks: Hunk[] = input.edits.map((e, i) => ({
     id: `h${i + 1}`,
@@ -378,18 +368,32 @@ export async function createProposal(
     newStr: e.newStr,
     status: "pending",
   }));
+  const warnings: string[] = [];
   const row = await writeTx(deps.db, async (tx) => {
+    // Checked on the page's locked row: the changes hold on the text published now, and the version stored
+    // is the one they were checked against.
+    const locked = await pageLock.row(tx, page.id);
+    if (!locked || locked.deletedAt) throw notFound("Page not found");
+    if (locked.locked) throw new HttpError(403, "wiki.page_locked", "This page is locked");
+    if (input.parentVersion !== locked.version)
+      warnings.push(
+        `The page changed since version ${input.parentVersion} (now ${locked.version}); the changes were checked against the latest text.`,
+      );
+    for (const [index, edit] of input.edits.entries()) {
+      const out = applyEdits(locked.body, [{ oldStr: edit.oldStr, newStr: edit.newStr }]);
+      if (!out.ok) throw new HttpError(400, "wiki.proposal.invalid", editFailureMessage({ ...out, index }));
+    }
     const [created] = await tx
       .insert(pageAnnotations)
       .values({
         id: newId("ann"),
-        workspaceId: page.workspaceId,
-        pageId: page.id,
+        workspaceId: locked.workspaceId,
+        pageId: locked.id,
         kind: "proposal",
         author: input.author,
         body: input.note,
         hunks,
-        parentVersion: page.version,
+        parentVersion: locked.version,
         status: "pending",
         createdAt: at,
         updatedAt: at,
@@ -397,7 +401,7 @@ export async function createProposal(
       .returning();
     if (!created) throw new Error("proposal insert failed");
     await logChange(tx, {
-      page,
+      page: locked,
       action: "proposal",
       author: input.author,
       at,
