@@ -496,9 +496,10 @@ export class NotAvailable extends HttpError {
 }
 
 /**
- * The runtime port until slice S6: `track` and `settle` are the background work, and every other method is
- * declared absent (it throws `NotAvailable`, with no behavior of its own). No route of this slice reaches
- * one of them; a later route that can is rejected at its entry, before any write.
+ * The runtime port until slice S6: `track` and `settle` are the background work. The questions about live runs
+ * (who is busy, which runs are live, who may stop one) have their true answer: without the runtime no run is
+ * live. Every other method is declared absent (it throws `NotAvailable`, with no behavior of its own); a route
+ * that can reach one is rejected at its entry, before any write.
  */
 function runtimePort(background: BackgroundWork): RuntimePort {
   const absent = (method: keyof RuntimePort) => {
@@ -514,15 +515,15 @@ function runtimePort(background: BackgroundWork): RuntimePort {
     complete: absent("complete"),
     runFor: absent("runFor"),
     activeRun: absent("activeRun"),
-    activeRuns: absent("activeRuns"),
+    activeRuns: () => [],
     liveRun: absent("liveRun"),
-    liveInfo: absent("liveInfo"),
+    liveInfo: () => null,
     cancel: absent("cancel"),
     onRunEnd: absent("onRunEnd"),
     onPersonMessage: absent("onPersonMessage"),
     providerForWorkspace: absent("providerForWorkspace"),
-    isBusy: absent("isBusy"),
-    busyAgents: absent("busyAgents"),
+    isBusy: () => false,
+    busyAgents: () => new Set(),
     awaitsApproval: absent("awaitsApproval"),
     resolveApproval: absent("resolveApproval"),
     reviseApproval: absent("reviseApproval"),

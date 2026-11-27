@@ -1,5 +1,15 @@
 // Agents: the API shape, the lookup in the workspace, the month's budget and who may edit.
-import { type Agent, type AgentDetail, type AgentRole, can, type Memory } from "@vanr/contract";
+import {
+  AGENT_BODIES,
+  AGENT_EXTRAS,
+  AGENT_MOUTHS,
+  type Agent,
+  type AgentAppearance,
+  type AgentDetail,
+  type AgentRole,
+  can,
+  type Memory,
+} from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import { contentSha256 } from "@vanr/engine/memory";
 import type { BudgetScope } from "@vanr/engine/usage";
@@ -49,6 +59,27 @@ export function isAgentRole(v: string): v is AgentRole {
   return AGENT_ROLES.some((r) => r === v);
 }
 
+const listed = <T extends string>(list: readonly T[], value: unknown): T | undefined =>
+  list.find((v) => v === value);
+
+/**
+ * The appearance as the API gives it. The routes write the body, the mouth and the extra only from the contract's
+ * lists; a stored value outside them (or null) is left out on the way out, as if the agent had no such part.
+ */
+export function toAppearance(stored: AgentAppearance): AgentAppearance {
+  const body = listed(AGENT_BODIES, stored.body);
+  const mouth = listed(AGENT_MOUTHS, stored.mouth);
+  const extra = listed(AGENT_EXTRAS, stored.extra);
+  return {
+    color: stored.color,
+    eyes: stored.eyes,
+    adornment: stored.adornment,
+    ...(body ? { body } : {}),
+    ...(mouth ? { mouth } : {}),
+    ...(extra ? { extra } : {}),
+  };
+}
+
 export function toAgent(row: Talker, viewerId: string, busy: boolean, testModel: boolean): Agent {
   return {
     id: row.id,
@@ -60,7 +91,7 @@ export function toAgent(row: Talker, viewerId: string, busy: boolean, testModel:
     ownerUserId: row.ownerUserId,
     audience: { mode: row.visibilityMode, userIds: row.audienceUserIds },
     reachable: canTalkTo(row, viewerId),
-    appearance: row.appearance,
+    appearance: toAppearance(row.appearance),
     harness: { kind: row.harnessKind, model: row.harnessModel ?? row.model, environment: row.environmentId },
     advisor: row.advisorModel ? { model: row.advisorModel, maxUses: row.advisorMaxUses } : null,
     busy,

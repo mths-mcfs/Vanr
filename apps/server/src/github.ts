@@ -108,6 +108,29 @@ async function fetchText(
   return capped(res, max);
 }
 
+const INSTRUCTION_FILES = [
+  "AGENTS.md",
+  "CLAUDE.md",
+  ".github/copilot-instructions.md",
+  ".cursorrules",
+  "README.md",
+];
+
+/**
+ * The instruction files of a repository folder, or the one file a blob URL points at: the ones that exist,
+ * and one past MAX_FILE is left out.
+ */
+export async function importInstructions(fetcher: typeof fetch, ref: RepoRef, token: string | null) {
+  const candidates =
+    ref.kind === "blob" ? [ref.path] : INSTRUCTION_FILES.map((f) => (ref.path ? `${ref.path}/${f}` : f));
+  const files: { path: string; text: string }[] = [];
+  for (const path of candidates) {
+    const read = await fetchText(fetcher, rawUrl(ref, path), token);
+    if (read.kind === "ok") files.push({ path, text: read.text });
+  }
+  return files;
+}
+
 const Listing = z.array(
   z.object({
     name: z.string(),
