@@ -94,7 +94,10 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
     (event: LiveEvent) => {
       if (event.type === "conflict") setConflict(event.version);
       else if (event.type === "published" || event.type === "discarded") setConflict(null);
-      if (event.type === "rights") setConflict(null);
+      if (event.type === "rights") {
+        setConflict(null);
+        setDeleting(false);
+      }
       if (event.type === "publish_failed" || event.type === "draft_save_failed")
         setFailure(
           new Error(t(event.type === "publish_failed" ? "draft.publishFailed" : "draft.saveFailed")),
@@ -193,7 +196,9 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
   // Who created the page, as the server counts it: their own first version, or an agent's made for them.
   const createdIt =
     firstAuthor?.type === "person" ? firstAuthor.id === userId : firstAuthor?.actingFor === userId;
-  const mayDelete = admin || (!p.locked && createdIt);
+  // A read the live document revoked counts at once, even before (or if never) the page reads again.
+  const denied = live.status === "denied";
+  const mayDelete = !denied && (admin || (!p.locked && createdIt && !live.readOnly));
   // Offline, the live document still takes edits: they wait in it and sync on reconnect.
   // One rule for every write control: the page says this person may edit it, and the live document has
   // not said otherwise since (a lock seen live, a revoked read).
@@ -368,17 +373,20 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
                 {t("draft.discard")}
               </MenuItem>
             )}
-            <MenuItem
-              icon={<Icon icon={p.pinned ? PinOff : Pin} />}
-              onSelect={() =>
-                void run("pin", async () => {
-                  await api.pinWikiPage({ workspaceId, pageId: slug, body: { pinned: !p.pinned } });
-                })
-              }
-            >
-              {p.pinned ? t("page.unpin") : t("page.pin")}
-            </MenuItem>
-            {admin && (
+            {!denied && (
+              // Pinning stays open on a locked page: any member may pin, as the server allows.
+              <MenuItem
+                icon={<Icon icon={p.pinned ? PinOff : Pin} />}
+                onSelect={() =>
+                  void run("pin", async () => {
+                    await api.pinWikiPage({ workspaceId, pageId: slug, body: { pinned: !p.pinned } });
+                  })
+                }
+              >
+                {p.pinned ? t("page.unpin") : t("page.pin")}
+              </MenuItem>
+            )}
+            {admin && !denied && (
               <MenuItem
                 icon={<Icon icon={p.locked ? LockOpen : Lock} />}
                 onSelect={() =>
@@ -577,7 +585,8 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
         />
       )}
       <ConfirmDialog
-        open={deleting}
+        // A confirmation open when the right to delete goes away closes with it.
+        open={deleting && mayDelete}
         onOpenChange={setDeleting}
         tone="danger"
         title={t("page.deleteTitle", { title: p.title })}

@@ -185,4 +185,68 @@ describe("a live wiki page", () => {
       thrown.map(String).filter((text) => text.includes("MilkdownError") || text.includes("not found")),
     ).toEqual([]);
   });
+  test("after a revoked read the page's own actions go too: no trash, pin or lock, and an open confirmation closes", async () => {
+    const server = withIrisPage();
+    const app = await renderApp({
+      path: `${WIKI}/iris-note`,
+      signedInAs: "usr_iris",
+      wikiSocket: live,
+      server,
+    });
+    await waitFor(() => expect(status()).toBe("Version 1 published"));
+    await app.user.click(screen.getByRole("button", { name: "Page actions" }));
+    await app.user.click(await screen.findByRole("menuitem", { name: "Move to trash" }));
+    expect(await screen.findByRole("alertdialog")).toBeDefined();
+    // The page can't be read again: the refetch fails and the cached page still says unlocked.
+    server.force("getWikiPage", { kind: "error", status: 404, code: "not_found" }, 50);
+    await act(async () => socket().serverClose(4403, "access-revoked"));
+    await waitFor(() => expect(status()).toBe("Read only"));
+    await waitFor(() => expect(screen.queryByRole("alertdialog") === null).toBe(true));
+    await app.user.click(screen.getByRole("button", { name: "Page actions" }));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).queryByRole("menuitem", { name: "Move to trash" }) === null).toBe(true);
+    expect(within(menu).queryByRole("menuitem", { name: "Pin" }) === null).toBe(true);
+    expect(
+      app.server.calls.some((call) => call.method === "deleteWikiPage" || call.method === "pinWikiPage"),
+    ).toBe(false);
+  });
+
+  test("a new property being named when the read is revoked is never saved", async () => {
+    const server = withIrisPage();
+    const app = await renderApp({
+      path: `${WIKI}/iris-note`,
+      signedInAs: "usr_iris",
+      wikiSocket: live,
+      server,
+    });
+    await waitFor(() => expect(status()).toBe("Version 1 published"));
+    await app.user.click(screen.getByRole("button", { name: "Add a property" }));
+    await app.user.click(await screen.findByRole("menuitem", { name: "New property…" }));
+    await app.user.type(await screen.findByRole("textbox", { name: "Property name" }), "Priority");
+    await act(async () => socket().serverClose(4403, "access-revoked"));
+    await waitFor(() => expect(status()).toBe("Read only"));
+    expect(screen.queryByRole("textbox", { name: "Property name" }) === null).toBe(true);
+    expect(app.server.calls.some((call) => call.method === "setWikiProps")).toBe(false);
+  });
+
+  test("a value typed before the read is revoked is not sent when the field is left", async () => {
+    const server = withIrisPage();
+    const app = await renderApp({
+      path: `${WIKI}/iris-note`,
+      signedInAs: "usr_iris",
+      wikiSocket: live,
+      server,
+    });
+    await waitFor(() => expect(status()).toBe("Version 1 published"));
+    await app.user.click(screen.getByRole("button", { name: "Add a property" }));
+    await app.user.click(await screen.findByRole("menuitem", { name: "Owner" }));
+    const owner = await screen.findByRole("textbox", { name: "Owner" });
+    await app.user.clear(owner);
+    await app.user.type(owner, "Someone else");
+    await act(async () => socket().serverClose(4403, "access-revoked"));
+    await waitFor(() => expect(status()).toBe("Read only"));
+    await act(async () => owner.blur());
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(app.server.calls.some((call) => call.method === "updateWikiPageMeta")).toBe(false);
+  });
 });
