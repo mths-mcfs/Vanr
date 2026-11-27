@@ -189,6 +189,8 @@ export function decide(s: Snapshot, now: Date): EngineAction {
       return { type: "validate", itemIds: judge.map((i) => i.id), round };
     }
   }
+  // Only fix items left (the person removed what they fix): nothing to submit until the plan changes.
+  if (!live.some((i) => i.kind !== "fix")) return wait("idle");
   return { type: "submit" };
 }
 
@@ -661,6 +663,12 @@ async function dispatch(
     await end("failed");
     return null;
   }
+  // The last check before the turn goes out: an attempt another loop reaped meanwhile sends nothing.
+  const [still] = await db
+    .select({ status: assignmentWork.status })
+    .from(assignmentWork)
+    .where(eq(assignmentWork.id, id));
+  if (still?.status === "ended") return null;
   const res = await deps.runtime.runFor({ agent, channel, trigger });
   if (!res.ok) {
     await end("failed");
@@ -681,7 +689,14 @@ async function dispatch(
     .where(and(eq(assignmentWork.id, id), ne(assignmentWork.status, "ended")))
     .returning();
   // The attempt was reaped while this step was still sending: its turn doesn't go on.
-  if (!bound) deps.runtime.cancel(res.runId, null);
+  // A run another attempt holds (the message went into a run already live) is left alone.
+  if (!bound) {
+    const [owner] = await db
+      .select({ id: assignmentWork.id })
+      .from(assignmentWork)
+      .where(eq(assignmentWork.refId, res.runId));
+    if (!owner) deps.runtime.cancel(res.runId, null);
+  }
   return null;
 }
 
@@ -807,6 +822,7 @@ async function validate(
             eq(assignmentPlanItems.id, t.id),
             eq(assignmentPlanItems.checks, t.checks),
             eq(assignmentPlanItems.epoch, t.epoch),
+            eq(assignmentPlanItems.status, "done"),
           ),
         );
     return RETRY_WAIT_MS;
@@ -832,6 +848,7 @@ async function validate(
           eq(assignmentPlanItems.id, t.id),
           eq(assignmentPlanItems.checks, t.checks),
           eq(assignmentPlanItems.epoch, t.epoch),
+          eq(assignmentPlanItems.status, "done"),
         ),
       )
       .returning();

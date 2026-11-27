@@ -149,6 +149,13 @@ describe("decide (pure)", () => {
     expect(decide({ ...base, items: [item("a", { status: "done", passes: true })] }, now)).toEqual({
       type: "submit",
     });
+    // Only a fix left (the person removed what it fixes): nothing to submit, so it waits instead of looping.
+    expect(
+      decide(
+        { ...base, items: [item("a-fix1", { status: "done", kind: "fix", fixes: "a", passes: true })] },
+        now,
+      ),
+    ).toMatchObject({ type: "wait", reason: "idle" });
   });
 });
 
@@ -692,6 +699,38 @@ describe("the engine on its loop", () => {
   );
 
   test(
+    "a run another attempt holds is left alone when this attempt was reaped",
+    async () => {
+      const row = await heldAgentAssignment("Shared run");
+      const id = workIdOf(row.id, "p1", 1);
+      const next = workIdOf(row.id, "p1", 2);
+      // The turn went into a run attempt 2 holds, and attempt 1 was reaped meanwhile.
+      runtime.hooks.onTurn = async (runId) => {
+        await act(server.deps, row.id, { type: "reap", workId: id });
+        await server.deps.db.insert(assignmentWork).values({
+          id: next,
+          assignmentId: row.id,
+          itemId: "p1",
+          n: 2,
+          kind: "run",
+          status: "running",
+          refId: runId,
+        });
+      };
+      try {
+        await act(server.deps, row.id, { type: "work", itemId: "p1", n: 1 });
+      } finally {
+        runtime.hooks.onTurn = undefined;
+      }
+      const run = runtime.turns.at(-1)?.runId ?? "";
+      expect(server.deps.runtime.liveRun(run)).not.toBeNull();
+      runtime.finish(run);
+      await server.deps.runtime.settle();
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "a cap raised and a due date moved since the decision: the step does nothing",
     async () => {
       const row = await heldAgentAssignment("Moved");
@@ -750,6 +789,37 @@ describe("the engine on its loop", () => {
           and(eq(schema.assignmentPlanItems.assignmentId, row.id), eq(schema.assignmentPlanItems.id, "p1")),
         );
       expect([p1?.passes, p1?.checks]).toEqual([null, 0]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a verdict on an item the person removed during the check is not applied and makes no fix",
+    async () => {
+      const row = await onRunner("Removed", ["Build"]);
+      const p1 = and(
+        eq(schema.assignmentPlanItems.assignmentId, row.id),
+        eq(schema.assignmentPlanItems.id, "p1"),
+      );
+      await server.deps.db
+        .update(schema.assignmentPlanItems)
+        .set({ status: "done", summary: "Built" })
+        .where(p1);
+      const removing: Verifier = async (_deps, _row, items) => {
+        await server.deps.db.update(schema.assignmentPlanItems).set({ status: "dropped" }).where(p1);
+        return {
+          ok: true,
+          runId: null,
+          verdicts: items.map((i) => ({ id: i.item.id, passes: false, reason: "no" })),
+        };
+      };
+      await act({ ...server.deps, assignmentVerifier: removing }, row.id, {
+        type: "validate",
+        itemIds: ["p1"],
+        round: 1,
+      });
+      const items = await planOf(server.deps, row.id);
+      expect(items.map((i) => [i.id, i.status, i.passes, i.checks])).toEqual([["p1", "dropped", null, 0]]);
     },
     SERVER_TEST_MS,
   );
