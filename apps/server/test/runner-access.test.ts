@@ -14,7 +14,16 @@ import { revalidateBrowsers } from "../src/realtime/browser-socket";
 import { MAX_TRANSITIONS } from "../src/runners/hub";
 import { publishIntervention, publishSecret, waitIntervention } from "../src/runners/requests";
 import type { RunningServer } from "../src/server";
-import { Browser, body, isEvent, SERVER_TEST_MS, signedIn, startTestServer, TestSocket } from "./harness";
+import {
+  Browser,
+  body,
+  isEvent,
+  SERVER_TEST_MS,
+  signedIn,
+  startTestServer,
+  TestSocket,
+  waitFor,
+} from "./harness";
 import { wrapQuery } from "./lock-double";
 import { connectProtocolRunner, mintSession, type ProtocolRunner } from "./protocol-runner";
 
@@ -1337,6 +1346,44 @@ describe("live view regressions", () => {
         }
       } finally {
         socket.close();
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "the live view is rate limited both ways: a runner's burst of frames and the controller's burst of input",
+    async () => {
+      const t = await team();
+      const paired = await pairOverHttp(t, t.ana);
+      const runner = await online(paired, { browser: true });
+      await lend(t.lia.id, paired.runnerId);
+      const ana = await TestSocket.open(t.ana.browser, t.workspaceId);
+      try {
+        ana.send({ type: "live_view.subscribe", agentId: t.lia.id });
+        await runner.request("live_view.start");
+        // Watching is 1 frame a second (and one of slack): a burst of 50 doesn't reach the watcher whole.
+        for (let i = 0; i < 50; i++)
+          runner.send({ type: "live_view.frame", agentId: t.lia.id, data: `F${i}`, width: 1, height: 1 });
+        runner.send({ type: "live_view.stream_ended", agentId: t.lia.id, reason: "stopped" });
+        await ana.event("live_view.ended");
+        const shown = ana.frames.filter((f) => isEvent(f, "live_view.frame")).map((f) => f.event.data);
+        expect(shown[0]).toBe("F0");
+        expect(shown.length).toBeLessThan(5);
+
+        // In control: input past 30 messages a second is turned away (the runner serves 8 calls at a time, so a
+        // burst of 300 at once ends with at least half of it turned away well within the wait).
+        await api(t.ana.browser, "POST", `${t.ws}/agents/${t.lia.id}/browser/interventions/start`, {});
+        await runner.request("live_view.start");
+        const burst = 300;
+        for (let i = 0; i < burst; i++)
+          ana.send({ type: "live_view.input", agentId: t.lia.id, events: [{ type: "click", x: i, y: 0 }] });
+        const turnedAway = () => ana.frames.filter((f) => f.type === "error" && f.code === "rate_limit");
+        await waitFor(async () => turnedAway().length >= burst / 2);
+        expect(turnedAway()[0]).toMatchObject({ agentId: t.lia.id });
+        expect(runner.invalid).toEqual([]);
+      } finally {
+        ana.close();
       }
     },
     SERVER_TEST_MS,
