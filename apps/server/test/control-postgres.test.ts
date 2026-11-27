@@ -170,6 +170,8 @@ async function undoAgainstSend(
     posted.map((m) => m.meta.retracted !== undefined),
     action?.revertedAt != null,
   ];
+  if (!Object.values(SEND_UNDO_ENDS).some((want) => Bun.deepEquals(want, end)))
+    console.log(`UNDO_SEND_MISMATCH ${JSON.stringify(end)}`);
   expect(Object.values(SEND_UNDO_ENDS)).toContainEqual(end);
   return Object.entries(SEND_UNDO_ENDS).find(([, want]) => Bun.deepEquals(want, end))?.[0];
 }

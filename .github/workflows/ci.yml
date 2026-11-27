@@ -902,6 +902,7 @@ jobs:
           git show 20e546a37a3b111ed49f1c74ff29e7c3a43cea3c:apps/server/test/control-postgres.test.ts > apps/server/test/control-postgres-base.test.ts
           bun test apps/server/test/control-postgres-base.test.ts --test-name-pattern "undo against the send" --rerun-each 200 > base.log 2>&1
           echo "LOOP base: exit $?, $(grep -ac '^(pass)' base.log) pass, $(grep -ac '^(fail)' base.log) fail"
+          grep -a -B2 -A30 '^error:' base.log | head -100
           rm apps/server/test/control-postgres-base.test.ts
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
@@ -913,6 +914,8 @@ jobs:
           echo "LOOP fix: exit $status, $(grep -ac '^(pass)' fix.log) pass, $(grep -ac '^(fail)' fix.log) fail"
           grep -ao 'UNDO_SEND_TALLY [a-z,]*' fix.log | sed 's/UNDO_SEND_TALLY //' | tr ',' '\n' | sort | uniq -c | sed 's/^/LOOP fix ends: /'
           echo "LOOP fix: runs with a retracted end: $(grep -ao 'UNDO_SEND_TALLY [a-z,]*' fix.log | grep -c retracted)"
+          grep -a 'UNDO_SEND_MISMATCH' fix.log | sort | uniq -c | sed 's/^/LOOP fix mismatch: /'
+          grep -a -B2 -A30 '^error:' fix.log | head -200
           exit $status
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
