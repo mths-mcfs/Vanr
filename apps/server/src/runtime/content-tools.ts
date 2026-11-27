@@ -31,6 +31,7 @@ import {
 } from "../drive";
 import { HttpError } from "../http";
 import { columnsOf, createIssue, issueByNumber, notifyComment, updateIssue } from "../issues";
+import { log } from "../logger";
 import { anchorOf, canSeeRoutine, nextRunFor, type RoutineRow } from "../routines";
 import { createPage, MAX_BODY, pageBySlug, recordRead, savePage } from "../wiki";
 import { audienceWithin, type WikiViewer } from "../wiki-access";
@@ -636,24 +637,33 @@ const commentIssue = defineStored({
   async run(ctx, input) {
     const { db } = ctx.deps;
     const row = await domain(issueByNumber(db, ctx.workspaceId, input.number));
-    const [act] = await db
-      .insert(issueTimeline)
-      .values({
-        id: newId("iact"),
-        issueId: row.id,
-        kind: "comment",
-        text: input.text,
-        author: self(ctx),
-        createdAt: ctx.deps.now(),
-      })
-      .returning();
-    if (!act) throw new Error("comment insert failed");
-    await notifyComment(ctx.deps, row, self(ctx), input.text);
-    await ctx.recordAction({
-      kind: "issue_commented",
-      target: { type: "issue", id: row.id, number: row.number, title: row.title },
-      params: { activityId: act.id },
+    // The comment and its receipt commit together; the notification goes after, and its failure doesn't undo them.
+    const act = await db.transaction(async (tx) => {
+      const [saved] = await tx
+        .insert(issueTimeline)
+        .values({
+          id: newId("iact"),
+          issueId: row.id,
+          kind: "comment",
+          text: input.text,
+          author: self(ctx),
+          createdAt: ctx.deps.now(),
+        })
+        .returning();
+      if (!saved) throw new Error("comment insert failed");
+      await ctx.recordAction(
+        {
+          kind: "issue_commented",
+          target: { type: "issue", id: row.id, number: row.number, title: row.title },
+          params: { activityId: saved.id },
+        },
+        tx,
+      );
+      return saved;
     });
+    await notifyComment(ctx.deps, row, self(ctx), input.text).catch((err: unknown) =>
+      log.warn("tool.comment_notify_failed", { issueId: row.id, activityId: act.id, err }),
+    );
     return `Commented on #${row.number}.`;
   },
 });
@@ -887,35 +897,47 @@ const updateRoutineTool = defineStored({
       );
     if (!found || !(await seenRoutines(ctx, [found])).length)
       throw new ToolInputError(`Routine ${input.routineId} not found`);
-    const row = found;
-    let trigger = row.trigger as RoutineTrigger;
-    if (input.schedule) {
-      const parsed = parseSchedulePhrase(input.schedule, input.timezone, ctx.deps.now());
-      if (!parsed.ok) throw new ToolInputError(`Couldn't understand the schedule (${parsed.code})`);
-      trigger =
-        parsed.kind === "once"
+    // Only the instructions: nothing else is written, so a pause in between stays a pause.
+    if (input.schedule === undefined && input.active === undefined) {
+      if (!input.prompt) return "Nothing to change.";
+      await db.update(routines).set({ prompt: input.prompt }).where(eq(routines.id, found.id));
+      return `Updated routine "${found.name}".`;
+    }
+    const parsed = input.schedule
+      ? parseSchedulePhrase(input.schedule, input.timezone, ctx.deps.now())
+      : null;
+    if (parsed && !parsed.ok) throw new ToolInputError(`Couldn't understand the schedule (${parsed.code})`);
+    // The state, the schedule and the next run come from the row as it is under the lock, not from the read.
+    const row = await db.transaction(async (tx) => {
+      const [locked] = await tx.select().from(routines).where(eq(routines.id, found.id)).for("update");
+      if (!locked || JSON.stringify(locked.target) !== JSON.stringify(found.target))
+        throw new ToolInputError(`Routine ${input.routineId} changed; list your routines again`);
+      const trigger: RoutineTrigger = !parsed?.ok
+        ? (locked.trigger as RoutineTrigger)
+        : parsed.kind === "once"
           ? { kind: "once", at: parsed.at.toISOString(), timezone: input.timezone }
           : { kind: "schedule", rule: parsed.rule };
-    }
-    const active = input.active ?? row.active;
-    const now = ctx.deps.now();
-    // A new schedule starts the series again; without a change, it follows the series from before.
-    const anchor = input.schedule ? now : anchorOf(row);
-    const nextFireAt = active ? nextRunFor(trigger, now, anchor) : null;
-    // On without a next time (a "once" that passed, a series that ended) it would never run.
-    if (active && !nextFireAt && (trigger.kind === "schedule" || trigger.kind === "once"))
-      throw new ToolInputError("That routine has no future run: give it a new schedule to turn it on");
-    await db
-      .update(routines)
-      .set({
-        ...(input.prompt ? { prompt: input.prompt } : {}),
-        trigger,
-        active,
-        nextFireAt,
-        ...(input.schedule ? { scheduleFrom: anchor } : {}),
-        ...(active && !row.active ? { pausedReason: null } : {}),
-      })
-      .where(eq(routines.id, row.id));
+      const active = input.active ?? locked.active;
+      const now = ctx.deps.now();
+      // A new schedule starts the series again; without a change, it follows the series from before.
+      const anchor = input.schedule ? now : anchorOf(locked);
+      const nextFireAt = active ? nextRunFor(trigger, now, anchor) : null;
+      // On without a next time (a "once" that passed, a series that ended) it would never run.
+      if (active && !nextFireAt && (trigger.kind === "schedule" || trigger.kind === "once"))
+        throw new ToolInputError("That routine has no future run: give it a new schedule to turn it on");
+      await tx
+        .update(routines)
+        .set({
+          ...(input.prompt ? { prompt: input.prompt } : {}),
+          trigger,
+          active,
+          nextFireAt,
+          ...(input.schedule ? { scheduleFrom: anchor } : {}),
+          ...(active && !locked.active ? { pausedReason: null } : {}),
+        })
+        .where(eq(routines.id, locked.id));
+      return locked;
+    });
     return `Updated routine "${row.name}".`;
   },
 });

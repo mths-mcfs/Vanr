@@ -258,6 +258,8 @@ async function write(
         ...meta,
         op,
         expectedSha256: contentSha256(args.current.text),
+        // a rename in between would make this change another file than the one the agent read
+        ...(args.current.path !== null ? { expectedPath: args.current.path } : {}),
         store,
       });
     }
