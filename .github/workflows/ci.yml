@@ -145,6 +145,10 @@ jobs:
       - run: bun test apps/server/test/messages-postgres.test.ts
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # A whole conversation on Postgres, and N sends of one clientId through the chat route routed once.
+      - run: bun test apps/server/test/chat-postgres.test.ts
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
       # Each queued send goes out once and is canceled or sent, never both, with passes on several connections at
       # once. Each guard is one conditional UPDATE (no lock to take out).
       - run: bun test apps/server/test/outbox-postgres.test.ts

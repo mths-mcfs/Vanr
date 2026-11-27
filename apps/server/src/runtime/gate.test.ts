@@ -2,12 +2,17 @@ import { describe, expect, test } from "bun:test";
 import type { CredentialRef } from "@vanr/engine/action-credential";
 import { payloadHash, RiskTracker } from "@vanr/engine/effects";
 import { z } from "zod";
+import type { AgentRow } from "../agents";
+import type { AppDeps } from "../context";
+import type { ConnectionRow } from "../integrations/access";
+import { connectionTools } from "../integrations/tools";
 import { BROWSER_TOOLS } from "../runners/agent-tools";
 import {
   type ApprovalOutcome,
   type ApprovalRequest,
   type DecisionBy,
   define,
+  planOf,
   type ReviewRequest,
   runTool,
   type ToolContext,
@@ -16,8 +21,6 @@ import {
 
 // runTool with the gate (seam 1), without a database: the context is fake and records what the runtime would do.
 // `rules`: remembered rules by `tool|key`; `review`: the model reviewer's verdict.
-// The origin's MCP connector class cases wait for `integrations/tools`: they come with the module that defines
-// those tools.
 function fakeCtx(
   decide: (req: ApprovalRequest) => Promise<ApprovalOutcome> | ApprovalOutcome,
   opts: { rules?: Record<string, string>; review?: (req: ReviewRequest) => "allow" | "ask" | null } = {},
@@ -252,6 +255,55 @@ describe("runTool: runs only the approved effect", () => {
 // The rule-of-two cases with the browser tools (read, type a secret, click, open a URL) belong to
 // apps/server/test/browser-security.test.ts: their plan asks the runner what the action will reach, so they run
 // with the real runner and Chrome.
+describe("the MCP connector's class", () => {
+  // A catalog connector: read access comes from the `readOnlyHint` the MCP server sends.
+  const conn = {
+    id: "conn1",
+    connector: "notion",
+    custom: false,
+    label: "Notion",
+    tools: [
+      {
+        name: "delete_page",
+        access: "read",
+        confirmed: true,
+        readOnlyHint: true,
+        label: "",
+        description: "",
+      },
+      { name: "search", access: "read", confirmed: true, readOnlyHint: true, label: "", description: "" },
+    ],
+  } as unknown as ConnectionRow;
+  const tools = connectionTools(
+    {} as AppDeps,
+    { repositories: [] } as unknown as AgentRow,
+    conn,
+    "read",
+    new Set(),
+    new Map(),
+    () => false,
+  );
+
+  test("a sensitive name the server marks read-only stays K3 and asks a person", async () => {
+    const { ctx, asked } = fakeCtx(() => ({ id: "apv1", decision: "rejected", reason: null, byName: "Ana" }));
+    const out = await runTool(ctx, tools, "notion__delete_page", { id: "p1" });
+    expect(out.isError).toBe(true);
+    expect(asked[0]).toMatchObject({ tool: "notion__delete_page", effect: "K3", gateReason: "irreversible" });
+  });
+
+  test("a real read stays K0 and raises A", async () => {
+    const search = tools.find((t) => t.name === "notion__search") as ToolDef<unknown>;
+    expect(search.effect).toBe("K0");
+    expect((await planOf(fakeCtx(() => approvedNever()).ctx, search, {})).raises).toEqual([
+      { flag: "A", source: "Notion: search" },
+    ]);
+  });
+});
+
+function approvedNever(): ApprovalOutcome {
+  throw new Error("should not ask");
+}
+
 describe("rule of two", () => {
   test("what the result raises (reads) counts for the next calls, not for this one", async () => {
     const { ctx, asked } = fakeCtx(() => ({ id: "apv1", decision: "rejected", reason: null, byName: "Ana" }));
