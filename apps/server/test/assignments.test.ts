@@ -281,6 +281,13 @@ describe("an assignment on a runner, over HTTP", () => {
         const [barred] = (await call(ana, "GET", `${path}/commands`)).body.commands;
         expect(barred).toMatchObject({ command: "npm test --watch=false", jobId: first, state: "pending" });
 
+        // Only a command this job was denied, and still waiting, can be allowed: nothing else becomes a rule.
+        const notAsked = await call(ana, "POST", `${path}/commands/retry`, {
+          jobId: first,
+          commands: ["rm -rf /"],
+        });
+        expect([notAsked.status, code(notAsked)]).toEqual([409, "assignment.command_closed"]);
+        expect((await call(ana, "GET", `${path}/settings`)).body.rules).toEqual([]);
         const wrongJob = await call(ana, "POST", `${path}/commands/retry`, {
           jobId: "aj_other",
           commands: ["ls"],
@@ -429,6 +436,14 @@ describe("who sees and does what", () => {
       const { zed, workspaceId: theirs } = await outsider();
       for (const [method, tail, payload] of routes) {
         const cross = await call(zed, method, `${ws(theirs)}/assignments/${t.assignmentId}${tail}`, payload);
+        // Another workspace's id answers exactly as an id that doesn't exist: existence doesn't leak.
+        const missing = await call(zed, method, `${ws(theirs)}/assignments/asg_doesnotexist${tail}`, payload);
+        expect([method, tail, missing.status, code(missing)]).toEqual([
+          method,
+          tail,
+          cross.status,
+          code(cross),
+        ]);
         expect([method, tail, cross.status, code(cross)]).toEqual([
           method,
           tail,
@@ -581,6 +596,37 @@ describe("who sees and does what", () => {
         expect([runner404.status, code(runner404)]).toEqual([404, "runner.not_found"]);
         const setRunner = await call(t.ana, "PUT", `${t.path}/runner`, { runnerId: runner.runnerId });
         expect([setRunner.status, code(setRunner)]).toEqual([404, "runner.not_found"]);
+        // The same answers for ids that don't exist anywhere.
+        const noRunner = await call(t.ana, "PUT", `${t.path}/runner`, { runnerId: "rn_doesnotexist" });
+        expect([noRunner.status, code(noRunner)]).toEqual([setRunner.status, code(setRunner)]);
+        const noRunnerCreate = await call(t.ana, "POST", base, {
+          agentId: t.agentId,
+          channelId: t.general,
+          goal: "x",
+          executor: "claude_code",
+          runnerId: "rn_doesnotexist",
+        });
+        expect([noRunnerCreate.status, code(noRunnerCreate)]).toEqual([runner404.status, code(runner404)]);
+        const noAgent = await call(t.ana, "POST", base, {
+          agentId: "agt_doesnotexist",
+          channelId: t.general,
+          goal: "x",
+        });
+        expect([noAgent.status, code(noAgent)]).toEqual([agent404.status, code(agent404)]);
+        const theirJob = newId("job");
+        await server.deps.db.insert(runnerJobs).values({
+          id: theirJob,
+          workspaceId: theirs,
+          runnerId: runner.runnerId,
+          agentId: theirAgent,
+          executor: "claude_code",
+          title: "Theirs",
+          prompt: "x",
+        });
+        const jobOutput = await call(t.ana, "GET", `${ws(t.workspaceId)}/jobs/${theirJob}/output`);
+        const noJob = await call(t.ana, "GET", `${ws(t.workspaceId)}/jobs/job_doesnotexist/output`);
+        expect([jobOutput.status, code(jobOutput)]).toEqual([404, "not_found"]);
+        expect([noJob.status, code(noJob)]).toEqual([jobOutput.status, code(jobOutput)]);
         const theirGeneral = (await seedWorkspace(server, zed, "Other")).general;
         const channel404 = await call(t.ana, "POST", base, {
           agentId: t.agentId,
@@ -998,6 +1044,203 @@ describe("the person's answers", () => {
         .from(schema.knowledgePages)
         .where(eq(schema.knowledgePages.id, pub?.wikiPageId ?? ""));
       expect(open?.access).toBeNull();
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("two people at once on the same list", () => {
+  test(
+    "two opinions, two ticks, two hand-overs, two answers to a suggestion and two rules: nothing is lost or doubled",
+    async () => {
+      const t = await team();
+      for (const p of [t.beto, t.caio])
+        await call(t.ana, "PATCH", `${t.path}/participants/${p.user.id}`, { role: "decide" });
+      const decision = newId("adec");
+      await server.deps.db.insert(assignmentDecisions).values({
+        id: decision,
+        assignmentId: t.assignmentId,
+        question: "Which host?",
+        options: ["a", "b"],
+        status: "pending",
+      });
+      const opinions = await Promise.all([
+        call(t.beto, "POST", `${t.path}/decisions/${decision}/opinion`, { option: "a" }),
+        call(t.caio, "POST", `${t.path}/decisions/${decision}/opinion`, { option: "b" }),
+      ]);
+      expect(opinions.map((r) => r.status)).toEqual([200, 200]);
+      const [d] = await server.deps.db
+        .select()
+        .from(assignmentDecisions)
+        .where(eq(assignmentDecisions.id, decision));
+      expect(d?.opinions.map((o) => o.option).sort()).toEqual(["a", "b"]);
+
+      const sub = newId("asub");
+      await server.deps.db.insert(schema.assignmentSubmissions).values({
+        id: sub,
+        assignmentId: t.assignmentId,
+        note: "Done",
+        checklist: [
+          { id: "c1", text: "One", verifiedBy: null },
+          { id: "c2", text: "Two", verifiedBy: null },
+        ],
+      });
+      await Promise.all([
+        call(t.beto, "PUT", `${t.path}/submissions/${sub}/checklist/c1`, { checked: true }),
+        call(t.caio, "PUT", `${t.path}/submissions/${sub}/checklist/c2`, { checked: true }),
+      ]);
+      const [s] = await server.deps.db
+        .select()
+        .from(schema.assignmentSubmissions)
+        .where(eq(schema.assignmentSubmissions.id, sub));
+      expect(s?.checklist.map((i) => i.verifiedBy)).toEqual([t.beto.user.id, t.caio.user.id]);
+
+      const [msg] = await server.deps.db
+        .insert(schema.messages)
+        .values({
+          id: newId("msg"),
+          workspaceId: t.workspaceId,
+          channelId: t.general,
+          threadId: t.threadId,
+          authorKind: "person",
+          authorId: t.beto.user.id,
+          body: "Use the dark theme",
+          meta: { assignmentSuggestion: { assignmentId: t.assignmentId, text: "Use the dark theme" } },
+        })
+        .returning();
+      const answers = await Promise.all([
+        call(t.ana, "POST", `${t.path}/suggestions/${msg?.id}/decline`),
+        call(t.beto, "POST", `${t.path}/suggestions/${msg?.id}/decline`),
+      ]);
+      expect(answers.map((r) => r.status).sort()).toEqual([200, 409]);
+
+      const commands = [newId("acmd"), newId("acmd")];
+      await server.deps.db.insert(assignmentCommands).values(
+        commands.map((id) => ({
+          id,
+          assignmentId: t.assignmentId,
+          jobId: "aj_test",
+          command: "npm test",
+          tool: "Bash",
+          rules: ["npm test *"],
+        })),
+      );
+      await Promise.all(
+        commands.map((id) => call(t.ana, "POST", `${t.path}/commands/${id}/decide`, { decision: "always" })),
+      );
+      expect((await call(t.ana, "GET", `${t.path}/commands`)).body.rules).toEqual(["npm test *"]);
+
+      const handOvers = await Promise.all([
+        call(t.ana, "POST", `${t.path}/transfer`, { userId: t.beto.user.id }),
+        call(t.ana, "POST", `${t.path}/transfer`, { userId: t.caio.user.id }),
+      ]);
+      // On PGlite the second may read the first's result (both valid, in order) or find it changed (409); the
+      // forced interleave on Postgres pins the second case. Either way the people end coherent.
+      for (const r of handOvers)
+        if (r.status !== 200) expect([r.status, code(r)]).toEqual([409, "assignment.changed"]);
+      const winner = (await call(t.ana, "GET", t.path)).body.ownerId;
+      const people = (await call(t.ana, "GET", `${t.path}/participants`)).body;
+      expect(people.owner.userId).toBe(winner);
+      expect(people.participants.map((p: { userId: string }) => p.userId)).not.toContain(winner);
+      expect(people.participants.map((p: { userId: string }) => p.userId)).toContain(t.ana.user.id);
+      expect(handOvers.some((r) => r.body.ownerId === winner)).toBe(true);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("what the review of #79 found", () => {
+  test(
+    "starting checks the executor on the runner it has now; two creations on one thread make one assignment",
+    async () => {
+      const t = await team();
+      const runner = await claudeRunner(t.ana, t.workspaceId);
+      try {
+        await call(t.ana, "PUT", `${t.path}/runner`, { runnerId: runner.runnerId });
+        await call(t.ana, "PUT", `${t.path}/executor`, { executor: "claude_code" });
+        await server.deps.db
+          .update(schema.runners)
+          .set({
+            access: { folders: [], tools: { claude: false, codex: false, commands: true, browser: false } },
+          })
+          .where(eq(schema.runners.id, runner.runnerId));
+        const start = await call(t.ana, "POST", `${t.path}/start`);
+        expect([start.status, code(start), start.body.error.params]).toEqual([
+          409,
+          "assignment.executor_unavailable",
+          { reason: "tool_off" },
+        ]);
+        expect(await status(t.assignmentId)).toBe("proposed");
+      } finally {
+        await runner.close();
+      }
+
+      for (let round = 0; round < 10; round++) {
+        const [root] = await server.deps.db
+          .insert(schema.messages)
+          .values({
+            id: newId("msg"),
+            workspaceId: t.workspaceId,
+            channelId: t.general,
+            authorKind: "person",
+            authorId: t.ana.user.id,
+            body: `We need to migrate the database ${round}`,
+          })
+          .returning();
+        const all = await Promise.all(
+          [1, 2, 3].map((i) =>
+            call(t.ana, "POST", `${ws(t.workspaceId)}/assignments`, {
+              agentId: t.agentId,
+              channelId: t.general,
+              goal: `Migrate ${i}`,
+              threadId: root?.id,
+            }),
+          ),
+        );
+        expect(all.map((r) => r.status).sort()).toEqual([201, 409, 409]);
+        const onThread = await server.deps.db
+          .select()
+          .from(assignments)
+          .where(eq(assignments.threadId, root?.id ?? ""));
+        expect(onThread).toHaveLength(1);
+        const cards = await server.deps.db
+          .select()
+          .from(schema.messages)
+          .where(eq(schema.messages.threadId, root?.id ?? ""));
+        expect(cards).toHaveLength(1);
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "adding who asked to join closes the owner's notice; a wiki copy that fails doesn't undo the close",
+    async () => {
+      const t = await team();
+      await call(t.caio, "POST", `${t.path}/join-requests`);
+      const waiting = async () =>
+        (
+          await server.deps.db
+            .select()
+            .from(schema.notifications)
+            .where(eq(schema.notifications.userId, t.ana.user.id))
+        ).filter((n) => n.waiting).length;
+      expect(await waiting()).toBe(1);
+      await call(t.ana, "PATCH", `${t.path}/participants/${t.caio.user.id}`, { role: "comment" });
+      expect(await waiting()).toBe(0);
+
+      // A title the wiki rejects ("[" breaks a link): the copy fails, the assignment is closed all the same.
+      await server.deps.db
+        .update(assignments)
+        .set({ title: "Fix [x]" })
+        .where(eq(assignments.id, t.assignmentId));
+      await call(t.ana, "POST", `${t.path}/start`);
+      const closed = await call(t.ana, "POST", `${t.path}/close`, { outcome: "done", copyToWiki: true });
+      expect([closed.status, closed.body.status]).toEqual([200, "done"]);
+      const events = (await call(t.ana, "GET", `${t.path}/events`)).body.events.map(
+        (e: { kind: string }) => e.kind,
+      );
+      expect(events.at(-1)).toBe("closed");
     },
     SERVER_TEST_MS,
   );

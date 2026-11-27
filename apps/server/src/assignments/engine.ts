@@ -437,6 +437,8 @@ export async function createSubmission(
 
 // ---- wiki ----
 
+class AudienceChanged extends Error {}
+
 /**
  * Copies the assignment's files to a wiki page. A private channel's assignment goes to a page only the channel's
  * readers read (the page follows the channel's members from then on); a public one's to the workspace. The
@@ -456,8 +458,25 @@ export async function copyToWiki(deps: AppDeps, row: AssignmentRow, actorUserId:
       .from(knowledgePages)
       .where(and(eq(knowledgePages.id, row.wikiPageId), isNull(knowledgePages.deletedAt)));
     if (page && audienceWithin(page.access, access)) {
-      await savePage(deps, { row: page, author, canBypassLock: false, body, note: "assignment" });
-      return page.id;
+      // The access may change between this read and the write (a change of access is not a version): checked
+      // again on the locked row, and a page that no longer fits gets a new restricted one instead.
+      const saved = await savePage(deps, {
+        row: page,
+        author,
+        canBypassLock: false,
+        body,
+        note: "assignment",
+        inTx: async (_tx, locked) => {
+          if (!audienceWithin(locked.access, access)) throw new AudienceChanged();
+        },
+      }).then(
+        () => true,
+        (err) => {
+          if (err instanceof AudienceChanged) return false;
+          throw err;
+        },
+      );
+      if (saved) return page.id;
     }
   }
   const page = await createPage(deps, {

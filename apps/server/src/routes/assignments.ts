@@ -21,12 +21,14 @@ import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
 import { agentInWorkspace, requireAgentEditor } from "../agents";
+import { addOpinion, addRules, answerSuggestion, checkSubmissionItem } from "../assignments/answers";
 import { assignmentUsage, ceilingState } from "../assignments/budget";
 import {
   type AssignmentRow,
   actOn,
   assignmentFiles,
   assignmentFor,
+  assignmentInWorkspace,
   assignmentOfThread,
   isClosed,
   moveAssignment,
@@ -51,7 +53,6 @@ import {
   cancelJobs,
   createAssignment,
   ruleFor,
-  ruleMatches,
   rulesOf,
   startAssignmentJob,
   stopAgentRun,
@@ -66,16 +67,19 @@ import {
   harnessOf,
   joinRequestsOf,
   participantsOf,
+  patchAssignment,
   person,
   requestSubmissionChanges,
   requireExecutor,
   requireManager,
   requireRunStop,
   requireTell,
+  serialized,
   setHarness,
   settingsOf,
   tell,
   tellIfPossible,
+  transferAssignment,
 } from "../assignments/lifecycle";
 import { resetTurns } from "../assignments/motor";
 import {
@@ -101,7 +105,6 @@ import { requireMember, WORKSPACE } from "../workspace-scope";
 const {
   agents,
   members,
-  messages,
   runnerJobs,
   channelMemberships,
   assignmentParticipants,
@@ -118,11 +121,6 @@ const id = z.string().min(1).max(64);
 const executorEnum = z.enum(["agent", "claude_code", "codex"]);
 const policyEnum = z.enum(["always", "when_safe", "never"]);
 const participantRole = z.enum(["decide", "comment"]);
-const suggestionMeta = z.object({
-  assignmentId: z.string(),
-  text: z.string(),
-  status: z.enum(["pending", "accepted", "declined"]).optional(),
-});
 /** What the runner answers to `job.output`: checked before it reaches the response. */
 const liveOutput = z.object({ lines: z.array(z.string().max(100_000)).max(2000) });
 
@@ -209,16 +207,6 @@ async function memberOfWorkspace(deps: AppDeps, workspaceId: string, userId: str
 async function requireReadsChannel(deps: AppDeps, row: AssignmentRow, userId: string) {
   if (!(await canReadChannel(deps.db, { workspaceId: row.workspaceId, userId, channelId: row.channelId })))
     throw badRequest("That person can't read this assignment's channel", { field: "userId" });
-}
-
-/** Saves the command rules the assignment doesn't have yet; returns every rule it has now. */
-async function addRules(deps: AppDeps, row: AssignmentRow, wanted: readonly string[], by: string) {
-  const have = new Set((await rulesOf(deps, row.id)).map((r) => r.rule));
-  for (const rule of wanted.filter((r) => !have.has(r))) {
-    await deps.db.insert(assignmentCommandRules).values({ id: newId("acr"), assignmentId: row.id, rule, by });
-    have.add(rule);
-  }
-  return have;
 }
 
 const notStarted = (start: boolean) =>
@@ -323,38 +311,41 @@ export function registerAssignments(app: Hono<AppEnv>) {
       );
     if (!inChannel)
       throw conflict("assignment.agent_not_in_channel", `Add ${agent.name} to this channel first`);
-    if (input.threadId) {
-      const root = await messageInWorkspace(deps.db, me.workspaceId, input.threadId);
-      if (!root || root.channelId !== channel.id || root.threadId)
-        throw badRequest("Thread not found", { field: "threadId" });
-      if (await assignmentOfThread(deps.db, root.id))
-        throw conflict("assignment.exists", "This thread already has an assignment");
-    }
-    const executor = input.executor ?? "agent";
-    let runnerId: string | null = null;
-    if (input.runnerId) {
-      const r = await runnerInWorkspace(deps.db, me.workspaceId, input.runnerId);
-      if (!canUseRunner(me, r)) throw forbidden("Only who paired that runner can use it");
-      runnerId = r.id;
-    }
-    if (executor !== "agent") {
-      const planned = { runnerId, agentId: agent.id, workspaceId: me.workspaceId, ownerId: me.userId };
-      requireExecutor(await runnerOfAssignment(deps.db, planned), executor, me.userId);
-    }
-    const goal = input.goal;
-    const title = input.title || goal.split("\n")[0]?.slice(0, 80) || "Assignment";
-    const row = await createAssignment(deps, {
-      workspaceId: me.workspaceId,
-      agentId: agent.id,
-      agentHandle: agent.handle,
-      channelId: channel.id,
-      ownerId: me.userId,
-      title,
-      goal,
-      executor,
-      runnerId,
-      commandPolicy: input.commandPolicy ?? agent.assignmentCommandPolicy,
-      threadId: input.threadId ?? null,
+    // Two creations on the same thread at once: the second sees the first's assignment, never a second card.
+    const row = await serialized(`thread:${input.threadId ?? newId("asg")}`, async () => {
+      if (input.threadId) {
+        const root = await messageInWorkspace(deps.db, me.workspaceId, input.threadId);
+        if (!root || root.channelId !== channel.id || root.threadId)
+          throw badRequest("Thread not found", { field: "threadId" });
+        if (await assignmentOfThread(deps.db, root.id))
+          throw conflict("assignment.exists", "This thread already has an assignment");
+      }
+      const executor = input.executor ?? "agent";
+      let runnerId: string | null = null;
+      if (input.runnerId) {
+        const r = await runnerInWorkspace(deps.db, me.workspaceId, input.runnerId);
+        if (!canUseRunner(me, r)) throw forbidden("Only who paired that runner can use it");
+        runnerId = r.id;
+      }
+      if (executor !== "agent") {
+        const planned = { runnerId, agentId: agent.id, workspaceId: me.workspaceId, ownerId: me.userId };
+        requireExecutor(await runnerOfAssignment(deps.db, planned), executor, me.userId);
+      }
+      const goal = input.goal;
+      const title = input.title || goal.split("\n")[0]?.slice(0, 80) || "Assignment";
+      return createAssignment(deps, {
+        workspaceId: me.workspaceId,
+        agentId: agent.id,
+        agentHandle: agent.handle,
+        channelId: channel.id,
+        ownerId: me.userId,
+        title,
+        goal,
+        executor,
+        runnerId,
+        commandPolicy: input.commandPolicy ?? agent.assignmentCommandPolicy,
+        threadId: input.threadId ?? null,
+      });
     });
     return c.json(await assignmentFor(deps, row, me), 201);
   });
@@ -435,6 +426,7 @@ export function registerAssignments(app: Hono<AppEnv>) {
       const parsed = liveOutput.safeParse(live);
       if (parsed.success) out = { lines: parsed.data.lines.slice(-tail), source: "live" };
     }
+    c.header("cache-control", "no-store");
     return c.json(out);
   });
 
@@ -488,8 +480,10 @@ export function registerAssignments(app: Hono<AppEnv>) {
     );
     if (moved) await assignmentEvent(deps, moved, { kind: "paused", actor: person(me), data: { action } });
     deps.assignmentEngine.wake(row.id);
+    // Not moved: someone else paused it (or it changed) meanwhile; answer with what it is now.
+    const now$ = moved ?? (await assignmentInWorkspace(deps.db, me.workspaceId, row.id));
     return c.json({
-      ...(await assignmentFor(deps, moved ?? row, me)),
+      ...(await assignmentFor(deps, now$, me)),
       ...(action === "stop" ? { canceledJobs } : {}),
     });
   });
@@ -546,7 +540,7 @@ export function registerAssignments(app: Hono<AppEnv>) {
         target: [assignmentParticipants.assignmentId, assignmentParticipants.userId],
         set: { role },
       });
-    await deps.db
+    const accepted = await deps.db
       .update(assignmentJoinRequests)
       .set({ status: "accepted", role, decidedAt: deps.now() })
       .where(
@@ -555,7 +549,10 @@ export function registerAssignments(app: Hono<AppEnv>) {
           eq(assignmentJoinRequests.userId, userId),
           eq(assignmentJoinRequests.status, "pending"),
         ),
-      );
+      )
+      .returning();
+    if (accepted.length)
+      await closeNotifications(deps, row.workspaceId, `assignment:${row.id}:join:${userId}`);
     publishAssignment(deps, row, "participants");
     return c.json(await participantsOf(deps, row));
   });
@@ -674,29 +671,10 @@ export function registerAssignments(app: Hono<AppEnv>) {
       !lend &&
       !!runner &&
       !canUseRunner({ userId: target.userId, role: target.role }, runner);
-    if (dropRunner && (await runningJobsOf(deps.db, row.id)).length > 0)
-      throw conflict("assignment.job_running", "Wait for the running job or stop it first");
-    await deps.db
-      .delete(assignmentParticipants)
-      .where(
-        and(eq(assignmentParticipants.assignmentId, row.id), eq(assignmentParticipants.userId, input.userId)),
-      );
-    await deps.db
-      .insert(assignmentParticipants)
-      .values({ assignmentId: row.id, userId: row.ownerId, role: "decide", addedBy: me.userId })
-      .onConflictDoUpdate({
-        target: [assignmentParticipants.assignmentId, assignmentParticipants.userId],
-        set: { role: "decide" },
-      });
-    const next = await updateAssignment(
-      deps,
-      row,
-      {
-        ownerId: input.userId,
-        ...(dropRunner ? { runnerId: null } : lend && runner ? { runnerId: runner.id } : {}),
-      },
-      "participants",
-    );
+    const next = await transferAssignment(deps, me, row, {
+      userId: input.userId,
+      runnerId: dropRunner ? { set: null } : lend && runner ? { set: runner.id } : null,
+    });
     const out = await assignmentFor(deps, next, me);
     return c.json(dropRunner ? { ...out, code: "assignment.needs_environment" } : out);
   });
@@ -709,30 +687,8 @@ export function registerAssignments(app: Hono<AppEnv>) {
     const { row } = await viewAssignment(deps, me, param(c, "assignmentId"));
     requireManager(me, row);
     const input = await readJson(c, updateAssignmentBody);
-    const pick = (v: number | null | undefined, was: number | null) => (v !== undefined ? v : was);
-    const limits = input.limits
-      ? {
-          dollars: pick(input.limits.dollars, row.limits.dollars),
-          minutes: pick(input.limits.minutes, row.limits.minutes),
-          steps: pick(
-            input.limits.steps === undefined || input.limits.steps === null
-              ? input.limits.steps
-              : Math.floor(input.limits.steps),
-            row.limits.steps,
-          ),
-        }
-      : undefined;
-    const next = await updateAssignment(
-      deps,
-      row,
-      {
-        ...(input.resumeJobs !== undefined ? { resumeJobs: input.resumeJobs } : {}),
-        ...(limits ? { limits } : {}),
-        ...(input.dueAt !== undefined ? { dueAt: input.dueAt ? new Date(input.dueAt) : null } : {}),
-      },
-      "settings",
-    );
-    if (limits || input.dueAt !== undefined) deps.assignmentEngine.wake(row.id);
+    const next = await patchAssignment(deps, row, input);
+    if (input.limits || input.dueAt !== undefined) deps.assignmentEngine.wake(row.id);
     return c.json(await assignmentFor(deps, next, me));
   });
 
@@ -870,7 +826,8 @@ export function registerAssignments(app: Hono<AppEnv>) {
       )
       .returning();
     if (!cmd) throw conflict("assignment.command_closed", "This command was already decided");
-    if (decision === "always") await addRules(deps, row, cmd.rules, me.userId);
+    if (decision === "always")
+      await addRules(deps, { assignmentId: row.id, wanted: cmd.rules, by: me.userId });
     wake(cmd.id, state);
     if (cmd.messageId)
       await closeNotifications(deps, row.workspaceId, `assignment:${row.id}:approval:${cmd.messageId}`);
@@ -892,8 +849,7 @@ export function registerAssignments(app: Hono<AppEnv>) {
       .from(runnerJobs)
       .where(and(eq(runnerJobs.id, input.jobId), eq(runnerJobs.assignmentId, row.id)));
     if (!job) throw notFound("Job not found");
-    const wanted = [...new Set(input.commands.map(ruleFor))];
-    const have = await addRules(deps, row, wanted, me.userId);
+    // Only commands this job was denied and that still wait are allowed; their rules are what gets saved.
     const waiting = await deps.db
       .select()
       .from(assignmentCommands)
@@ -904,20 +860,25 @@ export function registerAssignments(app: Hono<AppEnv>) {
           eq(assignmentCommands.state, "pending"),
         ),
       );
-    const freed = waiting.filter((cmd) => wanted.some((rule) => ruleMatches(rule, cmd.command)));
-    if (freed.length)
-      await deps.db
-        .update(assignmentCommands)
-        .set({ state: "allowed", decidedBy: me.userId, decidedAt: deps.now() })
-        .where(
-          and(
-            inArray(
-              assignmentCommands.id,
-              freed.map((cmd) => cmd.id),
-            ),
-            eq(assignmentCommands.state, "pending"),
+    const asked = new Set(input.commands);
+    const freed = waiting.filter((cmd) => asked.has(cmd.command));
+    if (freed.length === 0) throw conflict("assignment.command_closed", "None of these commands is waiting");
+    const wanted = [
+      ...new Set(freed.flatMap((cmd) => (cmd.rules.length ? cmd.rules : [ruleFor(cmd.command)]))),
+    ];
+    const have = await addRules(deps, { assignmentId: row.id, wanted, by: me.userId });
+    await deps.db
+      .update(assignmentCommands)
+      .set({ state: "allowed", decidedBy: me.userId, decidedAt: deps.now() })
+      .where(
+        and(
+          inArray(
+            assignmentCommands.id,
+            freed.map((cmd) => cmd.id),
           ),
-        );
+          eq(assignmentCommands.state, "pending"),
+        ),
+      );
     for (const cmd of freed)
       if (cmd.messageId)
         await closeNotifications(deps, row.workspaceId, `assignment:${row.id}:approval:${cmd.messageId}`);
@@ -1026,25 +987,14 @@ export function registerAssignments(app: Hono<AppEnv>) {
     if (role === "view")
       throw new HttpError(403, "assignment.forbidden", "Join the assignment to give an opinion");
     const { option } = await readJson(c, z.object({ option: z.string().trim().min(1).max(200) }).strict());
-    const [d] = await deps.db
-      .select()
-      .from(assignmentDecisions)
-      .where(
-        and(eq(assignmentDecisions.id, param(c, "decisionId")), eq(assignmentDecisions.assignmentId, row.id)),
-      );
-    if (!d) throw notFound("Decision not found");
-    if (!d.options.includes(option)) throw badRequest("Not one of the options", { field: "option" });
-    const opinions = [
-      ...d.opinions.filter((o) => o.userId !== me.userId),
-      { userId: me.userId, option, at: deps.now().toISOString() },
-    ];
-    const [next] = await deps.db
-      .update(assignmentDecisions)
-      .set({ opinions })
-      .where(eq(assignmentDecisions.id, d.id))
-      .returning();
+    const next = await addOpinion(deps, {
+      assignmentId: row.id,
+      decisionId: param(c, "decisionId"),
+      userId: me.userId,
+      option,
+    });
     publishAssignment(deps, row, "decision");
-    return c.json(toDecision(next ?? d));
+    return c.json(toDecision(next));
   });
 
   // ---- reviews ----
@@ -1130,19 +1080,13 @@ export function registerAssignments(app: Hono<AppEnv>) {
     const me = requireMember(c);
     const deps = c.get("deps");
     const { row } = await actOn(deps, me, param(c, "assignmentId"));
-    const d = await pendingSubmission(deps, row, param(c, "submissionId"));
     const { checked } = await readJson(c, z.object({ checked: z.boolean() }).strict());
-    const itemId = param(c, "itemId");
-    if (!d.checklist.some((i) => i.id === itemId)) throw notFound("Item not found");
-    const checklist = d.checklist.map((i) =>
-      i.id === itemId ? { ...i, verifiedBy: checked ? me.userId : null } : i,
-    );
-    const [next] = await deps.db
-      .update(assignmentSubmissions)
-      .set({ checklist })
-      .where(and(eq(assignmentSubmissions.id, d.id), eq(assignmentSubmissions.status, "pending")))
-      .returning();
-    if (!next) throw conflict("assignment.submission_closed", "This submission was already answered");
+    const next = await checkSubmissionItem(deps, {
+      assignmentId: row.id,
+      submissionId: param(c, "submissionId"),
+      itemId: param(c, "itemId"),
+      verifiedBy: checked ? me.userId : null,
+    });
     publishAssignment(deps, row, "submission");
     return c.json(toSubmission(next));
   });
@@ -1181,27 +1125,24 @@ export function registerAssignments(app: Hono<AppEnv>) {
     const me = requireMember(c);
     const deps = c.get("deps");
     const { row } = await actOn(deps, me, param(c, "assignmentId"));
-    // A suggestion is a message of the assignment's thread: its id is the message's.
-    const msg = await messageInWorkspace(deps.db, me.workspaceId, param(c, "suggestionId"));
-    const parsed = suggestionMeta.safeParse(msg?.meta.assignmentSuggestion);
-    const s = parsed.success ? parsed.data : null;
-    if (!msg || msg.threadId !== row.threadId || !s || s.assignmentId !== row.id)
-      throw notFound("Suggestion not found");
-    if (s.status && s.status !== "pending")
-      throw conflict("assignment.suggestion_closed", "This suggestion was already answered");
     const status = action === "accept" ? ("accepted" as const) : ("declined" as const);
     const tells = status === "accepted" && !isClosed(row) && row.status !== "paused";
     if (tells) requireTell(deps, row);
-    await deps.db
-      .update(messages)
-      .set({ meta: { ...msg.meta, assignmentSuggestion: { ...s, status } } })
-      .where(eq(messages.id, msg.id));
-    publishAssignment(deps, row, "suggestion", { messageId: msg.id, suggestion: { ...s, status } });
+    // A suggestion is a message of the assignment's thread: its id is the message's.
+    const messageId = param(c, "suggestionId");
+    const { suggestion, authorId } = await answerSuggestion(deps, {
+      workspaceId: me.workspaceId,
+      assignmentId: row.id,
+      threadId: row.threadId,
+      messageId,
+      status,
+    });
+    publishAssignment(deps, row, "suggestion", { messageId, suggestion });
     if (tells) {
-      const names = await nameMap(deps.db, [msg.authorId]);
-      await tellIfPossible(deps, row, me.userId, `${names.get(msg.authorId) ?? ""}: ${s.text}`);
+      const names = await nameMap(deps.db, [authorId]);
+      await tellIfPossible(deps, row, me.userId, `${names.get(authorId) ?? ""}: ${suggestion.text}`);
     }
-    return c.json({ messageId: msg.id, status });
+    return c.json({ messageId, status });
   });
 
   // ---- reading ----
@@ -1238,10 +1179,18 @@ export function registerAssignments(app: Hono<AppEnv>) {
     const me = requireMember(c);
     const deps = c.get("deps");
     const { row } = await viewAssignment(deps, me, param(c, "assignmentId"));
-    const items = await planOf(deps, row.id);
-    return c.json({
-      current: items.length ? { version: row.planVersion, items: items.map(toPlanItem) } : null,
-    });
+    // The version and the items from one snapshot: a client that edits what it read sends the right version.
+    const { version, items } = await deps.db.transaction(
+      async (tx) => {
+        const [fresh] = await tx
+          .select({ planVersion: schema.assignments.planVersion })
+          .from(schema.assignments)
+          .where(eq(schema.assignments.id, row.id));
+        return { version: fresh?.planVersion ?? row.planVersion, items: await planOf({ db: tx }, row.id) };
+      },
+      { isolationLevel: "repeatable read", accessMode: "read only" },
+    );
+    return c.json({ current: items.length ? { version, items: items.map(toPlanItem) } : null });
   });
 
   // A person edits the plan midway (P0-03): version and author; an old `parentVersion` gets 409.

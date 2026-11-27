@@ -12,10 +12,11 @@ import type {
 import { can } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import { MODELS } from "@vanr/engine/models/catalog";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { AgentRow } from "../agents";
 import { type AppDeps, requireRuntime, type WorkspaceMember } from "../context";
 import { badRequest, conflict, HttpError } from "../http";
+import { log } from "../logger";
 import { closeNotificationGroups, closeNotifications } from "../notifications";
 import { canUsePlan, EXECUTOR_MODELS, executorModelOk, executorProblem } from "../runners/plans";
 import type { RunnerRow } from "../runners/runners";
@@ -111,6 +112,71 @@ export async function environmentReady(deps: AppDeps, row: AssignmentRow) {
   if (!deps.runners.isOnline(runner.id)) throw conflict("runner.offline", "The runner is offline");
   if (!canUsePlan(row.ownerId, runner))
     throw conflict("assignment.personal_plan", "That runner's plan is personal to who paired it");
+  // The runner may have changed since the executor was chosen: it still has to run it.
+  if (row.executor !== "agent") requireExecutor(runner, row.executor, row.ownerId);
+}
+
+const queues = new Map<string, Promise<unknown>>();
+
+/**
+ * One at a time per key, in this process (the server is a single process, as the job queue in engine.ts
+ * assumes): creating an assignment on an existing thread checks the thread and writes the card in order.
+ */
+export function serialized<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const run = (queues.get(key) ?? Promise.resolve()).then(fn, fn);
+  const tail = run.then(
+    () => {},
+    () => {},
+  );
+  queues.set(key, tail);
+  void tail.then(() => {
+    if (queues.get(key) === tail) queues.delete(key);
+  });
+  return run;
+}
+
+/**
+ * The owner's settings on the locked row: a limit left out keeps the value it has now (two managers changing
+ * different limits at once both stay).
+ */
+export async function patchAssignment(
+  deps: AppDeps,
+  row: AssignmentRow,
+  input: {
+    resumeJobs?: boolean;
+    limits?: { dollars?: number | null; minutes?: number | null; steps?: number | null };
+    dueAt?: string | null;
+  },
+): Promise<AssignmentRow> {
+  const next = await deps.db.transaction(async (tx) => {
+    const [fresh] = await tx.select().from(assignments).where(eq(assignments.id, row.id)).for("update");
+    if (!fresh) throw closedError();
+    const given = input.limits;
+    const pick = (v: number | null | undefined, was: number | null) => (v !== undefined ? v : was);
+    const limits = given
+      ? {
+          dollars: pick(given.dollars, fresh.limits.dollars),
+          minutes: pick(given.minutes, fresh.limits.minutes),
+          steps: pick(
+            given.steps === undefined || given.steps === null ? given.steps : Math.floor(given.steps),
+            fresh.limits.steps,
+          ),
+        }
+      : undefined;
+    const [moved] = await tx
+      .update(assignments)
+      .set({
+        ...(input.resumeJobs !== undefined ? { resumeJobs: input.resumeJobs } : {}),
+        ...(limits ? { limits } : {}),
+        ...(input.dueAt !== undefined ? { dueAt: input.dueAt ? new Date(input.dueAt) : null } : {}),
+        updatedAt: deps.now(),
+      })
+      .where(eq(assignments.id, row.id))
+      .returning();
+    return moved ?? fresh;
+  });
+  publishAssignment(deps, next, "settings");
+  return next;
 }
 
 export async function participantsOf(deps: AppDeps, row: AssignmentRow): Promise<AssignmentParticipants> {
@@ -300,8 +366,11 @@ export async function finishAssignment(
   publishAssignment(deps, next, "status");
   stopAgentRun(deps, next, me.userId);
   await cancelJobs(deps, next);
+  // The copy is extra: the assignment is closed already, so a failed copy is logged and the close goes on.
   if (input.wiki) {
-    await copyToWiki(deps, next, me.userId);
+    await copyToWiki(deps, next, me.userId).catch((err) =>
+      log.error("assignment.wiki_copy_failed", { assignmentId: row.id, err }),
+    );
     next = (await deps.db.select().from(assignments).where(eq(assignments.id, row.id)))[0] ?? next;
   }
   await closeNotificationGroups(deps, row.workspaceId, `assignment:${row.id}:`);
@@ -361,5 +430,61 @@ export async function requestSubmissionChanges(
     data: { version: w.version, added: w.added, removed: [], edited: [], submissionId: answered.id },
   });
   deps.assignmentEngine.wake(row.id);
+  return next;
+}
+
+/**
+ * Hands the assignment over on its locked row: the owner, the runner and the executor must still be the ones the
+ * caller decided on (two hand-overs at once: the second finds it changed), and a runner left behind must have no
+ * job running. The new owner leaves the participants; the old one stays as who decides.
+ */
+export async function transferAssignment(
+  deps: AppDeps,
+  me: WorkspaceMember,
+  row: AssignmentRow,
+  input: { userId: string; runnerId: { set: string | null } | null },
+): Promise<AssignmentRow> {
+  const next = await deps.db.transaction(async (tx) => {
+    const fresh = await lockAssignment(tx, row.id);
+    if (fresh.ownerId !== row.ownerId || fresh.runnerId !== row.runnerId || fresh.executor !== row.executor)
+      throw conflict("assignment.changed", "This assignment changed meanwhile; open it again");
+    if (input.runnerId?.set === null) {
+      const [running] = await tx
+        .select({ id: schema.runnerJobs.id })
+        .from(schema.runnerJobs)
+        .where(
+          and(
+            eq(schema.runnerJobs.assignmentId, row.id),
+            inArray(schema.runnerJobs.status, ["queued", "running"]),
+          ),
+        )
+        .limit(1);
+      if (running) throw conflict("assignment.job_running", "Wait for the running job or stop it first");
+    }
+    await tx
+      .delete(assignmentParticipants)
+      .where(
+        and(eq(assignmentParticipants.assignmentId, row.id), eq(assignmentParticipants.userId, input.userId)),
+      );
+    await tx
+      .insert(assignmentParticipants)
+      .values({ assignmentId: row.id, userId: fresh.ownerId, role: "decide", addedBy: me.userId })
+      .onConflictDoUpdate({
+        target: [assignmentParticipants.assignmentId, assignmentParticipants.userId],
+        set: { role: "decide" },
+      });
+    const [moved] = await tx
+      .update(assignments)
+      .set({
+        ownerId: input.userId,
+        ...(input.runnerId ? { runnerId: input.runnerId.set } : {}),
+        updatedAt: deps.now(),
+      })
+      .where(eq(assignments.id, row.id))
+      .returning();
+    if (!moved) throw closedError();
+    return moved;
+  });
+  publishAssignment(deps, next, "participants");
   return next;
 }

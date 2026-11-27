@@ -772,27 +772,28 @@ jobs:
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
           VANR_TEST_WIKI_NO_SNAPSHOT: "1"
-      # Accepting a submission and asking for changes at once end in one outcome (the assignment row's lock).
+      # Two people at once on an assignment: answering a submission, opinions, checklist ticks, a suggestion, the
+      # command rules and a hand-over each read and write under a row lock, so nothing is lost or doubled.
       - run: bun test apps/server/test/assignment-routes-postgres.test.ts
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
-      - name: The forced submission answer test fails without the lock
+      - name: The forced assignment answer tests fail without the locks
         run: |
           set +e
           bun test apps/server/test/assignment-routes-postgres.test.ts --test-name-pattern forced > forced-answer.log 2>&1
           status=$?
           cat forced-answer.log
           if [ "$status" -eq 0 ]; then
-            echo "::error::the forced submission answer test passed without the lock"
+            echo "::error::the forced assignment answer tests passed without the locks"
             exit 1
           fi
           for broken in LOCK_WAIT_TIMEOUT CONNECTION_CLOSED "Unhandled error" "timed out"; do
             if grep -aqF "$broken" forced-answer.log; then
-              echo "::error::the forced submission answer test broke ($broken) instead of failing on its outcome"
+              echo "::error::the forced assignment answer tests broke ($broken) instead of failing on their outcome"
               exit 1
             fi
           done
-          set -- submission-answer
+          set -- submission-answer decision-opinion submission-checklist suggestion-answer command-rules assignment-transfer assignment-limits
           for label in "$@"; do
             if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" forced-answer.log; then
               echo "::error::the forced $label test did not fail on its outcome without the lock"
