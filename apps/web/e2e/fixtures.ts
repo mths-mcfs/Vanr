@@ -28,13 +28,15 @@ import filesEn from "../src/messages/files/en.ts";
 import filesPt from "../src/messages/files/pt-BR.ts";
 import shellEn from "../src/messages/shell/en.ts";
 import shellPt from "../src/messages/shell/pt-BR.ts";
+import wikiEn from "../src/messages/wiki/en.ts";
+import wikiPt from "../src/messages/wiki/pt-BR.ts";
 import { type RunningServer, startServer } from "./server.ts";
 
 export { expect };
 
 const CATALOGS = {
-  en: { account: accountEn, common: commonEn, files: filesEn, shell: shellEn },
-  "pt-BR": { account: accountPt, common: commonPt, files: filesPt, shell: shellPt },
+  en: { account: accountEn, common: commonEn, files: filesEn, shell: shellEn, wiki: wikiEn },
+  "pt-BR": { account: accountPt, common: commonPt, files: filesPt, shell: shellPt, wiki: wikiPt },
 } as const;
 type Catalogs = (typeof CATALOGS)["en"];
 export type Namespace = keyof Catalogs;

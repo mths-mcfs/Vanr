@@ -10,6 +10,7 @@ import { act, render } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ManualClock } from "@vanr/client/testing";
 import { type CookieJar, FakeServer, newJar, type SeedName } from "../dev/fake-server.ts";
+import { IdleWikiSocket } from "../dev/fake-wiki.ts";
 import { createFetchTransport } from "../src/api/index.ts";
 import { AppProviders } from "../src/app/context.tsx";
 import { type AppRuntime, createRuntime } from "../src/app/runtime.ts";
@@ -49,7 +50,12 @@ export function newTestRuntime(options: RenderOptions) {
     store: options.store ?? memoryStore(),
     tabStore,
     // The number a reconnection draws decides its wait; a fixed one keeps the wait the same.
-    openSocket: { baseUrl: "https://vanr.test", createSocket: server.socketFactory(jar), random: () => 0 },
+    openSocket: {
+      baseUrl: "https://vanr.test",
+      createSocket: server.socketFactory(jar),
+      random: () => 0,
+      wikiSocket: IdleWikiSocket as unknown as new (url: string) => WebSocket,
+    },
     clock,
     languages: options.languages ?? ["en-US"],
     origin: "https://vanr.test",
