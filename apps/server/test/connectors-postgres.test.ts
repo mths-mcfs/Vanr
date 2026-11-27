@@ -161,6 +161,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("the connection's row lock on Pos
       const release = gate();
       const aPids = new Set<number>();
       const bPids = new Set<number>();
+      let polling = true;
       // A holds right after it read the agent's grants; B then either waits on the agent's lock or, without it,
       // reads the same grants and ends before A writes.
       const a = replaceGrants(
@@ -179,17 +180,25 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("the connection's row lock on Pos
         agent.id,
         (current) => [...current, all],
       );
+      let b: Promise<void> | null = null;
+      let watcher: Promise<void> | null = null;
       try {
-        await held.opened;
-        const b = replaceGrants(
+        // A failure of A before its hold point shows as itself, not as a wait.
+        const reached = await Promise.race([
+          held.opened.then(() => true),
+          a.then(() => false),
+          Bun.sleep(WAIT_MS).then(() => false),
+        ]);
+        if (!reached) throw new Error("LOCK_WAIT_TIMEOUT(access): A ended or stalled before its hold point");
+        b = replaceGrants(
           instrumented(server.deps.db, { pids: bPids }),
           me.workspaceId,
           agent.id,
           (current) => [...current, deny],
         );
-        const waiting = async () => {
+        watcher = (async () => {
           const end = Date.now() + WAIT_MS;
-          while (Date.now() < end) {
+          while (polling && Date.now() < end) {
             const pid = [...bPids][0];
             if (pid !== undefined) {
               const [row] = await admin<{ wait_event_type: string | null }[]>`
@@ -198,14 +207,15 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("the connection's row lock on Pos
             }
             await Bun.sleep(25);
           }
-          throw new Error("LOCK_WAIT_TIMEOUT(access): B neither waited nor ended");
-        };
-        await Promise.race([b, waiting()]);
+          if (polling) throw new Error("LOCK_WAIT_TIMEOUT(access): B neither waited nor ended");
+        })();
+        await Promise.race([b, watcher]);
         release.open();
         await Promise.all([a, b]);
       } finally {
+        polling = false;
         release.open();
-        await a.catch(() => undefined);
+        await Promise.allSettled([a, b, watcher]);
       }
       const scopes = (await grantsOf(server.deps.db, agent.id)).map((g) => g.scope).sort();
       outcome("access", scopes, [all.scope, deny.scope].sort());

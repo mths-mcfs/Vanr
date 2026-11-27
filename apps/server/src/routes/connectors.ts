@@ -222,23 +222,24 @@ export function registerConnectors(app: Hono<AppEnv>) {
     return c.json(await connectCustom(c.get("deps"), me, input));
   });
 
-  const customById = async (deps: AppDeps, workspaceId: string, id: string) => {
+  /** An own MCP server of the workspace; `live` leaves out one whose OAuth hasn't come back (no secret yet). */
+  const customById = async (deps: AppDeps, workspaceId: string, id: string, live = false) => {
     const row = await connectionById(deps, workspaceId, id);
-    if (!row.custom) throw notFound("Server not found");
+    if (!row.custom || (live && row.status === "pending")) throw notFound("Server not found");
     return row;
   };
 
   app.post(`${WORKSPACE}/connectors/custom/:customId/refresh`, async (c) => {
     const me = requirePermission(c, "configure");
     const deps = c.get("deps");
-    const row = await customById(deps, me.workspaceId, param(c, "customId"));
+    const row = await customById(deps, me.workspaceId, param(c, "customId"), true);
     return c.json(toCustomServer(await refreshCustom(deps, row)));
   });
 
   app.put(`${WORKSPACE}/connectors/custom/:customId/tools`, async (c) => {
     const me = requirePermission(c, "configure");
     const deps = c.get("deps");
-    const row = await customById(deps, me.workspaceId, param(c, "customId"));
+    const row = await customById(deps, me.workspaceId, param(c, "customId"), true);
     const input = await readJson(c, toolsInput);
     return c.json(toCustomServer(await saveCustomTools(deps, row, input)));
   });

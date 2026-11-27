@@ -7,13 +7,14 @@ import {
   type CustomServer,
   can,
   type MessageMeta,
+  type Role,
   type SaveToolsInput,
 } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { newId, randomId } from "@vanr/engine/ids";
 import { createSealer, type Sealer } from "@vanr/engine/seal";
 import { PRODUCT } from "@vanr/product";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { AppDeps, WorkspaceMember } from "../context";
 import { isUniqueViolation } from "../db-errors";
@@ -39,7 +40,7 @@ import {
 } from "./oauth";
 import { outsideText } from "./outside-text";
 
-const { connections, oauthStates, agentGrants, messages, members } = schema;
+const { agentChannelAccess, agentGrants, agents, connections, oauthStates, messages, members } = schema;
 type StoredTool = schema.StoredTool;
 type ToolAccessLevel = schema.ToolAccessLevel;
 type StateRow = typeof oauthStates.$inferSelect;
@@ -184,8 +185,9 @@ export type TakenState =
 /**
  * Takes the state of a callback. It is spent on the first use (the delete returns it once, whatever comes
  * next) and only counts for the same person in the same session, before it expires and while that person can
- * still configure the workspace that started it: a removed member, a lowered role or another session gets the
- * state error.
+ * still do what started it: configure the workspace, or, for an agent's own account, edit that agent (as the
+ * routes that start those trips require). A removed member, a lowered role or another session gets the state
+ * error.
  */
 export async function takeState(
   deps: AppDeps,
@@ -208,8 +210,21 @@ export async function takeState(
     .select({ role: members.role })
     .from(members)
     .where(and(eq(members.workspaceId, st.workspaceId), eq(members.userId, viewer.userId)));
-  if (!m || !can(m.role, "configure")) return { ok: false, row: st };
+  if (!m) return { ok: false, row: st };
+  if (!can(m.role, "configure") && !(await editsTargetAgent(deps, st, m.role, viewer.userId)))
+    return { ok: false, row: st };
   return { ok: true, row: st, payload };
+}
+
+/** The state's target is an agent's own account and the person edits that agent (manages agents or owns it). */
+async function editsTargetAgent(deps: AppDeps, st: StateRow, role: Role, userId: string): Promise<boolean> {
+  if (st.kind !== "connector" || !st.targetId) return false;
+  const [target] = await deps.db
+    .select({ ownerUserId: agents.ownerUserId })
+    .from(connections)
+    .innerJoin(agents, eq(agents.id, connections.agentId))
+    .where(and(eq(connections.id, st.targetId), eq(connections.workspaceId, st.workspaceId)));
+  return !!target && (can(role, "manage_agents") || target.ownerUserId === userId);
 }
 
 /** A server address under the installation's network rule (the local network and plain text switches). */
@@ -882,13 +897,19 @@ export async function saveCustomTools(
   return updated ?? row;
 }
 
-/** Revokes and takes it away from the agents. */
-export async function disconnect(deps: AppDeps, row: ConnectionRow) {
+/** Revokes and takes it away from the agents (their grants and channel rules on it). */
+export const disconnect = (deps: AppDeps, row: ConnectionRow) => disconnectAll(deps, [row]);
+
+/** Revokes several connections at once: all of them change, or none does. */
+export async function disconnectAll(deps: AppDeps, rows: readonly ConnectionRow[]) {
+  const ids = rows.map((r) => r.id);
+  if (ids.length === 0) return;
   await deps.db.transaction(async (tx) => {
     await tx
       .update(connections)
       .set({ revokedAt: deps.now(), secret: null, updatedAt: deps.now() })
-      .where(eq(connections.id, row.id));
-    await tx.delete(agentGrants).where(eq(agentGrants.connectionId, row.id));
+      .where(inArray(connections.id, ids));
+    await tx.delete(agentGrants).where(inArray(agentGrants.connectionId, ids));
+    await tx.delete(agentChannelAccess).where(inArray(agentChannelAccess.connectionId, ids));
   });
 }

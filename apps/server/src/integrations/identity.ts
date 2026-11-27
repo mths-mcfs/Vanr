@@ -15,7 +15,7 @@ import { isUniqueViolation } from "../db-errors";
 import { HttpError } from "../http";
 import { activeConnections, agentConnections, channelRulesOf } from "./access";
 import { catalogEntry } from "./catalog";
-import { connectWithKey, disconnect, type Starter, startCatalogOAuth, toConnection } from "./connectors";
+import { connectWithKey, disconnectAll, type Starter, startCatalogOAuth, toConnection } from "./connectors";
 
 const { agentChannelAccess, agents, channels, connections } = schema;
 
@@ -62,7 +62,7 @@ export async function connectIdentity(
 /** Revokes every own account of the agent (the sealed credentials go; the tokens are useless here). */
 export async function revokeIdentity(deps: AppDeps, agent: AgentRow): Promise<number> {
   const own = await agentConnections(deps.db, agent.id);
-  for (const row of own) await disconnect(deps, row);
+  await disconnectAll(deps, own);
   return own.length;
 }
 

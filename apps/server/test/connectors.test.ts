@@ -224,19 +224,20 @@ describe("catalog connectors", () => {
       expect(new URL(consentUrl).searchParams.get("code_challenge_method")).toBe("S256");
       expect(await list(t)).toEqual([]);
 
-      // Another person with the same state completes nobody's connection.
-      const { code: authCode, state } = await mcp.authorize(toFake(consentUrl));
-      const stolen = await t.beto.browser.fetch(
-        `/api/v1/connectors/oauth/callback?code=${authCode}&state=${state}`,
-      );
-      expect(stolen.headers.get("location")).toContain("connector_error=state");
+      // Another person with the same state (and the issuer's own iss) completes nobody's connection.
+      expect((await completeOAuth(t.beto, consentUrl)).location).toContain("connector_error=state");
       expect(await list(t)).toEqual([]);
 
-      const again = await start(`/workspace/${t.workspaceId}/settings/connectors`);
-      const { location } = await completeOAuth(t.ana, again.consentUrl);
       // A nextPath from outside becomes the connectors screen; one from inside is kept.
-      expect(location).toBe(`/workspace/${t.workspaceId}/settings/connectors?connected=notion`);
-      expect((await list(t)).map((c) => c.connector)).toEqual(["notion"]);
+      const outside = await start("https://outside.example/steal");
+      expect((await completeOAuth(t.ana, outside.consentUrl)).location).toBe(
+        `/workspace/${t.workspaceId}/settings/connectors?connected=notion`,
+      );
+      const inside = await start(`/workspace/${t.workspaceId}/agents`);
+      expect((await completeOAuth(t.ana, inside.consentUrl)).location).toBe(
+        `/workspace/${t.workspaceId}/agents?connected=notion`,
+      );
+      expect((await list(t)).map((c) => c.connector)).toEqual(["notion", "notion"]);
     },
     SERVER_TEST_MS,
   );
@@ -387,11 +388,7 @@ describe("own MCP server", () => {
       expect(await status(connectCustom(t, t.beto, { serverUrl: mcp.url, nextPath: "/" }))).toBe(403);
       expect(await status(setAccess(t, { all: true }, t.beto))).toBe(403);
       const started = await ok(connectCustom(t, t.ana, { serverUrl: mcp.url, label: "Mine", nextPath: "/" }));
-      const { code: authCode, state } = await mcp.authorize(started.consentUrl);
-      const stolen = await t.beto.browser.fetch(
-        `/api/v1/connectors/oauth/callback?code=${authCode}&state=${state}`,
-      );
-      expect(stolen.headers.get("location")).toContain("connector_error=state");
+      expect((await completeOAuth(t.beto, started.consentUrl)).location).toContain("connector_error=state");
       expect((await servers(t)).map((s) => s.label)).toEqual(["Stock"]);
     },
     SERVER_TEST_MS,
@@ -488,7 +485,9 @@ describe("the agent's access", () => {
       ]);
       expect((await t.ask("remember", { text: "Part X" }))?.result).toContain("Saved memory");
       // Writing in an area includes reading in it.
-      expect((await t.ask("search", { query: "Part" }))?.failed).toBe(false);
+      const found = await t.ask("search", { query: "Part" });
+      expect(found?.failed).toBe(false);
+      expect(found?.result).toContain("Part X");
       expect(await code(setScopes(t, [{ connectionId: "", scope: "drive:everything" }]))).toBe(
         "access.unknown_scope",
       );

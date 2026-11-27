@@ -8,7 +8,7 @@ import { and, asc, desc, eq } from "drizzle-orm";
 import type { RunningServer } from "../src/server";
 import { startFakeMcp } from "./fake-mcp";
 import { SERVER_TEST_MS, settle, signedIn, startTestServer, waitFor } from "./harness";
-import { type Called, call, ws } from "./route-calls";
+import { type Called, call, seedAgent, ws } from "./route-calls";
 import { memberOf, type Person, seedChannel, seedWorkspace } from "./seed";
 
 const { connections, gateDecisions, runEvents, runs } = schema;
@@ -241,6 +241,37 @@ describe("the agent's own account", () => {
       const tries = await Promise.all(Array.from({ length: 4 }, () => connectOwn(t, t.ana, t.lia.id, input)));
       expect(tries.map((r) => r.status).sort()).toEqual([200, 409, 409, 409]);
       expect((await identity(t, t.ana, t.lia.id)).connections).toHaveLength(1);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("who edits the agent, without configuring the workspace", () => {
+  test(
+    "the agent's owner finishes the OAuth of its own account; revoking takes the rules on it away",
+    async () => {
+      const t = await team();
+      // Beto is a plain member and owns Bia: he edits her identity but configures nothing of the workspace.
+      const bia = await seedAgent(server, t.workspaceId, t.beto, `bia${n}`, [t.general]);
+      const started = await ok(connectOwn(t, t.beto, bia.id, { connector: "linear", nextPath: "/" }));
+      if (started.status !== "oauth") throw new Error("expected oauth");
+      const res = await comeBack(t.beto, started.consentUrl);
+      expect(res.headers.get("location")).toContain("connected=linear");
+      const [own] = (await identity(t, t.beto, bia.id)).connections;
+      expect(own?.connector).toBe("linear");
+      // Ana's own connector round trip doesn't become Beto's.
+      expect(
+        await status(call(t.beto, "POST", `${t.w}/connectors/linear/oauth/start`, { nextPath: "/" })),
+      ).toBe(403);
+
+      await ok(
+        setChannels(t, t.beto, bia.id, [{ channelId: t.general, connectionId: own?.id, level: "read" }]),
+      );
+      expect(await ok(call(t.beto, "POST", `${t.w}/agents/${bia.id}/identity/revoke`))).toEqual({
+        revoked: 1,
+      });
+      expect(await identity(t, t.beto, bia.id)).toEqual({ connections: [], channels: [] });
+      await ok(setChannels(t, t.beto, bia.id, [{ channelId: t.general, connectionId: "*", level: "read" }]));
     },
     SERVER_TEST_MS,
   );

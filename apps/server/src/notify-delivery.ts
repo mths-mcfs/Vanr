@@ -8,7 +8,7 @@ import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { dueAt, silenceUntil, wantsChannel } from "@vanr/engine/notify-rules";
 import { PRODUCT } from "@vanr/product";
-import { and, eq, inArray, isNull, lt, ne, sql } from "drizzle-orm";
+import { and, eq, inArray, lt, ne, sql } from "drizzle-orm";
 import { canReadChannel } from "./channels";
 import type { AppDeps } from "./context";
 import { log } from "./logger";
@@ -344,8 +344,6 @@ async function sendEmail(
   n: Pick<AppNotification, "reason" | "latest" | "source">,
   d: Delivery,
 ): Promise<Outcome> {
-  if (d.firstAttemptAt && deps.now().getTime() - d.firstAttemptAt.getTime() >= EMAIL_RETRY_MAX_AGE_MS)
-    return { status: "failed", note: "email_outcome_unknown" };
   const [user] = await deps.db.select({ email: users.email }).from(users).where(eq(users.id, row.userId));
   if (!user) return { status: "skipped", note: "no_user" };
   const [workspace] = await deps.db
@@ -362,12 +360,19 @@ async function sendEmail(
     settingsLink,
     n,
   });
-  // Written before the provider is called: an attempt it accepted and whose answer was lost still counts.
-  if (!d.firstAttemptAt)
-    await deps.db
-      .update(notificationDeliveries)
-      .set({ firstAttemptAt: deps.now() })
-      .where(and(eq(notificationDeliveries.id, d.id), isNull(notificationDeliveries.firstAttemptAt)));
+  // Written before the provider is called (an attempt it accepted and whose answer was lost still counts), and
+  // read back under the claim: a drain that lost the row since sends nothing, and the window is the row's own.
+  const now = deps.now();
+  const [stamped] = await deps.db
+    .update(notificationDeliveries)
+    .set({
+      firstAttemptAt: sql`coalesce(${notificationDeliveries.firstAttemptAt}, ${now.toISOString()}::timestamptz)`,
+    })
+    .where(ownedBy(d))
+    .returning({ firstAttemptAt: notificationDeliveries.firstAttemptAt });
+  if (!stamped) return { status: "retry", note: "not_owner" };
+  if (stamped.firstAttemptAt && now.getTime() - stamped.firstAttemptAt.getTime() >= EMAIL_RETRY_MAX_AGE_MS)
+    return { status: "failed", note: "email_outcome_unknown" };
   const sent = await deps.mailer.send({
     to: user.email,
     subject: mail.subject,

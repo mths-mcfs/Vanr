@@ -310,7 +310,7 @@ describe("SSRF attacks on the OAuth's new paths (cloud edition)", () => {
   test("a redirect of the metadata with a path to the internal network is barred", async () => {
     const { fetch: raw, hits } = recording({
       "https://93.184.216.34/.well-known/oauth-protected-resource/mcp": () =>
-        new Response(null, { status: 302, headers: { location: "http://127.0.0.1:5432/" } }),
+        new Response(null, { status: 302, headers: { location: "https://127.0.0.1:5432/" } }),
       "https://93.184.216.34/.well-known/oauth-protected-resource": () =>
         Response.json({
           resource: "https://93.184.216.34",
