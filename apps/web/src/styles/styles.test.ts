@@ -49,7 +49,7 @@ describe("the web's own styles", () => {
     expect(declarations.filter(({ property }) => /^(animation|transition)/.test(property))).toEqual([]);
   });
 
-  // Text color on the surface it sits on, as written in app.css.
+  // Text color on the surface it sits on, as written in app.css and files.css.
   const PAIRS: [text: string, surface: string, where: string][] = [
     ["fg", "bg-canvas", "page text"],
     ["fg-muted", "bg-canvas", "the reason under a title, muted page text"],
@@ -63,6 +63,11 @@ describe("the web's own styles", () => {
     ["fg", "bg-active", "the open sidebar link"],
     ["fg-muted", "bg-raised", "the search field"],
     ["fg", "bg-overlay", "the skip link"],
+    ["fg", "bg-raised", "a file's card, the answer to a question"],
+    ["fg", "bg-active", "the open version of a file"],
+    ["fg", "accent-wash", "the query's words marked in a snippet, a source's number"],
+    ["warning-fg", "bg-canvas", "the last days of a file in the trash"],
+    ["danger-fg", "bg-sunken", "an upload that failed"],
   ];
   for (const [text, surface, where] of PAIRS) {
     for (const theme of ["light", "dark"] as const) {

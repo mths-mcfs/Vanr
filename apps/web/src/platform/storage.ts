@@ -11,6 +11,10 @@ export const STORAGE_KEYS = {
   sidebar: "vanr.sidebar",
   lastWorkspace: "vanr.lastWorkspace",
   drafts: "vanr.drafts",
+  /** Files: grid or list. */
+  filesView: "vanr.files.view",
+  /** Files: the upload session of each file being sent, so a reload can go on from where it stopped. */
+  uploads: "vanr.files.uploads",
 } as const;
 
 /** A store that keeps values for the life of the page: the fallback when the browser's is blocked. */

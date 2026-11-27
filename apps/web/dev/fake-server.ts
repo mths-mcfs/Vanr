@@ -4,12 +4,14 @@
 // fake lacks and the web needs: the sign-in service, the waitlist, invitations, the overview, the
 // notice counts, agents and their runs, sessions by cookie, the server's side of the real-time
 // socket, and a way to force any state (an error, a held answer, a busy server, an ended session,
-// a dropped connection). It is never part of the production build.
+// a dropped connection). The Drive and the search live in `fake-files.ts`. It is never part of the
+// production build.
 import { endpoints, type FetchLike, type MethodName, type SocketLike } from "@vanr/client";
 import { type FakeServer as ClientFake, createFakeServer, FakeSocket } from "@vanr/client/testing";
 import type * as T from "@vanr/contract";
 import { z } from "zod";
 import { AUTH_ROUTES, type AuthMethod } from "../src/api/auth.ts";
+import { FakeFiles } from "./fake-files.ts";
 
 /** Any operation the web calls: one of the client's, or one of the sign-in service's. */
 export type FakeMethod = MethodName | AuthMethod;
@@ -47,7 +49,14 @@ export type Forced =
 export type CookieJar = { session: string | undefined };
 export const newJar = (): CookieJar => ({ session: undefined });
 
-type Reply = { status: number; body: unknown; retryAfter?: number | string; setSession?: string | null };
+type Reply = {
+  status: number;
+  body: unknown;
+  retryAfter?: number | string;
+  setSession?: string | null;
+  /** Raw bytes instead of JSON: a file's content. */
+  bytes?: { data: Uint8Array; type: string };
+};
 
 export const EXAMPLE_PASSWORD = "birch-and-tar";
 const DAY_MS = 86_400_000;
@@ -201,6 +210,8 @@ export class FakeServer {
   readonly closed: { workspaceId: string; code: number | undefined }[] = [];
   /** How many sockets browsers asked for, accepted or not. */
   socketsAsked = 0;
+  readonly files: FakeFiles;
+  private readonly fileOperations: ReturnType<FakeFiles["operations"]>;
   private readonly accounts = new Map<string, Account>();
   private readonly now: () => Date;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -217,6 +228,18 @@ export class FakeServer {
     this.now = options.now ?? (() => new Date());
     this.sleep = options.sleep ?? (() => Promise.resolve());
     this.inner = createFakeServer({ empty: true, actingUser: null, now: this.now });
+    this.files = new FakeFiles({
+      now: this.now,
+      id: (prefix) => this.id(prefix),
+      scope: (params, session) => {
+        const scope = this.scope(params, session);
+        if ("status" in scope) return scope;
+        const role = this.memberOf(scope.workspaceId, scope.user.id)?.role ?? "member";
+        return { ...scope, role };
+      },
+      emit: (workspaceId, event) => this.emit(workspaceId, event),
+    });
+    this.fileOperations = this.files.operations();
     this.seed(options.seed ?? "team");
   }
 
@@ -229,6 +252,8 @@ export class FakeServer {
 
   private seed(name: SeedName): void {
     this.signupOpen = name === "team";
+    this.files.files = [];
+    this.files.uploads = [];
     if (name === "empty") return;
     const inDays = (days: number) => new Date(this.now().getTime() + days * DAY_MS);
     const people: [string, string, string][] = [
@@ -264,6 +289,18 @@ export class FakeServer {
     this.enroll("workspace_nightshift", "usr_jonas", "owner");
     this.enroll("workspace_nightshift", "usr_ana", "member");
     this.approvals.set("workspace_birchwood", ["usr_ana", "usr_ana"]);
+    this.state.channels.push({
+      id: "ch_design",
+      workspaceId: "workspace_birchwood",
+      name: "design",
+      topic: "",
+      isGeneral: false,
+      visibility: "public",
+      budgetPerMonthUsd: null,
+      createdAt: SAMPLE_TIME,
+      memberIds: ["usr_ana", "usr_jonas", "usr_iris", "usr_tomas"],
+    });
+    this.files.seed();
     this.agents = [
       agent("agt_scout", "workspace_birchwood", "Scout", "usr_ana"),
       agent("agt_ledger", "workspace_birchwood", "Ledger", "usr_ana"),
@@ -535,9 +572,10 @@ export class FakeServer {
   private async respond(url: string, init: RequestInit, jar: CookieJar): Promise<Response> {
     const target = new URL(url, "http://vanr.test");
     const verb = (init.method ?? "GET").toUpperCase();
-    const route = ROUTES.find(
+    // A fixed segment wins over a parameter, as on the server: `/files/trash` is not file "trash".
+    const route = ROUTES.filter(
       (candidate) => candidate.verb === verb && candidate.pattern.test(target.pathname),
-    );
+    ).sort((a, b) => a.names.length - b.names.length)[0];
     // An address outside the table gets the client fake's own "no such route".
     if (route === undefined) return this.inner.fetch(url, init);
     const params: Record<string, unknown> = Object.fromEntries(target.searchParams);
@@ -588,6 +626,8 @@ export class FakeServer {
   ): Promise<Response> {
     const own = this.operations[route.name];
     if (own !== undefined) return this.send(own(params, jar.session), jar);
+    const drive = this.fileOperations[route.name];
+    if (drive !== undefined) return this.send(drive(params, jar.session, init.body), jar);
 
     // Everything else is the client fake's, acting as whoever this browser is signed in as.
     this.inner.signIn(this.userOf(jar.session)?.id ?? null);
@@ -603,6 +643,12 @@ export class FakeServer {
 
   private send(answer: Reply, jar: CookieJar): Response {
     if (answer.setSession !== undefined) jar.session = answer.setSession ?? undefined;
+    if (answer.bytes !== undefined) {
+      return new Response(new Blob([new Uint8Array(answer.bytes.data)]), {
+        status: answer.status,
+        headers: { "content-type": answer.bytes.type },
+      });
+    }
     const headers = new Headers({ "content-type": "application/json" });
     if (answer.retryAfter !== undefined) headers.set("retry-after", String(answer.retryAfter));
     const empty = answer.status === 204 || answer.body === null;

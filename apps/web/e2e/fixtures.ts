@@ -24,6 +24,8 @@ import accountEn from "../src/messages/account/en.ts";
 import accountPt from "../src/messages/account/pt-BR.ts";
 import commonEn from "../src/messages/common/en.ts";
 import commonPt from "../src/messages/common/pt-BR.ts";
+import filesEn from "../src/messages/files/en.ts";
+import filesPt from "../src/messages/files/pt-BR.ts";
 import shellEn from "../src/messages/shell/en.ts";
 import shellPt from "../src/messages/shell/pt-BR.ts";
 import { type RunningServer, startServer } from "./server.ts";
@@ -31,8 +33,8 @@ import { type RunningServer, startServer } from "./server.ts";
 export { expect };
 
 const CATALOGS = {
-  en: { account: accountEn, common: commonEn, shell: shellEn },
-  "pt-BR": { account: accountPt, common: commonPt, shell: shellPt },
+  en: { account: accountEn, common: commonEn, files: filesEn, shell: shellEn },
+  "pt-BR": { account: accountPt, common: commonPt, files: filesPt, shell: shellPt },
 } as const;
 type Catalogs = (typeof CATALOGS)["en"];
 export type Namespace = keyof Catalogs;
