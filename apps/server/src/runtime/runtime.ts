@@ -783,25 +783,13 @@ export class AgentRuntime implements RuntimePort {
     if (!routing) return;
     const { mentioned, threadAgentIds, byId, talker, routed } = routing;
 
-    // Routing again (a resend of a post whose first request failed after the insert) reaches only the agents
-    // this message hasn't reached yet: each agent's dispatch row is the mark that it was routed.
-    const reached = new Set(
-      (
-        await db
-          .select({ agentId: messageDispatches.agentId })
-          .from(messageDispatches)
-          .where(eq(messageDispatches.messageId, row.id))
-      ).map((r) => r.agentId),
-    );
     // No budget left this month also blocks (a run in progress keeps receiving the message).
     const threadId = row.threadId ?? (row.meta.spawnsThread ? row.id : null);
-    const blocked: { agent: RouteAgent; reason: BlockReason | "budget" }[] = routed.blocked.filter(
-      (b) => !reached.has(b.agent.id),
-    );
-    let plan: { agent: AgentRow; key: string; live: Live | undefined }[] = [];
+    const blocked: { agent: RouteAgent; reason: BlockReason | "budget" }[] = [...routed.blocked];
+    const plan: { agent: AgentRow; key: string; live: Live | undefined }[] = [];
     for (const target of routed.targets) {
       const agent = byId.get(target.id);
-      if (!agent || reached.has(agent.id)) continue;
+      if (!agent) continue;
       const key = `${agent.id}:${channel.id}:${threadId ?? "-"}`;
       const running = this.byKey.get(key);
       const live = running ? this.live.get(running) : undefined;
@@ -814,17 +802,10 @@ export class AgentRuntime implements RuntimePort {
     if (plan.length === 0 && blocked.length === 0) return;
     for (const b of blocked) await this.block(row, channel, b.agent, b.reason);
     if (plan.length) {
-      // Two routings of the same message at once: the one whose row lands takes the agent.
-      const claimed = new Set(
-        (
-          await db
-            .insert(messageDispatches)
-            .values(plan.map((p) => ({ messageId: row.id, agentId: p.agent.id, state: "routed" as const })))
-            .onConflictDoNothing()
-            .returning({ agentId: messageDispatches.agentId })
-        ).map((r) => r.agentId),
-      );
-      plan = plan.filter((p) => claimed.has(p.agent.id));
+      await db
+        .insert(messageDispatches)
+        .values(plan.map((p) => ({ messageId: row.id, agentId: p.agent.id, state: "routed" as const })))
+        .onConflictDoNothing();
     }
     // viewedBy: whom the message reached; claimedBy: who will answer; blocked: who can't.
     hub.toChannel(channel.id, {

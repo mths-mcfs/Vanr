@@ -3,7 +3,6 @@
 // runtime gets once (the unique index on (channel, author, clientId) picks it; the losers answer it with 200).
 // PGlite runs one statement at a time, so only this file shows it under real concurrency. CI postgres job only.
 import { describe, expect, test } from "bun:test";
-import type { RunningServer } from "../src/server";
 import { type ChatRuntime, chatRuntime } from "./chat-runtime";
 import { SERVER_TEST_MS, settle, signedIn, startTestServer } from "./harness";
 import { NO_POSTGRES, TEST_POSTGRES_URL, testDatabaseUrl } from "./postgres";
@@ -16,9 +15,8 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("the chat route on Postgres"), ()
   test(
     "a sign-up, a workspace and a message; N sends of one clientId at once route one message once",
     async () => {
-      let server!: RunningServer;
-      const runtime: ChatRuntime = chatRuntime(() => server.deps);
-      server = await startTestServer({
+      const runtime: ChatRuntime = chatRuntime();
+      const server = await startTestServer({
         env: { DATABASE_URL: await testDatabaseUrl("chat") },
         runtime: (port) => runtime.port(port),
       });

@@ -36,16 +36,8 @@ import { notifyReaction } from "../notify-sources";
 import { requireCanTalk } from "../runners/plans";
 import { requireMember, requirePermission, WORKSPACE } from "../workspace-scope";
 
-const {
-  channels,
-  channelMemberships,
-  members,
-  users,
-  messages,
-  emojiReactions,
-  pins,
-  threadSubscriptions,
-} = schema;
+const { channels, channelMemberships, members, users, messages, emojiReactions, pins, threadSubscriptions } =
+  schema;
 
 const NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
 const MAX_BODY = 20_000;
@@ -514,14 +506,9 @@ export function registerChat(app: Hono<AppEnv>) {
     // A resend of a post already accepted answers it as it is, whatever changed in the channel since.
     const resent = await byClientId(deps.db, channel.id, me.userId, input.clientId);
     if (resent) {
-      // The first request may have failed after the post was written: the resend finishes joining and routing
-      // (the runtime reaches only the agents the message hasn't reached yet).
+      // The first request may have failed after the post was written: the resend finishes joining.
       if (!isMember) await joinChannel(deps.db, channel.id, me.userId);
-      const message = await hydrateOne(deps.db, resent);
-      await deps.runtime
-        .onPersonMessage({ workspaceId: me.workspaceId, channel, message })
-        .catch((err) => log.error("runtime.route_failed", { messageId: message.id, err }));
-      return c.json(message, 200);
+      return c.json(await hydrateOne(deps.db, resent), 200);
     }
     const assignment = await assignmentPostMeta(deps, me, input.threadId, body);
     // An attachment is a file of this channel (or of the whole workspace): whoever reads the message can open it.
@@ -547,10 +534,11 @@ export function registerChat(app: Hono<AppEnv>) {
       },
     });
     if (!isMember) await joinChannel(deps.db, channel.id, me.userId);
-    // A routing failure doesn't fail the post.
-    await deps.runtime
-      .onPersonMessage({ workspaceId: me.workspaceId, channel, message })
-      .catch((err) => log.error("runtime.route_failed", { messageId: message.id, err }));
+    // A resend of the same clientId doesn't route again. A routing failure doesn't fail the post.
+    if (created)
+      await deps.runtime
+        .onPersonMessage({ workspaceId: me.workspaceId, channel, message })
+        .catch((err) => log.error("runtime.route_failed", { messageId: message.id, err }));
     return c.json(message, created ? 201 : 200);
   });
 
