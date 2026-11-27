@@ -2,7 +2,7 @@
 // shows its published text): the header and side panel, renaming in place, properties, the version
 // history and a restore, pin, lock and the trash by who may, and the missing and failed states.
 import { describe, expect, test } from "bun:test";
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { newServer, renderApp } from "../../../../test/app.tsx";
 
 const WIKI = "/workspace/workspace_birchwood/wiki";
@@ -57,12 +57,16 @@ describe("a wiki page", () => {
   test("a tag added on the page is saved, once more on the fresh version when someone saved in between", async () => {
     const app = await renderApp({ path: PAGE, signedInAs: "usr_ana" });
     await title();
+    // Jonas saved a tag of his own meanwhile: the retry adds "ink" to his list, never drops his tag.
+    const page = app.server.wiki.pages[0];
+    if (page !== undefined) {
+      page.tags = [...page.tags, "safety"];
+      const last = page.versions.at(-1);
+      if (last !== undefined) page.versions.push({ ...last, version: last.version + 1, note: "meta" });
+    }
     app.server.force("updateWikiPageMeta", { kind: "error", status: 409, code: "wiki.stale_draft" }, 1);
     await app.user.type(screen.getByRole("textbox", { name: "Add to Tags" }), "ink{Enter}");
-    await waitFor(() => {
-      const tags = screen.getByRole("list", { name: "Tags" });
-      expect(within(tags).getByText(/ink/)).toBeDefined();
-    });
+    await waitFor(() => expect(app.server.wiki.pages[0]?.tags).toEqual(["print", "daily", "safety", "ink"]));
     expect(app.server.calls.filter((call) => call.method === "updateWikiPageMeta")).toHaveLength(2);
   });
 
@@ -274,6 +278,86 @@ describe("a wiki page", () => {
     const app = await renderApp({ path: `${WIKI}/ink-suppliers`, signedInAs: "usr_iris", server });
     await title();
     expect(within(await actions(app)).queryByRole("menuitem", { name: "Move to trash" }) === null).toBe(true);
+  });
+
+  test("a link to a heading of the same page scrolls there, and one to another page's heading opens it there", async () => {
+    const server = newServer();
+    const ink = server.wiki.pages.find((each) => each.slug === "ink-suppliers");
+    const last = ink?.versions.at(-1);
+    if (last !== undefined)
+      last.body = "Two suppliers.\n\n## Prices\n\nSee [[#Prices]] and [[Press checklist#After]].";
+    const scrolled: string[] = [];
+    const original = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) {
+      scrolled.push(this.textContent ?? "");
+    };
+    try {
+      const app = await renderApp({ path: `${WIKI}/ink-suppliers`, signedInAs: "usr_ana", server });
+      const editor = await screen.findByRole("textbox", { name: "Text of Ink suppliers" });
+      await app.user.click(await within(editor).findByRole("link", { name: "Prices" }));
+      expect(scrolled).toEqual(["Prices"]);
+      expect(app.address()).toBe(`${WIKI}/ink-suppliers`);
+      await app.user.click(within(editor).getByRole("link", { name: "Press checklist › After" }));
+      await waitFor(() => expect(app.address()).toBe(`${WIKI}/press-checklist?at=After`));
+      await waitFor(() => expect(scrolled).toEqual(["Prices", "After"]));
+    } finally {
+      HTMLElement.prototype.scrollIntoView = original;
+    }
+  });
+
+  test("the outline scrolls to a heading by its name in the open document", async () => {
+    const scrolled: string[] = [];
+    const original = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) {
+      scrolled.push(this.textContent ?? "");
+    };
+    try {
+      const app = await renderApp({ path: PAGE, signedInAs: "usr_ana" });
+      await screen.findByRole("textbox", { name: "Text of Press checklist" });
+      const outline = await screen.findByRole("navigation", { name: "On this page" });
+      await app.user.click(within(outline).getByRole("button", { name: "After" }));
+      expect(scrolled).toEqual(["After"]);
+    } finally {
+      HTMLElement.prototype.scrollIntoView = original;
+    }
+  });
+
+  test("the Enter that ends an input method's composition saves no tag and no property", async () => {
+    const metaCalls = (app: Awaited<ReturnType<typeof renderApp>>) =>
+      app.server.calls.filter((call) => call.method === "updateWikiPageMeta").length;
+    const app = await renderApp({ path: PAGE, signedInAs: "usr_ana" });
+    await title();
+    const tags = screen.getByRole("textbox", { name: "Add to Tags" });
+    await app.user.type(tags, "インク");
+    fireEvent.keyDown(tags, { key: "Enter", isComposing: true });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(metaCalls(app)).toBe(0);
+    expect((tags as HTMLInputElement).value).toBe("インク");
+    app.unmount();
+
+    const again = await renderApp({ path: PAGE, signedInAs: "usr_ana" });
+    await title();
+    const owner = screen.getByRole("textbox", { name: "Owner" });
+    await again.user.type(owner, "!");
+    fireEvent.keyDown(owner, { key: "Enter", isComposing: true });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(metaCalls(again)).toBe(0);
+  });
+
+  test("changing the day of a date keeps the rest of the stored value, such as its end", async () => {
+    const server = newServer();
+    const defs = server.wiki.defs.get("workspace_birchwood");
+    defs?.defs.push({ id: "prop_due", name: "Due", type: "date" });
+    const checklist = server.wiki.pages[0];
+    if (checklist !== undefined) checklist.props.prop_due = { start: "2026-11-20", end: "2026-11-25" };
+    const app = await renderApp({ path: PAGE, signedInAs: "usr_ana", server });
+    await title();
+    const due = (await screen.findByLabelText("Due")) as HTMLInputElement;
+    fireEvent.change(due, { target: { value: "2026-11-21" } });
+    fireEvent.keyDown(due, { key: "Enter" });
+    await waitFor(() =>
+      expect(app.server.wiki.pages[0]?.props.prop_due).toEqual({ start: "2026-11-21", end: "2026-11-25" }),
+    );
   });
 
   test("a page that is not there offers to create it", async () => {

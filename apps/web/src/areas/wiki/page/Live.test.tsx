@@ -80,6 +80,7 @@ describe("a live wiki page", () => {
       socket().pushStateless("wiki/workspace_birchwood/press-checklist", { type: "published", version: 3 }),
     );
     await waitFor(() => expect(status()).toBe("Version 3 published"));
+    expect(document.activeElement === editor).toBe(true);
     expect(screen.getByRole("textbox", { name: "Text of Press checklist" }) === editor).toBe(true);
     expect(editor.isConnected).toBe(true);
   });
@@ -98,7 +99,11 @@ describe("a live wiki page", () => {
       timeout: 3000,
     });
     expect(status()).toBe("Offline: changes wait to sync");
+    // The retry gets through: the same editor is live again.
     FakeCollabSocket.autoOpen = true;
+    await act(async () => FakeCollabSocket.instances.at(-1)?.open());
+    await waitFor(() => expect(status()).toBe("Version 2 published"));
+    expect(screen.getByRole("textbox", { name: "Text of Press checklist" }) === editor).toBe(true);
   });
 
   test("leaving a live page closes its editor cleanly: nothing throws afterwards", async () => {

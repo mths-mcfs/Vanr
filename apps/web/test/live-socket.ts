@@ -151,6 +151,13 @@ export class FakeCollabSocket {
     this.emit("message", { data: new Uint8Array(out) });
   }
 
+  /** Opens a socket that waited (made while `autoOpen` was off): a retry that now gets through. */
+  open() {
+    if (this.closed || this.readyState === 1) return;
+    this.readyState = 1;
+    this.emit("open", {});
+  }
+
   serverClose(code: number, reason = "") {
     if (this.closed) return;
     this.closed = true;

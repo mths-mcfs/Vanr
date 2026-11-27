@@ -27,14 +27,17 @@ export function CreatePageDialog({
   const [body, setBody] = useState("");
   const create = useApiMutation("createWikiPage", {
     invalidates: () => [{ method: "listWikiPages", args: { workspaceId } }],
-    onSuccess: (page) => onCreated(page.slug),
   });
   const submit = () => {
     if (title.trim() === "" || create.isPending) return;
-    create.mutate({
-      workspaceId,
-      body: { title: title.trim(), body, ...(folder.trim() !== "" && { folder: folder.trim() }) },
-    });
+    // Passed to this call, not the hook: a page that answers after the dialog closed opens nothing.
+    create.mutate(
+      {
+        workspaceId,
+        body: { title: title.trim(), body, ...(folder.trim() !== "" && { folder: folder.trim() }) },
+      },
+      { onSuccess: (page) => onCreated(page.slug) },
+    );
   };
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>

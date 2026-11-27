@@ -20,7 +20,8 @@ export function SidePanel({
   workspaceId: string;
   page: WikiPage;
   agentName: (id: string) => string | undefined;
-  onHeading: (index: number) => void;
+  /** Scrolls the editor to the heading with this text. */
+  onHeading: (text: string) => void;
   onCreate: (target: string) => void;
   /** What goes first: the page's proposals and comments. */
   children?: ReactNode;
@@ -64,12 +65,12 @@ export function SidePanel({
                 {t("side.outline")}
               </h2>
               <ol className="wiki-side__outline">
-                {panel.data.outline.map((heading, index) => (
+                {panel.data.outline.map((heading) => (
                   <li
                     key={`${heading.line}`}
                     style={{ paddingInlineStart: `${(heading.level - 1) * 0.75}rem` }}
                   >
-                    <button type="button" className="wiki-side__jump" onClick={() => onHeading(index)}>
+                    <button type="button" className="wiki-side__jump" onClick={() => onHeading(heading.text)}>
                       {heading.text}
                     </button>
                   </li>

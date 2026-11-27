@@ -33,7 +33,7 @@ export type EditorHooks = {
   create: (title: string) => void;
   openFile: (fileId: string) => void;
   /** The address of a page, or of creating it, for the link's href (a modified click opens it in the browser). */
-  href: (resolved: ResolvedLink, target: string) => string;
+  href: (resolved: ResolvedLink, target: string, anchor: string | null) => string;
   /** An object URL with an attachment's bytes, for an embedded image. */
   imageUrl: (fileId: string) => Promise<string>;
   trigger: (trigger: Trigger | null) => void;
@@ -153,7 +153,7 @@ export const wikiLinkView = (hooks: Hooks) =>
     frame.dataset.raw = raw;
     const link = document.createElement("a");
     link.textContent = linkLabel(raw);
-    let image: { element: HTMLImageElement; fileId: string; url?: string } | null = null;
+    let image: { element: HTMLImageElement; fileId: string; url?: string; failed?: boolean } | null = null;
     let gone = false;
 
     const dropImage = () => {
@@ -161,12 +161,16 @@ export const wikiLinkView = (hooks: Hooks) =>
       image = null;
     };
     const showImage = (fileId: string, name: string) => {
-      if (image?.fileId === fileId) return;
+      // The same image on its way or shown stays; one that failed is asked for again.
+      if (image?.fileId === fileId && !image.failed) return;
       dropImage();
       const element = document.createElement("img");
       element.className = "wiki-embed";
       element.alt = name;
-      const shown = { element, fileId } as { element: HTMLImageElement; fileId: string; url?: string };
+      const shown: { element: HTMLImageElement; fileId: string; url?: string; failed?: boolean } = {
+        element,
+        fileId,
+      };
       image = shown;
       void hooks.current.imageUrl(fileId).then(
         (made) => {
@@ -176,7 +180,10 @@ export const wikiLinkView = (hooks: Hooks) =>
             element.src = made;
           }
         },
-        () => element.classList.add("wiki-embed--failed"),
+        () => {
+          shown.failed = true;
+          element.classList.add("wiki-embed--failed");
+        },
       );
       frame.replaceChildren(element);
     };
@@ -185,7 +192,7 @@ export const wikiLinkView = (hooks: Hooks) =>
       const missing = resolved.kind === "missing";
       const name = `wiki-link${embed ? " wiki-link--embed" : ""}${missing ? " wiki-link--missing" : ""}`;
       if (link.className !== name) link.className = name;
-      const href = hooks.current.href(resolved, target);
+      const href = hooks.current.href(resolved, target, anchor ?? null);
       if (link.getAttribute("href") !== href) link.setAttribute("href", href);
       if (missing) link.dataset.missing = "true";
       else delete link.dataset.missing;

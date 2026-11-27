@@ -78,6 +78,20 @@ describe("the wiki index", () => {
     expect(app.server.calls.filter((call) => call.method === "createWikiPage")).toHaveLength(1);
   });
 
+  test("a page that answers after the form was closed opens nothing", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
+    await tree();
+    await app.user.click(screen.getByRole("button", { name: "New page" }));
+    const dialog = await screen.findByRole("dialog", { name: "New page" });
+    await app.user.type(within(dialog).getByLabelText(/Title/), "Late page");
+    const held = app.server.hold("createWikiPage");
+    await app.user.click(within(dialog).getByRole("button", { name: "Create page" }));
+    await app.user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    held.release();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(app.address()).toBe(PATH);
+  });
+
   test("the Enter that ends an input method's composition does not create the page", async () => {
     const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
     await tree();
