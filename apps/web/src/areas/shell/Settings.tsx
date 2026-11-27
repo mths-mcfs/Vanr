@@ -63,7 +63,7 @@ export function SettingsScreen() {
   // On a phone the list scrolls sideways: the open section, even one reached by a link, stays in view.
   useEffect(() => {
     nav.current
-      ?.querySelector('[aria-current="page"]')
+      ?.querySelector(`[data-section="${section}"]`)
       ?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
   }, [section]);
   if (section === undefined) return null;
@@ -76,7 +76,12 @@ export function SettingsScreen() {
           <ul className="settings__nav">
             {open.map((name) => (
               <li key={name}>
-                <AppLink className="side__link" route="settings" params={{ workspaceId, section: name }}>
+                <AppLink
+                  className="side__link"
+                  data-section={name}
+                  route="settings"
+                  params={{ workspaceId, section: name }}
+                >
                   {t(`settings.${name}`)}
                 </AppLink>
               </li>
