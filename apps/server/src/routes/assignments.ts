@@ -880,7 +880,7 @@ export function registerAssignments(app: Hono<AppEnv>) {
     return c.json(toCommand(cmd));
   });
 
-  // Allows commands a job was refused (they become the assignment's rules) and resumes the job with them.
+  // Allows commands a job was denied (they become the assignment's rules) and resumes the job with them.
   app.post(`${AI}/commands/retry`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");

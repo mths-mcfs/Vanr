@@ -70,7 +70,7 @@ export function requireManager(me: WorkspaceMember, row: AssignmentRow) {
 
 /**
  * Stopping the agent's run in the thread (pause, stop, close) needs the agent runtime (slice S6): without it the
- * route is refused before any write.
+ * route is rejected before any write.
  */
 export function requireRunStop(deps: AppDeps) {
   requireRuntime(deps.runtime, "activeRun");
@@ -246,7 +246,7 @@ export async function tell(
   }
 }
 
-/** `tell` where the person's answer already counts: a refused delivery (runner offline) is not the answer's failure. */
+/** `tell` where the person's answer already counts: a runner that can't take it (offline) doesn't fail the answer. */
 export async function tellIfPossible(deps: AppDeps, row: AssignmentRow, userId: string, text: string) {
   await tell(deps, row, userId, text).catch((err) => {
     if (!(err instanceof HttpError)) throw err;

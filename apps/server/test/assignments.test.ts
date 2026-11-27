@@ -2,7 +2,7 @@
 // may see and do what (another workspace's member and a reader outside the private channel get 404, a reader
 // can't act, only the owner or an admin manages), the person's plan edits, the answers (commands, decisions,
 // reviews, submissions, suggestions, join requests), the wiki copy of a private channel's assignment, two
-// people at once on the same transition, and the routes refused before any write without the agent runtime.
+// people at once on the same transition, and the routes rejected before any write without the agent runtime.
 // The server runs on `agentRuntime` (the runtime as the engine sees it before slice S6) with a verifier that
 // passes everything; the runner is a fake one speaking the protocol, paired through its owner's browser.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
@@ -112,7 +112,12 @@ async function claudeRunner(
 }
 
 /** The runner ends a job and the server acknowledges it (the end was processed). */
-async function endJob(runner: ProtocolRunner, jobId: string, itemId: string) {
+async function endJob(
+  runner: ProtocolRunner,
+  jobId: string,
+  itemId: string,
+  extra: { denied?: string[]; session?: string } = {},
+) {
   runner.send({
     type: "job.done",
     job: {
@@ -121,10 +126,10 @@ async function endJob(runner: ProtocolRunner, jobId: string, itemId: string) {
       exitCode: 0,
       result: `Did ${itemId}`,
       files: [`src/${itemId}.ts`],
-      session: null,
+      session: extra.session ?? null,
       startedAt: new Date().toISOString(),
       endedAt: new Date().toISOString(),
-      denied: [],
+      denied: extra.denied ?? [],
       diff: `diff --git a/src/${itemId}.ts b/src/${itemId}.ts\n+ok`,
       blocked: [],
     },
@@ -232,6 +237,81 @@ describe("an assignment on a runner, over HTTP", () => {
         expect([viaOurs.status, code(viaOurs)]).toEqual([404, "not_found"]);
         const output404 = await call(zed, "GET", `${ws(theirs)}/jobs/${firstJob}/output`);
         expect([output404.status, code(output404)]).toEqual([404, "not_found"]);
+      } finally {
+        await runner.close();
+      }
+    },
+    2 * SERVER_TEST_MS,
+  );
+
+  test(
+    "a denied command becomes a card; retrying saves the rule and resumes the session with it allowed; stop cancels",
+    async () => {
+      const ana = await signedIn(server, "Ana", email("ana"));
+      const { workspaceId, general } = await seedWorkspace(server, ana, "Commands");
+      const runner = await claudeRunner(ana, workspaceId);
+      try {
+        const agentId = await seedAgent(server.deps.db, workspaceId, ana, runner.runnerId);
+        const created = await call(ana, "POST", `${ws(workspaceId)}/assignments`, {
+          agentId,
+          channelId: general,
+          goal: "Run the suite",
+          executor: "claude_code",
+          runnerId: runner.runnerId,
+        });
+        const id = created.body.id as string;
+        const path = `${ws(workspaceId)}/assignments/${id}`;
+        await call(ana, "PUT", `${path}/runtime`, { harness: "claude_code", model: "sonnet" });
+        await call(ana, "PUT", `${path}/plan`, {
+          parentVersion: 0,
+          items: [{ id: "p1", title: "Tests pass" }],
+        });
+        await call(ana, "POST", `${path}/start`);
+        const first = jobIdOf(workIdOf(id, "p1", 1));
+        const started = await runner.next(
+          (f) => f.type === "request" && f.op === "job.start" && f.args.jobId === first,
+          15_000,
+        );
+        expect(started.type === "request" && [started.args.model, started.args.allow ?? []]).toEqual([
+          "sonnet",
+          [],
+        ]);
+        await endJob(runner, first, "p1", { denied: ["npm test --watch=false"], session: "sess-1" });
+        await idle();
+        const [barred] = (await call(ana, "GET", `${path}/commands`)).body.commands;
+        expect(barred).toMatchObject({ command: "npm test --watch=false", jobId: first, state: "pending" });
+
+        const wrongJob = await call(ana, "POST", `${path}/commands/retry`, {
+          jobId: "aj_other",
+          commands: ["ls"],
+        });
+        expect(wrongJob.status).toBe(404);
+        const resumed = runner.next(
+          (f) => f.type === "request" && f.op === "job.start" && f.args.jobId !== first,
+          15_000,
+        );
+        const retried = await call(ana, "POST", `${path}/commands/retry`, {
+          jobId: first,
+          commands: [barred.command],
+        });
+        expect(retried.body).toEqual({ rules: ["npm test *"], delivered: true });
+        const again = await resumed;
+        expect(again.type === "request" && [again.args.allow, again.args.session]).toEqual([
+          ["npm test *"],
+          "sess-1",
+        ]);
+        expect((await call(ana, "GET", `${path}/commands`)).body.commands[0].state).toBe("allowed");
+        if (again.type === "request") await endJob(runner, String(again.args.jobId), "retry");
+        await idle();
+
+        expect((await call(ana, "PATCH", path, { resumeJobs: false })).body.resumeJobs).toBe(false);
+        const busy = runner.next((f) => f.type === "request" && f.op === "job.start", 15_000);
+        const message = await call(ana, "POST", `${path}/messages`, { text: "One more pass" });
+        expect(message.body.delivered).toBe(true);
+        const fresh = await busy;
+        expect(fresh.type === "request" && fresh.args.session).toBeUndefined();
+        const stopped = await call(ana, "POST", `${path}/stop`);
+        expect([stopped.body.status, stopped.body.canceledJobs]).toEqual(["paused", 1]);
       } finally {
         await runner.close();
       }
@@ -508,7 +588,7 @@ describe("who sees and does what", () => {
           goal: "x",
         });
         expect(channel404.status).toBe(404);
-        // Nothing was created by the refused calls.
+        // Nothing was created by the rejected calls.
         expect((await call(t.ana, "GET", base)).body.assignments).toHaveLength(1);
 
         const bare = await seedChannel(server, t.workspaceId, { name: `bare${n}`, members: [t.ana] });
@@ -925,7 +1005,7 @@ describe("the person's answers", () => {
 
 describe("the transitions on their own", () => {
   test(
-    "createAssignment refuses another workspace's agent or runner, before writing anything",
+    "createAssignment rejects another workspace's agent or runner, before writing anything",
     async () => {
       const t = await team();
       const { zed, workspaceId: theirs } = await outsider();
@@ -1010,7 +1090,7 @@ describe("without the agent runtime (before slice S6)", () => {
   }, SERVER_TEST_MS);
 
   test(
-    "stopping or telling the agent is refused with not_available before any write; the rest works",
+    "stopping or telling the agent is rejected with not_available before any write; the rest works",
     async () => {
       const ana = await signedIn(bare, "Ana", email("ana"));
       const { workspaceId, general } = await seedWorkspace(bare, ana, "Bare");
@@ -1034,7 +1114,7 @@ describe("without the agent runtime (before slice S6)", () => {
       await bare.deps.db
         .insert(schema.assignmentSubmissions)
         .values({ id: sub, assignmentId: created.body.id, note: "Done", checklist: [] });
-      const refused: [string, string, unknown?][] = [
+      const rejected: [string, string, unknown?][] = [
         ["POST", "/pause"],
         ["POST", "/stop"],
         ["POST", "/close", { outcome: "done" }],
@@ -1042,7 +1122,7 @@ describe("without the agent runtime (before slice S6)", () => {
         ["POST", "/messages", { text: "hello" }],
         ["POST", `/reviews/${review}/approve`, {}],
       ];
-      for (const [method, tail, payload] of refused) {
+      for (const [method, tail, payload] of rejected) {
         const r = await call(ana, method, `${path}${tail}`, payload);
         expect([tail, r.status, code(r)]).toEqual([tail, 503, "not_available"]);
       }
