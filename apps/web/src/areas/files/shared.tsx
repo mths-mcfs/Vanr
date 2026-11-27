@@ -5,7 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { type KeyPrefix, prefixKey, useApiQuery, useVanrClient } from "@vanr/client/react";
 import type { ActorRef, FileKind } from "@vanr/contract";
 import { Code, FileDiff, FileText, type LucideIcon, Paperclip, Table2, Workflow } from "lucide-react";
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocale, useMessages } from "../../i18n/react.tsx";
 import { useClock } from "../../platform/clock.tsx";
 
@@ -74,10 +74,25 @@ export function formatBytes(bytes: number, locale: string): string {
   }).format(value);
 }
 
-/** The relative time of a date, kept current with the app's clock. */
+/** How often relative times are worked out again: their smallest unit is the minute. */
+const RELATIVE_TICK_MS = 60_000;
+
+/** The relative time of a date, kept current with the app's clock (worked out again every minute). */
 export function useRelativeTime(): (iso: string) => string {
   const { locale } = useLocale();
   const clock = useClock();
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    let cancel = () => {};
+    const schedule = () => {
+      cancel = clock.setTimer(() => {
+        setTick((tick) => tick + 1);
+        schedule();
+      }, RELATIVE_TICK_MS);
+    };
+    schedule();
+    return () => cancel();
+  }, [clock]);
   return (iso) => relativeTime(iso, clock.now(), locale);
 }
 
@@ -96,7 +111,8 @@ export function highlightParts(text: string, query: string): { text: string; hit
     .split(/\s+/)
     .map((word) => word.replace(/^"|"$/g, ""))
     .filter((word) => word.length >= 2 && !word.startsWith("-") && !/^[a-z]+:/i.test(word))
-    .map(fold);
+    .map(fold)
+    .filter((word) => word !== "");
   if (words.length === 0) return [{ text, hit: false }];
   const folded = fold(text);
   // Folding can change the length (a decomposed letter); fall back to no marks then.

@@ -28,9 +28,12 @@ export type UploadItem = {
 export const isLive = (item: UploadItem) =>
   item.state === "queued" || item.state === "sending" || item.state === "paused";
 
-/** The browser's key for a file: the same file picked again after a reload has the same key. */
-export const fileKey = (workspaceId: string, file: File) =>
-  `${workspaceId}:${file.name}:${file.size}:${file.lastModified}`;
+/**
+ * The browser's key for a file and where it goes: the same file picked again after a reload for the
+ * same place has the same key; for another file (a new version of it) it is another upload.
+ */
+export const fileKey = (workspaceId: string, file: File, target: UploadTarget = {}) =>
+  `${workspaceId}:${target.fileId ?? "new"}:${file.name}:${file.size}:${file.lastModified}`;
 
 const Saved = z.record(z.string(), z.string());
 
@@ -107,7 +110,8 @@ export function useUploadQueue(workspaceId: string, onDone: (file: FileDetail) =
 
   const send = useCallback(
     async (item: UploadItem) => {
-      const key = fileKey(workspaceId, item.file);
+      const target = targets.current.get(item.id) ?? {};
+      const key = fileKey(workspaceId, item.file, target);
       const controller = new AbortController();
       controllers.current.set(item.id, controller);
       dispatch({ type: "patch", id: item.id, patch: { state: "sending", error: undefined } });
@@ -119,9 +123,10 @@ export function useUploadQueue(workspaceId: string, onDone: (file: FileDetail) =
           resume = await client.api
             .getFileUpload({ workspaceId, uploadId: before }, { signal: controller.signal })
             .catch(() => undefined);
-          if (resume?.status !== "open") resume = undefined;
+          // A finished session is kept too: completing it again gives back the file it made, instead of
+          // a second file when the answer to the first completion was lost.
+          if (resume === undefined || resume.offset > item.file.size) resume = undefined;
         }
-        const target = targets.current.get(item.id) ?? {};
         const detail = await uploadInParts(
           client.api,
           workspaceId,
@@ -168,6 +173,18 @@ export function useUploadQueue(workspaceId: string, onDone: (file: FileDetail) =
     };
   }, []);
 
+  /** Drops what the queue keeps for an item and the session it opened on the server. */
+  const forget = (id: string) => {
+    const item = items.find((candidate) => candidate.id === id);
+    const session = sessions.current.get(id);
+    if (item !== undefined) remember(fileKey(workspaceId, item.file, targets.current.get(id)), null);
+    sessions.current.delete(id);
+    targets.current.delete(id);
+    if (session !== undefined && session.status === "open") {
+      void client.api.deleteFileUpload({ workspaceId, uploadId: session.id }).catch(() => undefined);
+    }
+  };
+
   return {
     items,
     add(files: readonly File[], target: UploadTarget = {}) {
@@ -184,17 +201,12 @@ export function useUploadQueue(workspaceId: string, onDone: (file: FileDetail) =
     },
     cancel(id: string) {
       controllers.current.get(id)?.abort();
-      const item = items.find((candidate) => candidate.id === id);
-      const session = sessions.current.get(id);
-      sessions.current.delete(id);
-      targets.current.delete(id);
+      forget(id);
       dispatch({ type: "remove", id });
-      if (item !== undefined) remember(fileKey(workspaceId, item.file), null);
-      if (session !== undefined) {
-        void client.api.deleteFileUpload({ workspaceId, uploadId: session.id }).catch(() => undefined);
-      }
     },
     clearFinished() {
+      // A failed upload may have left its session open on the server; it goes with the item.
+      for (const item of items) if (item.state === "failed") forget(item.id);
       dispatch({ type: "clearFinished" });
     },
   };

@@ -100,3 +100,13 @@ describe("the search", () => {
     await waitFor(() => expect(answer.textContent).toContain("field-notes.txt"));
   });
 });
+
+describe("the search, past the happy path", () => {
+  test("an operator that would pass the length limit leaves the query as it is", async () => {
+    const long = "a".repeat(195);
+    const app = await renderApp({ path: `${PATH}?q=${long}`, signedInAs: "usr_ana" });
+    await app.user.click(screen.getByRole("button", { name: "Search operators" }));
+    await app.user.click(screen.getByRole("button", { name: "Add has:link" }));
+    expect((field() as HTMLInputElement).value).toBe(long);
+  });
+});

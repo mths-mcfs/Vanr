@@ -12,6 +12,7 @@ import { ScreenError, ScreenLoading, useErrorMessage } from "../../../app/screen
 import { useLocale, useMessages } from "../../../i18n/react.tsx";
 import { DOCUMENT_MAX, formatBytes, useActorName, useRefetch, useRelativeTime } from "../shared.tsx";
 import { FileBody } from "./preview-parts.tsx";
+import { MAX_UPLOAD_BYTES } from "./upload-queue.ts";
 
 type Edit = { text: string; parentVersion: number };
 
@@ -63,6 +64,8 @@ export function Preview({
           )
         ) : (
           <Opened
+            // Another file is another draft: what was typed for one never goes to the next.
+            key={shown.id}
             workspaceId={workspaceId}
             detail={shown}
             {...(page !== undefined && { page })}
@@ -101,6 +104,7 @@ function Opened({
   const [conflict, setConflict] = useState(false);
   const [sending, setSending] = useState<{ sent: number; total: number } | null>(null);
   const [failure, setFailure] = useState<unknown>(null);
+  const [tooBig, setTooBig] = useState(false);
   const picker = useRef<HTMLInputElement>(null);
   const latest = detail.viewVersion === detail.version;
   const fresh = () =>
@@ -155,6 +159,8 @@ function Opened({
 
   const sendVersion = async (file: File) => {
     setFailure(null);
+    if (file.size > MAX_UPLOAD_BYTES) return setTooBig(true);
+    setTooBig(false);
     setSending({ sent: 0, total: file.size });
     try {
       await uploadInParts(
@@ -263,6 +269,11 @@ function Opened({
             })}
           </p>
         )}
+        {tooBig && (
+          <Callout tone="danger" role="alert">
+            {t("upload.tooBigWhy")}
+          </Callout>
+        )}
         {(failure !== null || remove.isError || download.isError) && (
           <Callout tone="danger" role="alert">
             {describe(failure ?? remove.error ?? download.error)}
@@ -278,6 +289,8 @@ function Opened({
             <Textarea
               aria-label={t("preview.content")}
               rows={14}
+              // While the save is on its way the text stays as sent, so nothing typed meanwhile is lost.
+              readOnly={save.isPending}
               value={edit.text}
               maxLength={DOCUMENT_MAX}
               onChange={(event) => setEdit({ ...edit, text: event.target.value })}

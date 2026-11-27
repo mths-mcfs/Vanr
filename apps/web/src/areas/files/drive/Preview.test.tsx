@@ -139,3 +139,25 @@ describe("the trash", () => {
     expect(await screen.findByText("The trash is empty")).toBeDefined();
   });
 });
+
+describe("a file's preview, past the happy path", () => {
+  test("a new version over 1 GB is refused before anything is sent", async () => {
+    const app = await renderApp({ path: `${PATH}?file=fil_notes`, signedInAs: "usr_ana" });
+    const open = await dialog("field-notes.txt");
+    const huge = new File([new Uint8Array(1)], "field-notes.txt", { type: "text/plain" });
+    Object.defineProperty(huge, "size", { value: 1024 * 1024 * 1024 + 1 });
+    await app.user.upload(within(open).getByTestId("files-new-version"), huge);
+    expect((await within(open).findByRole("alert")).textContent).toContain("Files are limited to 1 GB.");
+    expect(app.server.calls.some((call) => call.method === "createFileUpload")).toBe(false);
+  });
+
+  test("a restore that fails says why", async () => {
+    const server = newServer();
+    server.force("restoreFile", { kind: "error", status: 403, code: "forbidden" });
+    const app = await renderApp({ path: `${PATH}?trash=1`, signedInAs: "usr_ana", server });
+    await app.user.click(await screen.findByRole("button", { name: "Restore Old flyer" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("The file could not be restored");
+    expect(alert.textContent).toContain("You don't have permission to do that.");
+  });
+});

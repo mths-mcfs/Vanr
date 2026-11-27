@@ -51,6 +51,7 @@ export default {
   "trash.deleted": "Deleted {when}",
   "trash.restore": "Restore",
   "trash.restoreNamed": "Restore {title}",
+  "trash.restoreFailed": "The file could not be restored",
   "trash.whoRestores": "Its author or an admin can restore it",
 
   "document.title": "Title",
@@ -79,6 +80,7 @@ export default {
   "preview.versionShort": "Version {version}",
   "preview.versionLine": "{name}, {when}",
   "preview.pages": "Text of each page",
+  "preview.mediaFailed": "This file could not be shown",
   "preview.binary": "No preview for this file. It is {type}, {size}.",
 
   "extract.working": "Reading the text",
