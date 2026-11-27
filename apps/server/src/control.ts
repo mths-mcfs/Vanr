@@ -44,7 +44,7 @@ const {
   memories,
   reminders,
 } = schema;
-const { messages, outbox, routines, users } = schema;
+const { files, messages, outbox, routines, users } = schema;
 
 export type ApprovalRow = typeof approvals.$inferSelect;
 export type ProposalRow = typeof proposals.$inferSelect;
@@ -846,8 +846,9 @@ export async function canUndo(db: Db, me: WorkspaceMember, row: ActionRow): Prom
 }
 
 /**
- * The person still sees what the action touched: the conversation its receipt is in and the target itself (a
- * message's or a queued post's channel, a routine). Checked under the action's lock, so access lost since the
+ * The person still sees what the action touched: the conversation its receipt is in and the target itself (the
+ * channel of a message, a queued post, a reminder or a file, and a routine). Issues, bases and wiki pages are seen
+ * by the whole workspace today. Checked under the action's lock, so access lost since the
  * action counts; without it the action answers as one that doesn't exist, as "undo all" does. Write rights stay
  * with each undoer (a file someone can't see, a locked page). Per-page wiki access goes here too.
  */
@@ -878,6 +879,13 @@ async function assertSees(deps: AppDeps, me: WorkspaceMember, row: ActionRow): P
       .where(and(eq(outbox.id, id), eq(outbox.workspaceId, row.workspaceId)));
     const channelId = queued?.payload.channelId;
     if (typeof channelId === "string" && !(await reads(channelId))) throw hidden();
+  } else if (type === "reminder" || type === "file") {
+    const table = type === "reminder" ? reminders : files;
+    const [scoped] = await db
+      .select({ channelId: table.channelId })
+      .from(table)
+      .where(and(eq(table.id, id), eq(table.workspaceId, row.workspaceId)));
+    if (scoped?.channelId && !(await reads(scoped.channelId))) throw hidden();
   } else if (type === "routine") {
     const [routine] = await db
       .select()

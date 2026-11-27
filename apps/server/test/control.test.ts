@@ -1012,6 +1012,39 @@ describe("undo", () => {
       const undo = await t.carla.browser.json(t.url(`/actions/${viaGeneral.id}/undo`), "POST");
       expect(undo.status).toBe(404);
       expect((await meta(viaGeneral.target.id))?.retracted).toBeUndefined();
+      // A reminder and a file of the room: the same answer, and they stay as they are.
+      const [rem] = await server.deps.db
+        .insert(reminders)
+        .values({
+          id: newId("rem"),
+          workspaceId: t.workspaceId,
+          agentId: t.agentId,
+          channelId: room,
+          text: "Call the client",
+          at: new Date(clock.getTime() + 3600_000),
+          createdByType: "agent",
+          createdById: t.agentId,
+        })
+        .returning();
+      if (!rem) throw new Error("no reminder");
+      const remind = await seedAction(t, "reminder_created", { type: "reminder", id: rem.id });
+      expect((await t.carla.browser.json(t.url(`/actions/${remind.id}/undo`), "POST")).status).toBe(404);
+      const [remNow] = await server.deps.db.select().from(reminders).where(eq(reminders.id, rem.id));
+      expect(remNow?.status).toBe("scheduled");
+      const fileId = newId("file");
+      await server.deps.db.insert(schema.files).values({
+        id: fileId,
+        workspaceId: t.workspaceId,
+        title: "Room notes",
+        kind: "document",
+        createdBy: { type: "agent", id: t.agentId },
+        updatedBy: { type: "agent", id: t.agentId },
+        channelId: room,
+      });
+      const made = await seedAction(t, "file_created", { type: "file", id: fileId });
+      expect((await t.carla.browser.json(t.url(`/actions/${made.id}/undo`), "POST")).status).toBe(404);
+      const [fileNow] = await server.deps.db.select().from(schema.files).where(eq(schema.files.id, fileId));
+      expect(fileNow?.deletedAt).toBeNull();
       // Whoever still reads the room (Ana manages agents and is added) undoes and redoes as before.
       await server.deps.db
         .insert(schema.channelMemberships)
