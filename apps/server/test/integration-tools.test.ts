@@ -255,6 +255,9 @@ describe("a connector call while the run goes on", () => {
       const out = await run.run(tools, "mcp_stock__list_items", {});
       expect(out.isError).toBe(true);
       expect(mcp.calls.slice(before).map((c) => c.auth)).toContain("Bearer rotated");
+      // The server refused that credential when the session opened: the connection asks to be reconnected.
+      const [after] = await server.deps.db.select().from(connections).where(eq(connections.id, connectionId));
+      expect(after?.status).toBe("reauth_required");
     },
     SERVER_TEST_MS,
   );
@@ -301,6 +304,28 @@ describe("a connector call while the run goes on", () => {
         expect(await keys(`lost_${connectionId}`)).toHaveLength(1);
       } finally {
         lossy.stop(true);
+      }
+
+      // The session is refused for lack of scope: the scope path answers, and nothing went out.
+      const scoped = Bun.serve({
+        port: 0,
+        fetch: () =>
+          new Response("forbidden", {
+            status: 403,
+            headers: { "www-authenticate": 'Bearer error="insufficient_scope", scope="items:write"' },
+          }),
+      });
+      try {
+        await pointAt(`http://localhost:${scoped.port}/mcp`);
+        const run = toolRun(server.deps, agent, channel, { effectKey: `scope_${connectionId}` });
+        const out = await run.run(tools, "mcp_stock__create_item", { name: "bolt" });
+        expect([out.isError, out.content]).toEqual([
+          true,
+          'Stock rejected: the key it was connected with lacks permission for "Create item". Ask an admin to connect it with a key that has it.',
+        ]);
+        expect(await keys(`scope_${connectionId}`)).toEqual([]);
+      } finally {
+        scoped.stop(true);
       }
 
       // Nobody answers the session: nothing was sent, the key goes and a retry may do it.

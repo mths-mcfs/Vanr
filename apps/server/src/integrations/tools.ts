@@ -222,32 +222,35 @@ export function connectionTools(
           // call didn't ask, goes back to the model to be planned again.
           if (now.access !== tool.access || (now.ask && !asks))
             throw new ToolInputError(`${conn.label}: "${label}" changed its access. Call it again.`);
+          // A refusal of the credential or of its scope means the service ran nothing, at the session or at the call.
+          const refused = async (err: unknown) => {
+            clients.delete(conn.id);
+            if (err instanceof McpInsufficientScope) return askScope(ctx, conn, label, err.scope);
+            const why = `${conn.label} failed: ${err instanceof Error ? err.message : "the server did not answer"}`;
+            // A credential rejected in use: the connectors screen must say "Reconnect".
+            if (err instanceof McpAuthRequired) await markNeedsReconnect(deps, conn.id);
+            return why;
+          };
           let client: McpClient;
           try {
             client = await sessionFor(deps, clients, now.row);
             // The session opens before the call: a failure here sent nothing, so the effect key is released.
             await client.init();
           } catch (err) {
-            clients.delete(conn.id);
-            throw new ToolInputError(
-              `${conn.label} failed: ${err instanceof Error ? err.message : "no client"}`,
-            );
+            const out = await refused(err);
+            if (typeof out !== "string") return out;
+            throw new ToolInputError(out);
           }
           try {
             const res = await client.callTool(tool.name, input);
             return { content: res.text || "(empty result)", isError: res.isError };
           } catch (err) {
-            clients.delete(conn.id);
-            if (err instanceof McpInsufficientScope) return askScope(ctx, conn, label, err.scope);
-            const why = `${conn.label} failed: ${err instanceof Error ? err.message : "the server did not answer"}`;
-            // A credential rejected in use (nothing ran): the connectors screen must say "Reconnect".
-            if (err instanceof McpAuthRequired) {
-              await markNeedsReconnect(deps, conn.id);
-              throw new ToolInputError(why);
-            }
+            const out = await refused(err);
+            if (typeof out !== "string") return out;
+            if (err instanceof McpAuthRequired) throw new ToolInputError(out);
             // Anything else may have reached the service: not an input error, so runTool keeps the effect key and a
             // retry doesn't repeat a write blindly.
-            throw new Error(why);
+            throw new Error(out);
           }
         },
       }),
