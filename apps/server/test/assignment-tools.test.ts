@@ -1302,4 +1302,25 @@ describe("commands on the agent's runner", () => {
     },
     SERVER_TEST_MS,
   );
+
+  test(
+    "commands turned off while the assignment's approval waits: the approved command isn't sent",
+    async () => {
+      const t = await team();
+      const row = await assignmentOf(t, { commandPolicy: "always" });
+      const r = await run(t, row.threadId);
+      const pending = r.call("execute_code", { command: "deploy.sh" });
+      const commandId = await pendingCommand(row.id);
+      await server.deps.db
+        .update(runners)
+        .set({
+          access: { folders: [], tools: { claude: true, codex: false, commands: false, browser: false } },
+        })
+        .where(eq(runners.id, t.fake.runnerId));
+      await decide(commandId, "allowed");
+      expect((await pending).content).toBe("Commands are turned off on this runner.");
+      expect(requests(t.fake.runner, "exec")).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
 });

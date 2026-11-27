@@ -351,6 +351,9 @@ const executeCode = defineStored(
       if (!runner.access.tools.commands) throw new ToolInputError(EXPLAIN.exec_disabled as string);
       // In an assignment, its autonomy decides whether the command goes on its own or waits for a person.
       await gated(ctx, "execute_code", input.command);
+      // Read again after the gate: the person may have taken the runner away, or turned commands off, meanwhile.
+      const current = await sameRunner(ctx, runner);
+      if (!current.access.tools.commands) throw new ToolInputError(EXPLAIN.exec_disabled as string);
       // The workspace's maximum time (Settings › Runners) is the command's default and its ceiling.
       const limit = (await sandboxOf(ctx))?.commandTimeoutSec ?? 120;
       const timeoutSeconds = Math.min(input.timeoutSeconds ?? limit, limit);
@@ -359,8 +362,7 @@ const executeCode = defineStored(
         ctx,
         "exec",
         { command: input.command, cwd: input.cwd, timeoutSeconds, network },
-        // Read again after the gate: the person may have taken the runner away while the command waited.
-        { timeoutMs: (timeoutSeconds + 15) * 1000, stream: true, runner: await sameRunner(ctx, runner) },
+        { timeoutMs: (timeoutSeconds + 15) * 1000, stream: true, runner: current },
       );
       const blocked = data.blocked?.length ? await askForDomains(ctx, data.blocked, input.command) : "";
       return {
