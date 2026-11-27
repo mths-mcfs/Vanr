@@ -202,9 +202,35 @@ export const channelViewer = (me: WorkspaceMember): ChannelViewer => ({
 });
 
 /**
- * The agent's channels (DMs stay out). Given a viewer who doesn't manage agents, a private channel they are not
- * a member of is left out: its id would name a channel whose runs answer them 404.
+ * The condition on `channels` for the channels a viewer may see of an agent's: channels only (DMs stay out), and,
+ * for a viewer who doesn't manage agents, the public ones and the private ones they belong to. A private channel
+ * they are not a member of stays out: its id would name a channel whose runs answer them 404. Every route that
+ * shows or changes an agent's channels (its memberships and its channel rules) uses this one rule.
  */
+export function visibleAgentChannel(db: Db, viewer?: ChannelViewer) {
+  return and(
+    eq(channels.kind, "channel"),
+    viewer && !viewer.seesAll
+      ? or(
+          eq(channels.visibility, "public"),
+          inArray(
+            channels.id,
+            db
+              .select({ id: channelMemberships.channelId })
+              .from(channelMemberships)
+              .where(
+                and(
+                  eq(channelMemberships.memberType, "person"),
+                  eq(channelMemberships.memberId, viewer.userId),
+                ),
+              ),
+          ),
+        )
+      : undefined,
+  );
+}
+
+/** The agent's channels, as `visibleAgentChannel` lets the viewer see them (archived ones stay out). */
 export async function agentChannels(db: Db, agentId: string, viewer?: ChannelViewer) {
   return db
     .select({ id: channelMemberships.channelId, autoAnswer: channelMemberships.autoAnswer })
@@ -214,25 +240,8 @@ export async function agentChannels(db: Db, agentId: string, viewer?: ChannelVie
       and(
         eq(channelMemberships.memberType, "agent"),
         eq(channelMemberships.memberId, agentId),
-        eq(channels.kind, "channel"),
         isNull(channels.archivedAt),
-        viewer && !viewer.seesAll
-          ? or(
-              eq(channels.visibility, "public"),
-              inArray(
-                channels.id,
-                db
-                  .select({ id: channelMemberships.channelId })
-                  .from(channelMemberships)
-                  .where(
-                    and(
-                      eq(channelMemberships.memberType, "person"),
-                      eq(channelMemberships.memberId, viewer.userId),
-                    ),
-                  ),
-              ),
-            )
-          : undefined,
+        visibleAgentChannel(db, viewer),
       ),
     );
 }

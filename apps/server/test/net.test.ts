@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { connectCustom } from "../src/integrations/connectors";
 import { guardedFetch, isPrivateAddress, type Resolver } from "../src/integrations/net";
 import { discoverAuthServer } from "../src/integrations/oauth";
 import type { RunningServer } from "../src/server";
@@ -242,13 +241,13 @@ describe("an MCP connector on the cloud edition", () => {
     async () => {
       const eve = await signedIn(server, "Eve", "eve@net.test");
       const { workspaceId } = await seedWorkspace(server, eve, "Eve Workspace");
-      const me = { workspaceId, userId: eve.user.id, role: "owner" as const, handle: "eve", sessionId: "s" };
-      const start = await connectCustom(server.deps, me, {
+      const res = await eve.browser.json(`/api/v1/workspaces/${workspaceId}/connectors/custom`, "POST", {
         serverUrl: "https://93.184.216.34/mcp",
         nextPath: "/",
       });
       // No OAuth possible (the internal addresses were rejected): the connector asks for a key.
-      expect(start).toMatchObject({ status: "key_missing" });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ status: "key_missing" });
       expect(seen.length).toBeGreaterThan(0);
       expect(seen.filter((s) => !s.url.startsWith("https://93.184.216.34/"))).toEqual([]);
     },

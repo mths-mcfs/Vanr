@@ -1,5 +1,5 @@
 {
-  "id": "e20e3c0d-f088-4a04-acfb-675976b2c558",
+  "id": "1842ca57-4196-4457-b43d-3fbdd8bd87c6",
   "prevId": "30099611-47c6-4169-969c-aa594683ef81",
   "version": "7",
   "dialect": "postgresql",
@@ -4704,13 +4704,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "effects_pending": {
-          "name": "effects_pending",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -8443,6 +8436,28 @@
             }
           ],
           "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "connections_agent_connector_uq": {
+          "name": "connections_agent_connector_uq",
+          "columns": [
+            {
+              "expression": "agent_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "connector",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"connections\".\"agent_id\" is not null and \"connections\".\"revoked_at\" is null and \"connections\".\"status\" <> 'pending'",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -13423,6 +13438,12 @@
         },
         "sent_at": {
           "name": "sent_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "first_attempt_at": {
+          "name": "first_attempt_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false

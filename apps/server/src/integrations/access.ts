@@ -8,7 +8,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import { HttpError } from "../http";
 import { BUILTIN_SCOPES, builtinScopeOf, connectionScopes } from "./catalog";
 
-const { agentGrants, agentChannelAccess, connections } = schema;
+const { agentGrants, agentChannelAccess, agents, connections } = schema;
 export type ConnectionRow = typeof connections.$inferSelect;
 
 const SPECIAL = (scope: string) =>
@@ -61,15 +61,20 @@ export async function channelRulesOf(db: Db, workspaceId: string, agentId: strin
     .where(and(eq(agentChannelAccess.agentId, agentId), eq(agentChannelAccess.workspaceId, workspaceId)));
 }
 
-/** Writes the whole list (replaces what was there). */
+/**
+ * Writes the whole list (replaces what was there). `grants` may be computed from the current list: it is read
+ * under the agent's row lock, so two saves of the same agent's access don't lose each other's change.
+ */
 export async function replaceGrants(
   db: Db,
   workspaceId: string,
   agentId: string,
-  grants: readonly ScopeGrant[],
+  grants: readonly ScopeGrant[] | ((current: ScopeGrant[]) => readonly ScopeGrant[]),
 ) {
-  const unique = new Map(grants.map((g) => [`${g.connectionId}|${g.scope}`, g]));
   await db.transaction(async (tx) => {
+    await tx.select({ id: agents.id }).from(agents).where(eq(agents.id, agentId)).for("no key update");
+    const list = typeof grants === "function" ? grants(await grantsOf(tx, agentId)) : grants;
+    const unique = new Map(list.map((g) => [`${g.connectionId}|${g.scope}`, g]));
     await tx.delete(agentGrants).where(eq(agentGrants.agentId, agentId));
     if (unique.size)
       await tx.insert(agentGrants).values(

@@ -1,0 +1,25 @@
+{
+  "extensions": [],
+  "tables": [],
+  "columns": [
+    {
+      "table": "notification_deliveries",
+      "name": "first_attempt_at",
+      "type": "timestamp with time zone",
+      "notNull": false,
+      "default": null,
+      "collation": null
+    }
+  ],
+  "constraints": [],
+  "indexes": [
+    {
+      "table": "connections",
+      "name": "connections_agent_connector_uq",
+      "definition": "CREATE UNIQUE INDEX connections_agent_connector_uq ON public.connections USING btree (agent_id, connector) WHERE ((agent_id IS NOT NULL) AND (revoked_at IS NULL) AND (status <> 'pending'::text))"
+    }
+  ],
+  "sequences": [],
+  "triggers": [],
+  "functions": []
+}

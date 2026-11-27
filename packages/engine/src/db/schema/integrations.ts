@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { boolean, index, integer, jsonb, pgTable, primaryKey, text, uniqueIndex } from "drizzle-orm/pg-core";
 import { agents } from "./agents";
 import { createdAt, ts, updatedAt } from "./columns";
@@ -61,7 +62,14 @@ export const connections = pgTable(
     updatedAt: updatedAt(),
     revokedAt: ts("revoked_at"),
   },
-  (t) => [index("connections_workspace_idx").on(t.workspaceId), index("connections_agent_idx").on(t.agentId)],
+  (t) => [
+    index("connections_workspace_idx").on(t.workspaceId),
+    index("connections_agent_idx").on(t.agentId),
+    // An agent has one own account per service: a second connect of the same service is rejected.
+    uniqueIndex("connections_agent_connector_uq")
+      .on(t.agentId, t.connector)
+      .where(sql`${t.agentId} is not null and ${t.revokedAt} is null and ${t.status} <> 'pending'`),
+  ],
 );
 
 /** Pending extra authorization step on an OAuth connection. */
