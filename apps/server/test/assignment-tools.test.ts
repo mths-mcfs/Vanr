@@ -8,6 +8,7 @@
 // and a runner that goes away in the middle leaves an error, never an assignment stuck on it.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
+import { RiskTracker } from "@vanr/engine/effects";
 import { and, eq } from "drizzle-orm";
 import { runningJobsOf } from "../src/assignments/core";
 import { createAssignment, wake } from "../src/assignments/engine";
@@ -20,6 +21,7 @@ import {
   assignmentToolsFor,
 } from "../src/assignments/tools";
 import { environmentToolsFor } from "../src/runners/agent-tools";
+import { moveIntervention } from "../src/runners/requests";
 import { TOOL_OUTPUT_MAX, type ToolContext } from "../src/runtime/tools";
 import type { RunningServer } from "../src/server";
 import { type Answer, type Answerer, doing, exec, pairFake, requests } from "./fake-runner";
@@ -368,6 +370,75 @@ describe("assignment tools", () => {
           .select()
           .from(schema.assignmentSubmissions)
           .where(eq(schema.assignmentSubmissions.assignmentId, empty.id)),
+      ).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "an approved item sent again without a status keeps its verdict; a proposal's item can't be finished",
+    async () => {
+      const t = await team();
+      const row = await assignmentOf(t);
+      const r = await run(t, row.threadId);
+      await r.call("update_plan", { items: [{ id: "p1", title: "Find the flaky test" }] });
+      await touchItem(server.deps, row.id, "p1", { status: "done", passes: true });
+      const again = await r.call("update_plan", {
+        items: [{ id: "p1", title: "Find the flaky test" }, { title: "Fix it" }],
+      });
+      expect(again.content).toBe("Plan v2: 1/2 done, 1 passed the verifier.");
+      const [p1] = await planOf(server.deps, row.id);
+      expect(p1).toMatchObject({ status: "done", passes: true });
+
+      const proposed = await createAssignment(server.deps, {
+        workspaceId: t.workspaceId,
+        agentId: t.lia.id,
+        agentHandle: t.lia.handle,
+        channelId: t.general,
+        ownerId: t.ana.user.id,
+        title: "Not started",
+        goal: "Wait for the owner",
+        executor: "agent",
+        runnerId: null,
+        commandPolicy: "never",
+        plan: ["Do it"],
+      });
+      const early = await (await run(t, proposed.threadId)).call("finish_item", {
+        itemId: "p1",
+        summary: "done",
+      });
+      expect(early.content).toContain("has not started this assignment yet");
+      const [untouched] = await planOf(server.deps, proposed.id);
+      expect(untouched?.status).toBe("todo");
+      expect(await proofsOf(server.deps, proposed.id)).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a decision or a review whose card can't be posted leaves nothing waiting",
+    async () => {
+      const t = await team();
+      const row = await assignmentOf(t);
+      const r = await run(t, row.threadId);
+      const failing = { postCard: async () => Promise.reject(new Error("chat down")) };
+      await expect(
+        r.call("ask_decision", { question: "Retry or rewrite?", options: ["retry", "rewrite"] }, failing),
+      ).rejects.toThrow("chat down");
+      await expect(r.call("request_review", { title: "Look", summary: "s" }, failing)).rejects.toThrow(
+        "chat down",
+      );
+      expect(
+        await server.deps.db
+          .select()
+          .from(assignmentDecisions)
+          .where(eq(assignmentDecisions.assignmentId, row.id)),
+      ).toEqual([]);
+      expect(
+        await server.deps.db
+          .select()
+          .from(schema.assignmentReviews)
+          .where(eq(schema.assignmentReviews.assignmentId, row.id)),
       ).toEqual([]);
     },
     SERVER_TEST_MS,
@@ -861,6 +932,46 @@ describe("commands on the agent's runner", () => {
         .from(schema.browserInterventions)
         .where(eq(schema.browserInterventions.agentId, t.lia.id));
       expect(rows.map((x) => x.id)).toEqual(["bi_concurrent"]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a person's request whose card can't be posted is canceled; the page after the person raises A",
+    async () => {
+      const t = await team(undefined, true);
+      const r = await run(t, null);
+      const failing = { postCard: async () => Promise.reject(new Error("chat down")) };
+      await expect(
+        r.call("browser_ask_person", { kind: "captcha", instructions: "Solve it" }, failing),
+      ).rejects.toThrow("chat down");
+      const [canceled] = await server.deps.db
+        .select()
+        .from(schema.browserInterventions)
+        .where(eq(schema.browserInterventions.agentId, t.lia.id));
+      expect(canceled?.status).toBe("canceled");
+
+      // The next request isn't held by the one without a card; once the person finishes, the page text counts as A.
+      const risk = new RiskTracker();
+      const asking = r.call("browser_ask_person", { kind: "captcha", instructions: "Solve it" }, { risk });
+      let id = "";
+      await waitFor(async () => {
+        const [open] = await server.deps.db
+          .select()
+          .from(schema.browserInterventions)
+          .where(
+            and(
+              eq(schema.browserInterventions.agentId, t.lia.id),
+              eq(schema.browserInterventions.status, "pending"),
+            ),
+          );
+        id = open?.messageId ? open.id : "";
+        return !!id;
+      });
+      await moveIntervention(server.deps, id, ["pending"], { status: "done", note: "solved" });
+      const out = await asking;
+      expect(out.content).toContain("The person finished: solved.");
+      expect(risk.reasons).toContainEqual({ flag: "A", source: "browser_ask_person (web page)" });
     },
     SERVER_TEST_MS,
   );

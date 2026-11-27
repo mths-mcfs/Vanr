@@ -1088,7 +1088,16 @@ const browserAskPerson = defineStored({
       return inserted ?? null;
     });
     if (!row) throw new ToolInputError("You already asked a person; wait for that request first.");
-    const card = await ctx.postCard(input.instructions, { browserIntervention: { id } });
+    // Without its card nobody can take the request, and it would block the agent's next ones until it expires.
+    const card = await ctx
+      .postCard(input.instructions, { browserIntervention: { id } })
+      .catch(async (err: unknown) => {
+        await ctx.deps.db
+          .update(browserInterventions)
+          .set({ status: "canceled", handledAt: ctx.deps.now() })
+          .where(eq(browserInterventions.id, id));
+        throw err;
+      });
     const [withCard] = await ctx.deps.db
       .update(browserInterventions)
       .set({ messageId: card.id })
@@ -1104,7 +1113,11 @@ const browserAskPerson = defineStored({
       const after = await browserCall(ctx, "browser_read", {}, "browser.act", { action: "read" }).catch(
         () => null,
       );
-      return `The person finished${h.note ? `: ${h.note}` : ""}.${after ? `\n\n${pageText(after)}` : ""}`;
+      const finished = `The person finished${h.note ? `: ${h.note}` : ""}.`;
+      // The page's text comes from outside, like browser_read's: it raises A for the next calls.
+      return after
+        ? { content: `${finished}\n\n${pageText(after)}`, reads: pageRead("browser_ask_person") }
+        : finished;
     }
     return {
       content: `The person did not finish (${h.status})${h.note ? `: ${h.note}` : ""}.`,

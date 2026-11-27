@@ -81,7 +81,8 @@ const planItem = z.object({
   /** Done criterion: what the verifier checks. */
   criteria: z.string().trim().max(2000).optional(),
   milestone: z.string().trim().max(80).nullable().optional(),
-  status: z.enum(["todo", "doing", "blocked_on_you", "done", "dropped"]).default("todo"),
+  // Without it, an item that exists keeps its status (and its verdict) and a new one starts as `todo`.
+  status: z.enum(["todo", "doing", "blocked_on_you", "done", "dropped"]).optional(),
   // No `passes`: only the verifier marks an item passed (zod drops the field if it comes).
 });
 
@@ -119,6 +120,10 @@ const finishItem = defineStored({
   }),
   async run(ctx, input) {
     const row = await current(ctx);
+    if (row.status === "proposed")
+      throw new ToolInputError(
+        "The owner has not started this assignment yet: discuss the plan, do not do the work.",
+      );
     const item = await itemOf(ctx.deps, row.id, input.itemId);
     if (!item || item.status === "dropped")
       throw new ToolInputError(`There is no item ${input.itemId} in the plan.`);
@@ -270,9 +275,13 @@ const askDecision = defineStored({
           ? new Date(ctx.deps.now().getTime() + input.deadlineMinutes * 60_000)
           : null,
     });
-    const card = await ctx.postCard(input.question, {
-      assignmentDecision: { assignmentId: row.id, decisionId: id },
-    });
+    // Without its card nobody can answer it, and a blocking decision would hold the assignment: it goes too.
+    const card = await ctx
+      .postCard(input.question, { assignmentDecision: { assignmentId: row.id, decisionId: id } })
+      .catch(async (err: unknown) => {
+        await ctx.deps.db.delete(assignmentDecisions).where(eq(assignmentDecisions.id, id));
+        throw err;
+      });
     await ctx.deps.db
       .update(assignmentDecisions)
       .set({ messageId: card.id })
@@ -316,9 +325,12 @@ const requestReview = defineStored({
       fileIds,
       prUrl: input.prUrl ?? null,
     });
-    const card = await ctx.postCard(input.title, {
-      assignmentReview: { assignmentId: row.id, reviewId: id },
-    });
+    const card = await ctx
+      .postCard(input.title, { assignmentReview: { assignmentId: row.id, reviewId: id } })
+      .catch(async (err: unknown) => {
+        await ctx.deps.db.delete(assignmentReviews).where(eq(assignmentReviews.id, id));
+        throw err;
+      });
     await ctx.deps.db
       .update(assignmentReviews)
       .set({ messageId: card.id })
