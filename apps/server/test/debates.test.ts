@@ -138,6 +138,66 @@ describe("a turn's paid call", () => {
     },
     SERVER_TEST_MS,
   );
+
+  test(
+    "a turn whose answer can't be recorded posts it all the same, and leaves no claim behind",
+    async () => {
+      const { open, ana, lia } = await team();
+      let calls = 0;
+      script = (agent, round) => {
+        if (agent === "Lia" && round === 0) calls++;
+        return byName(agent, round);
+      };
+      let failed = false;
+      const real = server.deps.db;
+      server.deps.db = new Proxy(real, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop, target);
+          if (prop !== "update") return typeof value === "function" ? value.bind(target) : value;
+          return (table: unknown) => {
+            const builder = target.update(table as typeof schema.effectKeys);
+            if (table !== schema.effectKeys || failed) return builder;
+            return new Proxy(builder, {
+              get(b, p) {
+                const v = Reflect.get(b, p, b);
+                if (p !== "set") return typeof v === "function" ? v.bind(b) : v;
+                return (row: { status?: string }) => {
+                  if (row.status === "done") {
+                    failed = true;
+                    throw new Error("record failed");
+                  }
+                  return v.call(b, row);
+                };
+              },
+            });
+          };
+        },
+      });
+      try {
+        const created = await open(ana, {
+          title: "Recorded?",
+          goal: "Decide",
+          agentIds: [lia.id],
+          rounds: 0,
+          speakers: [{ type: "agent", id: lia.id }],
+        });
+        await settle();
+        const posts = await server.deps.db
+          .select()
+          .from(schema.debatePosts)
+          .where(and(eq(schema.debatePosts.debateId, created.id), eq(schema.debatePosts.kind, "turn")));
+        const claims = await server.deps.db
+          .select()
+          .from(schema.effectKeys)
+          .where(sql`${schema.effectKeys.key} like ${`debate-turn:${created.id}:%`}`);
+        expect([failed, calls, posts.length, claims.length]).toEqual([true, 1, 1, 0]);
+      } finally {
+        server.deps.db = real;
+        script = byName;
+      }
+    },
+    SERVER_TEST_MS,
+  );
 });
 
 describe("debates", () => {

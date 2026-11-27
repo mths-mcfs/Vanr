@@ -10,7 +10,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { fakeProvider } from "@vanr/engine/models/fake";
-import type { ModelProvider, ModelRequest } from "@vanr/engine/models/types";
+import { ModelError, type ModelProvider, type ModelRequest } from "@vanr/engine/models/types";
 import { and, eq, inArray } from "drizzle-orm";
 import { channelInWorkspace } from "../src/channels";
 import { postMessage } from "../src/messages";
@@ -32,7 +32,7 @@ const textOf = (req: ModelRequest) =>
 function heldModel() {
   const fake = fakeProvider();
   const seen: string[] = [];
-  const holds = new Map<string, { entered: () => void; opened: Promise<void> }>();
+  const holds = new Map<string, { entered: () => void; opened: Promise<void>; fail?: Error }>();
   const provider: ModelProvider = {
     kind: "fake",
     stream(req) {
@@ -45,16 +45,17 @@ function heldModel() {
         if (hold) {
           hold.entered();
           await hold.opened;
+          if (hold.fail) throw hold.fail;
         }
         yield* fake.stream(req);
       })();
     },
   };
-  /** Holds the next call whose text has `marker`: `entered` resolves once it is held. */
-  const hold = (marker: string) => {
+  /** Holds the next call whose text has `marker`: `entered` resolves once it is held; `fail` is thrown on open. */
+  const hold = (marker: string, fail?: Error) => {
     const entered = gate();
     const release = gate();
-    holds.set(marker, { entered: entered.open, opened: release.opened });
+    holds.set(marker, { entered: entered.open, opened: release.opened, fail });
     return { entered: entered.opened, open: release.open };
   };
   return { provider, seen, hold };
@@ -298,6 +299,71 @@ describe("one conversation, one admission", () => {
     },
     SERVER_TEST_MS,
   );
+
+  test(
+    "a text answer on the last allowed turn finishes the run, and what came in during it gets the next run",
+    async () => {
+      const { ana, workspaceId, lia, dm, say } = await dmTeam(server);
+      const channel = await channelInWorkspace(server.deps.db, workspaceId, dm);
+      if (!channel) throw new Error("no dm");
+      const { message } = await postMessage(server.deps, {
+        workspaceId,
+        channel,
+        author: { type: "person", id: ana.user.id },
+        body: "text-on-the-last-turn",
+        clientId: newId("c"),
+      });
+      const [trigger] = await server.deps.db.select().from(messages).where(eq(messages.id, message.id));
+      if (!trigger) throw new Error("no trigger");
+      const thinking = model.hold("text-on-the-last-turn");
+      const started = await server.deps.runtime.runFor({
+        agent: lia,
+        channel,
+        trigger,
+        limits: { scopes: [], maxTurns: 1, timeoutMs: 60_000 },
+      });
+      if (!started.ok) throw new Error(`not started: ${started.code}`);
+      await thinking.entered;
+      let late: Awaited<ReturnType<typeof say>>;
+      try {
+        late = await say("one more while you answer");
+      } finally {
+        thinking.open();
+      }
+      await started.done;
+      await settle(server);
+      const [first] = await server.deps.db.select().from(runs).where(eq(runs.id, started.runId));
+      expect([first?.status, first?.errorCode]).toEqual(["done", null]);
+      const [d] = await dispatchesOf(server, [late.body.id]);
+      expect([d?.state, d?.status, d?.runId === started.runId]).toEqual(["handled", "answered", false]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a run that fails mid-turn leaves the message steered into it to the next run",
+    async () => {
+      const { say } = await dmTeam(server);
+      const thinking = model.hold("fails-mid-turn", new ModelError("network", "upstream 502"));
+      const first = await say("fails-mid-turn, please");
+      await thinking.entered;
+      let late: Awaited<ReturnType<typeof say>>;
+      try {
+        late = await say("steered before the failure");
+      } finally {
+        thinking.open();
+      }
+      await settle(server);
+      const [failedRun] = await server.deps.db
+        .select()
+        .from(runs)
+        .where(eq(runs.sourceMessageId, first.body.id));
+      expect(failedRun?.status).toBe("failed");
+      const [d] = await dispatchesOf(server, [late.body.id]);
+      expect([d?.state, d?.status, d?.runId === failedRun?.id]).toEqual(["handled", "answered", false]);
+    },
+    SERVER_TEST_MS,
+  );
 });
 
 describe("the server stopping", () => {
@@ -364,17 +430,18 @@ describe("durable effects", () => {
   let ana: Person;
   let workspaceId = "";
   let general = "";
-  let routingDown = false;
+  /** The next routing fails: before it routes, or right after it opened the run. */
+  let routingDown: "before" | "after" | null = null;
   beforeAll(async () => {
     server = await startTestServer({
       runtime: (port) => ({
         ...port,
         async onPersonMessage(input) {
-          if (routingDown) {
-            routingDown = false;
-            throw new Error("routing down");
-          }
-          return port.onPersonMessage(input);
+          const down = routingDown;
+          routingDown = null;
+          if (down === "before") throw new Error("routing down");
+          await port.onPersonMessage(input);
+          if (down === "after") throw new Error("routing fell after the run opened");
         },
       }),
     });
@@ -530,7 +597,7 @@ describe("durable effects", () => {
     "a person's post whose routing failed answers 201 and stays unsettled: the resend routes it",
     async () => {
       const { lia, say } = await dmTeam(server);
-      routingDown = true;
+      routingDown = "before";
       const first = await say("is the oven on?", "route-down");
       expect(first.status).toBe(201);
       const [row] = await server.deps.db.select().from(messages).where(eq(messages.id, first.body.id));
@@ -540,6 +607,61 @@ describe("durable effects", () => {
       await settle(server);
       const [d] = await dispatchesOf(server, [first.body.id]);
       expect([d?.agentId, d?.state, d?.status]).toEqual([lia.id, "handled", "answered"]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  /** The runs a post opened, and the agent's replies in that conversation. */
+  const answersTo = async (messageId: string, channelId: string, agentId: string) => ({
+    runs: (await server.deps.db.select().from(runs).where(eq(runs.sourceMessageId, messageId))).length,
+    replies: (
+      await server.deps.db
+        .select()
+        .from(messages)
+        .where(and(eq(messages.channelId, channelId), eq(messages.authorId, agentId)))
+    ).length,
+  });
+
+  test(
+    "a resend of a post whose routing reached the agent before failing doesn't reach it again",
+    async () => {
+      const { lia, dm, say } = await dmTeam(server);
+      routingDown = "after";
+      const first = await say("is the van loaded?", "routed-then-failed");
+      expect(first.status).toBe(201);
+      await settle(server);
+      const again = await say("is the van loaded?", "routed-then-failed");
+      expect(again.status).toBe(200);
+      await settle(server);
+      expect(await answersTo(first.body.id, dm, lia.id)).toEqual({ runs: 1, replies: 1 });
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a resend of a post routed before its settle mark failed doesn't route it again",
+    async () => {
+      const { lia, dm, say } = await dmTeam(server);
+      let failed = false;
+      const restore = onWrite(server, "update", messages, (q, row) => {
+        if (row.effectsPending === false && !failed) {
+          failed = true;
+          throw new Error("mark failed");
+        }
+        return q;
+      });
+      let first: Awaited<ReturnType<typeof say>>;
+      try {
+        first = await say("are the eggs in?", "mark-failed");
+      } finally {
+        restore();
+      }
+      expect(first.status).toBe(500);
+      await settle(server);
+      const again = await say("are the eggs in?", "mark-failed");
+      expect(again.status).toBe(200);
+      await settle(server);
+      expect(await answersTo(first.body.id ?? again.body.id, dm, lia.id)).toEqual({ runs: 1, replies: 1 });
     },
     SERVER_TEST_MS,
   );

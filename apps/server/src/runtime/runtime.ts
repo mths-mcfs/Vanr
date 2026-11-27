@@ -305,6 +305,19 @@ interface Live {
  */
 const ending = (live: Pick<Live, "closing" | "controller">) => live.closing || live.controller.signal.aborted;
 
+/**
+ * The run reads its inbox no more (it is closing): what waits there wasn't heard by any turn, so it goes to the
+ * next run instead of being marked handled with this one. No await around it, so a steer after it sees `closing`.
+ */
+function deferUnheard(live: Pick<Live, "closing" | "inbox" | "handles" | "after">) {
+  live.closing = true;
+  const unheard = live.inbox.splice(0);
+  if (!unheard.length) return;
+  const ids = new Set(unheard.map((m) => m.id));
+  live.handles = live.handles.filter((id) => !ids.has(id));
+  live.after.unshift(...unheard);
+}
+
 const personOf = (row: Pick<MessageRow, "authorKind" | "authorId">) =>
   row.authorKind === "person" ? row.authorId : null;
 /**
@@ -872,6 +885,23 @@ export class AgentRuntime implements RuntimePort {
     const routing = await routeMessage(this.deps, channel, row);
     if (!routing) return;
     const { mentioned, threadAgentIds, byId, talker, routed } = routing;
+    // A resend of a post whose routing already reached an agent (a run claimed or answered it) doesn't reach it
+    // again; a claim of a run the boot found fallen (interrupted) doesn't count.
+    const reached = new Set(
+      (
+        await db
+          .select({ agentId: messageDispatches.agentId })
+          .from(messageDispatches)
+          .leftJoin(runs, eq(runs.id, messageDispatches.runId))
+          .where(
+            and(
+              eq(messageDispatches.messageId, row.id),
+              inArray(messageDispatches.state, ["claimed", "handled"]),
+              sql`not (${runs.status} is not distinct from 'failed' and ${runs.errorCode} is not distinct from 'interrupted')`,
+            ),
+          )
+      ).map((d) => d.agentId),
+    );
 
     // No budget left this month also blocks (a run in progress keeps receiving the message).
     const threadId = row.threadId ?? (row.meta.spawnsThread ? row.id : null);
@@ -879,7 +909,7 @@ export class AgentRuntime implements RuntimePort {
     const plan: { agent: AgentRow; key: string; live: Live | undefined }[] = [];
     for (const target of routed.targets) {
       const agent = byId.get(target.id);
-      if (!agent) continue;
+      if (!agent || reached.has(agent.id)) continue;
       const key = `${agent.id}:${channel.id}:${threadId ?? "-"}`;
       const running = this.byKey.get(key);
       const live = running ? this.live.get(running) : undefined;
@@ -911,6 +941,8 @@ export class AgentRuntime implements RuntimePort {
       await this.admit(p.key, async () => {
         // Look again: there was an await between the plan and here, and the run may have ended.
         const live = this.liveOf(p.key);
+        // It already holds the message (put off to its next run, or in its inbox): a resend doesn't add it twice.
+        if (live && (live.handles.includes(row.id) || live.after.some((m) => m.id === row.id))) return;
         if (live) await this.steer(live, row);
         else
           await this.startRun({
@@ -1916,6 +1948,11 @@ export class AgentRuntime implements RuntimePort {
             runId: live.runId,
           });
           history.push({ role: "assistant", content: result.content, raw: result.raw });
+          // An answer on the last allowed turn finishes the run; what came in during it is the next run's.
+          if (turn + 1 >= maxTurns) {
+            finished = true;
+            break;
+          }
           continue;
         }
         finalText = text;
@@ -1925,13 +1962,7 @@ export class AgentRuntime implements RuntimePort {
       // From here no turn reads the inbox. What a person steered in on the last allowed turn wasn't heard: it waits
       // for the next run instead of being marked handled with this one (no await in between, so a steer that
       // comes after sees `closing`).
-      live.closing = true;
-      const unheard = live.inbox.splice(0);
-      if (unheard.length) {
-        const ids = new Set(unheard.map((m) => m.id));
-        live.handles = live.handles.filter((id) => !ids.has(id));
-        live.after.unshift(...unheard);
-      }
+      deferUnheard(live);
       // A routine: running out of turns while still asking for tools is stopping at the cap, not finishing the work.
       if (!finished && live.limits) throw new StepLimit(maxTurns);
 
@@ -1944,7 +1975,8 @@ export class AgentRuntime implements RuntimePort {
       await this.finish(live, { status: "done", handled: status, messageId: message?.id ?? null });
       await this.budgetNotices(live.agent, live.channel.id, personOf(live.trigger));
     } catch (caught) {
-      live.closing = true;
+      // A run that fails or is stopped mid-turn didn't hear its inbox either: the next run takes it.
+      deferUnheard(live);
       clearInterval(beat);
       if (deadline) clearTimeout(deadline);
       // The time cap aborts through the controller: the error that comes up is the stream's; the cause is the TimeLimit.

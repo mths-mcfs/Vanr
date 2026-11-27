@@ -48,6 +48,7 @@ import { canReadChannel, channelInWorkspace, isChannelMember, readableChannelsSq
 import { type ClaimOutput, claim, forget, release, settle } from "./claims";
 import type { AppDeps, CompleteResult } from "./context";
 import { notFound } from "./http";
+import { log } from "./logger";
 import { closeNotifications, notify } from "./notifications";
 import { fireRoutineEvent } from "./routines";
 import { reindex } from "./search-index";
@@ -1098,12 +1099,20 @@ async function callTurn(
     await release(deps.db, key, token);
     throw err;
   }
-  if (result.ok)
+  if (!result.ok) {
+    await release(deps.db, key, token);
+    return result;
+  }
+  try {
     await settle(deps.db, key, token, {
       content: JSON.stringify({ text: result.text, runId: result.runId }),
       isError: false,
     });
-  else await release(deps.db, key, token);
+  } catch (err) {
+    // The answer is in hand: it is posted all the same, and the claim goes (a resume can't reuse what wasn't recorded).
+    log.warn("debate.turn_record_failed", { debateId: row.id, agentId: agent.id, err });
+    await release(deps.db, key, token).catch(() => {});
+  }
   return result;
 }
 
