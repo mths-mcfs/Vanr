@@ -506,7 +506,7 @@ describe("an approval covers the class it was granted for", () => {
             level: "read_write",
             policy: { recipientAllowlist: ["@other.test"] },
           });
-          return "approved";
+          return "approved" as const;
         },
       });
       const out = await r.ask("mail_send", {
