@@ -29,7 +29,7 @@ import {
   Trash2,
   Undo2,
 } from "lucide-react";
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { z } from "zod";
 import { AppLink, useGo, useRouteParams, useSearch } from "../../../app/navigation.tsx";
 import { ScreenError, ScreenLoading, useDocumentTitle, useErrorMessage } from "../../../app/screens.tsx";
@@ -90,7 +90,8 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
   const queue = useRef<Promise<void>>(Promise.resolve());
   const mayWrite = useRef(true);
   const { at } = useSearch(PageAddress, NO_ANCHOR);
-  const reachedAnchor = useRef(false);
+  /** The `?at=` heading the live editor reached: a new one in the address is sought again. */
+  const reachedAnchor = useRef<string | null>(null);
   const p = page.data;
   useDocumentTitle(p?.title ?? t("index.title"));
 
@@ -179,6 +180,33 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
     [body],
   );
   const source = liveSource !== null && live.ready && live.status !== "denied" ? liveSource : staticSource;
+
+  // Scrolls to the `?at=` heading in the editor on screen. The published text is scrolled while it is
+  // there, but the live editor that replaces it starts at the top, so only the live one counts as arrived;
+  // its document fills in just after it is made, so it is tried until the heading is there.
+  const seekAnchor = useCallback(
+    (kind: EditorSource["kind"]) => {
+      if (at === undefined || reachedAnchor.current === at) return;
+      if (kind === "static") {
+        editor.current?.scrollToHeading(at);
+        return;
+      }
+      let tries = 0;
+      const attempt = () => {
+        if (reachedAnchor.current === at || tries > 40) return;
+        tries += 1;
+        if (editor.current?.scrollToHeading(at) === true) reachedAnchor.current = at;
+        else setTimeout(attempt, 50);
+      };
+      attempt();
+    },
+    [at],
+  );
+  // A new `?at=` on the same page (back, forward, a link) is sought in the editor already open.
+  const kind = source?.kind;
+  useEffect(() => {
+    if (kind !== undefined) seekAnchor(kind);
+  }, [kind, seekAnchor]);
 
   if (p === undefined) {
     if (page.isError && isApiError(page.error) && page.error.status === 404)
@@ -555,24 +583,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
                 label={t("page.editor", { title: p.title })}
                 pages={pages}
                 hooks={hooks}
-                onReady={(kind) => {
-                  if (at === undefined || reachedAnchor.current) return;
-                  if (kind === "static") {
-                    // The published text may be all there is (no live document): scroll it, but the live
-                    // editor that replaces it starts at the top, so only the live one counts as arrived.
-                    editor.current?.scrollToHeading(at);
-                    return;
-                  }
-                  // The live document fills in just after the editor is made: try until its heading is there.
-                  let tries = 0;
-                  const attempt = () => {
-                    if (reachedAnchor.current || tries > 40) return;
-                    tries += 1;
-                    if (editor.current?.scrollToHeading(at) === true) reachedAnchor.current = true;
-                    else setTimeout(attempt, 50);
-                  };
-                  attempt();
-                }}
+                onReady={seekAnchor}
               />
             )
           )}
