@@ -54,7 +54,7 @@ const clear = () => {
   mail.sent.length = 0;
 };
 
-/** The runtime as it will come, for the outbox's wake-up only (the test delivers with `deliverDue`). */
+/** The runtime with a silent wake-up (the test delivers with `deliverDue`). */
 const withWakeAt = (): AppDeps => ({ ...server.deps, runtime: { ...server.deps.runtime, wakeAt: () => {} } });
 
 async function team() {
@@ -643,7 +643,7 @@ describe("a send goes through the outbox", () => {
   );
 
   test(
-    "without the runtime's wake-up a send is rejected at its entry: no approval, no quota, nothing queued",
+    "on the server's own runtime an approved send is queued with its quota and the sweep delivers it once",
     async () => {
       clear();
       const { lia, ana, url, connect, runOf, workspaceId } = await team();
@@ -653,21 +653,26 @@ describe("a send goes through the outbox", () => {
         policy: { recipientAllowlist: ["@client.test"], autoSend: false, sendsPerDay: 5 },
       });
       const r = await runOf({ deps: server.deps, decide: () => "approved" });
-      await expect(
-        r.ask("mail_send", { account: mail.user, to: ["joao@client.test"], subject: "A", text: "B" }),
-      ).rejects.toMatchObject({ status: 503, code: "not_available" });
-      expect(r.approvals).toEqual([]);
-      expect(await server.deps.db.select().from(outbox).where(eq(outbox.workspaceId, workspaceId))).toEqual(
-        [],
-      );
+      const sent = await r.ask("mail_send", {
+        account: mail.user,
+        to: ["joao@client.test"],
+        subject: "A",
+        text: "B",
+      });
+      expect(sent.isError).toBe(false);
+      expect(r.approvals.map((a) => a.tool)).toEqual(["mail_send"]);
+      const queued = await server.deps.db.select().from(outbox).where(eq(outbox.workspaceId, workspaceId));
+      expect(queued.map((q) => [q.kind, q.status])).toEqual([["mail", "pending"]]);
       expect(
         await server.deps.db
           .select()
           .from(integrationUsage)
           .where(eq(integrationUsage.workspaceId, workspaceId)),
-      ).toEqual([]);
-      // Reading needs no runtime.
-      expect((await r.ask("mail_folders", { account: mail.user })).isError).toBe(false);
+      ).toHaveLength(1);
+      await server.runtime.tick();
+      await server.runtime.tick();
+      expect(mail.sent.map((m) => m.to)).toEqual([["joao@client.test"]]);
+      clear();
     },
     SERVER_TEST_MS,
   );

@@ -1280,9 +1280,6 @@ describe("the wiki check", () => {
     for (const [title, body] of specs) await ana.api.wiki.createWikiPage(workspaceId, { title, body });
     await ana.api.wiki.pinWikiPage(workspaceId, "start", true);
     await ana.api.wiki.deleteWikiPage(workspaceId, "old");
-    // "Run now" needs the model lookup of the runtime slice: until then 503, and nothing is written.
-    const absent = await apiError(ana.api.wiki.createWikiCheck(workspaceId));
-    expect([absent.status, absent.code]).toEqual([503, "not_available"]);
     expect((await ana.api.wiki.getWikiChecks(workspaceId)).ranAt).toBeNull();
     const fake = countingFake();
     const run = () =>
@@ -1344,6 +1341,20 @@ describe("the wiki check", () => {
       orphan(await ana.api.wiki.getWikiChecks(workspaceId)),
       orphan(await beto.api.wiki.getWikiChecks(workspaceId)),
     ]).toEqual([true, false]);
+  });
+
+  test('"Run now" checks with the workspace\'s model through the runtime, at most once a minute', async () => {
+    const { workspaceId, ana } = await team();
+    await ana.api.wiki.createWikiPage(workspaceId, { title: "Home", body: "See [[Linked]]." });
+    await ana.api.wiki.createWikiPage(workspaceId, { title: "Linked", body: "linked from home" });
+    await ana.api.wiki.createWikiPage(workspaceId, { title: "Alone", body: "nobody links here" });
+    await ana.api.wiki.pinWikiPage(workspaceId, "home", true);
+    const report = await ana.api.wiki.createWikiCheck(workspaceId);
+    expect(report.ranAt).not.toBeNull();
+    expect(report.testModel).toBe(true);
+    expect(report.findings.some((f) => f.kind === "orphan" && f.page.title === "Alone")).toBe(true);
+    const again = await apiError(ana.api.wiki.createWikiCheck(workspaceId));
+    expect([again.status, again.code]).toEqual([429, "wiki.checks.too_soon"]);
   });
 
   test("two runs at once on the same workspace: one claims it, the model is asked once", async () => {
