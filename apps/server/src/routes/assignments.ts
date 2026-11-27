@@ -45,7 +45,6 @@ import {
   requireOpen,
   roleOf,
   runnerOfAssignment,
-  runningJobsOf,
   toCommand,
   toDecision,
   toReview,
@@ -82,6 +81,7 @@ import {
   requireTell,
   serialized,
   setHarness,
+  setRunner,
   settingsOf,
   tell,
   tellIfPossible,
@@ -402,7 +402,11 @@ export function registerAssignments(app: Hono<AppEnv>) {
       .from(runnerJobs)
       .where(and(eq(runnerJobs.id, param(c, "jobId")), eq(runnerJobs.workspaceId, me.workspaceId)));
     if (!job) throw notFound("Job not found");
-    if (job.assignmentId) await viewAssignment(deps, me, job.assignmentId);
+    // A job of an assignment the caller doesn't see answers as a job that doesn't exist.
+    if (job.assignmentId)
+      await viewAssignment(deps, me, job.assignmentId).catch((err) => {
+        throw err instanceof HttpError && err.status === 404 ? notFound("Job not found") : err;
+      });
     else if (
       !job.channelId ||
       !(await canReadChannel(deps.db, {
@@ -706,18 +710,7 @@ export function registerAssignments(app: Hono<AppEnv>) {
     const input = await readJson(c, runnerBody);
     const r = await runnerInWorkspace(deps.db, me.workspaceId, input.runnerId);
     if (!canUseRunner(me, r)) throw forbidden("Only who paired that runner can use it");
-    if (row.executor !== "agent") requireExecutor(r, row.executor, row.ownerId);
-    if ((await runningJobsOf(deps.db, row.id)).length > 0)
-      throw conflict("assignment.job_running", "Wait for the running job or stop it first");
-    const next = await updateAssignment(
-      deps,
-      row,
-      {
-        runnerId: r.id,
-        ...(input.checkoutPath !== undefined ? { checkoutPath: input.checkoutPath || null } : {}),
-      },
-      "settings",
-    );
+    const next = await setRunner(deps, me, row, r, input.checkoutPath);
     return c.json(await assignmentFor(deps, next, me));
   });
 
@@ -727,7 +720,7 @@ export function registerAssignments(app: Hono<AppEnv>) {
     const { row } = await viewAssignment(deps, me, param(c, "assignmentId"));
     requireManager(me, row);
     const { executor } = await readJson(c, z.object({ executor: executorEnum }).strict());
-    return c.json(await assignmentFor(deps, await setHarness(deps, row, executor), me));
+    return c.json(await assignmentFor(deps, await setHarness(deps, me, row, executor), me));
   });
 
   app.put(`${AI}/command-approval`, async (c) => {
@@ -773,7 +766,7 @@ export function registerAssignments(app: Hono<AppEnv>) {
     const { row } = await viewAssignment(deps, me, param(c, "assignmentId"));
     requireManager(me, row);
     const input = await readJson(c, harnessBody);
-    const next = await setHarness(deps, row, input.harness, input.model);
+    const next = await setHarness(deps, me, row, input.harness, input.model);
     return c.json(await harnessOf(deps, me, next));
   });
 

@@ -135,20 +135,6 @@ async function lockOpen(tx: Tx, assignmentId: string) {
   return row;
 }
 
-/**
- * Saves the command rules the assignment doesn't have yet, on the assignment's row locked (two "always" at once
- * save a rule once). Returns every rule it has now.
- */
-export function addRules(
-  deps: AppDeps,
-  input: { assignmentId: string; wanted: readonly string[]; by: string },
-): Promise<Set<string>> {
-  return deps.db.transaction(async (tx) => {
-    const row = await lockOpen(tx, input.assignmentId);
-    return insertRules(tx, row.id, input.wanted, input.by);
-  });
-}
-
 async function insertRules(tx: Tx, assignmentId: string, wanted: readonly string[], by: string) {
   const have = new Set(
     (

@@ -30,7 +30,6 @@ import {
   publishAssignment,
   runnerOfAssignment,
   runningJobsOf,
-  updateAssignment,
 } from "./core";
 import {
   cancelJobs,
@@ -248,21 +247,124 @@ export async function harnessOf(
   };
 }
 
-/** Changes the executor (and the model). An executor on the runner needs the runner with it. */
+const jobRunning = () => conflict("assignment.job_running", "Wait for the running job or stop it first");
+
+/** Whether the assignment has a job queued or running, read in `tx`. */
+async function hasRunningJob(tx: Tx, assignmentId: string) {
+  const [running] = await tx
+    .select({ id: schema.runnerJobs.id })
+    .from(schema.runnerJobs)
+    .where(
+      and(
+        eq(schema.runnerJobs.assignmentId, assignmentId),
+        inArray(schema.runnerJobs.status, ["queued", "running"]),
+      ),
+    )
+    .limit(1);
+  return !!running;
+}
+
+/**
+ * The assignment's row locked for a settings change that was decided on `row`: who manages is checked again,
+ * and the fields the decision stood on must not have moved (otherwise `assignment.changed`).
+ */
+async function lockForSettings(
+  tx: Tx,
+  me: WorkspaceMember,
+  row: AssignmentRow,
+  same: readonly ("executor" | "runnerId" | "ownerId")[],
+) {
+  const [fresh] = await tx.select().from(assignments).where(eq(assignments.id, row.id)).for("update");
+  if (!fresh) throw closedError();
+  requireManager(me, fresh);
+  if (same.some((k) => fresh[k] !== row[k]))
+    throw conflict("assignment.changed", "This assignment changed meanwhile; open it again");
+  if (await hasRunningJob(tx, row.id)) throw jobRunning();
+  return fresh;
+}
+
+/**
+ * Changes the executor (and the model). An executor on the runner needs the runner with it. In the
+ * assignment's job queue and on its locked row, so no job starts on the old executor meanwhile.
+ */
 export async function setHarness(
   deps: AppDeps,
+  me: WorkspaceMember,
   row: AssignmentRow,
   harness: AssignmentExecutor,
   model?: string,
 ) {
-  if ((await runningJobsOf(deps.db, row.id)).length > 0)
-    throw conflict("assignment.job_running", "Wait for the running job or stop it first");
   if (harness !== "agent") requireExecutor(await runnerOfAssignment(deps.db, row), harness, row.ownerId);
   if (model) {
     const ok = harness === "agent" ? MODELS.some((m) => m.id === model) : executorModelOk(harness, model);
     if (!ok) throw badRequest("Unknown model for this harness", { field: "model" });
   }
-  return updateAssignment(deps, row, { executor: harness, model: model || null }, "settings");
+  const next = await withAssignmentJobs(row.id, () =>
+    setHarnessOnLockedRow(deps, me, row, { harness, model }),
+  );
+  publishAssignment(deps, next, "settings");
+  return next;
+}
+
+/** The executor's write, on the locked row: the runner and the owner it was checked against still hold. */
+export function setHarnessOnLockedRow(
+  deps: AppDeps,
+  me: WorkspaceMember,
+  row: AssignmentRow,
+  input: { harness: AssignmentExecutor; model?: string },
+): Promise<AssignmentRow> {
+  return deps.db.transaction(async (tx) => {
+    await lockForSettings(tx, me, row, ["runnerId", "ownerId"]);
+    const [moved] = await tx
+      .update(assignments)
+      .set({ executor: input.harness, model: input.model || null, updatedAt: deps.now() })
+      .where(eq(assignments.id, row.id))
+      .returning();
+    if (!moved) throw closedError();
+    return moved;
+  });
+}
+
+/**
+ * Picks the assignment's runner (and its folder: "" clears it, absent keeps it). The executor must run there.
+ * In the job queue and on the locked row: a job start in progress lands first and is seen, or reads the new one.
+ */
+export async function setRunner(
+  deps: AppDeps,
+  me: WorkspaceMember,
+  row: AssignmentRow,
+  runner: RunnerRow,
+  checkoutPath?: string,
+) {
+  if (row.executor !== "agent") requireExecutor(runner, row.executor, row.ownerId);
+  const next = await withAssignmentJobs(row.id, () =>
+    setRunnerOnLockedRow(deps, me, row, { runnerId: runner.id, checkoutPath }),
+  );
+  publishAssignment(deps, next, "settings");
+  return next;
+}
+
+/** The runner's write, on the locked row: the executor and the owner it was checked against still hold. */
+export function setRunnerOnLockedRow(
+  deps: AppDeps,
+  me: WorkspaceMember,
+  row: AssignmentRow,
+  input: { runnerId: string; checkoutPath?: string },
+): Promise<AssignmentRow> {
+  return deps.db.transaction(async (tx) => {
+    await lockForSettings(tx, me, row, ["executor", "ownerId"]);
+    const [moved] = await tx
+      .update(assignments)
+      .set({
+        runnerId: input.runnerId,
+        ...(input.checkoutPath !== undefined ? { checkoutPath: input.checkoutPath || null } : {}),
+        updatedAt: deps.now(),
+      })
+      .where(eq(assignments.id, row.id))
+      .returning();
+    if (!moved) throw closedError();
+    return moved;
+  });
 }
 
 export async function settingsOf(
@@ -472,19 +574,7 @@ export function transferOnLockedRow(
     const fresh = await lockAssignment(tx, row.id);
     if (fresh.ownerId !== row.ownerId || fresh.runnerId !== row.runnerId || fresh.executor !== row.executor)
       throw conflict("assignment.changed", "This assignment changed meanwhile; open it again");
-    if (input.runnerId?.set === null) {
-      const [running] = await tx
-        .select({ id: schema.runnerJobs.id })
-        .from(schema.runnerJobs)
-        .where(
-          and(
-            eq(schema.runnerJobs.assignmentId, row.id),
-            inArray(schema.runnerJobs.status, ["queued", "running"]),
-          ),
-        )
-        .limit(1);
-      if (running) throw conflict("assignment.job_running", "Wait for the running job or stop it first");
-    }
+    if (input.runnerId?.set === null && (await hasRunningJob(tx, row.id))) throw jobRunning();
     await tx
       .delete(assignmentParticipants)
       .where(

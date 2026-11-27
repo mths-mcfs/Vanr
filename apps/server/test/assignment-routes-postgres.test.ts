@@ -11,13 +11,21 @@ import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { eq } from "drizzle-orm";
 import postgres from "postgres";
-import { addOpinion, addRules, answerSuggestion, checkSubmissionItem } from "../src/assignments/answers";
+import {
+  addOpinion,
+  allowJobCommands,
+  answerSuggestion,
+  checkSubmissionItem,
+  decideCommand,
+} from "../src/assignments/answers";
 import { type AssignmentRow, assignmentInWorkspace } from "../src/assignments/core";
 import { createAssignment } from "../src/assignments/engine";
 import {
   finishAssignment,
   patchAssignment,
   requestSubmissionChanges,
+  setHarnessOnLockedRow,
+  setRunnerOnLockedRow,
   transferOnLockedRow,
 } from "../src/assignments/lifecycle";
 import type { AppDeps, WorkspaceMember } from "../src/context";
@@ -30,7 +38,14 @@ import { NO_POSTGRES, TEST_POSTGRES_URL, testDatabaseUrl } from "./postgres";
 import { memberOf, seedWorkspace } from "./seed";
 
 const onPostgres = (name: string) => (TEST_POSTGRES_URL ? name : `${name} (skipped: ${NO_POSTGRES})`);
-const { assignments, assignmentSubmissions, assignmentDecisions, assignmentCommandRules, messages } = schema;
+const {
+  assignments,
+  assignmentSubmissions,
+  assignmentDecisions,
+  assignmentCommands,
+  assignmentCommandRules,
+  messages,
+} = schema;
 
 interface Ctx {
   ana: WorkspaceMember;
@@ -327,22 +342,43 @@ describe("answering a submission on Postgres", () => {
   );
 
   test.skipIf(!TEST_POSTGRES_URL)(
-    onPostgres("forced: the same command rule saved twice at once is saved once"),
+    onPostgres('forced: "always" and allow-and-retry at once save the same command rule once'),
     async () => {
       await withServer("asg_rules", async (server, admin, ctx) => {
         const { row } = await ctx.waiting();
+        const [one, two] = [newId("acmd"), newId("acmd")];
+        await server.deps.db.insert(assignmentCommands).values(
+          [one, two].map((id, i) => ({
+            id,
+            assignmentId: row.id,
+            jobId: "aj_rules",
+            command: `npm test ${i}`,
+            tool: "Bash",
+            rules: ["npm test *"],
+          })),
+        );
         const { a, b } = await forcedPair(
           admin,
           "command-rules",
           "select",
-          (_side, hooks) =>
-            ended(
-              addRules(withDb(server.deps, hooks), {
-                assignmentId: row.id,
-                wanted: ["npm test *"],
-                by: ctx.ana.userId,
-              }),
-            ),
+          (side, hooks) =>
+            side === "A"
+              ? ended(
+                  decideCommand(withDb(server.deps, hooks), {
+                    assignmentId: row.id,
+                    commandId: one,
+                    decision: "always",
+                    by: ctx.ana.userId,
+                  }),
+                )
+              : ended(
+                  allowJobCommands(withDb(server.deps, hooks), {
+                    assignmentId: row.id,
+                    jobId: "aj_rules",
+                    commands: ["npm test 1"],
+                    by: ctx.ana.userId,
+                  }),
+                ),
           { match: `from "assignment_command_rules"` },
         );
         const rules = await server.deps.db
@@ -353,6 +389,45 @@ describe("answering a submission on Postgres", () => {
           "command-rules",
           { a, b, rules: rules.map((r) => r.rule) },
           { a: "ok", b: "ok", rules: ["npm test *"] },
+        );
+      });
+    },
+    2 * SERVER_TEST_MS,
+  );
+
+  test.skipIf(!TEST_POSTGRES_URL)(
+    onPostgres(
+      "forced: a runner picked against the old executor while the executor changes finds it changed",
+    ),
+    async () => {
+      await withServer("asg_runner", async (server, admin, ctx) => {
+        const { row } = await ctx.waiting();
+        const { a, b } = await forcedPair(
+          admin,
+          "assignment-runner",
+          "select",
+          (side, hooks) =>
+            side === "A"
+              ? ended(
+                  setHarnessOnLockedRow(withDb(server.deps, hooks), ctx.ana, row, { harness: "claude_code" }),
+                )
+              : ended(
+                  setRunnerOnLockedRow(withDb(server.deps, hooks), ctx.ana, row, {
+                    runnerId: "rn_elsewhere",
+                  }),
+                ),
+          { match: `from "assignments"` },
+        );
+        const [after] = await server.deps.db.select().from(assignments).where(eq(assignments.id, row.id));
+        outcome(
+          "assignment-runner",
+          { a, b, executor: after?.executor, runner: after?.runnerId },
+          {
+            a: "ok",
+            b: "err:assignment.changed",
+            executor: "claude_code",
+            runner: null,
+          },
         );
       });
     },

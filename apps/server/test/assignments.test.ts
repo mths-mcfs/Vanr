@@ -11,7 +11,13 @@ import { newId } from "@vanr/engine/ids";
 import { and, eq } from "drizzle-orm";
 import { createAssignment } from "../src/assignments/engine";
 import { jobIdOf, workIdOf } from "../src/assignments/keys";
-import { finishAssignment, patchAssignment, requestSubmissionChanges } from "../src/assignments/lifecycle";
+import {
+  finishAssignment,
+  patchAssignment,
+  requestSubmissionChanges,
+  setHarnessOnLockedRow,
+  setRunnerOnLockedRow,
+} from "../src/assignments/lifecycle";
 import type { RunningServer } from "../src/server";
 import { agentRuntime, pairRunner, passing, seedAgent } from "./assignment-kit";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
@@ -1251,6 +1257,105 @@ describe("what the review of #79 found", () => {
       // The copy really failed: no page is linked to the assignment.
       const [row] = await server.deps.db.select().from(assignments).where(eq(assignments.id, t.assignmentId));
       expect(row?.wikiPageId).toBeNull();
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("what the Opus check of d16b9d2 found", () => {
+  test(
+    "a running job blocks picking a runner or an executor; a job of a hidden assignment answers as a missing one",
+    async () => {
+      const t = await team();
+      const runner = await claudeRunner(t.ana, t.workspaceId);
+      try {
+        const job = newId("job");
+        await server.deps.db.insert(runnerJobs).values({
+          id: job,
+          workspaceId: t.workspaceId,
+          runnerId: runner.runnerId,
+          agentId: t.agentId,
+          assignmentId: t.assignmentId,
+          executor: "claude_code",
+          title: "Busy",
+          prompt: "x",
+          status: "running",
+        });
+        const pick = await call(t.ana, "PUT", `${t.path}/runner`, { runnerId: runner.runnerId });
+        expect([pick.status, code(pick)]).toEqual([409, "assignment.job_running"]);
+        const harness = await call(t.ana, "PUT", `${t.path}/executor`, { executor: "agent" });
+        expect([harness.status, code(harness)]).toEqual([409, "assignment.job_running"]);
+        await server.deps.db.update(runnerJobs).set({ status: "done" }).where(eq(runnerJobs.id, job));
+        expect((await call(t.ana, "PUT", `${t.path}/runner`, { runnerId: runner.runnerId })).status).toBe(
+          200,
+        );
+
+        // A private channel's assignment and its job: Caio doesn't read the channel.
+        const priv = await seedChannel(server, t.workspaceId, {
+          name: `jobs${n}`,
+          visibility: "private",
+          members: [t.ana],
+        });
+        await server.deps.db
+          .insert(schema.channelMemberships)
+          .values({ channelId: priv, memberType: "agent", memberId: t.agentId });
+        const hidden = await call(t.ana, "POST", `${ws(t.workspaceId)}/assignments`, {
+          agentId: t.agentId,
+          channelId: priv,
+          goal: "Hidden work",
+        });
+        const hiddenJob = newId("job");
+        await server.deps.db.insert(runnerJobs).values({
+          id: hiddenJob,
+          workspaceId: t.workspaceId,
+          runnerId: runner.runnerId,
+          agentId: t.agentId,
+          assignmentId: hidden.body.id,
+          executor: "claude_code",
+          title: "Hidden",
+          prompt: "x",
+        });
+        const seen = await call(t.caio, "GET", `${ws(t.workspaceId)}/jobs/${hiddenJob}/output`);
+        const missing = await call(t.caio, "GET", `${ws(t.workspaceId)}/jobs/job_doesnotexist/output`);
+        expect([seen.status, code(seen)]).toEqual([404, "not_found"]);
+        expect([seen.status, code(seen), seen.body.error.message]).toEqual([
+          missing.status,
+          code(missing),
+          missing.body.error.message,
+        ]);
+        expect((await call(t.ana, "GET", `${ws(t.workspaceId)}/jobs/${hiddenJob}/output`)).status).toBe(200);
+      } finally {
+        await runner.close();
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "who manages is checked on the locked row when the runner or the executor changes",
+    async () => {
+      const t = await team();
+      const [row] = await server.deps.db.select().from(assignments).where(eq(assignments.id, t.assignmentId));
+      if (!row) throw new Error("no row");
+      const beto = {
+        workspaceId: t.workspaceId,
+        userId: t.beto.user.id,
+        role: "member" as const,
+        handle: "beto",
+      };
+      await expect(setRunnerOnLockedRow(server.deps, beto, row, { runnerId: "rn_x" })).rejects.toMatchObject({
+        status: 403,
+      });
+      await expect(setHarnessOnLockedRow(server.deps, beto, row, { harness: "codex" })).rejects.toMatchObject(
+        {
+          status: 403,
+        },
+      );
+      const [after] = await server.deps.db
+        .select()
+        .from(assignments)
+        .where(eq(assignments.id, t.assignmentId));
+      expect([after?.runnerId, after?.executor]).toEqual([null, "agent"]);
     },
     SERVER_TEST_MS,
   );

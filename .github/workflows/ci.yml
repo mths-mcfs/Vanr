@@ -793,7 +793,7 @@ jobs:
               exit 1
             fi
           done
-          set -- submission-answer decision-opinion submission-checklist suggestion-answer command-rules assignment-transfer assignment-limits
+          set -- submission-answer decision-opinion submission-checklist suggestion-answer command-rules assignment-transfer assignment-limits assignment-runner
           for label in "$@"; do
             if ! grep -aqF "LOCK_OUTCOME_MISMATCH($label)" forced-answer.log; then
               echo "::error::the forced $label test did not fail on its outcome without the lock"
