@@ -34,6 +34,7 @@ import {
   approvalsView,
   canDecideFor,
   canUndo,
+  decidesProposal,
   ownersOf,
   type ProposalRow,
   proposalsView,
@@ -47,6 +48,7 @@ import {
   UNDO_WINDOW_MS,
 } from "../control";
 import { conflict, forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
+import { log } from "../logger";
 import { actorName, toAction } from "../messages";
 import { rememberRule, revokeRule, rulesView } from "../standing-rules";
 import { requireMember, requirePermission, WORKSPACE } from "../workspace-scope";
@@ -124,7 +126,7 @@ async function visibleProposals(
   const out: Proposal[] = [];
   for (const [i, p] of views.entries()) {
     const channelId = rows[i]?.channelId;
-    if (!channelId || p.decidable || p.decidedBy === me.userId) {
+    if (!channelId || p.decidable || p.canUndo || p.decidedBy === me.userId) {
       out.push(p);
       continue;
     }
@@ -278,7 +280,7 @@ export function registerControl(app: Hono<AppEnv>) {
             actorUserId: me.userId,
             at,
           });
-        await publishApproval(deps, next, "approval.resolved");
+        // The run gets the decision first: the event is a side effect and must not keep it waiting.
         runtime.resolveApproval(row.id, {
           id: row.id,
           decision,
@@ -286,6 +288,7 @@ export function registerControl(app: Hono<AppEnv>) {
           byName: name,
           ...(decision === "approved" && row.payloadHash ? { payloadHash: row.payloadHash } : {}),
         });
+        await publishApproval(deps, next, "approval.resolved");
         const [view] = await approvalsView(db, me, [next]);
         if (!view) throw notFound("Approval not found");
         return c.json(view satisfies Approval);
@@ -356,7 +359,6 @@ export function registerControl(app: Hono<AppEnv>) {
         actorUserId: me.userId,
         at,
       });
-    await publishApproval(deps, next, "approval.resolved");
     runtime.resolveApproval(row.id, {
       id: row.id,
       decision: "approved",
@@ -366,6 +368,7 @@ export function registerControl(app: Hono<AppEnv>) {
       payloadHash: revised.payloadHash,
       edited: true,
     });
+    await publishApproval(deps, next, "approval.resolved");
     const [view] = await approvalsView(db, me, [next]);
     if (!view) throw notFound("Approval not found");
     return c.json(view satisfies Approval);
@@ -418,7 +421,11 @@ export function registerControl(app: Hono<AppEnv>) {
     if (!row) throw notFound("Proposal not found");
     const [view] = await proposalsView(db, me, [row], at);
     if (!view) throw notFound("Proposal not found");
-    if (row.status !== "pending") throw conflict("proposal.decided", "Already decided");
+    if (row.status !== "pending") {
+      // Only whoever decides the target learns it was decided; anyone else gets the same 403 as before.
+      if (!(await decidesProposal(db, me, row))) throw forbidden();
+      throw conflict("proposal.decided", "Already decided");
+    }
     if (!view.decidable) throw forbidden();
     return { row, view };
   };
@@ -575,7 +582,11 @@ export function registerControl(app: Hono<AppEnv>) {
       const deps = c.get("deps");
       const row = await actionInWorkspace(deps.db, me.workspaceId, param(c, "actionId"));
       const next = await applyUndo(deps, me, row, direction);
-      if (next.messageId) await publishActions(deps, next.messageId);
+      // Committed: the receipt's refresh is a side event, and a failure there doesn't make the undo fail.
+      if (next.messageId)
+        await publishActions(deps, next.messageId).catch((err) =>
+          log.error("undo.publish_failed", { actionId: next.id, direction, err }),
+        );
       return c.json(actionOut(next) satisfies AgentAction);
     });
   undoRoute("undo");

@@ -20,14 +20,17 @@ import { contentSha256 } from "@vanr/engine/memory";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { changeMemory, createMemory, itemAtPath, storeWhere, writeInstructions } from "./agent-memory";
 import { BASE_UNDOERS } from "./bases/undo";
+import { canReadChannel } from "./channels";
 import { CONTENT_UNDOERS } from "./content-undo";
 import type { AppDeps, WorkspaceMember } from "./context";
 import { conflict, HttpError, notFound } from "./http";
+import { log } from "./logger";
 import { reviewsFor } from "./memory-reviews";
 import { hydrateOne } from "./messages";
 import { closeNotifications, notify } from "./notifications";
 import { cancelQueued } from "./outbox";
 import { publishMemory } from "./routes/memories";
+import { canSeeRoutine } from "./routines";
 import { reindex, unindex } from "./search-index";
 
 const {
@@ -41,7 +44,7 @@ const {
   memories,
   reminders,
 } = schema;
-const { messages, outbox, users } = schema;
+const { messages, outbox, routines, users } = schema;
 
 export type ApprovalRow = typeof approvals.$inferSelect;
 export type ProposalRow = typeof proposals.$inferSelect;
@@ -440,13 +443,13 @@ export async function publishQuestion(
 ) {
   const question = toQuestion(row);
   if (row.messageId) {
-    const [msg] = await deps.db.select().from(messages).where(eq(messages.id, row.messageId));
-    if (msg) {
-      await deps.db
-        .update(messages)
-        .set({ meta: { ...msg.meta, question } })
-        .where(eq(messages.id, msg.id));
-    }
+    // Only the `question` key: a copy of the whole meta read before an undo would drop its `retracted`.
+    await deps.db
+      .update(messages)
+      .set({
+        meta: sql`jsonb_set(coalesce(${messages.meta}, '{}'::jsonb), '{question}', ${JSON.stringify(question)}::jsonb)`,
+      })
+      .where(eq(messages.id, row.messageId));
   }
   deps.hub.toChannel(row.channelId, { type, question, messageId: row.messageId, runId: row.runId });
   const groupKey = `question:${row.id}`;
@@ -697,7 +700,14 @@ export async function applyProposalText(
             at,
             old.id,
             { archived: false },
-            { op: "unarchive", author, reason, expectArchived: true },
+            {
+              op: "unarchive",
+              author,
+              reason,
+              expectArchived: true,
+              expectedSha256: contentSha256(to),
+              store,
+            },
           );
         else
           await createMemory(
@@ -724,22 +734,23 @@ export async function applyProposalText(
         return true;
       }
       if (!current || current.text !== from) return false;
+      // Checked again under the item's lock: still this store, this path, active and the same text.
+      const unchanged = {
+        expectedSha256: contentSha256(from),
+        expectedPath: path,
+        expectArchived: false,
+        store,
+      };
       if (to === "")
         await changeMemory(
           db,
           at,
           current.id,
           { archived: true },
-          { op: "archive", author, reason, expectedSha256: contentSha256(from) },
+          { op: "archive", author, reason, ...unchanged },
         );
       else
-        await changeMemory(
-          db,
-          at,
-          current.id,
-          { text: to },
-          { op: "update", author, reason, expectedSha256: contentSha256(from) },
-        );
+        await changeMemory(db, at, current.id, { text: to }, { op: "update", author, reason, ...unchanged });
       return true;
     } catch (err) {
       if (err instanceof HttpError && (err.code === "memory.changed" || err.code === "memory.exists"))
@@ -801,6 +812,21 @@ export async function actionInWorkspace(db: Db, workspaceId: string, id: string)
   return row;
 }
 
+/** Whether the person decides the proposal's target (whatever its status). */
+export async function decidesProposal(
+  db: Db,
+  me: WorkspaceMember,
+  proposal: Pick<ProposalRow, "targetKind" | "recipientAgentId">,
+): Promise<boolean> {
+  const [target] = proposal.recipientAgentId
+    ? await db
+        .select({ ownerUserId: agents.ownerUserId })
+        .from(agents)
+        .where(and(eq(agents.id, proposal.recipientAgentId), eq(agents.workspaceId, me.workspaceId)))
+    : [];
+  return decidesTarget(me, proposal.targetKind, target?.ownerUserId);
+}
+
 export async function canUndo(db: Db, me: WorkspaceMember, row: ActionRow): Promise<boolean> {
   if (row.kind === "proposal_applied") {
     const [proposal] = await db
@@ -809,13 +835,7 @@ export async function canUndo(db: Db, me: WorkspaceMember, row: ActionRow): Prom
       .where(and(eq(proposals.id, row.target.id), eq(proposals.workspaceId, row.workspaceId)));
     // Gone: the undoer answers that (action.gone).
     if (!proposal) return true;
-    const [target] = proposal.recipientAgentId
-      ? await db
-          .select({ ownerUserId: agents.ownerUserId })
-          .from(agents)
-          .where(and(eq(agents.id, proposal.recipientAgentId), eq(agents.workspaceId, row.workspaceId)))
-      : [];
-    return decidesTarget(me, proposal.targetKind, target?.ownerUserId);
+    return decidesProposal(db, me, proposal);
   }
   if (row.requesterUserId === me.userId || can(me.role, "manage_agents")) return true;
   const [agent] = await db
@@ -823,6 +843,48 @@ export async function canUndo(db: Db, me: WorkspaceMember, row: ActionRow): Prom
     .from(agents)
     .where(and(eq(agents.id, row.agentId), eq(agents.workspaceId, row.workspaceId)));
   return agent?.ownerUserId === me.userId;
+}
+
+/**
+ * The person still sees what the action touched: the conversation its receipt is in and the target itself (a
+ * message's or a queued post's channel, a routine). Checked under the action's lock, so access lost since the
+ * action counts; without it the action answers as one that doesn't exist, as "undo all" does. Write rights stay
+ * with each undoer (a file someone can't see, a locked page). Per-page wiki access goes here too.
+ */
+async function assertSees(deps: AppDeps, me: WorkspaceMember, row: ActionRow): Promise<void> {
+  const { db } = deps;
+  const reads = (channelId: string) =>
+    canReadChannel(db, { workspaceId: me.workspaceId, userId: me.userId, channelId });
+  const channelOf = async (messageId: string) =>
+    (
+      await db
+        .select({ channelId: messages.channelId })
+        .from(messages)
+        .where(and(eq(messages.id, messageId), eq(messages.workspaceId, row.workspaceId)))
+    )[0]?.channelId;
+  const hidden = () => notFound("Action not found");
+  if (row.messageId) {
+    const channelId = await channelOf(row.messageId);
+    if (channelId && !(await reads(channelId))) throw hidden();
+  }
+  const { type, id } = row.target;
+  if (type === "message") {
+    const channelId = await channelOf(id);
+    if (channelId && !(await reads(channelId))) throw hidden();
+  } else if (type === "outbox") {
+    const [queued] = await db
+      .select({ payload: outbox.payload })
+      .from(outbox)
+      .where(and(eq(outbox.id, id), eq(outbox.workspaceId, row.workspaceId)));
+    const channelId = queued?.payload.channelId;
+    if (typeof channelId === "string" && !(await reads(channelId))) throw hidden();
+  } else if (type === "routine") {
+    const [routine] = await db
+      .select()
+      .from(routines)
+      .where(and(eq(routines.id, id), eq(routines.workspaceId, row.workspaceId)));
+    if (routine && !(await canSeeRoutine(deps, me, routine))) throw hidden();
+  }
 }
 
 /**
@@ -842,7 +904,6 @@ export async function applyUndo(
   if (!(await canUndo(deps.db, me, row))) throw actionError(403, "action.not_yours", "Not your action");
   const undoer = isKind(row.kind) ? UNDOERS[row.kind] : undefined;
   if (!undoer) throw actionError(409, "action.expired", "This action can't be undone");
-  const now = deps.now();
   const { next, after } = await deps.db.transaction(async (tx) => {
     const [locked] = await tx
       .select()
@@ -850,10 +911,13 @@ export async function applyUndo(
       .where(and(eq(reversibleActions.id, row.id), eq(reversibleActions.workspaceId, row.workspaceId)))
       .for("update");
     if (!locked) throw notFound("Action not found");
+    const scoped = { ...deps, db: tx };
+    await assertSees(scoped, me, locked);
+    // Read once the lock is held: an undo that waited past the deadline is too late.
+    const now = deps.now();
     if (!locked.revertibleUntil || locked.revertibleUntil.getTime() <= now.getTime()) {
       throw actionError(409, "action.expired", "Too late to undo");
     }
-    const scoped = { ...deps, db: tx };
     // biome-ignore lint/suspicious/noConfusingVoidType: what the undoer returned (nothing, or work for after the commit)
     let after: void | AfterCommit;
     if (direction === "undo") {
@@ -875,11 +939,17 @@ export async function applyUndo(
     if (!next) throw notFound("Action not found");
     return { next, after };
   });
-  if (after) await after(deps);
-  // The proposal's card shows it undone: the state comes from the action, saved only now.
-  if (next.kind === "proposal_applied") {
-    const [p] = await deps.db.select().from(proposals).where(eq(proposals.id, next.target.id));
-    if (p) await publishProposal(deps, p, "proposal.decided");
+  // The undo is committed: a failed side event is logged, never answered as a failed undo (a retry would only find
+  // it already undone).
+  try {
+    if (after) await after(deps);
+    // The proposal's card shows it undone: the state comes from the action, saved only now.
+    if (next.kind === "proposal_applied") {
+      const [p] = await deps.db.select().from(proposals).where(eq(proposals.id, next.target.id));
+      if (p) await publishProposal(deps, p, "proposal.decided");
+    }
+  } catch (err) {
+    log.error("undo.publish_failed", { actionId: next.id, direction, err });
   }
   return next;
 }

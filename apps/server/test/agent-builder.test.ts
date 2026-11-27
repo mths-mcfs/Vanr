@@ -115,6 +115,28 @@ describe("the draft", () => {
   );
 });
 
+describe("who may", () => {
+  test(
+    "a member who neither owns the agent nor manages agents can't redescribe it",
+    async () => {
+      const { me, agent } = await existingAgent();
+      const plain = { ...me, userId: newId("user"), role: "member" as const, handle: "eli" };
+      await expect(
+        proposeFromDescription(server.deps, plain, agent, "Answer in lists"),
+      ).rejects.toMatchObject({
+        status: 403,
+      });
+      const elsewhere = { ...me, workspaceId: newId("workspace") };
+      await expect(
+        proposeFromDescription(server.deps, elsewhere, agent, "Answer in lists"),
+      ).rejects.toMatchObject({
+        status: 403,
+      });
+    },
+    SERVER_TEST_MS,
+  );
+});
+
 describe("without the runtime", () => {
   test(
     "both entries answer not_available before the hourly slot or a proposal is taken",

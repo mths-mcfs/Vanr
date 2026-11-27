@@ -403,7 +403,13 @@ describe("approvals", () => {
 });
 
 describe("always allow", () => {
-  const rememberFor = async (t: Team, key: string, approvalId = newId("apv"), tool = "send_email") => {
+  const rememberFor = async (
+    t: Team,
+    key: string,
+    approvalId = newId("apv"),
+    tool = "send_email",
+    at = clock,
+  ) => {
     const { rememberRule } = await import("../src/standing-rules");
     return rememberRule(server.deps.db, {
       workspaceId: t.workspaceId,
@@ -413,7 +419,7 @@ describe("always allow", () => {
       label: `to ${key}`,
       approvalId,
       actorUserId: t.beto.user.id,
-      at: clock,
+      at,
     });
   };
 
@@ -452,12 +458,32 @@ describe("always allow", () => {
       // The index keeps the hash, never the predicate itself.
       expect(counted?.ruleKey).not.toContain("acme");
 
-      // Remembering again renews the same rule for 30 more days.
-      const renewed = await rememberFor(t, key);
+      // Remembering again a day later renews the same rule for 30 days from then.
+      const day = 24 * 3600_000;
+      const thirtyDays = 30 * day;
+      const renewedAt = new Date(clock.getTime() + day);
+      const renewed = await rememberFor(t, key, newId("apv"), "send_email", renewedAt);
       expect(renewed.id).toBe(rule.id);
-      const thirtyDays = 30 * 24 * 3600_000;
-      expect(await match(key, { at: new Date(clock.getTime() + thirtyDays - 1) })).toEqual({ id: rule.id });
-      expect(await match(key, { at: new Date(clock.getTime() + thirtyDays) })).toBeNull();
+      expect(await match(key, { at: new Date(clock.getTime() + thirtyDays) })).toEqual({ id: rule.id });
+      expect(await match(key, { at: new Date(renewedAt.getTime() + thirtyDays - 1) })).toEqual({
+        id: rule.id,
+      });
+      expect(await match(key, { at: new Date(renewedAt.getTime() + thirtyDays) })).toBeNull();
+
+      // Void while whoever remembered it doesn't answer for the agent: another owner, then left the workspace.
+      const owner = (userId: string) =>
+        server.deps.db.update(agents).set({ ownerUserId: userId }).where(eq(agents.id, t.agentId));
+      await owner(t.carla.user.id);
+      expect(await match(key)).toBeNull();
+      await owner(t.beto.user.id);
+      expect(await match(key)).toEqual({ id: rule.id });
+      const [membership] = await server.deps.db
+        .delete(schema.members)
+        .where(and(eq(schema.members.workspaceId, t.workspaceId), eq(schema.members.userId, t.beto.user.id)))
+        .returning();
+      expect(await match(key)).toBeNull();
+      if (membership) await server.deps.db.insert(schema.members).values(membership);
+      expect(await match(key)).toEqual({ id: rule.id });
 
       // Revoked: the very next call asks again.
       const me = { workspaceId: t.workspaceId, userId: t.beto.user.id, role: "member" as const, handle: "" };
@@ -909,8 +935,7 @@ describe("undo", () => {
       const state = new Map(
         all.actions.map((a: { id: string; revertedAt: string | null }) => [a.id, a.revertedAt]),
       );
-      expect(state.get(action.id)).not.toBeNull();
-      expect(state.get(second.id)).not.toBeNull();
+      for (const id of [action.id, second.id]) expect(typeof state.get(id)).toBe("string");
       expect(all.failed).toEqual([]);
       // Ana asked for that one: Carla's "undo all" neither lists nor touches it.
       expect(state.has(notMine.id)).toBe(false);
@@ -934,6 +959,65 @@ describe("undo", () => {
       expect(await code(await undo(t.carla, late.id))).toBe("action.expired");
       const unknown = await seedAction(t, "teleported", { type: "x", id: "x" });
       expect(await code(await undo(t.carla, unknown.id))).toBe("action.expired");
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "access lost since the action: undo and redo answer as if there were no action, and nothing changes",
+    async () => {
+      const t = await team();
+      const room = await seedChannel(server, t.workspaceId, {
+        name: `room${n}`,
+        visibility: "private",
+        members: [t.carla],
+      });
+      const channel = await channelInWorkspace(server.deps.db, t.workspaceId, room);
+      if (!channel) throw new Error("no channel");
+      const post = async (text: string) =>
+        (
+          await postMessage(server.deps, {
+            workspaceId: t.workspaceId,
+            channel,
+            author: { type: "agent", id: t.agentId },
+            body: text,
+            clientId: null,
+          })
+        ).message;
+      const posted = await post("Posted in the room");
+      const retract = await seedAction(t, "message_posted", { type: "message", id: posted.id });
+      const reply = await agentReply(t, "Done in #general");
+      // The receipt is in #general (still readable); the target is the room's message.
+      const viaGeneral = await seedAction(
+        t,
+        "message_posted",
+        { type: "message", id: (await post("Second one")).id },
+        { messageId: reply.id },
+      );
+      const meta = async (id: string) =>
+        (await server.deps.db.select().from(messages).where(eq(messages.id, id)))[0]?.meta;
+      expect((await t.carla.browser.json(t.url(`/actions/${retract.id}/undo`), "POST")).status).toBe(200);
+
+      await server.deps.db
+        .delete(schema.channelMemberships)
+        .where(
+          and(
+            eq(schema.channelMemberships.channelId, room),
+            eq(schema.channelMemberships.memberId, t.carla.user.id),
+          ),
+        );
+      const redo = await t.carla.browser.json(t.url(`/actions/${retract.id}/redo`), "POST");
+      expect(redo.status).toBe(404);
+      expect((await meta(posted.id))?.retracted).toMatchObject({ actorUserId: t.carla.user.id });
+      const undo = await t.carla.browser.json(t.url(`/actions/${viaGeneral.id}/undo`), "POST");
+      expect(undo.status).toBe(404);
+      expect((await meta(viaGeneral.target.id))?.retracted).toBeUndefined();
+      // Whoever still reads the room (Ana manages agents and is added) undoes and redoes as before.
+      await server.deps.db
+        .insert(schema.channelMemberships)
+        .values({ channelId: room, memberType: "person", memberId: t.ana.user.id });
+      expect((await t.ana.browser.json(t.url(`/actions/${retract.id}/redo`), "POST")).status).toBe(200);
+      expect((await meta(posted.id))?.retracted).toBeUndefined();
     },
     SERVER_TEST_MS,
   );

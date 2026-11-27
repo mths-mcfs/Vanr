@@ -4,15 +4,15 @@
 // rule, at K1/K2 and in a run without A (`rememberable` in effects.ts): it never covers K3, a request asked for
 // risk, nor a run that read outside content. The list is editable: whoever answers for the agent revokes.
 import { createHash } from "node:crypto";
-import { type ApprovalRule, can } from "@vanr/contract";
+import { type ApprovalRule, can, PERMISSIONS } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import { STANDING_RULE_TTL_MS } from "@vanr/engine/effects";
 import { newId } from "@vanr/engine/ids";
-import { and, desc, eq, gt, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, exists, gt, inArray, isNull, or, sql } from "drizzle-orm";
 import type { WorkspaceMember } from "./context";
 import { ownersOf } from "./control";
 
-const { approvalRules } = schema;
+const { approvalRules, agents, members } = schema;
 
 export type ApprovalRuleRow = typeof approvalRules.$inferSelect;
 
@@ -38,6 +38,24 @@ export async function matchRule(
         eq(approvalRules.ruleKey, keyOf(q.key)),
         isNull(approvalRules.revokedAt),
         gt(approvalRules.expiresAt, q.at),
+        // Void once whoever remembered it no longer answers for the agent: they left the workspace, or they
+        // neither own the agent now nor manage agents.
+        exists(
+          db
+            .select({ one: sql`1` })
+            .from(members)
+            .innerJoin(agents, eq(agents.id, approvalRules.agentId))
+            .where(
+              and(
+                eq(members.workspaceId, approvalRules.workspaceId),
+                eq(members.userId, approvalRules.createdByUserId),
+                or(
+                  eq(agents.ownerUserId, members.userId),
+                  inArray(members.role, [...PERMISSIONS.manage_agents]),
+                ),
+              ),
+            ),
+        ),
       ),
     )
     .returning({ id: approvalRules.id });
@@ -110,6 +128,16 @@ export async function rulesView(
         isNull(approvalRules.revokedAt),
         gt(approvalRules.expiresAt, at),
         agentId ? eq(approvalRules.agentId, agentId) : undefined,
+        // Before the limit: whoever doesn't manage agents only reads the rules of the agents they own.
+        can(me.role, "manage_agents")
+          ? undefined
+          : inArray(
+              approvalRules.agentId,
+              db
+                .select({ id: agents.id })
+                .from(agents)
+                .where(and(eq(agents.workspaceId, me.workspaceId), eq(agents.ownerUserId, me.userId))),
+            ),
       ),
     )
     .orderBy(desc(approvalRules.createdAt))

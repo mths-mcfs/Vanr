@@ -4,7 +4,7 @@
 //
 // Both entries call the agent runtime (the workspace's provider, or a completion paid by the agent): until the
 // runtime is there they are rejected at the entry, before the hourly slot or anything else is taken.
-import type { AgentDraft, BuilderResult } from "@vanr/contract";
+import { type AgentDraft, type BuilderResult, can } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { DEFAULT_MODEL, MODELS } from "@vanr/engine/models/catalog";
@@ -18,7 +18,7 @@ import { jsonFrom } from "./agent-lab";
 import { AGENT_ROLES, type AgentRow, isAgentRole } from "./agents";
 import { type AppDeps, requireRuntime, type WorkspaceMember } from "./context";
 import { proposalsView, proposalTrail, publishProposal } from "./control";
-import { HttpError } from "./http";
+import { forbidden, HttpError } from "./http";
 import { takenHandles } from "./members";
 
 const { skills, proposals } = schema;
@@ -258,6 +258,12 @@ export async function proposeFromDescription(
   agent: AgentRow,
   description: string,
 ): Promise<BuilderResult> {
+  // Whoever answers for the agent: its owner, or whoever manages agents.
+  if (
+    agent.workspaceId !== me.workspaceId ||
+    (agent.ownerUserId !== me.userId && !can(me.role, "manage_agents"))
+  )
+    throw forbidden("Only the agent's owner changes it");
   requireRuntime(deps.runtime, "complete");
   takeDraftSlot(me.userId, deps.now());
   const workspaceSkills = await workspaceSkillsOf(deps, me.workspaceId);
