@@ -5,7 +5,7 @@ import { QUERY_RETRIES } from "@vanr/client/react";
 import type { AppNotification } from "@vanr/contract";
 import { DEFAULT_NOTIFICATION_SETTINGS } from "../../../../dev/fake-server.ts";
 import { chooseOption, newServer, newTestRuntime, renderApp } from "../../../../test/app.tsx";
-import { dayGroupOf, destinationOf, joinPages, laterOptions } from "./notices.ts";
+import { destinationOf, joinPages, laterOptions, noticeDayOf } from "./notices.ts";
 
 const PATH = "/workspace/workspace_birchwood/notifications/settings";
 const saved = (server: ReturnType<typeof newServer>) =>
@@ -188,19 +188,21 @@ describe("where a notice leads", () => {
     expect(joinPages([a], [c], [c, b]).map((n) => n.id)).toEqual(["a", "c", "b"]);
   });
 
-  test("day groups and the later options follow the local calendar", () => {
+  test("day sections and the later options follow the local calendar", () => {
     const now = new Date(2026, 10, 14, 12).getTime(); // a Saturday, noon local time
-    expect(dayGroupOf(new Date(2026, 10, 14, 0, 30).toISOString(), now)).toBe("today");
-    expect(dayGroupOf(new Date(2026, 10, 13, 23).toISOString(), now)).toBe("yesterday");
-    expect(dayGroupOf(new Date(2026, 10, 9).toISOString(), now)).toBe("week");
-    expect(dayGroupOf(new Date(2026, 10, 7).toISOString(), now)).toBe("older");
+    expect(noticeDayOf(new Date(2026, 10, 14, 0, 30).toISOString(), now)).toBe("today");
+    expect(noticeDayOf(new Date(2026, 10, 13, 23).toISOString(), now)).toBe("yesterday");
+    expect(noticeDayOf(new Date(2026, 10, 9).toISOString(), now)).toBe("last7");
+    // The 7 days count today: the 8th is the seventh day, the 7th is already earlier.
+    expect(noticeDayOf(new Date(2026, 10, 8, 0, 30).toISOString(), now)).toBe("last7");
+    expect(noticeDayOf(new Date(2026, 10, 7, 23).toISOString(), now)).toBe("earlier");
     const [hour, tomorrow, monday] = laterOptions(now);
     expect(hour?.at.getTime()).toBe(now + 3_600_000);
     expect(tomorrow?.at.getTime()).toBe(new Date(2026, 10, 15, 9).getTime());
     expect(monday?.at.getTime()).toBe(new Date(2026, 10, 16, 9).getTime());
     // A day with 25 hours (clocks going back) still has its whole yesterday.
     const afterShift = new Date(2026, 10, 2, 12).getTime();
-    expect(dayGroupOf(new Date(2026, 10, 1, 0, 30).toISOString(), afterShift)).toBe("yesterday");
+    expect(noticeDayOf(new Date(2026, 10, 1, 0, 30).toISOString(), afterShift)).toBe("yesterday");
     // On a Monday, "Monday" is the next one.
     expect(laterOptions(new Date(2026, 10, 16, 8).getTime())[2]?.at.getTime()).toBe(
       new Date(2026, 10, 23, 9).getTime(),

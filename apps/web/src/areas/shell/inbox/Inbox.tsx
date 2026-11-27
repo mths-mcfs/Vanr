@@ -31,12 +31,12 @@ import { useLocale, useMessages } from "../../../i18n/react.tsx";
 import { useClock } from "../../../platform/clock.tsx";
 import { useOutcome } from "../settings/shared.tsx";
 import {
-  ALL_FILTERS,
-  DAY_GROUPS,
-  dayGroupOf,
+  ALL_TAB_FILTERS,
   destinationOf,
   joinPages,
   laterOptions,
+  NOTICE_DAYS,
+  noticeDayOf,
   TABS,
   type Tab,
   tabOf,
@@ -44,7 +44,7 @@ import {
 
 const PAGE = 50;
 
-const FILTERS = ["action_needed", "fyi", ...ALL_FILTERS] as const;
+const FILTERS = ["action_needed", "fyi", ...ALL_TAB_FILTERS] as const;
 const Search = z.object({
   filter: z.enum(FILTERS).optional(),
   open: z.string().min(1).max(200).optional(),
@@ -110,11 +110,11 @@ export function InboxScreen() {
             {name === "all" && (
               <fieldset className="inbox__filters">
                 <legend className="vr-visually-hidden">{t("filters")}</legend>
-                {ALL_FILTERS.map((option) => (
+                {ALL_TAB_FILTERS.map((option) => (
                   <Chip key={option} selected={filter === option} onSelectedChange={() => setFilter(option)}>
                     {option === "all" || counts.data === undefined || counts.data[option] === 0
-                      ? t(`filter.${option}`)
-                      : t("filter.counted", { label: t(`filter.${option}`), count: counts.data[option] })}
+                      ? t(`show.${option}`)
+                      : t("show.counted", { label: t(`show.${option}`), count: counts.data[option] })}
                   </Chip>
                 ))}
               </fieldset>
@@ -336,10 +336,10 @@ function NoticeList({ workspaceId, filter }: { workspaceId: string; filter: Noti
           {waiting.length > 0 && (
             <NoticeGroup label={t("group.waiting")} notices={waiting} workspaceId={workspaceId} />
           )}
-          {DAY_GROUPS.map((group) => {
-            const list = rest.filter((notice) => dayGroupOf(notice.updatedAt, now) === group);
+          {NOTICE_DAYS.map(({ day }) => {
+            const list = rest.filter((notice) => noticeDayOf(notice.updatedAt, now) === day);
             return list.length === 0 ? null : (
-              <NoticeGroup key={group} label={t(`group.${group}`)} notices={list} workspaceId={workspaceId} />
+              <NoticeGroup key={day} label={t(`group.${day}`)} notices={list} workspaceId={workspaceId} />
             );
           })}
           {cursor !== null && (
@@ -412,7 +412,9 @@ function NoticeRow({ notice, workspaceId }: { notice: AppNotification; workspace
         ? t("whoMany", { name: names[0] ?? "", count: names.length - 1 })
         : new Intl.ListFormat(locale, { type: "conjunction" }).format(names);
   const headline = t(
-    notice.kind === "mention" && notice.source.label !== undefined ? "kind.mentionIn" : `kind.${notice.kind}`,
+    notice.kind === "mention" && notice.source.label !== undefined
+      ? "kind.mentionWhere"
+      : `kind.${notice.kind}`,
     {
       who,
       count: notice.count,

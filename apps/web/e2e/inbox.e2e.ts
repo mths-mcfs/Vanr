@@ -42,7 +42,7 @@ test("a mention arrives in the inbox; opening it reads it and snoozing it mutes 
   await signIn(owner);
   const inbox = `/workspace/${owner.workspace.id}/notifications`;
   await page.goto(inbox);
-  const headline = t("inbox", "kind.mentionIn", { who: colleague.name, label: "#general" });
+  const headline = t("inbox", "kind.mentionWhere", { who: colleague.name, label: "#general" });
   const unread = page.getByRole("button", { name: `${t("inbox", "unreadMark")} ${headline}` });
   await expect(unread).toBeVisible();
   await expect(page.getByText("the proofs are ready")).toBeVisible();

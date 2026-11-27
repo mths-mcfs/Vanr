@@ -88,8 +88,8 @@ function InviteForm() {
 
   return (
     <Surface variant="card" className="section-card">
-      <h3 className="page__heading">{t("members.inviteTitle")}</h3>
-      <form className="invite-form" onSubmit={submit} aria-label={t("members.inviteTitle")}>
+      <h3 className="page__heading">{t("members.inviteHeading")}</h3>
+      <form className="invite-form" onSubmit={submit} aria-label={t("members.inviteHeading")}>
         <Field
           label={t("members.emails")}
           hint={t("members.emailsHint", { max: INVITE_MAX })}
@@ -222,7 +222,7 @@ function MemberList({ manage }: { manage: boolean }) {
               <span className="member__actions">
                 <Select
                   size="sm"
-                  aria-label={t("members.roleOf", { name: member.name })}
+                  aria-label={t("members.changeRole", { name: member.name })}
                   value={member.role}
                   disabled={changeRole.isPending && changeRole.variables?.memberId === member.userId}
                   onValueChange={(next) => {
@@ -330,19 +330,19 @@ function PendingInvitations() {
                 <Button
                   size="sm"
                   variant="ghost"
-                  aria-label={t("members.revokeOf", { who })}
+                  aria-label={t("members.withdrawOf", { who })}
                   loading={revoke.isPending && revoke.variables?.invitationId === invitation.id}
                   onClick={() =>
                     revoke.mutate(
                       { workspaceId, invitationId: invitation.id },
                       {
-                        onSuccess: () => outcome.done(t("members.revoked", { who })),
+                        onSuccess: () => outcome.done(t("members.withdrawn", { who })),
                         onError: outcome.failed,
                       },
                     )
                   }
                 >
-                  {t("members.revoke")}
+                  {t("members.withdraw")}
                 </Button>
               )}
             </li>

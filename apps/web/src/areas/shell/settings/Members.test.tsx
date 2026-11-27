@@ -30,13 +30,13 @@ describe("members", () => {
     await screen.findByRole("list", { name: "Members" });
     expect(within(row("Ana Beatriz Souza") as HTMLElement).queryByRole("combobox")).toBeNull();
     expect(within(row("Jonas Lind") as HTMLElement).queryByRole("combobox")).toBeNull();
-    const role = screen.getByRole("combobox", { name: "Role of Tomás Eriksen" });
+    const role = screen.getByRole("combobox", { name: "Change Tomás Eriksen's role" });
     expect(role.textContent).toBe("Member");
     await chooseOption(app, role, "Admin");
     expect(await screen.findByText("Tomás Eriksen is now Admin.")).toBeDefined();
     expect(roleOf(app.server, "usr_tomas")).toBe("admin");
     // An admin can't give the owner role.
-    const iris = screen.getByRole("combobox", { name: "Role of Íris Valença" });
+    const iris = screen.getByRole("combobox", { name: "Change Íris Valença's role" });
     await act(async () => {
       iris.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
     });
@@ -48,7 +48,11 @@ describe("members", () => {
 
   test("an owner may make someone an owner", async () => {
     const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
-    await chooseOption(app, await screen.findByRole("combobox", { name: "Role of Jonas Lind" }), "Owner");
+    await chooseOption(
+      app,
+      await screen.findByRole("combobox", { name: "Change Jonas Lind's role" }),
+      "Owner",
+    );
     expect(await screen.findByText("Jonas Lind is now Owner.")).toBeDefined();
     expect(roleOf(app.server, "usr_jonas")).toBe("owner");
   });
@@ -57,7 +61,11 @@ describe("members", () => {
     const server = newServer();
     server.force("updateMember", { kind: "error", status: 403, code: "forbidden" });
     const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
-    await chooseOption(app, await screen.findByRole("combobox", { name: "Role of Íris Valença" }), "Admin");
+    await chooseOption(
+      app,
+      await screen.findByRole("combobox", { name: "Change Íris Valença's role" }),
+      "Admin",
+    );
     expect(await screen.findByText("You don't have permission to do that.")).toBeDefined();
     expect(roleOf(server, "usr_iris")).toBe("member");
   });
