@@ -56,3 +56,47 @@ export interface IssueActivity {
   textKey: string | null;
   textVars: Record<string, string | number> | null;
 }
+
+/** Body of `createIssue`. */
+export interface IssueInput {
+  assignee?: ActorRef | null;
+  channelId?: string;
+  columnId?: string;
+  criteria?: string[];
+  description?: string;
+  dueDate?: string | null;
+  labels?: string[];
+  priority?: IssuePriority;
+  title: string;
+}
+
+/** Body of `updateIssue`. */
+export interface IssuePatch {
+  assignee?: ActorRef | null;
+  boardPosition?: number;
+  columnId?: string;
+  description?: string;
+  dueDate?: string | null;
+  labels?: string[];
+  priority?: IssuePriority;
+  title?: string;
+}
+
+/** Body of `createIssueComment`. */
+export interface IssueCommentInput {
+  attachedFileIds?: string[];
+  text: string;
+}
+
+/** Body of `createIssueColumn`. */
+export interface IssueColumnInput {
+  afterId?: string;
+  name: string;
+  stage: IssueStage;
+}
+
+/** Body of `updateIssueColumn`. */
+export interface IssueColumnPatch {
+  index?: number;
+  name?: string;
+}

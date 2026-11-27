@@ -176,6 +176,22 @@ async function installationToken(deps: AppDeps, installationId: string): Promise
   return out.token;
 }
 
+/**
+ * The credential to read a repository of the GitHub account `owner` for the workspace: the token of that workspace's
+ * own installation on the account (not suspended), or null when the workspace has none (the repository is then read
+ * as public). Never another workspace's installation.
+ */
+export async function repoReadToken(
+  deps: AppDeps,
+  workspaceId: string,
+  owner: string,
+): Promise<string | null> {
+  if (!deps.config.integrations.githubApp) return null;
+  const rows = await installations(deps, workspaceId);
+  const row = rows.find((r) => !r.suspended && r.accountUsername.toLowerCase() === owner.toLowerCase());
+  return row ? installationToken(deps, row.id) : null;
+}
+
 export async function installations(deps: AppDeps, workspaceId: string): Promise<InstallationRow[]> {
   return deps.db
     .select()

@@ -8,6 +8,12 @@ import type postgres from "postgres";
 
 /** The mutant mode of the forced tests: the double leaves the locks out. */
 export const DROP_LOCKS = process.env.VANR_TEST_DROP_LOCKS === "1";
+/**
+ * The ordering mutant: only the locks taken in a set order (a `select ... order by ... for update`, like the
+ * calendar family's) are left out, so the writes fall back to locking rows in whatever order they reach them.
+ */
+export const DROP_ORDERED_LOCKS = process.env.VANR_TEST_DROP_ORDERED_LOCKS === "1";
+const ordered = (q: Any): boolean => / order by /.test(q?.toSQL?.().sql ?? "");
 
 export interface Hooks {
   /** Runs once after a query of `kind` resolves, optionally matching its SQL (the hold point). */
@@ -24,7 +30,8 @@ type Any = any;
 export function wrapQuery(q: Any, done: (query: Any) => Promise<void>): Any {
   return new Proxy(q, {
     get(target, prop) {
-      if (prop === "for" && DROP_LOCKS) return () => wrapQuery(target, done);
+      if (prop === "for" && (DROP_LOCKS || (DROP_ORDERED_LOCKS && ordered(target))))
+        return () => wrapQuery(target, done);
       if (prop === "then") {
         return (ok: (v: unknown) => unknown, fail: (e: unknown) => unknown) =>
           target
