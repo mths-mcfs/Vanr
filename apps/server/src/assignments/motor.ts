@@ -16,6 +16,7 @@
 import { DBOS } from "@dbos-inc/dbos-sdk";
 import type { AssignmentLimitKind, AssignmentUsage, AssignmentWaitReason } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
+import { newId } from "@vanr/engine/ids";
 import { and, eq, gt, inArray, isNotNull, isNull, lt, max, ne, sql } from "drizzle-orm";
 import { channelInWorkspace } from "../channels";
 import type { AppDeps } from "../context";
@@ -700,8 +701,14 @@ async function settleLost(deps: AppDeps, jobId: string): Promise<void> {
 }
 
 /** Gives the item back the turn a claim counted when the turn never went out (rejected before the send, paused). */
-async function refundTurn(deps: AppDeps, assignmentId: string, itemId: string): Promise<void> {
-  if (!itemId) return;
+async function refundTurn(
+  deps: AppDeps,
+  assignmentId: string,
+  itemId: string,
+  /** The item's epoch the claim charged: after a plan edit the turns are the new epoch's, not this attempt's. */
+  epoch: number | null,
+): Promise<void> {
+  if (!itemId || epoch === null) return;
   await deps.db
     .update(assignmentPlanItems)
     .set({ turns: sql`${assignmentPlanItems.turns} - 1` })
@@ -710,6 +717,7 @@ async function refundTurn(deps: AppDeps, assignmentId: string, itemId: string): 
         eq(assignmentPlanItems.assignmentId, assignmentId),
         eq(assignmentPlanItems.id, itemId),
         gt(assignmentPlanItems.turns, 0),
+        eq(assignmentPlanItems.epoch, epoch),
       ),
     );
 }
@@ -722,8 +730,14 @@ async function refundTurn(deps: AppDeps, assignmentId: string, itemId: string): 
  * nothing. A crash after the claim leaves the row running with no ref; the next step reaps it and the item goes to
  * its next attempt.
  */
-async function claimWork(deps: AppDeps, workId: string, item: PlanItemRow | null): Promise<boolean> {
-  return deps.db.transaction(async (tx) => {
+/**
+ * The claim's result: `false` when nothing goes out; otherwise the item's epoch the turn was charged to (null for
+ * the planning turn, which charges none).
+ */
+type Claim = false | { epoch: number | null };
+
+async function claimWork(deps: AppDeps, workId: string, item: PlanItemRow | null): Promise<Claim> {
+  return deps.db.transaction(async (tx): Promise<Claim> => {
     const [w] = await tx.select().from(assignmentWork).where(eq(assignmentWork.id, workId)).for("update");
     if (w?.status !== "starting") return false;
     // Decided while active, acted after a pause, a cancel or the end: the turn doesn't go out.
@@ -738,6 +752,7 @@ async function claimWork(deps: AppDeps, workId: string, item: PlanItemRow | null
         .where(eq(assignmentWork.id, workId));
       return false;
     }
+    let charged: number | null = null;
     if (item) {
       // Only an item still open: one the person (or the executor) finished or dropped since the decision isn't
       // reopened by its old turn.
@@ -751,7 +766,7 @@ async function claimWork(deps: AppDeps, workId: string, item: PlanItemRow | null
             inArray(assignmentPlanItems.status, ["todo", "doing", "blocked_on_you"]),
           ),
         )
-        .returning({ id: assignmentPlanItems.id });
+        .returning({ id: assignmentPlanItems.id, epoch: assignmentPlanItems.epoch });
       if (!turned) {
         await tx
           .update(assignmentWork)
@@ -759,9 +774,10 @@ async function claimWork(deps: AppDeps, workId: string, item: PlanItemRow | null
           .where(eq(assignmentWork.id, workId));
         return false;
       }
+      charged = turned.epoch;
     }
     await tx.update(assignmentWork).set({ status: "running" }).where(eq(assignmentWork.id, workId));
-    return true;
+    return { epoch: charged };
   });
 }
 
@@ -808,7 +824,8 @@ async function dispatch(
     if (!live) await end("canceled");
     return null;
   }
-  if (!(await claimWork(deps, id, item))) return null;
+  const claim = await claimWork(deps, id, item);
+  if (!claim) return null;
   if (row.wakeAt) await db.update(assignments).set({ wakeAt: null }).where(eq(assignments.id, row.id));
   await assignmentEvent(deps, row, {
     kind: "item_started",
@@ -839,7 +856,7 @@ async function dispatch(
     const fresh = await assignmentById(deps, row.id);
     if (fresh?.status !== "active") {
       await end("canceled");
-      await refundTurn(deps, row.id, itemId);
+      await refundTurn(deps, row.id, itemId, claim.epoch);
       return false;
     }
     return true;
@@ -866,7 +883,7 @@ async function dispatch(
       if (!(err instanceof HttpError)) throw err;
       await end("failed");
       // Rejected before anything reached the runner (offline, no runner): the item keeps its turn.
-      if (BEFORE_SEND.has(err.code)) await refundTurn(deps, row.id, item.id);
+      if (BEFORE_SEND.has(err.code)) await refundTurn(deps, row.id, item.id, claim.epoch);
       // Another job already runs (a person asked for something): wait for it. Runner offline: try again later.
       if (err.code === "assignment.job_running") return null;
       await assignmentEvent(deps, row, {
@@ -908,7 +925,9 @@ async function dispatch(
   // canceled or done meanwhile, sends nothing. The fence turns away this turn if a later attempt already went.
   if (!(await sendable())) return null;
   const fence = { key: fenceKeyOf(row.id, itemId), token: n };
-  const res = await deps.runtime.runFor({ agent, channel, trigger, fence });
+  // Read again once the run took the turn: the records say whether this attempt is still the item's (the
+  // in-memory fence alone can't, once an ended assignment's fences are dropped).
+  const res = await deps.runtime.runFor({ agent, channel, trigger, fence, admit: sendable });
   if (!res.ok && res.code === "fenced") {
     await end("canceled");
     return null;
@@ -1011,18 +1030,22 @@ const ROUND_LEASE_MS = 20 * 60_000;
 const ROUND_HELD_WAIT_MS = 30_000;
 
 /**
- * Claims a validation round before the verifier's paid call: under the assignment row's lock, the round's key is
- * free (or its holder died past the lease) and every target is still done, unjudged and at the epoch and checks
- * this step read. Two steps on the same round (a forked workflow while the old one still runs its step) make one
- * call: the other finds the round `held`, or `stale` once the first wrote its verdicts.
+ * Claims the assignment's validation before the verifier's paid call. One claim per assignment, its row in
+ * `effect_keys` with the acquisition's token: under the assignment row's lock, no other step holds it (or its
+ * holder died past the lease), and the round is still the one the targets are at (`max(checks) + 1`), every target
+ * done, unjudged and at the epoch this step read. Two steps on the same round (a forked workflow while the old one
+ * still runs its step) make one call: the other finds it `held`, or `stale` once the first wrote its verdicts. A
+ * step can't start the next round while another still writes the last one's checks.
  */
 async function claimRound(
   deps: AppDeps,
   row: AssignmentRow,
   key: string,
+  round: number,
   targets: readonly PlanItemRow[],
-): Promise<"claimed" | "held" | "stale"> {
+): Promise<{ token: string } | "held" | "stale"> {
   const now = deps.now();
+  const token = newId("vcl");
   return deps.db.transaction(async (tx) => {
     await tx.select({ id: assignments.id }).from(assignments).where(eq(assignments.id, row.id)).for("update");
     const [held] = await tx.select().from(effectKeys).where(eq(effectKeys.key, key));
@@ -1049,18 +1072,24 @@ async function claimRound(
       const c = current.find((x) => x.id === t.id);
       return c?.status === "done" && c.passes !== true && c.epoch === t.epoch && c.checks === t.checks;
     });
-    if (!due) return "stale";
+    if (!due || current.length === 0 || Math.max(...current.map((c) => c.checks)) + 1 !== round)
+      return "stale";
+    // The acquisition's token rides in `run_id` (a claim has no run): only this acquisition releases it.
     await tx
       .insert(effectKeys)
       .values({
         key,
         workspaceId: row.workspaceId,
         tool: "assignment.validate",
+        runId: token,
         status: "pending",
         createdAt: now,
       })
-      .onConflictDoUpdate({ target: effectKeys.key, set: { status: "pending", createdAt: now } });
-    return "claimed";
+      .onConflictDoUpdate({
+        target: effectKeys.key,
+        set: { runId: token, status: "pending", createdAt: now },
+      });
+    return { token };
   });
 }
 
@@ -1075,15 +1104,16 @@ async function validate(
     .map((id) => items.find((i) => i.id === id))
     .filter((i): i is PlanItemRow => !!i && i.status === "done" && i.passes !== true);
   if (targets.length === 0) return null;
-  const key = `assignment-validate:${row.id}:${round}`;
-  const claim = await claimRound(deps, row, key, targets);
+  const key = `assignment-validate:${row.id}`;
+  const claim = await claimRound(deps, row, key, round, targets);
   if (claim === "held") return ROUND_HELD_WAIT_MS;
   if (claim === "stale") return null;
   try {
     return await judgeRound(deps, row, itemIds, round);
   } finally {
-    // The round is judged (its checks moved on) or left unspent (a pause): either way the claim's job is done.
-    await deps.db.delete(effectKeys).where(eq(effectKeys.key, key));
+    // The round is judged (its checks moved on) or left unspent (a pause): either way this claim's job is done.
+    // Only this acquisition's: past the lease another step may hold the key now.
+    await deps.db.delete(effectKeys).where(and(eq(effectKeys.key, key), eq(effectKeys.runId, claim.token)));
   }
 }
 

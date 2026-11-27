@@ -310,11 +310,10 @@ async function askAgent(deps: AppDeps, me: WorkspaceMember, issueId: string, age
     meta: { workedIssue: { issueId: row.id, number: updated.number } },
   });
   // The work belongs to this message: only the run that serves it (or its block) takes it out of "working".
-  const [withWork] = await db
+  await db
     .update(issues)
     .set({ work: { state: "working", reason: null, runId: null, messageId: message.id } })
-    .where(eq(issues.id, row.id))
-    .returning();
+    .where(eq(issues.id, row.id));
   try {
     await deps.runtime.onPersonMessage({ workspaceId: me.workspaceId, channel, message });
   } catch (err) {
@@ -325,7 +324,8 @@ async function askAgent(deps: AppDeps, me: WorkspaceMember, issueId: string, age
       reason: "interrupted",
       runId: null,
     });
-    return issueById(db, me.workspaceId, row.id);
   }
-  return withWork ?? updated;
+  // Read again: the routing (or its failure) may already have settled the work (blocked: out of budget, not in
+  // the channel, interrupted).
+  return issueById(db, me.workspaceId, row.id);
 }

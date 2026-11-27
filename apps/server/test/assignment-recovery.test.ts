@@ -652,6 +652,51 @@ describe("two attempts of one item", () => {
   );
 
   test(
+    "an attempt still starting its run when the assignment closes (and its fences are dropped) stops that run",
+    async () => {
+      const { row } = await active("Close mid-start", ["x"]);
+      const { deps } = server;
+      const real = deps.db;
+      let fired = false;
+      // While the attempt's run row is written: the assignment closes and its loop's last decision drops the fences.
+      deps.db = new Proxy(real, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop, target);
+          if (prop !== "insert") return typeof value === "function" ? value.bind(target) : value;
+          return (table: typeof runs) => {
+            const builder = target.insert(table);
+            if (table !== runs || fired) return builder;
+            return wrapQuery(builder, async () => {
+              fired = true;
+              await real.update(assignments).set({ status: "canceled" }).where(eq(assignments.id, row.id));
+              expect(await stepNext({ ...deps, db: real }, row.id)).toEqual({ type: "end" });
+            });
+          };
+        },
+      });
+      try {
+        await act(deps, row.id, { type: "work", itemId: "p1", n: 1 });
+      } finally {
+        deps.db = real;
+      }
+      expect(fired).toBe(true);
+      await server.deps.runtime.settle();
+      const [w] = await real
+        .select()
+        .from(assignmentWork)
+        .where(eq(assignmentWork.id, workIdOf(row.id, "p1", 1)));
+      const turnRuns = await real
+        .select({ status: runs.status })
+        .from(runs)
+        .innerJoin(messages, eq(messages.id, runs.sourceMessageId))
+        .where(eq(messages.clientId, workIdOf(row.id, "p1", 1)));
+      expect([w?.status, turnRuns.map((r) => r.status)]).toEqual(["ended", ["canceled"]]);
+      await close(row.id);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "the fences of an item that ended, and of an assignment that ended, are forgotten",
     async () => {
       const { row, agentId } = await active("Fence end", ["x", "y"]);
@@ -944,38 +989,147 @@ describe("the local engine stopping", () => {
   );
 });
 
-describe("two steps on one validation round", () => {
-  test(
-    "two validate steps at once call the verifier once and spend one round",
-    async () => {
-      const { row } = await active("Twice", ["Docs"]);
+describe("two steps on one validation", () => {
+  /** A barrier: `wait` resolves once `open` was called (or at once, if it already was). */
+  const barrier = () => {
+    let open!: () => void;
+    const opened = new Promise<void>((r) => {
+      open = r;
+    });
+    return { open, wait: () => opened };
+  };
+  const claimKey = (id: string) => `assignment-validate:${id}`;
+  const claimOf = async (id: string) =>
+    (
+      await server.deps.db
+        .select()
+        .from(schema.effectKeys)
+        .where(eq(schema.effectKeys.key, claimKey(id)))
+    )[0];
+  const doneItems = async (row: AssignmentRow, ids: string[]) => {
+    for (const id of ids)
       await server.deps.db
         .update(assignmentPlanItems)
         .set({ status: "done", summary: "wrote them" })
-        .where(and(eq(assignmentPlanItems.assignmentId, row.id), eq(assignmentPlanItems.id, "p1")));
+        .where(and(eq(assignmentPlanItems.assignmentId, row.id), eq(assignmentPlanItems.id, id)));
+  };
+  const verdicts = (items: Parameters<Verifier>[2], passes: boolean) => ({
+    ok: true as const,
+    runId: null,
+    verdicts: items.map((i) => ({ id: i.item.id, passes, reason: passes ? "ok" : "No" })),
+  });
+
+  test(
+    "two steps on the same round call the verifier once and spend one round",
+    async () => {
+      const { row } = await active("Twice", ["Docs"]);
+      await doneItems(row, ["p1"]);
+      // The first call waits until the other step is done (it found the round held).
+      const other = barrier();
       let calls = 0;
       const counting: Verifier = async (_deps, _row, items) => {
         calls++;
-        await Bun.sleep(50);
-        return {
-          ok: true,
-          runId: null,
-          verdicts: items.map((i) => ({ id: i.item.id, passes: false, reason: "No" })),
-        };
+        await other.wait();
+        return verdicts(items, false);
       };
       const deps = { ...server.deps, assignmentVerifier: counting };
       const step = { type: "validate" as const, itemIds: ["p1"], round: 1 };
-      const waits = await Promise.all([act(deps, row.id, step), act(deps, row.id, step)]);
+      const first = act(deps, row.id, step);
+      try {
+        await waitFor(async () => calls === 1);
+        expect(await act(deps, row.id, step)).toBe(30_000);
+      } finally {
+        other.open();
+      }
+      await first;
       const p1 = (await planOf(server.deps, row.id)).find((i) => i.id === "p1");
-      expect([calls, p1?.checks]).toEqual([1, 1]);
-      // The step that found the round held looks again later; the round's claim is gone once it's judged.
-      expect(waits.filter((w) => w === 30_000)).toHaveLength(1);
-      expect(
+      expect([calls, p1?.checks, await claimOf(row.id)]).toEqual([1, 1, undefined]);
+      await close(row.id);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a step decided for round 1 after round 1 was spent calls nothing; nor does round 2 while round 1 still writes",
+    async () => {
+      const { row } = await active("Rounds", ["Docs", "Tests"]);
+      await doneItems(row, ["p1", "p2"]);
+      let calls = 0;
+      // Round 1's verifier fails: it counts as a round (checks + 1) and frees the claim.
+      const unparsed: Verifier = async () => {
+        calls++;
+        return { ok: false, code: "unparsed", error: "no verdict" };
+      };
+      const step = { type: "validate" as const, itemIds: ["p1", "p2"], round: 1 };
+      await act({ ...server.deps, assignmentVerifier: unparsed }, row.id, step);
+      expect(calls).toBe(1);
+      // A second step decided for round 1 before that: it finds the round spent and calls nothing.
+      expect(await act({ ...server.deps, assignmentVerifier: unparsed }, row.id, step)).toBeNull();
+      expect(calls).toBe(1);
+
+      // Round 2 is held while its call is out; meanwhile p1's checks already moved on (a partial write) and a
+      // step decides round 3 for both: it waits for the claim instead of calling.
+      const out = barrier();
+      const slow: Verifier = async (_deps, _row, items) => {
+        calls++;
+        await out.wait();
+        return verdicts(items, false);
+      };
+      const second = act({ ...server.deps, assignmentVerifier: slow }, row.id, { ...step, round: 2 });
+      try {
+        await waitFor(async () => calls === 2);
         await server.deps.db
-          .select()
-          .from(schema.effectKeys)
-          .where(eq(schema.effectKeys.key, `assignment-validate:${row.id}:1`)),
-      ).toEqual([]);
+          .update(assignmentPlanItems)
+          .set({ checks: 2 })
+          .where(and(eq(assignmentPlanItems.assignmentId, row.id), eq(assignmentPlanItems.id, "p1")));
+        expect(await act({ ...server.deps, assignmentVerifier: slow }, row.id, { ...step, round: 3 })).toBe(
+          30_000,
+        );
+        expect(calls).toBe(2);
+      } finally {
+        out.open();
+      }
+      await second;
+      await close(row.id);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a step past the lease loses the claim to the next one, and its end doesn't release the next one's claim",
+    async () => {
+      const { row } = await active("Lease", ["Docs"]);
+      await doneItems(row, ["p1"]);
+      const later = barrier();
+      let calls = 0;
+      let next: Promise<number | null> | null = null;
+      // The first step's call outlives the lease; a second step takes the claim and is still calling when the
+      // first one ends.
+      const verifier: Verifier = async (_deps, _row, items) => {
+        calls++;
+        if (calls === 1) {
+          await server.deps.db
+            .update(schema.effectKeys)
+            .set({ createdAt: new Date(Date.now() - 21 * MIN) })
+            .where(eq(schema.effectKeys.key, claimKey(row.id)));
+          next = act(deps, row.id, { type: "validate", itemIds: ["p1"], round: 1 });
+          await waitFor(async () => calls === 2);
+          return verdicts(items, false);
+        }
+        await later.wait();
+        return verdicts(items, false);
+      };
+      const deps = { ...server.deps, assignmentVerifier: verifier };
+      try {
+        await act(deps, row.id, { type: "validate", itemIds: ["p1"], round: 1 });
+        // The first step is done; the second one's claim is still there.
+        const claim = await claimOf(row.id);
+        expect(claim?.status).toBe("pending");
+      } finally {
+        later.open();
+      }
+      await next;
+      expect(await claimOf(row.id)).toBeUndefined();
       await close(row.id);
     },
     SERVER_TEST_MS,

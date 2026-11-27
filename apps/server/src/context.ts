@@ -137,6 +137,8 @@ export interface RuntimePort {
     limits?: RunLimits;
     /** The attempt's fencing token: a late attempt older than one already seen is turned away (`fenced`). */
     fence?: RunFence;
+    /** Read once the run took the message: false (the work is no longer this attempt's) stops it, `fenced`. */
+    admit?: () => Promise<boolean>;
   }): Promise<
     | { ok: true; runId: string; done: Promise<void> }
     | { ok: false; code: "budget" | "personal_plan" | "busy" | "fenced" }

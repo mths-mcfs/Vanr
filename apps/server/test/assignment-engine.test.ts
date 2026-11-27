@@ -1007,6 +1007,53 @@ describe("the engine on its loop", () => {
   );
 
   test(
+    "a refusal that lands after the item was edited doesn't take back a turn of the new epoch",
+    async () => {
+      const row = await idleOnRunner("Edited meanwhile", ["Build"]);
+      const hub = server.deps.runners;
+      // Between the claim and the refusal: the owner edits the item (new epoch, turns cleared) and the new epoch's
+      // own attempt already counted its turn.
+      let edited = false;
+      const db = new Proxy(server.deps.db, {
+        get(target, prop) {
+          const value = Reflect.get(target, prop, target);
+          if (prop !== "select") return typeof value === "function" ? value.bind(target) : value;
+          return (...args: Parameters<typeof target.select>) =>
+            wrapQuery(target.select(...args), async (q) => {
+              if (edited || !String(q.toSQL?.().sql ?? "").includes('from "runner_jobs"')) return;
+              edited = true;
+              await writePlan(server.deps, row.id, {
+                author: { type: "person", id: ana.user.id },
+                mode: "person",
+                items: [{ id: "p1", title: "Build it again" }],
+              });
+              await server.deps.db
+                .update(schema.assignmentPlanItems)
+                .set({ turns: 1 })
+                .where(
+                  and(
+                    eq(schema.assignmentPlanItems.assignmentId, row.id),
+                    eq(schema.assignmentPlanItems.id, "p1"),
+                  ),
+                );
+            });
+        },
+      });
+      const offline: AppDeps = {
+        ...server.deps,
+        db,
+        runners: Object.assign(Object.create(hub), { isOnline: () => false }),
+      };
+      await act(offline, row.id, { type: "work", itemId: "p1", n: 1 });
+      expect(edited).toBe(true);
+      const p1 = await itemOf(row, "p1");
+      expect([p1?.epoch, p1?.turns]).toEqual([1, 1]);
+      await server.deps.db.update(assignments).set({ status: "canceled" }).where(eq(assignments.id, row.id));
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "starts refused because the runner is offline don't use up the item's turns",
     async () => {
       const row = await idleOnRunner("Offline", ["Build"]);

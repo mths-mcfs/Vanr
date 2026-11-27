@@ -202,11 +202,17 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("the assignment engine on Postgre
         .update(assignmentPlanItems)
         .set({ status: "done", summary: "wrote them" })
         .where(and(eq(assignmentPlanItems.assignmentId, row.id), eq(assignmentPlanItems.id, "p1")));
+      // The first call waits for the other step: until that one also calls (no lock) or ends (it found the claim
+      // held), so without the lock both steps are past the claim before either writes a verdict.
       let calls = 0;
-      // Slow enough that, without the lock, both steps are past the claim before either writes its verdict.
+      let other!: () => void;
+      const otherMoved = new Promise<void>((r) => {
+        other = r;
+      });
       const counting: Verifier = async (_deps, _row, items) => {
         calls++;
-        await Bun.sleep(300);
+        if (calls === 1) await otherMoved;
+        else other();
         return {
           ok: true,
           runId: null,
@@ -214,13 +220,18 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("the assignment engine on Postgre
         };
       };
       const step = { type: "validate" as const, itemIds: ["p1"], round: 1 };
-      await forcedPair(
-        admin,
-        "validate-claim",
-        "select",
-        (_side, hooks) => act({ ...withDb(hooks), assignmentVerifier: counting }, row.id, step),
-        { match: "effect_keys" },
-      );
+      try {
+        await forcedPair(
+          admin,
+          "validate-claim",
+          "select",
+          (_side, hooks) =>
+            act({ ...withDb(hooks), assignmentVerifier: counting }, row.id, step).finally(() => other()),
+          { match: "effect_keys" },
+        );
+      } finally {
+        other();
+      }
       const [p1] = await server.deps.db
         .select()
         .from(assignmentPlanItems)

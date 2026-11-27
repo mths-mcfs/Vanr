@@ -77,6 +77,40 @@ describe("the agent's runner, for whoever may use it", () => {
       expect((await results(betoRun?.id ?? "")).join()).toContain(refused);
       expect(await results(anaRun?.id ?? "")).toEqual([]);
       expect(execs()).not.toContain(SECRET);
+
+      // The run ends while Beto's message is being checked: the message isn't lost with it, it opens a run.
+      const short = await post(ana, `@${lia.handle} [[slow:150]] a short one`, "a3");
+      await waitFor(async () => server.deps.runtime.isBusy(lia.id));
+      const runtime = server.runtime;
+      const check = runtime["mayUseRunner"].bind(runtime);
+      let reached!: () => void;
+      const checking = new Promise<void>((r) => {
+        reached = r;
+      });
+      let release!: () => void;
+      const held = new Promise<void>((r) => {
+        release = r;
+      });
+      runtime["mayUseRunner"] = async (...args: Parameters<typeof check>) => {
+        reached();
+        await held;
+        return check(...args);
+      };
+      try {
+        const posting = call(beto, "POST", path, { body: `@${lia.handle} and me?`, clientId: "b3" });
+        await checking;
+        // Ana's run ends while the check waits.
+        await waitFor(async () => (await runOf(short))?.status === "done");
+        release();
+        const late = (await posting).body.id as string;
+        await settle(server);
+        const lateRun = await runOf(late);
+        expect(lateRun?.id).toBeDefined();
+        expect(lateRun?.id).not.toBe((await runOf(short))?.id);
+      } finally {
+        release();
+        runtime["mayUseRunner"] = check;
+      }
     },
     SERVER_TEST_MS,
   );

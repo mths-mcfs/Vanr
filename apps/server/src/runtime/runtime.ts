@@ -905,6 +905,11 @@ export class AgentRuntime implements RuntimePort {
     /** The run's hard caps. With them, the message doesn't go into a run already live in the conversation (`busy`). */
     limits?: RunLimits;
     fence?: RunFence;
+    /**
+     * Read once the run took the message: whether the work is still this attempt's (the caller's own records).
+     * False stops what this attempt started and answers `fenced`.
+     */
+    admit?: () => Promise<boolean>;
   }): Promise<
     | { ok: true; runId: string; done: Promise<void> }
     | { ok: false; code: "budget" | "personal_plan" | "busy" | "fenced" }
@@ -941,8 +946,15 @@ export class AgentRuntime implements RuntimePort {
         continue;
       }
       if (fence) running.fence = fence;
-      await this.steer(running, trigger);
-      return { ok: true, runId: running.runId, done: running.done };
+      const took = (await this.steer(running, trigger)) ?? running.runId;
+      const into = this.live.get(took);
+      if (fence && into) into.fence = fence;
+      if (input.admit && !(await input.admit())) {
+        // Gone stale while it went in (the work ended, the assignment closed): its turn in the run stops.
+        this.cancel(took, null, fence);
+        return { ok: false, code: "fenced" };
+      }
+      return { ok: true, runId: took, done: into?.done ?? running.done };
     }
     if (apiBudgetGates(agent) && (await this.budgetCheck(agent)) === "exhausted")
       return { ok: false, code: "budget" };
@@ -964,6 +976,12 @@ export class AgentRuntime implements RuntimePort {
         return { ok: false, code: "fenced" };
       }
       started.fence = fence;
+    }
+    if (input.admit && !(await input.admit())) {
+      // The run is on the air, but the work is no longer this attempt's (it ended, or the assignment closed
+      // while the run was starting): it stops here.
+      this.cancel(runId, null, fence);
+      return { ok: false, code: "fenced" };
     }
     return { ok: true, runId, done: started?.done ?? Promise.resolve() };
   }
@@ -1032,13 +1050,20 @@ export class AgentRuntime implements RuntimePort {
     return !!member && canUseRunner({ userId, role: member.role }, runner);
   }
 
-  private async steer(live: Live, row: MessageRow) {
+  /**
+   * Puts the message into the live run, or off to its next run. Returns the run that took it now (null when it
+   * waits for the next run).
+   */
+  private async steer(live: Live, row: MessageRow): Promise<string | null> {
     const { db, hub } = this.deps;
     const stop = isStopRequest(row.body);
-    if (await this.defers(live, row)) {
+    const deferred = await this.defers(live, row);
+    // The run ended during the check: its end already looked at what waited for it, so the message goes in again.
+    if (this.live.get(live.runId) !== live) return this.readmit(live, row);
+    if (deferred) {
       // "stop" for a run that is already ending changes nothing; anything else becomes the next run.
       if (!(live.closing && stop)) live.after.push(row);
-      return;
+      return null;
     }
     const who = personOf(row);
     if (who !== null && who !== live.person.id) live.person.id = null;
@@ -1061,16 +1086,35 @@ export class AgentRuntime implements RuntimePort {
     if (stop) {
       live.canceledBy = row.authorId;
       live.controller.abort(new RunCanceled());
-      return;
+      return live.runId;
     }
     // The agent asked and is waiting: the asked person's message is the answer, not a new request. A message
     // from someone else joins the run as an ordinary message.
     const q = live.waitingQuestion;
     if (q && (q.askedUserId === null || q.askedUserId === row.authorId)) {
       const text = row.body.replace(/@[a-z0-9][a-z0-9_-]{1,31}/gi, "").trim() || row.body;
-      if (await this.answerQuestion(q.id, text, row.authorId)) return;
+      if (await this.answerQuestion(q.id, text, row.authorId)) return live.runId;
     }
     live.inbox.push(row);
+    return live.runId;
+  }
+
+  /** A message for a run that ended while it was being let in: the conversation's next run takes it. */
+  private async readmit(gone: Live, row: MessageRow): Promise<string | null> {
+    // "stop" for a run that already ended changes nothing.
+    if (isStopRequest(row.body)) return null;
+    // Its end is over, including the start of the run that took what waited for it.
+    await gone.done;
+    const id = this.byKey.get(gone.key);
+    const current = id ? this.live.get(id) : undefined;
+    if (current) return this.steer(current, row);
+    return this.startRun({
+      agent: gone.agent,
+      channel: gone.channel,
+      threadId: gone.threadId,
+      key: gone.key,
+      trigger: row,
+    });
   }
 
   // ---- execution ----

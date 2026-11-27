@@ -637,9 +637,10 @@ describe("asking an agent", () => {
         call(ana, workspaceId, "POST", "/issues", { title: "Write the FAQ" }),
         201,
       );
+      // The answer already says it: the routing blocked the work before the route answered.
       expect(
         await ok<Issue>(call(ana, workspaceId, "POST", `/issues/${issue.id}/ask-agent`, { agentId: lia })),
-      ).toMatchObject({ work: { state: "working" } });
+      ).toMatchObject({ work: { state: "blocked", reason: "budget" } });
       await settle(server);
       expect((await issueOf(ana, workspaceId, issue.number)).work).toMatchObject({
         state: "blocked",
