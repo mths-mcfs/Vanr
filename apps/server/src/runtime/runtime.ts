@@ -1388,7 +1388,7 @@ export class AgentRuntime implements RuntimePort {
             })
             .where(eq(approvals.id, id))
             .returning();
-          if (row) await publishApproval(this.deps, row as ApprovalRow, "approval.resolved");
+          if (row) await publishApproval(this.deps, row, "approval.resolved");
         },
         ask: async (text, choices) => {
           const [row] = await db
@@ -1558,7 +1558,8 @@ export class AgentRuntime implements RuntimePort {
         }
         const reservation = held?.reservation ?? null;
         try {
-          for await (const ev of (provider as ModelProvider).stream({
+          if (!provider) throw new ModelError("network", "No provider for the turn");
+          for await (const ev of provider.stream({
             model: live.agent.model,
             system,
             messages: history,
@@ -1601,16 +1602,17 @@ export class AgentRuntime implements RuntimePort {
         usage = addUsage(usage, result.usage);
         // One ledger line per call. The Claude/ChatGPT plan isn't charged here: the runner run's line has cost 0
         // and doesn't weigh on the cap.
+        const source: UsageSource = live.replyMeta?.fromRoutine
+          ? "routine"
+          : live.assignment
+            ? "assignment"
+            : "chat";
         const call = {
           agent: live.agent,
           userId: personOf(live.trigger),
           runId: live.runId,
           channelId: live.channel.id,
-          source: (live.replyMeta?.fromRoutine
-            ? "routine"
-            : live.assignment
-              ? "assignment"
-              : "chat") as UsageSource,
+          source,
           usage: result.usage,
           assignmentId: live.assignment?.assignmentId ?? null,
         };
