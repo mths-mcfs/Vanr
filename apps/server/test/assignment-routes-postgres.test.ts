@@ -403,7 +403,7 @@ describe("answering a submission on Postgres", () => {
           "select",
           (side, hooks) =>
             ended(
-              patchAssignment(withDb(server.deps, hooks), row, {
+              patchAssignment(withDb(server.deps, hooks), ctx.ana, row, {
                 limits: side === "A" ? { dollars: 1 } : { steps: 3 },
               }),
             ),

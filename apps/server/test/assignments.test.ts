@@ -11,7 +11,7 @@ import { newId } from "@vanr/engine/ids";
 import { and, eq } from "drizzle-orm";
 import { createAssignment } from "../src/assignments/engine";
 import { jobIdOf, workIdOf } from "../src/assignments/keys";
-import { finishAssignment, requestSubmissionChanges } from "../src/assignments/lifecycle";
+import { finishAssignment, patchAssignment, requestSubmissionChanges } from "../src/assignments/lifecycle";
 import type { RunningServer } from "../src/server";
 import { agentRuntime, pairRunner, passing, seedAgent } from "./assignment-kit";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
@@ -1125,9 +1125,13 @@ describe("two people at once on the same list", () => {
           rules: ["npm test *"],
         })),
       );
-      await Promise.all(
+      const always = await Promise.all(
         commands.map((id) => call(t.ana, "POST", `${t.path}/commands/${id}/decide`, { decision: "always" })),
       );
+      expect(always.map((r) => [r.status, r.body.state])).toEqual([
+        [200, "allowed"],
+        [200, "allowed"],
+      ]);
       expect((await call(t.ana, "GET", `${t.path}/commands`)).body.rules).toEqual(["npm test *"]);
 
       const handOvers = await Promise.all([
@@ -1171,6 +1175,9 @@ describe("what the review of #79 found", () => {
           { reason: "tool_off" },
         ]);
         expect(await status(t.assignmentId)).toBe("proposed");
+        // Picking a runner that can't run the executor is rejected the same way.
+        const pick = await call(t.ana, "PUT", `${t.path}/runner`, { runnerId: runner.runnerId });
+        expect([pick.status, code(pick)]).toEqual([409, "assignment.executor_unavailable"]);
       } finally {
         await runner.close();
       }
@@ -1241,6 +1248,9 @@ describe("what the review of #79 found", () => {
         (e: { kind: string }) => e.kind,
       );
       expect(events.at(-1)).toBe("closed");
+      // The copy really failed: no page is linked to the assignment.
+      const [row] = await server.deps.db.select().from(assignments).where(eq(assignments.id, t.assignmentId));
+      expect(row?.wikiPageId).toBeNull();
     },
     SERVER_TEST_MS,
   );
@@ -1312,6 +1322,19 @@ describe("the transitions on their own", () => {
         finishAssignment(server.deps, me, row, { outcome: "done", wiki: false, submissionId: sub }),
       ).rejects.toMatchObject({ status: 409, code: "assignment.submission_closed" });
       expect(await status(t.assignmentId)).toBe("wrapping_up");
+      // Who manages is decided on the locked row: someone who isn't the owner (any more) can't change it.
+      const beto = {
+        workspaceId: t.workspaceId,
+        userId: t.beto.user.id,
+        role: "member" as const,
+        handle: "beto",
+      };
+      await expect(patchAssignment(server.deps, beto, row, { limits: { dollars: 0 } })).rejects.toMatchObject(
+        {
+          status: 403,
+          code: "assignment.forbidden",
+        },
+      );
       await finishAssignment(server.deps, me, row, { outcome: "canceled", wiki: false });
       await expect(requestSubmissionChanges(server.deps, me, row, sub, "More")).rejects.toMatchObject({
         status: 409,

@@ -21,7 +21,13 @@ import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
 import { agentInWorkspace, requireAgentEditor } from "../agents";
-import { addOpinion, addRules, answerSuggestion, checkSubmissionItem } from "../assignments/answers";
+import {
+  addOpinion,
+  allowJobCommands,
+  answerSuggestion,
+  checkSubmissionItem,
+  decideCommand,
+} from "../assignments/answers";
 import { assignmentUsage, ceilingState } from "../assignments/budget";
 import {
   type AssignmentRow,
@@ -540,7 +546,7 @@ export function registerAssignments(app: Hono<AppEnv>) {
         target: [assignmentParticipants.assignmentId, assignmentParticipants.userId],
         set: { role },
       });
-    const accepted = await deps.db
+    await deps.db
       .update(assignmentJoinRequests)
       .set({ status: "accepted", role, decidedAt: deps.now() })
       .where(
@@ -549,10 +555,9 @@ export function registerAssignments(app: Hono<AppEnv>) {
           eq(assignmentJoinRequests.userId, userId),
           eq(assignmentJoinRequests.status, "pending"),
         ),
-      )
-      .returning();
-    if (accepted.length)
-      await closeNotifications(deps, row.workspaceId, `assignment:${row.id}:join:${userId}`);
+      );
+    // Closed whether or not a pending request was accepted now: a repeat finishes a close that failed before.
+    await closeNotifications(deps, row.workspaceId, `assignment:${row.id}:join:${userId}`);
     publishAssignment(deps, row, "participants");
     return c.json(await participantsOf(deps, row));
   });
@@ -687,7 +692,7 @@ export function registerAssignments(app: Hono<AppEnv>) {
     const { row } = await viewAssignment(deps, me, param(c, "assignmentId"));
     requireManager(me, row);
     const input = await readJson(c, updateAssignmentBody);
-    const next = await patchAssignment(deps, row, input);
+    const next = await patchAssignment(deps, me, row, input);
     if (input.limits || input.dueAt !== undefined) deps.assignmentEngine.wake(row.id);
     return c.json(await assignmentFor(deps, next, me));
   });
@@ -701,6 +706,7 @@ export function registerAssignments(app: Hono<AppEnv>) {
     const input = await readJson(c, runnerBody);
     const r = await runnerInWorkspace(deps.db, me.workspaceId, input.runnerId);
     if (!canUseRunner(me, r)) throw forbidden("Only who paired that runner can use it");
+    if (row.executor !== "agent") requireExecutor(r, row.executor, row.ownerId);
     if ((await runningJobsOf(deps.db, row.id)).length > 0)
       throw conflict("assignment.job_running", "Wait for the running job or stop it first");
     const next = await updateAssignment(
@@ -814,20 +820,13 @@ export function registerAssignments(app: Hono<AppEnv>) {
     );
     const state = decision === "deny" ? "denied" : "allowed";
     // Only a pending command changes: the second click finds it decided.
-    const [cmd] = await deps.db
-      .update(assignmentCommands)
-      .set({ state, always: decision === "always", decidedBy: me.userId, decidedAt: deps.now() })
-      .where(
-        and(
-          eq(assignmentCommands.id, param(c, "commandId")),
-          eq(assignmentCommands.assignmentId, row.id),
-          eq(assignmentCommands.state, "pending"),
-        ),
-      )
-      .returning();
+    const cmd = await decideCommand(deps, {
+      assignmentId: row.id,
+      commandId: param(c, "commandId"),
+      decision,
+      by: me.userId,
+    });
     if (!cmd) throw conflict("assignment.command_closed", "This command was already decided");
-    if (decision === "always")
-      await addRules(deps, { assignmentId: row.id, wanted: cmd.rules, by: me.userId });
     wake(cmd.id, state);
     if (cmd.messageId)
       await closeNotifications(deps, row.workspaceId, `assignment:${row.id}:approval:${cmd.messageId}`);
@@ -850,35 +849,15 @@ export function registerAssignments(app: Hono<AppEnv>) {
       .where(and(eq(runnerJobs.id, input.jobId), eq(runnerJobs.assignmentId, row.id)));
     if (!job) throw notFound("Job not found");
     // Only commands this job was denied and that still wait are allowed; their rules are what gets saved.
-    const waiting = await deps.db
-      .select()
-      .from(assignmentCommands)
-      .where(
-        and(
-          eq(assignmentCommands.assignmentId, row.id),
-          eq(assignmentCommands.jobId, job.id),
-          eq(assignmentCommands.state, "pending"),
-        ),
-      );
-    const asked = new Set(input.commands);
-    const freed = waiting.filter((cmd) => asked.has(cmd.command));
-    if (freed.length === 0) throw conflict("assignment.command_closed", "None of these commands is waiting");
+    const { freed, rules: have } = await allowJobCommands(deps, {
+      assignmentId: row.id,
+      jobId: job.id,
+      commands: input.commands,
+      by: me.userId,
+    });
     const wanted = [
       ...new Set(freed.flatMap((cmd) => (cmd.rules.length ? cmd.rules : [ruleFor(cmd.command)]))),
     ];
-    const have = await addRules(deps, { assignmentId: row.id, wanted, by: me.userId });
-    await deps.db
-      .update(assignmentCommands)
-      .set({ state: "allowed", decidedBy: me.userId, decidedAt: deps.now() })
-      .where(
-        and(
-          inArray(
-            assignmentCommands.id,
-            freed.map((cmd) => cmd.id),
-          ),
-          eq(assignmentCommands.state, "pending"),
-        ),
-      );
     for (const cmd of freed)
       if (cmd.messageId)
         await closeNotifications(deps, row.workspaceId, `assignment:${row.id}:approval:${cmd.messageId}`);

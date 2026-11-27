@@ -32,7 +32,14 @@ import {
   runningJobsOf,
   updateAssignment,
 } from "./core";
-import { cancelJobs, copyToWiki, rulesOf, startAssignmentJob, stopAgentRun } from "./engine";
+import {
+  cancelJobs,
+  copyToWiki,
+  rulesOf,
+  startAssignmentJob,
+  stopAgentRun,
+  withAssignmentJobs,
+} from "./engine";
 import { assignmentEvent } from "./events";
 import { writePlan } from "./plan";
 
@@ -141,6 +148,7 @@ export function serialized<T>(key: string, fn: () => Promise<T>): Promise<T> {
  */
 export async function patchAssignment(
   deps: AppDeps,
+  me: WorkspaceMember,
   row: AssignmentRow,
   input: {
     resumeJobs?: boolean;
@@ -151,6 +159,8 @@ export async function patchAssignment(
   const next = await deps.db.transaction(async (tx) => {
     const [fresh] = await tx.select().from(assignments).where(eq(assignments.id, row.id)).for("update");
     if (!fresh) throw closedError();
+    // Who manages is decided on the locked row: a hand-over committed meanwhile counts.
+    requireManager(me, fresh);
     const given = input.limits;
     const pick = (v: number | null | undefined, was: number | null) => (v !== undefined ? v : was);
     const limits = given
@@ -444,7 +454,20 @@ export async function transferAssignment(
   row: AssignmentRow,
   input: { userId: string; runnerId: { set: string | null } | null },
 ): Promise<AssignmentRow> {
-  const next = await deps.db.transaction(async (tx) => {
+  // In the assignment's job queue: a job start in progress either lands first (and is seen running here) or
+  // reads the new owner and runner after.
+  const next = await withAssignmentJobs(row.id, () => transferNow(deps, me, row, input));
+  publishAssignment(deps, next, "participants");
+  return next;
+}
+
+function transferNow(
+  deps: AppDeps,
+  me: WorkspaceMember,
+  row: AssignmentRow,
+  input: { userId: string; runnerId: { set: string | null } | null },
+): Promise<AssignmentRow> {
+  return deps.db.transaction(async (tx) => {
     const fresh = await lockAssignment(tx, row.id);
     if (fresh.ownerId !== row.ownerId || fresh.runnerId !== row.runnerId || fresh.executor !== row.executor)
       throw conflict("assignment.changed", "This assignment changed meanwhile; open it again");
@@ -485,6 +508,4 @@ export async function transferAssignment(
     if (!moved) throw closedError();
     return moved;
   });
-  publishAssignment(deps, next, "participants");
-  return next;
 }
