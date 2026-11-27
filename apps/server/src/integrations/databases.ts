@@ -15,7 +15,7 @@ import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { createSealer, type Sealer } from "@vanr/engine/seal";
 import type { SqlTarget } from "@vanr/engine/sqlconn";
-import { and, count, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import type { AppDeps, WorkspaceMember } from "../context";
 import { HttpError, notFound } from "../http";
@@ -410,8 +410,10 @@ interface AgentDb {
   link: AgentDatabaseRow;
 }
 
+type DbRun = Pick<ToolContext, "deps" | "agent" | "workspaceId" | "channel">;
+
 /** The databases the agent reads, only of the run's workspace and not turned off in the run's channel. */
-async function agentDbs(ctx: ToolContext): Promise<AgentDb[]> {
+async function agentDbs(ctx: DbRun): Promise<AgentDb[]> {
   const links = await ctx.deps.db
     .select()
     .from(agentDatabases)
@@ -576,11 +578,7 @@ const dbQuery = define({
 
 export const DATABASE_TOOLS: readonly ToolDef<unknown>[] = [dbTables, dbDescribe, dbQuery];
 
-/** Does the agent read any database? */
-export async function hasDatabases(db: Db, agentId: string): Promise<boolean> {
-  const [row] = await db
-    .select({ n: count() })
-    .from(agentDatabases)
-    .where(and(eq(agentDatabases.agentId, agentId), eq(agentDatabases.level, "read")));
-  return (row?.n ?? 0) > 0;
+/** Does the agent read any database in this run (its workspace, and not turned off in its channel)? */
+export async function hasDatabases(run: DbRun): Promise<boolean> {
+  return (await agentDbs(run)).length > 0;
 }

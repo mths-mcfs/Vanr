@@ -66,7 +66,8 @@ function shallowArgs(schema: Record<string, unknown>) {
     schema.properties && typeof schema.properties === "object" ? Object.keys(schema.properties) : [];
   return anyArgs.superRefine((args, ctx) => {
     for (const key of required)
-      if (!(key in args)) ctx.addIssue({ code: "custom", message: `Missing required argument "${key}"` });
+      if (!Object.hasOwn(args, key))
+        ctx.addIssue({ code: "custom", message: `Missing required argument "${key}"` });
     if (schema.additionalProperties === false)
       for (const key of Object.keys(args))
         if (!known.includes(key)) ctx.addIssue({ code: "custom", message: `Unknown argument "${key}"` });
@@ -200,8 +201,8 @@ export function connectionTools(
         async run(ctx, input) {
           repoCheck(input);
           // Stricter than the source: an approval can come long after the plan, so the call runs only while the
-          // connection is still active and the tool still on at this run's level.
-          const live = await liveConnection(deps, conn.id, tool.name, level);
+          // connection is still active, the tool still on, and the agent's level in this channel still covers it.
+          const live = await stillAllowed(deps, agent, ctx.channel.id, conn.id, tool.name, name);
           let client = clients.get(conn.id);
           if (!client) {
             client = mcpFor(deps, live);
@@ -270,20 +271,62 @@ async function askScope(
   };
 }
 
-/** The connection as it is now: still active, with the tool still on at the level the run was given. */
-async function liveConnection(
+/** The connections that apply to the agent (OAuth that hasn't come back isn't an account yet), with their service. */
+async function candidatesOf(deps: AppDeps, agent: AgentRow) {
+  return [
+    ...(await activeConnections(deps.db, agent.workspaceId)),
+    ...(await agentConnections(deps.db, agent.id)),
+  ]
+    .filter((c) => c.status !== "pending" && c.workspaceId === agent.workspaceId)
+    .map((c) => ({ ...c, key: serviceKey(c) }));
+}
+
+type Candidate = Awaited<ReturnType<typeof candidatesOf>>[number];
+
+/**
+ * The agent's level on a connection in a channel: the workspace's grant (an own account writes), lowered by the
+ * channel's rules on that service. null when the connection is out, or replaced by the agent's own account.
+ */
+function levelIn(
+  agent: AgentRow,
+  conn: Candidate,
+  candidates: readonly Candidate[],
+  allow: ReturnType<typeof allowance>,
+  rules: Awaited<ReturnType<typeof channelRulesOf>>,
+  channelId: string,
+) {
+  if (conn.status !== "active") return null;
+  const granted = conn.agentId === agent.id ? "write" : allow.connection(conn);
+  const sameService = candidates.filter((c) => c.key === conn.key).map((c) => c.id);
+  return effectiveLevel(granted, rules, channelId, sameService);
+}
+
+/**
+ * The connection as it is now, if the call may still go out: active and still the agent's account for the
+ * service, the tool on and not denied, and the agent's current level in the channel enough for the tool.
+ */
+async function stillAllowed(
   deps: AppDeps,
+  agent: AgentRow,
+  channelId: string,
   connectionId: string,
   tool: string,
-  level: "read" | "write",
+  exposed: string,
 ): Promise<ConnectionRow> {
-  const [row] = await deps.db.select().from(connections).where(eq(connections.id, connectionId));
-  const now = row?.tools.find((t) => t.name === tool);
+  const allow = allowance(await grantsOf(deps.db, agent.id));
+  const rules = await channelRulesOf(deps.db, agent.workspaceId, agent.id);
+  const candidates = await candidatesOf(deps, agent);
+  const conn = credentialsFor(candidates, agent.id).find((c) => c.id === connectionId);
+  const now = conn?.tools.find((t) => t.name === tool);
+  const level = conn && levelIn(agent, conn, candidates, allow, rules, channelId)?.level;
   const on =
-    row && !row.revokedAt && row.status === "active" && now?.confirmed && now.access !== "off"
-      ? level === "write" || now.access === "read"
-      : false;
-  if (!row || !on) throw new ToolInputError("This connection or tool is no longer available to the agent.");
+    now?.confirmed &&
+    now.access !== "off" &&
+    !allow.denied(exposed) &&
+    !allow.denied(tool) &&
+    (level === "write" || (level === "read" && now.access === "read"));
+  if (!conn || !on) throw new ToolInputError("This connection or tool is no longer available to the agent.");
+  const { key: _, ...row } = conn;
   return row;
 }
 
@@ -304,18 +347,9 @@ export async function toolsFor(
   const taken = new Set(tools.map((t) => t.name));
   const clients = new Map<string, Promise<McpClient>>();
   const rules = await channelRulesOf(deps.db, workspaceId, agent.id);
-  // An OAuth that hasn't come back isn't an account yet: it must not take the workspace's away from the agent.
-  const candidates = [
-    ...(await activeConnections(deps.db, workspaceId)),
-    ...(await agentConnections(deps.db, agent.id)),
-  ]
-    .filter((c) => c.status !== "pending" && c.workspaceId === workspaceId)
-    .map((c) => ({ ...c, key: serviceKey(c) }));
-  const sameService = (key: string) => candidates.filter((c) => c.key === key).map((c) => c.id);
+  const candidates = await candidatesOf(deps, agent);
   for (const conn of credentialsFor(candidates, agent.id)) {
-    if (conn.status !== "active") continue;
-    const granted = conn.agentId === agent.id ? "write" : allow.connection(conn);
-    const eff = effectiveLevel(granted, rules, where.channel.id, sameService(conn.key));
+    const eff = levelIn(agent, conn, candidates, allow, rules, where.channel.id);
     if (eff)
       tools.push(...connectionTools(deps, agent, conn, eff.level, taken, clients, allow.denied, eff.ask));
   }
@@ -325,7 +359,6 @@ export async function toolsFor(
   for (const t of await environmentToolsFor(run)) if (!allow.denied(t.name)) tools.push(t);
   for (const t of await assignmentToolsFor(deps, agent, where.threadId))
     if (!allow.denied(t.name)) tools.push(t);
-  if (await hasDatabases(deps.db, agent.id))
-    tools.push(...DATABASE_TOOLS.filter((t) => !allow.denied(t.name)));
+  if (await hasDatabases(run)) tools.push(...DATABASE_TOOLS.filter((t) => !allow.denied(t.name)));
   return tools;
 }

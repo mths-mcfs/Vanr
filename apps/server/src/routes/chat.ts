@@ -4,6 +4,7 @@ import type {
   DirectMessage,
   DirectoryMember,
   FileRef,
+  MessageMeta,
   MessagePin,
   ReactionCount,
 } from "@vanr/contract";
@@ -14,10 +15,10 @@ import { channelName, parseMentions } from "@vanr/engine/text";
 import { and, asc, count, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
-import { agentInWorkspace, agentNames } from "../agents";
-import { assignmentPostMeta } from "../assignments/tools";
-import { type ChannelRow, openDm, readableChannel, writableChannel } from "../channels";
-import { type AppEnv, type Ctx, hasRuntime, requireRuntime } from "../context";
+import { type AgentRow, agentInWorkspace, agentNames } from "../agents";
+import { assignmentPostMeta, assignmentRouting } from "../assignments/tools";
+import { type ChannelRow, canReadChannel, openDm, readableChannel, writableChannel } from "../channels";
+import { type AppDeps, type AppEnv, type Ctx, hasRuntime, requireRuntime } from "../context";
 import { isUniqueViolation } from "../db-errors";
 import { fileFor } from "../drive";
 import { badRequest, conflict, forbidden, notFound, param, readJson, readQuery } from "../http";
@@ -32,7 +33,8 @@ import {
   reactionsFor,
 } from "../messages";
 import { notifyReaction } from "../notify-sources";
-import { requireCanTalk } from "../runners/plans";
+import { requireCanTalk, withPlanOwners } from "../runners/plans";
+import { route } from "../runtime/route";
 import { requireMember, requirePermission, WORKSPACE } from "../workspace-scope";
 
 const {
@@ -175,47 +177,82 @@ async function pinOf(db: Db, row: typeof pins.$inferSelect): Promise<MessagePin>
 }
 
 /**
- * Whether an agent could answer a post in this channel: one of the channel's agents, or an agent of the workspace
- * that the text mentions (the runtime tells the person it isn't in the channel).
+ * Whether an agent would answer this post, by the runtime's routing rule (runtime/route): the mentioned agents of
+ * the channel, else the DM's agent, else the agents that already spoke in the thread, else the channel's agents
+ * that answer without a mention; only those the author may talk to, and not a suggestion or a paused assignment.
  */
-async function agentMayAnswer(
-  db: Db,
-  workspaceId: string,
-  channelId: string,
-  body: string,
+async function agentWouldAnswer(
+  deps: AppDeps,
+  channel: ChannelRow,
+  post: { authorId: string; body: string; threadId: string | null; meta: MessageMeta },
 ): Promise<boolean> {
-  const [member] = await db
-    .select({ id: agents.id })
+  const { db } = deps;
+  if (!(await assignmentRouting(deps, post))) return false;
+  const handles = parseMentions(post.body);
+  const mentioned = handles.length
+    ? await db
+        .select()
+        .from(agents)
+        .where(
+          and(
+            eq(agents.workspaceId, channel.workspaceId),
+            inArray(agents.handle, handles),
+            isNull(agents.archivedAt),
+          ),
+        )
+    : [];
+  const inChannel = await db
+    .select({ agent: agents, autoAnswer: channelMemberships.autoAnswer })
     .from(channelMemberships)
     .innerJoin(agents, eq(agents.id, channelMemberships.memberId))
     .where(
       and(
-        eq(channelMemberships.channelId, channelId),
+        eq(channelMemberships.channelId, channel.id),
         eq(channelMemberships.memberType, "agent"),
         isNull(agents.archivedAt),
       ),
-    )
-    .limit(1);
-  if (member) return true;
-  const handles = parseMentions(body);
-  if (handles.length === 0) return false;
-  const [mentioned] = await db
-    .select({ id: agents.id })
-    .from(agents)
-    .where(
-      and(eq(agents.workspaceId, workspaceId), inArray(agents.handle, handles), isNull(agents.archivedAt)),
-    )
-    .limit(1);
-  return !!mentioned;
+    );
+  if (mentioned.length === 0 && inChannel.length === 0) return false;
+  const threadAgentIds = post.threadId
+    ? (
+        await db
+          .selectDistinct({ id: messages.authorId })
+          .from(messages)
+          .where(
+            and(
+              eq(messages.authorKind, "agent"),
+              or(eq(messages.threadId, post.threadId), eq(messages.id, post.threadId)),
+            ),
+          )
+      ).map((r) => r.id)
+    : [];
+  const talkers = new Map(
+    (await withPlanOwners(db, [...mentioned, ...inChannel.map((m) => m.agent)])).map((a) => [a.id, a]),
+  );
+  const talker = (a: AgentRow) => talkers.get(a.id) ?? { ...a, planOwnerUserId: null };
+  const routed = route({
+    authorUserId: post.authorId,
+    mentioned: mentioned.map(talker),
+    inChannel: inChannel.map((m) => ({ agent: talker(m.agent), autoAnswer: m.autoAnswer })),
+    isDm: channel.kind === "dm",
+    threadAgentIds,
+  });
+  return routed.targets.length > 0;
 }
 
-/** A message the person can read (its channel must be readable). */
-async function readableMessage(c: Ctx, messageId: string) {
+/**
+ * A message the person can read (its channel must be readable). A missing message and one of a channel they don't
+ * read answer the same 404, text included.
+ */
+async function readableMessage(c: Ctx, messageId: string, missing = "Message not found") {
   const me = requireMember(c);
   const { db } = c.get("deps");
   const row = await messageInWorkspace(db, me.workspaceId, messageId);
-  if (!row) throw notFound("Message not found");
-  await readableChannel(db, { workspaceId: me.workspaceId, userId: me.userId, channelId: row.channelId });
+  if (
+    !row ||
+    !(await canReadChannel(db, { workspaceId: me.workspaceId, userId: me.userId, channelId: row.channelId }))
+  )
+    throw notFound(missing);
   return row;
 }
 
@@ -515,10 +552,19 @@ export function registerChat(app: Hono<AppEnv>) {
       userId: me.userId,
       channelId: param(c, "channelId"),
     });
-    // Without the agent runtime (slice S6) a post an agent could answer is rejected before it is written: it would
-    // stay unanswered with no sign why. A post no agent can answer goes out as usual.
+    const assignment = await assignmentPostMeta(deps, me, input.threadId, body);
+    // Without the agent runtime (slice S6) a post an agent would answer is rejected before it is written: it would
+    // stay unanswered with no sign why. A post no agent answers goes out as usual.
     const routes = hasRuntime(deps.runtime, "onPersonMessage");
-    if (!routes && (await agentMayAnswer(deps.db, me.workspaceId, readable.id, body)))
+    if (
+      !routes &&
+      (await agentWouldAnswer(deps, readable, {
+        authorId: me.userId,
+        body,
+        threadId: input.threadId ?? null,
+        meta: assignment,
+      }))
+    )
       requireRuntime(deps.runtime, "onPersonMessage");
     const channel = await writableChannel(deps.db, {
       workspaceId: me.workspaceId,
@@ -533,7 +579,6 @@ export function registerChat(app: Hono<AppEnv>) {
         throw badRequest("Attach files from this conversation", { field: "attachments", fileId: id });
       attached.push({ id: file.id, version: file.version, title: file.title, deleted: false });
     }
-    const assignment = await assignmentPostMeta(deps, me, input.threadId, body);
     const { message, created } = await postMessage(deps, {
       workspaceId: me.workspaceId,
       channel,
@@ -655,6 +700,8 @@ export function registerChat(app: Hono<AppEnv>) {
       const agent = await agentInWorkspace(db, me.workspaceId, target.agentId);
       if (agent.archivedAt) throw notFound("Agent not found");
       await requireCanTalk(db, agent, me.userId);
+      // The agent answers every message of its DM: without the runtime (slice S6) the DM isn't opened at all.
+      requireRuntime(c.get("deps").runtime, "onPersonMessage");
       other = { type: "agent", id: agent.id };
     } else {
       const [person] = await db
@@ -756,7 +803,7 @@ export function registerChat(app: Hono<AppEnv>) {
   const follow = async (c: Ctx, following: boolean) => {
     const me = requireMember(c);
     const deps = c.get("deps");
-    const root = await readableMessage(c, param(c, "threadId"));
+    const root = await readableMessage(c, param(c, "threadId"), "Thread not found");
     if (root.threadId !== null) throw notFound("Thread not found");
     const at = deps.now();
     await ensureThread(deps.db, { root, by: { type: "person", id: me.userId }, at, title: "" });

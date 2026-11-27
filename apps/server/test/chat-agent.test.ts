@@ -8,8 +8,10 @@ import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { eq } from "drizzle-orm";
 import type { AgentRow } from "../src/agents";
+import { channelInWorkspace, openDm } from "../src/channels";
 import { replaceGrants } from "../src/integrations/access";
 import { connectCustom, saveCustomTools } from "../src/integrations/connectors";
+import { postMessage } from "../src/messages";
 import type { RunningServer } from "../src/server";
 import { type ChatRuntime, chatRuntime } from "./chat-runtime";
 import { type FakeMcp, startFakeMcp } from "./fake-mcp";
@@ -173,7 +175,7 @@ describe("a conversation with an agent", () => {
           payload,
         );
         expect([real.status, real.body?.error?.code]).toEqual([404, "not_found"]);
-        expect([missing.status, missing.body?.error?.code]).toEqual([404, "not_found"]);
+        expect([missing.status, missing.body]).toEqual([404, real.body]);
       };
       await asMissing(`${ow}/channels/${general}/messages`);
       await asMissing(`${ow}/channels/${general}/messages`, "POST", { body: "hi", clientId: "x-1" });
@@ -195,6 +197,34 @@ describe("a conversation with an agent", () => {
         .from(schema.messages)
         .where(eq(schema.messages.channelId, general));
       expect(rows.map((r) => r.id)).toEqual([root.id]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a message of a channel the person doesn't read answers exactly like a missing one",
+    async () => {
+      const { workspaceId, w, general, ana, beto } = await team();
+      const board = await seedChannel(server, workspaceId, {
+        name: "board",
+        visibility: "private",
+        members: [ana],
+      });
+      const { body: secret } = await post(ana, w, board, "board only", "secret-1");
+      const same = async (method: string, path: (id: string) => string, payload?: unknown) => {
+        const hidden = await call(beto, method, path(secret.id), payload);
+        const missing = await call(beto, method, path("msg_missing"), payload);
+        expect([hidden.status, hidden.body]).toEqual([missing.status, missing.body]);
+        expect(hidden.status).toBe(404);
+        return hidden.body.error.message as string;
+      };
+      expect(await same("GET", (id) => `${w}/messages/${id}/reactions`)).toBe("Message not found");
+      await same("POST", (id) => `${w}/messages/${id}/reactions`, { reaction: "x" });
+      await same("DELETE", (id) => `${w}/messages/${id}/reactions?reaction=x`);
+      expect(await same("PUT", (id) => `${w}/threads/${id}/follow`)).toBe("Thread not found");
+      await same("DELETE", (id) => `${w}/threads/${id}/follow`);
+      // A pin of that message from a channel Beto reads is the same 404 too.
+      await same("POST", (id) => `${w}/channels/${general}/pinned-messages/${id}`);
     },
     SERVER_TEST_MS,
   );
@@ -308,44 +338,97 @@ describe("live runs show only where the person may see the run", () => {
 });
 
 describe("without the agent runtime", () => {
-  test(
-    "a post an agent could answer is rejected before it is written; a post among people goes out",
-    async () => {
-      const bare = await startTestServer();
-      try {
-        const ana = await signedIn(bare, "Ana", email("ana"));
-        const { workspaceId, general } = await seedWorkspace(bare, ana, "Bare");
-        const w = ws(workspaceId);
-        const people = await seedChannel(bare, workspaceId, { name: "people", members: [ana] });
-        const lia = await seedAgent(bare, workspaceId, ana, "lia", [general]);
-        const rejected = await call(ana, "POST", `${w}/channels/${general}/messages`, {
-          body: "hi",
-          clientId: "b-1",
-        });
-        expect([rejected.status, rejected.body.error.code]).toEqual([503, "not_available"]);
-        const mention = await call(ana, "POST", `${w}/channels/${people}/messages`, {
-          body: `@${lia.handle} are you there?`,
-          clientId: "b-2",
-        });
-        expect([mention.status, mention.body.error.code]).toEqual([503, "not_available"]);
-        const written = await bare.deps.db.select({ id: schema.messages.id }).from(schema.messages);
-        expect(written).toEqual([]);
-        // An archived agent no longer answers, so it doesn't block the channel.
+  let bare: RunningServer;
+  beforeAll(async () => {
+    bare = await startTestServer();
+  }, SERVER_TEST_MS);
+  afterAll(() => bare.stop(), SERVER_TEST_MS);
+
+  /** Ana and Beto, Lia (who answers on mention only) in #general, and a #people channel without agents. */
+  async function bareTeam() {
+    const ana = await signedIn(bare, "Ana", email("ana"));
+    const { workspaceId, general } = await seedWorkspace(bare, ana, "Bare");
+    const beto = await memberOf(bare, workspaceId, "Beto", email("beto"));
+    const people = await seedChannel(bare, workspaceId, { name: "people", members: [ana, beto] });
+    const lia = await seedAgent(bare, workspaceId, ana, `lia${n}`, [general]);
+    const w = ws(workspaceId);
+    const send = (who: Person, channelId: string, body: string, extra: Record<string, unknown> = {}) =>
+      call(who, "POST", `${w}/channels/${channelId}/messages`, { body, clientId: `c${++n}`, ...extra });
+    const written = async (channelId: string) =>
+      (
         await bare.deps.db
-          .update(schema.agents)
-          .set({ archivedAt: new Date() })
-          .where(eq(schema.agents.id, lia.id));
-        expect(
-          (await call(ana, "POST", `${w}/channels/${general}/messages`, { body: "hi", clientId: "b-3" }))
-            .status,
-        ).toBe(201);
-        expect(
-          (await call(ana, "POST", `${w}/channels/${people}/messages`, { body: "plain", clientId: "b-4" }))
-            .status,
-        ).toBe(201);
-      } finally {
-        await bare.stop();
-      }
+          .select({ body: schema.messages.body })
+          .from(schema.messages)
+          .where(eq(schema.messages.channelId, channelId))
+      ).map((r) => r.body);
+    return { workspaceId, w, general, people, ana, beto, lia, send, written };
+  }
+  const rejected = (res: { status: number; body: { error?: { code?: string } } }) =>
+    expect([res.status, res.body.error?.code]).toEqual([503, "not_available"]);
+
+  test(
+    "a post goes out unless an agent would answer it: a mention, auto answer, a DM or a thread the agent is in",
+    async () => {
+      const { workspaceId, w, general, people, ana, beto, lia, send, written } = await bareTeam();
+      // Lia answers on mention only: a plain post in her channel goes out, a mention of her is rejected unwritten.
+      expect((await send(ana, general, "Quick update for the team")).status).toBe(201);
+      rejected(await send(ana, general, `@${lia.handle} are you there?`));
+      expect(await written(general)).toEqual(["Quick update for the team"]);
+      // A mention where she isn't, or by someone she doesn't talk to, reaches no agent: it goes out.
+      expect((await send(ana, people, `@${lia.handle} see this`)).status).toBe(201);
+      await bare.deps.db
+        .update(schema.agents)
+        .set({ visibilityMode: "owner" })
+        .where(eq(schema.agents.id, lia.id));
+      expect((await send(beto, general, `@${lia.handle} take a look`)).status).toBe(201);
+      await bare.deps.db
+        .update(schema.agents)
+        .set({ visibilityMode: "everyone" })
+        .where(eq(schema.agents.id, lia.id));
+
+      // A thread she already spoke in: a reply there reaches her, a reply in another thread doesn't.
+      const spoke = (await send(ana, general, "Plan for Monday")).body;
+      const quiet = (await send(ana, general, "Plan for Tuesday")).body;
+      const channel = await channelInWorkspace(bare.deps.db, workspaceId, general);
+      if (!channel) throw new Error("no channel");
+      await postMessage(bare.deps, {
+        workspaceId,
+        channel,
+        author: { type: "agent", id: lia.id },
+        body: "On it",
+        clientId: null,
+        threadId: spoke.id,
+      });
+      rejected(await send(beto, general, "and the budget?", { threadId: spoke.id }));
+      expect((await send(beto, general, "and the room?", { threadId: quiet.id })).status).toBe(201);
+
+      // Auto answer: every post in the channel reaches her.
+      await bare.deps.db
+        .update(schema.channelMemberships)
+        .set({ autoAnswer: true })
+        .where(eq(schema.channelMemberships.memberId, lia.id));
+      rejected(await send(ana, general, "Anyone?"));
+
+      // Her DM: it isn't opened, and a post in one opened before is rejected.
+      rejected(await call(ana, "POST", `${w}/dms`, { agentId: lia.id }));
+      const dms = await bare.deps.db
+        .select({ id: schema.channels.id })
+        .from(schema.channels)
+        .where(eq(schema.channels.kind, "dm"));
+      expect(dms).toEqual([]);
+      const dm = await openDm(bare.deps.db, {
+        workspaceId,
+        userId: ana.user.id,
+        other: { type: "agent", id: lia.id },
+      });
+      rejected(await send(ana, dm, "hello"));
+
+      // Archived, she answers nobody.
+      await bare.deps.db
+        .update(schema.agents)
+        .set({ archivedAt: new Date() })
+        .where(eq(schema.agents.id, lia.id));
+      expect((await send(ana, general, `@${lia.handle} still there?`)).status).toBe(201);
     },
     SERVER_TEST_MS,
   );
@@ -353,23 +436,16 @@ describe("without the agent runtime", () => {
   test(
     "a rejected post doesn't make the person join a public channel",
     async () => {
-      const bare = await startTestServer();
-      try {
-        const ana = await signedIn(bare, "Ana", email("ana"));
-        const { workspaceId } = await seedWorkspace(bare, ana, "Bare");
-        const beto = await memberOf(bare, workspaceId, "Beto", email("beto"));
-        const open = await seedChannel(bare, workspaceId, { name: "open", members: [ana] });
-        await seedAgent(bare, workspaceId, ana, "lia", [open]);
-        const res = await call(beto, "POST", `${ws(workspaceId)}/channels/${open}/messages`, {
-          body: "hi",
-          clientId: "j-1",
-        });
-        expect(res.status).toBe(503);
-        const { members } = (await call(ana, "GET", `${ws(workspaceId)}/channels/${open}/members`)).body;
-        expect(members.map((m: { id: string }) => m.id)).not.toContain(beto.user.id);
-      } finally {
-        await bare.stop();
-      }
+      const { workspaceId, w, ana, beto, lia } = await bareTeam();
+      const open = await seedChannel(bare, workspaceId, { name: "open", members: [ana] });
+      await addToChannel(bare, open, { type: "agent", id: lia.id });
+      const res = await call(beto, "POST", `${w}/channels/${open}/messages`, {
+        body: `@${lia.handle} hi`,
+        clientId: "j-1",
+      });
+      expect(res.status).toBe(503);
+      const { members } = (await call(ana, "GET", `${w}/channels/${open}/members`)).body;
+      expect(members.map((m: { id: string }) => m.id)).not.toContain(beto.user.id);
     },
     SERVER_TEST_MS,
   );

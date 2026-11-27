@@ -8,7 +8,7 @@ import type { AgentRow } from "../src/agents";
 import { type ChannelRow, channelInWorkspace } from "../src/channels";
 import { replaceGrants } from "../src/integrations/access";
 import { connectCustom, saveCustomTools } from "../src/integrations/connectors";
-import { toolsFor } from "../src/integrations/tools";
+import { argsValidator, toolsFor } from "../src/integrations/tools";
 import type { RunningServer } from "../src/server";
 import { type FakeMcp, startFakeMcp } from "./fake-mcp";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
@@ -143,4 +143,64 @@ describe("a connector's tools in the run", () => {
     },
     SERVER_TEST_MS,
   );
+
+  test(
+    "a call approved after the agent's level went down, in the channel or in its grants, isn't sent",
+    async () => {
+      const { workspaceId, channel, agent, connectionId } = await setup();
+      const all = [{ connectionId: "", scope: "*" }];
+      await replaceGrants(server.deps.db, workspaceId, agent.id, all);
+      await server.deps.db
+        .insert(agentChannelAccess)
+        .values({ agentId: agent.id, workspaceId, channelId: channel.id, connectionId, level: "approval" });
+      const tools = await toolsFor(server.deps, agent, { channel, threadId: null });
+      const approvedAfter = (change: () => Promise<unknown>) =>
+        toolRun(server.deps, agent, channel, {
+          decide: async () => {
+            await change();
+            return "approved" as const;
+          },
+        }).run(tools, "mcp_stock__create_item", { name: "bolt" });
+      const gone = [true, "This connection or tool is no longer available to the agent."];
+      const sent = mcp.toolCalls.length;
+
+      // Nothing changed while it waited: it goes out.
+      expect((await approvedAfter(async () => {})).content).toBe("created: bolt");
+      expect(mcp.toolCalls.length).toBe(sent + 1);
+
+      const rule = (level: "read" | "approval") =>
+        server.deps.db
+          .update(agentChannelAccess)
+          .set({ level })
+          .where(eq(agentChannelAccess.agentId, agent.id));
+      const readOnly = await approvedAfter(() => rule("read"));
+      expect([readOnly.isError, readOnly.content]).toEqual(gone);
+      await rule("approval");
+
+      const denied = await approvedAfter(() =>
+        replaceGrants(server.deps.db, workspaceId, agent.id, [
+          ...all,
+          { connectionId: "", scope: "deny:mcp_stock__create_item" },
+        ]),
+      );
+      expect([denied.isError, denied.content]).toEqual(gone);
+
+      const readGrant = await approvedAfter(() =>
+        replaceGrants(server.deps.db, workspaceId, agent.id, [
+          { connectionId, scope: `custom:${connectionId}:read` },
+        ]),
+      );
+      expect([readGrant.isError, readGrant.content]).toEqual(gone);
+      expect(mcp.toolCalls.length).toBe(sent + 1);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("a connector tool's arguments", () => {
+  test("a required key must be the argument's own, not one every object inherits", () => {
+    const check = argsValidator({ type: "object", required: ["constructor", "toString"] });
+    expect(check.safeParse({}).success).toBe(false);
+    expect(check.safeParse({ constructor: 1, toString: "x" }).success).toBe(true);
+  });
 });

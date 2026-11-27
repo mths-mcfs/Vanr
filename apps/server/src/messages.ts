@@ -473,17 +473,27 @@ async function touchThread(deps: AppDeps, input: { root: MessageRow; reply: Mess
   const { db } = deps;
   const { root, reply, author } = input;
   const at = deps.now();
+  const atSql = sql`${at.toISOString()}::timestamptz`;
   await db
     .update(messages)
-    .set({ replyCount: sql`${messages.replyCount} + 1`, lastReplyAt: at })
+    .set({
+      replyCount: sql`${messages.replyCount} + 1`,
+      lastReplyAt: sql`greatest(${messages.lastReplyAt}, ${atSql})`,
+    })
     .where(eq(messages.id, root.id));
   await ensureThread(db, { root, by: author, at });
+  // One statement each, and only forward: two replies at once leave the later one (in the page's order, created
+  // at then id) as the last message, whichever update lands last.
   await db
     .update(threads)
     .set({
-      firstReplyAt: sql`coalesce(${threads.firstReplyAt}, ${at.toISOString()}::timestamptz)`,
-      lastTouchedAt: at,
-      lastMessageId: reply.id,
+      firstReplyAt: sql`coalesce(${threads.firstReplyAt}, ${atSql})`,
+      lastTouchedAt: sql`greatest(${threads.lastTouchedAt}, ${atSql})`,
+      // Both times as stored (microseconds): the reply's JS date has only milliseconds.
+      lastMessageId: sql`case when coalesce((
+          select (l.created_at, l.id) < (r.created_at, r.id)
+          from ${messages} l, ${messages} r where l.id = ${threads.lastMessageId} and r.id = ${reply.id}
+        ), true) then ${reply.id} else ${threads.lastMessageId} end`,
     })
     .where(eq(threads.id, root.id));
   const followers = [author, { type: root.authorKind, id: root.authorId }].filter((a) => a.type === "person");
