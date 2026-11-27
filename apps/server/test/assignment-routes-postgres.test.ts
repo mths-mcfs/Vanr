@@ -410,14 +410,12 @@ describe("answering a submission on Postgres", () => {
           { match: `from "assignments"` },
         );
         const [after] = await server.deps.db.select().from(assignments).where(eq(assignments.id, row.id));
+        // jsonb keeps its own key order: the limits are compared as values.
+        const l = after?.limits;
         outcome(
           "assignment-limits",
-          { a, b, limits: after?.limits },
-          {
-            a: "ok",
-            b: "ok",
-            limits: { dollars: 1, minutes: 480, steps: 3 },
-          },
+          { a, b, limits: [l?.dollars, l?.minutes, l?.steps] },
+          { a: "ok", b: "ok", limits: [1, 480, 3] },
         );
       });
     },
