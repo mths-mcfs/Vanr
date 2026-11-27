@@ -199,6 +199,7 @@ export default {
   "base.empty.title": "Nenhuma linha ainda",
   "base.empty.body": "Adicione uma linha e preencha as propriedades aqui ou na página dela.",
   "base.more": "Mostrar mais linhas",
+  "base.viewSaveFailed": "A alteração da visão não foi salva",
   "base.saveFailed": "A alteração não foi salva",
 
   "view.list": "Visões",
@@ -227,6 +228,11 @@ export default {
   "filter.op": "Operador da condição {n}",
   "filter.value": "Valor para {prop}",
   "filter.me": "Você",
+  "filter.nested":
+    "O filtro desta visão tem grupos dentro de grupos, feitos em outro lugar. Aqui ele não pode ser alterado, só limpo.",
+  "filter.clear": "Limpar o filtro",
+  "quick.add": "Filtro rápido",
+  "quick.remove": "Remover o filtro rápido {filter}",
   "filter.add": "Adicionar condição",
   "filter.remove": "Remover",
   "op.eq": "é",
@@ -292,6 +298,9 @@ export default {
   "property.rollupProperty": "Propriedade das linhas ligadas",
   "property.chooseProperty": "Escolha uma propriedade",
   "property.rollupFunction": "Calcular",
+  "property.changed":
+    "Alguém alterou esta propriedade enquanto ela estava aberta. Esta é a versão dessa pessoa agora.",
+  "property.rollupTargetFailed": "Não foi possível carregar as propriedades da base ligada.",
   "property.save": "Salvar propriedade",
   "property.delete": "Excluir propriedade",
 
@@ -391,10 +400,12 @@ export default {
   "cell.loading": "Carregando as opções",
   "cell.nothing": "Ainda não há o que escolher aqui.",
   "cell.choices": "Opções",
+  "cell.failed": "Não foi possível carregar as opções.",
   "cell.done": "Pronto",
   "cell.error": "Erro",
 
   "row.untitled": "Sem título",
+  "row.newIn": "Nova linha em {group}",
   "row.new": "Nova linha",
   "row.open": "Abrir {title}",
   "row.panel": "Linha",

@@ -5,7 +5,7 @@ import { useApiMutation, useApiQuery } from "@vanr/client/react";
 import type { Base, BaseTable } from "@vanr/contract";
 import { Button, ConfirmDialog, Drawer, DrawerContent, Icon, Textarea } from "@vanr/ui";
 import { ArrowLeft, Maximize2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AppLink, useGo, useRouteParams } from "../../../app/navigation.tsx";
 import { ScreenError, ScreenLoading, useDocumentTitle } from "../../../app/screens.tsx";
 import { useLocale, useMessages } from "../../../i18n/react.tsx";
@@ -38,15 +38,29 @@ function RowEditor({
   const when = useRelativeTime();
   const row = useApiQuery("getBaseRow", { workspaceId, baseId: base.id, rowId });
   const save = useSaveRow(workspaceId, base.id);
-  const [title, setTitle] = useState("");
-  const [body, setBody] = useState("");
+  const [title, setTitle] = useState(() => {
+    const value = row.data?.props[table.titlePropId];
+    return typeof value === "string" ? value : "";
+  });
+  const [body, setBody] = useState(() => row.data?.body ?? "");
   const [confirming, setConfirming] = useState(false);
   const saved = row.data;
   const savedTitle =
     typeof saved?.props[table.titlePropId] === "string" ? String(saved.props[table.titlePropId]) : "";
-  // A change made elsewhere shows here: the title and the text follow the saved row.
-  useEffect(() => setTitle(savedTitle), [savedTitle]);
-  useEffect(() => setBody(saved?.body ?? ""), [saved?.body]);
+  // A change made elsewhere shows here, unless the person changed the field since it last followed
+  // the saved row: then what they typed stays (a save answered while they kept typing included).
+  const syncedTitle = useRef(savedTitle);
+  const syncedBody = useRef(saved?.body ?? "");
+  useEffect(() => {
+    setTitle((now) => (now === syncedTitle.current ? savedTitle : now));
+    syncedTitle.current = savedTitle;
+  }, [savedTitle]);
+  useEffect(() => {
+    const next = saved?.body ?? "";
+    setBody((now) => (now === syncedBody.current ? next : now));
+    syncedBody.current = next;
+  }, [saved?.body]);
+  const files = useApiQuery("listFiles", { workspaceId });
   const remove = useApiMutation("deleteBaseRow", {
     invalidates: () => [{ method: "createBaseTableQuery", args: { workspaceId, tableId: table.id } }],
     onSuccess: onDeleted,
@@ -63,7 +77,13 @@ function RowEditor({
       />
     );
   }
-  const context: CellContext = { names, locale, linked: saved.linked ?? {} };
+  const fileTitles = new Map((files.data ?? []).map((file) => [file.id, file.title]));
+  const context: CellContext = {
+    names,
+    locale,
+    linked: saved.linked ?? {},
+    files: (id) => fileTitles.get(id) ?? id,
+  };
   const commit = async (patch: Parameters<typeof save>[1]) => {
     await save(saved, patch);
     await row.refetch();

@@ -269,15 +269,24 @@ export function newCondition(def: BasePropDef): BaseFilterCondition {
 
 const isCondition = (filter: BaseFilter): filter is BaseFilterCondition => "prop" in filter;
 
-/** The screen's filter: a flat list of conditions joined by "and" or by "or". */
+/**
+ * The screen's filter: a flat list of conditions joined by "and" or by "or". `nested` says the saved
+ * filter has groups inside groups (made through the API or by an agent), which the panel can't show
+ * and so must not rewrite.
+ */
 export function flatFilter(filter: BaseFilter | null | undefined): {
   mode: "and" | "or";
   conditions: BaseFilterCondition[];
+  nested: boolean;
 } {
-  if (filter === null || filter === undefined) return { mode: "and", conditions: [] };
-  if ("and" in filter) return { mode: "and", conditions: filter.and.filter(isCondition) };
-  if ("or" in filter) return { mode: "or", conditions: filter.or.filter(isCondition) };
-  return { mode: "and", conditions: [filter] };
+  if (filter === null || filter === undefined) return { mode: "and", conditions: [], nested: false };
+  if ("and" in filter || "or" in filter) {
+    const mode = "and" in filter ? "and" : "or";
+    const parts = "and" in filter ? filter.and : filter.or;
+    const conditions = parts.filter(isCondition);
+    return { mode, conditions, nested: conditions.length !== parts.length };
+  }
+  return { mode: "and", conditions: [filter], nested: false };
 }
 
 export function toFilter(mode: "and" | "or", conditions: BaseFilterCondition[]): BaseFilter | null {
@@ -374,6 +383,20 @@ export function valueForGroup(def: BasePropDef, key: string | null): unknown {
 /** A view's name; one saved without a name (a base's first view) goes by its type. */
 export const viewName = (view: BaseView, typeName: (type: BaseView["type"]) => string) =>
   view.name.trim() === "" ? typeName(view.type) : view.name;
+
+/** The groups of a view: each key in order (a choice's options first, then "none"), with its rows. */
+export function groupRows(
+  def: BasePropDef,
+  rows: readonly BaseRow[],
+): { key: string | null; rows: BaseRow[] }[] {
+  const keys: (string | null)[] =
+    def.type === "select" || def.type === "status"
+      ? [...(def.options ?? []).map((option) => option.id), null]
+      : def.type === "checkbox"
+        ? ["true", "false"]
+        : [...new Set(rows.map((row) => groupKeyOf(def, row)))];
+  return keys.map((key) => ({ key, rows: rows.filter((row) => groupKeyOf(def, row) === key) }));
+}
 
 /** The properties a board can group by: the ones a card can be dragged across. */
 export const groupable = (def: BasePropDef) =>

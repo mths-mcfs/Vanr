@@ -60,7 +60,8 @@ test("bases: a relation links projects to tasks and a rollup adds up their hours
     const time = grid.getByRole("textbox", { name: cell(t, "Hours", name) });
     await time.fill(hours);
     await time.press("Enter");
-    await expect(time).toHaveValue(hours.replace(",", "."));
+    // The field writes the number the way the interface language does.
+    await expect(time).toHaveValue(new RegExp(`^${hours.replace(",", "[.,]")}$`));
   }
 
   await page.goto(`/workspace/${user.workspace.id}/bases`);

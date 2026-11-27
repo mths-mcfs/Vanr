@@ -4,9 +4,9 @@
 // dialog and saved together; dates take a start and keep a day as a day. Computed values only show.
 import { useApiQuery, useVanrClient } from "@vanr/client/react";
 import type { ActorRef, BaseLinkedRow, BasePropDef, BaseRelationTarget, BaseRow } from "@vanr/contract";
-import { Button, Dialog, DialogContent, Input } from "@vanr/ui";
+import { Button, Callout, Dialog, DialogContent, Input } from "@vanr/ui";
 import { useEffect, useState } from "react";
-import { useMessages } from "../../../i18n/react.tsx";
+import { useLocale, useMessages } from "../../../i18n/react.tsx";
 import {
   type CellContext,
   cellText,
@@ -162,6 +162,11 @@ export function parseNumber(text: string): number | null | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
+/** A number as the person types it in the interface language: a comma in Portuguese, never grouped. */
+export function formatEditable(n: number, locale: string): string {
+  return new Intl.NumberFormat(locale, { useGrouping: false, maximumFractionDigits: 20 }).format(n);
+}
+
 function NumberCell({
   label,
   value,
@@ -171,7 +176,8 @@ function NumberCell({
   value: number | null;
   onSave: (value: unknown) => void;
 }) {
-  const shown = value === null ? "" : String(value);
+  const { locale } = useLocale();
+  const shown = value === null ? "" : formatEditable(value, locale);
   const [draft, setDraft] = useState(shown);
   useEffect(() => setDraft(shown), [shown]);
   const commit = () => {
@@ -198,6 +204,14 @@ function NumberCell({
   );
 }
 
+/** An instant as the local "YYYY-MM-DDTHH:mm" a datetime field shows (the field has no time zone). */
+export function localInstant(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 function DateCell({
   label,
   def,
@@ -213,7 +227,7 @@ function DateCell({
     typeof value === "object" && value !== null ? (value as { start?: string; end?: string }) : {};
   const withTime = def.withTime === true;
   const shown =
-    range.start === undefined ? "" : withTime ? range.start.slice(0, 16) : range.start.slice(0, 10);
+    range.start === undefined ? "" : withTime ? localInstant(range.start) : range.start.slice(0, 10);
   return (
     <input
       className="bases__input"
@@ -277,6 +291,7 @@ const toActor = (key: string): ActorRef => {
 
 function Picker(props: CellProps & { initial: string[]; onDone: (ids: string[]) => void }) {
   const t = useMessages("files");
+  const common = useMessages("common");
   const [chosen, setChosen] = useState(props.initial);
   const [query, setQuery] = useState("");
   const choices = useChoices(props, query.trim());
@@ -292,7 +307,19 @@ function Picker(props: CellProps & { initial: string[]; onDone: (ids: string[]) 
           onChange={(event) => setQuery(event.target.value)}
         />
       )}
-      {choices.state === "loading" ? (
+      {choices.state === "failed" ? (
+        <Callout
+          tone="danger"
+          role="alert"
+          actions={
+            <Button size="sm" onClick={choices.retry}>
+              {common("action.retry")}
+            </Button>
+          }
+        >
+          {t("cell.failed")}
+        </Callout>
+      ) : choices.state === "loading" ? (
         <p className="page__muted" role="status">
           {t("cell.loading")}
         </p>
@@ -328,7 +355,10 @@ function Picker(props: CellProps & { initial: string[]; onDone: (ids: string[]) 
 }
 
 /** What a picker offers, by the property's type. */
-function useChoices(props: CellProps, query: string): { state: "loading" | "ready"; items: Choice[] } {
+function useChoices(
+  props: CellProps,
+  query: string,
+): { state: "loading" | "ready" | "failed"; items: Choice[]; retry?: () => void } {
   const { def, workspaceId } = props;
   const client = useVanrClient();
   const members = useApiQuery("listMembers", { workspaceId }, { enabled: def.type === "person" });
@@ -340,6 +370,8 @@ function useChoices(props: CellProps, query: string): { state: "loading" | "read
   );
   const target = props.relationTargets.find((each) => each.tableId === def.relation?.tableId);
   const [rows, setRows] = useState<{ items: Choice[]; linked: Record<string, BaseLinkedRow> } | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     if (def.type !== "relation" || target === undefined) return;
     const controller = new AbortController();
@@ -362,9 +394,13 @@ function useChoices(props: CellProps, query: string): { state: "loading" | "read
           linked: result.linked ?? {},
         }),
       )
-      .catch(() => setRows({ items: [], linked: {} }));
+      .catch(() => {
+        if (!controller.signal.aborted) setFailed(true);
+      });
+    setFailed(false);
     return () => controller.abort();
-  }, [client, workspaceId, def.type, target, query]);
+  }, [client, workspaceId, def.type, target, query, attempt]);
+  const retry = () => setAttempt((n) => n + 1);
 
   switch (def.type) {
     case "multi_select":
@@ -388,6 +424,7 @@ function useChoices(props: CellProps, query: string): { state: "loading" | "read
         items: (files.data ?? []).slice(0, PICKER_LIMIT).map((file) => ({ id: file.id, name: file.title })),
       };
     case "relation":
+      if (failed) return { state: "failed", items: [], retry };
       return rows === null ? { state: "loading", items: [] } : { state: "ready", items: rows.items };
     default:
       return { state: "ready", items: [] };

@@ -105,7 +105,7 @@ describe("a base", () => {
     await app.user.type(name, "Due");
     await app.user.selectOptions(within(dialog).getByRole("combobox", { name: "Type" }), "Date");
     await app.user.click(within(dialog).getByRole("button", { name: "Save property" }));
-    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("dialog") === null).toBe(true));
     const grid = screen.getByRole("table", { name: "Grid" });
     await waitFor(() =>
       expect(
@@ -214,5 +214,181 @@ describe("saving rows", () => {
     await waitFor(() => expect(tasks.rows[0]?.props).toMatchObject({ hours: 6 }));
     expect(tasks.rows[0]?.props[tasks.table.titlePropId]).toBe("Rinse");
     expect(screen.queryByText("The change was not saved")).toBeNull();
+  });
+});
+
+describe("a base, past the happy path", () => {
+  test("a File property shows the file's title in the row's panel and on its page", async () => {
+    const server = newServer();
+    const { tasks } = ids(server);
+    tasks.table.defs.push({ id: "doc", name: "Doc", type: "file" });
+    const wash = tasks.rows[0];
+    if (wash) wash.props.doc = ["fil_plan"];
+    const app = await renderApp({
+      path: `${W}/bases/${tasks.id}?row=${wash?.id}`,
+      signedInAs: "usr_ana",
+      server,
+    });
+    const panel = await screen.findByRole("dialog", { name: "Row" });
+    expect(await within(panel).findByRole("button", { name: "Doc of Wash" })).toBeDefined();
+    await waitFor(() =>
+      expect(within(panel).getByRole("button", { name: "Doc of Wash" }).textContent).toBe("Release plan"),
+    );
+    app.unmount();
+    await renderApp({ path: `${W}/bases/${tasks.id}/rows/${wash?.id}`, signedInAs: "usr_ana", server });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Doc of Wash" }).textContent).toBe("Release plan"),
+    );
+  });
+
+  test("Delete on a focused choice empties it; in a text field it only edits the text", async () => {
+    const server = newServer();
+    const { tasks } = ids(server);
+    const app = await renderApp({ path: `${W}/bases/${tasks.id}`, signedInAs: "usr_ana", server });
+    const grid = await screen.findByRole("table", { name: "Grid" });
+    within(grid).getByRole("combobox", { name: "Status of Wash" }).focus();
+    await app.user.keyboard("{Delete}");
+    await waitFor(() => expect(tasks.rows[0]?.props.status).toBeNull());
+    within(grid).getByRole("textbox", { name: "Name of Dry" }).focus();
+    await app.user.keyboard("{Backspace}");
+    expect(tasks.rows[1]?.props[tasks.table.titlePropId]).toBe("Dry");
+  });
+
+  test("a quick filter is made from a choice, narrows the rows, and goes with its chip", async () => {
+    const server = newServer();
+    const { tasks } = ids(server);
+    const app = await renderApp({ path: `${W}/bases/${tasks.id}`, signedInAs: "usr_ana", server });
+    await screen.findByRole("table", { name: "Grid" });
+    const grid = () => screen.getByRole("table", { name: "Grid" });
+    await app.user.selectOptions(screen.getByRole("combobox", { name: "Quick filter" }), "Status: Done");
+    await waitFor(() =>
+      expect(within(grid()).queryByRole("textbox", { name: "Name of Wash" }) === null).toBe(true),
+    );
+    expect(within(grid()).getByRole("textbox", { name: "Name of Dry" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Filter (1)" })).toBeDefined();
+    await app.user.click(screen.getByRole("button", { name: "Remove the quick filter Status: Done" }));
+    await waitFor(() => expect(within(grid()).getByRole("textbox", { name: "Name of Wash" })).toBeDefined());
+  });
+
+  test("a grouped grid shows each group with its count, and a group's new row starts in it", async () => {
+    const server = newServer();
+    const { tasks } = ids(server);
+    const view = tasks.views[0];
+    if (view) view.config = { groupBy: { prop: "status", hideEmpty: true } };
+    const app = await renderApp({ path: `${W}/bases/${tasks.id}`, signedInAs: "usr_ana", server });
+    const grid = await screen.findByRole("table", { name: "Grid" });
+    expect(
+      within(grid)
+        .getAllByRole("rowgroup")
+        .map((group) => group.getAttribute("aria-label")),
+    ).toEqual([null, "To do", "Done"]);
+    await app.user.click(within(grid).getByRole("button", { name: "New row in Done" }));
+    await waitFor(() => expect(tasks.rows).toHaveLength(3));
+    expect(tasks.rows[2]?.props.status).toBe("done");
+  });
+
+  test("a view change the server refuses says so and comes back to what is saved", async () => {
+    const server = newServer();
+    const { tasks } = ids(server);
+    server.force("updateBaseView", { kind: "error", status: 409, code: "base.bad_view" });
+    const app = await renderApp({ path: `${W}/bases/${tasks.id}`, signedInAs: "usr_ana", server });
+    await screen.findByRole("table", { name: "Grid" });
+    await app.user.selectOptions(screen.getByRole("combobox", { name: "Quick filter" }), "Status: Done");
+    expect(await screen.findByText("The view's change was not saved")).toBeDefined();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Filter" })).toBeDefined());
+  });
+
+  test("a relation picker whose rows could not be loaded says so, with a retry", async () => {
+    const server = newServer();
+    const { projects } = ids(server);
+    server.force("createBaseTableQuery", { kind: "error", status: 400, code: "base.bad_filter" });
+    const app = await renderApp({ path: `${W}/bases/${projects.id}`, signedInAs: "usr_ana", server });
+    const grid = await screen.findByRole("table", { name: "Grid" });
+    server.force("createBaseTableQuery", { kind: "error", status: 400, code: "base.bad_filter" });
+    await app.user.click(within(grid).getByRole("button", { name: "Tasks of Home" }));
+    const picker = await screen.findByRole("dialog", { name: "Tasks of Home" });
+    const alert = await within(picker).findByRole("alert");
+    expect(alert.textContent).toContain("The choices could not be loaded.");
+    await app.user.click(within(alert).getByRole("button", { name: "Retry" }));
+    expect(await within(picker).findByRole("checkbox", { name: "Wash" })).toBeDefined();
+  });
+
+  test("a rollup whose linked base could not be read says so", async () => {
+    const server = newServer();
+    const { projects } = ids(server);
+    const app = await renderApp({ path: `${W}/bases/${projects.id}`, signedInAs: "usr_ana", server });
+    await screen.findByRole("table", { name: "Grid" });
+    server.force("getBase", { kind: "error", status: 403, code: "forbidden" }, 1 + QUERY_RETRIES);
+    await app.user.click(screen.getByRole("button", { name: "Edit property Total hours" }));
+    const dialog = await screen.findByRole("dialog", { name: "Edit Total hours" });
+    expect((await within(dialog).findByRole("alert")).textContent).toContain(
+      "The linked base's properties could not be loaded.",
+    );
+  });
+
+  test("a property someone changed while it was open is shown again instead of written over", async () => {
+    const server = newServer();
+    const { tasks } = ids(server);
+    const app = await renderApp({ path: `${W}/bases/${tasks.id}`, signedInAs: "usr_ana", server });
+    await screen.findByRole("table", { name: "Grid" });
+    await app.user.click(screen.getByRole("button", { name: "Edit property Hours" }));
+    const dialog = await screen.findByRole("dialog", { name: "Edit Hours" });
+    // Jonas gives Hours a currency format meanwhile, and the screen hears of it.
+    const hours = tasks.table.defs.find((def) => def.id === "hours");
+    if (hours) hours.numberFormat = "currency_usd";
+    tasks.table = { ...tasks.table, schemaVersion: tasks.table.schemaVersion + 1 };
+    await act(async () => {
+      await app.runtime.queryClient.refetchQueries({
+        predicate: (query) => query.queryKey.includes("getBase"),
+      });
+    });
+    await app.user.click(within(dialog).getByRole("button", { name: "Save property" }));
+    const again = await screen.findByRole("dialog", { name: "Edit Hours" });
+    expect(await within(again).findByRole("alert")).toBeDefined();
+    expect((within(again).getByRole("combobox", { name: "Number format" }) as HTMLSelectElement).value).toBe(
+      "currency_usd",
+    );
+    expect(server.calls.some((call) => call.method === "setBaseTableSchema")).toBe(false);
+  });
+
+  test("a filter with groups inside groups is not rewritten by the panel", async () => {
+    const server = newServer();
+    const { tasks } = ids(server);
+    const view = tasks.views[0];
+    const nested = {
+      and: [{ prop: "hours", op: "gt", value: 0 }, { or: [{ prop: "status", op: "eq", value: "todo" }] }],
+    };
+    if (view) view.config = { filter: nested };
+    const app = await renderApp({ path: `${W}/bases/${tasks.id}`, signedInAs: "usr_ana", server });
+    await screen.findByRole("table", { name: "Grid" });
+    await app.user.click(screen.getByRole("button", { name: /^Filters? / }));
+    const panel = await screen.findByRole("dialog", { name: "Filter" });
+    expect(within(panel).getByText(/groups inside groups/)).toBeDefined();
+    expect(within(panel).queryByRole("button", { name: "Add a condition" }) === null).toBe(true);
+    expect(server.calls.some((call) => call.method === "updateBaseView")).toBe(false);
+  });
+
+  test("text typed while the row's text is being saved stays", async () => {
+    const server = newServer();
+    const { tasks } = ids(server);
+    const app = await renderApp({
+      path: `${W}/bases/${tasks.id}?row=${tasks.rows[0]?.id}`,
+      signedInAs: "usr_ana",
+      server,
+    });
+    const panel = await screen.findByRole("dialog", { name: "Row" });
+    const body = (await within(panel).findByRole("textbox", { name: "Page text" })) as HTMLTextAreaElement;
+    await app.user.type(body, "B");
+    const held = server.hold("updateBaseRow");
+    await app.user.click(within(panel).getByRole("button", { name: "Save text" }));
+    await app.user.type(body, "C");
+    held.release();
+    await waitFor(() => expect(tasks.rows[0]?.body).toBe("B"));
+    await act(async () => {
+      await app.runtime.queryClient.refetchQueries({
+        predicate: (query) => query.queryKey.includes("getBaseRow"),
+      });
+    });
+    expect(body.value).toBe("BC");
   });
 });

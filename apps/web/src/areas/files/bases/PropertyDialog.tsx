@@ -16,6 +16,7 @@ import { FUNCTION_NAMES } from "@vanr/engine/formula/functions";
 import { ROLLUP_FNS } from "@vanr/engine/props";
 import { Button, Dialog, DialogContent, Field, Input, Textarea } from "@vanr/ui";
 import { type ComponentPropsWithoutRef, useDeferredValue, useId, useMemo, useState } from "react";
+import { useErrorMessage } from "../../../app/screens.tsx";
 import { useLocale, useLookup, useMessages } from "../../../i18n/react.tsx";
 import { useClock } from "../../../platform/clock.tsx";
 import { formulaByName, type Names, OPTION_COLORS, previewOf, typeKey } from "./model.ts";
@@ -440,6 +441,7 @@ function RollupEditor({
     { enabled: target !== undefined },
   );
   const targetDefs = linked.data?.tables.find((each) => each.id === target?.tableId)?.defs ?? [];
+  const describe = useErrorMessage("files");
   if (relations.length === 0) return <p className="page__muted">{t("property.rollupNeedsRelation")}</p>;
   return (
     <div className="files__stack">
@@ -455,6 +457,11 @@ function RollupEditor({
           </option>
         ))}
       </SelectField>
+      {linked.isError && (
+        <p className="bases__error" role="alert">
+          {t("property.rollupTargetFailed")} {describe(linked.error)}
+        </p>
+      )}
       <SelectField
         label={t("property.rollupProperty")}
         value={value.targetPropId}

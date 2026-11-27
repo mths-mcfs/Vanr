@@ -29,3 +29,17 @@ describe("bases em português", () => {
     expect(within(dialog).getByText(/Um rollup trabalha sobre uma relação/)).toBeDefined();
   });
 });
+
+describe("números em português", () => {
+  test("a célula de número em edição usa vírgula, como a leitura", async () => {
+    const server = newServer();
+    const tasks = server.bases.bases[0];
+    const wash = tasks?.rows[0];
+    if (wash) wash.props.hours = 3.5;
+    await renderApp({ path: `${W}/bases/${tasks?.id}`, ...pt, server });
+    const grid = await screen.findByRole("table", { name: "Grid" });
+    expect((within(grid).getByRole("textbox", { name: "Hours de Wash" }) as HTMLInputElement).value).toBe(
+      "3,5",
+    );
+  });
+});

@@ -25,6 +25,44 @@ const record = (value: unknown) =>
     ? (value as Record<string, unknown>)
     : undefined;
 
+/** One condition on a row, for the few operators the tests use. */
+function matches(condition: { prop: string; op?: string; value?: unknown }, row: FakeRow): boolean {
+  const value = row.props[condition.prop];
+  const empty =
+    value === undefined || value === null || value === "" || (Array.isArray(value) && value.length === 0);
+  switch (condition.op ?? "eq") {
+    case "empty":
+      return empty;
+    case "not_empty":
+      return !empty;
+    case "neq":
+      return value !== condition.value;
+    case "contains":
+      return typeof value === "string" && value.toLowerCase().includes(String(condition.value).toLowerCase());
+    case "gt":
+      return typeof value === "number" && value > Number(condition.value);
+    case "lt":
+      return typeof value === "number" && value < Number(condition.value);
+    case "has":
+      return Array.isArray(value) && value.includes(condition.value);
+    default:
+      return value === condition.value;
+  }
+}
+
+/** A filter on a row: a condition, or groups of them joined by "and" or "or", nested as deep as given. */
+function matchesFilter(filter: T.BaseFilter | null | undefined, row: FakeRow): boolean {
+  if (filter === null || filter === undefined) return true;
+  if ("and" in filter) return filter.and.every((each) => matchesFilter(each, row));
+  if ("or" in filter) return filter.or.some((each) => matchesFilter(each, row));
+  return matches(filter, row);
+}
+
+/** A view's saved filter and its quick filters, joined with "and", as the server reads a view. */
+function matchesView(config: T.BaseViewConfig, row: FakeRow): boolean {
+  return (config.quickFilters ?? []).every((each) => matches(each, row)) && matchesFilter(config.filter, row);
+}
+
 export class FakeBases {
   bases: FakeBase[] = [];
   private counter = 0;
@@ -288,9 +326,17 @@ export class FakeBases {
       }),
       createBaseTableQuery: inBase((base, params) => {
         const search = text(params.search)?.toLowerCase();
+        const view = base.views.find((each) => each.id === params.viewId);
         const rows = base.rows.filter((row) => {
           const title = row.props[base.table.titlePropId];
-          return search === undefined || (typeof title === "string" && title.toLowerCase().includes(search));
+          const found =
+            search === undefined || (typeof title === "string" && title.toLowerCase().includes(search));
+          // The filter sent with the query wins over the view's, as on the server.
+          const kept =
+            params.filter !== undefined
+              ? matchesFilter(params.filter as T.BaseFilter | null, row)
+              : view === undefined || matchesView(view.config, row);
+          return found && kept;
         });
         return reply(200, {
           rows: rows.map((row) => this.shown(base, row)),

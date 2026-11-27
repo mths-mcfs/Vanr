@@ -5,7 +5,9 @@
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import type { BaseQueryResult, BaseRowBody } from "@vanr/client";
 import { prefixKey, queryKey, useVanrClient } from "@vanr/client/react";
-import type { Base, BaseRow, BaseView } from "@vanr/contract";
+import type { Base, BaseFilter, BaseRow, BaseTable, BaseView } from "@vanr/contract";
+import { effectiveFilter, type ViewConfig } from "@vanr/engine/bases/view";
+import type { PropDef } from "@vanr/engine/props";
 import { useToast } from "@vanr/ui";
 import { useCallback } from "react";
 import { useErrorMessage } from "../../../app/screens.tsx";
@@ -13,19 +15,29 @@ import { useMessages } from "../../../i18n/react.tsx";
 
 export const PAGE = 200;
 
-/** The rows of a view, page by page. */
-export function useRows(workspaceId: string, base: Base, view: BaseView, search: string) {
+/**
+ * The rows of a view, page by page. The view's filter (with its quick filters), sorts and group go in
+ * the query itself, from the view as this screen holds it: a change shows at once, without waiting for
+ * the view to be saved, and an answer never reflects a setting the person already changed.
+ */
+export function useRows(workspaceId: string, base: Base, table: BaseTable, view: BaseView, search: string) {
   const client = useVanrClient();
   const args = {
     workspaceId,
     baseId: base.id,
     tableId: view.tableId,
-    body: { viewId: view.id, limit: PAGE, ...(search !== "" && { search }) },
+    body: {
+      viewId: view.id,
+      limit: PAGE,
+      filter:
+        (effectiveFilter(view.config as ViewConfig, table.defs as PropDef[]) as BaseFilter | null) ?? null,
+      sorts: view.config.sorts ?? [],
+      groupBy: view.config.groupBy ?? null,
+      ...(search !== "" && { search }),
+    },
   };
   return useInfiniteQuery({
-    // The view's config goes after the call's own key, so a change to it asks again; the server reads it
-    // from the view. Events still match the key by its method and arguments.
-    queryKey: [...queryKey(client, "createBaseTableQuery", args), view.config],
+    queryKey: queryKey(client, "createBaseTableQuery", args),
     initialPageParam: null as string | null,
     queryFn: ({ pageParam, signal }) =>
       client.call("createBaseTableQuery", { ...args, body: { ...args.body, cursor: pageParam } }, { signal }),

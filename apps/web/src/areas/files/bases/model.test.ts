@@ -2,7 +2,7 @@
 // group a row falls in and the value that moves it there, and a number typed with a comma.
 import { describe, expect, test } from "bun:test";
 import type { BasePropDef, BaseRow, BaseTable } from "@vanr/contract";
-import { parseNumber } from "./cells.tsx";
+import { formatEditable, localInstant, parseNumber } from "./cells.tsx";
 import {
   cellText,
   flatFilter,
@@ -99,7 +99,11 @@ describe("filters and groups", () => {
     expect(newCondition(def("person"))).toEqual({ prop: "p", op: "has", value: "me" });
     expect(newCondition(def("relation"))).toEqual({ prop: "p", op: "not_empty" });
     const conditions = [newCondition(def("number")), newCondition(def("text"))];
-    expect(flatFilter(toFilter("or", conditions))).toEqual({ mode: "or", conditions });
+    expect(flatFilter(toFilter("or", conditions))).toEqual({ mode: "or", conditions, nested: false });
+    // A group inside a group is flagged, so the panel never rewrites it flat.
+    expect(flatFilter({ and: [conditions[0] ?? newCondition(def("text")), { or: conditions }] }).nested).toBe(
+      true,
+    );
     expect(toFilter("and", [])).toBeNull();
   });
 
@@ -130,5 +134,19 @@ describe("a number typed in a cell", () => {
     expect(parseNumber("")).toBeNull();
     expect(parseNumber("lots")).toBeUndefined();
     expect(parseNumber("1e999")).toBeUndefined();
+  });
+});
+
+describe("numbers and instants in their editing fields", () => {
+  test("a number is edited the way the interface language writes it, without grouping", () => {
+    expect(formatEditable(3.5, "pt-BR")).toBe("3,5");
+    expect(formatEditable(1200.25, "en")).toBe("1200.25");
+    expect(parseNumber(formatEditable(3.5, "pt-BR"))).toBe(3.5);
+  });
+
+  test("an instant shows in local time, and going back gives the same instant", () => {
+    const iso = "2026-11-01T10:00:00.000Z";
+    const local = localInstant(iso);
+    expect(new Date(local).toISOString()).toBe(iso);
   });
 });

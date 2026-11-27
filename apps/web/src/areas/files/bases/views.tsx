@@ -1,11 +1,11 @@
 // The four ways a view shows rows. The grid edits cells in place and opens a row from its title; the
 // board needs a group and moves a card to another column by dragging it (or by its own control); the
-// list shows up to four properties and a gallery card two, or six when large. Each one opens a row's panel
-// and adds a row.
+// list shows up to four properties and a gallery card two, or six when large. With a group, each one
+// shows a section per group with its count and a new row that starts in that group when it can.
 import type { BasePropDef, BaseRelationTarget, BaseRow, BaseTable, BaseView } from "@vanr/contract";
 import { Button, Icon } from "@vanr/ui";
 import { Maximize2, Plus } from "lucide-react";
-import { useState } from "react";
+import { type KeyboardEvent, type ReactNode, useState } from "react";
 import { useMessages } from "../../../i18n/react.tsx";
 import { CellEditor, CellValue } from "./cells.tsx";
 import {
@@ -13,6 +13,8 @@ import {
   cellText,
   groupable,
   groupKeyOf,
+  groupRows,
+  isComputed,
   isTabular,
   optionColor,
   optionName,
@@ -25,7 +27,6 @@ export type ViewProps = {
   table: BaseTable;
   view: BaseView;
   rows: BaseRow[];
-  groups: { key: string | null; count: number }[] | undefined;
   context: CellContext;
   relationTargets: readonly BaseRelationTarget[];
   onOpen: (row: BaseRow) => void;
@@ -42,10 +43,122 @@ const titleOf = (table: BaseTable, row: BaseRow) => {
   return typeof value === "string" ? value : "";
 };
 
+type Group = {
+  key: string | null;
+  label: string;
+  rows: BaseRow[];
+  color: string | undefined;
+  newProps: Record<string, unknown> | undefined;
+};
+
+/** The view's groups, or one group of every row when it has none. */
+function useGroups(props: ViewProps): { def: BasePropDef | undefined; groups: Group[] } {
+  const t = useMessages("files");
+  const def = props.table.defs.find((each) => each.id === props.view.config.groupBy?.prop);
+  if (def === undefined)
+    return {
+      def,
+      groups: [{ key: null, label: "", rows: props.rows, color: undefined, newProps: undefined }],
+    };
+  const label = (key: string | null, rows: BaseRow[]) => {
+    if (key === null) return t("board.none", { prop: def.name });
+    if (def.type === "checkbox") return key === "true" ? t("board.checked") : t("board.unchecked");
+    if (def.type === "select" || def.type === "status") return optionName(def, key);
+    const sample = rows[0];
+    return sample === undefined ? key : cellText(def, sample, props.context);
+  };
+  const groups = groupRows(def, props.rows)
+    .filter((group) => props.view.config.groupBy?.hideEmpty !== true || group.rows.length > 0)
+    .map((group) => {
+      const value = groupable(def) ? valueForGroup(def, group.key) : undefined;
+      return {
+        ...group,
+        label: label(group.key, group.rows),
+        color:
+          group.key !== null && (def.type === "select" || def.type === "status")
+            ? optionColor(def, group.key)
+            : undefined,
+        newProps: value === undefined || value === null ? undefined : { [def.id]: value },
+      };
+    });
+  return { def, groups };
+}
+
+/** A group's heading: its name, how many rows, and a new row that starts in it. */
+function GroupHead({ group, onNewRow }: { group: Group; onNewRow: ViewProps["onNewRow"] }) {
+  const t = useMessages("files");
+  return (
+    <div className="bases__group-head" data-color={group.color}>
+      <h3 className="bases__column-title">
+        {group.label} <span className="files__meta">{group.rows.length}</span>
+      </h3>
+      <Button
+        size="sm"
+        variant="ghost"
+        icon={<Icon icon={Plus} />}
+        aria-label={t("row.newIn", { group: group.label })}
+        onClick={() => onNewRow(group.newProps)}
+      />
+    </div>
+  );
+}
+
+/** Delete or Backspace on a focused cell that is not a text field empties it. */
+const clearOnDelete =
+  (def: BasePropDef, save: (value: unknown) => void) => (event: KeyboardEvent<HTMLTableCellElement>) => {
+    if (event.key !== "Delete" && event.key !== "Backspace") return;
+    const target = event.target as HTMLElement;
+    if (target instanceof HTMLTextAreaElement) return;
+    if (
+      target instanceof HTMLInputElement &&
+      target.type !== "checkbox" &&
+      target.type !== "date" &&
+      target.type !== "datetime-local"
+    )
+      return;
+    if (isComputed(def)) return;
+    event.preventDefault();
+    save(def.type === "checkbox" ? false : null);
+  };
+
 export function TableView(props: ViewProps) {
   const t = useMessages("files");
-  const { table, view, rows } = props;
+  const { table, view } = props;
   const columns = viewColumns(table, view.config);
+  const { def: grouped, groups } = useGroups(props);
+  const row = (each: BaseRow) => {
+    const title = titleOf(table, each);
+    return (
+      <tr key={each.id}>
+        {columns.map((def) => {
+          const save = (value: unknown) => props.onSave(each, def.id, value);
+          const editor = <CellEditor {...props} def={def} row={each} rowTitle={title} onSave={save} />;
+          return (
+            <td
+              key={def.id}
+              className={isTabular(def) ? "bases__num" : undefined}
+              onKeyDown={clearOnDelete(def, save)}
+            >
+              {def.id === table.titlePropId ? (
+                <div className="bases__title-cell">
+                  {editor}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    icon={<Icon icon={Maximize2} />}
+                    aria-label={t("row.open", { title: title === "" ? t("row.untitled") : title })}
+                    onClick={() => props.onOpen(each)}
+                  />
+                </div>
+              ) : (
+                editor
+              )}
+            </td>
+          );
+        })}
+      </tr>
+    );
+  };
   return (
     <div className="bases__scroll">
       <table className="bases__grid" aria-label={props.name}>
@@ -65,49 +178,26 @@ export function TableView(props: ViewProps) {
             ))}
           </tr>
         </thead>
-        <tbody>
-          {rows.map((row) => {
-            const title = titleOf(table, row);
-            return (
-              <tr key={row.id}>
-                {columns.map((def) => (
-                  <td key={def.id} className={isTabular(def) ? "bases__num" : undefined}>
-                    {def.id === table.titlePropId ? (
-                      <div className="bases__title-cell">
-                        <CellEditor
-                          {...props}
-                          def={def}
-                          row={row}
-                          rowTitle={title}
-                          onSave={(value) => props.onSave(row, def.id, value)}
-                        />
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          icon={<Icon icon={Maximize2} />}
-                          aria-label={t("row.open", { title: title === "" ? t("row.untitled") : title })}
-                          onClick={() => props.onOpen(row)}
-                        />
-                      </div>
-                    ) : (
-                      <CellEditor
-                        {...props}
-                        def={def}
-                        row={row}
-                        rowTitle={title}
-                        onSave={(value) => props.onSave(row, def.id, value)}
-                      />
-                    )}
-                  </td>
-                ))}
+        {grouped === undefined ? (
+          <tbody>{props.rows.map(row)}</tbody>
+        ) : (
+          groups.map((group) => (
+            <tbody key={group.key ?? "none"} aria-label={group.label}>
+              <tr>
+                <th scope="rowgroup" colSpan={columns.length}>
+                  <GroupHead group={group} onNewRow={props.onNewRow} />
+                </th>
               </tr>
-            );
-          })}
-        </tbody>
+              {group.rows.map(row)}
+            </tbody>
+          ))
+        )}
       </table>
-      <Button size="sm" variant="ghost" icon={<Icon icon={Plus} />} onClick={() => props.onNewRow()}>
-        {t("row.new")}
-      </Button>
+      {grouped === undefined && (
+        <Button size="sm" variant="ghost" icon={<Icon icon={Plus} />} onClick={() => props.onNewRow()}>
+          {t("row.new")}
+        </Button>
+      )}
     </div>
   );
 }
@@ -135,143 +225,136 @@ function Card({ props, row, shown }: { props: ViewProps; row: BaseRow; shown: Ba
 const others = (props: ViewProps) =>
   viewColumns(props.table, props.view.config).filter((def) => def.id !== props.table.titlePropId);
 
-export function ListView(props: ViewProps) {
+/** List and gallery: the same rows as items or cards, one section per group when there are groups. */
+function Items({
+  props,
+  className,
+  itemClass,
+  shown,
+}: {
+  props: ViewProps;
+  className: string;
+  itemClass: string;
+  shown: BasePropDef[];
+}) {
   const t = useMessages("files");
-  const shown = others(props).slice(0, 4);
+  const { def: grouped, groups } = useGroups(props);
+  const items = (rows: BaseRow[], label: string): ReactNode => (
+    <ul className={className} aria-label={label}>
+      {rows.map((row) => (
+        <li key={row.id} className={itemClass}>
+          <Card props={props} row={row} shown={shown} />
+        </li>
+      ))}
+    </ul>
+  );
+  if (grouped === undefined) {
+    return (
+      <>
+        {items(props.rows, props.name)}
+        <Button size="sm" variant="ghost" icon={<Icon icon={Plus} />} onClick={() => props.onNewRow()}>
+          {t("row.new")}
+        </Button>
+      </>
+    );
+  }
   return (
     <>
-      <ul className="bases__items" aria-label={props.name}>
-        {props.rows.map((row) => (
-          <li key={row.id} className="bases__item">
-            <Card props={props} row={row} shown={shown} />
-          </li>
-        ))}
-      </ul>
-      <Button size="sm" variant="ghost" icon={<Icon icon={Plus} />} onClick={() => props.onNewRow()}>
-        {t("row.new")}
-      </Button>
+      {groups.map((group) => (
+        <section key={group.key ?? "none"} className="bases__group" aria-label={group.label}>
+          <GroupHead group={group} onNewRow={props.onNewRow} />
+          {items(group.rows, group.label)}
+        </section>
+      ))}
     </>
+  );
+}
+
+export function ListView(props: ViewProps) {
+  return (
+    <Items props={props} className="bases__items" itemClass="bases__item" shown={others(props).slice(0, 4)} />
   );
 }
 
 export function GalleryView(props: ViewProps) {
-  const t = useMessages("files");
   const shown = others(props).slice(0, props.view.config.cardSize === "large" ? 6 : 2);
-  return (
-    <>
-      <ul className="bases__gallery" aria-label={props.name}>
-        {props.rows.map((row) => (
-          <li key={row.id} className="bases__card">
-            <Card props={props} row={row} shown={shown} />
-          </li>
-        ))}
-      </ul>
-      <Button size="sm" variant="ghost" icon={<Icon icon={Plus} />} onClick={() => props.onNewRow()}>
-        {t("row.new")}
-      </Button>
-    </>
-  );
+  return <Items props={props} className="bases__gallery" itemClass="bases__card" shown={shown} />;
 }
 
 export function BoardView(props: ViewProps) {
   const t = useMessages("files");
-  const { table, view, rows } = props;
+  const { table, rows } = props;
   const [dragging, setDragging] = useState<string | null>(null);
-  const def = table.defs.find((each) => each.id === view.config.groupBy?.prop);
+  const { def, groups } = useGroups(props);
   if (def === undefined) return <p className="page__muted">{t("board.needsGroup")}</p>;
   const movable = groupable(def);
-  const keys: (string | null)[] =
-    def.type === "select" || def.type === "status"
-      ? [...(def.options ?? []).map((option) => option.id), null]
-      : def.type === "checkbox"
-        ? ["true", "false"]
-        : [...new Set(rows.map((row) => groupKeyOf(def, row)))];
   const shown = others(props)
     .filter((each) => each.id !== def.id)
     .slice(0, 3);
-  const label = (key: string | null) => {
-    if (key === null) return t("board.none", { prop: def.name });
-    if (def.type === "checkbox") return key === "true" ? t("board.checked") : t("board.unchecked");
-    if (def.type === "select" || def.type === "status") return optionName(def, key);
-    const sample = rows.find((row) => groupKeyOf(def, row) === key);
-    return sample === undefined ? key : cellText(def, sample, props.context);
-  };
   const move = (row: BaseRow, key: string | null) => {
     const value = valueForGroup(def, key);
     if (value !== undefined && groupKeyOf(def, row) !== key) props.onSave(row, def.id, value);
   };
   return (
     <section className="bases__board" aria-label={props.name}>
-      {keys.map((key) => {
-        const inColumn = rows.filter((row) => groupKeyOf(def, row) === key);
-        if (view.config.groupBy?.hideEmpty === true && inColumn.length === 0) return null;
-        return (
-          <section
-            key={key ?? "none"}
-            className="bases__column"
-            aria-label={label(key)}
-            data-color={
-              key !== null && (def.type === "select" || def.type === "status")
-                ? optionColor(def, key)
-                : undefined
-            }
-            onDragOver={(event) => {
-              if (movable && dragging !== null) event.preventDefault();
-            }}
-            onDrop={(event) => {
-              event.preventDefault();
-              const row = rows.find((each) => each.id === dragging);
-              setDragging(null);
-              if (row !== undefined) move(row, key);
-            }}
-          >
-            <h3 className="bases__column-title">
-              {label(key)} <span className="files__meta">{inColumn.length}</span>
-            </h3>
-            <ul className="bases__cards">
-              {inColumn.map((row) => (
-                <li
-                  key={row.id}
-                  className="bases__card"
-                  draggable={movable}
-                  data-testid={`card-${row.id}`}
-                  onDragStart={() => setDragging(row.id)}
-                  onDragEnd={() => setDragging(null)}
-                >
-                  <Card props={props} row={row} shown={shown} />
-                  {movable && (
-                    <select
-                      className="bases__select bases__card-move"
-                      aria-label={t("board.move", { title: titleOf(table, row) || t("row.untitled") })}
-                      value={key ?? ""}
-                      onChange={(event) => move(row, event.target.value === "" ? null : event.target.value)}
-                    >
-                      {keys.map((each) => (
-                        <option key={each ?? "none"} value={each ?? ""}>
-                          {label(each)}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                </li>
-              ))}
-            </ul>
-            {movable && (
-              <Button
-                size="sm"
-                variant="ghost"
-                icon={<Icon icon={Plus} />}
-                onClick={() => {
-                  const value = valueForGroup(def, key);
-                  props.onNewRow(value === undefined || value === null ? undefined : { [def.id]: value });
-                }}
+      {groups.map((group) => (
+        <section
+          key={group.key ?? "none"}
+          className="bases__column"
+          aria-label={group.label}
+          data-color={group.color}
+          onDragOver={(event) => {
+            if (movable && dragging !== null) event.preventDefault();
+          }}
+          onDrop={(event) => {
+            event.preventDefault();
+            const row = rows.find((each) => each.id === dragging);
+            setDragging(null);
+            if (row !== undefined) move(row, group.key);
+          }}
+        >
+          <h3 className="bases__column-title">
+            {group.label} <span className="files__meta">{group.rows.length}</span>
+          </h3>
+          <ul className="bases__cards">
+            {group.rows.map((row) => (
+              <li
+                key={row.id}
+                className="bases__card"
+                draggable={movable}
+                onDragStart={() => setDragging(row.id)}
+                onDragEnd={() => setDragging(null)}
               >
-                {t("row.new")}
-              </Button>
-            )}
-          </section>
-        );
-      })}
+                <Card props={props} row={row} shown={shown} />
+                {movable && (
+                  <select
+                    className="bases__select bases__card-move"
+                    aria-label={t("board.move", { title: titleOf(table, row) || t("row.untitled") })}
+                    value={group.key ?? ""}
+                    onChange={(event) => move(row, event.target.value === "" ? null : event.target.value)}
+                  >
+                    {groups.map((each) => (
+                      <option key={each.key ?? "none"} value={each.key ?? ""}>
+                        {each.label}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </li>
+            ))}
+          </ul>
+          {movable && (
+            <Button
+              size="sm"
+              variant="ghost"
+              icon={<Icon icon={Plus} />}
+              onClick={() => props.onNewRow(group.newProps)}
+            >
+              {t("row.new")}
+            </Button>
+          )}
+        </section>
+      ))}
     </section>
   );
 }

@@ -1,9 +1,10 @@
 // What a view shows: conditions joined by "all" or "any", up to ten sorts, one group, and which
 // properties are visible. Every choice is saved in the view, so everyone who opens it sees the same.
 import type { BaseFilterCondition, BaseSort, BaseTable, BaseViewConfig } from "@vanr/contract";
-import { Button, Dialog, DialogContent } from "@vanr/ui";
-import { useState } from "react";
-import { useLookup, useMessages } from "../../../i18n/react.tsx";
+import { Button, Chip, Dialog, DialogContent } from "@vanr/ui";
+import { useEffect, useState } from "react";
+import { useLocale, useLookup, useMessages } from "../../../i18n/react.tsx";
+import { formatEditable, parseNumber } from "./cells.tsx";
 import {
   flatFilter,
   isHidden,
@@ -92,23 +93,53 @@ function ConditionValue({
   if (def.type === "person" || def.type === "creator" || def.type === "editor") {
     return <span className="files__meta">{t("filter.me")}</span>;
   }
-  const number = def.type === "number";
+  if (def.type === "number") return <NumberValue label={label} condition={condition} onChange={onChange} />;
   return (
     <input
       className="bases__input bases__input--boxed"
       aria-label={label}
-      inputMode={number ? "decimal" : undefined}
       type={def.type === "date" ? "date" : "text"}
-      value={
-        typeof condition.value === "string" || typeof condition.value === "number"
-          ? String(condition.value)
-          : ""
-      }
+      value={typeof condition.value === "string" ? condition.value : ""}
       onChange={(event) => {
         const text = event.target.value;
         if (def.type === "date")
           return onChange({ ...condition, value: text === "" ? { rel: "today" } : text });
-        onChange({ ...condition, value: number ? Number(text.replace(",", ".")) || 0 : text });
+        onChange({ ...condition, value: text });
+      }}
+    />
+  );
+}
+
+/** A number typed freely ("-", "4,") and saved once it is one, on leaving the field or on Enter. */
+function NumberValue({
+  label,
+  condition,
+  onChange,
+}: {
+  label: string;
+  condition: BaseFilterCondition;
+  onChange: (condition: BaseFilterCondition) => void;
+}) {
+  const { locale } = useLocale();
+  const saved = typeof condition.value === "number" ? condition.value : 0;
+  const shown = formatEditable(saved, locale);
+  const [draft, setDraft] = useState(shown);
+  useEffect(() => setDraft(shown), [shown]);
+  const commit = () => {
+    const parsed = parseNumber(draft);
+    if (parsed === undefined || parsed === null) return setDraft(shown);
+    if (parsed !== saved) onChange({ ...condition, value: parsed });
+  };
+  return (
+    <input
+      className="bases__input bases__input--boxed"
+      aria-label={label}
+      inputMode="decimal"
+      value={draft}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") event.currentTarget.blur();
       }}
     />
   );
@@ -117,7 +148,18 @@ function ConditionValue({
 function FilterPanel({ table, config, onChange }: PanelProps) {
   const t = useMessages("files");
   const lookup = useLookup("files");
-  const { mode, conditions } = flatFilter(config.filter);
+  const { mode, conditions, nested } = flatFilter(config.filter);
+  if (nested) {
+    // Groups inside groups can't be shown here; rewriting them from a flat list would lose them.
+    return (
+      <div className="files__stack">
+        <p className="page__muted">{t("filter.nested")}</p>
+        <Button size="sm" onClick={() => onChange({ ...config, filter: null })}>
+          {t("filter.clear")}
+        </Button>
+      </div>
+    );
+  }
   const write = (nextMode: "and" | "or", next: BaseFilterCondition[]) =>
     onChange({ ...config, filter: toFilter(nextMode, next) });
   const first = table.defs[0];
@@ -322,5 +364,87 @@ function PropertiesPanel({ table, config, onChange }: PanelProps) {
         </li>
       ))}
     </ul>
+  );
+}
+
+type QuickFilter = NonNullable<BaseViewConfig["quickFilters"]>[number];
+type QuickChoice = { key: string; label: string; filter: QuickFilter };
+
+/**
+ * Quick filters: one-tap conditions on a choice, a person or a checkbox, joined with "and" to the
+ * view's filter. Each shows as a chip that removes it.
+ */
+export function QuickFilters({
+  table,
+  config,
+  onChange,
+}: {
+  table: BaseTable;
+  config: BaseViewConfig;
+  onChange: (config: BaseViewConfig) => void;
+}) {
+  const t = useMessages("files");
+  const quick = config.quickFilters ?? [];
+  const write = (next: typeof quick) => onChange({ ...config, quickFilters: next });
+  const choices = table.defs.flatMap((def): QuickChoice[] => {
+    if (def.type === "checkbox")
+      return [
+        {
+          key: `${def.id}:true`,
+          label: `${def.name}: ${t("board.checked")}`,
+          filter: { prop: def.id, op: "eq", value: true },
+        },
+      ];
+    if (def.type === "person")
+      return [
+        {
+          key: `${def.id}:me`,
+          label: `${def.name}: ${t("filter.me")}`,
+          filter: { prop: def.id, op: "has", value: "me" as const },
+        },
+      ];
+    if (def.options === undefined) return [];
+    const op = def.type === "multi_select" ? "has" : "eq";
+    return def.options.map((option) => ({
+      key: `${def.id}:${option.id}`,
+      label: `${def.name}: ${option.name}`,
+      filter: { prop: def.id, op, value: option.id },
+    }));
+  });
+  const keyOf = (filter: (typeof quick)[number]) => `${filter.prop}:${String(filter.value)}`;
+  const label = (filter: (typeof quick)[number]) =>
+    choices.find((each) => each.key === keyOf(filter))?.label ?? filter.prop;
+  if (choices.length === 0) return null;
+  return (
+    <div className="bases__quick">
+      {quick.map((filter) => (
+        <Chip
+          key={keyOf(filter)}
+          onRemove={() => write(quick.filter((each) => keyOf(each) !== keyOf(filter)))}
+          removeLabel={t("quick.remove", { filter: label(filter) })}
+        >
+          {label(filter)}
+        </Chip>
+      ))}
+      <select
+        className="bases__select bases__select--field bases__quick-add"
+        aria-label={t("quick.add")}
+        value=""
+        onChange={(event) => {
+          const picked = choices.find((each) => each.key === event.target.value);
+          if (picked !== undefined && !quick.some((each) => keyOf(each) === picked.key))
+            write([...quick, picked.filter]);
+        }}
+      >
+        <option value="">{t("quick.add")}</option>
+        {choices
+          .filter((each) => !quick.some((filter) => keyOf(filter) === each.key))
+          .map((each) => (
+            <option key={each.key} value={each.key}>
+              {each.label}
+            </option>
+          ))}
+      </select>
+    </div>
   );
 }

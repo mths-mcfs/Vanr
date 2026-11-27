@@ -196,6 +196,7 @@ export default {
   "base.empty.title": "No rows yet",
   "base.empty.body": "Add a row, then fill in its properties here or in its own page.",
   "base.more": "Show more rows",
+  "base.viewSaveFailed": "The view's change was not saved",
   "base.saveFailed": "The change was not saved",
 
   "view.list": "Views",
@@ -224,6 +225,11 @@ export default {
   "filter.op": "Operator of condition {n}",
   "filter.value": "Value for {prop}",
   "filter.me": "You",
+  "filter.nested":
+    "This view's filter has groups inside groups, made elsewhere. It can't be changed here, only cleared.",
+  "filter.clear": "Clear the filter",
+  "quick.add": "Quick filter",
+  "quick.remove": "Remove the quick filter {filter}",
   "filter.add": "Add a condition",
   "filter.remove": "Remove",
   "op.eq": "is",
@@ -288,6 +294,8 @@ export default {
   "property.rollupProperty": "Property of the linked rows",
   "property.chooseProperty": "Choose a property",
   "property.rollupFunction": "Work out",
+  "property.changed": "Someone changed this property while it was open. This is their version now.",
+  "property.rollupTargetFailed": "The linked base's properties could not be loaded.",
   "property.save": "Save property",
   "property.delete": "Delete property",
 
@@ -386,10 +394,12 @@ export default {
   "cell.loading": "Loading the choices",
   "cell.nothing": "Nothing to choose here yet.",
   "cell.choices": "Choices",
+  "cell.failed": "The choices could not be loaded.",
   "cell.done": "Done",
   "cell.error": "Error",
 
   "row.untitled": "Untitled",
+  "row.newIn": "New row in {group}",
   "row.new": "New row",
   "row.open": "Open {title}",
   "row.panel": "Row",

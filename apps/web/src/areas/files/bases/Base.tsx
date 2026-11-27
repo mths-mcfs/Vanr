@@ -11,7 +11,7 @@ import type {
   BaseViewConfig,
   BaseViewType,
 } from "@vanr/contract";
-import { Button, ConfirmDialog, EmptyState, Icon, Input } from "@vanr/ui";
+import { Button, ConfirmDialog, EmptyState, Icon, Input, useToast } from "@vanr/ui";
 import { Download, Plus, Upload } from "lucide-react";
 import { useDeferredValue, useMemo, useRef, useState } from "react";
 import { z } from "zod";
@@ -23,7 +23,7 @@ import { downloadText, useRows, useSaveRow } from "./data.ts";
 import { type CellContext, flatFilter, viewName } from "./model.ts";
 import { PropertyDialog } from "./PropertyDialog.tsx";
 import { RowPanel } from "./Row.tsx";
-import { type Panel, ViewPanel } from "./toolbar.tsx";
+import { type Panel, QuickFilters, ViewPanel } from "./toolbar.tsx";
 import { BoardView, GalleryView, ListView, TableView, type ViewProps } from "./views.tsx";
 
 const VIEW_TYPES: readonly BaseViewType[] = ["table", "board", "list", "gallery"];
@@ -88,7 +88,7 @@ function Loaded({
   const files = useApiQuery("listFiles", { workspaceId });
   const [query, setQuery] = useState("");
   const search = useDeferredValue(query.trim());
-  const rows = useRows(workspaceId, base, view, search);
+  const rows = useRows(workspaceId, base, table, view, search);
   const saveRow = useSaveRow(workspaceId, base.id);
   const [panel, setPanel] = useState<Panel | null>(null);
   const [editing, setEditing] = useState<BasePropDef | "new" | null>(null);
@@ -97,6 +97,8 @@ function Loaded({
   const [deleting, setDeleting] = useState(false);
   const [adding, setAdding] = useState(false);
   const picker = useRef<HTMLInputElement>(null);
+  const writes = useRef(0);
+  const toast = useToast();
   const baseKey = queryKey(client, "getBase", { workspaceId, baseId: base.id });
   const rowsPrefix = { method: "createBaseTableQuery" as const, args: { workspaceId, tableId: table.id } };
   const open = (next: BaseAddress) =>
@@ -120,9 +122,17 @@ function Loaded({
         ? old
         : { ...old, views: old.views.map((each) => (each.id === view.id ? { ...each, config } : each)) },
     );
+    // Only the newest write brings the saved view back: an older answer must not undo a newer choice.
+    writes.current += 1;
+    const mine = writes.current;
     void client.api
       .updateBaseView({ workspaceId, baseId: base.id, viewId: view.id, body: { config } })
-      .finally(() => void queries.invalidateQueries({ queryKey: baseKey, exact: true }));
+      .catch((error: unknown) => {
+        toast.push({ tone: "danger", title: t("base.viewSaveFailed"), description: describe(error) });
+      })
+      .finally(() => {
+        if (writes.current === mine) void queries.invalidateQueries({ queryKey: baseKey, exact: true });
+      });
   };
 
   const saveSchema = useApiMutation("setBaseTableSchema", {
@@ -203,7 +213,6 @@ function Loaded({
     table,
     view,
     rows: all,
-    groups: first?.groups,
     context,
     relationTargets: base.relationTargets,
     onOpen: (row) => open({ view: view.id, row: row.id }),
@@ -388,6 +397,7 @@ function Loaded({
           {t("property.new")}
         </Button>
       </div>
+      <QuickFilters table={table} config={view.config} onChange={setConfig} />
       {(view.type !== "table" || all.length === 0) && (
         <fieldset className="bases__defs">
           <legend className="vr-visually-hidden">{t("property.list")}</legend>
@@ -470,6 +480,8 @@ function Loaded({
       )}
       {editing !== null && (
         <PropertyDialog
+          // A property shown again after someone changed it starts from their version.
+          key={editing === "new" ? "new" : JSON.stringify(editing)}
           workspaceId={workspaceId}
           base={base}
           table={table}
@@ -482,13 +494,20 @@ function Loaded({
             setEditing(null);
             setSchemaError(null);
           }}
-          onSave={(def) =>
+          onSave={(def) => {
+            // Someone changed this property while the dialog was open: show theirs instead of writing over it.
+            const current = editing === "new" ? undefined : table.defs.find((each) => each.id === editing.id);
+            if (editing !== "new" && JSON.stringify(current) !== JSON.stringify(editing)) {
+              setSchemaError(t("property.changed"));
+              setEditing(current ?? null);
+              return;
+            }
             writeDefs(
               editing === "new"
                 ? [...table.defs, def]
                 : table.defs.map((each) => (each.id === def.id ? def : each)),
-            )
-          }
+            );
+          }}
           {...(editing !== "new" && {
             onDelete: () => writeDefs(table.defs.filter((each) => each.id !== editing.id)),
           })}
