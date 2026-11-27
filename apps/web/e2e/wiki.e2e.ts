@@ -93,12 +93,14 @@ test("restrict a page: another member no longer finds it in the tree, the search
   t,
   seedUser,
   signIn,
+  apiAs,
 }, testInfo) => {
   const owner = await seedUser({ workspace: "Harbour Café" });
-  const teammate = await join(server, owner, await seedUser());
+  const teammate = await seedUser({ joins: { by: owner } });
   const title = "Payroll dates";
-  const slug = await createPage(server, owner, { title, body: "Salaries go out on the 25th." });
-  await createPage(server, owner, { title: "Menu", body: "Soup of the day." });
+  const api = await apiAs(owner);
+  const slug = await createPage(api, owner, { title, body: "Salaries go out on the 25th." });
+  await createPage(api, owner, { title: "Menu", body: "Soup of the day." });
 
   await signIn(owner);
   await page.goto(`/workspace/${owner.workspace.id}/wiki/${slug}`);
@@ -119,7 +121,7 @@ test("restrict a page: another member no longer finds it in the tree, the search
     ownTree.getByRole("link", { name: title }).getByRole("img", { name: t("wiki", "access.restricted") }),
   ).toBeVisible();
 
-  const other = await browserOf(browser, server, teammate, testInfo.project.use.locale);
+  const other = await browserOf(browser, server, await apiAs(teammate), testInfo.project.use.locale);
   const second = await other.newPage();
   await second.goto(`/workspace/${owner.workspace.id}/wiki`);
   const tree = second.getByRole("navigation", { name: t("wiki", "index.tree") });
@@ -138,14 +140,17 @@ test("restrict a page: another member no longer finds it in the tree, the search
 
 test("comment on a passage: the comment keeps the quoted passage", async ({
   page,
-  server,
   t,
   seedUser,
   signIn,
+  apiAs,
 }) => {
   const owner = await seedUser({ workspace: "Harbour Café" });
   const title = "Opening checklist";
-  const slug = await createPage(server, owner, { title, body: "Doors open at nine. Bring the keys." });
+  const slug = await createPage(await apiAs(owner), owner, {
+    title,
+    body: "Doors open at nine. Bring the keys.",
+  });
   await signIn(owner);
   await page.goto(`/workspace/${owner.workspace.id}/wiki/${slug}`);
   await expect(
@@ -183,47 +188,58 @@ test("comment on a passage: the comment keeps the quoted passage", async ({
 });
 
 // An agent proposes the change through its `propose_wiki_edit` tool, driven by the fake model's
-// directive in a direct message. That run needs the harness runtime (#88); until it lands this journey
-// is marked fixme (#99).
-test.fixme("accept a proposal: an agent's change lands on the page as a new version", async ({
+// directive in a direct message, and the harness runtime runs the tool.
+test("accept a proposal: an agent's change lands on the page as a new version", async ({
   page,
-  server,
   t,
   seedUser,
   signIn,
+  apiAs,
 }) => {
   const owner = await seedUser({ workspace: "Harbour Café" });
   const title = "Closing checklist";
-  const slug = await createPage(server, owner, { title, body: "Cover the oven." });
-  const api = await apiAs(server, owner);
-  try {
-    const base = `/api/v1/workspaces/${owner.workspace.id}`;
-    const agent = (await (
-      await api.post(`${base}/agents`, { data: { name: "Scribe", handle: "scribe", role: "content" } })
-    ).json()) as { id: string };
-    await api.patch(`${base}/wiki/pages/${slug}/meta`, { data: { parentVersion: 1, agentEdits: "propose" } });
-    const dm = (await (await api.post(`${base}/dms`, { data: { agentId: agent.id } })).json()) as {
-      channelId: string;
-    };
-    const directive = JSON.stringify({
-      slug,
-      parent_version: 1,
-      edits: [{ old_str: "Cover the oven.", new_str: "Cover the oven and switch it off." }],
-      note: "The oven stays warm otherwise.",
-    });
-    await api.post(`${base}/channels/${dm.channelId}/messages`, {
-      data: { body: `[[tool:propose_wiki_edit ${directive}]]`, clientId: `proposal-${slug}` },
-    });
-  } finally {
-    await api.dispose();
-  }
+  const api = await apiAs(owner);
+  const slug = await createPage(api, owner, { title, body: "Cover the oven." });
+  const base = `/api/v1/workspaces/${owner.workspace.id}`;
+  const made = await api.post(`${base}/agents`, {
+    data: { name: "Scribe", handle: "scribe", role: "content" },
+  });
+  if (!made.ok()) throw new Error(`create agent: HTTP ${made.status()} ${await made.text()}`);
+  const agent = (await made.json()) as { id: string };
+  const meta = await api.patch(`${base}/wiki/pages/${slug}/meta`, {
+    data: { parentVersion: 1, agentEdits: "propose" },
+  });
+  if (!meta.ok()) throw new Error(`agents propose: HTTP ${meta.status()} ${await meta.text()}`);
+  const dm = await api.post(`${base}/dms`, { data: { agentId: agent.id } });
+  if (!dm.ok()) throw new Error(`open DM: HTTP ${dm.status()} ${await dm.text()}`);
+  const { channelId } = (await dm.json()) as { channelId: string };
+  const directive = JSON.stringify({
+    slug,
+    parent_version: 1,
+    edits: [{ old_str: "Cover the oven.", new_str: "Cover the oven and switch it off." }],
+    note: "The oven stays warm otherwise.",
+  });
+  const posted = await api.post(`${base}/channels/${channelId}/messages`, {
+    data: { body: `[[tool:propose_wiki_edit ${directive}]]`, clientId: `proposal-${slug}` },
+  });
+  if (!posted.ok()) throw new Error(`post: HTTP ${posted.status()} ${await posted.text()}`);
+  // The agent's run is asynchronous: the proposal is there once its tool ran.
+  await expect
+    .poll(
+      async () => {
+        const notes = await api.get(`${base}/wiki/pages/${slug}/annotations`);
+        return ((await notes.json()) as { proposals: unknown[] }).proposals.length;
+      },
+      { timeout: 20_000 },
+    )
+    .toBe(1);
 
   await signIn(owner);
   await page.goto(`/workspace/${owner.workspace.id}/wiki/${slug}`);
   const proposals = page.getByRole("region", { name: t("wiki", "proposals.title", { count: 1 }) });
   await expect(proposals.getByText("Cover the oven and switch it off.")).toBeVisible();
   await proposals.getByRole("button", { name: t("wiki", "proposals.accept") }).click();
-  await expect(page.getByText(t("wiki", "proposals.decided", { version: 3 }))).toBeVisible();
+  await expect(page.getByText(t("wiki", "proposals.decided", { version: 2 })).first()).toBeVisible();
   await expect(page.getByRole("textbox", { name: t("wiki", "page.editor", { title }) })).toContainText(
     "Cover the oven and switch it off.",
   );
