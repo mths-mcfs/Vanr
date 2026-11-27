@@ -31,15 +31,15 @@ import {
 } from "../drive";
 import { HttpError } from "../http";
 import { columnsOf, createIssue, issueByNumber, notifyComment, updateIssue } from "../issues";
-import { anchorOf, nextRunFor } from "../routines";
+import { anchorOf, canSeeRoutine, nextRunFor, type RoutineRow } from "../routines";
 import { createPage, MAX_BODY, pageBySlug, recordRead, savePage } from "../wiki";
-import type { WikiViewer } from "../wiki-access";
+import { audienceWithin, type WikiViewer } from "../wiki-access";
 import { annotationsOf, MAX_HUNKS, createProposal as proposeWikiChanges } from "../wiki-annotations";
 import { missingTargets } from "../wiki-links";
-import { BASE_TOOLS } from "./base-tools";
+import { BASE_TOOLS, defineStored } from "./base-tools";
 import { MEMORY_TOOLS } from "./memory-tool";
 import { lineDiff, linksIn } from "./preview";
-import { BUILTIN_TOOLS, define, type ToolContext, type ToolDef, ToolInputError } from "./tools";
+import { BUILTIN_TOOLS, type ToolContext, type ToolDef, ToolInputError } from "./tools";
 
 const { files, issues, issueTimeline, routines, calendarProposals, members, agents, debatePosts } = schema;
 const short = (s: string, n = 300) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
@@ -100,7 +100,7 @@ function render(content: ReturnType<typeof contentOf>): string {
 
 // ---- Drive ----
 
-const listFiles = define({
+const listFiles = defineStored({
   name: "list_drive_files",
   description:
     "List files in the workspace's Drive that you and the person asking can see. Optional search by title.",
@@ -137,7 +137,7 @@ const listFiles = define({
   },
 });
 
-const readFile = define({
+const readFile = defineStored({
   name: "read_drive_file",
   description: "Read a Drive file (the latest version, or an older one).",
   effect: "K0",
@@ -149,7 +149,7 @@ const readFile = define({
   },
 });
 
-const createFileTool = define({
+const createFileTool = defineStored({
   name: "create_drive_file",
   description:
     "Create a document, table, diff, diagram (mermaid) or HTML page in the Drive, attached to this conversation.",
@@ -179,7 +179,7 @@ const createFileTool = define({
   },
 });
 
-const updateFileTool = define({
+const updateFileTool = defineStored({
   name: "update_drive_file",
   description:
     "Save a new version of a Drive document (same kind). Read it first; pass the version you read as parentVersion.",
@@ -228,7 +228,7 @@ const updateFileTool = define({
   },
 });
 
-const shareFile = define({
+const shareFile = defineStored({
   name: "share_drive_file",
   description:
     "Bring a Drive file into this conversation as an attachment (only if the person asking can see it).",
@@ -236,6 +236,12 @@ const shareFile = define({
   input: z.object({ fileId: z.string().min(1) }),
   async run(ctx, input) {
     const row = await visibleFile(ctx, input.fileId);
+    // The card shows the file's title to everyone in this conversation: only a workspace file, or one of this
+    // same channel, has that audience.
+    if (row.channelId && row.channelId !== ctx.channel.id)
+      throw new ToolInputError(
+        `"${row.title}" belongs to another channel; this conversation's people may not all see it`,
+      );
     await ctx.postCard(row.title, {
       files: [{ id: row.id, version: row.version, title: row.title, deleted: false }],
     });
@@ -255,7 +261,7 @@ export const wikiViewer = (ctx: ToolContext): WikiViewer => ({
   ...(ctx.personId ? { userId: ctx.personId } : ctx.trigger ? { userId: ctx.trigger.authorId } : {}),
 });
 
-const readWikiPage = define({
+const readWikiPage = defineStored({
   name: "open_wiki_page",
   description:
     "Read a whole wiki page by its slug. Its version is the parent_version for update_wiki_page and propose_wiki_edit. " +
@@ -289,7 +295,7 @@ const actingFor = (ctx: ToolContext) => ({
   ...(ctx.trigger ? { actingFor: ctx.trigger.authorId } : {}),
 });
 
-const createWikiPage = define({
+const createWikiPage = defineStored({
   name: "add_wiki_page",
   description: "Create a wiki page when someone asks for it. Use [[Page title]] to link other pages.",
   effect: "K1",
@@ -382,7 +388,7 @@ async function wikiUpdate(ctx: ToolContext, input: z.infer<typeof updateWikiInpu
 // A safe edit: the agent says which version it read the page at (`parent_version`) and swaps quoted passages
 // (`old_str`/`new_str`) instead of sending the whole body. If the page changed since the read, a swap by
 // passage still lands in the right place (with a warning); replacing the whole body is rejected.
-const updateWikiPage = define({
+const updateWikiPage = defineStored({
   name: "update_wiki_page",
   description:
     "Change a wiki page when someone asks. Read it first and pass its version as parent_version. " +
@@ -408,7 +414,7 @@ const updateWikiPage = define({
   },
   async run(ctx, input) {
     const { row, body, added, warnings } = await wikiUpdate(ctx, input);
-    for (const t of await missingTargets(ctx.deps.db, ctx.workspaceId, added))
+    for (const t of await missingTargets(ctx.deps.db, ctx.workspaceId, added, wikiViewer(ctx)))
       warnings.push(`[[${t}]] does not match any page (it will show as a link to a new page).`);
     const saved = await domain(
       savePage(ctx.deps, {
@@ -430,7 +436,7 @@ const updateWikiPage = define({
   },
 });
 
-const proposeWikiEdit = define({
+const proposeWikiEdit = defineStored({
   name: "propose_wiki_edit",
   description:
     "Propose changes to a wiki page without changing it: a person accepts or rejects each change. " +
@@ -447,12 +453,17 @@ const proposeWikiEdit = define({
   }),
   async run(ctx, input) {
     const page = await domain(pageBySlug(ctx.deps.db, wikiViewer(ctx), input.slug));
+    const edits = input.edits.map((e) => ({ oldStr: e.old_str, newStr: e.new_str }));
+    // Accepting every change must still fit the page's cap.
+    const all = applyEdits(page.body, edits);
+    if (all.ok && all.text.length > MAX_BODY)
+      throw new ToolInputError(`The page would pass ${MAX_BODY} characters`);
     const { row, warnings } = await domain(
       proposeWikiChanges(ctx.deps, {
         page,
         author: actingFor(ctx),
         parentVersion: input.parent_version,
-        edits: input.edits.map((e) => ({ oldStr: e.old_str, newStr: e.new_str })),
+        edits,
         note: input.note,
       }),
     );
@@ -461,7 +472,7 @@ const proposeWikiEdit = define({
   },
 });
 
-const linkToWiki = define({
+const linkToWiki = defineStored({
   name: "link_to_wiki",
   description:
     "Link one wiki page to another (adds a [[link]] at the end of the first page) when someone asks.",
@@ -474,12 +485,19 @@ const linkToWiki = define({
       throw new ToolInputError(`"${from.title}" takes changes only as proposals: use propose_wiki_edit.`);
     if (from.body.includes(`[[${to.title}]]`) || from.body.includes(`[[${to.slug}]]`))
       return "Already linked.";
+    // The link writes the target's title where the first page's readers see it.
+    if (!audienceWithin(from.access, to.access))
+      throw new ToolInputError(
+        `Not everyone who reads "${from.title}" can read the page you want to link; ask a person to link it`,
+      );
+    const body = `${from.body.replace(/\s+$/, "")}\n\nSee also: [[${to.title}]]`;
+    if (body.length > MAX_BODY) throw new ToolInputError(`The page would pass ${MAX_BODY} characters`);
     const saved = await domain(
       savePage(ctx.deps, {
         row: from,
         author: actingFor(ctx),
         canBypassLock: false,
-        body: `${from.body.replace(/\s+$/, "")}\n\nSee also: [[${to.title}]]`,
+        body,
         note: `link to ${to.slug}`,
       }),
     );
@@ -494,7 +512,7 @@ const linkToWiki = define({
 
 // ---- Issues ----
 
-const listIssues = define({
+const listIssues = defineStored({
   name: "list_issues",
   description: "List the workspace's issues (tasks), optionally searching by text, or open one by number.",
   effect: "K0",
@@ -524,7 +542,7 @@ const listIssues = define({
   },
 });
 
-const createIssueTool = define({
+const createIssueTool = defineStored({
   name: "create_issue",
   description: "Create an issue (task) with acceptance criteria. Assign it to yourself to work on it.",
   effect: "K1",
@@ -560,7 +578,7 @@ const createIssueTool = define({
 
 const STAGES = ["todo", "in_progress", "reviewing", "canceled"] as const satisfies readonly IssueStage[];
 
-const updateIssueTool = define({
+const updateIssueTool = defineStored({
   name: "update_issue",
   description:
     "Update an issue: move it to todo, in_progress, reviewing or canceled (only a person marks it done), change priority or title, or link a pull request URL.",
@@ -610,7 +628,7 @@ const updateIssueTool = define({
   },
 });
 
-const commentIssue = define({
+const commentIssue = defineStored({
   name: "comment_issue",
   description: "Comment on an issue (progress, blockers, what you found).",
   effect: "K1",
@@ -653,7 +671,7 @@ async function asRequester(ctx: ToolContext): Promise<WorkspaceMember> {
   return { workspaceId: ctx.workspaceId, userId: m.userId, role: m.role, handle: m.handle };
 }
 
-const listEvents = define({
+const listEvents = defineStored({
   name: "list_events",
   description: "List calendar events of the person asking between two dates (default: the next 7 days).",
   effect: "K0",
@@ -689,7 +707,7 @@ async function personIds(ctx: ToolContext, handles: string[]): Promise<string[]>
   return out;
 }
 
-const findFreeTime = define({
+const findFreeTime = defineStored({
   name: "find_available_time",
   description:
     "Find times when the person asking and the given people (by @handle) are all free, on weekdays between 9:00 and 18:00 UTC, in the next days.",
@@ -728,7 +746,7 @@ const findFreeTime = define({
   },
 });
 
-const proposeEvent = define({
+const proposeEvent = defineStored({
   name: "propose_calendar_event",
   description:
     "Suggest a calendar event. The person who asked confirms it in the calendar before it's created.",
@@ -765,7 +783,7 @@ const proposeEvent = define({
 
 // ---- Routines ----
 
-const createRoutineTool = define({
+const createRoutineTool = defineStored({
   name: "schedule_routine",
   description:
     'Create a recurring routine for yourself in this conversation, from a schedule phrase like "every weekday at 9am" or "every monday at 10am". Runs on behalf of the person asking.',
@@ -813,17 +831,27 @@ const createRoutineTool = define({
   },
 });
 
-const listRoutinesTool = define({
+/** The agent's routines the person asking may see; with no person (a routine's own run), all of them. */
+async function seenRoutines(ctx: ToolContext, rows: RoutineRow[]): Promise<RoutineRow[]> {
+  if (!ctx.trigger) return rows;
+  const me = await asRequester(ctx);
+  const out: RoutineRow[] = [];
+  for (const r of rows) if (await canSeeRoutine(ctx.deps, me, r)) out.push(r);
+  return out;
+}
+
+const listRoutinesTool = defineStored({
   name: "list_routines",
   description: "List your routines.",
   effect: "K0",
   input: z.object({}),
   async run(ctx) {
-    const rows = await ctx.deps.db
+    const all = await ctx.deps.db
       .select()
       .from(routines)
       .where(and(eq(routines.workspaceId, ctx.workspaceId), eq(routines.agentId, ctx.agent.id)))
       .orderBy(asc(routines.createdAt));
+    const rows = await seenRoutines(ctx, all);
     if (rows.length === 0) return "You have no routines.";
     return rows
       .map(
@@ -834,7 +862,7 @@ const listRoutinesTool = define({
   },
 });
 
-const updateRoutineTool = define({
+const updateRoutineTool = defineStored({
   name: "update_routine",
   description: "Change one of your routines: instructions, schedule phrase, or pause/resume.",
   effect: "K1",
@@ -847,7 +875,7 @@ const updateRoutineTool = define({
   }),
   async run(ctx, input) {
     const { db } = ctx.deps;
-    const [row] = await db
+    const [found] = await db
       .select()
       .from(routines)
       .where(
@@ -857,7 +885,9 @@ const updateRoutineTool = define({
           eq(routines.agentId, ctx.agent.id),
         ),
       );
-    if (!row) throw new ToolInputError(`Routine ${input.routineId} not found`);
+    if (!found || !(await seenRoutines(ctx, [found])).length)
+      throw new ToolInputError(`Routine ${input.routineId} not found`);
+    const row = found;
     let trigger = row.trigger as RoutineTrigger;
     if (input.schedule) {
       const parsed = parseSchedulePhrase(input.schedule, input.timezone, ctx.deps.now());
@@ -908,7 +938,7 @@ async function agentIdsByHandle(ctx: ToolContext, handles: string[]): Promise<st
   return out;
 }
 
-const openDebateTool = define({
+const openDebateTool = defineStored({
   name: "open_debate",
   description:
     "Propose a debate between agents (by @handle) about a goal. Each agent answers blind first; extra challenge rounds (`rounds`, 0 = just vote) run only while they disagree. By default it posts a suggestion the person accepts; use open: true only when the person explicitly asked to start it now.",
@@ -967,7 +997,7 @@ async function debateFor(ctx: ToolContext, debateId: string) {
   return debate;
 }
 
-const readDebate = define({
+const readDebate = defineStored({
   name: "read_debate",
   description: "Read a debate: its goal, status and what each participant said.",
   effect: "K0",
@@ -993,7 +1023,7 @@ const readDebate = define({
   },
 });
 
-const postInDebate = define({
+const postInDebate = defineStored({
   name: "post_in_debate",
   description:
     "Add a contribution to a debate you are a speaker at, outside the rounds. Not available while the debate runs its blind, anonymous rounds.",

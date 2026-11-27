@@ -21,7 +21,7 @@ import {
   type TableRow,
 } from "../bases/core";
 import { queryRows } from "../bases/query";
-import { createRow, refreshVolatile, touchDatabase, updateRow } from "../bases/write";
+import { refreshVolatile, rewriteRows, touchDatabase } from "../bases/write";
 import { HttpError } from "../http";
 import { define, type ToolContext, type ToolDef, ToolInputError } from "./tools";
 
@@ -29,6 +29,8 @@ const { dbDatabases, dbTables, dbViews, dbRows } = schema;
 /** The model's input: text with a NUL or half of a surrogate pair would reach SQL and fail in Postgres. */
 const storable = <S extends z.ZodType>(input: S) =>
   input.refine(isStorable, { message: "Text with a NUL or a broken character" });
+/** `define` with the input checked as storable at the boundary (the content and memory tools use it too). */
+export const defineStored = <I>(def: ToolDef<I>) => define({ ...def, input: storable(def.input) });
 // the same `self` and `domain` as content-tools.ts (importing from there would make a cycle with AGENT_TOOLS)
 const self = (ctx: ToolContext): ActorRef => ({ type: "agent", id: ctx.agent.id });
 async function domain<T>(work: Promise<T>): Promise<T> {
@@ -88,7 +90,8 @@ function toFilter(table: TableRow, raw: unknown, depth = 0): Filter {
   const o = raw as Record<string, unknown>;
   if (Array.isArray(o.and)) return { and: o.and.map((f) => toFilter(table, f, depth + 1)) };
   if (Array.isArray(o.or)) return { or: o.or.map((f) => toFilter(table, f, depth + 1)) };
-  const def = propOf(table, String(o.prop ?? ""));
+  if (typeof o.prop !== "string") throw new ToolInputError("Invalid filter: prop is a property name");
+  const def = propOf(table, o.prop);
   let value = o.value;
   if (def.options && o.op !== "group")
     value = Array.isArray(value) ? value.map((v) => optionId(def, v)) : optionId(def, value);
@@ -263,7 +266,11 @@ const queryBase = define({
 /** The value the model sent → the stored value: text becomes the property's type (an option by its name). */
 function toValue(def: PropDef, v: unknown): unknown {
   if (v === null) return null;
-  if (def.type === "text" || def.type === "url") return typeof v === "string" ? v : String(v);
+  if (def.type === "text" || def.type === "url") {
+    if (typeof v === "string") return v;
+    if (typeof v === "number" || typeof v === "boolean") return String(v);
+    throw new ToolInputError(`"${def.name}" takes text`);
+  }
   if (def.type === "relation" && typeof v === "string")
     return v
       .split(",")
@@ -294,10 +301,12 @@ const upsertRow = z.object({
   values: z.record(z.string().max(100), z.unknown()),
 });
 
+const NOTHING_SAVED = "Nothing was saved: fix this and send the whole batch again.";
+
 const upsertBaseRows = define({
   name: "upsert_base_rows",
   description:
-    "Create or change rows of a database when someone asks. Rows without id are created. To change a row, pass its id and the parentVersion you read (query_base); if someone saved it after, you get the current values back and nothing is overwritten. Values by property name; select/status by option name; null clears.",
+    "Create or change rows of a database when someone asks. Rows without id are created. To change a row, pass its id and the parentVersion you read (query_base); if someone saved it after, you get the current values back and nothing is overwritten. The batch saves whole or not at all. Values by property name; select/status by option name; null clears.",
   effect: "K1",
   input: storable(
     z.object({ base: z.string().trim().min(1).max(200), rows: z.array(upsertRow).min(1).max(50) }),
@@ -305,60 +314,76 @@ const upsertBaseRows = define({
   async run(ctx, input) {
     const { base, table } = await findBase(ctx, input.base);
     const names = await namesOf(ctx.deps.db, ctx.workspaceId);
-    const actor = self(ctx);
-    const created: string[] = [];
-    const updated: { id: string; before: RowRow["props"]; after: RowRow["props"]; version: number }[] = [];
-    const lines: string[] = [];
+    // Every row is checked before anything is written: one wrong row leaves the whole batch out.
+    const problems: string[] = [];
+    const planned: { n: number; id?: string; parentVersion?: number; props: Record<string, unknown> }[] = [];
     for (const [i, r] of input.rows.entries()) {
       try {
         const props = toWrite(table, r.values);
-        if (!r.id) {
-          const row = await createRow(ctx.deps, table, { props, actor }, names);
-          created.push(row.id);
-          lines.push(`#${i + 1} created ${row.id} (parentVersion 1)`);
-          continue;
-        }
-        if (r.parentVersion === undefined) {
-          lines.push(`#${i + 1} ${r.id}: pass the parentVersion you read with query_base`);
-          continue;
-        }
-        const { row, before } = await updateRow(
-          ctx.deps,
-          table,
-          r.id,
-          { props, actor, parentVersion: r.parentVersion },
-          names,
-        );
-        // the same row twice in the call is one entry (the first one's before, the last one's version): the
-        // undo checks one version per row
-        const again = updated.find((u) => u.id === row.id);
-        if (again) Object.assign(again, { after: row.props, version: row.version });
-        else updated.push({ id: row.id, before: before.props, after: row.props, version: row.version });
-        lines.push(`#${i + 1} updated ${row.id} (parentVersion ${row.version})`);
+        if (r.id && r.parentVersion === undefined)
+          problems.push(`#${i + 1} ${r.id}: pass the parentVersion you read with query_base`);
+        else planned.push({ n: i + 1, id: r.id, parentVersion: r.parentVersion, props });
       } catch (err) {
-        if (err instanceof HttpError && err.code === "base.row_conflict") {
-          const [current] = await ctx.deps.db
-            .select()
-            .from(dbRows)
-            .where(and(eq(dbRows.id, r.id ?? ""), eq(dbRows.tableId, table.id)));
-          lines.push(
-            `#${i + 1} conflict: someone saved ${r.id} after you read it. Now: ${current ? rowLine(table, current, names) : "deleted"}`,
-          );
-        } else if (err instanceof HttpError || err instanceof ToolInputError) {
-          const detail =
-            err instanceof HttpError && err.params ? ` ${JSON.stringify(err.params).slice(0, 300)}` : "";
-          lines.push(`#${i + 1} not saved: ${err.message}${detail}`);
-        } else throw err;
+        if (!(err instanceof ToolInputError)) throw err;
+        problems.push(`#${i + 1} not saved: ${err.message}`);
       }
     }
-    if (created.length || updated.length) {
-      await touchDatabase(ctx.deps.db, base.id, ctx.deps.now());
-      await ctx.recordAction({
-        kind: "base_rows_upserted",
-        target: { type: "base", id: base.id, title: base.title },
-        params: { tableId: table.id, created, updated },
+    if (problems.length) return { content: [...problems, NOTHING_SAVED].join("\n"), isError: true };
+    const created: string[] = [];
+    const updated: { id: string; before: RowRow["props"]; after: RowRow["props"]; version: number }[] = [];
+    const lines: string[] = [];
+    let at: (typeof planned)[number] | undefined;
+    try {
+      // The rows and the receipt in one transaction: all of it or none, and an undo that covers exactly it.
+      await rewriteRows(ctx.deps, table, self(ctx), async (ops) => {
+        for (const p of planned) {
+          at = p;
+          if (!p.id) {
+            const row = await ops.create({ props: p.props });
+            created.push(row.id);
+            lines.push(`#${p.n} created ${row.id} (parentVersion 1)`);
+            continue;
+          }
+          const [prev] = await ops.tx
+            .select({ props: dbRows.props })
+            .from(dbRows)
+            .where(and(eq(dbRows.id, p.id), eq(dbRows.tableId, ops.table.id)));
+          const row = await ops.update(p.id, { props: p.props, parentVersion: p.parentVersion });
+          // the same row twice in the call is one entry (the first one's before, the last one's version): the
+          // undo checks one version per row
+          const again = updated.find((u) => u.id === row.id);
+          if (again) Object.assign(again, { after: row.props, version: row.version });
+          else
+            updated.push({ id: row.id, before: prev?.props ?? {}, after: row.props, version: row.version });
+          lines.push(`#${p.n} updated ${row.id} (parentVersion ${row.version})`);
+        }
+        await ctx.recordAction(
+          {
+            kind: "base_rows_upserted",
+            target: { type: "base", id: base.id, title: base.title },
+            params: { tableId: table.id, created, updated },
+          },
+          ops.tx,
+        );
       });
+    } catch (err) {
+      if (!(err instanceof HttpError)) throw err;
+      const n = at?.n ?? 1;
+      if (err.code === "base.row_conflict") {
+        const [current] = await ctx.deps.db
+          .select()
+          .from(dbRows)
+          .where(and(eq(dbRows.id, at?.id ?? ""), eq(dbRows.tableId, table.id)));
+        const now = current ? rowLine(table, current, names) : "deleted";
+        return {
+          content: `#${n} conflict: someone saved ${at?.id} after you read it. Now: ${now}\n${NOTHING_SAVED}`,
+          isError: true,
+        };
+      }
+      const detail = err.params ? ` ${JSON.stringify(err.params).slice(0, 300)}` : "";
+      return { content: `#${n} not saved: ${err.message}${detail}\n${NOTHING_SAVED}`, isError: true };
     }
+    await touchDatabase(ctx.deps.db, base.id, ctx.deps.now());
     return lines.join("\n");
   },
 });

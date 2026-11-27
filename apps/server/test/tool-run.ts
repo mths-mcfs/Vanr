@@ -106,9 +106,9 @@ export async function toolRun(
       async ask() {
         return null;
       },
-      async recordAction(action) {
+      async recordAction(action, tx) {
         const at = server.deps.now();
-        const [row] = await server.deps.db
+        const [row] = await (tx ?? server.deps.db)
           .insert(reversibleActions)
           .values({
             id: newId("act"),

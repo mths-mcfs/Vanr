@@ -69,7 +69,10 @@ export const catalogEntry = (id: string) => CATALOG.find((c) => c.id === id) ?? 
 
 /** Built-in area → tools per level. The ones not listed here always apply (conversation). */
 export const BUILTIN_AREAS = {
-  context: { read: ["search"], write: ["remember", "edit_memory", "forget"] },
+  context: {
+    read: ["search"],
+    write: ["remember", "edit_memory", "forget", "memory", "propose_workspace_memory_change"],
+  },
   drive: {
     read: ["list_drive_files", "read_drive_file"],
     write: ["create_drive_file", "update_drive_file", "share_drive_file"],

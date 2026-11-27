@@ -228,10 +228,18 @@ export async function viewerEdges(db: Conn, viewer: WikiViewer): Promise<{ from:
   );
 }
 
-/** Targets of the text's [[links]] that lead to no page outside the trash (attachment embeds are left out). */
-export async function missingTargets(db: Conn, workspaceId: string, md: string): Promise<string[]> {
+/**
+ * Targets of the text's [[links]] that lead to no page outside the trash (attachment embeds are left out). With
+ * `viewer`, a page they don't read counts as missing: the answer must not tell that it exists.
+ */
+export async function missingTargets(
+  db: Conn,
+  workspaceId: string,
+  md: string,
+  viewer?: WikiViewer,
+): Promise<string[]> {
   const targets = [...new Set(parseWikiLinks(md).flatMap((r) => (r.embed || !r.target ? [] : [r.target])))];
-  const pages = await candidates(db, workspaceId, targets);
+  const pages = await candidates(db, workspaceId, targets, viewer);
   return targets.filter((t) => !resolveTarget(t, pages));
 }
 

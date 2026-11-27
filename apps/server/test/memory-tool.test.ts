@@ -344,4 +344,55 @@ describe("memory tool: three stores in Postgres", () => {
     },
     SERVER_TEST_MS,
   );
+
+  test(
+    "the limits and scopes of the memory tools: a proposal counts bytes, and both tools need the context write scope",
+    async () => {
+      const t = await team();
+      const { call } = await t.as(t.beto);
+      // 60,000 two-byte characters: under the character count, over the 100,000 bytes the approval writes
+      const big = await call("propose_workspace_memory_change", {
+        path: "/memories/workspace/big.md",
+        text: "é".repeat(60_000),
+        title: "Oversize",
+        why: "boundary",
+      });
+      expect(big).toMatchObject({ isError: true, content: "Error: a memory file holds up to 100000 bytes" });
+      expect((await ok(api<ProposalList>(t.ana, t.workspaceId, "GET", "/proposals"))).proposals).toEqual([]);
+      const nul = await call("memory", {
+        command: "create",
+        path: "/memories/agent/n.md",
+        file_text: "a\u0000",
+      });
+      expect(nul.isError).toBe(true);
+      expect(nul.content).toContain("NUL");
+
+      const reader = await seedAgent(server, t.workspaceId, t.ana, {
+        name: "Reader",
+        channels: [t.general],
+        scopes: ["context:read"],
+      });
+      const run = await toolRun(server, {
+        workspaceId: t.workspaceId,
+        agent: reader,
+        channelId: t.general,
+        asker: t.ana,
+      });
+      for (const name of ["memory", "propose_workspace_memory_change"])
+        expect((await run.call(name, {})).content).toBe(`Unknown tool ${name}`);
+      const writer = await seedAgent(server, t.workspaceId, t.ana, {
+        name: "Writer",
+        channels: [t.general],
+        scopes: ["context:write"],
+      });
+      const allowed = await toolRun(server, {
+        workspaceId: t.workspaceId,
+        agent: writer,
+        channelId: t.general,
+        asker: t.ana,
+      });
+      expect((await allowed.call("memory", { command: "view", path: "/memories" })).isError).toBe(false);
+    },
+    SERVER_TEST_MS,
+  );
 });

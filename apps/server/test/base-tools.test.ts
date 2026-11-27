@@ -3,6 +3,8 @@
 // with the bases' scope. Each write reads back through the bases routes.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { BasePropDef } from "@vanr/contract";
+import { schema } from "@vanr/engine/db";
+import { eq } from "drizzle-orm";
 import type { RunningServer } from "../src/server";
 import { type BasesApi, basesApi, baseWithTypes } from "./bases-api";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
@@ -70,17 +72,22 @@ describe("bases: the agent's tools", () => {
       expect(schemaText).toContain("- Stage (select) · options: Alpha, Beta");
       expect(schemaText).toContain('= prop("Amount") * 2 → number');
 
-      const created = await call("upsert_base_rows", {
+      const good = [
+        { values: { Name: "Order 2", Amount: 7, Stage: "Beta", Status: "Done", Due: "2026-11-01" } },
+        { id: first.id, parentVersion: 1, values: { Amount: 11 } },
+      ];
+      // one wrong row leaves the whole batch out
+      const wrong = await call("upsert_base_rows", {
         base: base.id,
-        rows: [
-          { values: { Name: "Order 2", Amount: 7, Stage: "Beta", Status: "Done", Due: "2026-11-01" } },
-          { id: first.id, parentVersion: 1, values: { Amount: 11 } },
-          { values: { Stage: "Gamma" } },
-        ],
+        rows: [...good, { values: { Stage: "Gamma" } }],
       });
+      expect(wrong.isError).toBe(true);
+      expect(wrong.content).toContain('#3 not saved: "Gamma" is not a valid select');
+      expect(wrong.content).toContain("Nothing was saved");
+      expect((await ana.api.query(workspaceId, base.id, table.id)).total).toBe(1);
+      const created = await call("upsert_base_rows", { base: base.id, rows: good });
       expect(created.content).toContain("#1 created");
       expect(created.content).toContain(`#2 updated ${first.id} (parentVersion 2)`);
-      expect(created.content).toContain('#3 not saved: "Gamma" is not a valid select');
       const q = await call("query_base", {
         base: "Orders",
         filter: {
@@ -100,6 +107,7 @@ describe("bases: the agent's tools", () => {
         base: base.id,
         rows: [{ id: first.id, parentVersion: 2, values: { Amount: 1 } }],
       });
+      expect(stale.isError).toBe(true);
       expect(stale.content).toContain(`conflict: someone saved ${first.id}`);
       expect(stale.content).toContain('"Amount":"99"');
       expect((await ana.api.getRow(workspaceId, base.id, first.id)).props.p_num).toBe(99);
@@ -301,6 +309,61 @@ describe("bases: the agent's tools", () => {
         rows: [{ id: "dbr_x", values: { Amount: 1 } }],
       });
       expect(noVersion.content).toContain("pass the parentVersion you read with query_base");
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a batch is all or nothing with its receipt: a wrong value or a conflict midway leaves no row and no undo",
+    async () => {
+      const { workspaceId, ana, lia, call } = await withAgent();
+      const { base, table } = await baseWithTypes(ana.api, workspaceId, "Batch");
+      const t = table.titlePropId;
+      const first = await ana.api.createRow(workspaceId, base.id, table.id, {
+        props: { [t]: "Kept", p_num: 1 },
+      });
+      const receipts = async () =>
+        (
+          await server.deps.db
+            .select()
+            .from(schema.reversibleActions)
+            .where(eq(schema.reversibleActions.agentId, lia.id))
+        ).length;
+      const titles = async () =>
+        (await ana.api.query(workspaceId, base.id, table.id)).rows.map((r) => r.props[t]).sort();
+      // an object where text goes is a tool error, not a throw, and the valid row before it stays out
+      const objectValue = await call("upsert_base_rows", {
+        base: base.id,
+        rows: [{ values: { Name: "valid" } }, { values: { Name: { toString: null } } }],
+      });
+      expect(objectValue).toMatchObject({ isError: true });
+      expect(objectValue.content).toContain('#2 not saved: "Name" takes text');
+      const badFilter = await call("query_base", {
+        base: base.id,
+        filter: { prop: { toString: null }, op: "eq" },
+      });
+      expect(badFilter).toMatchObject({ isError: true, content: "Invalid filter: prop is a property name" });
+      // a conflict on the second row, after the first was created inside the transaction: both roll back
+      await ana.api.updateRow(workspaceId, base.id, first.id, { props: { p_num: 2 }, parentVersion: 1 });
+      const midway = await call("upsert_base_rows", {
+        base: base.id,
+        rows: [
+          { values: { Name: "created then rolled back" } },
+          { id: first.id, parentVersion: 1, values: { Amount: 9 } },
+        ],
+      });
+      expect(midway.isError).toBe(true);
+      expect(midway.content).toContain(`#2 conflict: someone saved ${first.id}`);
+      expect(midway.content).toContain("Nothing was saved");
+      expect(await titles()).toEqual(["Kept"]);
+      expect((await ana.api.getRow(workspaceId, base.id, first.id)).props.p_num).toBe(2);
+      expect(await receipts()).toBe(0);
+      // a batch that saves writes its receipt with it
+      expect(
+        (await call("upsert_base_rows", { base: base.id, rows: [{ values: { Name: "New" } }] })).isError,
+      ).toBe(false);
+      expect(await titles()).toEqual(["Kept", "New"]);
+      expect(await receipts()).toBe(1);
     },
     SERVER_TEST_MS,
   );

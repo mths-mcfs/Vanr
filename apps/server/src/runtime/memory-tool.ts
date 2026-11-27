@@ -33,7 +33,8 @@ import {
 import { HttpError } from "../http";
 import { queueMemoryReview } from "../memory-reviews";
 import { channelNameOf } from "../messages";
-import { createProposal, define, type ToolContext, ToolInputError } from "./tools";
+import { defineStored } from "./base-tools";
+import { createProposal, type ToolContext, ToolInputError } from "./tools";
 
 const path = z.string().min(1).max(400);
 const input = z.discriminatedUnion("command", [
@@ -384,7 +385,7 @@ async function runMemory(ctx: ToolContext, inp: Input): Promise<string> {
   }
 }
 
-export const memoryTool = define<Input>({
+export const memoryTool = defineStored<Input>({
   name: "memory",
   description:
     "Your memory directory at /memories: /memories/agent (yours), /memories/you (about the person who asked; private to them) and /memories/workspace (the workspace's, read only). Commands: view, create, str_replace, insert, delete, rename.",
@@ -403,7 +404,7 @@ export const memoryTool = define<Input>({
  * The workspace's memory is read only for the agent: changing one of its files is a proposal, and a person
  * with `manage_agents` accepts or rejects it, like the instructions and the workspace's context.
  */
-export const proposeWorkspaceMemory = define({
+export const proposeWorkspaceMemory = defineStored({
   name: "propose_workspace_memory_change",
   description:
     "Propose a new version of a file in /memories/workspace (the workspace's memory, which you can only read), or a new file. Give the full new text. A person reviews it. Write the title in the language of the conversation.",
@@ -420,6 +421,9 @@ export const proposeWorkspaceMemory = define({
     if (p.kind !== "store" || p.scope !== "workspace" || p.path === "")
       throw new ToolInputError("Error: propose changes only to files in /memories/workspace");
     if (p.path.startsWith("remembered/")) throw new ToolInputError("Error: pick another folder");
+    // the same limit the write after approval checks (bytes, not characters)
+    if (utf8Bytes(inp.text) > MEMORY_ITEM_MAX_BYTES)
+      throw new ToolInputError(`Error: a memory file holds up to ${MEMORY_ITEM_MAX_BYTES} bytes`);
     const current = await itemAtPath(
       ctx.deps.db,
       { scope: "workspace", workspaceId: ctx.workspaceId },

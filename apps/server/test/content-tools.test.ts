@@ -585,4 +585,144 @@ describe("content tools", () => {
     },
     SERVER_TEST_MS,
   );
+
+  test(
+    "Wiki: the page cap holds on every write path, and NUL text is rejected at the input",
+    async () => {
+      const { workspaceId: ws, wiki, call } = await team();
+      const full = await wiki.ana.createWikiPage(ws, {
+        title: "Full page",
+        body: `${"x".repeat(499_990)}UNIQUE0000`,
+      });
+      const dest = await wiki.ana.createWikiPage(ws, { title: "Link target", body: "short" });
+      for (const [tool, input] of [
+        ["update_wiki_page", { slug: full.slug, parent_version: 1, mode: "append", text: "small" }],
+        ["link_to_wiki", { from: full.slug, to: dest.slug }],
+        [
+          "propose_wiki_edit",
+          {
+            slug: full.slug,
+            parent_version: 1,
+            edits: [{ old_str: "UNIQUE0000", new_str: "UNIQUE00000" }],
+          },
+        ],
+      ] as const) {
+        const out = await call(tool, input);
+        expect(out).toMatchObject({ isError: true, content: "The page would pass 500000 characters" });
+      }
+      expect((await wiki.ana.getWikiPage(ws, full.slug)).body.length).toBe(500_000);
+      expect((await wiki.ana.listWikiPageAnnotations(ws, full.slug)).proposals).toEqual([]);
+      const nul = await call("add_wiki_page", { title: "Bad", body: "a\u0000b" });
+      expect(nul.isError).toBe(true);
+      expect(nul.content).toContain("Text with a NUL or a broken character");
+      expect((await call("comment_issue", { number: 1, text: "x\u0000" })).content).toContain("NUL");
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "Wiki: a restricted page's title doesn't leak through link warnings or a link",
+    async () => {
+      const { workspaceId: ws, wiki, lia, call, as, ana } = await team();
+      const secret = await wiki.ana.createWikiPage(ws, { title: "Layoffs", body: "secret" });
+      const { slug } = await wiki.ana.setWikiPageAccess(ws, secret.slug, {
+        kind: "private",
+        userIds: [],
+        agentIds: [lia.id],
+      });
+      await call("add_wiki_page", { title: "Notes", body: "Start." });
+      // asked by Beto, who can't read it: the warning is the same as for a title that doesn't exist
+      const warned = await call("update_wiki_page", {
+        slug: "notes",
+        parent_version: 1,
+        mode: "append",
+        text: "[[Layoffs]] and [[Nothing here]]",
+      });
+      expect(warned.content).toContain("[[Layoffs]] does not match any page");
+      expect(warned.content).toContain("[[Nothing here]] does not match any page");
+      // asked by Ana, who reads it: no warning for it, but its title can't go onto a page everyone reads
+      const forAna = await as(ana);
+      const seen = await forAna.call("update_wiki_page", {
+        slug: "notes",
+        parent_version: 2,
+        mode: "append",
+        text: "[[Layoffs]]",
+      });
+      expect(seen.content).not.toContain("[[Layoffs]] does not");
+      await forAna.call("add_wiki_page", { title: "Plain", body: "Open to all." });
+      const link = await forAna.call("link_to_wiki", { from: "plain", to: slug });
+      expect(link.isError).toBe(true);
+      expect(link.content).toContain("Not everyone who reads");
+      expect((await wiki.ana.getWikiPage(ws, "plain")).body).toBe("Open to all.");
+      // the other way round is fine: everyone who reads the restricted page reads the open one
+      expect((await forAna.call("link_to_wiki", { from: slug, to: "plain" })).content).toBe(
+        'Linked "Layoffs" to "Plain".',
+      );
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "Drive: a file of another channel isn't shared into a conversation whose people may not see it",
+    async () => {
+      const { workspaceId: ws, ana, beto, lia, call, cards } = await team();
+      const board = await seedChannel(server, ws, {
+        name: "board",
+        visibility: "private",
+        members: [ana, beto],
+      });
+      await server.deps.db
+        .insert(schema.channelMemberships)
+        .values({ channelId: board, memberType: "agent", memberId: lia.id });
+      const file = await api<FileDetail>(ana, ws, "POST", "/files", {
+        title: "Board minutes",
+        content: { kind: "document", markdown: "minutes" },
+        channelId: board,
+      });
+      // Lia and Beto both see it, but #general is everyone's
+      const out = await call("share_drive_file", { fileId: file.id });
+      expect(out.isError).toBe(true);
+      expect(out.content).toContain("belongs to another channel");
+      expect(cards).toEqual([]);
+      // a workspace file is shared
+      const open = await api<FileDetail>(ana, ws, "POST", "/files", {
+        title: "Handbook",
+        content: { kind: "document", markdown: "rules" },
+      });
+      expect((await call("share_drive_file", { fileId: open.id })).content).toBe('Shared "Handbook" here.');
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "Routines: a routine of a channel the person asking can't read is neither listed nor changed for them",
+    async () => {
+      const { workspaceId: ws, ana, lia, call, as } = await team();
+      const board = await seedChannel(server, ws, { name: "board", visibility: "private", members: [ana] });
+      const id = newId("rtn");
+      await server.deps.db.insert(schema.routines).values({
+        id,
+        workspaceId: ws,
+        name: "Payroll digest",
+        prompt: "Sum the payroll",
+        agentId: lia.id,
+        target: { kind: "channel", channelId: board },
+        trigger: {
+          kind: "schedule",
+          rule: { freq: "daily", interval: 1, times: ["09:00"], timezone: "UTC" },
+        },
+        active: true,
+        createdBy: ana.user.id,
+      });
+      expect((await call("list_routines", {})).content).toBe("You have no routines.");
+      const change = await call("update_routine", { routineId: id, active: false });
+      expect(change).toMatchObject({ isError: true, content: `Routine ${id} not found` });
+      const [row] = await server.deps.db.select().from(schema.routines).where(eq(schema.routines.id, id));
+      expect(row?.active).toBe(true);
+      // Ana, who reads the channel, sees it; a run with no person sees the agent's own routines
+      expect((await (await as(ana)).call("list_routines", {})).content).toContain("Payroll digest");
+      expect((await (await as(null)).call("list_routines", {})).content).toContain("Payroll digest");
+    },
+    SERVER_TEST_MS,
+  );
 });
