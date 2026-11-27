@@ -2,8 +2,9 @@
 // people, replying to and resolving a comment, accepting an agent's proposed change, and where a
 // picked passage anchors in the published text.
 import { describe, expect, test } from "bun:test";
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import { newServer, renderApp } from "../../../../test/app.tsx";
+import { FakeCollabSocket } from "../../../../test/live-socket.ts";
 import { anchorFor } from "./Annotations.tsx";
 
 const WIKI = "/workspace/workspace_birchwood/wiki";
@@ -52,6 +53,29 @@ describe("access, comments and proposals", () => {
       expect(within(panel).queryByRole("region", { name: "1 proposal to review" }) === null).toBe(true),
     );
     expect(app.server.wiki.pages[0]?.versions.at(-1)?.body).toContain("Cover the press and switch it off.");
+  });
+
+  test("when the live document turns read only, deciding a proposal goes away with it", async () => {
+    FakeCollabSocket.instances = [];
+    FakeCollabSocket.nextScope = "read-write";
+    FakeCollabSocket.autoOpen = true;
+    FakeCollabSocket.failHandshake = false;
+    await renderApp({
+      path: PAGE,
+      signedInAs: "usr_iris",
+      wikiSocket: FakeCollabSocket as unknown as new (url: string) => WebSocket,
+    });
+    const panel = await side();
+    const proposals = await within(panel).findByRole("region", { name: "1 proposal to review" });
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Version 2 published"));
+    expect(within(proposals).getByRole("button", { name: "Accept" })).toBeDefined();
+    // The server reopens the page read only for this person, before the page itself says so.
+    FakeCollabSocket.nextScope = "readonly";
+    await act(async () => FakeCollabSocket.instances[0]?.serverClose(4409, "reconnect-read-only"));
+    await waitFor(() =>
+      expect(within(proposals).queryByRole("button", { name: "Accept" }) === null).toBe(true),
+    );
+    FakeCollabSocket.nextScope = "read-write";
   });
 
   test("a member who may not edit the page reads a proposal without deciding it", async () => {
