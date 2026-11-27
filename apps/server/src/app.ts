@@ -10,6 +10,7 @@ import { registerControl } from "./routes/control";
 import { registerDebates } from "./routes/debates";
 import { registerDrive } from "./routes/drive";
 import { registerDriveUploads } from "./routes/drive-upload";
+import { registerIntegrations } from "./routes/integrations";
 import { registerInvitations } from "./routes/invitations";
 import { registerIssues } from "./routes/issues";
 import { registerMemories } from "./routes/memories";
@@ -133,7 +134,7 @@ export function createApp(
   // server port): chat S6, then the threads and memories below; agents S5, agent lab S5,
   // skills S4, control S5, then invitations, notifications and push below, then the Drive, the wiki and the
   // bases below; issues S4, debates S4, routines S4, calendar S4, then the search below; connectors S6,
-  // integrations S5, then the runners and their requests below; assignments S5.
+  // then the integrations, the runners and their requests below; assignments S5.
   registerThreads(app);
   registerSkills(app);
   registerMemories(app);
@@ -150,6 +151,7 @@ export function createApp(
   registerDebates(app);
   registerRoutines(app);
   registerSearch(app);
+  registerIntegrations(app);
   registerRunners(app);
   registerRunnerRequests(app);
 

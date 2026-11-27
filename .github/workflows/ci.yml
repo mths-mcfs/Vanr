@@ -667,6 +667,11 @@ jobs:
       - run: bun test apps/server/test/sql-guard-identity.test.ts --test-name-pattern Postgres
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
+      # A connected database on a real Postgres through the server's own connector: a read through the tool, a write
+      # rejected, the read-only session and its statement timeout.
+      - run: bun test apps/server/test/databases-postgres.test.ts --test-name-pattern Postgres
+        env:
+          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
       # The wiki on a real Postgres: saves on the same parent version; a member's save, move or trash that
       # comes while a lock holds the page waits for the page's row lock and is rejected; two saves that link
       # to each other both commit. The next two runs swap the row lock in the test (no lock, then the old FOR

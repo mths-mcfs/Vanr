@@ -3,7 +3,6 @@ import { diskBlobs, memoryBlobs } from "@vanr/engine/blobs";
 import { openDb, schema } from "@vanr/engine/db";
 import { PRICES } from "@vanr/engine/models/prices";
 import { createSealer } from "@vanr/engine/seal";
-import { postgresConnector, type SqlConnector } from "@vanr/engine/sqlconn";
 import { count } from "drizzle-orm";
 import { createApp } from "./app";
 import { createEngine } from "./assignments/motor";
@@ -17,6 +16,7 @@ import { extractPending } from "./drive-extract";
 import { errorBody, HttpError } from "./http";
 import { holdInstanceLock } from "./instance-lock";
 import { guardedFetch } from "./integrations/net";
+import { type GuardedConnector, postgresGuardedConnector } from "./integrations/sql-identity";
 import { routedBlobs } from "./integrations/storage";
 import { log } from "./logger";
 import { createMailer, type Mailer } from "./mailer";
@@ -60,7 +60,7 @@ interface StartOptions {
   now?: () => Date;
   fetchExternal?: typeof fetch;
   /** Tests: the workspaces' databases on a PGlite. */
-  sql?: SqlConnector;
+  sql?: GuardedConnector;
   /** Tests: every agent uses the fake provider, even with a credential saved. */
   forceFakeModels?: boolean;
   /** The single-instance lock's connection dropped with the server up (index.ts ends the process). */
@@ -355,7 +355,7 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
       undefined,
       effective.integrations.allowPlaintext,
     ),
-    sql: opts.sql ?? postgresConnector,
+    sql: opts.sql ?? postgresGuardedConnector,
     runners: runnersHub,
     // Push goes only to known push service hosts (push.ts), without redirects: it doesn't go through
     // guardedFetch, which would resolve DNS to check for a private network.

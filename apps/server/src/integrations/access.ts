@@ -2,12 +2,13 @@
 // `*` grants everything; `tool:x` grants and `deny:x` denies a tool by name; on a connection,
 // `connector:*` is the whole connection and `<base>:read|write` a level.
 import type { AccessInput, AccessLevel, AgentAccess, ScopeGrant } from "@vanr/contract";
+import type { ChannelRule } from "@vanr/engine/action-credential";
 import { type Db, schema } from "@vanr/engine/db";
 import { and, eq, isNull } from "drizzle-orm";
 import { HttpError } from "../http";
 import { BUILTIN_SCOPES, builtinScopeOf, connectionScopes } from "./catalog";
 
-const { agentGrants, connections } = schema;
+const { agentGrants, agentChannelAccess, connections } = schema;
 export type ConnectionRow = typeof connections.$inferSelect;
 
 const SPECIAL = (scope: string) =>
@@ -43,6 +44,21 @@ export async function agentConnections(db: Db, agentId: string): Promise<Connect
     .from(connections)
     .where(and(eq(connections.agentId, agentId), isNull(connections.revokedAt)))
     .orderBy(connections.createdAt);
+}
+
+/**
+ * The agent's channel rules in its workspace (seam 7): each one only lowers, in its channel, what the workspace
+ * granted on a connection, a mailbox or a database (`*` = all of them).
+ */
+export async function channelRulesOf(db: Db, workspaceId: string, agentId: string): Promise<ChannelRule[]> {
+  return db
+    .select({
+      channelId: agentChannelAccess.channelId,
+      connectionId: agentChannelAccess.connectionId,
+      level: agentChannelAccess.level,
+    })
+    .from(agentChannelAccess)
+    .where(and(eq(agentChannelAccess.agentId, agentId), eq(agentChannelAccess.workspaceId, workspaceId)));
 }
 
 /** Writes the whole list (replaces what was there). */

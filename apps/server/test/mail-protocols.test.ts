@@ -145,6 +145,29 @@ test("MIME: multipart prefers text; HTML becomes text; attachments show by name"
   expect(parseList('* LIST (\\Noselect) "/" "[Gmail]"')).toBeNull();
 });
 
+test("IMAP LIST keeps every special-use role: a folder that is both Sent and Trash is a trash too", () => {
+  expect(parseList('* LIST (\\HasNoChildren \\Sent \\Trash) "/" "Combined"')).toEqual({
+    name: "Combined",
+    special: "sent",
+    roles: ["sent", "trash"],
+  });
+  expect(parseList('* LIST (\\HasNoChildren \\Trash) "/" "Trash"')).toEqual({
+    name: "Trash",
+    special: "trash",
+    roles: ["trash"],
+  });
+  expect(parseList('* LIST (\\HasNoChildren) "/" "INBOX"')).toEqual({
+    name: "INBOX",
+    special: "inbox",
+    roles: ["inbox"],
+  });
+  expect(parseList('* LIST (\\HasNoChildren) "/" "Projects"')).toEqual({
+    name: "Projects",
+    special: null,
+    roles: [],
+  });
+});
+
 test.each([true, false])("IMAP fallback preserves other deleted messages (UIDPLUS=%s)", async (uidPlus) => {
   const local = await startFakeMail({ move: false, uidPlus });
   const client = await ImapClient.open({ ...imapOpts(), port: local.imapPort });
