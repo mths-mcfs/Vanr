@@ -141,6 +141,11 @@ const deletedPage = z.object({
     .nullable()
     .default(null),
   agentEdits: z.enum(["direct", "propose"]).default("direct"),
+  // Who created it (the first version's author, with the person an agent acted for): who may change who
+  // reads it is the same before the undo and after the redo.
+  author: z
+    .object({ type: z.enum(["person", "agent"]), id: z.string(), actingFor: z.string().optional() })
+    .optional(),
   createdAt: z.string(),
 });
 
@@ -304,6 +309,10 @@ export const CONTENT_UNDOERS: Record<
         .where(eq(pageAnnotations.pageId, page.id))
         .limit(1);
       if (annotated) throw changed("Someone commented on the page");
+      const [first] = await deps.db
+        .select({ author: pageRevisions.author })
+        .from(pageRevisions)
+        .where(and(eq(pageRevisions.pageId, page.id), eq(pageRevisions.version, 1)));
       const deleted: z.input<typeof deletedPage> = {
         slug: page.slug,
         title: page.title,
@@ -314,6 +323,7 @@ export const CONTENT_UNDOERS: Record<
         props: page.props,
         access: page.access ?? null,
         agentEdits: page.agentEdits,
+        author: first?.author,
         createdAt: page.createdAt.toISOString(),
       };
       // Deleted for good (versions, links and draft go by the cascade) and out of the search in the same commit.
@@ -331,7 +341,7 @@ export const CONTENT_UNDOERS: Record<
       const viewer = { workspaceId: row.workspaceId, userId: actorUserId };
       if (!(await canReadPage(deps.db, viewer, { workspaceId: row.workspaceId, access: p.access })))
         throw notFound("Page not found");
-      const author = { type: "agent" as const, id: row.agentId };
+      const author = p.author ?? { type: "agent" as const, id: row.agentId };
       const at = deps.now();
       try {
         await deps.db.transaction(async (tx) => {

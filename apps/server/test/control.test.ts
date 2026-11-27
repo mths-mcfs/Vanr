@@ -1319,6 +1319,43 @@ describe("undo", () => {
   );
 
   test(
+    "content: after undo and redo of a page the agent wrote for someone, that person still changes who reads it",
+    async () => {
+      const t = await team();
+      // Lia writes a restricted page for Carla: Carla counts as its creator.
+      const page = await createPage(server.deps, {
+        workspaceId: t.workspaceId,
+        title: `For Carla ${n}`,
+        body: "draft",
+        author: { type: "agent", id: t.agentId, actingFor: t.carla.user.id },
+      });
+      await server.deps.db
+        .update(schema.knowledgePages)
+        .set({ access: { kind: "private", principals: [`user:${t.carla.user.id}`] } })
+        .where(eq(schema.knowledgePages.id, page.id));
+      const write = await seedAction(t, "wiki_written", { type: "wiki", id: page.id });
+      expect((await t.carla.browser.json(t.url(`/actions/${write.id}/undo`), "POST")).status).toBe(200);
+      expect((await t.carla.browser.json(t.url(`/actions/${write.id}/redo`), "POST")).status).toBe(200);
+      // She lets Beto read it: the route answers for who created the page, and she still did.
+      const res = await t.carla.browser.json(
+        `/api/v1/workspaces/${t.workspaceId}/wiki/pages/${page.slug}/access`,
+        "PUT",
+        { access: { kind: "private", userIds: [t.beto.user.id], agentIds: [] } },
+      );
+      expect(res.status).toBe(200);
+      const [row] = await server.deps.db
+        .select({ access: schema.knowledgePages.access })
+        .from(schema.knowledgePages)
+        .where(eq(schema.knowledgePages.id, page.id));
+      expect(row?.access).toEqual({
+        kind: "private",
+        principals: expect.arrayContaining([`user:${t.carla.user.id}`, `user:${t.beto.user.id}`]),
+      });
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "content: undoing and redoing a restricted page the agent wrote brings it back restricted, with its agent mode",
     async () => {
       const t = await team();
