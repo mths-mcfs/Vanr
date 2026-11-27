@@ -106,6 +106,8 @@ export interface RunningServer {
   mailer: Mailer;
   /** Registered routes (method and path), for the coverage script. */
   routes: { method: string; path: string }[];
+  /** One pass of the runtime's sweep (the tests run it by hand: their timer is off). */
+  tick(): Promise<number>;
   stop(): Promise<void>;
 }
 
@@ -466,6 +468,7 @@ async function boot(opts: StartOptions, undo: Undo): Promise<RunningServer> {
     deps,
     mailer,
     routes: app.routes.map((r) => ({ method: r.method, path: r.path })),
+    tick: () => runtime.tick(),
     stop: () => {
       stopping ??= undoAll(undo);
       return stopping;

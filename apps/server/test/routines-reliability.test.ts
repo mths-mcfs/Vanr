@@ -1,8 +1,6 @@
 // Reliable routines through routes/routines: starts paused, one execution per key, the signed webhook (the
 // `webhook-id` as the dedupe key, the secret out of every JSON, the body read with a cap before the signature is
-// checked) and the entry that rejects a target the runtime would run (slice S6) before recording anything.
-// The routines here open a debate, which needs no runtime; the scenarios that run an agent in a conversation, the
-// caps of a run and the retries on a model failure wait for the runtime (the ledger lists them).
+// checked), and "run now" and the webhook running the agent in a channel on the runtime.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { RoutineInput } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
@@ -111,20 +109,29 @@ describe("F4-3.3-P0-01: one execution per key", () => {
   );
 
   test(
-    "'Run now' of a routine that talks in a channel is rejected before the fire is recorded (no runtime yet)",
+    "'Run now' of a routine that talks in a channel runs the agent there once: its answer is the execution's",
     async () => {
-      const { ana, base, general, create } = await team();
+      const { ana, base, general, lia, create } = await team();
       const r = await create({
         trigger: { kind: "webhook" },
         target: { kind: "channel", channelId: general },
       });
-      const res = await call(ana, "POST", `${base}/${r.id}/run`, { key: "k" });
-      expect([res.status, res.body.error.code, res.body.error.params]).toEqual([
-        503,
-        "not_available",
-        { method: "runFor" },
+      const twice = await Promise.all([
+        call(ana, "POST", `${base}/${r.id}/run`, { key: "k" }),
+        call(ana, "POST", `${base}/${r.id}/run`, { key: "k" }),
       ]);
-      expect(await runsOf(r.id)).toHaveLength(0);
+      expect(twice.map((res) => [res.status, res.body.running])).toEqual([
+        [200, true],
+        [200, true],
+      ]);
+      await settle();
+      const rows = await runsOf(r.id);
+      expect(rows.map((x) => [x.dedupeKey, x.status])).toEqual([["manual:k", "ok"]]);
+      const [reply] = await server.deps.db
+        .select()
+        .from(schema.messages)
+        .where(eq(schema.messages.id, rows[0]?.messageId ?? ""));
+      expect([reply?.channelId, reply?.authorKind, reply?.authorId]).toEqual([general, "agent", lia.id]);
     },
     SERVER_TEST_MS,
   );
@@ -334,7 +341,7 @@ describe("F4-3.3-P0-06: signed webhook, the webhook-id as the dedupe key, the se
   );
 
   test(
-    "a webhook whose routine talks in a channel is rejected at its entry after the signature (no runtime yet)",
+    "a webhook whose routine talks in a channel is accepted after the signature and runs the agent there",
     async () => {
       const { ana, base, general, create } = await team();
       const r = await create({
@@ -345,8 +352,11 @@ describe("F4-3.3-P0-06: signed webhook, the webhook-id as the dedupe key, the se
       const { secret } = (await call(ana, "POST", `${base}/${r.id}/webhook-secret`)).body;
       const path = new URL(r.webhookUrl).pathname;
       const res = await send(path, "{}", signed(secret, "c1", "{}"));
-      expect([res.status, await codeOf(res)]).toEqual([503, "not_available"]);
-      expect(await runsOf(r.id)).toHaveLength(0);
+      expect(res.status).toBe(202);
+      await settle();
+      expect((await runsOf(r.id)).map((x) => [x.dedupeKey, x.status, x.channelId])).toEqual([
+        ["webhook:c1", "ok", general],
+      ]);
     },
     SERVER_TEST_MS,
   );
