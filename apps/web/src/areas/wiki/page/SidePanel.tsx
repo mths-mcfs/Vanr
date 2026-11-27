@@ -9,6 +9,9 @@ import { AppLink } from "../../../app/navigation.tsx";
 import { useMessages } from "../../../i18n/react.tsx";
 import { plainSnippet } from "../shared.tsx";
 
+/** Two heading texts the editor treats as the same one (it matches ignoring case and outer spaces). */
+const sameHeading = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
+
 export function SidePanel({
   workspaceId,
   page,
@@ -77,7 +80,7 @@ export function SidePanel({
                         // Which of the headings with this text: the second "Notes" goes to the second one.
                         onHeading(
                           heading.text,
-                          all.slice(0, index).filter((each) => each.text === heading.text).length,
+                          all.slice(0, index).filter((each) => sameHeading(each.text, heading.text)).length,
                         )
                       }
                     >
