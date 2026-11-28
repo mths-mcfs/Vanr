@@ -223,6 +223,39 @@ test("revalidates and re-signs redirects, and never follows a private redirect",
   expect(calls).toBe(1);
 });
 
+test("a ranged read redirected to another origin keeps its range and is signed again there", async () => {
+  const hops: { host: string | null; range: string | null; authorization: string | null }[] = [];
+  const wire = Object.assign(
+    async (_input: string | URL | Request, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      hops.push({
+        host: headers.get("host"),
+        range: headers.get("range"),
+        authorization: headers.get("authorization"),
+      });
+      return hops.length === 1
+        ? new Response(null, { status: 307, headers: { location: "https://next.example/key" } })
+        : new Response("abcd", { status: 206 });
+    },
+    { preconnect() {} },
+  );
+  const resolve = async () => ["93.184.216.34"];
+  const res = await client(cfg({ endpoint: "https://first.example" }), { ...CLOSED, resolve }, wire).request(
+    "GET",
+    "key",
+    {},
+    undefined,
+    { range: "bytes=0-3" },
+  );
+  expect(await res.text()).toBe("abcd");
+  expect(hops.map((h) => [h.host, h.range])).toEqual([
+    ["first.example", "bytes=0-3"],
+    ["next.example", "bytes=0-3"],
+  ]);
+  expect(hops[1]?.authorization).toStartWith("AWS4-HMAC-SHA256 ");
+  expect(hops[1]?.authorization).not.toBe(hops[0]?.authorization);
+});
+
 test("over plain http only when the installation allows it", async () => {
   // The fake S3 is http on localhost: the local network allowed, plain text not.
   const tlsOnly = s3Blobs(cfg(), { allowPrivate: true, allowPlaintext: false });
