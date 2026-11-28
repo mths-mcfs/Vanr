@@ -1158,19 +1158,22 @@ export class AgentRuntime implements RuntimePort {
    * Whether the live run puts this message off to the next run instead of taking it: the run is ending, it runs
    * on the plan of whoever paired (not even someone else's "stop" touches it), it is pinned to another person,
    * or the agent has a runner the message's author may not use (the run's tools act with its starter's access).
+   * A "stop" from whoever may stop the run (`stopsRun`) is taken past the last two: it ends the run, it doesn't
+   * talk to it.
    */
-  private async defers(live: Live, row: MessageRow): Promise<boolean> {
+  private async defers(live: Live, row: MessageRow, stop?: boolean): Promise<boolean> {
     const who = personOf(row);
-    // The one await first, so the checks below read the run as it is now.
+    // The awaits first, so the checks below read the run as it is now.
+    const stops = stop ?? (await this.stopsRun(live, row));
     const barred =
       who !== null &&
       live.runner !== null &&
       who !== requesterOf(live.trigger) &&
-      !(await this.stopsRun(live, row)) &&
+      !stops &&
       !(await this.mayUseRunner(live.workspaceId, who, live.runner));
     if (ending(live)) return true;
     if (live.plan && !canUsePlan(who, live.plan)) return true;
-    if (who !== null && who !== live.person.id && live.person.pinned) return true;
+    if (!stops && who !== null && who !== live.person.id && live.person.pinned) return true;
     return barred;
   }
 
@@ -1200,7 +1203,7 @@ export class AgentRuntime implements RuntimePort {
   private async steer(live: Live, row: MessageRow, keep = true): Promise<string | null> {
     const { db } = this.deps;
     const stop = await this.stopsRun(live, row);
-    if (!(await this.defers(live, row))) {
+    if (!(await this.defers(live, row, stop))) {
       await db
         .insert(messageDispatches)
         .values({ messageId: row.id, agentId: live.agent.id, state: "claimed", runId: live.runId })

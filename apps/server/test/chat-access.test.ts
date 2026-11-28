@@ -8,8 +8,10 @@ import { newId } from "@vanr/engine/ids";
 import { fakeProvider } from "@vanr/engine/models/fake";
 import type { ModelRequest } from "@vanr/engine/models/types";
 import { eq } from "drizzle-orm";
+import { createMemory } from "../src/agent-memory";
 import { channelInWorkspace } from "../src/channels";
 import { postMessage } from "../src/messages";
+import { fireRoutine } from "../src/routines";
 import type { RunningServer } from "../src/server";
 import { isEvent, SERVER_TEST_MS, settle, signedIn, startTestServer, TestSocket, waitFor } from "./harness";
 import { call, seedAgent, ws } from "./route-calls";
@@ -141,6 +143,29 @@ describe("chat access", () => {
           files: [{ id: "file_payroll", version: 1, title: "Payroll.xlsx", deleted: false }],
         },
       });
+      // The agent saved a memory from it: the message shows its chip.
+      const memory = await createMemory(
+        server.deps.db,
+        new Date(),
+        {
+          workspaceId,
+          agentId: bot.id,
+          scope: "agent",
+          path: null,
+          text: `${secret} remembered`,
+          untrustedSource: false,
+          origin: { by: null, name: null, channel: null, at: new Date().toISOString() },
+        },
+        { author: { type: "system" } },
+      );
+      await server.deps.db
+        .update(schema.memories)
+        .set({ originMessageId: top.id })
+        .where(eq(schema.memories.id, memory.id));
+      const chips = (await call(insider, "GET", `${w}/channels/${general}/messages`)).body.messages.find(
+        (m: { id: string }) => m.id === top.id,
+      ).memories;
+      expect(chips).toEqual([{ id: memory.id, agentId: bot.id, text: `${secret} remembered` }]);
       // Beto quotes it and answers it in a thread; a routine run took it as its answer.
       const quote = await call(insider, "POST", `${w}/channels/${general}/messages`, {
         body: "quoting",
@@ -210,6 +235,7 @@ describe("chat access", () => {
         const again = list.body.messages.find((m: { id: string }) => m.id === top.id);
         expect(again).toMatchObject({ body: "", meta: { retracted: { actorUserId: insider.user.id } } });
         expect(again.meta.files).toBeUndefined();
+        expect(again.memories).toEqual([]);
         expect(again.meta.approvalId).toBeUndefined();
         const quoting = list.body.messages.find((m: { id: string }) => m.id === quote.body.id);
         expect(quoting.meta.replyTo.excerpt).toBe("");
@@ -341,6 +367,18 @@ describe("chat access", () => {
         await waitFor(async () => server.deps.runtime.liveRun(runId) === null);
         expect(await status(runId)).toBe("canceled");
       }
+
+      // A run whose memory is pinned to Carla puts others' messages off to the next run, but not a stop
+      // from whoever may stop it.
+      const pinned = await liveRun(outsider, w, general, bot.handle);
+      const live = (
+        server.runtime as unknown as { live: Map<string, { person: { pinned: boolean } }> }
+      ).live.get(pinned);
+      if (!live) throw new Error("no live run");
+      live.person.pinned = true;
+      await stop(owner);
+      await waitFor(async () => server.deps.runtime.liveRun(pinned) === null);
+      expect(await status(pinned)).toBe("canceled");
 
       // A routine posts in its creator's name, but the run isn't the creator's: neither the button nor "stop".
       const channel = await channelOf(workspaceId, general);
@@ -480,6 +518,47 @@ describe("chat access", () => {
       );
       expect(listed).toMatchObject({ lastRun: null, recentFires: [] });
       expect(JSON.stringify(listed)).not.toContain(priv);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a routine run that ends before posting keeps the channel it was fired for: hidden after the target moves",
+    async () => {
+      const { workspaceId, w, general, priv, owner, outsider } = await team();
+      const bot = await seedAgent(server, workspaceId, owner, `early${seq}`, [general, priv]);
+      const base = `${w}/routines`;
+      const routine = (
+        await call(owner, "POST", base, {
+          agentId: bot.id,
+          prompt: "Summarize the secret deal",
+          target: { kind: "channel", channelId: priv },
+          trigger: { kind: "webhook" },
+        })
+      ).body;
+      // The agent is gone: the run fails before it posts anything anywhere.
+      await server.deps.db
+        .update(schema.agents)
+        .set({ archivedAt: new Date() })
+        .where(eq(schema.agents.id, bot.id));
+      const fired = await fireRoutine(server.deps, routine.id, { trigger: "manual", key: newId("k") });
+      expect(fired.run).toMatchObject({ status: "failed", reason: "agent_gone", channelId: priv });
+      await server.deps.db
+        .update(schema.agents)
+        .set({ archivedAt: null })
+        .where(eq(schema.agents.id, bot.id));
+      const moved = await call(owner, "PATCH", `${base}/${routine.id}`, {
+        target: { kind: "channel", channelId: general },
+      });
+      expect(moved.status).toBe(200);
+      expect((await call(owner, "GET", `${base}/${routine.id}/runs`)).body.runs).toHaveLength(1);
+      const theirs = await call(outsider, "GET", `${base}/${routine.id}/runs`);
+      expect(theirs.status).toBe(200);
+      expect(theirs.body.runs).toEqual([]);
+      const listed = (await call(outsider, "GET", base)).body.routines.find(
+        (r: { id: string }) => r.id === routine.id,
+      );
+      expect(listed).toMatchObject({ lastRun: null, recentFires: [] });
     },
     SERVER_TEST_MS,
   );
