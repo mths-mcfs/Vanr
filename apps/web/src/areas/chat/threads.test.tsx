@@ -387,3 +387,44 @@ describe("a held-back receipt read by someone else", () => {
     expect(screen.queryByText("Scout doesn't take requests from you here.") === null).toBe(true);
   });
 });
+
+describe("a lost thread, and the next one", () => {
+  test("the loss stays with that thread: another opens, and the first loads again once re-added", async () => {
+    const server = newServer();
+    seedBoard(server);
+    seedThread(server);
+    const app = await open("/threads/msg_broot", "usr_iris", server);
+    expect(await screen.findByText("Agreed, quietly")).toBeDefined();
+    const board = server.state.channels.find((channel) => channel.id === "ch_board");
+    if (board !== undefined) board.memberIds = ["usr_ana"];
+    // The history answers 404 first: the panel finds the loss before anything else does.
+    await act(async () => {
+      await app.runtime.queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[2] === "listChannelMessages",
+      });
+    });
+    expect(await screen.findByRole("heading", { name: "There's no thread here" })).toBeDefined();
+    await act(() => app.runtime.router.navigate({ to: `/workspace/${WS}/threads/msg_root` }));
+    expect(await screen.findByText("Matte, like last time.")).toBeDefined();
+    if (board !== undefined) board.memberIds = ["usr_ana", "usr_iris"];
+    await act(() => app.runtime.router.navigate({ to: `/workspace/${WS}/threads/msg_broot` }));
+    expect(await screen.findByText("Agreed, quietly")).toBeDefined();
+  });
+
+  test("after the loss, the list of threads draws no row of the lost channel, even offline", async () => {
+    const server = newServer();
+    const remove = seedBoard(server);
+    const app = await open("/threads", "usr_iris", server);
+    expect(await screen.findByRole("link", { name: "Secret pricing" })).toBeDefined();
+    await act(() =>
+      app.runtime.router.navigate({ to: `/workspace/${WS}/channel/ch_board?thread=msg_broot` }),
+    );
+    expect(await screen.findByText("Agreed, quietly")).toBeDefined();
+    await act(async () => remove());
+    expect(await screen.findByText("There's no conversation here")).toBeDefined();
+    server.force("listThreads", { kind: "offline" }, 4);
+    await act(() => app.runtime.router.navigate({ to: `/workspace/${WS}/threads` }));
+    expect(await screen.findByRole("heading", { name: "Threads" })).toBeDefined();
+    expect(screen.queryAllByText(/Secret pricing|board-room/).length).toBe(0);
+  });
+});

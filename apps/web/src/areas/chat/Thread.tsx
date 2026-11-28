@@ -246,10 +246,15 @@ export function ThreadPanel({
 
 /** A thread on a page of its own, with the way back to the list and into its channel. */
 export function ThreadScreen() {
+  const { workspaceId, threadId } = useRouteParams("thread");
+  // Each thread is its own page: what one learned (it is gone) never carries to the next.
+  return <ThreadPage key={`${workspaceId}/${threadId}`} workspaceId={workspaceId} threadId={threadId} />;
+}
+
+function ThreadPage({ workspaceId, threadId }: { workspaceId: string; threadId: string }) {
   const t = useMessages("chat");
   const common = useMessages("common");
   const describe = useErrorMessage("chat");
-  const { workspaceId, threadId } = useRouteParams("thread");
   const info = useApiQuery("getThread", { workspaceId, threadId });
   const channels = useApiQuery("listChannels", { workspaceId });
   const [lostHere, setLostHere] = useState(false);
