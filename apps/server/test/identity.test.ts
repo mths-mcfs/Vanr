@@ -265,8 +265,10 @@ describe("the agent's own account", () => {
       duringToken = async () => {
         expect(await status(call(t.ana, "DELETE", `${t.w}/agents/${t.lia.id}`))).toBe(204);
       };
-      await comeBack(t.ana, started.consentUrl);
+      const res = await comeBack(t.ana, started.consentUrl);
       expect(duringToken === null).toBe(true);
+      // "gone" is the archive's answer; an error inside the hook would answer "token" instead.
+      expect(res.headers.get("location")).toContain("connector_error=gone");
       const own = await server.deps.db.select().from(connections).where(eq(connections.agentId, t.lia.id));
       expect(own.filter((c) => c.status === "active")).toEqual([]);
     },

@@ -201,7 +201,8 @@ export function registerMemories(app: Hono<AppEnv>) {
         ),
       )
       .orderBy(desc(memories.pinned), desc(memories.updatedAt));
-    return c.json({ memories: await shownMemories(db, me, rows) });
+    // The origins depend on who asks: no shared cache keeps one person's answer for another.
+    return c.json({ memories: await shownMemories(db, me, rows) }, 200, { "cache-control": "no-store" });
   });
 
   // The person's store: what the agents kept about them. Only they see it.
@@ -228,7 +229,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       .where(storeWhere({ scope: "workspace", workspaceId: me.workspaceId }))
       .orderBy(memories.path)
       .limit(STORE_LIST_LIMIT);
-    return c.json({ memories: await shownMemories(db, me, rows) });
+    return c.json({ memories: await shownMemories(db, me, rows) }, 200, { "cache-control": "no-store" });
   });
 
   app.post(`${WORKSPACE}/memories`, async (c) => {
@@ -414,6 +415,8 @@ export function registerMemories(app: Hono<AppEnv>) {
     const target = await messageInWorkspace(db, me.workspaceId, param(c, "messageId"));
     if (!target) throw notFound("Message not found");
     if (target.authorKind !== "agent") throw badRequest("Only agent replies take feedback");
+    // The lesson goes into the agent's store, which is read-only once the agent is archived.
+    requireActiveAgent(await agentInWorkspace(db, me.workspaceId, target.authorId));
     const viewer = { workspaceId: me.workspaceId, userId: me.userId, channelId: target.channelId };
     // The right to write, without joining the channel yet (joining is an effect).
     const { channel } = await readableChannel(db, viewer);

@@ -53,10 +53,14 @@ export function runnerError(err: unknown): never {
 
 const MAX_TIMEOUT_S = 3600;
 
-/** Changing the binding and closing its requests commit together, before any new send can claim them. */
+/**
+ * Changing the binding and closing its requests commit together, before any new send can claim them. Lending a
+ * runner checks the archive under the agent's lock (an archive that lands mid-request wins); clearing it doesn't.
+ */
 async function setAgentRunner(deps: AppDeps, agentId: string, runnerId: string | null) {
   const { previous, closed } = await deps.db.transaction(async (tx) => {
     const [agent] = await tx.select().from(agents).where(eq(agents.id, agentId)).for("update");
+    if (runnerId && agent) requireActiveAgent(agent);
     const previous = agent?.environmentId ?? null;
     await tx
       .update(agents)

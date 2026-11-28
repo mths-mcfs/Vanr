@@ -749,11 +749,12 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const agent = await agentInWorkspace(deps.db, me.workspaceId, param(c, "agentId"));
     if (!canTalkTo(await withPlanOwner(deps.db, agent), me.userId) && !isEditor(me, agent)) throw forbidden();
-    // Closing the browser acts on the runner: as starting a takeover, only whoever may use it.
-    if (agent.environmentId) {
-      const [runner] = await deps.db.select().from(runners).where(eq(runners.id, agent.environmentId));
-      if (runner && !canUseRunner(me, runner)) throw forbidden("Only who paired this runner can use it");
-    }
+    // Closing the browser acts on the runner: as starting a takeover, only whoever may use it. The runner checked
+    // is the one the close goes to, so a move in between doesn't reach one they can't use.
+    const [runner] = agent.environmentId
+      ? await deps.db.select().from(runners).where(eq(runners.id, agent.environmentId))
+      : [];
+    if (runner && !canUseRunner(me, runner)) throw forbidden("Only who paired this runner can use it");
     const open = await deps.db
       .select({ id: browserInterventions.id })
       .from(browserInterventions)
@@ -768,14 +769,10 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
         status: "canceled",
         handledAt: deps.now(),
       });
-    const [a] = await deps.db
-      .select({ environmentId: agents.environmentId })
-      .from(agents)
-      .where(eq(agents.id, agent.id));
-    if (a?.environmentId && deps.runners.isOnline(a.environmentId))
+    if (runner && deps.runners.isOnline(runner.id))
       await deps.runners
         .call(
-          a.environmentId,
+          runner.id,
           "browser.close",
           {},
           { agent: { id: agent.id, handle: agent.handle }, timeoutMs: 15_000 },

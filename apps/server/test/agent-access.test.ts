@@ -116,6 +116,36 @@ async function feedbackIn(t: Team, who: Person, channelId: string, body: string)
   return memory;
 }
 
+/**
+ * A write whose body arrives late: the route reads lia (still active) and waits on the body; lia is archived
+ * then, and the body goes. Returns the status and the error code.
+ */
+async function archivedWhileSending(t: Team, method: string, path: string, payload: unknown) {
+  let send!: (chunk: string) => void;
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      send = (chunk) => {
+        controller.enqueue(new TextEncoder().encode(chunk));
+        controller.close();
+      };
+    },
+  });
+  const pending = t.ana.browser.fetch(path, {
+    method,
+    headers: { "content-type": "application/json" },
+    body,
+    duplex: "half",
+  });
+  await Bun.sleep(300);
+  await server.deps.db
+    .update(schema.agents)
+    .set({ archivedAt: new Date() })
+    .where(eq(schema.agents.id, t.lia.id));
+  send(JSON.stringify(payload));
+  const res = await pending;
+  return [res.status, ((await res.json()) as { error?: { code?: string } }).error?.code];
+}
+
 /** A delegation lia asked helper from #secret: lia's run in the channel and helper's run with no channel. */
 async function delegationFromSecret(t: Team) {
   const askingRun = await insertRun(t, { agentId: t.lia.id, channelId: t.secret, what: "board prep" });
@@ -261,6 +291,15 @@ describe("an archived agent", () => {
       const base = `${t.w}/agents/${t.lia.id}`;
       const runner = await pairedRunner(t, t.ana, `ana-box-${seq}`);
       const lesson = await feedbackIn(t, t.ana, t.general, `Answer in English ${seq}.`);
+      const reply = newId("msg");
+      await server.deps.db.insert(schema.messages).values({
+        id: reply,
+        workspaceId: t.workspaceId,
+        channelId: t.general,
+        authorKind: "agent",
+        authorId: t.lia.id,
+        body: "Another draft.",
+      });
       expect((await call(t.ana, "DELETE", base)).status).toBe(204);
       const writes = [
         call(t.ana, "PUT", `${base}/browser`, { permittedDomains: ["example.com"] }),
@@ -270,6 +309,7 @@ describe("an archived agent", () => {
         call(t.ana, "PATCH", `${t.w}/memories/${lesson.id}`, { text: "Changed." }),
         call(t.ana, "POST", `${t.w}/memories/${lesson.id}/revert`, {}),
         call(t.ana, "POST", `${t.w}/memories/${lesson.id}/versions/mv_any/restore`, {}),
+        call(t.ana, "POST", `${t.w}/messages/${reply}/feedback`, { body: "Too late." }),
       ];
       for (const res of await Promise.all(writes))
         expect([res.status, res.body?.error?.code]).toEqual([409, "agent.archived"]);
@@ -280,6 +320,11 @@ describe("an archived agent", () => {
         .from(schema.memories)
         .where(eq(schema.memories.id, lesson.id));
       expect(kept?.text).toBe(lesson.text);
+      const late = await server.deps.db
+        .select()
+        .from(schema.memories)
+        .where(eq(schema.memories.text, "Too late."));
+      expect(late).toEqual([]);
     },
     SERVER_TEST_MS,
   );
@@ -289,38 +334,36 @@ describe("an archived agent", () => {
     async () => {
       const t = await team();
       const ops = await seedChannel(server, t.workspaceId, { name: "ops", members: [t.ana] });
-      // The body arrives late, so the route reads the agent (still active) and waits on it; the archive lands then.
-      let send!: (chunk: string) => void;
-      const body = new ReadableStream<Uint8Array>({
-        start(controller) {
-          send = (chunk) => {
-            controller.enqueue(new TextEncoder().encode(chunk));
-            controller.close();
-          };
-        },
+      const res = await archivedWhileSending(t, "PUT", `${t.w}/agents/${t.lia.id}/channels`, {
+        channels: [{ channelId: ops, autoAnswer: true }],
       });
-      const pending = t.ana.browser.fetch(`${t.w}/agents/${t.lia.id}/channels`, {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body,
-        duplex: "half",
-      });
-      await Bun.sleep(300);
-      await server.deps.db
-        .update(schema.agents)
-        .set({ archivedAt: new Date() })
-        .where(eq(schema.agents.id, t.lia.id));
-      send(JSON.stringify({ channels: [{ channelId: ops, autoAnswer: true }] }));
-      const res = await pending;
-      expect([res.status, ((await res.json()) as { error?: { code?: string } }).error?.code]).toEqual([
-        409,
-        "agent.archived",
-      ]);
+      expect(res).toEqual([409, "agent.archived"]);
       const links = await server.deps.db
         .select({ channelId: schema.channelMemberships.channelId })
         .from(schema.channelMemberships)
         .where(eq(schema.channelMemberships.memberId, t.lia.id));
       expect(links.map((l) => l.channelId)).toEqual([t.general]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "PUT /environment/target refuses when the archive lands after the first read: no runner is lent",
+    async () => {
+      const t = await team();
+      const runner = await pairedRunner(t, t.ana, `ana-box-${seq}`);
+      const res = await archivedWhileSending(t, "PUT", `${t.w}/agents/${t.lia.id}/environment/target`, {
+        runnerId: runner.id,
+      });
+      expect(res).toEqual([409, "agent.archived"]);
+      const [agent] = await server.deps.db.select().from(schema.agents).where(eq(schema.agents.id, t.lia.id));
+      expect(agent?.environmentId ?? null).toBe(null);
+      const env = await server.deps.db
+        .select()
+        .from(schema.agentEnvironments)
+        .where(eq(schema.agentEnvironments.agentId, t.lia.id));
+      expect(env.filter((e) => e.status === "running")).toEqual([]);
+      online.delete(runner.id);
     },
     SERVER_TEST_MS,
   );
@@ -429,6 +472,9 @@ describe("a memory's origin", () => {
       expect(await channels(t.ana)).toEqual([`#payroll${seq}`, `#payroll${seq}`]);
       expect(await channels(t.beto)).toEqual([null, null]);
       expect(await channels(t.carla)).toEqual([null, null]);
+      // The answer depends on who asks: no shared cache keeps it.
+      for (const path of [`${t.w}/agents/${t.lia.id}/memories`, `${t.w}/memories/workspace`])
+        expect((await t.beto.browser.fetch(path)).headers.get("cache-control")).toBe("no-store");
     },
     SERVER_TEST_MS,
   );
