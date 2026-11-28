@@ -32,6 +32,8 @@ export type StoredDebate = T.DebateDetail & {
   workspaceId: string;
   spent: number;
   letters: Record<string, string>;
+  /** Positions given in the open round: sealed (counted, never sent) until the round closes. */
+  sealed: T.DebatePost[];
 };
 const LETTERS = "ABCDEFGH";
 /** While the debate hasn't closed, an agent shows only by its letter (the server's `isAnonymous`). */
@@ -66,6 +68,16 @@ export class FakeDebates {
   /** Closes the debate with a synthesis from the last round's majority, revealing who spoke. */
   synthesize(workspaceId: string, row: StoredDebate): void {
     if (row.status !== "open" || row.phase !== "concluding") return;
+    // The round closes: what was sealed in it is published, as the server's `revealHidden` does.
+    if (row.sealed.length > 0) {
+      row.posts.push(...row.sealed);
+      const ids = row.sealed.map((post) => post.id);
+      const current = row.track.roundLimit.find((view) => view.round === row.round);
+      if (current === undefined) row.track.roundLimit.push({ round: row.round, posts: ids, majority: null });
+      else current.posts.push(...ids);
+      row.sealed = [];
+      row.sealedCount = 0;
+    }
     const rounds = row.track.roundLimit;
     const final = rounds.at(-1)?.majority ?? null;
     const winner = final?.winner ?? null;
@@ -298,6 +310,7 @@ export class FakeDebates {
       workspaceId,
       spent: 0,
       letters: Object.fromEntries(agentIds.map((id, index) => [id, LETTERS[index] ?? "?"])),
+      sealed: [],
       goal: fields.title,
       agentIds,
       anonymous: true,
@@ -417,6 +430,7 @@ export class FakeDebates {
       workspaceId: _workspace,
       spent: _spent,
       letters,
+      sealed: _sealedPosts,
       issues: _issues,
       posts: _posts,
       sealedCount: _sealed,
@@ -499,6 +513,7 @@ export class FakeDebates {
         );
         if (turn) {
           // The position stays sealed until the round closes.
+          row.sealed.push(post);
           row.sealedCount += 1;
           row.waitingUserIds = row.waitingUserIds.filter((id) => id !== scope.user.id);
           row.awaitedUserId = row.waitingUserIds[0] ?? null;

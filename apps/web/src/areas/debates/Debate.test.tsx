@@ -49,6 +49,23 @@ describe("an open debate", () => {
     expect(screen.getByText("2 answers are sealed until everyone in this round has answered.")).toBeDefined();
   });
 
+  test("a sealed position shows once the round closes", async () => {
+    const server = newServer();
+    const asAna = await renderApp({ path: PAGE("deb_paper"), signedInAs: "usr_ana", server });
+    const turn = within(await screen.findByRole("region", { name: "It's your turn" }));
+    await asAna.user.type(turn.getByRole("textbox", { name: "Your argument" }), "Speed beats price.");
+    await asAna.user.click(turn.getByRole("button", { name: "Give my position" }));
+    expect(await screen.findByText("Your position is in")).toBeDefined();
+    // Sealed: counted, not shown.
+    expect(screen.queryByText("Speed beats price.") === null).toBe(true);
+    asAna.unmount();
+
+    const asJonas = await renderApp({ path: PAGE("deb_paper"), signedInAs: "usr_jonas", server });
+    await asJonas.user.click(await screen.findByRole("button", { name: "Conclude now" }));
+    await screen.findByRole("region", { name: "Synthesis" });
+    expect(await screen.findByText("Speed beats price.")).toBeDefined();
+  });
+
   test("skipping the turn", async () => {
     const app = await renderApp({ path: PAGE("deb_paper"), signedInAs: "usr_ana" });
     const turn = within(await screen.findByRole("region", { name: "It's your turn" }));
