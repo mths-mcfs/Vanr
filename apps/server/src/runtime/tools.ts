@@ -39,7 +39,14 @@ import type { SourceKind, Viewer } from "@vanr/engine/search";
 import { parseQuery, textOf } from "@vanr/engine/search-query";
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import { z } from "zod";
-import { type Author, changeMemory, createMemory, type MemoryRow, type Store } from "../agent-memory";
+import {
+  type Author,
+  changeMemory,
+  createMemory,
+  type MemoryRow,
+  type Store,
+  storeWhere,
+} from "../agent-memory";
 import type { AgentRow } from "../agents";
 import { agentCanPost, type ChannelRow } from "../channels";
 import type { AppDeps } from "../context";
@@ -419,6 +426,8 @@ const remember = define({
         source: "conversation",
         origin: await agentOrigin(ctx),
         originMessageId: ctx.trigger?.id ?? null,
+        // What replaces a lesson confined to this channel stays confined with it.
+        channelId: old?.channelId ?? null,
         replaces: old?.id ?? null,
       },
       { author, reason: "remember" },
@@ -466,12 +475,21 @@ const remember = define({
   },
 });
 
-/** Only the agent's own store: the person's and the workspace's don't go through here. */
+/**
+ * Only the agent's own store, as this run's channel sees it (a lesson confined to another channel is not found):
+ * the person's and the workspace's don't go through here.
+ */
 async function ownMemory(ctx: ToolContext, id: string) {
+  const store = {
+    scope: "agent",
+    workspaceId: ctx.workspaceId,
+    agentId: ctx.agent.id,
+    seenFrom: ctx.channel.id,
+  } as const;
   const [row] = await ctx.deps.db
     .select()
     .from(memories)
-    .where(and(eq(memories.id, id), eq(memories.agentId, ctx.agent.id), eq(memories.scope, "agent")));
+    .where(and(eq(memories.id, id), storeWhere(store)));
   if (!row) throw new ToolInputError(`Memory ${id} not found`);
   return row;
 }
@@ -779,9 +797,14 @@ async function channelByName(ctx: ToolContext, raw: string): Promise<ChannelRow>
     .select()
     .from(channels)
     .where(
-      and(eq(channels.workspaceId, ctx.workspaceId), eq(channels.kind, "channel"), eq(channels.name, name)),
+      and(
+        eq(channels.workspaceId, ctx.workspaceId),
+        eq(channels.kind, "channel"),
+        eq(channels.name, name),
+        isNull(channels.archivedAt),
+      ),
     );
-  if (!row || row.archivedAt) throw new ToolInputError(`No channel #${name}`);
+  if (!row) throw new ToolInputError(`No channel #${name}`);
   if (!(await agentCanPost(ctx.deps.db, row, ctx.agent.id)))
     throw new ToolInputError(`You are not in #${name}`);
   return row;

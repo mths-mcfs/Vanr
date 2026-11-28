@@ -12,14 +12,17 @@
 // that land together check once.
 import type { WikiCheckFinding, WikiCheckReport } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
-import { addUsage, emptyUsage, type ModelProvider, type Usage } from "@vanr/engine/models/types";
+import { emptyUsage, type ModelProvider, type Usage } from "@vanr/engine/models/types";
+import { utf8Bytes } from "@vanr/engine/usage";
 import { and, asc, eq, isNull, lt } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { z } from "zod";
 import type { AppDeps } from "./context";
+import { HttpError } from "./http";
 import { log } from "./logger";
 import { readablePagesSql, type WikiViewer } from "./wiki-access";
 import { targetsFor } from "./wiki-links";
+import { onWorkspaceBudget } from "./workspace-spend";
 
 const { wikiChecks, pageLinks, knowledgePages } = schema;
 
@@ -31,6 +34,7 @@ export const CHECK_NOW_GAP_MS = 60_000;
 /** Pairs the model checks per run (the rest waits for the next one). */
 export const CHECK_PAIRS = 12;
 const PAIR_CHARS = 6000;
+const PAIR_MAX_TOKENS = 512;
 const MAX_CHECKED = 2000;
 
 type Stored = { kind: "contradiction"; pageIds: [string, string]; summary: string };
@@ -69,36 +73,69 @@ export interface CheckModel {
   test: boolean;
 }
 
+/** Whether the workspace's month budget stopped the check before every pair was asked. */
+type PairOutcome = { summary: string | null } | "skipped" | "out_of_budget";
+
 async function askPair(
+  deps: AppDeps,
+  workspaceId: string,
   model: CheckModel,
   a: PageRow,
   b: PageRow,
-): Promise<{ summary: string | null; usage: Usage } | null> {
+): Promise<PairOutcome> {
   // With the test model, only the pairs made for it (with [[reply:...]]).
-  if (model.test && !/\[\[reply:/.test(a.body + b.body)) return null;
+  if (model.test && !/\[\[reply:/.test(a.body + b.body)) return "skipped";
   const text = (p: PageRow) => stripPageTags(p.body.slice(0, PAIR_CHARS));
   const title = (p: PageRow) => p.title.replace(/[<>"]/g, "");
   const prompt = `<page title="${title(a)}">\n${text(a)}\n</page>\n\n<page title="${title(b)}">\n${text(b)}\n</page>`;
-  let usage: Usage = emptyUsage();
-  let out = "";
-  for await (const ev of model.provider.stream({
-    model: CHECK_MODEL,
-    system: CHECK_SYSTEM,
-    messages: [{ role: "user", content: [{ type: "text", text: prompt }] }],
-    tools: [],
-    maxTokens: 512,
-    signal: AbortSignal.timeout(60_000),
-  })) {
-    if (ev.type === "turn") {
-      usage = ev.usage;
-      out = ev.content.flatMap((c) => (c.type === "text" ? [c.text] : [])).join("");
-    }
+  try {
+    // Each pair reserves on the workspace's month budget before it is asked.
+    const out = await onWorkspaceBudget(
+      deps,
+      {
+        workspaceId,
+        userId: null,
+        source: "wiki",
+        model: CHECK_MODEL,
+        promptBytes: utf8Bytes(CHECK_SYSTEM) + utf8Bytes(prompt),
+        maxTokens: PAIR_MAX_TOKENS,
+        test: model.test,
+      },
+      async () => {
+        let usage: Usage = emptyUsage();
+        let value = "";
+        for await (const ev of model.provider.stream({
+          model: CHECK_MODEL,
+          system: CHECK_SYSTEM,
+          messages: [{ role: "user", content: [{ type: "text", text: prompt }] }],
+          tools: [],
+          maxTokens: PAIR_MAX_TOKENS,
+          signal: AbortSignal.timeout(60_000),
+        })) {
+          if (ev.type === "turn") {
+            usage = ev.usage;
+            value = ev.content.flatMap((c) => (c.type === "text" ? [c.text] : [])).join("");
+          }
+        }
+        return { value, usage };
+      },
+    );
+    return { summary: parseCheck(out) };
+  } catch (err) {
+    if (err instanceof HttpError && err.code === "workspace.budget") return "out_of_budget";
+    throw err;
   }
-  return { summary: parseCheck(out), usage };
 }
 
-/** Runs the workspace's check and stores the contradictions (null model: none is asked this time). */
-async function runCheck(deps: AppDeps, workspaceId: string, model: CheckModel | null): Promise<void> {
+/**
+ * Runs the workspace's check and stores the contradictions (null model: none is asked this time). Out of the month's
+ * budget it stops asking (the pairs left wait for the next check) and says so.
+ */
+async function runCheck(
+  deps: AppDeps,
+  workspaceId: string,
+  model: CheckModel | null,
+): Promise<{ outOfBudget: boolean }> {
   const { db } = deps;
   const pages: PageRow[] = await db
     .select({
@@ -132,17 +169,20 @@ async function runCheck(deps: AppDeps, workspaceId: string, model: CheckModel | 
     pairs.set(pairKey(a, b), [a, b]);
   }
   let asked = 0;
+  let outOfBudget = false;
   let test = model?.test ?? prev?.testModel ?? false;
-  let usage: Usage = emptyUsage();
   for (const [key, [a, b]] of pairs) {
     if (!(key in checked)) {
-      if (!model || asked >= CHECK_PAIRS) continue;
+      if (!model || outOfBudget || asked >= CHECK_PAIRS) continue;
       asked++;
       try {
-        const res = await askPair(model, a, b);
-        if (!res) continue;
+        const res = await askPair(deps, workspaceId, model, a, b);
+        if (res === "skipped") continue;
+        if (res === "out_of_budget") {
+          outOfBudget = true;
+          continue;
+        }
         test = model.test;
-        usage = addUsage(usage, res.usage);
         checked[key] = res.summary ?? "";
       } catch (err) {
         log.warn("wiki.check_pair_failed", { workspaceId, err });
@@ -158,20 +198,6 @@ async function runCheck(deps: AppDeps, workspaceId: string, model: CheckModel | 
       .filter(([k]) => pairs.has(k))
       .slice(-MAX_CHECKED),
   );
-  if (model && !model.test && usage.inputTokens + usage.outputTokens > 0)
-    await deps.ledger.record(
-      {
-        workspaceId,
-        agentId: null,
-        userId: null,
-        runId: null,
-        source: "wiki",
-        model: CHECK_MODEL,
-        usage,
-        at: deps.now(),
-      },
-      [],
-    );
   const ranAt = deps.now();
   await db
     .insert(wikiChecks)
@@ -180,6 +206,7 @@ async function runCheck(deps: AppDeps, workspaceId: string, model: CheckModel | 
       target: wikiChecks.workspaceId,
       set: { findings, checked: keep, testModel: test, ranAt },
     });
+  return { outOfBudget };
 }
 
 /**
@@ -201,23 +228,23 @@ export async function claimCheck(deps: AppDeps, workspaceId: string, gapMs: numb
 }
 
 /**
- * Checks a workspace's wiki if its turn is free (`gapMs` since the last check): false when another run has
- * it. The model is looked up first, before the claim writes anything. The run is the server's background work,
- * so stopping the server waits for it before the database closes.
+ * Checks a workspace's wiki if its turn is free (`gapMs` since the last check): "busy" when another run has it,
+ * "out_of_budget" when the month's budget stopped it before every pair was asked (what it found is stored). The
+ * model is looked up first, before the claim writes anything. The run is the server's background work, so stopping
+ * the server waits for it before the database closes.
  */
 export async function checkWorkspace(
   deps: AppDeps,
   workspaceId: string,
   opts: { gapMs: number; model: () => Promise<ModelProvider | { error: string }> },
-): Promise<boolean> {
+): Promise<"ran" | "busy" | "out_of_budget"> {
   const lookup = await opts.model();
   const test = (await deps.testModelFor(workspaceId))({ credentialId: null, harnessKind: "model" });
   const model: CheckModel | null = "error" in lookup ? null : { provider: lookup, test };
-  if (!(await claimCheck(deps, workspaceId, opts.gapMs))) return false;
+  if (!(await claimCheck(deps, workspaceId, opts.gapMs))) return "busy";
   const work = runCheck(deps, workspaceId, model);
   deps.runtime.track(work, "wiki.check");
-  await work;
-  return true;
+  return (await work).outOfBudget ? "out_of_budget" : "ran";
 }
 
 /**

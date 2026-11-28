@@ -10,7 +10,6 @@ import { and, eq } from "drizzle-orm";
 import {
   type AssignmentRow,
   agentSays,
-  assignmentFor,
   moveAssignment,
   personSays,
   roleOf,
@@ -148,7 +147,7 @@ describe("who sees and acts on an assignment", () => {
           { id: "todo", title: "Next" },
         ],
       });
-      const assignment = await assignmentFor(server.deps, await reload(t.row), t.member(t.ana));
+      const assignment = await toAssignment(server.deps, await reload(t.row), t.member(t.ana));
       expect(assignment.plan).toMatchObject({ done: 1, total: 2 });
       const res = await t.ana.browser.fetch(`/api/v1/workspaces/${t.workspaceId}/threads/${t.root.id}`);
       expect(res.status).toBe(200);
@@ -279,19 +278,18 @@ describe("who sees and acts on an assignment", () => {
     "the API shape: actionable for who decides, manageable for the owner and an admin, the dollar cap as `usd`",
     async () => {
       const t = await team();
-      const owner = await assignmentFor(server.deps, t.row, t.member(t.ana, "owner"));
+      const owner = await toAssignment(server.deps, t.row, t.member(t.ana, "owner"));
       expect(owner).toMatchObject({ role: "owner", actionable: true, manageable: true, status: "proposed" });
-      const decider = await assignmentFor(server.deps, t.row, t.member(t.beto));
+      const decider = await toAssignment(server.deps, t.row, t.member(t.beto));
       expect(decider).toMatchObject({ role: "decide", actionable: true, manageable: false });
-      const reader = await assignmentFor(server.deps, t.row, t.member(t.caio));
+      const reader = await toAssignment(server.deps, t.row, t.member(t.caio));
       expect(reader).toMatchObject({
         role: "view",
         actionable: false,
         manageable: false,
         pendingJoin: false,
       });
-      expect((await assignmentFor(server.deps, t.row, t.member(t.dora, "admin"))).manageable).toBe(true);
-      expect((await toAssignment(server.deps, t.row, t.member(t.dora, "admin"))).manageable).toBe(false);
+      expect((await toAssignment(server.deps, t.row, t.member(t.dora, "admin"))).manageable).toBe(true);
 
       await server.deps.db
         .update(schema.assignments)

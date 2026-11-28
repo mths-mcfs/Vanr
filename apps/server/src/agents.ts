@@ -16,10 +16,10 @@ import type { Hono } from "hono";
 import { readableChannelsSql } from "./channels";
 import type { AppEnv, WorkspaceMember } from "./context";
 import { badRequest, conflict, forbidden, notFound } from "./http";
-import { type Talker, withPlanOwner } from "./runners/plans";
+import { requireCanTalk, type Talker, withPlanOwner } from "./runners/plans";
 import { canTalkTo } from "./runtime/route";
 
-const { agents, runs, workspaces, channelMemberships, channels, credentials, debates } = schema;
+const { agents, runs, workspaces, channelMemberships, channels, credentials, debates, usageLines } = schema;
 
 /**
  * Runs that count in the per-agent numbers (the month's usage, the report). The ones of a debate that is still
@@ -157,9 +157,21 @@ export function registerArchivedAgentGuard(app: Hono<AppEnv>) {
 }
 
 /** Who edits an agent: who manages agents or the agent's owner. */
+export const isAgentEditor = (me: WorkspaceMember, agent: AgentRow) =>
+  can(me.role, "manage_agents") || agent.ownerUserId === me.userId;
+
 export function requireAgentEditor(me: WorkspaceMember, agent: AgentRow) {
-  if (can(me.role, "manage_agents") || agent.ownerUserId === me.userId) return;
-  throw forbidden();
+  if (!isAgentEditor(me, agent)) throw forbidden();
+}
+
+/**
+ * Who puts an agent where it answers (a channel's members, a debate's table): who edits it, or who talks to it.
+ * Someone else's owner-only (or personal-plan) agent stays out. `PUT /agents/:id/channels` asks for the editor,
+ * which this also lets through.
+ */
+export async function requirePlacesAgent(db: Db, me: WorkspaceMember, agent: AgentRow): Promise<void> {
+  if (isAgentEditor(me, agent)) return;
+  await requireCanTalk(db, agent, me.userId);
 }
 
 export const monthStart = (now: Date) => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
@@ -214,6 +226,30 @@ export async function agentBudgetScope(db: Db, agent: AgentRow): Promise<BudgetS
   return { kind: "agent", id: agent.id, limitUsd: budgetOf(agent, workspace.defaultBudget), period: "month" };
 }
 
+/**
+ * The workspace's budget for the month: what its active agents may spend together, the one the overview measures
+ * the month's spend against. With no active agent yet, a new agent's budget, so the first agent can be drafted.
+ */
+export async function workspaceMonthBudget(db: Db, workspaceId: string): Promise<number> {
+  const { defaultBudget } = await workspaceBudgetDefaults(db, workspaceId);
+  const active = await db
+    .select()
+    .from(agents)
+    .where(and(eq(agents.workspaceId, workspaceId), isNull(agents.archivedAt)));
+  if (active.length === 0) return defaultBudget;
+  return active.reduce((total, a) => total + budgetOf(a, defaultBudget), 0);
+}
+
+/** The workspace's month as a ledger scope: it counts all of the workspace's spend against its budget. */
+export async function workspaceBudgetScope(db: Db, workspaceId: string): Promise<BudgetScope> {
+  return {
+    kind: "workspace",
+    id: workspaceId,
+    limitUsd: await workspaceMonthBudget(db, workspaceId),
+    period: "month",
+  };
+}
+
 /** A workspace key that still holds (not revoked). */
 export async function requireCredential(db: Db, workspaceId: string, id: string | null | undefined) {
   if (!id) return;
@@ -234,6 +270,22 @@ export async function usageSince(db: Db, workspaceId: string, since: Date) {
     .where(and(eq(runs.workspaceId, workspaceId), gte(runs.createdAt, since), outsideAnonymousDebate()))
     .groupBy(runs.agentId);
   return new Map(rows.map((r) => [r.agentId, { calls: r.calls, costUsd: Number(r.cost ?? 0) }]));
+}
+
+/**
+ * The calls no agent paid since `since` (search answers and embeddings, wiki checks, agent drafts), by source: the
+ * runs leave them out, so the usage report adds them from the ledger.
+ */
+export async function workspaceCallsSince(db: Db, workspaceId: string, since: Date) {
+  const rows = await db
+    .select({ source: usageLines.source, calls: count(), micros: sum(usageLines.costMicros) })
+    .from(usageLines)
+    .where(
+      and(eq(usageLines.workspaceId, workspaceId), isNull(usageLines.agentId), gte(usageLines.at, since)),
+    )
+    .groupBy(usageLines.source)
+    .orderBy(usageLines.source);
+  return rows.map((r) => ({ kind: r.source, calls: r.calls, costUsd: Number(r.micros ?? 0) / 1_000_000 }));
 }
 
 /** Who looks at an agent's channels: whoever manages agents sees every one, anyone else only those they read. */

@@ -1284,7 +1284,7 @@ describe("the wiki check", () => {
     const fake = countingFake();
     const run = () =>
       checkWorkspace(server.deps, workspaceId, { gapMs: 0, model: async () => fake.provider });
-    expect(await run()).toBe(true);
+    expect(await run()).toBe("ran");
     const report = await ana.api.wiki.getWikiChecks(workspaceId);
     expect(report.testModel).toBe(true);
     const of = (kind: string) => report.findings.filter((f) => f.kind === kind);
@@ -1312,7 +1312,7 @@ describe("the wiki check", () => {
     // "Run now" twice within the minute: the second doesn't run.
     const once = () =>
       checkWorkspace(server.deps, workspaceId, { gapMs: CHECK_NOW_GAP_MS, model: async () => fake.provider });
-    expect(await once()).toBe(false);
+    expect(await once()).toBe("busy");
     // The cache: a text changed without a new version isn't asked again; a new version is.
     const b = await rowOf(workspaceId, "deadline-b");
     await db()
@@ -1370,7 +1370,7 @@ describe("the wiki check", () => {
         }),
       ),
     );
-    expect(runs.filter(Boolean)).toHaveLength(1);
+    expect(runs.filter((r) => r !== "busy")).toHaveLength(1);
     expect(fake.calls()).toBe(1);
     // A day later the turn is free again.
     skew += 25 * 3600_000;
@@ -1380,7 +1380,7 @@ describe("the wiki check", () => {
           gapMs: CHECK_NOW_GAP_MS,
           model: async () => fake.provider,
         }),
-      ).toBe(true);
+      ).toBe("ran");
     } finally {
       skew = 0;
     }
@@ -1440,7 +1440,7 @@ describe("the wiki check", () => {
           // The held check is let go even when the assertion failed, so the stop can end.
           open();
         }
-        expect(await checking).toBe(true);
+        expect(await checking).toBe("ran");
         await stopping;
         expect(stopped).toBe(true);
       } finally {

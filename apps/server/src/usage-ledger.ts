@@ -87,6 +87,36 @@ async function legacySpent(tx: Tx, scope: BudgetScope, at: Date): Promise<number
   return Number(row?.cost ?? 0);
 }
 
+/**
+ * What the workspace scope counts, in micros: every ledger row of the workspace in the month whatever scopes its call
+ * went through (an agent's run reserves only its own), but the platform's embeddings (`platformEmbedding`); and a
+ * run of the month with a cost and no ledger row (from before the ledger), once. Its counter row is only the lock
+ * that makes the reservations of the scope go one at a time.
+ */
+export async function workspaceSpent(tx: Tx | Db, scope: BudgetScope, at: Date): Promise<number> {
+  const from = periodStart(scope, at) ?? new Date(0);
+  const to =
+    scope.period === "month" ? new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth() + 1, 1)) : null;
+  // One statement, so one snapshot: a run whose rows a settle commits meanwhile counts by its rows or by its cost,
+  // never by neither. The names are written out: inside the subqueries a bare column would bind to the wrong table.
+  // Bound as text: the postgres driver takes no Date in a raw template.
+  const start = from.toISOString();
+  const end = (to ?? new Date("9999-12-31T00:00:00Z")).toISOString();
+  const [row] = await tx
+    .select({
+      lines: sql<number | string | null>`(
+        select sum(l.cost_micros) from usage_lines l
+        where l.workspace_id = ${scope.id} and l.at >= ${start}::timestamptz and l.at < ${end}::timestamptz
+          and not (l.source = 'embedding' or (l.source = 'search' and l.user_id is null)))`,
+      runs: sql<number | string | null>`(
+        select sum(r.cost_usd) from runs r
+        where r.workspace_id = ${scope.id} and r.created_at >= ${start}::timestamptz and r.created_at < ${end}::timestamptz
+          and not exists (select 1 from usage_lines l where l.run_id = r.id))`,
+    })
+    .from(sql`(select 1) as one`);
+  return Number(row?.lines ?? 0) + toMicros(Number(row?.runs ?? 0));
+}
+
 /** Counter of the scope in the period, locked until the end of the transaction; born with the legacy spending. */
 async function lockCounter(tx: Tx, workspaceId: string, scope: BudgetScope, at: Date): Promise<number> {
   const key = { scope: scopeKey(scope), period: periodKey(scope, at) };
@@ -186,7 +216,8 @@ export function postgresLedger(db: Db, book: PriceBook): UsageLedger {
       const estimate = Math.ceil(estimateUsd * 1_000_000);
       return db.transaction(async (tx) => {
         for (const scope of byKey(scopes)) {
-          const spent = await lockCounter(tx, workspaceId, scope, at);
+          const counted = await lockCounter(tx, workspaceId, scope, at);
+          const spent = scope.kind === "workspace" ? await workspaceSpent(tx, scope, at) : counted;
           const [open] = await tx
             .select({ sum: sql<number | string | null>`sum(${usageReservations.estimateMicros})` })
             .from(usageReservationScopes)
@@ -276,6 +307,7 @@ export function postgresLedger(db: Db, book: PriceBook): UsageLedger {
     },
 
     async spent(scope, at) {
+      if (scope.kind === "workspace") return (await workspaceSpent(db, scope, at)) / 1_000_000;
       const [row] = await db
         .select({ spent: budgetCounters.spentMicros })
         .from(budgetCounters)

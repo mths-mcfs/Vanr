@@ -232,19 +232,29 @@ export class FakeAssignments {
   }
 
   /**
-   * Whether something waits on the person, as the server's waitingFor: only for who may act; a pause on
-   * the cost ceiling and requests to take part only for the owner; never a provisional decision; and a
-   * step that is blocked on someone or stuck.
+   * Whether something waits on the person, as the server's waitingFor: requests to take part on who manages it,
+   * taking part or not; the rest only on who may act: a pause on the cost ceiling only on the owner, never a
+   * provisional decision, and a step that is blocked on someone or stuck.
    */
   private waitsOn(scope: Scope, row: Stored): boolean {
     if (row.status === "done" || row.status === "canceled") return false;
+    const p = this.pendingFor(scope, row);
+    if (p.joinRequests > 0) return true;
     const role = this.roleOf(scope, row);
     if (role !== "owner" && role !== "decide") return false;
-    const owner = role === "owner";
-    if (row.status === "paused" && row.ceiling !== null && owner) return true;
-    const p = row.pending;
-    if (p.decisions + p.reviews + p.commands + p.submissions + (owner ? p.joinRequests : 0) > 0) return true;
+    if (row.status === "paused" && row.ceiling !== null && role === "owner") return true;
+    if (p.decisions + p.reviews + p.commands + p.submissions > 0) return true;
     return row.plan.items.some((item) => item.status === "blocked_on_you" || item.stallReason !== null);
+  }
+
+  /** Who lets people in, as the server's managesAssignment: the owner, or an admin (`configure`). */
+  private manages(scope: Scope, row: Stored): boolean {
+    return this.roleOf(scope, row) === "owner" || scope.role !== "member";
+  }
+
+  /** The counts as the server sends them to this person: join requests only to who lets people in. */
+  private pendingFor(scope: Scope, row: Stored): T.Assignment["pending"] {
+    return this.manages(scope, row) ? row.pending : { ...row.pending, joinRequests: 0 };
   }
 
   private view(scope: Scope, row: Stored): T.Assignment {
@@ -267,7 +277,8 @@ export class FakeAssignments {
       ...rest,
       role,
       actionable: role === "owner" || role === "decide",
-      manageable: role === "owner" || scope.role !== "member",
+      manageable: this.manages(scope, row),
+      pending: this.pendingFor(scope, row),
       pendingJoin: requests.some(
         (request) => request.userId === scope.user.id && request.status === "pending",
       ),
@@ -542,8 +553,8 @@ export class FakeAssignments {
         row.people = row.people.filter((each) => each.userId !== params.participantId);
         return reply(204, null);
       }),
-      // Listing the requests asks who may act (the server's actOn); answering them, who manages.
-      listAssignmentJoinRequests: withOne((_scope, row) => reply(200, { requests: row.requests }), "act"),
+      // Listing the requests and answering them ask the same: who manages (the server's requireManager).
+      listAssignmentJoinRequests: withOne((_scope, row) => reply(200, { requests: row.requests }), "manage"),
       // One request per person, as on the server: asking again after a no opens the same one again.
       createAssignmentJoinRequest: withOne((scope, row) => {
         if (this.roleOf(scope, row) !== "view")

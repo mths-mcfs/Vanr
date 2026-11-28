@@ -167,7 +167,7 @@ describe("search: every kind the index accepts", () => {
     expect(await ids(caio, workspaceId, "espresso")).toEqual(["issue:7"]);
   });
 
-  test("a debate in a private channel: who takes part sees it, the rest don't; a hidden turn stays out", async () => {
+  test("a debate in a private channel: who reads the channel sees it, a participant outside it doesn't; a hidden turn stays out", async () => {
     const { workspaceId, sales, ana, beto, caio } = await team();
     const dora = await memberOf(server, workspaceId, "Dora", email("dora"));
     const debateId = newId("deb");
@@ -201,7 +201,7 @@ describe("search: every kind the index accepts", () => {
     ]);
     await reindex(server.deps, { kind: "debate", id: debateId });
     expect(await ids(beto, workspaceId, "harbor")).toEqual([`debate:${debateId}`]);
-    expect(await ids(dora, workspaceId, "harbor")).toEqual([`debate:${debateId}`]);
+    expect(await ids(dora, workspaceId, "harbor")).toEqual([]);
     expect(await ids(caio, workspaceId, "harbor")).toEqual([]);
     expect(await ids(beto, workspaceId, "anchovy")).toEqual([`debate:${debateId}`]);
     expect(await ids(beto, workspaceId, "sardine")).toEqual([]);
