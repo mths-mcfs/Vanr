@@ -18,6 +18,7 @@ export function useRuleWords(): RuleWords {
   const t = useMessages("work");
   return {
     daily: (count) => t("rule.daily", { count }),
+    dailyOn: (count, days) => t("rule.dailyOn", { count, days }),
     weekdays: () => t("rule.weekdays"),
     weekly: (count, days) => t("rule.weekly", { count, days }),
     hourly: (count) => t("rule.hourly", { count }),

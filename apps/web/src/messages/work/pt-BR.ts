@@ -244,6 +244,7 @@ export default {
   "recur.via.webhook": "Por um webhook",
   "recur.via.retry": "Nova tentativa",
   "rule.daily": { one: "Todo dia", other: "A cada {count} dias" },
+  "rule.dailyOn": { one: "Todo dia que cair em {days}", other: "A cada {count} dias, quando cair em {days}" },
   "rule.weekdays": "Todo dia útil",
   "rule.weekly": { one: "Toda semana, {days}", other: "A cada {count} semanas, {days}" },
   "rule.hourly": { one: "Toda hora", other: "A cada {count} horas" },

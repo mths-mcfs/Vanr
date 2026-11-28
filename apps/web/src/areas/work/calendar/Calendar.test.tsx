@@ -39,6 +39,25 @@ describe("the week", () => {
     expect(screen.queryByRole("region", { name: "Proposed by agents" }) === null).toBe(true);
   });
 
+  test("answering one proposal keeps another's buttons waiting while its answer is on its way", async () => {
+    const server = newServer();
+    const first = server.work.proposals[0];
+    if (first !== undefined)
+      server.work.proposals.push({ ...first, id: "prp_proof", title: "Proof sign-off", note: null });
+    const held = server.hold("confirmCalendarProposal");
+    const app = await renderApp({ path: CALENDAR, signedInAs: "usr_ana", server });
+    const proposals = within(await screen.findByRole("region", { name: "Proposed by agents" }));
+    const confirmOf = (title: string) =>
+      within(proposals.getByRole("listitem", { name: title })).getByRole("button", { name: "Add to calendar" });
+    await app.user.click(confirmOf("Paper supplier call"));
+    await app.user.click(confirmOf("Proof sign-off"));
+    expect((confirmOf("Paper supplier call") as HTMLButtonElement).disabled).toBe(true);
+    expect((confirmOf("Proof sign-off") as HTMLButtonElement).disabled).toBe(true);
+    held.release();
+    expect(await screen.findByText("“Paper supplier call” is on the calendar")).toBeDefined();
+    expect(await screen.findByText("“Proof sign-off” is on the calendar")).toBeDefined();
+  });
+
   test("another week, and back to this one", async () => {
     const app = await renderApp({ path: CALENDAR, signedInAs: "usr_ana" });
     await screen.findByRole("region", { name: /^Thursday/ });

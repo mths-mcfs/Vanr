@@ -78,6 +78,7 @@ export function weekdayName(day: Weekday, locale: string): string {
 
 export type RuleWords = {
   daily: (count: number) => string;
+  dailyOn: (count: number, days: string) => string;
   weekdays: () => string;
   weekly: (count: number, days: string) => string;
   hourly: (count: number) => string;
@@ -104,9 +105,11 @@ export function describeRule(rule: RecurrenceRule, words: RuleWords, locale: str
     case "daily":
       text = !someDays
         ? words.daily(count)
-        : count === 1 && workweek
-          ? words.weekdays()
-          : words.weekly(1, named());
+        : count > 1
+          ? words.dailyOn(count, named())
+          : workweek
+            ? words.weekdays()
+            : words.weekly(1, named());
       break;
     case "weekly":
       text = count === 1 && workweek ? words.weekdays() : words.weekly(count, named());

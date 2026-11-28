@@ -269,14 +269,36 @@ function Proposals({
   const { locale } = useLocale();
   const outcome = useOutcome();
   const refresh = () => [{ method: "getCalendar" as const, args: { workspaceId } }];
+  // Pending by proposal: a mutation's own state follows only its latest call, so answering B
+  // would free A's buttons while A is still on its way.
+  const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
+  const mark = (id: string, on: boolean) =>
+    setPending((now) => {
+      const next = new Set(now);
+      if (on) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  // Kept from the click: once answered, the proposal leaves the range before the toast shows.
+  const titles = useRef(new Map<string, string>());
+  const titleOf = (id: string) => titles.current.get(id) ?? "";
   const confirm = useApiMutation("confirmCalendarProposal", {
     invalidates: refresh,
+    onSuccess: (_result, args) => outcome.done(t("week.confirmed", { title: titleOf(args.proposalId) })),
     onError: (error) => outcome.failed(error),
+    onSettled: (_result, _error, args) => mark(args.proposalId, false),
   });
   const dismiss = useApiMutation("dismissCalendarProposal", {
     invalidates: refresh,
+    onSuccess: () => outcome.done(t("week.dismissed")),
     onError: (error) => outcome.failed(error),
+    onSettled: (_result, _error, args) => mark(args.proposalId, false),
   });
+  const answer = (proposal: { id: string; title: string }, how: typeof confirm | typeof dismiss) => {
+    titles.current.set(proposal.id, proposal.title);
+    mark(proposal.id, true);
+    how.mutate({ workspaceId, proposalId: proposal.id });
+  };
   if (range.proposals.length === 0) return null;
   const when = new Intl.DateTimeFormat(locale, {
     weekday: "short",
@@ -290,9 +312,7 @@ function Proposals({
       <h2 className="page__heading">{t("week.proposals")}</h2>
       <ul>
         {range.proposals.map((proposal) => {
-          const busy =
-            (confirm.isPending && confirm.variables?.proposalId === proposal.id) ||
-            (dismiss.isPending && dismiss.variables?.proposalId === proposal.id);
+          const busy = pending.has(proposal.id);
           return (
             <li key={proposal.id} className="work-proposal" aria-label={proposal.title}>
               <p className="work-proposal__by">
@@ -308,12 +328,7 @@ function Proposals({
                   variant="primary"
                   size="sm"
                   disabled={busy}
-                  onClick={() =>
-                    confirm.mutate(
-                      { workspaceId, proposalId: proposal.id },
-                      { onSuccess: () => outcome.done(t("week.confirmed", { title: proposal.title })) },
-                    )
-                  }
+                  onClick={() => answer(proposal, confirm)}
                 >
                   {t("week.confirm")}
                 </Button>
@@ -321,12 +336,7 @@ function Proposals({
                   variant="ghost"
                   size="sm"
                   disabled={busy}
-                  onClick={() =>
-                    dismiss.mutate(
-                      { workspaceId, proposalId: proposal.id },
-                      { onSuccess: () => outcome.done(t("week.dismissed")) },
-                    )
-                  }
+                  onClick={() => answer(proposal, dismiss)}
                 >
                   {t("week.dismiss")}
                 </Button>

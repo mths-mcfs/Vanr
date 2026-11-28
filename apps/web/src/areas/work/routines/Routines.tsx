@@ -212,17 +212,16 @@ function RoutineCard({
             size="sm"
             loading={run.isPending}
             onClick={() => {
-              // One key per intent: a second click before the answer sends the same key, which runs once.
+              // One key per intent: a second click, or a retry after a failure whose answer may have
+              // been lost, sends the same key, which runs once. Only a run that started ends the intent.
               intent.current ??= crypto.randomUUID();
               run.mutate(
                 { workspaceId, routineId: routine.id, body: { key: intent.current } },
                 {
                   onSuccess: () => {
+                    intent.current = null;
                     setOpen(true);
                     outcome.done(t("recur.started", { name: routine.name }));
-                  },
-                  onSettled: () => {
-                    intent.current = null;
                   },
                 },
               );

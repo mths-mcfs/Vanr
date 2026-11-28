@@ -627,8 +627,9 @@ export class FakeWork {
         return reply(201, this.viewRoutine(copy));
       }),
       runRoutine: withRoutine((_scope, routine, params) => {
-        // The same key twice (a double click, a resend) runs once.
-        const key = text(params.key);
+        // The same key twice on one routine (a double click, a resend) runs once, as on the server.
+        const given = text(params.key);
+        const key = given === undefined ? undefined : `${routine.id}:${given}`;
         if (key !== undefined) {
           if (this.runKeys.has(key)) return reply(200, { ...this.viewRoutine(routine), running: true });
           this.runKeys.add(key);
