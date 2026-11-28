@@ -1,5 +1,6 @@
-// The agent routes follow the channel rules: a delegation from a private channel, a live run there and an agent's
-// spend don't show to whoever can't see them, and an archived agent takes no writes.
+// The agent routes follow the channel and runner rules: a delegation from a private channel, a live run there, an
+// agent's spend and a memory's channel don't show to whoever can't see them, the browser on a runner is driven only
+// by whoever may use the runner, and an archived agent takes no writes.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { ActiveRun } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
@@ -10,10 +11,14 @@ import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
 import { call, seedAgent, ws } from "./route-calls";
 import { memberOf, type Person, seedChannel, seedWorkspace } from "./seed";
 
+type Runner = { id: string };
+
 let server: RunningServer;
 /** Live runs the fake runtime reports on top of the real ones, with the workspace of each. */
 const live: (ActiveRun & { workspaceId: string })[] = [];
 let completes = 0;
+/** Runners the fake hub reports online; the browser calls on them answer at once. */
+const online = new Set<string>();
 
 beforeAll(async () => {
   server = await startTestServer({
@@ -32,6 +37,14 @@ beforeAll(async () => {
       },
     }),
   });
+  const { runners } = server.deps;
+  const isOnline = runners.isOnline.bind(runners);
+  runners.isOnline = (id: string) => online.has(id) || isOnline(id);
+  const callRunner = runners.call.bind(runners);
+  runners.call = ((runnerId: string, op: string, ...rest: unknown[]) =>
+    online.has(runnerId) && op === "browser.close"
+      ? Promise.resolve({})
+      : (callRunner as (...a: unknown[]) => Promise<unknown>)(runnerId, op, ...rest)) as typeof runners.call;
 }, SERVER_TEST_MS);
 
 afterAll(() => server.stop(), SERVER_TEST_MS);
@@ -62,6 +75,45 @@ async function insertRun(t: Team, values: Partial<typeof schema.runs.$inferInser
     .insert(schema.runs)
     .values({ id, workspaceId: t.workspaceId, status: "done", model: "claude-haiku-5-5", ...values });
   return id;
+}
+
+/** A runner paired by `who`, online, with the browser on. */
+async function pairedRunner(t: Team, who: Person, name: string): Promise<Runner> {
+  const start = await call(who, "POST", "/api/v1/runner-pairings", {
+    name,
+    os: "linux",
+    arch: "x64",
+    hostname: `${name}.local`,
+    version: "1.0.0",
+  });
+  const runner = await call(who, "POST", `${t.w}/runner-pairings/${start.body.userCode}/confirm`, { name });
+  expect(runner.status).toBe(200);
+  online.add(runner.body.id);
+  await server.deps.db
+    .update(schema.runners)
+    .set({
+      browser: true,
+      access: { folders: [], tools: { browser: true, claude: false, codex: false, commands: false } },
+    })
+    .where(eq(schema.runners.id, runner.body.id));
+  return runner.body;
+}
+
+/** A reply of lia in `channelId` and the feedback `who` leaves on it: a lesson in lia's memory, from that channel. */
+async function feedbackIn(t: Team, who: Person, channelId: string, body: string) {
+  const id = newId("msg");
+  await server.deps.db.insert(schema.messages).values({
+    id,
+    workspaceId: t.workspaceId,
+    channelId,
+    authorKind: "agent",
+    authorId: t.lia.id,
+    body: "Draft ready.",
+  });
+  expect((await call(who, "POST", `${t.w}/messages/${id}/feedback`, { body })).status).toBe(201);
+  const [memory] = await server.deps.db.select().from(schema.memories).where(eq(schema.memories.text, body));
+  if (!memory) throw new Error("no lesson");
+  return memory;
 }
 
 /** A delegation lia asked helper from #secret: lia's run in the channel and helper's run with no channel. */
@@ -203,6 +255,36 @@ describe("an archived agent", () => {
   );
 
   test(
+    "refuses the browser, environment and memory writes",
+    async () => {
+      const t = await team();
+      const base = `${t.w}/agents/${t.lia.id}`;
+      const runner = await pairedRunner(t, t.ana, `ana-box-${seq}`);
+      const lesson = await feedbackIn(t, t.ana, t.general, `Answer in English ${seq}.`);
+      expect((await call(t.ana, "DELETE", base)).status).toBe(204);
+      const writes = [
+        call(t.ana, "PUT", `${base}/browser`, { permittedDomains: ["example.com"] }),
+        call(t.ana, "PUT", `${base}/browser/policy`, { level: "free", sites: [] }),
+        call(t.ana, "POST", `${base}/environment/start`),
+        call(t.ana, "PUT", `${base}/environment/target`, { runnerId: runner.id }),
+        call(t.ana, "PATCH", `${t.w}/memories/${lesson.id}`, { text: "Changed." }),
+        call(t.ana, "POST", `${t.w}/memories/${lesson.id}/revert`, {}),
+        call(t.ana, "POST", `${t.w}/memories/${lesson.id}/versions/mv_any/restore`, {}),
+      ];
+      for (const res of await Promise.all(writes))
+        expect([res.status, res.body?.error?.code]).toEqual([409, "agent.archived"]);
+      const [agent] = await server.deps.db.select().from(schema.agents).where(eq(schema.agents.id, t.lia.id));
+      expect(agent?.environmentId ?? null).toBe(null);
+      const [kept] = await server.deps.db
+        .select()
+        .from(schema.memories)
+        .where(eq(schema.memories.id, lesson.id));
+      expect(kept?.text).toBe(lesson.text);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "PUT /channels refuses when the archive lands after the first read: the check runs again under the lock",
     async () => {
       const t = await team();
@@ -288,6 +370,65 @@ describe("an agent's spend on its profile", () => {
       expect(admin[0]).toBe(2);
       expect(admin[4]).toBe(1);
       expect(admin.every((v) => typeof v === "number")).toBe(true);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("an agent's browser on someone's runner", () => {
+  test(
+    "a member who may talk to the agent but can't use the runner neither takes over nor stops it",
+    async () => {
+      const t = await team();
+      const base = `${t.w}/agents/${t.lia.id}`;
+      const runner = await pairedRunner(t, t.ana, `ana-box-${seq}`);
+      expect((await call(t.ana, "PUT", `${base}/environment/target`, { runnerId: runner.id })).status).toBe(
+        200,
+      );
+      const davi = await memberOf(server, t.workspaceId, "Davi", email("davi"));
+      for (const res of [
+        await call(davi, "POST", `${base}/browser/interventions/start`, {}),
+        await call(davi, "POST", `${base}/browser/stop`, {}),
+      ])
+        expect(res.status).toBe(403);
+      // Whoever paired the runner takes over and stops.
+      expect((await call(t.ana, "POST", `${base}/browser/interventions/start`, {})).status).toBe(200);
+      expect((await call(t.ana, "POST", `${base}/browser/stop`, {})).status).toBe(204);
+      online.delete(runner.id);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("a memory's origin", () => {
+  test(
+    "names its channel only to whoever reads it, from feedback and from a run",
+    async () => {
+      const t = await team();
+      const payroll = await seedChannel(server, t.workspaceId, {
+        name: `payroll${seq}`,
+        visibility: "private",
+        members: [t.ana],
+      });
+      await feedbackIn(t, t.ana, payroll, `Keep salaries confidential ${seq}.`);
+      const runId = await insertRun(t, { agentId: t.lia.id, channelId: payroll });
+      await server.deps.db.insert(schema.memories).values({
+        id: newId("mem"),
+        workspaceId: t.workspaceId,
+        agentId: t.lia.id,
+        scope: "agent",
+        text: "Bonus sheet is in the drive.",
+        origin: { by: null, name: null, channel: `#payroll${seq}`, at: new Date().toISOString(), runId },
+      });
+      const channels = async (who: Person) =>
+        (
+          (await call(who, "GET", `${t.w}/agents/${t.lia.id}/memories`)).body.memories as {
+            origin: { channel: string | null } | null;
+          }[]
+        ).map((m) => m.origin?.channel);
+      expect(await channels(t.ana)).toEqual([`#payroll${seq}`, `#payroll${seq}`]);
+      expect(await channels(t.beto)).toEqual([null, null]);
+      expect(await channels(t.carla)).toEqual([null, null]);
     },
     SERVER_TEST_MS,
   );

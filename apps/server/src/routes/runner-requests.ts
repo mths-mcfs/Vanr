@@ -15,7 +15,7 @@ import { newId } from "@vanr/engine/ids";
 import { and, eq, gt, inArray, lte, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
-import { type AgentRow, agentInWorkspace, requireAgentEditor } from "../agents";
+import { type AgentRow, agentInWorkspace, requireActiveAgent, requireAgentEditor } from "../agents";
 import type { AppDeps, AppEnv, WorkspaceMember } from "../context";
 import { conflict, forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
 import {
@@ -40,7 +40,7 @@ import {
   toIntervention,
   toSecretRequest,
 } from "../runners/requests";
-import { canManageRunner } from "../runners/runners";
+import { canManageRunner, canUseRunner } from "../runners/runners";
 import { canTalkTo } from "../runtime/route";
 import { requireMember, WORKSPACE } from "../workspace-scope";
 import { runnerError } from "./runners";
@@ -351,6 +351,7 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const agent = await agentInWorkspace(deps.db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, agent);
+    requireActiveAgent(agent);
     const { permittedDomains } = await readJson(
       c,
       z.object({
@@ -394,6 +395,7 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const agent = await agentInWorkspace(deps.db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, agent);
+    requireActiveAgent(agent);
     const body = await readJson(
       c,
       z.object({
@@ -630,6 +632,8 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
     if (!agent.environmentId) throw conflict("browser.no_environment", "This agent has no runner");
     const [runner] = await deps.db.select().from(runners).where(eq(runners.id, agent.environmentId));
     if (!runner || runner.removedAt) throw conflict("browser.no_environment", "This agent has no runner");
+    // Driving the browser is using the runner: only whoever may use it (who paired it or manages agents).
+    if (!canUseRunner(me, runner)) throw forbidden("Only who paired this runner can use it");
     if (!deps.runners.isOnline(runner.id)) throw conflict("runner.offline", "The runner is offline");
     if (!runner.browser || !runner.access.tools.browser)
       throw conflict("browser.disabled", "The browser is turned off on this runner");
@@ -745,6 +749,11 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const agent = await agentInWorkspace(deps.db, me.workspaceId, param(c, "agentId"));
     if (!canTalkTo(await withPlanOwner(deps.db, agent), me.userId) && !isEditor(me, agent)) throw forbidden();
+    // Closing the browser acts on the runner: as starting a takeover, only whoever may use it.
+    if (agent.environmentId) {
+      const [runner] = await deps.db.select().from(runners).where(eq(runners.id, agent.environmentId));
+      if (runner && !canUseRunner(me, runner)) throw forbidden("Only who paired this runner can use it");
+    }
     const open = await deps.db
       .select({ id: browserInterventions.id })
       .from(browserInterventions)

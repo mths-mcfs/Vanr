@@ -10,7 +10,7 @@ import {
   MemoryPathError,
   parseMemoryPath,
 } from "@vanr/engine/memory";
-import { and, asc, desc, eq, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, or, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
 import {
@@ -23,12 +23,13 @@ import {
   restoreMemory,
   storeWhere,
 } from "../agent-memory";
-import { agentInWorkspace, toMemory } from "../agents";
-import { canReadChannel, readableChannel, writableChannel } from "../channels";
+import { agentInWorkspace, requireActiveAgent, toMemory } from "../agents";
+import { canReadChannel, readableChannel, readableChannelsSql, writableChannel } from "../channels";
 import type { AppDeps, AppEnv, WorkspaceMember } from "../context";
 import { badRequest, conflict, forbidden, notFound, param, readJson, readQuery } from "../http";
 import { approveReview, rejectReview, reviewsFor, toMemoryReview } from "../memory-reviews";
 import { channelNameOf, hydrateOne, memoriesFor, messageInWorkspace, postMessage } from "../messages";
+import { readableRuns } from "../run-access";
 import { requireMember, WORKSPACE } from "../workspace-scope";
 
 const { memories, reminders } = schema;
@@ -58,18 +59,58 @@ async function memoryFor(deps: AppDeps, me: WorkspaceMember, id: string) {
   if (!row) throw notFound("Memory not found");
   if (row.scope === "person") {
     if (row.ownerUserId !== me.userId) throw notFound("Memory not found");
-    return { row, editable: true };
+    return { row, agent: null, editable: true };
   }
-  if (row.scope === "workspace") return { row, editable: can(me.role, "manage_agents") };
+  if (row.scope === "workspace") return { row, agent: null, editable: can(me.role, "manage_agents") };
   const agent = await agentInWorkspace(deps.db, me.workspaceId, row.agentId ?? "");
-  return { row, editable: can(me.role, "manage_agents") || agent.ownerUserId === me.userId };
+  return { row, agent, editable: can(me.role, "manage_agents") || agent.ownerUserId === me.userId };
 }
 
+/** A memory the person may change; an archived agent's store is read-only. */
 async function editableMemory(deps: AppDeps, me: WorkspaceMember, id: string) {
   const found = await memoryFor(deps, me, id);
   if (!found.editable) throw forbidden();
+  if (found.agent) requireActiveAgent(found.agent);
   return found.row;
 }
+
+/**
+ * The memories as the person sees them: the origin's channel name only to whoever reads that channel, found
+ * through the message the memory came from or the run that wrote it (under the runs' rule). One whose channel
+ * can't be found keeps no name. Whether the memory itself shows waits on its own decision (#47).
+ */
+async function shownMemories(db: Db, me: WorkspaceMember, rows: MemoryRow[]): Promise<Memory[]> {
+  const named = rows.filter((r) => r.origin?.channel);
+  const messageIds = named.flatMap((r) => (r.originMessageId ? [r.originMessageId] : []));
+  const runIds = named.flatMap((r) => (!r.originMessageId && r.origin?.runId ? [r.origin.runId] : []));
+  const readMessages = messageIds.length
+    ? await db
+        .select({ id: schema.messages.id })
+        .from(schema.messages)
+        .where(
+          and(
+            inArray(schema.messages.id, messageIds),
+            sql`${schema.messages.channelId} in ${readableChannelsSql(me)}`,
+          ),
+        )
+    : [];
+  const readRuns = runIds.length
+    ? await db
+        .select({ id: schema.runs.id })
+        .from(schema.runs)
+        .where(and(inArray(schema.runs.id, runIds), readableRuns(db, me)))
+    : [];
+  const shown = new Set([...readMessages, ...readRuns].map((r) => r.id));
+  return rows.map((r) => {
+    const memory = toMemory(r);
+    const source = r.originMessageId ?? r.origin?.runId;
+    if (!memory.origin?.channel || (source && shown.has(source))) return memory;
+    return { ...memory, origin: { ...memory.origin, channel: null } };
+  });
+}
+
+const shownMemory = async (db: Db, me: WorkspaceMember, row: MemoryRow) =>
+  (await shownMemories(db, me, [row]))[0];
 
 const person = (me: WorkspaceMember): Author => ({ type: "person", id: me.userId });
 
@@ -142,8 +183,6 @@ function toReminder(row: typeof reminders.$inferSelect): Reminder {
   };
 }
 
-const memoryList = (rows: MemoryRow[]): { memories: Memory[] } => ({ memories: rows.map(toMemory) });
-
 export function registerMemories(app: Hono<AppEnv>) {
   // The agent's store (the person's and the workspace's have their own routes).
   app.get(`${WORKSPACE}/agents/:agentId/memories`, async (c) => {
@@ -162,7 +201,7 @@ export function registerMemories(app: Hono<AppEnv>) {
         ),
       )
       .orderBy(desc(memories.pinned), desc(memories.updatedAt));
-    return c.json(memoryList(rows));
+    return c.json({ memories: await shownMemories(db, me, rows) });
   });
 
   // The person's store: what the agents kept about them. Only they see it.
@@ -176,7 +215,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       .orderBy(desc(memories.updatedAt))
       .limit(STORE_LIST_LIMIT);
     // One person's store: no browser or proxy keeps a copy for whoever signs in next.
-    return c.json(memoryList(rows), 200, { "cache-control": "no-store" });
+    return c.json({ memories: await shownMemories(db, me, rows) }, 200, { "cache-control": "no-store" });
   });
 
   // The workspace's store: every member reads it (the agents too); only who manages agents writes.
@@ -189,7 +228,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       .where(storeWhere({ scope: "workspace", workspaceId: me.workspaceId }))
       .orderBy(memories.path)
       .limit(STORE_LIST_LIMIT);
-    return c.json(memoryList(rows));
+    return c.json({ memories: await shownMemories(db, me, rows) });
   });
 
   app.post(`${WORKSPACE}/memories`, async (c) => {
@@ -286,7 +325,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       { op, author: person(me), reason: input.reason ?? "", expectedSha256: input.expectedSha256 },
     );
     await publishMemory(deps, updated);
-    return c.json(toMemory(updated));
+    return c.json(await shownMemory(deps.db, me, updated));
   });
 
   // Brings back the text before the last edit by a person (it is a new version).
@@ -304,7 +343,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       { op: "update", author: person(me), reason: "revert", expectedSha256: contentSha256(row.text) },
     );
     await publishMemory(deps, updated);
-    return c.json(toMemory(updated));
+    return c.json(await shownMemory(deps.db, me, updated));
   });
 
   app.get(`${WORKSPACE}/memories/:memoryId/versions`, async (c) => {
@@ -330,7 +369,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       input.reason ?? "",
     );
     await publishMemory(deps, updated);
-    return c.json(toMemory(updated));
+    return c.json(await shownMemory(deps.db, me, updated));
   });
 
   // ---- review queue (a run's write under flag A) ----

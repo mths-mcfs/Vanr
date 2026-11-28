@@ -7,7 +7,7 @@ import { PRODUCT } from "@vanr/product";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
-import { agentInWorkspace, requireAgentEditor } from "../agents";
+import { agentInWorkspace, requireActiveAgent, requireAgentEditor } from "../agents";
 import { type AppDeps, type AppEnv, requireUser } from "../context";
 import { conflict, forbidden, HttpError, notFound, param, readJson } from "../http";
 import { endLiveView, endLiveViewsOf, updateRunnerAccess } from "../runners/browser-live";
@@ -413,6 +413,7 @@ export function registerRunners(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const agent = await agentInWorkspace(deps.db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, agent);
+    requireActiveAgent(agent);
     if (!agent.environmentId)
       throw conflict("sandbox.not_set_up", "This installation has no cloud sandbox; pair a runner");
     if (!deps.runners.isOnline(agent.environmentId)) throw offline();
@@ -461,6 +462,7 @@ export function registerRunners(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const agent = await agentInWorkspace(deps.db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, agent);
+    requireActiveAgent(agent);
     const { runnerId } = await readJson(c, z.object({ runnerId: z.string().max(64).nullable() }));
     if (runnerId) {
       const runner = await runnerInWorkspace(deps.db, me.workspaceId, runnerId);
