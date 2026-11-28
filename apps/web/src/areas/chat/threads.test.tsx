@@ -625,6 +625,33 @@ describe("a thread's page against a list it can't trust", () => {
     expect(screen.queryByText("This thread didn't load") === null).toBe(true);
   });
 
+  test("added back while the thread still can't be read: one more read, then the error with its retry", async () => {
+    const server = newServer();
+    seedBoard(server);
+    const app = await open("/threads/msg_broot", "usr_iris", server);
+    expect(await screen.findByText("Agreed, quietly")).toBeDefined();
+    const board = server.state.channels.find((channel) => channel.id === "ch_board");
+    if (board !== undefined) board.memberIds = ["usr_ana"];
+    server.force("getThread", { kind: "offline" }, 100_000);
+    const relist = () =>
+      act(async () => {
+        void app.runtime.queryClient.invalidateQueries({
+          predicate: (query) => query.queryKey[2] === "listChannels",
+        });
+      });
+    await relist();
+    expect(await screen.findByRole("heading", { name: "There's no thread here" })).toBeDefined();
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+    if (board !== undefined) board.memberIds = ["usr_ana", "usr_iris"];
+    const before = count(server, "getThread");
+    await relist();
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 2000)));
+    // The read and its retries, and no more.
+    expect(count(server, "getThread") - before).toBeLessThanOrEqual(5);
+    expect(screen.getByRole("heading", { name: "This thread didn't load" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeDefined();
+  }, 15_000);
+
   test("replies loaded past the record's count are counted", async () => {
     const server = newServer();
     server.state.messages.push(message({ id: "msg_root", body: "Kiln log", replyCount: 3 }));
