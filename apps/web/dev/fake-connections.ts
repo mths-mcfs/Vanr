@@ -190,15 +190,14 @@ export class FakeConnections {
         const confirm =
           params.confirmActions === undefined ? [] : actions(params.confirmActions, MAIL_ACTIONS);
         if (disabled === undefined || confirm === undefined) return fail(400, "validation", "Invalid body");
+        // A refused password changes nothing, as on the server.
+        if (params.password === "wrong-password") {
+          return fail(400, "mail.auth", "The mail server rejected the password");
+        }
         if (text(params.label) !== undefined) account.label = text(params.label)?.trim() ?? account.label;
         if (params.disabledActions !== undefined) account.disabledActions = disabled;
         if (params.confirmActions !== undefined) account.confirmActions = confirm;
-        if (text(params.password) !== undefined) {
-          if (params.password === "wrong-password") {
-            return fail(400, "mail.auth", "The mail server rejected the password");
-          }
-          account.status = "active";
-        }
+        if (text(params.password) !== undefined) account.status = "active";
         return reply(200, { account: mailView(account) });
       }, true),
       deleteMailAccount: within((scope, params) => {

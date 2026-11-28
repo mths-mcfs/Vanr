@@ -19,7 +19,7 @@ import {
   SelectItem,
 } from "@vanr/ui";
 import { Plus } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { useErrorMessage } from "../../../app/screens.tsx";
 import { useMessages } from "../../../i18n/react.tsx";
 import { useOutcome } from "../shared.tsx";
@@ -185,6 +185,8 @@ function AddMailbox({ workspaceId, onClose }: { workspaceId: string; onClose: ()
   const t = useMessages("control");
   const common = useMessages("common");
   const providers = useApiQuery("listMailProviders", { workspaceId });
+  // While a connection is on its way the dialog stays: Escape, the overlay and the close button too.
+  const [busy, setBusy] = useState(false);
   let body: ReactNode;
   if (providers.isPending) body = <PartLoading />;
   else if (providers.isError)
@@ -195,12 +197,15 @@ function AddMailbox({ workspaceId, onClose }: { workspaceId: string; onClose: ()
         onRetry={() => void providers.refetch()}
       />
     );
-  else body = <MailboxForm workspaceId={workspaceId} providers={providers.data} onClose={onClose} />;
+  else
+    body = (
+      <MailboxForm workspaceId={workspaceId} providers={providers.data} onClose={onClose} onBusy={setBusy} />
+    );
   return (
     <Dialog
       open
       onOpenChange={(next) => {
-        if (!next) onClose();
+        if (!next && !busy) onClose();
       }}
     >
       <DialogContent
@@ -219,10 +224,12 @@ function MailboxForm({
   workspaceId,
   providers,
   onClose,
+  onBusy,
 }: {
   workspaceId: string;
   providers: MailProviders;
   onClose: () => void;
+  onBusy: (busy: boolean) => void;
 }) {
   const t = useMessages("control");
   const common = useMessages("common");
@@ -249,6 +256,16 @@ function MailboxForm({
       smtpPort !== null);
   const ready = address.trim().length >= 3 && password !== "" && serversReady;
   const busy = connect.isPending || hosted.isPending;
+  useEffect(() => onBusy(busy), [busy, onBusy]);
+  const forget = useForgetOnLoss(workspaceId, READS);
+  // Access lost while the dialog was open closes it and says why; any other failure keeps what was typed.
+  const lost = (error: unknown) => {
+    forget(error);
+    if (isLost(error)) {
+      outcome.failed(error);
+      onClose();
+    }
+  };
   const failure = connect.error ?? hosted.error;
   const portError = (text: string) =>
     text.trim() !== "" && portOf(text) === null ? t("wire.portInvalid") : undefined;
@@ -268,7 +285,7 @@ function MailboxForm({
                   latch(() =>
                     hosted
                       .mutateAsync({ workspaceId, body: { provider } })
-                      .then((answer) => leaveFor(answer.redirectUrl)),
+                      .then((answer) => leaveFor(answer.redirectUrl), lost),
                   )
                 }
               >
@@ -308,7 +325,7 @@ function MailboxForm({
                 connect.reset();
                 outcome.done(t("box.connected", { address: answer.address }));
                 onClose();
-              }),
+              }, lost),
           );
         }}
       >
@@ -404,7 +421,7 @@ function MailboxForm({
             </div>
           </>
         )}
-        {failure !== null && (
+        {failure !== null && !isLost(failure) && (
           <Callout tone="danger" role="alert">
             {describe(failure)}
           </Callout>

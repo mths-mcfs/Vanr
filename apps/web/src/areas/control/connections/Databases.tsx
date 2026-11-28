@@ -200,6 +200,7 @@ function AddDatabase({ workspaceId, onClose }: { workspaceId: string; onClose: (
   const describe = useErrorMessage("control");
   const outcome = useOutcome();
   const latch = useLatch();
+  const forget = useForgetOnLoss(workspaceId, READS);
   const [provider, setProvider] = useState<DatabaseProvider>("supabase");
   const [name, setName] = useState("");
   const [by, setBy] = useState<"url" | "fields">("url");
@@ -254,13 +255,22 @@ function AddDatabase({ workspaceId, onClose }: { workspaceId: string; onClose: (
             event.preventDefault();
             if (!ready) return;
             latch(() =>
-              connect.mutateAsync({ workspaceId, body: input() }).then((created) => {
-                setUrl("");
-                setPassword("");
-                connect.reset();
-                outcome.done(t("db.connected", { name: created.label }));
-                onClose();
-              }),
+              connect.mutateAsync({ workspaceId, body: input() }).then(
+                (created) => {
+                  setUrl("");
+                  setPassword("");
+                  connect.reset();
+                  outcome.done(t("db.connected", { name: created.label }));
+                  onClose();
+                },
+                (error: unknown) => {
+                  forget(error);
+                  if (isLost(error)) {
+                    outcome.failed(error);
+                    onClose();
+                  }
+                },
+              ),
             );
           }}
         >
@@ -293,7 +303,10 @@ function AddDatabase({ workspaceId, onClose }: { workspaceId: string; onClose: (
           <Field label={t("db.by")}>
             <RadioGroup
               value={by}
+              disabled={connect.isPending}
               onValueChange={(next) => {
+                // A connection on its way keeps its form: its answer still has to arrive and say how it went.
+                if (connect.isPending) return;
                 setBy(next === "fields" ? "fields" : "url");
                 // What was typed for one way never goes with the other.
                 setUrl("");
@@ -400,7 +413,7 @@ function AddDatabase({ workspaceId, onClose }: { workspaceId: string; onClose: (
               ))}
             </Select>
           </Field>
-          {connect.isError && (
+          {connect.isError && !isLost(connect.error) && (
             <Callout tone="danger" role="alert">
               {describe(connect.error)}
             </Callout>
