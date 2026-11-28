@@ -260,6 +260,27 @@ describe("what CodeRabbit found on the channels round", () => {
     expect(await within(dialog).findByRole("button", { name: "Open #general" })).toBeDefined();
   });
 
+  test("taking one agent out of a channel never changed before keeps the others", async () => {
+    const server = newServer();
+    const app = await open("/channel/ch_print", "usr_ana", server);
+    const field = await screen.findByRole("textbox", { name: "Write in #print-queue" });
+    await act(async () => {
+      await app.runtime.api.client.call("deleteChannelMemberAgent", {
+        workspaceId: WS,
+        channelId: "ch_print",
+        agentId: "agt_scout",
+      });
+      await app.runtime.queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[2] === "getChannelDirectory",
+      });
+    });
+    await app.user.type(field, "@ledger check it");
+    expect(await screen.findByText("Ledger will answer")).toBeDefined();
+    await app.user.clear(field);
+    await app.user.type(field, "@scout check it");
+    expect(screen.queryByText("Scout will answer") === null).toBe(true);
+  });
+
   test("an agent taken out of a channel no longer answers there", async () => {
     const server = newServer();
     // The channel's agents were changed: only Ledger is in #general now.

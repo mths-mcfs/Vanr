@@ -37,6 +37,20 @@ export class FakeChat {
   pins: T.MessagePin[] = [];
 
   /** A thread's record, made from its first message as the server makes it. */
+  /** A channel's agents, kept from its first change on; until then every active agent, as seeded. */
+  private roster(workspaceId: string, channelId: string): Set<string> {
+    const kept = this.agentMembers.get(channelId);
+    if (kept !== undefined) return kept;
+    const seeded = new Set(
+      this.host
+        .agents(workspaceId)
+        .filter((agent) => agent.archivedAt === null)
+        .map((agent) => agent.id),
+    );
+    this.agentMembers.set(channelId, seeded);
+    return seeded;
+  }
+
   thread(rootId: string, by: string, fields: Partial<T.ThreadInfo> = {}): T.ThreadInfo {
     const existing = this.threads.find((each) => each.id === rootId);
     if (existing !== undefined) return existing;
@@ -258,9 +272,8 @@ export class FakeChat {
         if (!room.memberIds.includes(scope.user.id))
           return fail(403, "forbidden", "Join the channel to add people");
         if (typeof params.agentId === "string") {
-          const set = this.agentMembers.get(room.id) ?? new Set<string>();
+          const set = this.roster(scope.workspaceId, room.id);
           set.add(params.agentId);
-          this.agentMembers.set(room.id, set);
         } else if (typeof params.userId === "string" && !room.memberIds.includes(params.userId))
           room.memberIds.push(params.userId);
         return reply(204, null);
@@ -279,7 +292,7 @@ export class FakeChat {
         const room = this.room(scope, params.channelId);
         if (room === undefined) return notFound();
         if (!manages(scope.role)) return fail(403, "forbidden", "Forbidden");
-        this.agentMembers.get(room.id)?.delete(String(params.agentId));
+        this.roster(scope.workspaceId, room.id).delete(String(params.agentId));
         return reply(204, null);
       }),
       listChannelPinnedMessages: within((scope, params) => {
