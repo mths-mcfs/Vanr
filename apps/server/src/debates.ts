@@ -1173,7 +1173,7 @@ function buildSynthesis(
 async function synthesize(deps: AppDeps, row: DebateRow) {
   const { db } = deps;
   const leadId = leadOf(row);
-  let [lead] = leadId ? await liveAgents(db, [leadId]) : [];
+  const [lead] = leadId ? await liveAgents(db, [leadId]) : [];
   await publishRevealed(deps, row, await revealHidden(db, deps, row.id));
   const posts = await postsOf(db, row.id);
   let structured: DivergenceSynthesis;
@@ -1191,12 +1191,7 @@ async function synthesize(deps: AppDeps, row: DebateRow) {
       scopes: capScope(row),
       ...synthesisPrompt(lead, row, transcript(posts, names)),
     });
-    // The lead archived while it wrote: its text doesn't go out in its name; the debate closes on the votes.
-    if (!(await liveAgents(db, [lead.id])).length) {
-      const final = buildSynthesis(row, posts, { summary: "" }, null).final;
-      structured = final ? voteSynthesis(final) : { summary: "" };
-      lead = undefined;
-    } else if (result.ok) {
+    if (result.ok) {
       structured = parseDivergenceSynthesis(result.text);
       runId = result.runId;
     } else if (result.code === "budget") {
@@ -1217,28 +1212,63 @@ async function synthesize(deps: AppDeps, row: DebateRow) {
   } else {
     structured = { summary: "" };
   }
-  // It closes only if nobody canceled or reopened it while the lead wrote.
-  const done = await changeDebate(deps, row.id, (fresh) =>
-    fresh.status === "open" && fresh.phase === "concluding" && fresh.round === row.round
-      ? {
-          status: "done",
-          phase: null,
-          pendingSpeakers: [],
-          synthesis: { ...buildSynthesis(fresh, posts, structured, fallback) },
+  // It closes only if nobody canceled or reopened it while the lead wrote. Who signs is read in the same transaction
+  // that writes the synthesis, under each agent's row lock (`archiveAgent` takes it FOR UPDATE): the lead while it is
+  // active; if the lead was archived while it wrote, its text goes and the debate closes on the votes, signed by the
+  // first active agent in `agentIds` order. With none of its agents active, the synthesis stays on the debate and no
+  // post is written: it is never signed by an archived agent.
+  let signer: string | null = null;
+  let post: DebatePostRow | null = null;
+  const done = await changeDebate(deps, row.id, async (fresh, tx) => {
+    if (!(fresh.status === "open" && fresh.phase === "concluding" && fresh.round === row.round)) return null;
+    const active = async (id: string) => {
+      const [a] = await tx
+        .select({ archivedAt: agents.archivedAt })
+        .from(agents)
+        .where(eq(agents.id, id))
+        .for("share");
+      return !!a && a.archivedAt === null;
+    };
+    if (lead && !(await active(lead.id))) {
+      const final = buildSynthesis(fresh, posts, { summary: "" }, null).final;
+      structured = final ? voteSynthesis(final) : { summary: "" };
+      fallback = null;
+      runId = null;
+    } else if (lead) signer = lead.id;
+    if (!signer)
+      for (const id of fresh.agentIds)
+        if (id !== lead?.id && (await active(id))) {
+          signer = id;
+          break;
         }
-      : null,
-  );
-  if (!done) return;
-  // Without a lead (none, or archived): the first speaker still active signs the votes' synthesis.
-  const signer = lead ?? (await liveAgents(db, row.agentIds))[0];
-  await insertPost(deps, done, {
-    author: { type: "agent", id: signer?.id ?? row.agentIds[0] ?? "" },
-    kind: "synthesis",
-    round: row.round,
-    body: structured.summary,
-    runId,
-    meta: { synthesis: done.synthesis },
+    const synthesis = { ...buildSynthesis(fresh, posts, structured, fallback) };
+    // A debate of people only has no agent to sign: its post goes out as it always did. One whose agents were all
+    // archived gets none.
+    const peopleOnly = fresh.agentIds.length === 0;
+    if (signer || peopleOnly) {
+      const [inserted] = await tx
+        .insert(debatePosts)
+        .values({
+          id: newId("dpost"),
+          debateId: row.id,
+          createdAt: deps.now(),
+          author: { type: "agent", id: signer ?? "" },
+          kind: "synthesis",
+          round: row.round,
+          body: structured.summary,
+          runId,
+          meta: { synthesis },
+        })
+        .returning();
+      post = inserted ?? null;
+    }
+    return { status: "done", phase: null, pendingSpeakers: [], synthesis };
   });
+  if (!done) return;
+  if (post) {
+    await publishPost(deps, done, post);
+    await reindex(deps, { kind: "debate", id: done.id });
+  }
   await closeNotifications(deps, row.workspaceId, turnKey(row.id));
   for (const userId of stakeholders(row)) {
     await notify(deps, {
@@ -1246,7 +1276,7 @@ async function synthesize(deps: AppDeps, row: DebateRow) {
       userId,
       kind: "debate_synthesis",
       groupKey: `debate_synthesis:${row.id}`,
-      ...(lead ? { actor: { type: "agent" as const, id: lead.id } } : {}),
+      ...(signer ? { actor: { type: "agent" as const, id: signer } } : {}),
       source: { debateId: row.id, label: row.title },
       latest: { title: row.title, text: (structured.decision ?? structured.summary).slice(0, 160) },
     });

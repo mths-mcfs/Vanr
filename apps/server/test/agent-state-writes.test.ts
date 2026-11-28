@@ -53,70 +53,43 @@ const IN_REGISTER: { re: RegExp; name: (m: RegExpExecArray) => string }[] = [
 ];
 
 /**
- * Comments go blank (same length, newlines kept), read the way the language reads them: `//` and `/*` inside a
- * string or a template's text aren't comments, and what a template interpolates (`${...}`) is code again.
+ * The writes in one file's text, as `where owner: op(table)`: Drizzle's `.update|insert|delete(table)` on those tables,
+ * whatever the line breaks, and raw SQL on them (`RAW`). Comments are read like code: a write that only a comment
+ * mentions gets flagged too, which fails safe, and nothing a lexer could misread (a regex, a string) hides a real one.
+ * What it doesn't see: a table renamed into another variable, or passed to a helper as a parameter.
  */
-function blankComments(text: string): string {
-  const out = text.split("");
-  const blank = (from: number, to: number) => {
-    for (let k = from; k < to; k++) if (out[k] !== "\n") out[k] = " ";
-  };
-  // What encloses the cursor: code (with its open braces), a template's text.
-  const stack: ("code" | "template")[] = ["code"];
-  const braces: number[] = [0];
-  let i = 0;
-  while (i < text.length) {
-    const c = text[i];
-    const next = text[i + 1];
-    if (stack.at(-1) === "template") {
-      if (c === "\\") i += 2;
-      else if (c === "`") {
-        stack.pop();
-        i++;
-      } else if (c === "$" && next === "{") {
-        stack.push("code");
-        braces.push(0);
-        i += 2;
-      } else i++;
-      continue;
-    }
-    if (c === "/" && next === "/") {
-      const end = text.indexOf("\n", i);
-      const stop = end === -1 ? text.length : end;
-      blank(i, stop);
-      i = stop;
-    } else if (c === "/" && next === "*") {
-      const end = text.indexOf("*/", i + 2);
-      const stop = end === -1 ? text.length : end + 2;
-      blank(i, stop);
-      i = stop;
-    } else if (c === '"' || c === "'") {
-      i++;
-      while (i < text.length && text[i] !== c && text[i] !== "\n") i += text[i] === "\\" ? 2 : 1;
-      i++;
-    } else if (c === "`") {
-      stack.push("template");
-      i++;
-    } else if (c === "\\") i += 2;
-    else if (c === "{") {
-      braces[braces.length - 1] = (braces.at(-1) ?? 0) + 1;
-      i++;
-    } else if (c === "}") {
-      if ((braces.at(-1) ?? 0) === 0 && stack.length > 1) {
-        stack.pop();
-        braces.pop();
-      } else braces[braces.length - 1] = (braces.at(-1) ?? 0) - 1;
-      i++;
-    } else i++;
+function writesIn(text: string, where: string): string[] {
+  const lines = text.split("\n");
+  // The owner of each line, by the last function, const, method or route above it.
+  const owners: string[] = [];
+  let top = "(module)";
+  let owner = top;
+  for (const line of lines) {
+    const ownerIn = (list: typeof TOP) => {
+      for (const { re, name } of list) {
+        const m = re.exec(line);
+        if (m) return name(m);
+      }
+      return null;
+    };
+    const t = ownerIn(TOP);
+    if (t) top = owner = t;
+    else if (top.startsWith("register")) owner = ownerIn(IN_REGISTER) ?? owner;
+    owners.push(owner);
   }
-  return out.join("");
+  const lineOf = (at: number) => text.slice(0, at).split("\n").length - 1;
+  const found: string[] = [];
+  for (const m of text.matchAll(WRITE))
+    found.push(`${where} ${owners[lineOf(m.index ?? 0)]}: ${m[1]}(${m[2]})`);
+  for (const m of text.matchAll(RAW)) {
+    const table = m[2] ?? TABLES[SQL_TABLES.indexOf((m[3] ?? "").toLowerCase())] ?? m[3];
+    const op = (m[1] ?? "").split(/\s/)[0]?.toLowerCase();
+    found.push(`${where} ${owners[lineOf(m.index ?? 0)]}: sql ${op}(${table})`);
+  }
+  return found;
 }
 
-/**
- * What it scans: every `.ts` under apps/server/src and packages/(name)/src but tests, comments left out. What it
- * finds: Drizzle's `.update|insert|delete(table)` on those tables, whatever the line breaks, and raw SQL on them
- * (`RAW`). What it doesn't see: a table renamed into another variable, or passed to a helper as a parameter.
- */
+/** Every `.ts` under apps/server/src and packages/(name)/src but tests, and the writes in each. */
 function writesInSource(): string[] {
   const files: string[] = [];
   const walk = (dir: string) => {
@@ -134,35 +107,8 @@ function writesInSource(): string[] {
   }
   const found = new Set<string>();
   for (const file of files) {
-    const text = blankComments(readFileSync(file, "utf8"));
-    const lines = text.split("\n");
-    // The owner of each line, by the last function, const, method or route above it.
-    const owners: string[] = [];
-    let top = "(module)";
-    let owner = top;
-    for (const line of lines) {
-      const ownerIn = (list: typeof TOP) => {
-        for (const { re, name } of list) {
-          const m = re.exec(line);
-          if (m) return name(m);
-        }
-        return null;
-      };
-      const t = ownerIn(TOP);
-      if (t) top = owner = t;
-      else if (top.startsWith("register")) owner = ownerIn(IN_REGISTER) ?? owner;
-      owners.push(owner);
-    }
     const where = file.startsWith(SRC) ? relative(SRC, file) : relative(REPO, file);
-    const lineOf = (at: number) => text.slice(0, at).split("\n").length - 1;
-    for (const m of text.matchAll(WRITE))
-      found.add(`${where} ${owners[lineOf(m.index ?? 0)]}: ${m[1]}(${m[2]})`);
-    for (const m of text.matchAll(RAW)) {
-      const table = m[2] ?? TABLES[SQL_TABLES.indexOf((m[3] ?? "").toLowerCase())] ?? m[3];
-      found.add(
-        `${where} ${owners[lineOf(m.index ?? 0)]}: sql ${(m[1] ?? "").split(/\s/)[0]?.toLowerCase()}(${table})`,
-      );
-    }
+    for (const w of writesIn(readFileSync(file, "utf8"), where)) found.add(w);
   }
   return [...found].sort();
 }
@@ -273,4 +219,40 @@ describe("writes to an agent's own state", () => {
     expect(found.filter((k) => !(k in WRITES))).toEqual([]);
     expect(Object.keys(WRITES).filter((k) => !found.includes(k))).toEqual([]);
   });
+
+  // Each form the scan claims to catch, in a file of its own: dropping a form from `WRITE` or `RAW` fails its line.
+  const forms: [string, string][] = [
+    ["a call on one line", "await db.update(agents).set({ name });"],
+    ["a call over several lines", "await db\n  .update(\n    agents,\n  )\n  .set({ name });"],
+    ["the schema's table", "await tx.insert(schema.agents).values(row);"],
+    ["raw SQL, the table interpolated", "await db.execute(sql`update $" + "{agents} set name = 'x'`);"],
+    [
+      "raw SQL, the schema's table interpolated",
+      "await db.execute(sql`delete from $" + "{schema.agents} where id = 'x'`);",
+    ],
+    ["raw SQL, the table named", "await db.execute(sql`update agents set name = 'x'`);"],
+    ["raw SQL, a schema prefix", "await db.execute(sql`update public.agents set name = 'x'`);"],
+    ["raw SQL, a quoted table", "await db.execute(sql`update \"agents\" set name = 'x'`);"],
+    ["raw SQL, a column list right after", "await db.execute(sql`insert into agents(id) values ('x')`);"],
+    ["raw SQL, a semicolon right after", "await db.execute(sql`delete from agents;`);"],
+    ["raw SQL, the end of the template right after", "await db.execute(sql`delete from agents`);"],
+    [
+      "after a regex literal holding a comment opener",
+      "const pattern = /[/*]/;\nawait db.update(agents).set({ name });",
+    ],
+    [
+      "after a regex literal holding a backtick",
+      "const tick = /[`]/;\nawait db.update(agents).set({ name });",
+    ],
+    [
+      "after a string holding a comment opener",
+      'const marker = "/*";\nawait db.update(agents).set({ name });\n/* a comment */',
+    ],
+  ];
+  for (const [form, code] of forms)
+    test(`finds a write to the agents table: ${form}`, () => {
+      const found = writesIn(`async function sample() {\n  ${code}\n}\n`, "sample.ts");
+      expect(found.length).toBe(1);
+      expect(found[0]).toMatch(/^sample\.ts sample: (sql )?(update|insert|delete)\(agents\)$/);
+    });
 });

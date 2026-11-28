@@ -135,47 +135,74 @@ describe("an archived agent in a debate", () => {
     SERVER_TEST_MS,
   );
 
-  test(
-    "a lead archived while it writes the synthesis doesn't sign it: the debate closes on the votes",
-    async () => {
-      const ana = await signedIn(server, "Ana", "ana4@debate-archive.test");
-      const { workspaceId, general } = await seedWorkspace(server, ana, "Synthesis");
-      const lia = await seedAgent(server, workspaceId, ana, "lia", [general]);
-      const rui = await seedAgent(server, workspaceId, ana, "rui", [general]);
-      let archived = false;
-      duringLiaSynth = async () => {
-        await archiveAgent(server.deps, workspaceId, lia.id, ana.user.id);
-        archived = true;
-      };
-      const res = await call(ana, "POST", `${ws(workspaceId)}/debates`, {
-        title: "Archive mid-synthesis",
-        goal: "Decide",
-        agentIds: [lia.id, rui.id],
-        rounds: 0,
-        speakers: [
-          { type: "agent", id: lia.id },
-          { type: "agent", id: rui.id },
-        ],
-      });
-      expect(res.status).toBe(201);
-      for (let i = 0; i < 80 && !archived; i++) {
-        await server.deps.runtime.settle();
-        await Bun.sleep(50);
-      }
-      await Bun.sleep(300);
+  /** A debate of Lia (lead) and Rui; `archive` runs inside Lia's synthesis call. Returns its posts and status. */
+  async function synthesisWhile(email: string, archive: (ids: { lia: string; rui: string }) => string[]) {
+    const ana = await signedIn(server, "Ana", email);
+    const { workspaceId, general } = await seedWorkspace(server, ana, "Synthesis");
+    const lia = await seedAgent(server, workspaceId, ana, "lia", [general]);
+    const rui = await seedAgent(server, workspaceId, ana, "rui", [general]);
+    let archived = false;
+    duringLiaSynth = async () => {
+      for (const id of archive({ lia: lia.id, rui: rui.id }))
+        await archiveAgent(server.deps, workspaceId, id, ana.user.id);
+      archived = true;
+    };
+    const res = await call(ana, "POST", `${ws(workspaceId)}/debates`, {
+      title: "Archive mid-synthesis",
+      goal: "Decide",
+      agentIds: [lia.id, rui.id],
+      rounds: 0,
+      speakers: [
+        { type: "agent", id: lia.id },
+        { type: "agent", id: rui.id },
+      ],
+    });
+    expect(res.status).toBe(201);
+    for (let i = 0; i < 80 && !archived; i++) {
       await server.deps.runtime.settle();
-      expect(archived).toBe(true);
-      const posts = await server.deps.db
-        .select({ author: schema.debatePosts.author, kind: schema.debatePosts.kind })
-        .from(schema.debatePosts)
-        .where(eq(schema.debatePosts.debateId, res.body.id));
-      const synthesis = posts.filter((p) => p.kind === "synthesis");
-      expect(synthesis.map((p) => (p.author as { id?: string } | null)?.id)).toEqual([rui.id]);
-      const notices = await server.deps.db
-        .select({ actors: schema.notifications.actors })
-        .from(schema.notifications)
-        .where(eq(schema.notifications.groupKey, `debate_synthesis:${res.body.id}`));
-      expect(JSON.stringify(notices)).not.toContain(lia.id);
+      await Bun.sleep(50);
+    }
+    await Bun.sleep(300);
+    await server.deps.runtime.settle();
+    expect(archived).toBe(true);
+    const posts = await server.deps.db
+      .select({ author: schema.debatePosts.author, kind: schema.debatePosts.kind })
+      .from(schema.debatePosts)
+      .where(eq(schema.debatePosts.debateId, res.body.id));
+    const [debate] = await server.deps.db
+      .select({ status: schema.debates.status, synthesis: schema.debates.synthesis })
+      .from(schema.debates)
+      .where(eq(schema.debates.id, res.body.id));
+    const notices = await server.deps.db
+      .select({ actors: schema.notifications.actors })
+      .from(schema.notifications)
+      .where(eq(schema.notifications.groupKey, `debate_synthesis:${res.body.id}`));
+    const signers = posts
+      .filter((p) => p.kind === "synthesis")
+      .map((p) => (p.author as { id?: string } | null)?.id);
+    return { lia: lia.id, rui: rui.id, signers, debate, notices: JSON.stringify(notices) };
+  }
+
+  test(
+    "a lead archived while it writes the synthesis doesn't sign it: the next active agent signs the votes",
+    async () => {
+      const out = await synthesisWhile("ana4@debate-archive.test", ({ lia }) => [lia]);
+      expect(out.signers).toEqual([out.rui]);
+      expect(out.debate?.status).toBe("done");
+      expect(out.notices).not.toContain(out.lia);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "with every agent archived while the lead writes, the debate closes on the votes and nobody signs it",
+    async () => {
+      const out = await synthesisWhile("ana5@debate-archive.test", ({ lia, rui }) => [lia, rui]);
+      expect(out.signers).toEqual([]);
+      expect(out.debate?.status).toBe("done");
+      expect(out.debate?.synthesis).not.toBe(null);
+      expect(out.notices).not.toContain(out.lia);
+      expect(out.notices).not.toContain(out.rui);
     },
     SERVER_TEST_MS,
   );
