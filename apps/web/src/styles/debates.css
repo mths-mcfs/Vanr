@@ -1,0 +1,319 @@
+/*
+ * The debates area. Loaded with the area's chunk. Tokens only, as in app.css (styles.test.ts reads this
+ * file too).
+ *
+ * One mark of its own: the round rail. A debate opens with a sealed round, drawn as a ring, and each
+ * round of challenge after it is a notch that fills as the debate reaches it, so how far an argument
+ * went reads before its words do. Beside it sits the table: one small seat per participant in speaking
+ * order, and the person the round still waits on wears a ring in the accent. The rows themselves stay
+ * plain, set on hairlines rather than in boxes, because a list of questions reads like a docket.
+ */
+@layer vanr.app {
+  .debates__head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--vr-space-4);
+    margin-block-end: var(--vr-space-4);
+  }
+
+  .debates__lead {
+    max-width: 40rem;
+  }
+
+  .debates__group {
+    margin-block: var(--vr-space-4) var(--vr-space-6);
+  }
+
+  .debates__group-title {
+    margin: 0 0 var(--vr-space-2);
+    font-size: var(--vr-text-md);
+    line-height: var(--vr-text-md-lh);
+    font-weight: var(--vr-weight-strong);
+  }
+
+  .debates__group--you .debates__group-title {
+    color: var(--vr-accent-fg);
+  }
+
+  .debates__tools {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: var(--vr-space-4);
+    margin-block: var(--vr-space-4) var(--vr-space-2);
+  }
+
+  .debates__search {
+    flex: 1 1 16rem;
+    max-width: 28rem;
+  }
+
+  .debates__note {
+    margin: var(--vr-space-4) 0;
+    color: var(--vr-fg-muted);
+  }
+
+  .debate-list {
+    max-width: 56rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    border-block-start: var(--vr-border) solid var(--vr-line);
+  }
+
+  .debate-list > li {
+    border-block-end: var(--vr-border) solid var(--vr-line);
+  }
+
+  .debate-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--vr-space-1) var(--vr-space-4);
+    padding: var(--vr-space-3) var(--vr-space-1);
+  }
+
+  .debate-row__head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--vr-space-2) var(--vr-space-3);
+    grid-column: 1 / -1;
+  }
+
+  .debate-row__title {
+    font-size: var(--vr-text-md);
+    line-height: var(--vr-text-md-lh);
+    font-weight: var(--vr-weight-strong);
+    color: var(--vr-fg);
+    text-decoration: none;
+    overflow-wrap: anywhere;
+  }
+
+  .debate-row__title:hover {
+    text-decoration: underline;
+  }
+
+  .debate-row__progress {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--vr-space-2) var(--vr-space-3);
+    grid-column: 1 / -1;
+    font-size: var(--vr-text-sm);
+    line-height: var(--vr-text-sm-lh);
+    color: var(--vr-fg-muted);
+  }
+
+  .debate-row__goal {
+    margin: 0;
+    max-width: 70ch;
+    color: var(--vr-fg-muted);
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .debate-row__goal[data-stuck] {
+    color: var(--vr-danger-fg);
+  }
+
+  .debate-row__when {
+    margin: 0;
+    align-self: end;
+    font-size: var(--vr-text-xs);
+    line-height: var(--vr-text-xs-lh);
+    color: var(--vr-fg-subtle);
+    white-space: nowrap;
+  }
+
+  /* The round rail: a ring for the sealed opening, then a notch per round of challenge. */
+  .debate-rail {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+  }
+
+  .debate-rail__opening {
+    inline-size: 10px;
+    block-size: 10px;
+    border: 2px solid var(--vr-accent);
+    border-radius: 50%;
+  }
+
+  .debate-rail__notch {
+    inline-size: 14px;
+    block-size: 6px;
+    border-radius: var(--vr-radius-1);
+    background-color: var(--vr-bg-active);
+  }
+
+  .debate-rail__notch[data-reached] {
+    background-color: var(--vr-accent);
+  }
+
+  .debate-rail__notch[data-current] {
+    outline: 2px solid var(--vr-accent-wash);
+    outline-offset: 1px;
+  }
+
+  .debate-rail[data-finished] .debate-rail__opening {
+    border-color: var(--vr-fg-subtle);
+  }
+
+  .debate-rail[data-finished] .debate-rail__notch[data-reached] {
+    background-color: var(--vr-fg-subtle);
+  }
+
+  [data-status="done"] .debate-rail[data-finished] .debate-rail__opening {
+    border-color: var(--vr-success-fg);
+  }
+
+  [data-status="done"] .debate-rail[data-finished] .debate-rail__notch[data-reached] {
+    background-color: var(--vr-success-fg);
+  }
+
+  /* The table: seats in speaking order, slightly overlapping, the awaited one ringed. */
+  .debate-table {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .debate-table__seat {
+    display: inline-flex;
+    border-radius: 50%;
+    outline: 2px solid transparent;
+    outline-offset: 1px;
+  }
+
+  .debate-table__seat[data-waited] {
+    outline-color: var(--vr-accent);
+  }
+
+  /* The numbers of the last days, folded until asked for. */
+  .debate-metrics {
+    max-width: 56rem;
+    margin-block: var(--vr-space-2) var(--vr-space-4);
+  }
+
+  .debate-metrics__toggle {
+    cursor: pointer;
+    font-size: var(--vr-text-sm);
+    line-height: var(--vr-text-sm-lh);
+    color: var(--vr-fg-muted);
+  }
+
+  .debate-metrics__toggle:hover {
+    color: var(--vr-fg);
+  }
+
+  .debate-metrics__body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-3);
+    margin-block-start: var(--vr-space-3);
+  }
+
+  .debate-metrics__note {
+    margin: var(--vr-space-3) 0 0;
+    color: var(--vr-fg-muted);
+  }
+
+  .debate-metrics__figures {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+    gap: var(--vr-space-3) var(--vr-space-6);
+    margin: 0;
+  }
+
+  .debate-metrics__figure dt {
+    font-size: var(--vr-text-xs);
+    line-height: var(--vr-text-xs-lh);
+    color: var(--vr-fg-muted);
+  }
+
+  .debate-metrics__figure dd {
+    margin: 0;
+    font-size: var(--vr-text-lg);
+    line-height: var(--vr-text-lg-lh);
+    font-weight: var(--vr-weight-medium);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* A figure that is a sentence rather than a number takes two columns and the body size. */
+  .debate-metrics__figure[data-long] {
+    grid-column: span 2;
+  }
+
+  .debate-metrics__figure[data-long] dd {
+    font-size: var(--vr-text-md);
+    line-height: var(--vr-text-md-lh);
+  }
+
+  /* Starting a debate. */
+  .debate-form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-4);
+  }
+
+  .debate-form__row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+    gap: var(--vr-space-4);
+  }
+
+  .debate-form__seats {
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+
+  .debate-form__seats legend {
+    padding: 0;
+    font-weight: var(--vr-weight-medium);
+  }
+
+  .debate-form__hint {
+    margin: var(--vr-space-1) 0 var(--vr-space-2);
+    font-size: var(--vr-text-sm);
+    line-height: var(--vr-text-sm-lh);
+    color: var(--vr-fg-muted);
+  }
+
+  .debate-form__choices {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
+    gap: var(--vr-space-2) var(--vr-space-4);
+  }
+
+  .debate-form__estimate {
+    margin: 0 auto 0 0;
+    font-size: var(--vr-text-sm);
+    line-height: var(--vr-text-sm-lh);
+    color: var(--vr-fg-muted);
+  }
+
+  @media (max-width: 40rem) {
+    .debate-metrics__figure[data-long] {
+      grid-column: auto;
+    }
+
+    .debate-row {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .debate-row__when {
+      align-self: start;
+    }
+  }
+}
