@@ -323,7 +323,7 @@ describe("a lost connection", () => {
 
   test("one connection serves the frame and the screen in it", async () => {
     const app = await open(`${HOME}/agents`);
-    await screen.findByRole("list", { name: "Agents" });
+    await screen.findByRole("list", { name: "Delegations today" });
     expect(app.server.openSockets()).toHaveLength(1);
     await app.user.click(within(areas()).getByRole("link", { name: "Wiki" }));
     await screen.findByRole("heading", { level: 1, name: "Wiki" });

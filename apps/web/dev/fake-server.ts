@@ -5,7 +5,7 @@
 // settings, members' roles and storage, the inbox and its preferences, agents and their runs,
 // sessions by cookie, the server's side of the real-time
 // socket, and a way to force any state (an error, a held answer, a busy server, an ended session,
-// a dropped connection). The Drive and the search live in `fake-files.ts`, bases in `fake-bases.ts`, the wiki in `fake-wiki.ts`. It is never part of the
+// a dropped connection). The Drive and the search live in `fake-files.ts`, bases in `fake-bases.ts`, the wiki in `fake-wiki.ts`, the agents' team, profile, lab and skills in `fake-agents.ts`. It is never part of the
 // production build.
 import { endpoints, type FetchLike, type MethodName, type SocketLike } from "@vanr/client";
 import { type FakeServer as ClientFake, createFakeServer, FakeSocket } from "@vanr/client/testing";
@@ -13,6 +13,7 @@ import type * as T from "@vanr/contract";
 import { can } from "@vanr/contract";
 import { z } from "zod";
 import { AUTH_ROUTES, type AuthMethod } from "../src/api/auth.ts";
+import { FakeAgents } from "./fake-agents.ts";
 import { FakeBases } from "./fake-bases.ts";
 import { FakeFiles } from "./fake-files.ts";
 import { FakeWiki } from "./fake-wiki.ts";
@@ -282,6 +283,7 @@ export class FakeServer {
   readonly files: FakeFiles;
   readonly bases: FakeBases;
   readonly wiki: FakeWiki;
+  readonly agentWork: FakeAgents;
   private readonly fileOperations: ReturnType<FakeFiles["operations"]>;
   private readonly accounts = new Map<string, Account>();
   private readonly now: () => Date;
@@ -316,10 +318,16 @@ export class FakeServer {
     this.files = new FakeFiles(host);
     this.bases = new FakeBases(host);
     this.wiki = new FakeWiki(host);
+    this.agentWork = new FakeAgents({
+      ...host,
+      agents: () => this.agents,
+      people: (workspaceId) => this.state.members.filter((member) => member.workspaceId === workspaceId),
+    });
     this.fileOperations = {
       ...this.files.operations(),
       ...this.bases.operations(),
       ...this.wiki.operations(),
+      ...this.agentWork.operations(),
     };
     this.seed(options.seed ?? "team");
   }
@@ -339,6 +347,7 @@ export class FakeServer {
     this.wiki.pages = [];
     this.wiki.reads = [];
     this.wiki.defs = new Map();
+    this.agentWork.clear();
     if (name === "empty") return;
     const inDays = (days: number) => new Date(this.now().getTime() + days * DAY_MS);
     const people: [string, string, string][] = [
@@ -406,6 +415,7 @@ export class FakeServer {
     this.files.seed();
     this.bases.seed();
     this.wiki.seed();
+    this.agentWork.seed();
     this.agents = [
       agent("agt_scout", "workspace_birchwood", "Scout", "usr_ana"),
       agent("agt_ledger", "workspace_birchwood", "Ledger", "usr_ana"),

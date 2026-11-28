@@ -1,0 +1,519 @@
+/*
+ * The agents area: the team, creating an agent, its profile, the lab and the skills catalog. Loaded with
+ * the area's chunk. Tokens only, as in app.css (styles.test.ts reads this file too).
+ *
+ * One mark of its own: the before / after columns of the lab, split by a single rule, so a change in the
+ * instructions reads as two answers next to each other. Everything else stays quiet.
+ */
+@layer vanr.app {
+  .agents-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--vr-space-4);
+  }
+
+  /* ---------- The team ---------- */
+
+  .team {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--vr-space-8);
+    align-items: start;
+  }
+
+  .team--open {
+    grid-template-columns: minmax(0, 1fr) minmax(16rem, 22rem);
+  }
+
+  .team__groups {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-6);
+    min-width: 0;
+  }
+
+  .team__card {
+    position: sticky;
+    top: var(--vr-space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-4);
+    padding: var(--vr-space-5);
+  }
+
+  .team__card-head {
+    display: flex;
+    align-items: center;
+    gap: var(--vr-space-3);
+  }
+
+  .team__card-name {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .team__delegations {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-2);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .team__delegations li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--vr-space-2);
+    padding: var(--vr-space-1) var(--vr-space-2);
+    border-radius: var(--vr-radius-2);
+  }
+
+  .team__delegation--new {
+    background: var(--vr-accent-wash);
+  }
+
+  /* ---------- Facts, lists and sections shared by the screens ---------- */
+
+  .agent-facts {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: var(--vr-space-2) var(--vr-space-4);
+    margin: 0;
+  }
+
+  .agent-facts dt {
+    color: var(--vr-fg-muted);
+  }
+
+  .agent-facts dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .agent-plain,
+  .agent-picks {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-2);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .agent-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-4);
+    padding-block: var(--vr-space-5);
+    border-bottom: var(--vr-border) solid var(--vr-line);
+  }
+
+  .agent-section__head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--vr-space-3);
+  }
+
+  .agent-fieldset {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-3);
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+
+  .agent-appearance {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr)) max-content;
+    gap: var(--vr-space-3);
+    align-items: end;
+  }
+
+  .agent-error {
+    color: var(--vr-danger-fg);
+    font-size: var(--vr-text-sm);
+  }
+
+  /* ---------- Creating an agent ---------- */
+
+  .wizard-steps {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--vr-space-2);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    counter-reset: step;
+  }
+
+  .wizard-steps li {
+    padding: var(--vr-space-1) var(--vr-space-3);
+    border: var(--vr-border) solid var(--vr-line);
+    border-radius: var(--vr-radius-3);
+    font-size: var(--vr-text-sm);
+    color: var(--vr-fg-muted);
+    counter-increment: step;
+  }
+
+  .wizard-steps li::before {
+    content: counter(step) ". ";
+  }
+
+  .wizard-steps .wizard-steps__on {
+    border-color: var(--vr-accent);
+    color: var(--vr-fg);
+    font-weight: var(--vr-weight-medium);
+  }
+
+  .wizard-steps .wizard-steps__done {
+    color: var(--vr-fg);
+  }
+
+  .wizard-card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-5);
+    max-width: 44rem;
+    padding: var(--vr-space-6);
+  }
+
+  .wizard-card--done {
+    align-items: flex-start;
+  }
+
+  .agent-describe {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-3);
+    padding-bottom: var(--vr-space-5);
+    border-bottom: var(--vr-border) solid var(--vr-line);
+  }
+
+  .role-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
+    gap: var(--vr-space-2);
+  }
+
+  .role-grid__item {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-1);
+    padding: var(--vr-space-3);
+    border: var(--vr-border) solid var(--vr-line);
+    border-radius: var(--vr-radius-2);
+    background: var(--vr-bg-raised);
+    color: var(--vr-fg);
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+  }
+
+  .role-grid__item span {
+    font-size: var(--vr-text-sm);
+    color: var(--vr-fg-muted);
+  }
+
+  .role-grid__item:hover {
+    background: var(--vr-bg-hover);
+  }
+
+  .role-grid__item[aria-pressed="true"] {
+    border-color: var(--vr-accent);
+    background: var(--vr-accent-wash);
+  }
+
+  .role-grid__item:focus-visible {
+    outline: var(--vr-ring) solid var(--vr-focus);
+    outline-offset: 2px;
+  }
+
+  .agent-review {
+    display: flex;
+    gap: var(--vr-space-5);
+    align-items: flex-start;
+  }
+
+  /* ---------- The profile ---------- */
+
+  .agent-page {
+    gap: var(--vr-space-5);
+  }
+
+  .agent-cover {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--vr-space-4);
+  }
+
+  .agent-cover__text {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: var(--vr-space-1);
+    min-width: 0;
+  }
+
+  .agent-cover__meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--vr-space-1) var(--vr-space-3);
+    color: var(--vr-fg-muted);
+  }
+
+  .agent-cover__handle {
+    font-family: var(--vr-font-mono);
+    font-size: var(--vr-text-sm);
+    color: var(--vr-fg-subtle);
+  }
+
+  .agent-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+    gap: 0 var(--vr-space-8);
+  }
+
+  .agent-history {
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .agent-history__item {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-2);
+    padding-block: var(--vr-space-3);
+    border-top: var(--vr-border) solid var(--vr-line);
+  }
+
+  .agent-history__line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--vr-space-1) var(--vr-space-3);
+  }
+
+  .agent-diff__body {
+    margin: 0;
+    padding: var(--vr-space-3);
+    overflow-x: auto;
+    border-radius: var(--vr-radius-2);
+    background: var(--vr-bg-sunken);
+    font-family: var(--vr-font-mono);
+    font-size: var(--vr-text-sm);
+    line-height: var(--vr-text-sm-lh);
+    white-space: pre-wrap;
+  }
+
+  .agent-diff__body span {
+    display: block;
+  }
+
+  .agent-diff__add {
+    background: var(--vr-success-wash);
+  }
+
+  .agent-diff__del {
+    background: var(--vr-danger-wash);
+  }
+
+  .agent-diff__gap {
+    color: var(--vr-fg-subtle);
+  }
+
+  .agent-runs {
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .agent-runs__row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--vr-space-2) var(--vr-space-3);
+    min-height: var(--vr-control-lg);
+    border-bottom: var(--vr-border) solid var(--vr-line);
+  }
+
+  .agent-runs__what {
+    flex: 1;
+    min-width: 12rem;
+    overflow-wrap: anywhere;
+  }
+
+  /* ---------- The lab ---------- */
+
+  .lab-cases {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-2);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .lab-case {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) max-content;
+    gap: var(--vr-space-2);
+    align-items: start;
+    padding: var(--vr-space-3);
+    border: var(--vr-border) solid var(--vr-line);
+    border-radius: var(--vr-radius-2);
+  }
+
+  .lab-case--result {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .lab-case__input {
+    font-weight: var(--vr-weight-medium);
+    overflow-wrap: anywhere;
+  }
+
+  .lab-case__checks {
+    display: flex;
+    flex-wrap: wrap;
+    grid-column: 1;
+    gap: var(--vr-space-1);
+  }
+
+  .lab-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--vr-space-3);
+  }
+
+  .lab-sides {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .lab-side {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-2);
+    padding-inline: var(--vr-space-3);
+  }
+
+  .lab-side + .lab-side {
+    border-inline-start: var(--vr-border) solid var(--vr-line);
+  }
+
+  /* The one mark of the area: the new text changed the outcome of this case. */
+  .lab-side[data-change] {
+    border-radius: var(--vr-radius-2);
+    padding-block: var(--vr-space-2);
+  }
+
+  .lab-side[data-change="better"] {
+    background: var(--vr-success-wash);
+  }
+
+  .lab-side[data-change="worse"] {
+    background: var(--vr-danger-wash);
+  }
+
+  .lab-side__change {
+    font-size: var(--vr-text-sm);
+    font-weight: var(--vr-weight-medium);
+  }
+
+  .lab-side__text {
+    color: var(--vr-fg-muted);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .lab-progress {
+    display: flex;
+    align-items: center;
+    gap: var(--vr-space-2);
+    color: var(--vr-fg-muted);
+  }
+
+  /* ---------- The skills catalog ---------- */
+
+  .skill-list {
+    display: flex;
+    flex-direction: column;
+    max-width: 52rem;
+    margin: 0;
+    padding: 0;
+    border-top: var(--vr-border) solid var(--vr-line);
+    list-style: none;
+  }
+
+  .skill-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--vr-space-3);
+    align-items: flex-start;
+    justify-content: space-between;
+    padding-block: var(--vr-space-3);
+    border-bottom: var(--vr-border) solid var(--vr-line);
+  }
+
+  .skill-row__text {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: var(--vr-space-1);
+    min-width: 14rem;
+  }
+
+  .skill-row__name {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--vr-space-2);
+  }
+
+  .skill-row__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--vr-space-1);
+  }
+
+  /* ---------- Narrow screens ---------- */
+
+  @media (max-width: 48rem) {
+    .team--open {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .team__card {
+      position: static;
+    }
+
+    .agent-appearance,
+    .lab-row,
+    .lab-sides {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .lab-side + .lab-side {
+      padding-top: var(--vr-space-3);
+      border-inline-start: 0;
+      border-top: var(--vr-border) solid var(--vr-line);
+    }
+  }
+}
