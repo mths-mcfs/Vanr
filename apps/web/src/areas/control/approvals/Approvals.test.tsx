@@ -96,17 +96,81 @@ describe("the approvals page", () => {
     expect(app.server.control.approvals[0]?.approval.input).toMatchObject({ text: "Proofs ready at 3pm." });
   });
 
-  test("a request that changed since it was opened is not approved blind", async () => {
+  test("a request that changed since it was opened is not approved blind, and shows its new version", async () => {
     const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
     const post = await card("Post in #print-queue");
     const stored = app.server.control.approvals[0]?.approval;
-    if (stored === undefined) throw new Error("no approval");
+    if (stored === undefined || stored.preview === null) throw new Error("no approval");
     stored.payloadHash = "hash_post_2";
+    stored.preview = { ...stored.preview, body: "The Hartley proofs are delayed." };
     await app.user.click(within(post).getByRole("button", { name: "Approve sending" }));
     expect(
       await screen.findByText("The request changed since you opened it. Look at it again before you decide."),
     ).toBeDefined();
+    expect(await within(post).findByText("The Hartley proofs are delayed.")).toBeDefined();
     expect(stored.status).toBe("pending");
+  });
+
+  test("an edit is sent with the version it started from: a change meanwhile is refused", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
+    const post = await card("Post in #print-queue");
+    await app.user.click(within(post).getByRole("button", { name: "Edit and approve" }));
+    const dialog = await screen.findByRole("dialog", { name: "Edit before approving" });
+    const stored = app.server.control.approvals[0]?.approval;
+    if (stored === undefined) throw new Error("no approval");
+    stored.payloadHash = "hash_post_2";
+    await act(async () => {
+      app.server.emit("workspace_birchwood", { type: "approval.requested", approvalId: "apr_post" });
+    });
+    await app.user.click(within(dialog).getByRole("button", { name: "Save and approve" }));
+    expect(
+      await screen.findByText("The request changed since you opened it. Look at it again before you decide."),
+    ).toBeDefined();
+    expect(stored.status).toBe("pending");
+    await waitFor(() => expect(screen.queryByRole("dialog") === null).toBe(true));
+  });
+
+  test("always allow is asked again when the rule it would remember changed", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
+    const post = await card("Post in #print-queue");
+    await app.user.click(within(post).getByRole("checkbox", { name: /Always allow for 30 days/ }));
+    const stored = app.server.control.approvals[0]?.approval;
+    if (stored === undefined) throw new Error("no approval");
+    stored.rememberLabel = "#design";
+    await act(async () => {
+      app.server.emit("workspace_birchwood", { type: "approval.requested", approvalId: "apr_post" });
+    });
+    expect(await within(post).findByText(/Posts in #design/)).toBeDefined();
+    const box = within(post).getByRole("checkbox", { name: /Always allow for 30 days/ });
+    expect(box.getAttribute("aria-checked")).toBe("false");
+    await app.user.click(within(post).getByRole("button", { name: "Approve sending" }));
+    expect(await within(post).findByText("Approved by Ana Beatriz Souza.")).toBeDefined();
+    expect(app.server.control.rules.map((rule) => rule.rule.label)).toEqual(["#design"]);
+  });
+
+  test("past its deadline the decision is no longer offered", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas" });
+    const mail = await card("Email the October invoices");
+    expect(within(mail).getByText("Decide within 40 min")).toBeDefined();
+    await app.advance(41 * 60_000);
+    expect(await within(mail).findByText("Nobody decided in time, so nothing ran.")).toBeDefined();
+    expect(within(mail).queryByRole("button", { name: /Approve|Reject/ }) === null).toBe(true);
+  });
+
+  test("a decision made elsewhere closes the open dialog", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
+    const post = await card("Post in #print-queue");
+    await app.user.click(within(post).getByRole("button", { name: "Reject" }));
+    await screen.findByRole("dialog", { name: "Reject this request" });
+    const stored = app.server.control.approvals[0]?.approval;
+    if (stored === undefined) throw new Error("no approval");
+    stored.status = "approved";
+    stored.deciderUserId = "usr_jonas";
+    await act(async () => {
+      app.server.emit("workspace_birchwood", { type: "approval.resolved", approvalId: "apr_post" });
+    });
+    expect(await within(post).findByText("Approved by Jonas Lind.")).toBeDefined();
+    expect(screen.queryByRole("dialog") === null).toBe(true);
   });
 
   test("a member sees who decides and no decision; the requester can undo what ran for them", async () => {
@@ -213,7 +277,10 @@ describe("the approvals page", () => {
     const server = newServer();
     const held = server.hold("listApprovals");
     await renderApp({ path: PATH, server, signedInAs: "usr_ana" });
-    expect((await screen.findAllByText("Loading")).length > 0).toBe(true);
+    // The rules beside it are not held: once they are in, the loading left is the list's.
+    await screen.findByRole("list", { name: "Always allowed rules" });
+    expect(screen.getByText("Loading")).toBeDefined();
+    expect(screen.queryByRole("list", { name: "Approvals" }) === null).toBe(true);
     held.release();
     expect(await card("Post in #print-queue")).toBeDefined();
   });

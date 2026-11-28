@@ -113,7 +113,7 @@ test.describe("the control center", () => {
     apiAs,
   }) => {
     const owner = await seedUser({ workspace: "Always Allow Journey" });
-    const { api, workspaceId, post } = await agentAsking(await apiAs(owner), owner);
+    const { api, workspaceId, general, post } = await agentAsking(await apiAs(owner), owner);
     await post("Proofs are on the table.");
 
     await signIn(owner);
@@ -145,6 +145,21 @@ test.describe("the control center", () => {
       .toBe(1);
     const pending = await api.get(`/api/v1/workspaces/${workspaceId}/approvals?status=pending`);
     expect(((await pending.json()) as { approvals: unknown[] }).approvals).toEqual([]);
+    // And the post went to the send queue: the run's answer carries its receipt, like the approved one.
+    await expect
+      .poll(
+        async () => {
+          const answer = await api.get(`/api/v1/workspaces/${workspaceId}/channels/${general}/messages`);
+          const { messages } = (await answer.json()) as {
+            messages: { actions: { kind: string; target: { type: string } }[] }[];
+          };
+          return messages
+            .flatMap((message) => message.actions)
+            .filter((action) => action.target.type === "outbox").length;
+        },
+        { timeout: 30_000 },
+      )
+      .toBe(2);
     await page.reload();
     await expect(page.getByText(t("control", "approvals.nonePending"))).toBeVisible();
     await expect(list.getByText(t("control", "rules.uses", { count: 1 }))).toBeVisible();

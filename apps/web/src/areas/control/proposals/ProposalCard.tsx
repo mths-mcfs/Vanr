@@ -125,7 +125,8 @@ export function ProposalCard({
         </pre>
       </Block>
       {pending && proposal.stale && <Callout tone="warning">{t("proposal.stale")}</Callout>}
-      {pending && proposal.decidable && proposal.target.kind === "agent_prompt" && (
+      {/* The test cases run the saved proposal: while the final text is being edited they would not match it. */}
+      {pending && proposal.decidable && !editing && proposal.target.kind === "agent_prompt" && (
         <ProposalEval workspaceId={workspaceId} proposal={proposal} />
       )}
       {pending && proposal.decidable && editing && !proposal.stale && (

@@ -370,20 +370,28 @@ export class FakeControl {
     approval.result = { ok: true, text: "Queued." };
     approval.trail = [...approval.trail, { at: this.at(0), code: "executed", params: {}, text: "Done" }];
     if (approval.channelId === null || approval.runId === null) return;
-    const title = typeof approval.params.channel === "string" ? approval.params.channel : approval.title;
+    // A post can still be retracted after it leaves (24 h); an email only until it leaves, as the real queue.
+    const mail = approval.tool === "send_email";
+    const recipients = approval.preview?.recipients?.join(", ");
+    const title = mail
+      ? (recipients ?? approval.title)
+      : typeof approval.params.channel === "string"
+        ? approval.params.channel
+        : approval.title;
+    const sendAt = this.at(SEND_WINDOW_MS);
     this.host.messages().push(
       this.answer(approval.channelId, approval.agentId, approval.runId, [
         {
           id: `act_${approval.id}`,
           agentId: approval.agentId,
           createdAt: this.at(0),
-          kind: "message_posted",
+          kind: mail ? "mail_sent" : "message_posted",
           messageId: `msg_${approval.runId}`,
-          params: { outboxId: `out_${approval.id}`, sendAt: this.at(SEND_WINDOW_MS) },
+          params: { outboxId: `out_${approval.id}`, sendAt },
           requesterUserId,
           revertedAt: null,
           reverterUserId: null,
-          revertibleUntil: this.at(24 * HOUR_MS),
+          revertibleUntil: mail ? sendAt : this.at(24 * HOUR_MS),
           target: { id: `out_${approval.id}`, title, type: "outbox" },
         },
       ]),
@@ -616,8 +624,11 @@ export class FakeControl {
         if (message === undefined) return fail(404, "not_found", "No actions on this message");
         const mine = message.actions.filter((action) => this.mayUndo(scope, action));
         if (mine.length === 0) return fail(404, "not_found", "No actions on this message");
+        const now = this.host.now().getTime();
         for (const action of mine) {
+          // Only what is still open, as the real "undo all": the rest stays as it is.
           if (action.revertedAt !== null) continue;
+          if (action.revertibleUntil === null || Date.parse(action.revertibleUntil) <= now) continue;
           action.revertedAt = this.at(0);
           action.reverterUserId = scope.user.id;
         }

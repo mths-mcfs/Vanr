@@ -4,13 +4,14 @@
 // days" shows only when the server says what it would remember. Approving and editing send the hash
 // of the version on screen, so a request that changed meanwhile is never approved blind. Once the
 // approved action ran, the card shows the receipt of what it changed, with undo.
-import { useApiMutation, useApiQuery } from "@vanr/client/react";
+import { useQueryClient } from "@tanstack/react-query";
+import { prefixKey, useApiMutation, useApiQuery, useVanrClient } from "@vanr/client/react";
 import type { Approval, EffectClass } from "@vanr/contract";
 import { AgentSigil, Button, Callout, Checkbox, StatusBadge } from "@vanr/ui";
 import { useState } from "react";
 import { AppLink } from "../../../app/navigation.tsx";
 import { useLocale, useLookup, useMessages } from "../../../i18n/react.tsx";
-import { useClock } from "../../../platform/clock.tsx";
+import { useSecondsUntil } from "../../../platform/clock.tsx";
 import { useChannelSubscription } from "../../../realtime/react.tsx";
 import { ActionReceipt } from "../actions/Receipt.tsx";
 import {
@@ -141,12 +142,22 @@ export function ApprovalCard({
   const t = useMessages("control");
   const lookup = useLookup("control");
   const { locale } = useLocale();
-  const clock = useClock();
   const outcome = useOutcome();
-  const [dialog, setDialog] = useState<"reject" | "edit" | null>(null);
-  const [remember, setRemember] = useState(false);
+  const client = useVanrClient();
+  const queryClient = useQueryClient();
+  const [rejecting, setRejecting] = useState(false);
+  // The version the edit started from: its fields and its hash go together, so a request that changed while
+  // the dialog was open is refused by the server instead of approved with fields the person never saw.
+  const [editing, setEditing] = useState<Approval | null>(null);
+  // The rule the person ticked "always allow" for: a request whose rule changed since asks for a new tick.
+  const [remember, setRemember] = useState<string | null>(null);
   const title = approvalTitle(approval, lookup);
-  const pending = approval.status === "pending";
+  const expiresAt = Date.parse(approval.expiresAt);
+  const secondsLeft = useSecondsUntil(approval.status === "pending" ? expiresAt : undefined);
+  // Past its deadline the server expires it: the decision is no longer offered while that lands.
+  const lapsed = approval.status === "pending" && secondsLeft === 0;
+  const pending = approval.status === "pending" && !lapsed;
+  const deciding = pending && approval.decidable;
   const readable = approval.channelId !== null && readableChannels.has(approval.channelId);
   // Following the conversation brings the card's events (and the receipt's) to people who don't decide.
   useChannelSubscription(readable ? (approval.channelId ?? undefined) : undefined);
@@ -165,8 +176,14 @@ export function ApprovalCard({
   });
   const reject = useApiMutation("rejectApproval", { invalidates: () => changed(false) });
   const busy = approve.isPending || edit.isPending || reject.isPending;
-  // "Remember" goes with the decision only while its box is on screen and ticked.
-  const remembering = remember && approval.rememberLabel !== null;
+  // "Remember" goes with the decision only while its box is on screen and ticked for the rule it shows.
+  const remembering = remember !== null && remember === approval.rememberLabel;
+  /** A refused decision shows the request as it is now, to look at again; nothing is sent again. */
+  const failed = (error: unknown) => {
+    outcome.failed(error);
+    for (const method of ["listApprovals", "getApproval"] as const)
+      void queryClient.invalidateQueries({ queryKey: prefixKey(client, { method, args: { workspaceId } }) });
+  };
 
   const onApprove = () =>
     approve.mutate(
@@ -179,21 +196,24 @@ export function ApprovalCard({
         },
       },
       {
-        onError: outcome.failed,
+        onError: failed,
         onSuccess: () => outcome.done(t(remembering ? "toast.remembered" : "toast.approved")),
       },
     );
-  const onEdit = (input: Record<string, unknown>) =>
+  const onEdit = (from: Approval, input: Record<string, unknown>) =>
     edit.mutate(
       {
         workspaceId,
         approvalId: approval.id,
-        body: { input, payloadHash: approval.payloadHash ?? "", remember: remembering },
+        body: { input, payloadHash: from.payloadHash ?? "", remember: remembering },
       },
       {
-        onError: outcome.failed,
+        onError: (error) => {
+          setEditing(null);
+          failed(error);
+        },
         onSuccess: () => {
-          setDialog(null);
+          setEditing(null);
           outcome.done(t(remembering ? "toast.remembered" : "toast.approved"));
         },
       },
@@ -202,9 +222,9 @@ export function ApprovalCard({
     reject.mutate(
       { workspaceId, approvalId: approval.id, body: reason === undefined ? {} : { reason } },
       {
-        onError: outcome.failed,
+        onError: failed,
         onSuccess: () => {
-          setDialog(null);
+          setRejecting(false);
           outcome.done(t("toast.rejected"));
         },
       },
@@ -239,12 +259,12 @@ export function ApprovalCard({
         </Block>
       )}
       {pending && <WhyGate approval={approval} />}
-      {pending && approval.decidable && approval.rememberLabel !== null && (
+      {deciding && approval.rememberLabel !== null && (
         <div className="approval__remember">
           <Checkbox
-            checked={remember}
+            checked={remembering}
             disabled={busy}
-            onCheckedChange={(next) => setRemember(next === true)}
+            onCheckedChange={(next) => setRemember(next === true ? approval.rememberLabel : null)}
             label={t("remember.label")}
             hint={`${ruleText(approval.tool, approval.rememberLabel, lookup)}. ${t("remember.help")}`}
           />
@@ -254,13 +274,15 @@ export function ApprovalCard({
         (approval.decidable ? (
           <div className="approval__actions">
             <span className="approval__left">
-              {t("card.timeLeft", { time: timeLeft(approval.expiresAt, clock.now(), locale) })}
+              {t("card.timeLeft", {
+                time: timeLeft(approval.expiresAt, expiresAt - secondsLeft * 1000, locale),
+              })}
             </span>
-            <Button variant="ghost" disabled={busy} onClick={() => setDialog("reject")}>
+            <Button variant="ghost" disabled={busy} onClick={() => setRejecting(true)}>
               {t("action.reject")}
             </Button>
             {approval.editable.length > 0 && approval.input !== null && (
-              <Button variant="secondary" disabled={busy} onClick={() => setDialog("edit")}>
+              <Button variant="secondary" disabled={busy} onClick={() => setEditing(approval)}>
                 {t("action.edit")}
               </Button>
             )}
@@ -288,7 +310,7 @@ export function ApprovalCard({
         </p>
       )}
       {approval.status === "approved" && <Result approval={approval} />}
-      {approval.status === "expired" && <p className="control-note">{t("card.expired")}</p>}
+      {(approval.status === "expired" || lapsed) && <p className="control-note">{t("card.expired")}</p>}
       {approval.status === "canceled" && <p className="control-note">{t("card.canceled")}</p>}
       {approval.status === "approved" &&
         approval.appliedAt !== null &&
@@ -320,15 +342,16 @@ export function ApprovalCard({
           <ConversationLink workspaceId={workspaceId} approval={approval} />
         )}
       </footer>
-      {dialog === "reject" && (
-        <RejectDialog busy={reject.isPending} onReject={onReject} onClose={() => setDialog(null)} />
+      {/* A request someone else decided, or that ran out of time, takes its open dialog with it. */}
+      {deciding && rejecting && (
+        <RejectDialog busy={reject.isPending} onReject={onReject} onClose={() => setRejecting(false)} />
       )}
-      {dialog === "edit" && (
+      {deciding && editing !== null && (
         <EditDialog
-          approval={approval}
+          approval={editing}
           busy={edit.isPending}
-          onSave={onEdit}
-          onClose={() => setDialog(null)}
+          onSave={(input) => onEdit(editing, input)}
+          onClose={() => setEditing(null)}
         />
       )}
     </article>

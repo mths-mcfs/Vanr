@@ -40,8 +40,9 @@ export function ProposalsScreen() {
   const toDecide = (proposals.data ?? []).filter(
     (proposal) => proposal.status === "pending" && proposal.decidable && !proposal.stale,
   ).length;
-  const proposers = directory.agents.filter((each) =>
-    (proposals.data ?? []).some((p) => p.agentId === each.id),
+  // The agent filtered on stays a choice, so a filter that matches nothing can always be cleared.
+  const proposers = directory.agents.filter(
+    (each) => each.id === agent || (proposals.data ?? []).some((p) => p.agentId === each.id),
   );
 
   return (
@@ -56,7 +57,7 @@ export function ProposalsScreen() {
             </p>
           )}
         </div>
-        {proposers.length > 1 && (
+        {(proposers.length > 1 || agent !== undefined) && (
           <Select
             aria-label={t("proposals.agentFilter")}
             value={agent ?? ALL}

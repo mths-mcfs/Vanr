@@ -40,12 +40,14 @@ describe("the line diff", () => {
   });
 
   test("a text too long to compare line by line is all out, then all in", () => {
-    const before = Array.from({ length: 600 }, (_, i) => `old ${i}`).join("\n");
-    const after = Array.from({ length: 600 }, (_, i) => `new ${i}`).join("\n");
+    // A line both sides share: compared line by line it would stay "same".
+    const before = ["shared", ...Array.from({ length: 600 }, (_, i) => `old ${i}`)].join("\n");
+    const after = ["shared", ...Array.from({ length: 600 }, (_, i) => `new ${i}`)].join("\n");
     const diff = lineDiff(before, after);
-    expect(diff.length).toBe(1200);
-    expect(diff[0]).toEqual({ kind: "del", text: "old 0" });
-    expect(diff[600]).toEqual({ kind: "add", text: "new 0" });
+    expect(diff.length).toBe(1202);
+    expect(diff[0]).toEqual({ kind: "del", text: "shared" });
+    expect(diff[601]).toEqual({ kind: "add", text: "shared" });
+    expect(diff.some((line) => line.kind === "same")).toBe(false);
   });
 });
 

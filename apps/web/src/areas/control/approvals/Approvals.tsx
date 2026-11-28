@@ -8,7 +8,7 @@
 import { useApiQuery } from "@vanr/client/react";
 import { can } from "@vanr/contract";
 import { EmptyState, Input, Tabs, TabsList, TabsTrigger } from "@vanr/ui";
-import { useDeferredValue, useMemo, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { z } from "zod";
 import { useGo, useRouteParams, useSearch } from "../../../app/navigation.tsx";
 import { ScreenError, ScreenLoading, useDocumentTitle } from "../../../app/screens.tsx";
@@ -41,8 +41,10 @@ export function ApprovalsScreen() {
   const directory = useDirectory(workspaceId);
   const approvals = useApiQuery("listApprovals", { workspaceId });
   const seenPending = useRef(new Set<string>());
-  for (const approval of approvals.data ?? [])
-    if (approval.status === "pending") seenPending.current.add(approval.id);
+  useEffect(() => {
+    for (const approval of approvals.data ?? [])
+      if (approval.status === "pending") seenPending.current.add(approval.id);
+  }, [approvals.data]);
   const channels = useApiQuery("listChannels", { workspaceId });
   useDocumentTitle(shell("route.approvals"));
   const readable = useMemo(
@@ -53,7 +55,9 @@ export function ApprovalsScreen() {
   const shown = useMemo(() => {
     const words = fold(typed).split(/\s+/).filter(Boolean);
     const inTab = (approvals.data ?? []).filter((approval) =>
-      show === "pending" ? seenPending.current.has(approval.id) : approval.status !== "pending",
+      show === "pending"
+        ? approval.status === "pending" || seenPending.current.has(approval.id)
+        : approval.status !== "pending",
     );
     if (words.length === 0) return inTab;
     return inTab.filter((approval) => {

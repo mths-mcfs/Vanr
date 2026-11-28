@@ -3,7 +3,9 @@
 // by a choice here or by replying in the conversation. While a choice is on its way the others wait
 // and the chosen one shows its progress. `question.closed` refetches the conversation, which closes
 // the card.
-import { useApiMutation } from "@vanr/client/react";
+import { useQueryClient } from "@tanstack/react-query";
+import { isApiError } from "@vanr/client";
+import { prefixKey, useApiMutation, useVanrClient } from "@vanr/client/react";
 import type { AgentQuestion } from "@vanr/contract";
 import { AgentSigil, Button, StatusBadge } from "@vanr/ui";
 import { useState } from "react";
@@ -25,6 +27,8 @@ export function QuestionCard({
   const t = useMessages("control");
   const describe = useErrorMessage("control");
   const outcome = useOutcome();
+  const client = useVanrClient();
+  const queryClient = useQueryClient();
   const [sending, setSending] = useState<string | null>(null);
   const answer = useApiMutation("answerQuestion", {
     invalidates: () => [
@@ -40,7 +44,17 @@ export function QuestionCard({
     answer.mutate(
       { workspaceId, questionId: question.id, body: { choice } },
       {
-        onError: (error) => outcome.warn(t("question.failed", { error: describe(error) })),
+        onError: (error) => {
+          outcome.warn(t("question.failed", { error: describe(error) }));
+          // Closed meanwhile: the conversation is read again, which closes the card; other failures can be tried again.
+          if (isApiError(error) && error.rawCode === "question.closed")
+            void queryClient.invalidateQueries({
+              queryKey: prefixKey(client, {
+                method: "listChannelMessages",
+                args: { workspaceId, channelId: question.channelId },
+              }),
+            });
+        },
         onSettled: () => setSending(null),
       },
     );

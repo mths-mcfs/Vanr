@@ -80,6 +80,12 @@ describe("the proposals page", () => {
     expect(app.address()).toBe(`${PATH}?agent=agt_ledger`);
   });
 
+  test("a filter that matches nothing can be cleared", async () => {
+    await renderApp({ path: `${PATH}?agent=agt_tally`, signedInAs: "usr_ana" });
+    expect(await screen.findByText("No proposals from Tally")).toBeDefined();
+    expect(screen.getByRole("combobox", { name: "Agent" }).textContent).toBe("Tally");
+  });
+
   test("no proposals yet", async () => {
     const empty = newServer();
     empty.control.proposals = [];
