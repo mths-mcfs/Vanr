@@ -51,7 +51,7 @@ test("an owner connects a database source and it holds after a reload", async ({
     .filter({ hasText: "Shop customers" });
   await expect(listed).toContainText(t("control", "db.status.active"));
   await expect(listed).toContainText(t("control", "wire.noAgents"));
-  await expect(listed).toContainText('public.customers."card_number"');
+  await expect(listed).toContainText("public.customers.card_number");
 
   await page.reload();
   await expect(listed).toContainText(t("control", "db.status.active"));
