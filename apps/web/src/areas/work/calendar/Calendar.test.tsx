@@ -48,7 +48,9 @@ describe("the week", () => {
     const app = await renderApp({ path: CALENDAR, signedInAs: "usr_ana", server });
     const proposals = within(await screen.findByRole("region", { name: "Proposed by agents" }));
     const confirmOf = (title: string) =>
-      within(proposals.getByRole("listitem", { name: title })).getByRole("button", { name: "Add to calendar" });
+      within(proposals.getByRole("listitem", { name: title })).getByRole("button", {
+        name: "Add to calendar",
+      });
     await app.user.click(confirmOf("Paper supplier call"));
     await app.user.click(confirmOf("Proof sign-off"));
     expect((confirmOf("Paper supplier call") as HTMLButtonElement).disabled).toBe(true);

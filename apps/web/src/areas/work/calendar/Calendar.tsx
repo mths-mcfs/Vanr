@@ -324,20 +324,10 @@ function Proposals({
               </p>
               {proposal.note !== null && proposal.note !== "" && <p>{proposal.note}</p>}
               <div className="work-proposal__actions">
-                <Button
-                  variant="primary"
-                  size="sm"
-                  disabled={busy}
-                  onClick={() => answer(proposal, confirm)}
-                >
+                <Button variant="primary" size="sm" disabled={busy} onClick={() => answer(proposal, confirm)}>
                   {t("week.confirm")}
                 </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={busy}
-                  onClick={() => answer(proposal, dismiss)}
-                >
+                <Button variant="ghost" size="sm" disabled={busy} onClick={() => answer(proposal, dismiss)}>
                   {t("week.dismiss")}
                 </Button>
               </div>
