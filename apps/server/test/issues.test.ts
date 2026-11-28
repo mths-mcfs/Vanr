@@ -1410,4 +1410,42 @@ describe("issues of a private channel", () => {
     },
     SERVER_TEST_MS,
   );
+  test(
+    "a debate of a private channel opened from a public issue keeps the issues it turns out in its own channel",
+    async () => {
+      const { workspaceId, general, ana, beto } = await team();
+      const secret = await seedChannel(server, workspaceId, {
+        name: `secret${++n}`,
+        visibility: "private",
+        members: [ana],
+      });
+      const lia = await seedAgent(workspaceId, ana, `lia${++n}`);
+      const open = await ok<Issue>(
+        call(ana, workspaceId, "POST", "/issues", { title: "Open plan", channelId: general }),
+        201,
+      );
+      const debate = await ok<{ id: string }>(
+        call(ana, workspaceId, "POST", "/debates", {
+          title: "Steps",
+          goal: "Plan",
+          agentIds: [lia],
+          rounds: 1,
+          channelId: secret,
+          sourceIssueId: open.id,
+        }),
+        201,
+      );
+      await settle(server);
+      const made = await ok<{ numbers: number[] }>(
+        call(ana, workspaceId, "POST", `/debates/${debate.id}/issues`, { items: [{ title: "Quiet step" }] }),
+        201,
+      );
+      const number = made.numbers[0];
+      expect((await call(beto, workspaceId, "GET", `/issues/seq/${number}`)).status).toBe(404);
+      expect((await ok<Issue>(call(ana, workspaceId, "GET", `/issues/seq/${number}`))).channelId).toBe(
+        secret,
+      );
+    },
+    SERVER_TEST_MS,
+  );
 });
