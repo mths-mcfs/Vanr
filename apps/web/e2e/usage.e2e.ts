@@ -36,7 +36,7 @@ test("an owner reads the month's usage and lowers the default agent budget", asy
     ["Day Clerk", "day-clerk"],
   ]) {
     const created = await api.post(`/api/v1/workspaces/${workspaceId}/agents`, {
-      data: { name, handle, role: "operations" },
+      data: { name, handle, role: "ops" },
     });
     expect(created.ok()).toBe(true);
   }
