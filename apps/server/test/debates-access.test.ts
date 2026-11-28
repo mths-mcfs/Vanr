@@ -344,6 +344,8 @@ describe("someone removed from the workspace", () => {
         201,
       );
       await waitFor(async () => (await seen()).status === "done");
+      // "done" is written before the conclusion's notices: the debate's background work ends after the last one.
+      await server.deps.runtime.settle();
       const notices = await server.deps.db
         .select()
         .from(schema.notifications)
