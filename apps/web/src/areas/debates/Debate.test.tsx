@@ -207,6 +207,35 @@ describe("an action starts once, however fast the clicks", () => {
     expect(app.server.debates.debates.find((row) => row.id === "deb_logo")?.issues.length).toBe(2);
   });
 
+  test("steps into issues: when the answer is lost after the server made them, a click during the reload repeats nothing", async () => {
+    const server = newServer();
+    const logo = server.debates.debates.find((row) => row.id === "deb_logo");
+    if (logo === undefined) throw new Error("the seed has no logo debate");
+    // The server makes the issues, then the answer never arrives (a timeout on the way back).
+    let number = 950;
+    server.force("createDebateIssue", { kind: "error", status: 504, code: "timeout" }, 1, (params) => {
+      for (const item of params.items as { title: string }[])
+        logo.issues.push({ id: `iss_lost_${number}`, number: number++, title: item.title });
+      return true;
+    });
+    const app = await renderApp({ path: PAGE("deb_logo"), signedInAs: "usr_ana", server });
+    const synthesis = within(await screen.findByRole("region", { name: "Synthesis" }));
+    const button = synthesis.getByRole("button", { name: "Turn 2 steps into issues" });
+    // The reload that would show them as made is slow.
+    const late = server.delay("getDebate");
+    await app.user.click(button);
+    expect(await screen.findByText("The server took too long to answer. Try again.")).toBeDefined();
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    late.release();
+    await waitFor(() =>
+      expect(synthesis.queryByRole("button", { name: /into (issues|an issue)/ }) === null).toBe(true),
+    );
+    expect(callsOf(app, "createDebateIssue")).toBe(1);
+    expect(logo.issues.length).toBe(2);
+  });
+
   test("steps into issues: after a failed batch, a retry sends only what wasn't made", async () => {
     const server = newServer();
     const logo = server.debates.debates.find((row) => row.id === "deb_logo");
