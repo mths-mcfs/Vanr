@@ -20,7 +20,7 @@ import { type ReactNode, useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import { useGo, useRouteParams, useSearch } from "../../../app/navigation.tsx";
 import { useErrorMessage } from "../../../app/screens.tsx";
-import { useMessages } from "../../../i18n/react.tsx";
+import { useLocale, useMessages } from "../../../i18n/react.tsx";
 import { useOutcome } from "../shared.tsx";
 import { MailReturn } from "./DataSources.tsx";
 import { GitHubApp } from "./GitHub.tsx";
@@ -38,6 +38,7 @@ import {
   SECRET,
   useForgetOnLoss,
   useLatch,
+  useReturnFocus,
 } from "./shared.tsx";
 
 const CONNECTOR_READS = ["listConnectors", "getConnectorCatalog"] as const;
@@ -101,22 +102,34 @@ function ComeBack({
       { replace: true, search: { mail_connected: mail.mail_connected, mail_error: mail.mail_error } },
     );
   }, [mail, go, workspaceId]);
+  const servers = useApiQuery("getConnectorCustom", { workspaceId });
+  // The address only says what came back; the name shown is the catalog's or the workspace's own, never
+  // the address's, so a crafted link can't announce a connection that isn't there.
+  const ownServer = back.connected?.startsWith("custom:") === true;
   const named =
     back.connected === undefined ||
-    back.connected.startsWith("custom:") ||
-    catalog.data !== undefined ||
-    catalog.isError;
+    (ownServer
+      ? servers.data !== undefined || servers.isError
+      : catalog.data !== undefined || catalog.isError);
   useEffect(() => {
     if (said.current || !named) return;
     const { connected, connector_error: failed, github_app: install } = back;
     if (connected === undefined && failed === undefined && install === undefined) return;
     said.current = true;
-    if (connected?.startsWith("custom:")) {
-      toast.push({ tone: "success", title: t("back.serverConnected") });
-      onServerBack(connected.slice("custom:".length));
+    if (connected !== undefined && ownServer) {
+      const server = servers.data?.find((each) => each.id === connected.slice("custom:".length));
+      if (server === undefined) toast.push({ tone: "info", title: t("back.unknown") });
+      else {
+        toast.push({ tone: "success", title: t("back.serverConnected") });
+        onServerBack(server.id);
+      }
     } else if (connected !== undefined) {
-      const service = catalog.data?.connectors.find((each) => each.id === connected)?.label ?? connected;
-      toast.push({ tone: "success", title: t("back.connected", { service }) });
+      const service = catalog.data?.connectors.find((each) => each.id === connected)?.label;
+      toast.push(
+        service === undefined
+          ? { tone: "info", title: t("back.unknown") }
+          : { tone: "success", title: t("back.connected", { service }) },
+      );
     }
     if (failed !== undefined) {
       const known = SIGN_IN_FAILURES.find((each) => each === failed);
@@ -133,7 +146,7 @@ function ComeBack({
       });
     }
     void go("settings", { workspaceId, section: "connectors" }, { replace: true });
-  }, [back, named, catalog.data, go, onServerBack, t, toast, workspaceId]);
+  }, [back, named, ownServer, catalog.data, servers.data, go, onServerBack, t, toast, workspaceId]);
   return null;
 }
 
@@ -143,8 +156,11 @@ type Asking = { def: ConnectorDef; again: boolean };
 
 function Services({ workspaceId }: { workspaceId: string }) {
   const t = useMessages("control");
+  const { locale } = useLocale();
+  const when = new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" });
   const outcome = useOutcome();
   const latch = useLatch();
+  const focus = useReturnFocus();
   const forget = useForgetOnLoss(workspaceId, CONNECTOR_READS);
   const catalog = useApiQuery("getConnectorCatalog", {});
   const connections = useApiQuery("listConnectors", { workspaceId });
@@ -187,7 +203,13 @@ function Services({ workspaceId }: { workspaceId: string }) {
                 <ServiceState def={def} connection={undefined} />
                 <div className="wire-row__actions">
                   {connectable && (
-                    <Button size="sm" onClick={() => setAsking({ def, again: false })}>
+                    <Button
+                      size="sm"
+                      onClick={() => {
+                        focus.remember();
+                        setAsking({ def, again: false });
+                      }}
+                    >
                       {t("svc.connect")}
                     </Button>
                   )}
@@ -196,7 +218,9 @@ function Services({ workspaceId }: { workspaceId: string }) {
             ];
           const working = own.some((each) => each.status === "active");
           return own.map((connection) => {
-            const who = connection.accountDisplayName ?? connection.label;
+            // Two connections of one service with the same name are told apart by when they were made.
+            const since = t("svc.since", { date: when.format(new Date(connection.createdAt)) });
+            const who = connection.accountDisplayName ?? (own.length > 1 ? since : connection.label);
             return (
               <li key={connection.id} className="wire-row" data-state={connection.status}>
                 <div className="wire-row__who">
@@ -204,7 +228,9 @@ function Services({ workspaceId }: { workspaceId: string }) {
                   <span className="wire-row__what">
                     {connection.accountDisplayName != null
                       ? t("svc.account", { account: connection.accountDisplayName })
-                      : def.description}
+                      : own.length > 1
+                        ? since
+                        : def.description}
                   </span>
                   {connection.status === "reauth_required" && (
                     <span className="wire-row__note">{t("svc.reauthBody")}</span>
@@ -248,7 +274,14 @@ function Services({ workspaceId }: { workspaceId: string }) {
                     </Button>
                   )}
                   {connection.status === "reauth_required" && !working && connectable && (
-                    <Button size="sm" variant="primary" onClick={() => setAsking({ def, again: true })}>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      onClick={() => {
+                        focus.remember();
+                        setAsking({ def, again: true });
+                      }}
+                    >
                       {t("svc.reconnect")}
                     </Button>
                   )}
@@ -260,7 +293,10 @@ function Services({ workspaceId }: { workspaceId: string }) {
                         ? t("svc.disconnectOne", { service: def.label, account: who })
                         : t("svc.disconnectNamed", { service: def.label })
                     }
-                    onClick={() => setRemoving({ connection, service: def.label })}
+                    onClick={() => {
+                      focus.remember();
+                      setRemoving({ connection, service: def.label });
+                    }}
                   >
                     {t("svc.disconnect")}
                   </Button>
@@ -284,9 +320,11 @@ function Services({ workspaceId }: { workspaceId: string }) {
           def={asking.def}
           again={asking.again}
           onClose={() => setAsking(null)}
+          onCloseAutoFocus={focus.onCloseAutoFocus}
         />
       )}
       <ConfirmDialog
+        returnFocus={focus.back}
         open={removing !== null}
         onOpenChange={(open) => {
           if (!open && !remove.isPending) setRemoving(null);
@@ -341,11 +379,13 @@ function ConnectDialog({
   def,
   again,
   onClose,
+  onCloseAutoFocus,
 }: {
   workspaceId: string;
   def: ConnectorDef;
   again: boolean;
   onClose: () => void;
+  onCloseAutoFocus: (event: Event) => void;
 }) {
   const t = useMessages("control");
   const common = useMessages("common");
@@ -382,6 +422,7 @@ function ConnectDialog({
       }}
     >
       <DialogContent
+        onCloseAutoFocus={onCloseAutoFocus}
         size="md"
         closeLabel={common("action.close")}
         title={t(again ? "svc.reconnectTitle" : "svc.connectTitle", { service: def.label })}

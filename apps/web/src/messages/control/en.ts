@@ -276,6 +276,7 @@ export default {
   "wire.keep": "Keep it",
 
   "back.connected": "{service} is connected.",
+  "back.unknown": "A sign-in came back. The list below shows what is connected now.",
   "back.serverConnected": "The server is connected. Choose what its tools may do.",
   "back.failed.state": "That sign-in expired before it came back. Start it again.",
   "back.failed.gone": "The connection was removed while the sign-in was open.",
@@ -310,6 +311,7 @@ export default {
   "svc.disconnect": "Disconnect",
   "svc.disconnectNamed": "Disconnect {service}",
   "svc.disconnectOne": "Disconnect {service} ({account})",
+  "svc.since": "Connected {date}",
   "svc.disconnectTitle": "Disconnect {service}?",
   "svc.disconnectBody":
     "Agents lose this service at once, and its saved sign-in is deleted. You can connect it again later.",
@@ -393,7 +395,8 @@ export default {
   "gh.remove": "Remove",
   "gh.removeNamed": "Remove the install on {account}",
   "gh.removeTitle": "Remove the install on {account}?",
-  "gh.removeBody": "Agents stop reaching its repositories. The app is also uninstalled on GitHub.",
+  "gh.removeBody":
+    "Agents stop reaching its repositories, and Vanr asks GitHub to uninstall the app there too.",
   "gh.removed": "The install on {account} is removed.",
 
   "error.connector.unknown": "This service is not on this server.",

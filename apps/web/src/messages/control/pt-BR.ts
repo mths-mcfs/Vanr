@@ -278,6 +278,7 @@ export default {
   "wire.keep": "Manter",
 
   "back.connected": "{service} está conectado.",
+  "back.unknown": "Um login voltou. A lista abaixo mostra o que está conectado agora.",
   "back.serverConnected": "O servidor está conectado. Escolha o que as ferramentas dele podem fazer.",
   "back.failed.state": "O login expirou antes de voltar. Comece de novo.",
   "back.failed.gone": "A conexão foi removida enquanto o login estava aberto.",
@@ -313,6 +314,7 @@ export default {
   "svc.disconnect": "Desconectar",
   "svc.disconnectNamed": "Desconectar {service}",
   "svc.disconnectOne": "Desconectar {service} ({account})",
+  "svc.since": "Conectado em {date}",
   "svc.disconnectTitle": "Desconectar {service}?",
   "svc.disconnectBody":
     "Os agentes perdem este serviço na hora, e o login salvo é apagado. Dá para conectar de novo depois.",
@@ -399,7 +401,7 @@ export default {
   "gh.removeNamed": "Remover a instalação em {account}",
   "gh.removeTitle": "Remover a instalação em {account}?",
   "gh.removeBody":
-    "Os agentes deixam de alcançar os repositórios dela. O app também é desinstalado no GitHub.",
+    "Os agentes deixam de alcançar os repositórios dela, e o Vanr pede ao GitHub para desinstalar o app lá também.",
   "gh.removed": "A instalação em {account} foi removida.",
 
   "error.connector.unknown": "Este serviço não existe neste servidor.",
