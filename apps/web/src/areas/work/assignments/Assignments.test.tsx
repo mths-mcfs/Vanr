@@ -238,7 +238,8 @@ describe("an assignment's states, as each person sees them", () => {
     }
     await renderApp({ path: LIST, signedInAs: "usr_iris", server });
     const row = within(await screen.findByRole("article", { name: "Restock the paper room" }));
-    expect(row.getByText("2 open items")).toBeDefined();
+    // She decides but doesn't manage it: the server doesn't even count the requests for her.
+    expect(row.queryByText(/open item/) === null).toBe(true);
     expect(row.queryByText(/wait on you/) === null).toBe(true);
   });
 
@@ -251,7 +252,7 @@ describe("an assignment's states, as each person sees them", () => {
     }
     await renderApp({ path: PAGE("asg_paper"), signedInAs: "usr_iris", server });
     const panel = within(await screen.findByRole("region", { name: "Assignment" }));
-    expect(panel.getByText("2 open items")).toBeDefined();
+    expect(panel.queryByText(/open item/) === null).toBe(true);
     expect(panel.queryByText(/wait on you/) === null).toBe(true);
   });
 
