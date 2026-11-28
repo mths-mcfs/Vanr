@@ -119,13 +119,48 @@ function secretsOf(secret: ConnSecret | null): string[] {
   return [];
 }
 
-/** The kept credential of a row for redaction, or none when it can't be opened. */
-function rowSecrets(deps: AppDeps, row: { secret: string | null }): string[] {
-  if (!row.secret) return [];
+/** The shortest part of an address treated as a credential: a shorter one would blank common words in errors. */
+const ADDRESS_SECRET_MIN = 6;
+
+/** A percent-decoded form, or the text itself when it doesn't decode. */
+const decoded = (text: string) => {
   try {
-    return secretsOf(openSecret(deps, row.secret));
+    return decodeURIComponent(text);
   } catch {
-    return [];
+    return text;
+  }
+};
+
+/**
+ * What an own server's address can carry as a credential, for redaction: its query string (`?key=…`), each value in
+ * it raw, percent-decoded and form-decoded (`+` read as a space), and a sign-in part (`user:pass@`).
+ */
+function addressSecrets(url: string | null | undefined): string[] {
+  if (!url || !URL.canParse(url)) return [];
+  const address = new URL(url);
+  const query = address.search.slice(1);
+  const raw = query.split("&").map((pair) => pair.slice(pair.indexOf("=") + 1));
+  const parts = [
+    query,
+    ...raw,
+    ...raw.map(decoded),
+    ...address.searchParams.values(),
+    address.username,
+    address.password,
+    decoded(address.username),
+    decoded(address.password),
+  ];
+  return [...new Set(parts.filter((part) => part.length >= ADDRESS_SECRET_MIN))];
+}
+
+/** The kept credential of a row (and what its address carries) for redaction, or none when it can't be opened. */
+function rowSecrets(deps: AppDeps, row: { secret: string | null; serverUrl?: string | null }): string[] {
+  const inAddress = addressSecrets(row.serverUrl);
+  if (!row.secret) return inAddress;
+  try {
+    return [...secretsOf(openSecret(deps, row.secret)), ...inAddress];
+  } catch {
+    return inAddress;
   }
 }
 
@@ -263,10 +298,25 @@ export const toConnection = (row: ConnectionRow): Connection => ({
   scopeRequest: row.scopeRequest ? { scope: row.scopeRequest.scope, tool: row.scopeRequest.tool } : null,
 });
 
+/**
+ * An own server's address as members read it: without the query string and the sign-in part, which can carry a key
+ * and stay write-only like the other credentials. `queryHidden` says the saved address has one of them.
+ */
+function shownAddress(url: string | null): { serverUrl: string; queryHidden: boolean } {
+  if (!url || !URL.canParse(url)) return { serverUrl: "", queryHidden: false };
+  const address = new URL(url);
+  const queryHidden = address.search !== "" || address.username !== "" || address.password !== "";
+  address.search = "";
+  address.hash = "";
+  address.username = "";
+  address.password = "";
+  return { serverUrl: address.toString(), queryHidden };
+}
+
 export const toCustomServer = (row: ConnectionRow): CustomServer => ({
   id: row.id,
   label: row.label,
-  serverUrl: row.serverUrl ?? "",
+  ...shownAddress(row.serverUrl),
   createdAt: row.createdAt.toISOString(),
   vettedAt: row.vettedAt?.toISOString() ?? null,
   tools: row.tools.map((t) => ({
@@ -361,7 +411,7 @@ export async function mcpFor(deps: AppDeps, row: ConnectionRow): Promise<McpClie
     policy: netPolicy(deps.config.integrations),
     headers: headersFor(secret),
   });
-  sentBy.set(client, secretsOf(secret));
+  sentBy.set(client, [...secretsOf(secret), ...addressSecrets(row.serverUrl)]);
   return client;
 }
 
@@ -482,6 +532,9 @@ async function beginOAuth(
   reuse: { issuer: string; clientId: string; clientSecret: string | null } | null = null,
 ): Promise<string> {
   const url = row.serverUrl ?? "";
+  // The resource the sign-in is for (RFC 8707): the address without its query, fragment or sign-in part, which can
+  // carry a key. The consent link goes to the authorization server and to whoever asks for more scope later.
+  const resource = shownAddress(url).serverUrl;
   if (!challenge.resourceMetadata) {
     try {
       await probe(deps, url, { kind: "none" });
@@ -492,7 +545,7 @@ async function beginOAuth(
   }
   const server: AuthServer | null = await discoverAuthServer(
     deps.fetchExternal,
-    url,
+    resource,
     challenge.resourceMetadata,
     netPolicy(deps.config.integrations),
     challenge.scope,
@@ -523,7 +576,7 @@ async function beginOAuth(
     clientSecret: client.clientSecret,
     tokenEndpoint: server.token_endpoint,
     redirectUri,
-    resource: url,
+    resource,
     issuer: server.issuer,
     issParameterSupported: server.issParameterSupported,
     scope: server.scope,
@@ -541,7 +594,7 @@ async function beginOAuth(
     state,
     challenge: pkce,
     scope: server.scope,
-    resource: url,
+    resource,
   });
 }
 
@@ -609,7 +662,8 @@ export async function connectCustom(
   try {
     tools = await probe(deps, url, secret);
   } catch (err) {
-    if (!(err instanceof McpAuthRequired)) throw unreachable(err, secretsOf(secret));
+    if (!(err instanceof McpAuthRequired))
+      throw unreachable(err, [...secretsOf(secret), ...addressSecrets(url)]);
     // With a rejected key, or without OAuth on the server, the person needs (another) key.
     if (input.apiKey) return { status: "key_missing", serverId: null };
     const row = await pendingConnection(deps, me, {

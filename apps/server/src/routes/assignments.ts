@@ -473,7 +473,7 @@ export function registerAssignments(app: Hono<AppEnv>) {
     }
     if (row.status === "proposed")
       throw conflict("assignment.not_started", "This assignment has not started");
-    stopAgentRun(deps, row, me.userId);
+    stopAgentRun(deps, row, me);
     const canceledJobs = action === "stop" ? await cancelJobs(deps, row) : 0;
     const moved = await moveAssignment(
       deps,

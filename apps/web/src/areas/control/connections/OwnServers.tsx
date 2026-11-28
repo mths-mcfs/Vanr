@@ -1,6 +1,8 @@
 // The workspace's own MCP servers: added by address, with a key or a sign-in on the server when it asks
 // for one. A new server's tools stay off for agents until someone reviews them and saves what each one
 // may do; the server's own hint is shown as the suggestion. Refresh asks the server for its tools again.
+// The server never sends back an address's query string or sign-in part, which can hold a key; the row
+// only says there is one.
 import { useApiMutation, useApiQuery } from "@vanr/client/react";
 import type { CustomServer, CustomServerTool, ToolAccess } from "@vanr/contract";
 import {
@@ -89,6 +91,7 @@ export function OwnServers({
               </div>
               <div className="wire-row__chips">
                 <Chip>{t("mcp.toolCount", { count: server.tools.length })}</Chip>
+                {server.queryHidden && <Chip>{t("mcp.queryHidden")}</Chip>}
                 {waiting > 0 && (
                   <Chip className="wire-chip--attention">{t("mcp.waiting", { count: waiting })}</Chip>
                 )}

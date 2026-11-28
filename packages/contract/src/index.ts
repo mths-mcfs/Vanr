@@ -236,6 +236,7 @@ export type {
   DatabaseTable,
   DatabaseUpdateInput,
   GitHubAppInstallation,
+  GitHubAppRemoval,
   GitHubRepositories,
   IdentityConnectInput,
   IdentityConnectStart,

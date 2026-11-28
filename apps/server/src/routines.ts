@@ -29,6 +29,7 @@ import { addressOrDomain } from "./integrations/mail-rules";
 import { log } from "./logger";
 import { postMessage } from "./messages";
 import { notify } from "./notifications";
+import { readableRuns } from "./run-access";
 import { PERSONAL_PLAN_TEXT, withPlanOwner } from "./runners/plans";
 import type { RunLimits } from "./runtime/runtime";
 
@@ -215,13 +216,19 @@ export function webhookUrl(deps: AppDeps, row: RoutineRow): string | null {
  * for or answered in, which can differ from the routine's target now (the target moved from a private channel). A
  * run of a channel they don't read doesn't show at all, not its reply, its channel or when and how it went. A run
  * with no channel (a file's or a debate's) follows the routine's own visibility: the callers only reach here once
- * `canSeeRoutine` let the person in.
+ * `canSeeRoutine` let the person in. Once an execution has its agent run, that run must also be one the person
+ * reads (`readableRuns`), so the history, `running` and the estimate's `recent` all keep the same runs out.
  */
 export function visibleRunsSql(
+  db: Db,
   viewer: { workspaceId: string; userId: string },
-  column: SQL | typeof routineExecutions.channelId = routineExecutions.channelId,
+  at: {
+    channelId: SQL | typeof routineExecutions.channelId;
+    runId: SQL | typeof routineExecutions.runId;
+  } = routineExecutions,
 ): SQL {
-  return sql`(${column} is null or ${column} in ${readableChannelsSql(viewer)})`;
+  const readable = db.select({ id: runs.id }).from(runs).where(readableRuns(db, viewer));
+  return sql`((${at.channelId} is null or ${at.channelId} in ${readableChannelsSql(viewer)}) and (${at.runId} is null or ${at.runId} in ${readable}))`;
 }
 
 async function recentFires(
@@ -238,7 +245,7 @@ async function recentFires(
       and(
         inArray(routineExecutions.routineId, ids),
         sql`${routineExecutions.id} in (select id from routine_executions r2 where r2.routine_id = ${routineExecutions.routineId}
-          and ${visibleRunsSql(viewer, sql.raw("r2.channel_id"))} order by r2.at desc limit ${RECENT})`,
+          and ${visibleRunsSql(db, viewer, { channelId: sql.raw("r2.channel_id"), runId: sql.raw("r2.run_id") })} order by r2.at desc limit ${RECENT})`,
       ),
     )
     .orderBy(desc(routineExecutions.at));
@@ -260,7 +267,7 @@ async function visiblyRunning(
       and(
         inArray(routineExecutions.routineId, ids),
         eq(routineExecutions.status, "running"),
-        visibleRunsSql(viewer),
+        visibleRunsSql(db, viewer),
       ),
     );
   return new Set(rows.map((r) => r.routineId));

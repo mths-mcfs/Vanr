@@ -355,6 +355,7 @@ export default {
   "mcp.keyNeeded": "Este servidor pede uma chave (ou recusou a enviada). Cole uma para continuar.",
   "mcp.addAction": "Adicionar",
   "mcp.toolCount": { one: "{count} ferramenta", other: "{count} ferramentas" },
+  "mcp.queryHidden": "Resto do endereço guardado em sigilo",
   "mcp.waiting": { one: "{count} para revisar", other: "{count} para revisar" },
   "mcp.review": "Revisar ferramentas",
   "mcp.refresh": "Atualizar",
@@ -405,6 +406,8 @@ export default {
   "gh.removeBody":
     "Os agentes deixam de alcançar os repositórios dela, e o Vanr pede ao GitHub para desinstalar o app lá também.",
   "gh.removed": "A instalação em {account} foi removida.",
+  "gh.removedStillOnGitHub":
+    "A conta {account} foi desligada daqui, mas o GitHub não confirmou a desinstalação. Remova o app nas configurações de {account} no GitHub.",
 
   "error.connector.unknown": "Este serviço não existe neste servidor.",
   "error.connector.key_unsupported": "Este serviço conecta por login, não por chave.",

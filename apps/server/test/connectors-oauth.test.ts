@@ -471,3 +471,43 @@ describe("the extra step on insufficient_scope", () => {
     SERVER_TEST_MS,
   );
 });
+
+describe("an own server's address with a key in its query (RFC 8707 resource)", () => {
+  test(
+    "the sign-in names the resource without the query: the consent links, the token request and another admin's step-up never carry the key",
+    async () => {
+      const t = await team();
+      const KEY = "query-secret-abcdef123";
+      const f = fake({});
+      const started = await ok(
+        call(t.ana, "POST", `${t.w}/connectors/custom`, {
+          serverUrl: `${f.url}?key=${KEY}`,
+          label: "Store",
+          nextPath: "/",
+        }),
+      );
+      expect(started.status).toBe("oauth");
+      expect(new URL(started.consentUrl).searchParams.get("resource")).toBe(f.url);
+      expect(await callback(t.ana, f, started.consentUrl)).toContain("connected=");
+      // The service asked for more scope (as requestScope records it); another admin grants it.
+      await server.deps.db
+        .update(connections)
+        .set({
+          scopeRequest: {
+            scope: "items:write",
+            attempts: 1,
+            tool: "create_item",
+            at: new Date().toISOString(),
+          },
+        })
+        .where(eq(connections.id, started.serverId));
+      const carla = await memberOf(server, t.workspaceId, "Carla", email("carla"), "admin");
+      const stepped = await ok(stepUp(t, carla, started.serverId));
+      expect(new URL(stepped.consentUrl).searchParams.get("resource")).toBe(f.url);
+      expect(f.tokenRequests.map((r) => r.get("resource"))).toEqual([f.url]);
+      const sent = [...f.authorizeRequests, ...f.tokenRequests].map(String);
+      expect(JSON.stringify({ started, stepped, sent, listed: await servers(t) })).not.toContain(KEY);
+    },
+    SERVER_TEST_MS,
+  );
+});

@@ -70,6 +70,26 @@ describe("outside text", () => {
     expect(out).toContain("[redacted]");
   });
 
+  test("a secret with a space is also taken out form-encoded, as a re-serialized query string carries it", () => {
+    const secret = "abc def/ghi==";
+    const form = new URLSearchParams({ key: secret }).toString().slice("key=".length);
+    expect(form).toBe("abc+def%2Fghi%3D%3D");
+    expect(outsideText(`bad key ${form} and ${form.toLowerCase()}`, [secret])).toBe(
+      "bad key [redacted] and [redacted]",
+    );
+    // URLSearchParams also escapes what encodeURIComponent leaves as is.
+    const marks = "key!(it's)~123";
+    const escaped = new URLSearchParams({ key: marks }).toString().slice("key=".length);
+    expect(escaped).toBe("key%21%28it%27s%29%7E123");
+    expect(outsideText(`bad key ${escaped} and ${escaped.toLowerCase()}`, [marks])).toBe(
+      "bad key [redacted] and [redacted]",
+    );
+    // A service may write the hex digits of its escapes in any case, even mixed in one secret.
+    expect(outsideText("bad key key%21%c3%A9%7e123 (key%21%C3%a9%7E123)", ["key!é~123"])).toBe(
+      "bad key [redacted] ([redacted])",
+    );
+  });
+
   test("the text keeps OUTSIDE_TEXT_MAX characters at most", () => {
     expect(outsideText("x".repeat(OUTSIDE_TEXT_MAX), [])).toBe("x".repeat(OUTSIDE_TEXT_MAX));
     const cut = outsideText("x".repeat(OUTSIDE_TEXT_MAX + 1), []);
