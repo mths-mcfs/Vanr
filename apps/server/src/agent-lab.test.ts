@@ -139,7 +139,7 @@ describe("agent lab", () => {
       .from(schema.agentEvals)
       .where(eq(schema.agentEvals.id, row.id));
     if (!after) throw new Error("gone");
-    expect(toEval(after)).toMatchObject({ status: "failed", error: "interrupted", total: 2, done: 0 });
+    expect(toEval(after, true)).toMatchObject({ status: "failed", error: "interrupted", total: 2, done: 0 });
     expect(after.finishedAt).not.toBeNull();
   });
 });

@@ -8,7 +8,7 @@ import type { Context, Hono } from "hono";
 import { z } from "zod";
 import { DESCRIPTION_MAX, draftNewAgent, proposeFromDescription } from "../agent-builder";
 import { startEval, TEST_CASES_MAX, toEval, toTestCase } from "../agent-lab";
-import { agentInWorkspace, requireActiveAgent, requireAgentEditor } from "../agents";
+import { agentInWorkspace, requireActiveAgent, requireAgentEditor, seesSpend } from "../agents";
 import type { AppEnv } from "../context";
 import { conflict, forbidden, notFound, param, readJson, readQuery } from "../http";
 import {
@@ -156,11 +156,11 @@ export function registerAgentLab(app: Hono<AppEnv>) {
       after = input.instructions;
     }
     const row = await startEval(deps, { agent, userId: me.userId, after, proposalId });
-    return c.json(toEval(row), 201);
+    return c.json(toEval(row, seesSpend(me)), 201);
   });
 
   app.get(`${WORKSPACE}/agents/:agentId/evals`, async (c) => {
-    const { agent } = await editable(c);
+    const { me, agent } = await editable(c);
     const q = readQuery(c, z.object({ proposalId: z.string().min(1).max(64).optional() }));
     const rows = await c
       .get("deps")
@@ -174,18 +174,18 @@ export function registerAgentLab(app: Hono<AppEnv>) {
       )
       .orderBy(desc(agentEvals.createdAt), desc(agentEvals.id))
       .limit(20);
-    return c.json({ evals: rows.map(toEval) });
+    return c.json({ evals: rows.map((r) => toEval(r, seesSpend(me))) });
   });
 
   app.get(`${WORKSPACE}/agents/:agentId/evals/:evalId`, async (c) => {
-    const { agent } = await editable(c);
+    const { me, agent } = await editable(c);
     const [row] = await c
       .get("deps")
       .db.select()
       .from(agentEvals)
       .where(and(eq(agentEvals.id, param(c, "evalId")), eq(agentEvals.agentId, agent.id)));
     if (!row) throw notFound("Test run not found");
-    return c.json(toEval(row));
+    return c.json(toEval(row, seesSpend(me)));
   });
 
   // ---- "describe it and I build it" ----

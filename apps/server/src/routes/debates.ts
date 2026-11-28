@@ -35,6 +35,7 @@ import { ANSWER_MAX, answerKey } from "@vanr/engine/debate-protocol";
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
+import { seesSpend } from "../agents";
 import { isPublicChannel, readableChannel } from "../channels";
 import type { AppDeps, AppEnv, Ctx, WorkspaceMember } from "../context";
 import {
@@ -371,7 +372,7 @@ export function registerDebates(app: Hono<AppEnv>) {
       .from(debates)
       .where(and(visibleDebates(me), eq(debates.status, "done"), sql`${debates.updatedAt} >= ${since}`))
       .limit(2000);
-    return c.json<DebateMetrics>(await debateMetrics(deps, rows, days));
+    return c.json<DebateMetrics>(await debateMetrics(deps, rows, days, seesSpend(me)));
   });
 
   app.get(`${WORKSPACE}/debates/:debateId`, async (c) => {
@@ -850,7 +851,13 @@ function reviewView(
 const END_REASONS = ["budget", "concluded", "deadline", "max_rounds", "no_change", "unanimous"] as const;
 const endReason = z.enum(END_REASONS);
 
-async function debateMetrics(deps: AppDeps, rows: DebateRow[], days: number): Promise<DebateMetrics> {
+/** The debates' numbers; their mean cost only for whoever has view_usage (`seesSpend`). */
+async function debateMetrics(
+  deps: AppDeps,
+  rows: DebateRow[],
+  days: number,
+  sees: boolean,
+): Promise<DebateMetrics> {
   const debateIds = rows.map((r) => r.id);
   const changes = debateIds.length
     ? await deps.db
@@ -863,12 +870,13 @@ async function debateMetrics(deps: AppDeps, rows: DebateRow[], days: number): Pr
         .where(and(inArray(debatePosts.debateId, debateIds), eq(debatePosts.kind, "turn")))
         .groupBy(debatePosts.debateId)
     : [];
-  const [cost] = debateIds.length
-    ? await deps.db
-        .select({ total: sql<number>`coalesce(sum(${runs.costUsd}), 0)::float8` })
-        .from(runs)
-        .where(inArray(runs.debateId, debateIds))
-    : [{ total: 0 }];
+  const [cost] =
+    sees && debateIds.length
+      ? await deps.db
+          .select({ total: sql<number>`coalesce(sum(${runs.costUsd}), 0)::float8` })
+          .from(runs)
+          .where(inArray(runs.debateId, debateIds))
+      : [{ total: 0 }];
   const challenged = changes.filter((c) => c.challenged);
   const changedDebates = challenged.filter((c) => c.changed).length;
   const endReasons: Partial<Record<DebateEndReason, number>> = {};
@@ -894,7 +902,11 @@ async function debateMetrics(deps: AppDeps, rows: DebateRow[], days: number): Pr
     challenged: challenged.length,
     endReasons,
     blindReviews,
-    meanCostUsd: rows.length ? Math.round(((cost?.total ?? 0) / rows.length) * 1_000_000) / 1_000_000 : 0,
+    meanCostUsd: !sees
+      ? null
+      : rows.length
+        ? Math.round(((cost?.total ?? 0) / rows.length) * 1_000_000) / 1_000_000
+        : 0,
     // Many debates with a challenge and almost no change of position: the debate is theater.
     theater: challenged.length >= 10 && changedDebates / challenged.length < 0.1,
   };

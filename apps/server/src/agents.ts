@@ -333,6 +333,12 @@ type Spend = Pick<
   | "costThisMonthUsd"
 >;
 
+/**
+ * Who sees spend: amounts, tokens and a budget's share follow `view_usage`, as GET /usage. Every place that sends
+ * spend out asks this one rule; whoever doesn't have it gets nulls.
+ */
+export const seesSpend = (me: Pick<WorkspaceMember, "role">) => can(me.role, "view_usage");
+
 /** Spend and budget are shown under `view_usage`, as GET /usage: whoever doesn't have it gets nulls. */
 const NO_SPEND: Spend = {
   budgetSpentPct: null,

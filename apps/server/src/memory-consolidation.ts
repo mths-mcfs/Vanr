@@ -8,7 +8,7 @@ import { contentSha256, MEMORY_ITEM_MAX_BYTES } from "@vanr/engine/memory";
 import { and, asc, count, desc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import { jsonFrom } from "./agent-lab";
-import { changeMemory, createMemory, type MemoryRow, storeWhere } from "./agent-memory";
+import { changeMemory, createMemory, lockActiveAgent, type MemoryRow, storeWhere } from "./agent-memory";
 import type { AgentRow } from "./agents";
 import type { AppDeps, WorkspaceMember } from "./context";
 import { isUniqueViolation } from "./db-errors";
@@ -276,6 +276,8 @@ export async function applyConsolidation(deps: AppDeps, me: WorkspaceMember, age
   const store = agentStore(agent);
   const author = { type: "person" as const, id: me.userId };
   const result = await deps.db.transaction(async (tx) => {
+    // The agent first, as every write to its store: an archive that landed after the route's check refuses here.
+    await lockActiveAgent(tx, agent.id);
     const [row] = await tx
       .select()
       .from(memoryConsolidations)

@@ -16,15 +16,26 @@ export type { AssignmentEventKind };
 
 export const SYSTEM: AssignmentActor = { type: "system", id: null };
 
-export function toEvent(row: EventRow): AssignmentEvent {
+/**
+ * An event as the reader gets it. A cap's warning and hit record the usage they saw; its dollars and job tokens reach
+ * only whoever has view_usage (`seesSpend`). The channel event reaches everyone in the channel, so it never carries
+ * them.
+ */
+export function toEvent(row: EventRow, seesSpend: boolean): AssignmentEvent {
   return {
     seq: row.seq,
     kind: row.kind as AssignmentEventKind,
     actor: row.actor,
     itemId: row.itemId,
-    data: row.data,
+    data: seesSpend ? row.data : withoutSpend(row.data),
     at: row.at.toISOString(),
   };
+}
+
+function withoutSpend(data: Record<string, unknown>): Record<string, unknown> {
+  const usage = data.usage;
+  if (typeof usage !== "object" || usage === null) return data;
+  return { ...data, usage: { ...usage, dollars: null, jobTokens: null } };
 }
 
 /** Appends an event and notifies the channel. With a repeated `key`, it does not record again (returns null). */
@@ -58,7 +69,7 @@ export async function assignmentEvent(
     assignmentId: assignment.id,
     threadId: assignment.threadId,
     channelId: assignment.channelId,
-    event: toEvent(row),
+    event: toEvent(row, false),
   });
   return row;
 }

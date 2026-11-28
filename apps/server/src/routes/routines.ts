@@ -27,7 +27,7 @@ import { createSealer, type Sealer } from "@vanr/engine/seal";
 import { and, desc, eq } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
-import { type AgentRow, agentInWorkspace } from "../agents";
+import { type AgentRow, agentInWorkspace, seesSpend } from "../agents";
 import { writableChannel } from "../channels";
 import type { AppDeps, AppEnv, Ctx, WorkspaceMember } from "../context";
 import {
@@ -423,7 +423,8 @@ export function registerRoutines(app: Hono<AppEnv>) {
     const row = await routineOf(c, me);
     const at = deps.now();
     const target = targetOf(row);
-    const recent = await recentRoutineCosts(deps.db, row.id);
+    // What the latest runs cost is spend: only with view_usage, and only the runs the person sees.
+    const recent = seesSpend(me) ? await recentRoutineCosts(deps.db, row.id, me) : null;
     const [agent] = await speakerAgents(deps.db, me.workspaceId, [row.agentId]);
     // The trigger can add outside content to the request (webhook, email, event): its ceiling counts.
     const extra = contextChars(triggerOf(row));
@@ -437,7 +438,7 @@ export function registerRoutines(app: Hono<AppEnv>) {
         at,
       );
     return c.json<RoutineEstimate>(
-      routineEstimate({ upToUsd: bound?.upToUsd ?? null, calls: bound?.calls ?? null, recent }),
+      routineEstimate({ upToUsd: bound?.upToUsd ?? null, calls: bound?.calls ?? null, recent: recent ?? [] }),
     );
   });
 

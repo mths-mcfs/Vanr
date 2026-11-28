@@ -149,22 +149,26 @@ export async function writableChannel(
   return channel;
 }
 
+type DmOf = { workspaceId: string; userId: string; other: { type: ActorType; id: string } };
+
+const dmKeyOf = ({ userId, other }: DmOf) =>
+  [`person:${userId}`, `${other.type}:${other.id}`].sort().join("|");
+
+/** The person's DM with another person or an agent, if it was ever opened. */
+export async function existingDm(db: Db, input: DmOf): Promise<string | null> {
+  const [row] = await db
+    .select({ id: channels.id })
+    .from(channels)
+    .where(and(eq(channels.workspaceId, input.workspaceId), eq(channels.dmKey, dmKeyOf(input))));
+  return row?.id ?? null;
+}
+
 /** Opens (or finds) the person's DM with another person or with an agent. Two opens at once give the same DM. */
-export async function openDm(
-  db: Db,
-  input: { workspaceId: string; userId: string; other: { type: ActorType; id: string } },
-): Promise<string> {
+export async function openDm(db: Db, input: DmOf): Promise<string> {
   const { workspaceId, userId, other } = input;
-  const dmKey = [`person:${userId}`, `${other.type}:${other.id}`].sort().join("|");
-  const find = async () =>
-    (
-      await db
-        .select({ id: channels.id })
-        .from(channels)
-        .where(and(eq(channels.workspaceId, workspaceId), eq(channels.dmKey, dmKey)))
-    )[0];
-  const existing = await find();
-  if (existing) return existing.id;
+  const dmKey = dmKeyOf(input);
+  const existing = await existingDm(db, input);
+  if (existing) return existing;
   const id = newId("ch");
   try {
     await db.transaction(async (tx) => {
@@ -188,8 +192,8 @@ export async function openDm(
     });
   } catch (err) {
     if (!isUniqueViolation(err)) throw err;
-    const raced = await find();
-    if (raced) return raced.id;
+    const raced = await existingDm(db, input);
+    if (raced) return raced;
     throw err;
   }
   return id;

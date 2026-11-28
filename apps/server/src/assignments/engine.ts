@@ -37,6 +37,7 @@ import { planOf, touchItem, writePlan } from "./plan";
 import { addJobProofs } from "./proofs";
 
 const {
+  agents,
   assignments,
   assignmentWork,
   assignmentCommands,
@@ -320,6 +321,10 @@ async function startAssignmentJobNow(
   row: AssignmentRow,
   input: AssignmentJobInput,
 ): Promise<JobRow> {
+  // Every job of an assignment starts here, under the assignment's job lock that the archive's cancel also takes:
+  // an archived agent's runs nothing on the runner.
+  const agent = await agentOf(deps.db, row);
+  if (agent.archivedAt) throw new HttpError(409, "agent.archived", "This agent was archived");
   if (row.executor === "agent")
     throw new HttpError(409, "assignment.no_job", "This assignment runs in the conversation");
   if (input.id) {
@@ -334,7 +339,6 @@ async function startAssignmentJobNow(
     throw new HttpError(409, "assignment.personal_plan", "That runner's plan is personal to who paired it");
   if ((await runningJobsOf(deps.db, row.id)).length > 0)
     throw new HttpError(409, "assignment.job_running", "A job is already running for this assignment");
-  const agent = await agentOf(deps.db, row);
   const [last] = await deps.db
     .select()
     .from(runnerJobs)
@@ -414,7 +418,13 @@ async function cancelJobsNow(deps: AppDeps, row: AssignmentRow, only?: string): 
   return running.length;
 }
 
-/** Stops the agent's run in this thread (if there is one). */
+/**
+ * Stops the agent's run in the assignment's thread (if there is one). It follows `actOn`, not `mayStopRun`, on
+ * purpose: the thread is the assignment's, and a paused or closed assignment has no work running in it. The engine
+ * halts that run itself (`halt` in the motor) whoever paused, so this is only the immediate form of that halt. Who
+ * may pause the assignment (its owner or who decides) therefore stops its run; the Stop button and a typed "stop"
+ * on a run outside an assignment still ask `mayStopRun`.
+ */
 export function stopAgentRun(deps: AppDeps, row: AssignmentRow, actorUserId: string): boolean {
   const runId = deps.runtime.activeRun(row.agentId, row.channelId, row.threadId);
   return runId ? deps.runtime.cancel(runId, actorUserId) : false;
@@ -886,6 +896,12 @@ export async function runAgentJob(
   let job: JobRow;
   try {
     job = await withAssignmentJobs(row.id, async () => {
+      // Read under the job lock the archive's cancel also takes: an archived agent starts no job.
+      const [current] = await ctx.deps.db
+        .select({ archivedAt: agents.archivedAt })
+        .from(agents)
+        .where(eq(agents.id, ctx.agent.id));
+      if (!current || current.archivedAt) throw new ToolInputError("Not done: this agent was archived.");
       await openForJob(ctx.deps, row.id);
       if ((await runningJobsOf(ctx.deps.db, row.id)).length > 0)
         throw new HttpError(409, "assignment.job_running", "A job is already running for this assignment");

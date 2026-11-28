@@ -13,7 +13,6 @@
 // the real cost in the ledger after; without room for the reservation, the call doesn't go out.
 
 import type { ActiveRun, HandledStatus, Message, MessageMeta, RunStatus } from "@vanr/contract";
-import { can } from "@vanr/contract";
 import { actionCredential, type CredentialRef } from "@vanr/engine/action-credential";
 import { schema } from "@vanr/engine/db";
 import { breakerOpen, type GateDecision, RiskTracker } from "@vanr/engine/effects";
@@ -41,7 +40,14 @@ import { PRODUCT } from "@vanr/product";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import { failInterruptedAgentJobs } from "../agent-lab";
 import { memoryPrompt } from "../agent-memory";
-import { type AgentRow, agentBudgetScope, agentNames, monthKey, workspaceBudgetDefaults } from "../agents";
+import {
+  type AgentRow,
+  agentBudgetScope,
+  agentNames,
+  monthKey,
+  seesSpend,
+  workspaceBudgetDefaults,
+} from "../agents";
 import { assignmentOfRun } from "../assignments/budget";
 import { publishAssignment } from "../assignments/core";
 import { assignmentPrompt, assignmentRouting } from "../assignments/tools";
@@ -524,6 +530,13 @@ export class AgentRuntime implements RuntimePort {
   async complete(input: CompleteInput): Promise<CompleteResult> {
     const { db } = this.deps;
     const { agent } = input;
+    // An archived agent writes nothing more: a debate turn, a synthesis or a routine's file that read it before.
+    const [current] = await db
+      .select({ archivedAt: agents.archivedAt })
+      .from(agents)
+      .where(eq(agents.id, agent.id));
+    if (!current || current.archivedAt)
+      return { ok: false, code: "failed", error: `${agent.name} was archived` };
     const planOwner = (await withPlanOwner(db, agent)).planOwnerUserId;
     if (planOwner !== null && planOwner !== input.initiatedBy)
       return { ok: false, code: "personal_plan", error: `${agent.name} ${PERSONAL_PLAN_TEXT}` };
@@ -1007,7 +1020,7 @@ export class AgentRuntime implements RuntimePort {
     admit?: () => Promise<boolean>;
   }): Promise<
     | { ok: true; runId: string; done: Promise<void> }
-    | { ok: false; code: "budget" | "personal_plan" | "busy" | "fenced" }
+    | { ok: false; code: "budget" | "personal_plan" | "busy" | "fenced" | "archived" }
   > {
     const { agent, channel, trigger } = input;
     // The run's thread is the trigger's, and the tools are picked by thread: the trigger must be of this channel.
@@ -1021,6 +1034,12 @@ export class AgentRuntime implements RuntimePort {
       if (stale()) return { ok: false, code: "fenced" };
       this.fences.set(fence.key, fence.token);
     }
+    // An archived agent starts nothing: an assignment's turn or a routine read the agent before the archive.
+    const [current] = await this.deps.db
+      .select({ archivedAt: agents.archivedAt })
+      .from(agents)
+      .where(eq(agents.id, agent.id));
+    if (!current || current.archivedAt) return { ok: false, code: "archived" };
     // Without routing, the personal plan's lock is here: only whoever paired triggers the agent (not even into a live run).
     const planOwner = (await withPlanOwner(this.deps.db, agent)).planOwnerUserId;
     if (planOwner !== null && planOwner !== personOf(trigger)) return { ok: false, code: "personal_plan" };
@@ -1484,7 +1503,16 @@ export class AgentRuntime implements RuntimePort {
       return message;
     };
 
+    // Set when the agent turned out archived: the run ends canceled, and what waited in it goes with it.
+    let archived = false;
     try {
+      // Every run, however it started (a mention, the run after this one, a routine, an assignment's turn), comes
+      // here once it is in `live`. `archiveAgent` commits `archivedAt` before it stops the live runs: either its
+      // loop sees this run or this read sees the archive. An archived agent calls no model and says nothing.
+      if (!(await this.agentActive(live.agent.id))) {
+        archived = true;
+        throw new RunCanceled();
+      }
       const modelProvider = async (): Promise<ModelProvider> => {
         const p = await this.opts.providerFor(live.agent);
         if ("error" in p) throw new ModelError("auth", p.error);
@@ -2004,13 +2032,28 @@ export class AgentRuntime implements RuntimePort {
       const err = reason instanceof TimeLimit ? reason : caught;
       const canceled =
         !(err instanceof TimeLimit) && (err instanceof RunCanceled || live.controller.signal.aborted);
-      // A run that fails or is stopped mid-turn didn't hear its inbox: the next run takes it. A person's stop
-      // cancels it with the run instead (it stays in `handles`, handled as canceled).
-      if (!(canceled && live.canceledBy !== null)) deferUnheard(live);
       clearInterval(beat);
       if (deadline) clearTimeout(deadline);
-      if (canceled) {
-        if (partial.trim()) await post(partial.trim(), { canceled: true }).catch(() => null);
+      // A cancel or a time cap that came while the agent was archived is the archive's: read it once more. A read
+      // that fails leaves the run to end as it would have.
+      if ((canceled || err instanceof TimeLimit) && !archived)
+        archived = !(await this.agentActive(live.agent.id).catch(() => true));
+      // A run that fails or is stopped mid-turn didn't hear its inbox: the next run takes it. A person's stop
+      // cancels it with the run instead (it stays in `handles`, handled as canceled), and so does the archive.
+      if (!archived && !(canceled && live.canceledBy !== null)) deferUnheard(live);
+      // No next run for an archived agent: what waited for one is canceled with this run, its issue work too.
+      if (archived) {
+        const waiting = live.after.splice(0).map((m) => m.id);
+        await this.markHandled(live, waiting, "canceled");
+        await settleIssueWork(db, live.workspaceId, waiting, {
+          state: "idle",
+          reason: null,
+          runId: live.runId,
+        });
+      }
+      if (canceled || archived) {
+        // An archived agent says nothing more, not even what it had half written or that it ran out of time.
+        if (partial.trim() && !archived) await post(partial.trim(), { canceled: true }).catch(() => null);
         await this.finish(live, { status: "canceled", handled: "canceled", messageId: null });
         return;
       }
@@ -2659,7 +2702,9 @@ export class AgentRuntime implements RuntimePort {
       .update(agents)
       .set({ budgetNotice: `${kind}:${month}` })
       .where(eq(agents.id, agent.id));
-    // The amounts follow view_usage, as GET /usage: an owner without it hears only that the budget was reached.
+    // The spend follows view_usage, as GET /usage: an owner without it hears only that the budget ran out, with no
+    // amounts. The 80% notice doesn't reach them at all (it alone tells how much went), as on the channel's side.
+    if (kind === "warning" && !sees) return;
     hub.toUser(agent.workspaceId, agent.ownerUserId, {
       type: kind === "exhausted" ? "budget.cap_reached" : "budget.threshold_reached",
       agentId: agent.id,
@@ -2735,12 +2780,21 @@ export class AgentRuntime implements RuntimePort {
       });
   }
 
+  /** Whether the agent is still there and not archived (read now, not from the run's copy). */
+  private async agentActive(agentId: string): Promise<boolean> {
+    const [row] = await this.deps.db
+      .select({ archivedAt: agents.archivedAt })
+      .from(agents)
+      .where(eq(agents.id, agentId));
+    return !!row && row.archivedAt === null;
+  }
+
   private async seesUsage(workspaceId: string, userId: string): Promise<boolean> {
     const [member] = await this.deps.db
       .select({ role: members.role })
       .from(members)
       .where(and(eq(members.workspaceId, workspaceId), eq(members.userId, userId)));
-    return !!member && can(member.role, "view_usage");
+    return !!member && seesSpend(member);
   }
 
   // ---- sweep ----
@@ -2773,6 +2827,20 @@ export class AgentRuntime implements RuntimePort {
         .limit(50);
       let sent = 0;
       for (const r of due) {
+        // An archived agent's reminder doesn't go out: one scheduled while the archive landed is canceled here.
+        if (r.agentId !== null) {
+          const [agent] = await db
+            .select({ archivedAt: agents.archivedAt })
+            .from(agents)
+            .where(eq(agents.id, r.agentId));
+          if (!agent || agent.archivedAt) {
+            await db
+              .update(reminders)
+              .set({ status: "canceled" })
+              .where(and(eq(reminders.id, r.id), eq(reminders.status, "scheduled")));
+            continue;
+          }
+        }
         const [channel] = await db.select().from(channels).where(eq(channels.id, r.channelId));
         const author =
           r.agentId !== null
