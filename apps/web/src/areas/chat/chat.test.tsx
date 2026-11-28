@@ -72,13 +72,13 @@ describe("the conversations in the sidebar", () => {
     // Folding a group keeps its unread count on the heading.
     await act(async () =>
       within(sidebar)
-        .getByRole("button", { name: /People/ })
+        .getByRole("button", { name: /with people/ })
         .click(),
     );
     expect(within(sidebar).queryByRole("link", { name: /Jonas Lind/ }) === null).toBe(true);
     expect(
       within(sidebar)
-        .getByRole("button", { name: /People/ })
+        .getByRole("button", { name: /with people/ })
         .getAttribute("aria-expanded"),
     ).toBe("false");
   });

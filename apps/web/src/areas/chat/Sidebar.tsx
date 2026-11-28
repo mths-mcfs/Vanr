@@ -13,10 +13,13 @@ const shown = (count: number) => (count > 99 ? "99+" : String(count));
 
 function Group({
   title,
+  label,
   count,
   children,
 }: {
   title: string;
+  /** What the fold button says to a screen reader; it holds the visible title. */
+  label: string;
   /** Unread messages in the whole group, said on the folded heading. */
   count: number;
   children: ReactNode;
@@ -34,7 +37,8 @@ function Group({
         onClick={() => setOpen((value) => !value)}
       >
         <Icon icon={ChevronDown} size="sm" className="chat-side__chevron" />
-        <span>{title}</span>
+        <span aria-hidden="true">{title}</span>
+        <span className="vr-visually-hidden">{label}</span>
         {!open && count > 0 && <Unread count={count} label={t("side.unread", { count })} />}
       </button>
       {open && (
@@ -104,6 +108,7 @@ export function ChannelList() {
     <div className="chat-side">
       <Group
         title={t("side.channels")}
+        label={t("side.channelsGroup")}
         count={visible.reduce((sum, channel) => sum + channel.unreadCount, 0)}
       >
         {channels.isPending ? (
@@ -140,6 +145,7 @@ export function ChannelList() {
       </Group>
       <Group
         title={t("side.agents")}
+        label={t("side.agentsGroup")}
         count={[...agentUnread.values()].reduce((sum, count) => sum + count, 0)}
       >
         {agents.isPending ? (
@@ -176,7 +182,11 @@ export function ChannelList() {
           </ul>
         )}
       </Group>
-      <Group title={t("side.people")} count={people.reduce((sum, dm) => sum + dm.unread, 0)}>
+      <Group
+        title={t("side.people")}
+        label={t("side.peopleGroup")}
+        count={people.reduce((sum, dm) => sum + dm.unread, 0)}
+      >
         {dms.isPending ? (
           <Loading />
         ) : dms.isError ? (

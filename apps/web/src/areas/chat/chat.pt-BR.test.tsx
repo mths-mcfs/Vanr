@@ -25,8 +25,8 @@ describe("conversa em português", () => {
       languages: ["pt-BR"],
     });
     const sidebar = await screen.findByRole("complementary");
-    expect(await within(sidebar).findByRole("button", { name: /Canais/ })).toBeDefined();
-    expect(within(sidebar).getByRole("button", { name: /Agentes/ })).toBeDefined();
+    expect(await within(sidebar).findByRole("button", { name: /em canais/ })).toBeDefined();
+    expect(within(sidebar).getByRole("button", { name: /com agentes/ })).toBeDefined();
     expect(within(sidebar).getByText("3 mensagens não lidas")).toBeDefined();
 
     const run = await screen.findByRole("region", { name: "Scout trabalhando" });
