@@ -94,3 +94,13 @@ describe("the web's own styles", () => {
     }
   });
 });
+
+describe("chat's own styles", () => {
+  // A message's actions are revealed on hover or focus, never taken out of the tab order.
+  test("message actions are never hidden with display: none", () => {
+    const chat = readFileSync(join(import.meta.dir, "chat.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const rules = [...chat.matchAll(/([^{}]*\.chat-message__actions[^{}]*)\{([^}]*)\}/g)];
+    expect(rules.length).toBeGreaterThan(0);
+    expect(rules.filter(([, , body]) => /display\s*:\s*none/.test(body ?? ""))).toEqual([]);
+  });
+});

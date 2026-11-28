@@ -32,6 +32,7 @@ let caio: Person;
 let workspaceId: string;
 let general: string;
 const person = (p: Person) => ({ type: "person" as const, id: p.user.id });
+const viewer = (p: Person) => ({ workspaceId, userId: p.user.id });
 
 beforeAll(async () => {
   server = await startTestServer();
@@ -170,7 +171,7 @@ describe("creating an issue", () => {
       labels: ["web"],
       author: person(ana),
     });
-    const issue = await toIssue(server.deps.db, row);
+    const issue = await toIssue(server.deps.db, viewer(ana), row);
     expect(issue).toMatchObject({
       title: "Ship the board",
       status: "todo",
@@ -336,9 +337,10 @@ describe("changing an issue", () => {
       { from: "todo", to: "in_progress" },
       { from: "in_progress", to: "done" },
     ]);
-    expect((await toIssue(server.deps.db, await issueById(server.deps.db, workspaceId, row.id))).status).toBe(
-      "done",
-    );
+    expect(
+      (await toIssue(server.deps.db, viewer(ana), await issueById(server.deps.db, workspaceId, row.id)))
+        .status,
+    ).toBe("done");
   });
 
   test("a column that isn't on the board is not found and nothing changes", async () => {
@@ -407,7 +409,7 @@ describe("the API shape", () => {
       .update(issues)
       .set({ work: { state: "dreaming", reason: null, runId: null }, source: { kind: "email" } })
       .where(eq(issues.id, child.id));
-    const [p, c] = await toIssues(server.deps.db, workspaceId, [
+    const [p, c] = await toIssues(server.deps.db, viewer(ana), [
       parent,
       await issueById(server.deps.db, workspaceId, child.id),
     ]);
@@ -418,7 +420,7 @@ describe("the API shape", () => {
     expect(c?.debates.map((d) => d.title)).toEqual(["Unrelated"]);
     expect(c?.work).toBeNull();
     expect(c?.source).toBeNull();
-    expect(await toIssues(server.deps.db, workspaceId, [])).toEqual([]);
+    expect(await toIssues(server.deps.db, viewer(ana), [])).toEqual([]);
   });
 });
 

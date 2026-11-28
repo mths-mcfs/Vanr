@@ -3,8 +3,9 @@
 import type { ActorRef, Issue, IssueActivity, IssueColumn, IssueStage } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
-import { and, asc, desc, eq, gte, inArray, isNull, lt, max, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lt, max, ne, type SQL, sql } from "drizzle-orm";
 import { z } from "zod";
+import { canReadChannel, readableChannelsSql } from "./channels";
 import type { AppDeps } from "./context";
 import { HttpError, notFound } from "./http";
 import { log } from "./logger";
@@ -188,22 +189,52 @@ export function deleteColumn(
   );
 }
 
-export async function issueById(db: Db, workspaceId: string, id: string): Promise<IssueRow> {
-  const [row] = await db
-    .select()
-    .from(issues)
-    .where(and(eq(issues.id, id), eq(issues.workspaceId, workspaceId)));
+/** Who is looking at issues: a person of the workspace. */
+export type IssueViewer = { workspaceId: string; userId: string };
+
+/**
+ * The issues the person sees: those of no channel belong to the whole workspace, and one opened in a channel
+ * (an agent's issue carries the channel it was asked in) is seen by whoever reads that channel. A private channel
+ * or a DM the person isn't in hides its issues, as it hides its messages.
+ */
+export function visibleIssuesSql(viewer: IssueViewer): SQL {
+  return sql`(${issues.channelId} is null or ${issues.channelId} in ${readableChannelsSql(viewer)})`;
+}
+
+/** Whether the person sees this issue (the same rule as `visibleIssuesSql`, for one row already read). */
+export async function seesIssue(db: Db, row: IssueRow, userId: string): Promise<boolean> {
+  if (row.channelId === null) return true;
+  return canReadChannel(db, { workspaceId: row.workspaceId, userId, channelId: row.channelId });
+}
+
+async function oneIssue(db: Db, where: SQL | undefined): Promise<IssueRow> {
+  const [row] = await db.select().from(issues).where(where);
   if (!row) throw notFound("Issue not found");
   return row;
 }
 
-export async function issueByNumber(db: Db, workspaceId: string, number: number): Promise<IssueRow> {
-  const [row] = await db
-    .select()
-    .from(issues)
-    .where(and(eq(issues.number, number), eq(issues.workspaceId, workspaceId)));
-  if (!row) throw notFound("Issue not found");
-  return row;
+/** The issue, whoever may see it: for the server's own work (runs, settling), never for an answer to a person. */
+export function issueById(db: Db, workspaceId: string, id: string): Promise<IssueRow> {
+  return oneIssue(db, and(eq(issues.id, id), eq(issues.workspaceId, workspaceId)));
+}
+
+export function issueByNumber(db: Db, workspaceId: string, number: number): Promise<IssueRow> {
+  return oneIssue(db, and(eq(issues.number, number), eq(issues.workspaceId, workspaceId)));
+}
+
+/** The issue if the person sees it: one of a channel they don't read is the same 404 as a missing one. */
+export function issueSeenBy(db: Db, viewer: IssueViewer, id: string): Promise<IssueRow> {
+  return oneIssue(
+    db,
+    and(eq(issues.id, id), eq(issues.workspaceId, viewer.workspaceId), visibleIssuesSql(viewer)),
+  );
+}
+
+export function issueNumberSeenBy(db: Db, viewer: IssueViewer, number: number): Promise<IssueRow> {
+  return oneIssue(
+    db,
+    and(eq(issues.number, number), eq(issues.workspaceId, viewer.workspaceId), visibleIssuesSql(viewer)),
+  );
 }
 
 /** What the issue says it came from, as saved (`source`): only the kinds the contract knows reach the API. */
@@ -220,9 +251,10 @@ const savedWork = z.object({
 /** The debate's origin, as saved: only the issue it was opened from matters here. */
 const debateOrigin = z.object({ issueId: z.string() });
 
-/** The issues in the API's shape, with the stage, the sub-issues and the linked debates. */
-export async function toIssues(db: Db, workspaceId: string, rows: IssueRow[]): Promise<Issue[]> {
+/** The issues in the API's shape for the person, with the stage, the sub-issues they see and the linked debates. */
+export async function toIssues(db: Db, viewer: IssueViewer, rows: IssueRow[]): Promise<Issue[]> {
   if (rows.length === 0) return [];
+  const { workspaceId } = viewer;
   const cols = new Map((await columnsOf(db, workspaceId)).map((c) => [c.id, c]));
   const ids = rows.map((r) => r.id);
   const children = await db
@@ -234,7 +266,7 @@ export async function toIssues(db: Db, workspaceId: string, rows: IssueRow[]): P
       parentId: issues.parentId,
     })
     .from(issues)
-    .where(and(eq(issues.workspaceId, workspaceId), inArray(issues.parentId, ids)));
+    .where(and(eq(issues.workspaceId, workspaceId), inArray(issues.parentId, ids), visibleIssuesSql(viewer)));
   const linked = await db
     .select({
       id: debates.id,
@@ -293,8 +325,8 @@ export async function toIssues(db: Db, workspaceId: string, rows: IssueRow[]): P
   });
 }
 
-export async function toIssue(db: Db, row: IssueRow): Promise<Issue> {
-  const [issue] = await toIssues(db, row.workspaceId, [row]);
+export async function toIssue(db: Db, viewer: IssueViewer, row: IssueRow): Promise<Issue> {
+  const [issue] = await toIssues(db, viewer, [row]);
   if (!issue) throw new Error("toIssues returned nothing");
   return issue;
 }
@@ -610,6 +642,7 @@ async function issueCreated(deps: AppDeps, row: IssueRow, by: ActorRef) {
     workspaceId: row.workspaceId,
     event: "issue.created",
     eventId: row.id,
+    channelId: row.channelId,
     context: `Issue #${row.number}: ${row.title}\n\n${row.description}`.trim(),
   }).catch((err) => log.error("routine.issue_event_failed", { issueId: row.id, err }));
 }
@@ -694,6 +727,8 @@ const noticeSource = (row: IssueRow) => ({ issueId: row.id, issueSeq: row.number
 async function notifyAssigned(deps: AppDeps, row: IssueRow, by: ActorRef) {
   const a = row.assignee;
   if (a?.type !== "person" || (by.type === "person" && by.id === a.id)) return;
+  // A notice carries the title: never to someone the issue's channel hides it from.
+  if (!(await seesIssue(deps.db, row, a.id))) return;
   await notify(deps, {
     workspaceId: row.workspaceId,
     userId: a.id,
@@ -705,16 +740,21 @@ async function notifyAssigned(deps: AppDeps, row: IssueRow, by: ActorRef) {
   });
 }
 
-/** Who follows the issue: the assignee and whoever opened it (people), minus whoever made the change. */
-function watchers(row: IssueRow, by: ActorRef): string[] {
+/**
+ * Who follows the issue: the assignee and whoever opened it (people), minus whoever made the change and anyone
+ * the issue's channel hides it from.
+ */
+async function watchers(db: Db, row: IssueRow, by: ActorRef): Promise<string[]> {
   const out = new Set<string>();
   for (const a of [row.assignee, row.createdBy]) if (a?.type === "person") out.add(a.id);
   if (by.type === "person") out.delete(by.id);
-  return [...out];
+  const seen: string[] = [];
+  for (const userId of out) if (await seesIssue(db, row, userId)) seen.push(userId);
+  return seen;
 }
 
 export async function notifyComment(deps: AppDeps, row: IssueRow, by: ActorRef, text: string) {
-  for (const userId of watchers(row, by)) {
+  for (const userId of await watchers(deps.db, row, by)) {
     await notify(deps, {
       workspaceId: row.workspaceId,
       userId,
@@ -728,7 +768,7 @@ export async function notifyComment(deps: AppDeps, row: IssueRow, by: ActorRef, 
 }
 
 async function notifyProgress(deps: AppDeps, row: IssueRow, by: ActorRef, from: IssueStage, to: IssueStage) {
-  for (const userId of watchers(row, by)) {
+  for (const userId of await watchers(deps.db, row, by)) {
     await notify(deps, {
       workspaceId: row.workspaceId,
       userId,

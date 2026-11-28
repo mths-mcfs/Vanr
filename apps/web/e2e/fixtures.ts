@@ -29,6 +29,8 @@ import accountEn from "../src/messages/account/en.ts";
 import accountPt from "../src/messages/account/pt-BR.ts";
 import agentsEn from "../src/messages/agents/en.ts";
 import agentsPt from "../src/messages/agents/pt-BR.ts";
+import chatEn from "../src/messages/chat/en.ts";
+import chatPt from "../src/messages/chat/pt-BR.ts";
 import commonEn from "../src/messages/common/en.ts";
 import commonPt from "../src/messages/common/pt-BR.ts";
 import controlEn from "../src/messages/control/en.ts";
@@ -43,6 +45,8 @@ import shellEn from "../src/messages/shell/en.ts";
 import shellPt from "../src/messages/shell/pt-BR.ts";
 import wikiEn from "../src/messages/wiki/en.ts";
 import wikiPt from "../src/messages/wiki/pt-BR.ts";
+import workEn from "../src/messages/work/en.ts";
+import workPt from "../src/messages/work/pt-BR.ts";
 import { type Bucket, startBucket } from "./bucket.ts";
 import { type RunningServer, startServer } from "./server.ts";
 
@@ -52,6 +56,7 @@ const CATALOGS = {
   en: {
     account: accountEn,
     agents: agentsEn,
+    chat: chatEn,
     common: commonEn,
     control: controlEn,
     files: filesEn,
@@ -59,10 +64,12 @@ const CATALOGS = {
     settings: settingsEn,
     inbox: inboxEn,
     wiki: wikiEn,
+    work: workEn,
   },
   "pt-BR": {
     account: accountPt,
     agents: agentsPt,
+    chat: chatPt,
     common: commonPt,
     control: controlPt,
     files: filesPt,
@@ -70,6 +77,7 @@ const CATALOGS = {
     settings: settingsPt,
     inbox: inboxPt,
     wiki: wikiPt,
+    work: workPt,
   },
 } as const;
 type Catalogs = (typeof CATALOGS)["en"];

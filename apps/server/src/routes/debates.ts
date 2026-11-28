@@ -35,7 +35,7 @@ import { ANSWER_MAX, answerKey } from "@vanr/engine/debate-protocol";
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
-import { readableChannel } from "../channels";
+import { isPublicChannel, readableChannel } from "../channels";
 import type { AppDeps, AppEnv, Ctx, WorkspaceMember } from "../context";
 import {
   answerRound,
@@ -61,7 +61,7 @@ import {
 } from "../debates";
 import { debateEstimate, speakerAgents } from "../estimates";
 import { conflict, forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
-import { createIssue, issueById } from "../issues";
+import { createIssue, issueById, issueSeenBy } from "../issues";
 import { type MessageRow, messageInWorkspace } from "../messages";
 import { closeNotifications } from "../notifications";
 import { requirePlanOwners } from "../runners/plans";
@@ -376,7 +376,7 @@ export function registerDebates(app: Hono<AppEnv>) {
 
   app.get(`${WORKSPACE}/debates/:debateId`, async (c) => {
     const me = requireMember(c);
-    return c.json<DebateDetail>(await toDetail(c.get("deps"), await debateOf(c, me)));
+    return c.json<DebateDetail>(await toDetail(c.get("deps"), await debateOf(c, me), me));
   });
 
   app.post(`${WORKSPACE}/debates`, async (c) => {
@@ -402,9 +402,14 @@ export function registerDebates(app: Hono<AppEnv>) {
       });
     if (input.deadline && new Date(input.deadline) <= deps.now())
       throw new HttpError(400, "debate.deadline_past", "The deadline must be in the future");
-    const sourceIssue = input.sourceIssueId
-      ? await issueById(deps.db, me.workspaceId, input.sourceIssueId)
-      : null;
+    const sourceIssue = input.sourceIssueId ? await issueSeenBy(deps.db, me, input.sourceIssueId) : null;
+    // An issue of a private channel or a DM is debated in that channel, never somewhere wider.
+    const issueChannel =
+      sourceIssue?.channelId && !(await isPublicChannel(deps.db, me.workspaceId, sourceIssue.channelId))
+        ? sourceIssue.channelId
+        : null;
+    if (issueChannel && input.channelId && input.channelId !== issueChannel)
+      throw new HttpError(400, "debate.issue_channel", "Debate this issue in the channel it belongs to");
     const row = await openDebate(deps, {
       workspaceId: me.workspaceId,
       title: input.title,
@@ -419,13 +424,16 @@ export function registerDebates(app: Hono<AppEnv>) {
       spendCapPercent: input.spendCapPercent,
       createdBy: person(me),
       requesterUserId: me.userId,
-      channelId: input.channelId ?? null,
+      channelId: issueChannel ?? input.channelId ?? null,
       origin: sourceIssue
         ? { kind: "issue", issueId: sourceIssue.id, issueSeq: sourceIssue.number }
         : { kind: "manual" },
     });
     if (sourceIssue) await saveDebate(deps, row, { issueIds: [sourceIssue.id] });
-    return c.json<DebateDetail>(await toDetail(deps, await debateById(deps.db, me.workspaceId, row.id)), 201);
+    return c.json<DebateDetail>(
+      await toDetail(deps, await debateById(deps.db, me.workspaceId, row.id), me),
+      201,
+    );
   });
 
   // The round runs in parallel: whoever holds a speaker slot and hasn't answered in this round gives their position
@@ -506,7 +514,7 @@ export function registerDebates(app: Hono<AppEnv>) {
     } finally {
       scheduleAdvance(deps, row.id);
     }
-    return c.json<DebateDetail>(await toDetail(deps, saved));
+    return c.json<DebateDetail>(await toDetail(deps, saved, me));
   });
 
   // Ends the debate now and goes to the synthesis.
@@ -518,7 +526,7 @@ export function registerDebates(app: Hono<AppEnv>) {
     if (isClosed(row)) throw closedError();
     const saved = await stopDebate(deps, row, "concluded");
     if (!saved) throw closedError();
-    return c.json<DebateDetail>(await toDetail(deps, saved));
+    return c.json<DebateDetail>(await toDetail(deps, saved, me));
   });
 
   app.post(`${WORKSPACE}/debates/:debateId/cancel`, async (c) => {
@@ -531,7 +539,7 @@ export function registerDebates(app: Hono<AppEnv>) {
     );
     if (!saved) throw closedError();
     await closeNotifications(deps, me.workspaceId, turnKey(row.id));
-    return c.json<DebateDetail>(await toDetail(deps, saved));
+    return c.json<DebateDetail>(await toDetail(deps, saved, me));
   });
 
   // Stalled (an agent failed): tries again from whoever stalled it.
@@ -551,7 +559,7 @@ export function registerDebates(app: Hono<AppEnv>) {
     );
     if (!saved) throw conflict("debate.not_stalled", "This debate is not stalled");
     scheduleAdvance(deps, row.id);
-    return c.json<DebateDetail>(await toDetail(deps, saved));
+    return c.json<DebateDetail>(await toDetail(deps, saved, me));
   });
 
   app.put(`${WORKSPACE}/debates/:debateId/participants`, async (c) => {
@@ -611,7 +619,7 @@ export function registerDebates(app: Hono<AppEnv>) {
     } finally {
       if (saved.status === "open") scheduleAdvance(deps, row.id);
     }
-    return c.json<DebateDetail>(await toDetail(deps, saved));
+    return c.json<DebateDetail>(await toDetail(deps, saved, me));
   });
 
   // Items of the synthesis become issues (sub-issues of the source issue, when the debate came from one).
@@ -623,6 +631,13 @@ export function registerDebates(app: Hono<AppEnv>) {
     const { items } = await readJson(c, issuesBody);
     const origin = issueOrigin.safeParse(row.origin);
     const parentId = origin.success ? origin.data.issueId : null;
+    // The new issues stay where the debate is read: the debate's own channel, or the parent issue's when the
+    // debate has none. An issue never lands somewhere more open than the debate it came from.
+    const parent =
+      parentId && !row.channelId
+        ? await issueById(deps.db, me.workspaceId, parentId).catch(() => null)
+        : null;
+    const channelId = row.channelId ?? parent?.channelId ?? undefined;
     const workspaceAgents = await deps.db
       .select({ id: agents.id, name: agents.name, handle: agents.handle })
       .from(agents)
@@ -639,6 +654,7 @@ export function registerDebates(app: Hono<AppEnv>) {
         description: [item.description, item.step].filter(Boolean).join("\n\n"),
         assignee: agent ? { type: "agent", id: agent.id } : null,
         parentId,
+        channelId,
         source: { kind: "debate", id: row.id },
         author: person(me),
       });
@@ -671,7 +687,7 @@ export function registerDebates(app: Hono<AppEnv>) {
       }
       return verdict === current ? null : { verdictState: verdict };
     });
-    return c.json<DebateDetail>(await toDetail(deps, saved));
+    return c.json<DebateDetail>(await toDetail(deps, saved, me));
   });
 
   // The blind read: the synthesis against a single agent's answer (the lead's round 0), in an order drawn once per
@@ -766,7 +782,7 @@ export function registerDebates(app: Hono<AppEnv>) {
     };
     await settleSuggestion(deps, row, accepted, { debate: { debateId: debate.id, title: debate.title } });
     return c.json<AcceptedDebateSuggestion>(
-      { debate: await toDetail(deps, debate), suggestion: accepted },
+      { debate: await toDetail(deps, debate, me), suggestion: accepted },
       201,
     );
   });

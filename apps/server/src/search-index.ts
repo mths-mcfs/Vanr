@@ -393,8 +393,8 @@ async function build(tx: Tx, ref: { kind: IndexedKind; id: string }): Promise<Ch
         {
           workspaceId: row.workspaceId,
           title: `#${row.number} ${row.title}`,
-          // Issues belong to the whole workspace today (the list and the screen don't look at the channel).
-          scope: { kind: "workspace" },
+          // An issue opened in a channel is read by whoever reads the channel; one of no channel, by everyone.
+          scope: row.channelId ? { kind: "channel", channelId: row.channelId } : { kind: "workspace" },
           url: `/workspace/${row.workspaceId}/issues/${row.number}`,
           authorId: actorKey(row.createdBy),
           updatedAt: row.updatedAt.toISOString(),
@@ -564,6 +564,24 @@ export async function backfillSearch(deps: Pick<AppDeps, "db" | "search">, batch
     for (const id of ids) {
       seen.add(id);
       await reindex(deps, { kind: "db_row", id });
+    }
+    n += ids.length;
+  }
+  // Issues of a channel indexed when every issue was the whole workspace's: built again with their channel's scope.
+  const widened = sql`select ${issues.id} as id from ${issues}
+    where ${issues.channelId} is not null and exists (
+      select 1 from ${searchChunks} c
+      where c.source_kind = 'issue' and c.source_id = ${issues.id} and c.scope_kind = 'workspace')
+    limit ${batch}`;
+  const rebuilt = new Set<string>();
+  for (;;) {
+    const ids = rowsOf(await deps.db.execute(widened))
+      .map((r) => String(r.id))
+      .filter((id) => !rebuilt.has(id));
+    if (!ids.length) break;
+    for (const id of ids) {
+      rebuilt.add(id);
+      await reindex(deps, { kind: "issue", id });
     }
     n += ids.length;
   }

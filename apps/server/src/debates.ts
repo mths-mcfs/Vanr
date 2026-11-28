@@ -48,6 +48,7 @@ import { canReadChannel, channelInWorkspace, isChannelMember, readableChannelsSq
 import { type ClaimOutput, claim, forget, release, settle } from "./claims";
 import type { AppDeps, CompleteResult } from "./context";
 import { notFound } from "./http";
+import { type IssueViewer, visibleIssuesSql } from "./issues";
 import { log } from "./logger";
 import { closeNotifications, notify } from "./notifications";
 import { fireRoutineEvent } from "./routines";
@@ -372,7 +373,8 @@ const roundMajority = (
   return votes.length ? majority(votes, row.options) : null;
 };
 
-export async function toDetail(deps: AppDeps, row: DebateRow): Promise<DebateDetail> {
+/** The debate as the person reads it: its linked issues only as far as they see them (`visibleIssuesSql`). */
+export async function toDetail(deps: AppDeps, row: DebateRow, viewer: IssueViewer): Promise<DebateDetail> {
   const { db } = deps;
   const posts = await postsOf(db, row.id);
   const rounds = new Map<number, string[]>();
@@ -387,7 +389,13 @@ export async function toDetail(deps: AppDeps, row: DebateRow): Promise<DebateDet
     ? await db
         .select({ id: issues.id, number: issues.number, title: issues.title })
         .from(issues)
-        .where(and(eq(issues.workspaceId, row.workspaceId), inArray(issues.id, row.issueIds)))
+        .where(
+          and(
+            eq(issues.workspaceId, row.workspaceId),
+            inArray(issues.id, row.issueIds),
+            visibleIssuesSql(viewer),
+          ),
+        )
     : [];
   const [hidden] = await db
     .select({ n: sql<number>`count(*)::int` })

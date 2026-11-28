@@ -37,7 +37,7 @@ import {
 } from "../calendar";
 import type { AppDeps, AppEnv, WorkspaceMember } from "../context";
 import { forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
-import { columnsOf } from "../issues";
+import { columnsOf, visibleIssuesSql } from "../issues";
 import { log } from "../logger";
 import {
   anchorOf,
@@ -524,6 +524,7 @@ export function registerCalendar(app: Hono<AppEnv>) {
       .where(
         and(
           eq(issues.workspaceId, me.workspaceId),
+          visibleIssuesSql(me),
           gte(issues.dueDate, q.from.slice(0, 10)),
           lte(issues.dueDate, q.to.slice(0, 10)),
           closed.length ? notInArray(issues.columnId, closed) : undefined,

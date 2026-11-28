@@ -241,7 +241,9 @@ describe("a debate between people", () => {
       expect(failures).toEqual([]);
       row = await fresh(opened.id);
       expect(row).toMatchObject({ status: "done", phase: null, endReason: "unanimous", pendingSpeakers: [] });
-      const synthesis = toDetail(server.deps, row).then((d) => d.synthesis);
+      const synthesis = toDetail(server.deps, row, { workspaceId, userId: ana.user.id }).then(
+        (d) => d.synthesis,
+      );
       expect(await synthesis).toMatchObject({
         revision: 1,
         endReason: "unanimous",
@@ -443,7 +445,7 @@ describe("anonymity until the debate closes", () => {
         expect(out).toMatchObject({ author: null, runId: null });
         expect(out.pseudonym).toBe(row.pseudonyms[p.author.id] ?? "missing");
       }
-      const detail = await toDetail(server.deps, row);
+      const detail = await toDetail(server.deps, row, { workspaceId, userId: ana.user.id });
       expect(detail.pseudonyms).toBeNull();
       expect(leaks(detail.posts)).toBe(false);
       expect(leaks(detail.track)).toBe(false);
@@ -562,7 +564,10 @@ describe("the debate's spend at once", () => {
       expect(costs).toHaveLength(3);
       const total = costs.reduce((sum, c) => sum + c.costUsd, 0);
       expect(total).toBeGreaterThan(0);
-      const detail = await toDetail(server.deps, await fresh(opened.id));
+      const detail = await toDetail(server.deps, await fresh(opened.id), {
+        workspaceId,
+        userId: ana.user.id,
+      });
       expect(detail.spentUsd).toBeCloseTo(Math.round(total * 10_000) / 10_000, 4);
     },
     SERVER_TEST_MS,

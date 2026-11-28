@@ -5,7 +5,7 @@
 // settings, members' roles and storage, the inbox and its preferences, agents and their runs,
 // sessions by cookie, the server's side of the real-time
 // socket, and a way to force any state (an error, a held answer, a busy server, an ended session,
-// a dropped connection). The Drive and the search live in `fake-files.ts`, bases in `fake-bases.ts`, the wiki in `fake-wiki.ts`, the agents' team, profile, lab and skills in `fake-agents.ts`, their memory and identity in `fake-agent-access.ts`, runners and pairing in `fake-runners.ts`. It is never part of the
+// a dropped connection). The Drive and the search live in `fake-files.ts`, bases in `fake-bases.ts`, the wiki in `fake-wiki.ts`, the agents' team, profile, lab and skills in `fake-agents.ts`, their memory and identity in `fake-agent-access.ts`, runners and pairing in `fake-runners.ts`, issues in `fake-work.ts`. It is never part of the
 // production build.
 import { endpoints, type FetchLike, type MethodName, type SocketLike } from "@vanr/client";
 import { type FakeServer as ClientFake, createFakeServer, FakeSocket } from "@vanr/client/testing";
@@ -16,10 +16,12 @@ import { AUTH_ROUTES, type AuthMethod } from "../src/api/auth.ts";
 import { FakeAgentAccess } from "./fake-agent-access.ts";
 import { FakeAgents } from "./fake-agents.ts";
 import { FakeBases } from "./fake-bases.ts";
+import { FakeChat } from "./fake-chat.ts";
 import { FakeControl } from "./fake-control.ts";
 import { FakeFiles } from "./fake-files.ts";
 import { FakeRunners } from "./fake-runners.ts";
 import { FakeWiki } from "./fake-wiki.ts";
+import { FakeWork } from "./fake-work.ts";
 
 /** Any operation the web calls: one of the client's, or one of the sign-in service's. */
 export type FakeMethod = MethodName | AuthMethod;
@@ -290,8 +292,10 @@ export class FakeServer {
   readonly wiki: FakeWiki;
   readonly control: FakeControl;
   readonly agentWork: FakeAgents;
+  readonly chat: FakeChat;
   readonly agentAccess: FakeAgentAccess;
   readonly runnerWork: FakeRunners;
+  readonly work: FakeWork;
   private readonly fileOperations: ReturnType<FakeFiles["operations"]>;
   private readonly accounts = new Map<string, Account>();
   private readonly now: () => Date;
@@ -357,6 +361,20 @@ export class FakeServer {
       },
       evals: () => this.control.evals,
     });
+    this.chat = new FakeChat({
+      ...host,
+      channels: () => this.state.channels,
+      people: (workspaceId) => this.state.members.filter((member) => member.workspaceId === workspaceId),
+      agents: (workspaceId) => this.agents.filter((candidate) => candidate.workspaceId === workspaceId),
+      dms: (workspaceId) => {
+        let list = this.dms.get(workspaceId);
+        if (list === undefined) {
+          list = [];
+          this.dms.set(workspaceId, list);
+        }
+        return list;
+      },
+    });
     this.agentAccess = new FakeAgentAccess({
       ...host,
       agents: () => this.agents,
@@ -375,8 +393,20 @@ export class FakeServer {
       roles: (userId) =>
         this.state.members.filter((member) => member.userId === userId).map((member) => member.role),
     });
+    this.work = new FakeWork({
+      ...host,
+      agents: (workspaceId) => this.agents.filter((candidate) => candidate.workspaceId === workspaceId),
+      readsChannel: (userId, channelId) => {
+        const channel = this.state.channels.find((candidate) => candidate.id === channelId);
+        return (
+          channel !== undefined && (channel.visibility === "public" || channel.memberIds.includes(userId))
+        );
+      },
+    });
     this.fileOperations = {
+      ...this.chat.operations(),
       ...this.files.operations(),
+      ...this.work.operations(),
       ...this.bases.operations(),
       ...this.wiki.operations(),
       ...this.control.operations(),
@@ -419,6 +449,7 @@ export class FakeServer {
     this.agentWork.clear();
     this.agentAccess.clear();
     this.runnerWork.clear();
+    this.work.clear();
     if (name === "empty") return;
     const inDays = (days: number) => new Date(this.now().getTime() + days * DAY_MS);
     const people: [string, string, string][] = [
@@ -500,6 +531,7 @@ export class FakeServer {
       run("agt_ledger", "workspace_birchwood", "Reconciling the October invoices"),
     ];
     this.control.seed();
+    this.work.seed();
     const invitation = (
       token: string,
       address: string | null,
@@ -713,6 +745,7 @@ export class FakeServer {
     this.storage.clear();
     this.notifications = [];
     this.dms.clear();
+    this.chat.runs = [];
     this.notificationSettings.clear();
     this.approvals.clear();
     this.accounts.clear();
@@ -832,6 +865,14 @@ export class FakeServer {
 
   private dropSocket(socket: ServedSocket, code: number): void {
     if (this.sockets.delete(socket)) socket.drop(code);
+  }
+
+  /** The server stops a person's subscription to a channel, as when they are taken out of it. */
+  dropFromChannel(userId: string, channelId: string): void {
+    for (const socket of this.sockets) {
+      if (socket.userId !== userId || !socket.channels.delete(channelId)) continue;
+      socket.push({ type: "unsubscribed", channelId });
+    }
   }
 
   /** Sends an event to everyone in a workspace, or to the followers of one channel. */
@@ -1278,7 +1319,12 @@ export class FakeServer {
     getDms: (params, session) => {
       const scope = this.scope(params, session);
       if ("status" in scope) return scope;
-      return reply(200, { dms: this.dms.get(scope.workspaceId) ?? [] });
+      // Only the caller's: a direct message whose channel is known lists for its members alone.
+      const mine = (this.dms.get(scope.workspaceId) ?? []).filter((dm) => {
+        const channel = this.state.channels.find((candidate) => candidate.id === dm.channelId);
+        return channel === undefined || channel.memberIds.includes(scope.user.id);
+      });
+      return reply(200, { dms: mine });
     },
     getInvitation: (params, session) => {
       const body = Bodies.invitation.safeParse(params);
