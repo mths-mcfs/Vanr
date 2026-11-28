@@ -17,6 +17,7 @@ import { estimateUsd, utf8Bytes } from "@vanr/engine/usage";
 import { and, desc, eq, inArray, isNotNull } from "drizzle-orm";
 import type { AgentRow } from "./agents";
 import { MAX_ROUNDS, synthesisPrompt, TRANSCRIPT_CHARS, TURN_EXTRA_CHARS, turnPrompt } from "./debates";
+import { readableRuns } from "./run-access";
 
 const { agents, routineExecutions, runs } = schema;
 
@@ -79,13 +80,26 @@ export async function speakerAgents(
   return unique.flatMap((id) => rows.filter((r) => r.id === id && !r.archivedAt));
 }
 
-/** What the routine's latest executions cost (the sum of each run's ledger), from the newest to the oldest. */
-export async function recentRoutineCosts(db: Db, routineId: string): Promise<number[]> {
+/**
+ * What the routine's latest executions cost (the sum of each run's ledger), from the newest to the oldest. Only the
+ * runs the person sees count (`readableRuns`): a run in a channel they can't read doesn't show through its cost.
+ */
+export async function recentRoutineCosts(
+  db: Db,
+  routineId: string,
+  viewer: { workspaceId: string; userId: string },
+): Promise<number[]> {
   const rows = await db
     .select({ cost: runs.costUsd })
     .from(routineExecutions)
     .innerJoin(runs, eq(runs.id, routineExecutions.runId))
-    .where(and(eq(routineExecutions.routineId, routineId), isNotNull(routineExecutions.runId)))
+    .where(
+      and(
+        eq(routineExecutions.routineId, routineId),
+        isNotNull(routineExecutions.runId),
+        readableRuns(db, viewer),
+      ),
+    )
     .orderBy(desc(routineExecutions.at))
     .limit(RECENT_RUNS);
   return rows.map((r) => Number(r.cost ?? 0));

@@ -14,7 +14,7 @@
 // and the job on the runner carries an id derived from the key, which the runner rejects when repeated.
 
 import { DBOS } from "@dbos-inc/dbos-sdk";
-import type { AssignmentLimitKind, AssignmentUsage, AssignmentWaitReason } from "@vanr/contract";
+import type { AssignmentLimitKind, AssignmentWaitReason } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { and, eq, gt, inArray, isNotNull, isNull, lt, max, ne, sql } from "drizzle-orm";
@@ -24,7 +24,7 @@ import { launchDurable } from "../durable";
 import { HttpError } from "../http";
 import { log } from "../logger";
 import { postMessage } from "../messages";
-import { assignmentUsage, ceilingState, type LimitKind } from "./budget";
+import { assignmentUsage, ceilingState, type LimitKind, type MeasuredUsage } from "./budget";
 import { type AssignmentRow, agentOf, agentSays, isClosed, moveAssignment, publishAssignment } from "./core";
 import {
   announceCommand,
@@ -117,7 +117,7 @@ export interface Snapshot {
   executor: AssignmentRow["executor"];
   ceiling: AssignmentRow["ceiling"];
   limits: AssignmentLimits;
-  usage: Pick<AssignmentUsage, LimitKind>;
+  usage: Pick<MeasuredUsage, LimitKind>;
   dueAt: Date | null;
   wakeAt: Date | null;
   items: SnapItem[];

@@ -13,16 +13,17 @@ export interface Run {
   id: string;
   agentId: string;
   blockedRepo: string | null;
-  cachedTokens: number;
+  /** Spend: null without view_usage (also the tokens). */
+  cachedTokens: number | null;
   channelId: string | null;
-  costUsd: number;
+  costUsd: number | null;
   createdAt: string;
   error: string | null;
   errorCode: string | null;
   errorVars: Record<string, string | number> | null;
   finishedAt: string | null;
-  inputTokens: number;
-  outputTokens: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
   repo: string | null;
   sourceMessageId: string | null;
   status: RunStatus;

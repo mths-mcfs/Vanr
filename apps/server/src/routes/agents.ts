@@ -41,6 +41,7 @@ import {
   requireActiveAgent,
   requireAgentEditor,
   requireCredential,
+  seesSpend,
   toAgent,
   toAgentDetail,
 } from "../agents";
@@ -246,7 +247,8 @@ async function busyFor(deps: AppDeps, me: WorkspaceMember): Promise<Set<string>>
   return new Set(active.filter((a) => shown.has(a.runId)).map((a) => a.agentId));
 }
 
-export function toRun(row: typeof runs.$inferSelect): Run {
+/** A run as the person reads it: its spend (cost and tokens) only with view_usage (`seesSpend`). */
+export function toRun(row: typeof runs.$inferSelect, sees: boolean): Run {
   return {
     id: row.id,
     agentId: row.agentId,
@@ -261,10 +263,10 @@ export function toRun(row: typeof runs.$inferSelect): Run {
     error: row.error,
     errorCode: row.errorCode,
     errorVars: row.errorVars ?? null,
-    inputTokens: row.inputTokens,
-    cachedTokens: row.cachedTokens,
-    outputTokens: row.outputTokens,
-    costUsd: row.costUsd,
+    inputTokens: sees ? row.inputTokens : null,
+    cachedTokens: sees ? row.cachedTokens : null,
+    outputTokens: sees ? row.outputTokens : null,
+    costUsd: sees ? row.costUsd : null,
     sourceMessageId: row.sourceMessageId,
   };
 }
@@ -399,7 +401,7 @@ export function registerAgents(app: Hono<AppEnv>) {
     return c.json(
       await toAgentDetail(db, row, {
         viewer: channelViewer(me),
-        seesUsage: can(me.role, "view_usage"),
+        seesUsage: seesSpend(me),
         busy: (await busyFor(deps, me)).has(row.id),
         testModel: (await deps.testModelFor(me.workspaceId))(row),
         now: now(),
@@ -760,7 +762,8 @@ export function registerAgents(app: Hono<AppEnv>) {
       .where(and(readableRuns(db, me), q.agentId ? eq(runs.agentId, q.agentId) : undefined))
       .orderBy(desc(runs.createdAt), desc(runs.id))
       .limit(q.limit);
-    return c.json({ runs: rows.map(toRun) });
+    const sees = seesSpend(me);
+    return c.json({ runs: rows.map((r) => toRun(r, sees)) });
   });
 
   app.get(`${WORKSPACE}/runs/:runId`, async (c) => {
@@ -773,7 +776,7 @@ export function registerAgents(app: Hono<AppEnv>) {
       .where(eq(runEvents.runId, row.id))
       .orderBy(asc(runEvents.seq));
     return c.json({
-      run: toRun(row),
+      run: toRun(row, seesSpend(me)),
       steps: steps.map(
         (s): RunStep => ({ seq: s.seq, kind: s.kind, createdAt: s.createdAt.toISOString(), data: s.data }),
       ),

@@ -41,7 +41,14 @@ import { PRODUCT } from "@vanr/product";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import { failInterruptedAgentJobs } from "../agent-lab";
 import { memoryPrompt } from "../agent-memory";
-import { type AgentRow, agentBudgetScope, agentNames, monthKey, workspaceBudgetDefaults } from "../agents";
+import {
+  type AgentRow,
+  agentBudgetScope,
+  agentNames,
+  monthKey,
+  seesSpend,
+  workspaceBudgetDefaults,
+} from "../agents";
 import { assignmentOfRun } from "../assignments/budget";
 import { publishAssignment } from "../assignments/core";
 import { assignmentPrompt, assignmentRouting } from "../assignments/tools";
@@ -2665,7 +2672,9 @@ export class AgentRuntime implements RuntimePort {
       .update(agents)
       .set({ budgetNotice: `${kind}:${month}` })
       .where(eq(agents.id, agent.id));
-    // The amounts follow view_usage, as GET /usage: an owner without it hears only that the budget was reached.
+    // The spend follows view_usage, as GET /usage: an owner without it hears only that the budget ran out, with no
+    // amounts. The 80% notice doesn't reach them at all (it alone tells how much went), as on the channel's side.
+    if (kind === "warning" && !sees) return;
     hub.toUser(agent.workspaceId, agent.ownerUserId, {
       type: kind === "exhausted" ? "budget.cap_reached" : "budget.threshold_reached",
       agentId: agent.id,
@@ -2746,7 +2755,7 @@ export class AgentRuntime implements RuntimePort {
       .select({ role: members.role })
       .from(members)
       .where(and(eq(members.workspaceId, workspaceId), eq(members.userId, userId)));
-    return !!member && can(member.role, "view_usage");
+    return !!member && seesSpend(member);
   }
 
   // ---- sweep ----

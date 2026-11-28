@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { eq } from "drizzle-orm";
+import { createAssignment } from "../src/assignments/engine";
 import { queueMemoryReview } from "../src/memory-reviews";
 import { revalidateInterventions } from "../src/runners/requests";
 import type { RunningServer } from "../src/server";
@@ -823,7 +824,144 @@ describe("spend outside the usage page", () => {
   );
 
   test(
-    "D2: the agent's budget notice reaches an owner without view_usage with no amounts",
+    "D4: a run's cost and tokens are null without view_usage, in the list and the detail",
+    async () => {
+      const t = await team();
+      const id = newId("run");
+      await server.deps.db.insert(schema.runs).values({
+        id,
+        workspaceId: t.workspaceId,
+        agentId: t.lia.id,
+        channelId: t.general,
+        status: "done",
+        model: "claude-haiku-5-5",
+        costUsd: 2,
+        inputTokens: 10,
+        cachedTokens: 3,
+        outputTokens: 5,
+      });
+      const spend = (run: Record<string, unknown>) => [
+        run.costUsd,
+        run.inputTokens,
+        run.cachedTokens,
+        run.outputTokens,
+      ];
+      const listed = async (who: Person) =>
+        (await call(who, "GET", `${t.w}/runs?agentId=${t.lia.id}`)).body.runs.find(
+          (r: { id: string }) => r.id === id,
+        );
+      expect(spend(await listed(t.beto))).toEqual([null, null, null, null]);
+      expect(spend((await call(t.beto, "GET", `${t.w}/runs/${id}`)).body.run)).toEqual([
+        null,
+        null,
+        null,
+        null,
+      ]);
+      expect(spend(await listed(t.carla))).toEqual([2, 10, 3, 5]);
+      expect(spend((await call(t.carla, "GET", `${t.w}/runs/${id}`)).body.run)).toEqual([2, 10, 3, 5]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "D5: a debate's spend is null without view_usage",
+    async () => {
+      const t = await team();
+      const debateId = newId("dbt");
+      await server.deps.db.insert(schema.debates).values({
+        id: debateId,
+        workspaceId: t.workspaceId,
+        title: "Price",
+        goal: "Pick the price",
+        channelId: t.general,
+        createdBy: { type: "person", id: t.ana.user.id },
+      });
+      const beto = await call(t.beto, "GET", `${t.w}/debates/${debateId}`);
+      expect([beto.status, beto.body.spentUsd]).toEqual([200, null]);
+      expect(typeof (await call(t.carla, "GET", `${t.w}/debates/${debateId}`)).body.spentUsd).toBe("number");
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "D6: an assignment's dollars are null without view_usage; its minutes and steps stay",
+    async () => {
+      const t = await team();
+      const row = await createAssignment(server.deps, {
+        workspaceId: t.workspaceId,
+        agentId: t.lia.id,
+        agentHandle: t.lia.handle,
+        channelId: t.general,
+        ownerId: t.beto.user.id,
+        title: "Fix the flaky test",
+        goal: "The suite passes ten times in a row",
+        executor: "agent",
+        runnerId: null,
+        commandPolicy: "never",
+      });
+      const usage = async (who: Person) =>
+        (await call(who, "GET", `${t.w}/assignments/${row.id}`)).body.usage;
+      expect(await usage(t.beto)).toMatchObject({ dollars: null, minutes: 0, steps: 0 });
+      expect(await usage(t.carla)).toMatchObject({ dollars: 0, minutes: 0, steps: 0 });
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "D7: a routine's recent cost is null without view_usage, and counts only the runs the person sees",
+    async () => {
+      const t = await team();
+      const secret = await seedChannel(server, t.workspaceId, {
+        name: `secret-${seq}`,
+        visibility: "private",
+        members: [t.beto],
+      });
+      const routineId = newId("rtn");
+      await server.deps.db.insert(schema.routines).values({
+        id: routineId,
+        workspaceId: t.workspaceId,
+        name: "Digest",
+        prompt: "Sum up the day",
+        agentId: t.lia.id,
+        target: { kind: "channel", channelId: t.general },
+        trigger: { kind: "webhook" },
+        createdBy: t.carla.user.id,
+      });
+      // One run in #general, and one from when the routine pointed at a private channel Carla isn't in.
+      for (const [channelId, cost] of [
+        [t.general, 1],
+        [secret, 5],
+      ] as const) {
+        const runId = newId("run");
+        await server.deps.db.insert(schema.runs).values({
+          id: runId,
+          workspaceId: t.workspaceId,
+          agentId: t.lia.id,
+          channelId,
+          status: "done",
+          model: "claude-haiku-5-5",
+          costUsd: cost,
+        });
+        await server.deps.db.insert(schema.routineExecutions).values({
+          id: newId("rrun"),
+          routineId,
+          at: new Date(),
+          status: "ok",
+          trigger: "webhook",
+          runId,
+          channelId,
+        });
+      }
+      const estimate = (who: Person) => call(who, "GET", `${t.w}/routines/${routineId}/estimate`);
+      expect((await estimate(t.carla)).body.recent).toEqual({ runs: 1, avgUsd: 1, maxUsd: 1 });
+      const beto = await estimate(t.beto);
+      expect([beto.status, beto.body.recent]).toEqual([200, null]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "D2: the agent's budget notice reaches an owner without view_usage only when it runs out, with no amounts",
     async () => {
       const sent: { userId: string; event: Record<string, unknown> }[] = [];
       const { hub } = server.deps;
@@ -834,14 +972,17 @@ describe("spend outside the usage page", () => {
       };
       try {
         const t = await team();
-        const notify = (agentId: string) => {
-          const [agent] = [agentId];
-          return server.deps.db
+        const notify = (agentId: string, kind: "warning" | "exhausted" = "exhausted") =>
+          server.deps.db
             .select()
             .from(schema.agents)
-            .where(eq(schema.agents.id, agent as string))
-            .then(([row]) => server.runtime["notifyBudget"](row as never, "exhausted", 12, 10));
-        };
+            .where(eq(schema.agents.id, agentId))
+            .then(([row]) =>
+              server.runtime["notifyBudget"](row as never, kind, kind === "warning" ? 8.5 : 12, 10),
+            );
+        // The 80% notice alone tells how much went: it doesn't reach Beto.
+        await notify(t.lia.id, "warning");
+        expect(sent.filter((s) => s.userId === t.beto.user.id)).toEqual([]);
         await notify(t.lia.id);
         expect(sent.find((s) => s.userId === t.beto.user.id)?.event).toMatchObject({
           type: "budget.cap_reached",
@@ -850,8 +991,14 @@ describe("spend outside the usage page", () => {
           budgetUsd: null,
         });
         const owned = await seedAgent(server, t.workspaceId, t.carla, "max");
-        await notify(owned.id);
+        await notify(owned.id, "warning");
         expect(sent.find((s) => s.userId === t.carla.user.id)?.event).toMatchObject({
+          type: "budget.threshold_reached",
+          spentUsd: 8.5,
+          budgetUsd: 10,
+        });
+        await notify(owned.id);
+        expect(sent.findLast((s) => s.userId === t.carla.user.id)?.event).toMatchObject({
           type: "budget.cap_reached",
           spentUsd: 12,
           budgetUsd: 10,

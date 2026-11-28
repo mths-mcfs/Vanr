@@ -52,11 +52,14 @@ export async function assignmentOfRun(
   return { assignmentId: row.id, scope: assignmentScope(row) };
 }
 
+/** The usage as measured: the dollars are always there (the API nulls them for whoever lacks view_usage). */
+export type MeasuredUsage = AssignmentUsage & { dollars: number };
+
 /** Usage so far: USD in the ledger, minutes of the jobs on the runner and steps the engine sent. */
 export async function assignmentUsage(
   deps: Pick<AppDeps, "db" | "ledger" | "now">,
   row: { id: string; limits: AssignmentLimits },
-): Promise<AssignmentUsage> {
+): Promise<MeasuredUsage> {
   const now = deps.now();
   const spentUsd = await deps.ledger.spent(
     { kind: "assignment", id: row.id, limitUsd: Number.MAX_SAFE_INTEGER, period: "total" },
@@ -86,7 +89,7 @@ export async function assignmentUsage(
 }
 
 /** Which cap is already hit (in order: USD, minutes, steps) and which ones passed the warning. */
-export function ceilingState(limits: AssignmentLimits, usage: Pick<AssignmentUsage, LimitKind>) {
+export function ceilingState(limits: AssignmentLimits, usage: Pick<MeasuredUsage, LimitKind>) {
   let hit: LimitKind | null = null;
   const warn: LimitKind[] = [];
   for (const k of LIMIT_KINDS) {

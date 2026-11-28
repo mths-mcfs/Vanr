@@ -43,10 +43,10 @@ import type { BudgetScope } from "@vanr/engine/usage";
 import { PRODUCT } from "@vanr/product";
 import { and, asc, eq, inArray, isNull, lte, or, type SQL, sql } from "drizzle-orm";
 import { z } from "zod";
-import { type AgentRow, agentBudgetScope } from "./agents";
+import { type AgentRow, agentBudgetScope, seesSpend } from "./agents";
 import { canReadChannel, channelInWorkspace, isChannelMember, readableChannelsSql } from "./channels";
 import { type ClaimOutput, claim, forget, release, settle } from "./claims";
-import type { AppDeps, CompleteResult } from "./context";
+import type { AppDeps, CompleteResult, WorkspaceMember } from "./context";
 import { notFound } from "./http";
 import { type IssueViewer, visibleIssuesSql } from "./issues";
 import { log } from "./logger";
@@ -374,7 +374,11 @@ const roundMajority = (
 };
 
 /** The debate as the person reads it: its linked issues only as far as they see them (`visibleIssuesSql`). */
-export async function toDetail(deps: AppDeps, row: DebateRow, viewer: IssueViewer): Promise<DebateDetail> {
+export async function toDetail(
+  deps: AppDeps,
+  row: DebateRow,
+  viewer: IssueViewer & Pick<WorkspaceMember, "role">,
+): Promise<DebateDetail> {
   const { db } = deps;
   const posts = await postsOf(db, row.id);
   const rounds = new Map<number, string[]>();
@@ -411,7 +415,7 @@ export async function toDetail(deps: AppDeps, row: DebateRow, viewer: IssueViewe
     synthesis: synthesisOf(row),
     issues: linked.sort((a, b) => a.number - b.number),
     sealedCount: hidden?.n ?? 0,
-    spentUsd: Math.round((await debateSpent(deps, row)) * 10_000) / 10_000,
+    spentUsd: seesSpend(viewer) ? Math.round((await debateSpent(deps, row)) * 10_000) / 10_000 : null,
   };
 }
 

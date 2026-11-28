@@ -135,7 +135,7 @@ function waitingRuntime(liveAgentId: string) {
       lastPingAt: new Date().toISOString(),
       sourceMessageId: "msg",
       initiatedBy: null,
-      browser: null,
+      browser: false,
     },
   ];
   rt.cancel = (runId) => {
@@ -348,7 +348,7 @@ describe("what reaches an archived agent another way", () => {
         .returning();
       if (!active) throw new Error("assignment not activated");
       await t.archive();
-      await expect(startAssignmentJob(server.deps, active, {})).rejects.toMatchObject({
+      await expect(startAssignmentJob(server.deps, active, { extra: "" })).rejects.toMatchObject({
         code: "agent.archived",
       });
       const res = await call(t.ana, "POST", `${t.w}/assignments`, {
