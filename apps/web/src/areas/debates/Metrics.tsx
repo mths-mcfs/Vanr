@@ -5,7 +5,7 @@ import { useApiQuery } from "@vanr/client/react";
 import { Button, Callout } from "@vanr/ui";
 import { useState } from "react";
 import { useErrorMessage } from "../../app/screens.tsx";
-import { useMessages } from "../../i18n/react.tsx";
+import { useLocale, useMessages } from "../../i18n/react.tsx";
 import { useMoney, useSeesSpend } from "./shared.tsx";
 
 const DAYS = 90;
@@ -26,6 +26,8 @@ function MetricsBody({ workspaceId }: { workspaceId: string }) {
   const common = useMessages("common");
   const describe = useErrorMessage("debates");
   const money = useMoney();
+  const { locale } = useLocale();
+  const count = new Intl.NumberFormat(locale);
   const seesSpend = useSeesSpend(workspaceId);
   const metrics = useApiQuery("listDebateMetrics", { workspaceId, query: { days: DAYS } });
   if (metrics.isPending)
@@ -47,9 +49,9 @@ function MetricsBody({ workspaceId }: { workspaceId: string }) {
   // Spend comes only to who may see it; the number is shown only to them, and never as zero by default.
   const cost = seesSpend ? money(m.meanCostUsd) : null;
   const figures: { key: string; label: string; value: string; long?: true }[] = [
-    { key: "settled", label: t("metrics.settled"), value: String(m.settled) },
-    { key: "accepted", label: t("metrics.accepted"), value: String(m.accepted) },
-    { key: "reverted", label: t("metrics.reverted"), value: String(m.reverted30) },
+    { key: "settled", label: t("metrics.settled"), value: count.format(m.settled) },
+    { key: "accepted", label: t("metrics.accepted"), value: count.format(m.accepted) },
+    { key: "reverted", label: t("metrics.reverted"), value: count.format(m.reverted30) },
     {
       key: "moved",
       label: t("metrics.moved"),

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { chooseOption, newServer, renderApp } from "../../../test/app.tsx";
 import { optionsFit, optionsOf } from "./NewDebate.tsx";
 import { usdText } from "./shared.tsx";
@@ -102,6 +102,27 @@ describe("the debates", () => {
     await asMember.user.click(await screen.findByText("How debates went in the last 90 days"));
     await screen.findByText("Verdict accepted");
     expect(screen.queryByText("Average cost per debate") === null).toBe(true);
+  });
+
+  test("the numbers are written in the person's language, and count what moved", async () => {
+    const server = newServer();
+    const logo = server.debates.debates.find((row) => row.id === "deb_logo");
+    if (logo === undefined) throw new Error("the seed has no logo debate");
+    logo.posts = [
+      server.debates.post("pst_a", 1, { type: "agent", id: "agt_ledger" }, "B", "Convinced.", {
+        ...server.debates.claim("Round mark", 0.7),
+        changed: true,
+      }),
+    ];
+    for (let n = 0; n < 1233; n++)
+      server.debates.debates.push(
+        server.debates.make(WORKSPACE, { id: `deb_old${n}`, title: `Old ${n}`, status: "done", phase: null }),
+      );
+    const app = await renderApp({ path: LIST, signedInAs: "usr_ana", server });
+    await app.user.click(await screen.findByText("How debates went in the last 90 days"));
+    const settled = await screen.findByText("Concluded", { selector: "dt" });
+    expect(settled.nextElementSibling?.textContent).toBe("1,234");
+    expect(screen.getByText("1 of 1 challenged")).toBeDefined();
   });
 
   test("the numbers that did not load say so and load on retry", async () => {
@@ -218,7 +239,8 @@ describe("starting a debate", () => {
 
   test("a refused start stays in the form with the server's reason", async () => {
     const server = newServer();
-    server.force("createDebate", { kind: "error", status: 403, code: "agent.personal_plan" }, 1);
+    // Scout runs on Jonas's personal plan: only Jonas can seat it.
+    server.debates.planOwners.set("agt_scout", "usr_jonas");
     const app = await renderApp({ path: LIST, signedInAs: "usr_ana", server });
     await app.user.click(await screen.findByRole("button", { name: "Start a debate" }));
     const dialog = within(await screen.findByRole("dialog", { name: "Start a debate" }));
@@ -231,6 +253,23 @@ describe("starting a debate", () => {
       ),
     ).toBeDefined();
     expect(dialog.getByRole("textbox", { name: /^Question/ })).toBeDefined();
+    expect(server.debates.debates.some((row) => row.title === "Which printer first?")).toBe(false);
+  });
+
+  test("two clicks on Start before the screen redraws open one debate", async () => {
+    const app = await renderApp({ path: LIST, signedInAs: "usr_ana" });
+    await app.user.click(await screen.findByRole("button", { name: "Start a debate" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "Start a debate" }));
+    await app.user.type(dialog.getByRole("textbox", { name: /^Question/ }), "Which printer first?");
+    await app.user.click(await dialog.findByRole("checkbox", { name: "Scout" }));
+    const start = dialog.getByRole("button", { name: "Start" });
+    // Both in the same tick: the button's pending state has not reached the screen yet.
+    await act(async () => {
+      fireEvent.click(start);
+      fireEvent.click(start);
+    });
+    await waitFor(() => expect(app.address().startsWith(`/workspace/${WORKSPACE}/debates/deb`)).toBe(true));
+    expect(app.server.calls.filter((call) => call.method === "createDebate").length).toBe(1);
   });
 
   test("no agent to seat: the form says why, and archived agents are never offered", async () => {
@@ -268,6 +307,9 @@ describe("starting a debate", () => {
     expect(optionsFit(["Yes", "a".repeat(200)])).toBe(true);
     expect(optionsFit([])).toBe(true);
     expect(optionsFit(["Yes"])).toBe(false);
+    // Counted as the server counts, in characters: an emoji is one, never half of one.
+    expect(optionsFit(["Yes", `${"a".repeat(199)}😀😀`])).toBe(false);
+    expect(optionsFit(["Yes", "😀".repeat(150)])).toBe(true);
   });
 
   test("a new table's cost never shows the last table's figure while it loads", async () => {
@@ -283,5 +325,66 @@ describe("starting a debate", () => {
     expect(dialog.queryByText("At most 3 model calls, up to $0.1275") === null).toBe(true);
     held.release();
     expect(await dialog.findByText("At most 5 model calls, up to $0.2125")).toBeDefined();
+  });
+});
+
+describe("the fake follows the server", () => {
+  const server = newServer();
+  const ops = server.debates.operations();
+  const as = (userId: string) => server.sessionFor(userId);
+  /** Calls one of the fake's operations directly, as the person. */
+  const call = (name: string, params: Record<string, unknown>, userId = "usr_ana") => {
+    const operation = ops[name];
+    if (operation === undefined) throw new Error(`the fake has no ${name}`);
+    return operation({ workspaceId: WORKSPACE, ...params }, as(userId));
+  };
+  const open = (body: Record<string, unknown>, userId = "usr_ana") =>
+    call("createDebate", { title: "Q", goal: "G", agentIds: ["agt_scout"], ...body }, userId);
+
+  test("a speaker who isn't an agent or member of the workspace is refused", () => {
+    expect(open({ speakers: [{ type: "agent", id: "agt_fjell" }] }).status).toBe(404);
+    expect(open({ speakers: [{ type: "person", id: "usr_noor" }] }).status).toBe(404);
+  });
+
+  test("a debate from an issue of a private channel stays in that channel", () => {
+    server.state.channels.push({
+      id: "ch_back",
+      workspaceId: WORKSPACE,
+      name: "back-office",
+      topic: "",
+      isGeneral: false,
+      visibility: "private",
+      budgetPerMonthUsd: null,
+      createdAt: "2026-11-01T00:00:00.000Z",
+      memberIds: ["usr_ana"],
+    });
+    const issue = server.work.issues[0];
+    if (issue === undefined) throw new Error("the seed has no issue");
+    issue.channelId = "ch_back";
+    const made = open({ sourceIssueId: issue.id });
+    expect(made.status).toBe(201);
+    expect((made.body as { channelId: string }).channelId).toBe("ch_back");
+    expect(open({ sourceIssueId: issue.id, channelId: "ch_general" }).status).toBe(400);
+    // Someone who doesn't read the channel can't open a debate from its issue.
+    expect(open({ sourceIssueId: issue.id }, "usr_iris").status).toBe(404);
+  });
+
+  test("an archived agent adds nothing to the estimate", () => {
+    const ledger = server.agents.find((agent) => agent.id === "agt_ledger");
+    if (ledger === undefined) throw new Error("the seed has no Ledger");
+    ledger.archivedAt = "2026-11-01T00:00:00.000Z";
+    const answer = call("estimateDebate", { agentIds: "agt_scout,agt_ledger", rounds: "1" });
+    expect((answer.body as { calls: number }).calls).toBe(3);
+  });
+
+  test("spend goes only to who may see usage", () => {
+    const read = (userId: string) =>
+      (call("getDebate", { debateId: "deb_logo" }, userId).body as { spentUsd: number | null }).spentUsd;
+    expect(read("usr_ana")).toBe(0.0123);
+    expect(read("usr_iris")).toBe(null);
+    const mean = (userId: string) =>
+      (call("listDebateMetrics", { days: "90" }, userId).body as { meanCostUsd: number | null }).meanCostUsd;
+    expect(mean("usr_iris")).toBe(null);
+    expect(typeof mean("usr_ana")).toBe("number");
   });
 });

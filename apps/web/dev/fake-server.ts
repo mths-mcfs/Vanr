@@ -445,6 +445,26 @@ export class FakeServer {
         );
       },
       isMember: (workspaceId, userId) => this.memberOf(workspaceId, userId) !== undefined,
+      issue: (workspaceId, userId, issueId) => {
+        const issue = this.work.issues.find(
+          (each) => each.id === issueId && each.workspaceId === workspaceId,
+        );
+        if (issue === undefined) return undefined;
+        const channel =
+          issue.channelId === null
+            ? undefined
+            : this.state.channels.find((candidate) => candidate.id === issue.channelId);
+        if (
+          issue.channelId !== null &&
+          (channel === undefined || !(channel.visibility === "public" || channel.memberIds.includes(userId)))
+        )
+          return undefined;
+        return {
+          number: issue.number,
+          channelId: issue.channelId,
+          publicChannel: channel?.visibility === "public",
+        };
+      },
     });
     this.fileOperations = {
       ...this.chat.operations(),

@@ -4,7 +4,7 @@
 import { useApiQuery } from "@vanr/client/react";
 import { type ActorRef, can, type Debate, type DebateSpeaker } from "@vanr/contract";
 import type { WorkStatus } from "@vanr/ui";
-import { useMemo } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import { useLocale, useMessages } from "../../i18n/react.tsx";
 import { useSession } from "../../session/react.tsx";
 
@@ -85,6 +85,24 @@ export function useMe(workspaceId: string): { id: string; role: Parameters<typeo
 /** Whether the person may see what things cost. The server decides; this only hides. */
 export function useSeesSpend(workspaceId: string): boolean {
   return can(useMe(workspaceId).role, "view_usage");
+}
+
+/** Characters as the server counts them: code points, so an emoji is one. */
+export const charCount = (text: string) => [...text].length;
+
+/**
+ * A latch for an action that must start once: a second click before the screen redraws (when a pending
+ * flag would disable the button) is dropped. `start` gets `done`, to call when the request settles.
+ */
+export function useOnce(): (start: (done: () => void) => void) => void {
+  const busy = useRef(false);
+  return useCallback((start) => {
+    if (busy.current) return;
+    busy.current = true;
+    start(() => {
+      busy.current = false;
+    });
+  }, []);
 }
 
 /** A sum of money in dollars, or null when the server sent none (the person may not see it). */

@@ -28,6 +28,7 @@ import {
   AGENTS_MAX,
   CAP_MAX,
   CAP_MIN,
+  charCount,
   type Directory,
   GOAL_MAX,
   type ListState,
@@ -39,6 +40,7 @@ import {
   SEATS_MAX,
   useMe,
   useMoney,
+  useOnce,
   useSeesSpend,
 } from "./shared.tsx";
 
@@ -57,7 +59,7 @@ export const optionsFit = (options: readonly string[]) =>
   options.length === 0 ||
   (options.length >= OPTIONS_MIN &&
     options.length <= OPTIONS_MAX &&
-    options.every((option) => option.length <= OPTION_MAX));
+    options.every((option) => charCount(option) <= OPTION_MAX));
 
 /** Toggles an id in a picking order: added at the end, or taken out. */
 const toggle = (list: readonly string[], id: string, on: boolean) =>
@@ -81,6 +83,7 @@ export function NewDebateDialog({
   const me = useMe(workspaceId);
   const seesSpend = useSeesSpend(workspaceId);
   const money = useMoney();
+  const once = useOnce();
 
   const [question, setQuestion] = useState("");
   const [goal, setGoal] = useState("");
@@ -141,15 +144,19 @@ export function NewDebateDialog({
       ...(options.length > 0 && { options }),
       ...(capValue !== null && { spendCapPercent: capValue }),
     };
-    create.mutate(
-      { workspaceId, body },
-      {
-        onSuccess: (debate) => {
-          toast.push({ tone: "success", title: t("start.started") });
-          onClose();
-          void go("debate", { workspaceId, debateId: debate.id });
+    // Two clicks before the button greys out would open two debates, each spending model calls.
+    once((done) =>
+      create.mutate(
+        { workspaceId, body },
+        {
+          onSettled: done,
+          onSuccess: (debate) => {
+            toast.push({ tone: "success", title: t("start.started") });
+            onClose();
+            void go("debate", { workspaceId, debateId: debate.id });
+          },
         },
-      },
+      ),
     );
   };
 

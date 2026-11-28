@@ -1,8 +1,11 @@
 // Debates for the fake server: the list, one debate, opening one, the estimate of what it can cost and
 // the numbers of the last days. The answers follow the server's rules: a debate of a channel the caller
 // doesn't read is one that doesn't exist (unless they take part), an agent at an open table shows only
-// by its pseudonym, and the table has 1 to 8 agents and 20 seats at most. Never part of the production build.
+// by its pseudonym, the table has 1 to 8 live agents and 20 seats at most, an agent on someone's personal
+// plan sits only at its owner's table, a debate opened from an issue of a private channel stays in that
+// channel, and spend goes only to who may see usage. Never part of the production build.
 import type * as T from "@vanr/contract";
+import { can } from "@vanr/contract";
 import type { FilesHost, FilesReply } from "./fake-files.ts";
 
 type Scope = { workspaceId: string; user: T.User; role: T.Role };
@@ -11,6 +14,12 @@ type Host = FilesHost & {
   /** Whether the person reads the channel, which must be one of this workspace. */
   readsChannel: (userId: string, channelId: string, workspaceId: string) => boolean;
   isMember: (workspaceId: string, userId: string) => boolean;
+  /** An issue the person sees, with the channel it lives in and whether that channel is public. */
+  issue: (
+    workspaceId: string,
+    userId: string,
+    issueId: string,
+  ) => { number: number; channelId: string | null; publicChannel: boolean } | undefined;
 };
 export type StoredDebate = T.DebateDetail & { workspaceId: string; spent: number };
 
@@ -24,11 +33,17 @@ const DAY_MS = 86_400_000;
 
 export class FakeDebates {
   debates: StoredDebate[] = [];
+  /** Who paired each personal-plan agent's runner, by agent id: only they can seat it. */
+  planOwners = new Map<string, string>();
+  /** Each person's blind pick, by `${debateId}/${userId}`; null once opened and not picked. */
+  picks = new Map<string, "a" | "b" | "tie" | null>();
 
   constructor(private readonly host: Host) {}
 
   clear(): void {
     this.debates = [];
+    this.planOwners = new Map();
+    this.picks = new Map();
   }
 
   seed(): void {
@@ -157,6 +172,35 @@ export class FakeDebates {
     return debate;
   }
 
+  post(
+    id: string,
+    round: number,
+    author: T.ActorRef | null,
+    pseudonym: string | null,
+    body: string,
+    claimData: T.DebateClaim | null,
+    kind: T.DebatePost["kind"] = author?.type === "person" ? "speaker" : "turn",
+  ): T.DebatePost {
+    return {
+      id,
+      author,
+      body,
+      claimData,
+      createdAt: this.host.now().toISOString(),
+      kind,
+      meta: {},
+      pseudonym,
+      replyTo: null,
+      round,
+      runId: null,
+      wantsExtraRound: false,
+    };
+  }
+
+  claim(answer: string, confidence: number | null): T.DebateClaim {
+    return { answer, key: answer.toLowerCase(), confidence, changed: false, evidence: [], reason: "" };
+  }
+
   /** The server's rule: a debate without a channel, or of a channel the person reads, or one they take part in. */
   sees(scope: Scope, row: StoredDebate): boolean {
     if (row.workspaceId !== scope.workspaceId) return false;
@@ -185,10 +229,10 @@ export class FakeDebates {
     return debate;
   }
 
-  /** The detail as the person reads it. The server sends spend to everyone today; the web hides it. */
-  detail(_scope: Scope, row: StoredDebate): T.DebateDetail {
+  /** The detail as the person reads it: spend only to who may see usage, null for everyone else. */
+  detail(scope: Scope, row: StoredDebate): T.DebateDetail {
     const { workspaceId: _workspace, spent, ...debate } = row;
-    return { ...debate, spentUsd: spent };
+    return { ...debate, spentUsd: can(scope.role, "view_usage") ? spent : null };
   }
 
   operations(): Record<string, (params: Record<string, unknown>, session: string | undefined) => FilesReply> {
@@ -214,7 +258,10 @@ export class FakeDebates {
       }),
       estimateDebate: within((scope, params) => {
         const ids = typeof params.agentIds === "string" ? params.agentIds.split(",").filter(Boolean) : [];
-        const known = this.host.agents(scope.workspaceId).filter((agent) => ids.includes(agent.id));
+        // An archived agent costs nothing: it never takes a turn.
+        const known = this.host
+          .agents(scope.workspaceId)
+          .filter((agent) => agent.archivedAt === null && ids.includes(agent.id));
         const rounds = Math.max(0, Math.min(10, Number(params.rounds ?? 3) || 0));
         const calls = known.length * (rounds + 1) + (known.length > 0 ? 1 : 0);
         return reply(200, { calls, upToUsd: Math.round(calls * 0.0425 * 10_000) / 10_000 });
@@ -225,19 +272,36 @@ export class FakeDebates {
         const done = visible(scope).filter(
           (row) => row.status === "done" && Date.parse(row.updatedAt) >= since,
         );
-        const challenged = done.filter((row) => row.roundLimit > 0);
+        // A debate counts as challenged once it had a round after the opening, and as changed when a
+        // position moved in one of them.
+        const challenged = done.filter((row) =>
+          row.posts.some((post) => post.kind === "turn" && post.round > 0),
+        );
+        const changed = challenged.filter((row) =>
+          row.posts.some((post) => post.kind === "turn" && post.claimData?.changed === true),
+        );
+        const endReasons: Partial<Record<T.DebateEndReason, number>> = {};
+        for (const row of done)
+          if (row.endReason !== null) endReasons[row.endReason] = (endReasons[row.endReason] ?? 0) + 1;
+        const blindReviews = { debate: 0, single: 0, tie: 0 };
+        for (const [key, pick] of this.picks) {
+          const row = done.find((each) => key.startsWith(`${each.id}/`));
+          // The fake shows the synthesis first, so "a" is the debate's own answer.
+          if (row !== undefined && pick !== null)
+            blindReviews[pick === "a" ? "debate" : pick === "b" ? "single" : "tie"]++;
+        }
         const cost = done.reduce((sum, row) => sum + row.spent, 0);
         const metrics: T.DebateMetrics = {
           days,
           settled: done.length,
           accepted: done.filter((row) => row.verdictState !== null).length,
           reverted30: done.filter((row) => row.verdictState?.state === "reverted").length,
-          changedDebates: 0,
+          changedDebates: changed.length,
           challenged: challenged.length,
-          endReasons: {},
-          blindReviews: { debate: 0, single: 0, tie: 0 },
-          meanCostUsd: done.length === 0 ? 0 : cost / done.length,
-          theater: false,
+          endReasons,
+          blindReviews,
+          meanCostUsd: can(scope.role, "view_usage") ? (done.length === 0 ? 0 : cost / done.length) : null,
+          theater: challenged.length >= 10 && changed.length / challenged.length < 0.1,
         };
         return reply(200, metrics);
       }),
@@ -249,11 +313,20 @@ export class FakeDebates {
         if (title === "" || title.length > 200) return invalid("The question must have 1 to 200 characters");
         if (goal === "" || goal.length > 4000) return invalid("The goal must have 1 to 4000 characters");
         if (agentIds.length < 1 || agentIds.length > 8) return invalid("Pick 1 to 8 agents");
+        const speakers = Array.isArray(params.speakers)
+          ? (params.speakers as T.DebateSpeaker[])
+          : agentIds.map((id) => ({ type: "agent" as const, id }));
+        const seatedAgents = [
+          ...new Set([...agentIds, ...speakers.filter((s) => s.type === "agent").map((s) => s.id)]),
+        ];
         const live = this.host
           .agents(scope.workspaceId)
-          .filter((agent) => agent.archivedAt === null && agentIds.includes(agent.id));
-        if (live.length !== new Set(agentIds).size) return fail(404, "not_found", "Agent not found");
-        if (userIds.some((id) => !this.host.isMember(scope.workspaceId, id)))
+          .filter((agent) => agent.archivedAt === null && seatedAgents.includes(agent.id));
+        if (live.length !== seatedAgents.length) return fail(404, "not_found", "Agent not found");
+        if (seatedAgents.some((id) => (this.planOwners.get(id) ?? scope.user.id) !== scope.user.id))
+          return fail(403, "agent.personal_plan", "This agent runs on someone else's personal plan");
+        const people = [...userIds, ...speakers.filter((s) => s.type === "person").map((s) => s.id)];
+        if (people.some((id) => !this.host.isMember(scope.workspaceId, id)))
           return fail(404, "not_found", "Member not found");
         if (agentIds.length + userIds.length > 20) return invalid("At most 20 seats");
         const options = strings(params.options);
@@ -266,12 +339,16 @@ export class FakeDebates {
         const channelId = typeof params.channelId === "string" ? params.channelId : null;
         if (channelId !== null && !this.host.readsChannel(scope.user.id, channelId, scope.workspaceId))
           return fail(404, "not_found", "Channel not found");
+        // An issue of a private channel (or a DM) is debated in that channel, never somewhere wider.
+        const source = typeof params.sourceIssueId === "string" ? params.sourceIssueId : null;
+        const issue = source === null ? undefined : this.host.issue(scope.workspaceId, scope.user.id, source);
+        if (source !== null && issue === undefined) return fail(404, "not_found", "Issue not found");
+        const issueChannel = issue?.channelId != null && !issue.publicChannel ? issue.channelId : null;
+        if (issueChannel !== null && channelId !== null && channelId !== issueChannel)
+          return fail(400, "debate.issue_channel", "Debate this issue in the channel it belongs to");
         const deadline = typeof params.deadline === "string" ? params.deadline : null;
         if (deadline !== null && Date.parse(deadline) <= this.host.now().getTime())
           return fail(400, "debate.deadline_past", "The deadline must be in the future");
-        const speakers = Array.isArray(params.speakers)
-          ? (params.speakers as T.DebateSpeaker[])
-          : agentIds.map((id) => ({ type: "agent" as const, id }));
         const rounds = typeof params.rounds === "number" ? params.rounds : 1;
         const format = params.format === "plan" ? "plan" : "decision";
         const row = this.make(scope.workspaceId, {
@@ -286,7 +363,8 @@ export class FakeDebates {
           deadline,
           options: options ?? [],
           spendCapPercent: typeof cap === "number" ? cap : null,
-          channelId,
+          channelId: issueChannel ?? channelId,
+          origin: issue === undefined ? { kind: "manual" } : { kind: "issue", issueSeq: issue.number },
           createdBy: { type: "person", id: scope.user.id },
           requesterUserId: scope.user.id,
           engagedAgentIds: agentIds,
