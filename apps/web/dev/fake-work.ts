@@ -14,6 +14,15 @@ type Host = FilesHost & {
   /** Whether the person reads the channel (public, or one they are in). */
   readsChannel: (userId: string, channelId: string) => boolean;
 };
+/** The calendar date of an instant in a zone, as YYYY-MM-DD. */
+const localDate = (at: Date, zone: string) =>
+  new Intl.DateTimeFormat("en-CA", {
+    timeZone: zone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(at);
+
 export type FakeIssue = T.Issue & { workspaceId: string };
 type FakeColumn = T.IssueColumn & { workspaceId: string };
 type FakeActivity = T.IssueActivity & { issueId: string };
@@ -495,10 +504,11 @@ export class FakeWork {
           start: new Date(String(params.start)).toISOString(),
           end: new Date(String(params.end)).toISOString(),
           allDay: params.allDay === true,
-          // Whole days carry their first and last day (the last one inclusive), as the server answers them.
+          // Whole days carry their first and last day (the last one inclusive) in the event's zone,
+          // as the server answers them.
           ...(params.allDay === true && {
-            startDate: String(params.start).slice(0, 10),
-            endDate: new Date(Date.parse(String(params.end)) - 1).toISOString().slice(0, 10),
+            startDate: localDate(new Date(String(params.start)), text(params.timezone) ?? "UTC"),
+            endDate: localDate(new Date(Date.parse(String(params.end)) - 1), text(params.timezone) ?? "UTC"),
           }),
           rule,
           recurrence: rule?.freq ?? null,
@@ -627,8 +637,9 @@ export class FakeWork {
         return reply(201, this.viewRoutine(copy));
       }),
       runRoutine: withRoutine((_scope, routine, params) => {
-        // The same key twice (a double click, a resend) runs once.
-        const key = text(params.key);
+        // The same key twice on one routine (a double click, a resend) runs once, as on the server.
+        const given = text(params.key);
+        const key = given === undefined ? undefined : `${routine.id}:${given}`;
         if (key !== undefined) {
           if (this.runKeys.has(key)) return reply(200, { ...this.viewRoutine(routine), running: true });
           this.runKeys.add(key);

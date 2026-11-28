@@ -5,6 +5,7 @@ process.env.TZ = "UTC";
 
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { newServer, renderApp } from "../../../../test/app.tsx";
+import { readLimit } from "./NewRoutine.tsx";
 
 const ROUTINES = "/workspace/workspace_birchwood/routines";
 const card = (name: string) => within(screen.getByRole("article", { name }));
@@ -115,6 +116,51 @@ describe("the routines", () => {
     );
     expect(keys.size).toBe(1);
     expect(app.server.work.runs.length).toBe(before + 1);
+  });
+
+  test("a run now that failed is retried with the same key, so a run the server took isn't doubled", async () => {
+    const server = newServer();
+    server.force("runRoutine", { kind: "error", status: 500, code: "internal" });
+    const app = await renderApp({ path: ROUTINES, signedInAs: "usr_ana", server });
+    const runNow = (await screen.findAllByRole("button", { name: "Run now" }))[0] as HTMLElement;
+    await app.user.click(runNow);
+    const sent = () => app.server.calls.filter((call) => call.method === "runRoutine");
+    await waitFor(() => expect(sent().length).toBe(1));
+    await waitFor(() => expect((runNow as HTMLButtonElement).disabled).toBe(false));
+    await app.user.click(runNow);
+    expect(await screen.findByText("Morning digest started")).toBeDefined();
+    expect(sent().length).toBe(2);
+    expect(sent()[1]?.params.key).toBe(sent()[0]?.params.key);
+    // The next intent is a new one.
+    await app.user.click(runNow);
+    await waitFor(() => expect(sent().length).toBe(3));
+    expect(sent()[2]?.params.key === sent()[0]?.params.key).toBe(false);
+  });
+
+  test("the same key on two routines runs each of them", async () => {
+    const original = crypto.randomUUID.bind(crypto);
+    crypto.randomUUID = () => "00000000-0000-4000-8000-000000000000";
+    try {
+      const app = await renderApp({ path: ROUTINES, signedInAs: "usr_ana" });
+      const buttons = await screen.findAllByRole("button", { name: "Run now" });
+      expect(buttons.length).toBeGreaterThan(1);
+      const before = app.server.work.runs.length;
+      await app.user.click(buttons[0] as HTMLElement);
+      await waitFor(() => expect(app.server.work.runs.length).toBe(before + 1));
+      await app.user.click(buttons[1] as HTMLElement);
+      await waitFor(() => expect(app.server.work.runs.length).toBe(before + 2));
+    } finally {
+      crypto.randomUUID = original;
+    }
+  });
+
+  test("a limit is digits with one decimal mark", () => {
+    const cost = { key: "maxCostUsd", min: 0.01, max: 100, step: "any" } as const;
+    expect(readLimit("1.5", cost)).toBe(1.5);
+    expect(readLimit("1,5", cost)).toBe(1.5);
+    expect(readLimit("0x10", cost)).toBeUndefined();
+    expect(readLimit("1e1", cost)).toBeUndefined();
+    expect(readLimit("1.000.5", cost)).toBeUndefined();
   });
 
   test("the limits keep what is typed until the routine is sent", async () => {

@@ -48,6 +48,7 @@ describe("formatted text", () => {
 describe("a repeating rule in words", () => {
   const words: RuleWords = {
     daily: (count) => `every ${count} day`,
+    dailyOn: (count, days) => `every ${count} day when on ${days}`,
     weekdays: () => "every weekday",
     weekly: (count, days) => `every ${count} week on ${days}`,
     hourly: (count) => `every ${count} hour`,
@@ -68,6 +69,10 @@ describe("a repeating rule in words", () => {
     expect(
       say({ freq: "daily", weekdays: ["SU", "MO", "TU", "WE", "TH", "FR", "SA"], timezone: "UTC" }),
     ).toBe("every 1 day");
+    // Every other day, kept only on Monday or Wednesday: the two-day step comes before the days.
+    expect(say({ freq: "daily", interval: 2, weekdays: ["MO", "WE"], timezone: "UTC" })).toBe(
+      "every 2 day when on Monday and Wednesday",
+    );
     expect(describeRule({ freq: "daily", weekdays: ["MO", "WE"], timezone: "UTC" }, words, "pt-BR")).toBe(
       "every 1 week on segunda-feira e quarta-feira",
     );

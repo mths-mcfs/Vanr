@@ -39,6 +39,46 @@ describe("the week", () => {
     expect(screen.queryByRole("region", { name: "Proposed by agents" }) === null).toBe(true);
   });
 
+  test("answering one proposal keeps another's buttons waiting while its answer is on its way", async () => {
+    const server = newServer();
+    const first = server.work.proposals[0];
+    if (first !== undefined)
+      server.work.proposals.push({ ...first, id: "prp_proof", title: "Proof sign-off", note: null });
+    const held = server.hold("confirmCalendarProposal");
+    const app = await renderApp({ path: CALENDAR, signedInAs: "usr_ana", server });
+    const proposals = within(await screen.findByRole("region", { name: "Proposed by agents" }));
+    const confirmOf = (title: string) =>
+      within(proposals.getByRole("listitem", { name: title })).getByRole("button", {
+        name: "Add to calendar",
+      });
+    await app.user.click(confirmOf("Paper supplier call"));
+    await app.user.click(confirmOf("Proof sign-off"));
+    expect((confirmOf("Paper supplier call") as HTMLButtonElement).disabled).toBe(true);
+    expect((confirmOf("Proof sign-off") as HTMLButtonElement).disabled).toBe(true);
+    held.release();
+    expect(await screen.findByText("“Paper supplier call” is on the calendar")).toBeDefined();
+    expect(await screen.findByText("“Proof sign-off” is on the calendar")).toBeDefined();
+  });
+
+  test("a whole-day event made three hours behind UTC stays on its one day", async () => {
+    process.env.TZ = "America/Sao_Paulo";
+    try {
+      const app = await renderApp({ path: CALENDAR, signedInAs: "usr_ana" });
+      await app.user.click(await screen.findByRole("button", { name: /^Add an event on Tuesday/ }));
+      const dialog = within(await screen.findByRole("dialog", { name: "New event" }));
+      await app.user.type(dialog.getByRole("textbox", { name: "Title" }), "Stock count");
+      await app.user.click(dialog.getByRole("checkbox", { name: "All day" }));
+      await app.user.click(dialog.getByRole("button", { name: "Create event" }));
+      expect(await screen.findByText("“Stock count” added")).toBeDefined();
+      const made = app.server.work.events.find((event) => event.title === "Stock count");
+      expect([made?.startDate, made?.endDate]).toEqual(["2026-11-10", "2026-11-10"]);
+      expect(await within(day(/^Tuesday/)).findByRole("button", { name: /Stock count/ })).toBeDefined();
+      expect(within(day(/^Wednesday/)).queryByRole("button", { name: /Stock count/ }) === null).toBe(true);
+    } finally {
+      process.env.TZ = "UTC";
+    }
+  });
+
   test("another week, and back to this one", async () => {
     const app = await renderApp({ path: CALENDAR, signedInAs: "usr_ana" });
     await screen.findByRole("region", { name: /^Thursday/ });
