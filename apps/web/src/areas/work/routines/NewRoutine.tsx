@@ -1,0 +1,393 @@
+// A new routine: its name, the agent (only one the person may set to work), the instruction, what makes
+// it run (a schedule in plain words, read back by the server with its next run; an event; an email in
+// one of the agent's inboxes; a call to its web address), where it answers, its limits, and whether it
+// starts on. Created off unless the person turns it on here.
+import { useApiMutation, useApiQuery } from "@vanr/client/react";
+import type { Channel, RoutinePolicy, RoutineTarget, RoutineTrigger } from "@vanr/contract";
+import {
+  Button,
+  Callout,
+  Checkbox,
+  Dialog,
+  DialogContent,
+  Field,
+  Input,
+  Select,
+  SelectItem,
+  Textarea,
+} from "@vanr/ui";
+import { useEffect, useState } from "react";
+import { useErrorMessage } from "../../../app/screens.tsx";
+import { useLocale, useMessages } from "../../../i18n/react.tsx";
+import { type Actors, useOutcome } from "../issues/shared.tsx";
+import { browserTimezone } from "../time.ts";
+import { ROUTINE_EVENTS, useTriggerText } from "./words.ts";
+
+export const ROUTINE_NAME_MAX = 120;
+export const INSTRUCTION_MAX = 10_000;
+const PHRASE_MAX = 300;
+const PHRASE_PAUSE_MS = 400;
+
+const KINDS = ["schedule", "event", "email", "webhook"] as const;
+type Kind = (typeof KINDS)[number];
+const TARGETS = ["dm", "channel", "file"] as const;
+type TargetKind = (typeof TARGETS)[number];
+
+/** The server's defaults, shown so the person sees what they change. */
+const DEFAULT_POLICY: RoutinePolicy = {
+  missed: "once",
+  missedWindowMin: 60,
+  overlap: "skip",
+  maxCostUsd: 2,
+  maxSteps: 12,
+  maxMinutes: 30,
+  retries: 2,
+  pauseAfterFailures: 3,
+};
+const NUMBERS = [
+  // Any amount: a step of 0.01 from 0.01 trips the browser's own check on round sums.
+  { key: "maxCostUsd", min: 0.01, max: 100, step: "any" },
+  { key: "maxSteps", min: 1, max: 50, step: 1 },
+  { key: "maxMinutes", min: 1, max: 240, step: 1 },
+  { key: "retries", min: 0, max: 5, step: 1 },
+  { key: "pauseAfterFailures", min: 0, max: 20, step: 1 },
+] as const;
+const NUMBER_LABEL = {
+  maxCostUsd: "routines.form.maxCost",
+  maxSteps: "routines.form.maxSteps",
+  maxMinutes: "routines.form.maxMinutes",
+  retries: "routines.form.retries",
+  pauseAfterFailures: "routines.form.pauseAfter",
+} as const;
+
+function useSettled(value: string, ms: number): string {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setSettled(value), ms);
+    return () => clearTimeout(timer);
+  }, [value, ms]);
+  return settled;
+}
+
+export function NewRoutineDialog({
+  workspaceId,
+  actors,
+  channels,
+  onClose,
+}: {
+  workspaceId: string;
+  actors: Actors;
+  channels: Channel[];
+  onClose: () => void;
+}) {
+  const t = useMessages("work");
+  const common = useMessages("common");
+  const { locale } = useLocale();
+  const describe = useErrorMessage("work");
+  const outcome = useOutcome();
+  const triggerText = useTriggerText();
+  const [name, setName] = useState("");
+  const [agentId, setAgentId] = useState(actors.reachable[0]?.id ?? "");
+  const [prompt, setPrompt] = useState("");
+  const [kind, setKind] = useState<Kind>("schedule");
+  const [phrase, setPhrase] = useState("");
+  const [event, setEvent] = useState<string>(ROUTINE_EVENTS[0]);
+  const [accountId, setAccountId] = useState("");
+  const [folder, setFolder] = useState("INBOX");
+  const [from, setFrom] = useState("");
+  const [targetKind, setTargetKind] = useState<TargetKind>("dm");
+  const [channelId, setChannelId] = useState(channels.find((channel) => channel.isMember)?.id ?? "");
+  const [policy, setPolicy] = useState<RoutinePolicy>(DEFAULT_POLICY);
+  const [active, setActive] = useState(false);
+  const timezone = browserTimezone();
+  const settled = useSettled(phrase.trim(), PHRASE_PAUSE_MS);
+  const parsed = useApiQuery(
+    "parseRoutineSchedule",
+    { workspaceId, body: { phrase: settled, timezone } },
+    { enabled: kind === "schedule" && settled !== "" },
+  );
+  const mailboxes = useApiQuery(
+    "getAgentMail",
+    { workspaceId, agentId },
+    { enabled: kind === "email" && agentId !== "", retry: false },
+  );
+  const readable = (mailboxes.data ?? []).filter((box) => box.level !== "none");
+  const create = useApiMutation("createRoutine", {
+    invalidates: () => [{ method: "listRoutines", args: { workspaceId } }],
+  });
+  const when = new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" });
+
+  const trigger = ((): RoutineTrigger | undefined => {
+    switch (kind) {
+      case "schedule":
+        return settled !== "" && settled === phrase.trim() && parsed.data?.ok === true
+          ? (parsed.data.trigger ?? undefined)
+          : undefined;
+      case "event":
+        return { kind: "event", event };
+      case "email": {
+        const senders = from
+          .split(",")
+          .map((each) => each.trim())
+          .filter((each) => each !== "");
+        return accountId === "" || folder.trim() === ""
+          ? undefined
+          : {
+              kind: "email",
+              accountId,
+              folder: folder.trim(),
+              ...(senders.length > 0 && { filter: { from: senders } }),
+            };
+      }
+      default:
+        return { kind: "webhook" };
+    }
+  })();
+  const target: RoutineTarget | undefined =
+    targetKind === "channel"
+      ? channelId === ""
+        ? undefined
+        : { kind: "channel", channelId }
+      : { kind: targetKind };
+  const ready =
+    name.trim() !== "" &&
+    agentId !== "" &&
+    prompt.trim() !== "" &&
+    trigger !== undefined &&
+    target !== undefined &&
+    !create.isPending;
+
+  const submit = () => {
+    if (!ready || trigger === undefined || target === undefined) return;
+    create.mutate(
+      {
+        workspaceId,
+        body: { name: name.trim(), agentId, prompt: prompt.trim(), trigger, target, policy, active },
+      },
+      {
+        onSuccess: (routine) => {
+          outcome.done(t("routines.form.created", { name: routine.name }));
+          onClose();
+        },
+      },
+    );
+  };
+
+  const scheduleHint =
+    kind !== "schedule" || settled === "" || parsed.isPending || parsed.data === undefined
+      ? t("routines.form.scheduleHint")
+      : parsed.data.ok && parsed.data.trigger !== null
+        ? t("routines.form.scheduleNext", {
+            text: triggerText(parsed.data.trigger),
+            when:
+              parsed.data.upcomingFireTimes[0] === undefined
+                ? ""
+                : when.format(new Date(parsed.data.upcomingFireTimes[0])),
+          })
+        : undefined;
+  const scheduleWrong =
+    kind === "schedule" && parsed.data !== undefined && !parsed.data.ok && settled === phrase.trim();
+
+  return (
+    <Dialog open onOpenChange={(next) => !next && onClose()}>
+      <DialogContent
+        size="lg"
+        title={t("routines.new")}
+        closeLabel={common("action.close")}
+        footer={
+          <>
+            <Button variant="ghost" onClick={onClose}>
+              {common("action.cancel")}
+            </Button>
+            <Button
+              variant="primary"
+              type="submit"
+              form="work-new-routine"
+              disabled={!ready}
+              loading={create.isPending}
+            >
+              {t("routines.form.create")}
+            </Button>
+          </>
+        }
+      >
+        <form
+          id="work-new-routine"
+          className="work-form"
+          onSubmit={(submitted) => {
+            submitted.preventDefault();
+            submit();
+          }}
+        >
+          <div className="work-form__row">
+            <Field label={t("routines.form.name")} required>
+              <Input
+                value={name}
+                maxLength={ROUTINE_NAME_MAX}
+                autoFocus
+                onChange={(change) => setName(change.target.value)}
+              />
+            </Field>
+            <Field label={t("routines.form.agent")}>
+              <Select value={agentId} onValueChange={setAgentId}>
+                {actors.reachable.map((agent) => (
+                  <SelectItem key={agent.id} value={agent.id}>
+                    {agent.name}
+                  </SelectItem>
+                ))}
+              </Select>
+            </Field>
+          </div>
+          <Field label={t("routines.form.instruction")} hint={t("routines.form.instructionHint")} required>
+            <Textarea
+              rows={4}
+              value={prompt}
+              maxLength={INSTRUCTION_MAX}
+              onChange={(change) => setPrompt(change.target.value)}
+            />
+          </Field>
+          <Field label={t("routines.form.trigger")}>
+            <Select
+              value={kind}
+              onValueChange={(value) => setKind(KINDS.find((each) => each === value) ?? "schedule")}
+            >
+              {KINDS.map((each) => (
+                <SelectItem key={each} value={each}>
+                  {t(`routines.form.trigger.${each}`)}
+                </SelectItem>
+              ))}
+            </Select>
+          </Field>
+          {kind === "schedule" && (
+            <Field
+              label={t("routines.form.schedule")}
+              {...(scheduleHint !== undefined && { hint: scheduleHint })}
+              {...(scheduleWrong && { error: t("routines.form.scheduleWrong") })}
+            >
+              <Input
+                value={phrase}
+                maxLength={PHRASE_MAX}
+                onChange={(change) => setPhrase(change.target.value)}
+              />
+            </Field>
+          )}
+          {kind === "event" && (
+            <Field label={t("routines.form.event")}>
+              <Select value={event} onValueChange={setEvent}>
+                {ROUTINE_EVENTS.map((each) => (
+                  <SelectItem key={each} value={each}>
+                    {t(`routines.event.${each}`)}
+                  </SelectItem>
+                ))}
+              </Select>
+            </Field>
+          )}
+          {kind === "email" &&
+            (readable.length === 0 ? (
+              <p className="work-note">{t("routines.form.noMailbox")}</p>
+            ) : (
+              <>
+                <div className="work-form__row">
+                  <Field label={t("routines.form.mailbox")}>
+                    <Select value={accountId} onValueChange={setAccountId}>
+                      {readable.map((box) => (
+                        <SelectItem key={box.accountId} value={box.accountId}>
+                          {box.accountId}
+                        </SelectItem>
+                      ))}
+                    </Select>
+                  </Field>
+                  <Field label={t("routines.form.folder")}>
+                    <Input value={folder} onChange={(change) => setFolder(change.target.value)} />
+                  </Field>
+                </div>
+                <Field label={t("routines.form.from")} hint={t("routines.form.fromHint")}>
+                  <Input value={from} onChange={(change) => setFrom(change.target.value)} />
+                </Field>
+              </>
+            ))}
+          <div className="work-form__row">
+            <Field label={t("routines.form.target")}>
+              <Select
+                value={targetKind}
+                onValueChange={(value) => setTargetKind(TARGETS.find((each) => each === value) ?? "dm")}
+              >
+                {TARGETS.map((each) => (
+                  <SelectItem key={each} value={each}>
+                    {each === "channel" ? t("routines.form.channel") : t(`routines.where.${each}`)}
+                  </SelectItem>
+                ))}
+              </Select>
+            </Field>
+            {targetKind === "channel" && (
+              <Field label={t("routines.form.channel")}>
+                <Select value={channelId} onValueChange={setChannelId}>
+                  {channels.map((channel) => (
+                    <SelectItem key={channel.id} value={channel.id}>
+                      #{channel.name}
+                    </SelectItem>
+                  ))}
+                </Select>
+              </Field>
+            )}
+          </div>
+          <details className="work-limits">
+            <summary>{t("routines.form.limits")}</summary>
+            <div className="work-form__row">
+              {NUMBERS.map((each) => (
+                <Field key={each.key} label={t(NUMBER_LABEL[each.key])}>
+                  <Input
+                    type="number"
+                    min={each.min}
+                    max={each.max}
+                    step={each.step}
+                    value={policy[each.key]}
+                    onChange={(change) => {
+                      const value = Number(change.target.value);
+                      if (Number.isFinite(value)) {
+                        setPolicy({ ...policy, [each.key]: Math.min(each.max, Math.max(each.min, value)) });
+                      }
+                    }}
+                  />
+                </Field>
+              ))}
+              <Field label={t("routines.form.missed")}>
+                <Select
+                  value={policy.missed}
+                  onValueChange={(value) =>
+                    setPolicy({ ...policy, missed: value === "skip" ? "skip" : "once" })
+                  }
+                >
+                  <SelectItem value="once">{t("routines.form.missed.once")}</SelectItem>
+                  <SelectItem value="skip">{t("routines.form.missed.skip")}</SelectItem>
+                </Select>
+              </Field>
+              <Field label={t("routines.form.overlap")}>
+                <Select
+                  value={policy.overlap}
+                  onValueChange={(value) =>
+                    setPolicy({ ...policy, overlap: value === "queue" ? "queue" : "skip" })
+                  }
+                >
+                  <SelectItem value="skip">{t("routines.form.overlap.skip")}</SelectItem>
+                  <SelectItem value="queue">{t("routines.form.overlap.queue")}</SelectItem>
+                </Select>
+              </Field>
+            </div>
+          </details>
+          <Checkbox
+            label={t("routines.form.startActive")}
+            hint={t("routines.form.startActiveHint")}
+            checked={active}
+            onCheckedChange={(checked) => setActive(checked === true)}
+          />
+          {create.isError && (
+            <Callout tone="danger" role="alert">
+              {describe(create.error)}
+            </Callout>
+          )}
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}

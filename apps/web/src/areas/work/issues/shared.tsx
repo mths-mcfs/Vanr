@@ -2,7 +2,7 @@
 // the people and agents an issue mentions, the marks a card and a row draw (stage, priority, criteria),
 // how a description turns into criteria, and where a card lands between two others.
 import { useApiQuery } from "@vanr/client/react";
-import type { ActorRef, IssueColumn, IssuePriority, IssueStage } from "@vanr/contract";
+import { type ActorRef, can, type IssueColumn, type IssuePriority, type IssueStage } from "@vanr/contract";
 import { useToast } from "@vanr/ui";
 import { useMemo } from "react";
 import { useErrorMessage } from "../../../app/screens.tsx";
@@ -99,6 +99,13 @@ export function useActors(workspaceId: string): Actors {
 /** The signed-in person's id. */
 export function useMyId(): string {
   return useSession().me?.user.id ?? "";
+}
+
+/** Whether the signed-in person sets the workspace up (admins and owners): the server decides, this hides. */
+export function useConfigures(workspaceId: string): boolean {
+  const { me } = useSession();
+  const role = me?.workspaces.find((workspace) => workspace.id === workspaceId)?.role ?? "member";
+  return can(role, "configure");
 }
 
 /** Says a change went through, or why it did not, in a toast. */
