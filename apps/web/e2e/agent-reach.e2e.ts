@@ -1,6 +1,7 @@
 // An agent's access against the real server. The workspace has one connection, an MCP server of its own
-// (a double on a local port). A new agent reaches everything: an owner turns that off in the settings'
-// Access matrix, which keeps the connection at read and change, narrows it to read, follows the agent's
+// (a double on a local port) with one reading tool. A new agent reaches everything: an owner turns that off
+// in the settings' Access matrix, which keeps the connection at read and change, narrows it to read (and
+// the agent can still call the reading tool), follows the agent's
 // name to its Access tab, sees the same level there, and turns every connection off for the agent in
 // #general. After a reload the rule and the level are both still there.
 import { expect, test } from "./fixtures.ts";
@@ -43,6 +44,14 @@ test("an owner sets an agent's access to a connection and its channel access", a
   const started = (await server.json()) as { status: string; server?: { id: string } };
   expect(started.status).toBe("server");
   const serverId = started.server?.id ?? "";
+  // The workspace decides on the server's tool: it reads, so agents may use it at the Read level.
+  const decided = await api.put(`/api/v1/workspaces/${workspaceId}/connectors/custom/${serverId}/tools`, {
+    data: {
+      label: "Ledger tools",
+      tools: [{ name: "lookup_invoice", access: "read", label: "Look up an invoice", confirmed: true }],
+    },
+  });
+  expect(decided.ok()).toBe(true);
 
   await signIn(owner);
   await page.goto(`/workspace/${workspaceId}/settings/access`);
@@ -74,6 +83,15 @@ test("an owner sets an agent's access to a connection and its channel access", a
   ]);
   // Turning "everything" off kept the built-in areas as they were.
   expect(scopes.scopes.some((grant) => grant.scope === "drive:write")).toBe(true);
+  // At Read the agent has the reading tool: asked in #general, it calls it on the server.
+  const asked = await api.post(`/api/v1/workspaces/${workspaceId}/channels/${general.id}/messages`, {
+    data: {
+      body: "@invoice-clerk find it [[tool:mcp_ledger_tools__lookup_invoice {}]]",
+      clientId: `reach-${Date.now()}`,
+    },
+  });
+  expect(asked.ok()).toBe(true);
+  await expect.poll(() => double.calls, { timeout: 30_000 }).toEqual(["lookup_invoice"]);
 
   await grid.getByRole("link", { name: "Invoice Clerk" }).click();
   const reach = page.getByRole("region", { name: t("agents", "reach.title") });

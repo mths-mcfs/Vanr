@@ -125,7 +125,7 @@ function AgentRow({
     );
   const current: AgentAccess = access.data;
   return (
-    <tr data-everything={current.all}>
+    <tr data-everything={current.all} aria-busy={change.pending}>
       {name}
       <td>
         <Switch

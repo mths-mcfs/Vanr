@@ -604,7 +604,6 @@ export default {
   "grid.level.write": "Ler e alterar",
   "grid.level.custom": "Só alterar",
   "error.access.unknown_scope": "Esta permissão não existe neste servidor. Recarregue e tente de novo.",
-  "error.access.unknown_connection":
-    "Essa conexão não existe mais. Recarregue para ver as que existem agora.",
+  "error.access.unknown_connection": "Essa conexão não existe mais: alguém a removeu nesse meio-tempo.",
   "error.agent.archived": "Este agente está arquivado, então o acesso dele não muda.",
 } satisfies TranslationOf<typeof en>;

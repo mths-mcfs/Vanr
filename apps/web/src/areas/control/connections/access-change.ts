@@ -1,54 +1,85 @@
 // One agent's access, changed from the matrix or from the agent's own tab. Every change reads the
-// agent's scopes fresh and writes the whole list back, so it builds on what is saved now rather than
-// on what the screen showed; one change at a time per agent, and a second press while one is on its
-// way is dropped. A 404 or 403 drops what the screen kept of this agent's access.
-import { useApiMutation, useVanrClient } from "@vanr/client/react";
+// agent's access fresh and writes from what is saved now rather than from what the screen showed. One
+// change at a time per agent: the controls stay disabled from the fresh read until the write is done.
+// A 404 or 403 drops what the screen kept of this agent's access; a connection that is no longer active
+// or an archived agent loads the reads again, so the screen stops offering them.
+import { useQueryClient } from "@tanstack/react-query";
+import { isApiError } from "@vanr/client";
+import { prefixKey, useApiMutation, useVanrClient } from "@vanr/client/react";
 import type { AgentAccess, ScopeGrant } from "@vanr/contract";
+import { useState } from "react";
 import { useOutcome } from "../shared.tsx";
 import { type ConnLevel, everythingSpelledOut, withBuiltin, withLevel } from "./levels.ts";
 import { useForgetOnLoss, useLatch } from "./shared.tsx";
 
 const READS = ["getAgentAccess", "listAgentScopes"] as const;
+/** What a stale column or agent shows in: the matrix, the agent's page and its access. */
+const STALE = ["listAgents", "getAgent", ...READS] as const;
+
+/** The answer says the screen offered something that is gone: a connection, or the agent itself. */
+const isStale = (error: unknown) =>
+  isApiError(error) &&
+  ((error.status === 400 && error.code === "access.unknown_connection") ||
+    (error.status === 409 && error.code === "agent.archived"));
 
 export function useAccessChange(workspaceId: string, agentId: string, onDone?: () => void) {
   const client = useVanrClient();
+  const queryClient = useQueryClient();
   const outcome = useOutcome();
   const latch = useLatch();
+  const [busy, setBusy] = useState(false);
   const forget = useForgetOnLoss(workspaceId, READS);
+  const args = { workspaceId, agentId };
   const invalidates = () => [
-    { method: "getAgentAccess" as const, args: { workspaceId, agentId } },
-    { method: "listAgentScopes" as const, args: { workspaceId, agentId } },
+    { method: "getAgentAccess" as const, args },
+    { method: "listAgentScopes" as const, args },
   ];
   const scopes = useApiMutation("setAgentScopes", { invalidates });
   const everything = useApiMutation("setAgentAccess", { invalidates });
-  const args = { workspaceId, agentId };
+  const reload = () => {
+    for (const { method, args: of } of invalidates())
+      void queryClient.invalidateQueries({ queryKey: prefixKey(client, { method, args: of }) });
+  };
   const failed = (error: unknown) => {
     forget(error);
+    if (isStale(error))
+      for (const method of STALE)
+        void queryClient.invalidateQueries({
+          queryKey: prefixKey(client, { method, args: { workspaceId } }),
+        });
     outcome.failed(error);
   };
+  /** Runs one change: the fresh read, then the write it decides on, or nothing when nothing is left to do. */
+  const run = (work: () => Promise<"written" | "unchanged">) =>
+    latch(() => {
+      setBusy(true);
+      return work()
+        .then((done) => (done === "written" ? onDone?.() : reload()), failed)
+        .finally(() => setBusy(false));
+    });
   const rewrite = (next: (current: ScopeGrant[]) => ScopeGrant[]) =>
-    latch(() =>
+    run(() =>
       client
         .call("listAgentScopes", args)
         .then((current) => scopes.mutateAsync({ ...args, body: { scopes: next(current) } }))
-        .then(() => onDone?.(), failed),
+        .then(() => "written" as const),
     );
   return {
-    pending: scopes.isPending || everything.isPending,
+    pending: busy || scopes.isPending || everything.isPending,
     setLevel: (connection: AgentAccess["connectors"][number], level: ConnLevel) =>
       rewrite((current) => withLevel(current, connection, level)),
     setBuiltin: (scope: string, on: boolean) => rewrite((current) => withBuiltin(current, scope, on)),
+    // From the access as it is now: when someone else already made the switch, nothing is written and
+    // the screen catches up, so a stale screen never widens or resets what they saved.
     setEverything: (on: boolean) =>
-      on
-        ? latch(() => everything.mutateAsync({ ...args, body: { all: true } }).then(() => onDone?.(), failed))
-        : // Spelled out from the access as it is now, not as the screen last saw it.
-          latch(() =>
-            client
-              .call("getAgentAccess", args)
-              .then((access) =>
-                scopes.mutateAsync({ ...args, body: { scopes: everythingSpelledOut(access) } }),
-              )
-              .then(() => onDone?.(), failed),
-          ),
+      run(() =>
+        client.call("getAgentAccess", args).then((access) => {
+          if (access.all === on) return "unchanged" as const;
+          const write = on
+            ? everything.mutateAsync({ ...args, body: { all: true } })
+            : scopes.mutateAsync({ ...args, body: { scopes: everythingSpelledOut(access) } });
+          return write.then(() => "written" as const);
+        }),
+      ),
   };
 }

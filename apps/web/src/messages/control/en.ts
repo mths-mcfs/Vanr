@@ -598,6 +598,6 @@ export default {
   "grid.level.write": "Read and change",
   "grid.level.custom": "Change only",
   "error.access.unknown_scope": "That permission is not one this server knows. Reload and try again.",
-  "error.access.unknown_connection": "That connection is gone. Reload to see the ones there are now.",
+  "error.access.unknown_connection": "That connection is gone: someone removed it meanwhile.",
   "error.agent.archived": "This agent is archived, so its access can't change.",
 } as const satisfies Catalog;
