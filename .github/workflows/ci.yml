@@ -1069,43 +1069,6 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
 
-  # TEMPORARY (#136): runs the two wiki test files 20 times in a row. Removed before merge.
-  wiki-flake-loop:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    services:
-      postgres:
-        image: pgvector/pgvector:0.8.6-pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
-        env:
-          POSTGRES_DB: vanr_test
-          POSTGRES_HOST_AUTH_METHOD: trust
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d vanr_test"
-          --health-interval 2s
-          --health-timeout 5s
-          --health-retries 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup
-      - name: Run the two wiki test files 20 times
-        run: |
-          for i in $(seq 1 20); do
-            echo "::group::run $i"
-            if ! bun test apps/server/test/wiki-live-guards.test.ts apps/server/test/wiki-annotations-postgres.test.ts; then
-              echo "::error::run $i failed"
-              exit 1
-            fi
-            echo "::endgroup::"
-            echo "run $i/20 passed"
-          done
-          echo "20/20 passed"
-        env:
-          VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
-
   ci-ok:
     if: always()
     needs: [lint, typecheck, test, web, e2e, postgres, sandbox, workflows, secrets]
