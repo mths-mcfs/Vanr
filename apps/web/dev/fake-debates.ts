@@ -97,7 +97,7 @@ export class FakeDebates {
         phase: null,
         round: 1,
         roundLimit: 3,
-        stallInfo: { agentId: "agt_ledger", reason: "The model did not answer", round: 1 },
+        stallInfo: { agentId: "agt_ledger", pseudonym: null, reason: "The model did not answer", round: 1 },
         updatedAt: ago(5),
       }),
       this.make("workspace_birchwood", {

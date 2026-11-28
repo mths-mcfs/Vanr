@@ -161,7 +161,7 @@ describe("the debates", () => {
     Object.assign(ink, {
       status: "stalled",
       phase: null,
-      stallInfo: { agentId: "agt_tally", reason: "Out of time", round: 0 },
+      stallInfo: { agentId: "agt_tally", pseudonym: null, reason: "Out of time", round: 0 },
     });
     await act(async () => app.server.emit(WORKSPACE, { type: "debate.updated", debateId: "deb_ink" }));
     expect(await screen.findByText("A participant is taking longer than expected")).toBeDefined();

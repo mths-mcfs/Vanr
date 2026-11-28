@@ -200,7 +200,9 @@ function DebateRow({
             : debate.anonymous
               ? t("row.stuckBlind")
               : t("row.stuck", {
-                  who: directory.name({ type: "agent", id: stuck.agentId }),
+                  who: stuck.agentId
+                    ? directory.name({ type: "agent", id: stuck.agentId })
+                    : (stuck.pseudonym ?? ""),
                   reason: stuck.reason,
                 })}
         </p>
