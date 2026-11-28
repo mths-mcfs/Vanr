@@ -99,6 +99,15 @@ describe("the lab", () => {
     expect(screen.getByText("Add a test case to run.")).toBeDefined();
   });
 
+  test("while the cases are loading there is nothing to run yet", async () => {
+    const server = newServer();
+    const held = server.hold("listAgentTestCases");
+    await renderApp({ path: lab("agt_scout"), signedInAs: "usr_jonas", server });
+    const run = await screen.findByRole("button", { name: "Run the cases" });
+    expect(run.hasAttribute("disabled")).toBe(true);
+    held.release();
+  });
+
   test("an archived agent's lab is closed, and nothing is asked of the server", async () => {
     const server = newServer();
     const scout = server.agents.find((agent) => agent.id === "agt_scout");

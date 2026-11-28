@@ -76,6 +76,19 @@ describe("adding an agent", () => {
     expect(screen.getByText(/2 to 32 characters from a–z/)).toBeDefined();
   });
 
+  test("an archived agent is not among the agents the wizard checks handles against", async () => {
+    const server = newServer();
+    const tally = server.agents.find((agent) => agent.id === "agt_tally");
+    if (tally !== undefined) tally.archivedAt = "2026-11-10T09:00:00.000Z";
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana", server });
+    await form("Role");
+    await next(app);
+    await app.user.type(await screen.findByLabelText("Name"), "Tally");
+    // Only the server knows an archived agent keeps its handle; it says so when the agent is created.
+    expect(screen.queryByText("That handle is taken. Pick another.") === null).toBe(true);
+    expect(screen.getByRole("button", { name: "Next" }).hasAttribute("disabled")).toBe(false);
+  });
+
   test("a handle the server refuses at the end sends the person back to the name", async () => {
     const server = newServer();
     server.force("createAgent", { kind: "error", status: 409, code: "agent.handle_taken" });

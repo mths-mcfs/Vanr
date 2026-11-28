@@ -176,7 +176,7 @@ export interface RuntimePort {
   reviseApproval(
     approvalId: string,
     edits: Record<string, unknown>,
-  ): Promise<RevisedApproval | { error: string } | null>;
+  ): Promise<RevisedApproval | { error: string; code?: string } | null>;
   /** Answers an open question and wakes the run; null when it was no longer open. Caller: routes/control. */
   answerQuestion(questionId: string, answer: string, actorUserId: string): Promise<QuestionRow | null>;
   /** Delivers the send queue at `at` without waiting for the next sweep. Caller: outbox. */

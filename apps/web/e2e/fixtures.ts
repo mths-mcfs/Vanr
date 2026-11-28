@@ -31,6 +31,8 @@ import agentsEn from "../src/messages/agents/en.ts";
 import agentsPt from "../src/messages/agents/pt-BR.ts";
 import commonEn from "../src/messages/common/en.ts";
 import commonPt from "../src/messages/common/pt-BR.ts";
+import controlEn from "../src/messages/control/en.ts";
+import controlPt from "../src/messages/control/pt-BR.ts";
 import filesEn from "../src/messages/files/en.ts";
 import filesPt from "../src/messages/files/pt-BR.ts";
 import inboxEn from "../src/messages/inbox/en.ts";
@@ -51,6 +53,7 @@ const CATALOGS = {
     account: accountEn,
     agents: agentsEn,
     common: commonEn,
+    control: controlEn,
     files: filesEn,
     shell: shellEn,
     settings: settingsEn,
@@ -61,6 +64,7 @@ const CATALOGS = {
     account: accountPt,
     agents: agentsPt,
     common: commonPt,
+    control: controlPt,
     files: filesPt,
     shell: shellPt,
     settings: settingsPt,

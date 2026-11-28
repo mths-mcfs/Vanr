@@ -14,6 +14,7 @@ import { type Db, schema } from "@vanr/engine/db";
 import { contentSha256 } from "@vanr/engine/memory";
 import type { BudgetScope } from "@vanr/engine/usage";
 import { and, count, eq, gte, inArray, isNull, notInArray, or, sql, sum } from "drizzle-orm";
+import { readableChannelsSql } from "./channels";
 import type { WorkspaceMember } from "./context";
 import { badRequest, forbidden, notFound } from "./http";
 import { type Talker, withPlanOwner } from "./runners/plans";
@@ -262,16 +263,38 @@ export async function toAgentDetail(
     budgetInherited: row.budgetPerMonthUsd === null,
     credentialId: row.credentialId,
     channels: await agentChannels(db, row.id, input.viewer),
+    // Pending requests the viewer may see, as the approvals list shows them: whoever decides them (the agent's
+    // owner, or someone who manages agents once the owner left) sees all of them, anyone else only those of
+    // conversations they read (and the ones asked outside any conversation).
     queuedApprovals: (
       await db
         .select({ id: schema.approvals.id })
         .from(schema.approvals)
-        .where(and(eq(schema.approvals.agentId, row.id), eq(schema.approvals.status, "pending")))
+        .where(
+          and(
+            eq(schema.approvals.agentId, row.id),
+            eq(schema.approvals.status, "pending"),
+            (await decidesFor(db, row, input.viewer))
+              ? undefined
+              : sql`(${schema.approvals.channelId} is null or ${schema.approvals.channelId} in ${readableChannelsSql({ workspaceId: row.workspaceId, userId: input.viewer.userId })})`,
+          ),
+        )
     ).length,
     monthRuns: usage.runs,
     monthTokens: usage.tokens,
     costThisMonthUsd: usage.costUsd,
   };
+}
+
+/** The viewer decides the agent's approvals: its owner, or someone who manages agents once the owner left. */
+async function decidesFor(db: Db, row: AgentRow, viewer: ChannelViewer): Promise<boolean> {
+  if (row.ownerUserId === viewer.userId) return true;
+  if (!viewer.seesAll) return false;
+  const [owner] = await db
+    .select({ userId: schema.members.userId })
+    .from(schema.members)
+    .where(and(eq(schema.members.workspaceId, row.workspaceId), eq(schema.members.userId, row.ownerUserId)));
+  return owner === undefined;
 }
 
 export function toMemory(row: MemoryRow): Memory {
