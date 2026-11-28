@@ -35,6 +35,8 @@ import commonEn from "../src/messages/common/en.ts";
 import commonPt from "../src/messages/common/pt-BR.ts";
 import controlEn from "../src/messages/control/en.ts";
 import controlPt from "../src/messages/control/pt-BR.ts";
+import debatesEn from "../src/messages/debates/en.ts";
+import debatesPt from "../src/messages/debates/pt-BR.ts";
 import filesEn from "../src/messages/files/en.ts";
 import filesPt from "../src/messages/files/pt-BR.ts";
 import inboxEn from "../src/messages/inbox/en.ts";
@@ -59,6 +61,7 @@ const CATALOGS = {
     chat: chatEn,
     common: commonEn,
     control: controlEn,
+    debates: debatesEn,
     files: filesEn,
     shell: shellEn,
     settings: settingsEn,
@@ -72,6 +75,7 @@ const CATALOGS = {
     chat: chatPt,
     common: commonPt,
     control: controlPt,
+    debates: debatesPt,
     files: filesPt,
     shell: shellPt,
     settings: settingsPt,
