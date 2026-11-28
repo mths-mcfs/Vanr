@@ -652,7 +652,7 @@ export async function connectCustom(
   return { status: "server", server: toCustomServer(row) };
 }
 
-async function archivedAgent(db: Pick<AppDeps["db"], "select">, agentId: string): Promise<boolean> {
+async function archivedAgent(db: AppDeps["db"], agentId: string): Promise<boolean> {
   const [agent] = await db
     .select({ archivedAt: agents.archivedAt })
     .from(agents)
@@ -731,9 +731,18 @@ export async function finishOAuth(
     received.push(...secretsOf(secret));
     // Recheck consent under the lock. A token refresh preserves it; revocation or a newer consent does not.
     const active = await deps.db.transaction(async (tx) => {
+      // The agent's row first (as deleting an agent reaches its connections): an archive waits for this activation
+      // or this one sees it, so an archived agent's account never comes alive.
+      if (row.agentId) {
+        const [owner] = await tx
+          .select({ archivedAt: agents.archivedAt })
+          .from(agents)
+          .where(eq(agents.id, row.agentId))
+          .for("share");
+        if (!owner || owner.archivedAt) return null;
+      }
       const [locked] = await tx.select().from(connections).where(eq(connections.id, row.id)).for("update");
       if (!locked || locked.revokedAt) return null;
-      if (locked.agentId && (await archivedAgent(tx, locked.agentId))) return null;
       if (locked.secret !== s.credential) {
         const started = s.credential ? openSecret(deps, s.credential) : null;
         const current = locked.secret ? openSecret(deps, locked.secret) : null;
