@@ -411,7 +411,8 @@ describe("a lost thread, and the next one", () => {
     // The thread answers first; the fresh channel list comes only later.
     const later = server.delay("listChannels");
     await act(() => app.runtime.router.navigate({ to: `/workspace/${WS}/threads/msg_broot` }));
-    await waitFor(() => expect(server.calls.some((call) => call.method === "getThread")).toBe(true));
+    // The thread's answer against the old list: its channel isn't in it, so the page says gone.
+    expect(await screen.findByRole("heading", { name: "There's no thread here" })).toBeDefined();
     await act(async () => later.release());
     expect(await screen.findByText("Agreed, quietly")).toBeDefined();
   });
