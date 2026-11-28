@@ -245,8 +245,8 @@ export function Board({
                         {issue.assignee !== null && (
                           <span className="work-card__who">{actors.name(issue.assignee)}</span>
                         )}
-                        {issue.work?.state === "working" && <Chip>{t("issues.agentWorking")}</Chip>}
-                        {issue.work?.state === "blocked" && <Chip>{t("issues.agentBlocked")}</Chip>}
+                        {issue.work?.state === "working" && <Chip>{t("tracker.agentWorking")}</Chip>}
+                        {issue.work?.state === "blocked" && <Chip>{t("tracker.agentBlocked")}</Chip>}
                       </div>
                     </li>
                   );

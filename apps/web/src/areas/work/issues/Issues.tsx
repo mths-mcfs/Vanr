@@ -129,7 +129,7 @@ function IssuesView({ workspaceId }: { workspaceId: string }) {
   if (failed !== undefined) {
     return (
       <ScreenError
-        title={t("issues.failed")}
+        title={t("tracker.failed")}
         error={failed.error}
         onRetry={() => void failed.refetch()}
         namespace="work"
@@ -152,7 +152,7 @@ function IssuesView({ workspaceId }: { workspaceId: string }) {
 
   const add = (
     <Button variant="primary" icon={<Plus size={16} />} onClick={() => setCreating(true)}>
-      {t("issues.new")}
+      {t("tracker.new")}
     </Button>
   );
 
@@ -161,45 +161,45 @@ function IssuesView({ workspaceId }: { workspaceId: string }) {
       <header className="work__head">
         <div>
           <h1 className="page__title">{shell("route.issues")}</h1>
-          {!nothingYet && <p className="page__muted">{t("issues.count", { count: placed.length })}</p>}
+          {!nothingYet && <p className="page__muted">{t("tracker.count", { count: placed.length })}</p>}
         </div>
         {add}
       </header>
       {nothingYet ? (
         <EmptyState
           className="page__narrow"
-          title={t("issues.empty.title")}
-          description={t("issues.empty.body")}
+          title={t("tracker.empty.title")}
+          description={t("tracker.empty.body")}
           action={add}
         />
       ) : (
         <Tabs value={view} onValueChange={(value) => setView(value === "list" ? "list" : "board")}>
           <div className="work__tools">
-            <Field label={t("issues.search")} className="work__search">
+            <Field label={t("tracker.search")} className="work__search">
               <Input
                 type="search"
                 value={text}
                 maxLength={SEARCH_MAX}
-                placeholder={t("issues.searchHint")}
+                placeholder={t("tracker.searchHint")}
                 onChange={(event) => setText(event.target.value)}
               />
             </Field>
-            <TabsList aria-label={t("issues.views")}>
-              <TabsTrigger value="board">{t("issues.view.board")}</TabsTrigger>
-              <TabsTrigger value="list">{t("issues.view.list")}</TabsTrigger>
+            <TabsList aria-label={t("tracker.views")}>
+              <TabsTrigger value="board">{t("tracker.view.board")}</TabsTrigger>
+              <TabsTrigger value="list">{t("tracker.view.list")}</TabsTrigger>
             </TabsList>
           </div>
           <div className="work__filters">
             <fieldset className="work__chips">
-              <legend className="vr-visually-hidden">{t("issues.owner")}</legend>
+              <legend className="vr-visually-hidden">{t("tracker.owner")}</legend>
               {OWNERS.map((each) => (
                 <Chip key={each} selected={owner === each} onSelectedChange={() => setOwner(each)}>
-                  {t(`issues.owner.${each}`)}
+                  {t(`tracker.owner.${each}`)}
                 </Chip>
               ))}
             </fieldset>
             <Switch
-              label={t("issues.showCanceled")}
+              label={t("tracker.showCanceled")}
               checked={showCanceled}
               onCheckedChange={setShowCanceled}
             />
@@ -215,7 +215,7 @@ function IssuesView({ workspaceId }: { workspaceId: string }) {
           </TabsContent>
           <TabsContent value="list">
             {shown.length === 0 ? (
-              <EmptyState title={t("issues.none.title")} description={t("issues.none.body")} />
+              <EmptyState title={t("tracker.none.title")} description={t("tracker.none.body")} />
             ) : (
               <IssueTable workspaceId={workspaceId} issues={shown} columns={allColumns} actors={actors} />
             )}
@@ -251,14 +251,14 @@ function IssueTable({
   const sorted = [...issues].sort((a, b) => b.number - a.number);
   return (
     <div className="work-table">
-      <table aria-label={t("issues.list.label")}>
+      <table aria-label={t("tracker.list.label")}>
         <thead>
           <tr>
-            <th scope="col">{t("issues.list.number")}</th>
-            <th scope="col">{t("issues.list.title")}</th>
-            <th scope="col">{t("issues.list.stage")}</th>
-            <th scope="col">{t("issues.list.assignee")}</th>
-            <th scope="col">{t("issues.list.priority")}</th>
+            <th scope="col">{t("tracker.list.number")}</th>
+            <th scope="col">{t("tracker.list.title")}</th>
+            <th scope="col">{t("tracker.list.stage")}</th>
+            <th scope="col">{t("tracker.list.assignee")}</th>
+            <th scope="col">{t("tracker.list.priority")}</th>
           </tr>
         </thead>
         <tbody>
@@ -277,7 +277,7 @@ function IssueTable({
                   </AppLink>
                   <span className="work-table__marks">
                     <CriteriaMark criteria={issue.criteria} />
-                    {issue.work?.state === "working" && <Chip>{t("issues.agentWorking")}</Chip>}
+                    {issue.work?.state === "working" && <Chip>{t("tracker.agentWorking")}</Chip>}
                   </span>
                 </td>
                 <td>
