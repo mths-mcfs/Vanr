@@ -211,8 +211,13 @@ export class FakeAgentAccess {
       const agent = memory === undefined ? undefined : agentOf(scope, memory.agentId);
       if (memory === undefined || agent === undefined) return fail(404, "not_found", "Memory not found");
       if (!editor(scope, agent)) return forbidden();
+      const expected = text(params.expectedSha256);
+      if (expected !== undefined && expected !== memory.sha256) {
+        return fail(409, "memory.changed", "The memory changed since it was read");
+      }
       if (text(params.text) !== undefined) {
         memory.text = text(params.text) ?? memory.text;
+        memory.sha256 = `${memory.id}-${this.versions.length + 1}`;
         memory.editorUserId = scope.user.id;
         this.version(memory, "update", scope.user.id);
       }

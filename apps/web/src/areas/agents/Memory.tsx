@@ -169,9 +169,11 @@ function Note({
   const outcome = useOutcome();
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(memory.text);
+  // The version the edit started from: a save on top of another change is refused, not written over it.
+  const [base, setBase] = useState(memory.sha256);
   const [history, setHistory] = useState(false);
   const invalidates = () => [{ method: "listAgentMemories" as const, args: { workspaceId, agentId } }];
-  const rewrite = useApiMutation("updateMemoryText", { invalidates });
+  const rewrite = useApiMutation("updateMemory", { invalidates });
   const pin = useApiMutation("setMemoryPinned", { invalidates });
   const archive = useApiMutation("setMemoryArchived", { invalidates });
   const revert = useApiMutation("revertMemory", { invalidates });
@@ -189,7 +191,7 @@ function Note({
             event.preventDefault();
             if (text.trim() === "") return;
             rewrite.mutate(
-              { ...args, body: { text: text.trim() } },
+              { ...args, body: { text: text.trim(), expectedSha256: base } },
               {
                 onSuccess: () => {
                   setEditing(false);
@@ -244,6 +246,7 @@ function Note({
               onClick={() => {
                 // The draft starts from the note as it is now, not as it was when the list first loaded.
                 setText(memory.text);
+                setBase(memory.sha256);
                 setEditing(true);
               }}
             >

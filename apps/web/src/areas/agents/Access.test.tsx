@@ -129,6 +129,19 @@ describe("the rules per channel", () => {
     expect(screen.queryByRole("option", { name: "#payroll" }) === null).toBe(true);
   });
 
+  test("the workspace's connections that fail to load say so and can be tried again", async () => {
+    const server = newServer();
+    server.force("listConnectors", { kind: "error", status: 503, code: "unavailable" }, 4);
+    const app = await renderApp({ path: tab("agt_scout"), signedInAs: "usr_ana", server });
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("The workspace's connections could not be loaded");
+    await app.user.click(within(alert).getByRole("button", { name: "Retry" }));
+    const form = await screen.findByRole("form", { name: "Add rule" });
+    await waitFor(() => expect(screen.queryByRole("alert") === null).toBe(true));
+    await app.user.click(within(form).getByRole("combobox", { name: "Connection" }));
+    expect(await screen.findByRole("option", { name: "Linear · Team Linear" })).toBeDefined();
+  });
+
   test("rules that fail to load can be tried again", async () => {
     const server = newServer();
     server.force("getAgentIdentity", { kind: "error", status: 503, code: "unavailable" }, 4);

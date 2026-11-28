@@ -85,6 +85,21 @@ describe("the agent's memory", () => {
     );
   });
 
+  test("a save on top of a change made meanwhile is refused, not written over it", async () => {
+    const app = await renderApp({ path: `${BASE}?tab=memory`, signedInAs: "usr_ana" });
+    const list = await screen.findByRole("list", { name: /^Facts and decisions/ });
+    const paper = within(list).getAllByRole("listitem")[0] as HTMLElement;
+    await app.user.click(within(paper).getByRole("button", { name: "Edit" }));
+    // The agent rewrites the note while the person is editing it.
+    const note = app.server.agentAccess.memories.find((memory) => memory.id === "mem_paper");
+    if (note !== undefined)
+      Object.assign(note, { text: "Paper now comes on Fridays.", sha256: "mem_paper-agent" });
+    await app.user.type(screen.getByLabelText("Text"), " Mine.");
+    await app.user.click(screen.getByRole("button", { name: "Save note" }));
+    expect(await screen.findByText(/This note changed since you opened it/)).toBeDefined();
+    expect(note?.text).toBe("Paper now comes on Fridays.");
+  });
+
   test("a memory that fails to load can be tried again", async () => {
     const server = newServer();
     server.force("listAgentMemories", { kind: "error", status: 503, code: "unavailable" }, 4);

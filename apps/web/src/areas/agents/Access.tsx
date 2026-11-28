@@ -303,6 +303,13 @@ function Rules({
           })}
         </ul>
       )}
+      {rights.editLook && shared.isError && (
+        <PartError
+          title={t("access.connectionsFailed")}
+          error={shared.error}
+          onRetry={() => void shared.refetch()}
+        />
+      )}
       {rights.editLook &&
         (channels.isError ? (
           <PartError
