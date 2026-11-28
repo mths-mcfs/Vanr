@@ -22,6 +22,7 @@ import { useGo, useRouteParams, useSearch } from "../../../app/navigation.tsx";
 import { useErrorMessage } from "../../../app/screens.tsx";
 import { useMessages } from "../../../i18n/react.tsx";
 import { useOutcome } from "../shared.tsx";
+import { MailReturn } from "./DataSources.tsx";
 import { GitHubApp } from "./GitHub.tsx";
 import { OwnServers } from "./OwnServers.tsx";
 import {
@@ -62,6 +63,7 @@ const Back = z.object({
   github_app: z.string().optional(),
 });
 const NOTHING_BACK: z.infer<typeof Back> = {};
+const NO_MAIL: z.infer<typeof MailReturn> = {};
 // What the server's callbacks say (integrations/connectors.ts, github-app.ts); anything else reads as
 // the generic failure.
 const SIGN_IN_FAILURES = [
@@ -88,7 +90,17 @@ function ComeBack({
   const go = useGo();
   const back = useSearch(Back, NOTHING_BACK);
   const catalog = useApiQuery("getConnectorCatalog", {});
+  const mail = useSearch(MailReturn, NO_MAIL);
   const said = useRef(false);
+  // The server sends a hosted mail sign-in back here; mailboxes are in Data sources, so it goes on there.
+  useEffect(() => {
+    if (mail.mail_connected === undefined && mail.mail_error === undefined) return;
+    void go(
+      "settings",
+      { workspaceId, section: "data-sources" },
+      { replace: true, search: { mail_connected: mail.mail_connected, mail_error: mail.mail_error } },
+    );
+  }, [mail, go, workspaceId]);
   const named =
     back.connected === undefined ||
     back.connected.startsWith("custom:") ||

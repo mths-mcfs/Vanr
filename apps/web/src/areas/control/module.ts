@@ -7,6 +7,7 @@ import "../../styles/connections.css";
 import type { AreaModule } from "../../app/areas.ts";
 import { ApprovalsScreen } from "./approvals/Approvals.tsx";
 import { ConnectorsSection } from "./connections/Connectors.tsx";
+import { DataSourcesSection } from "./connections/DataSources.tsx";
 import { ProposalsScreen } from "./proposals/Proposals.tsx";
 
 export const screens: AreaModule<"control">["screens"] = {
@@ -16,4 +17,5 @@ export const screens: AreaModule<"control">["screens"] = {
 
 export const settings: AreaModule<"control">["settings"] = {
   connectors: ConnectorsSection,
+  "data-sources": DataSourcesSection,
 };

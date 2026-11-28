@@ -1,7 +1,8 @@
 // The workspace's connections for the fake server: services from the catalog connected with a key or
 // a sign-in, the workspace's own MCP servers with the access each of their tools gets, and the GitHub
-// App's installations. As on the server, reading is open to members and every change needs `configure`.
-// A key or a sign-in never comes back in an answer. Never part of the production build.
+// App's installations, the mail accounts and the customer databases. As on the server, reading is open to
+// members and every change needs `configure`. A key, a password or a sign-in never comes back in an answer.
+// Never part of the production build.
 import type * as T from "@vanr/contract";
 import { can } from "@vanr/contract";
 import { FAKE_CATALOG } from "./fake-agent-access.ts";
@@ -46,8 +47,41 @@ export const FAKE_SERVER_TOOLS: T.CustomServerTool[] = [
   },
 ];
 
+export type FakeMailAccount = T.MailAccount & { workspaceId: string };
+export type FakeDatabase = T.DatabaseConnection & { workspaceId: string; sslmode: string; port: number };
+
+export const FAKE_MAIL_PROVIDERS: T.MailProviders = {
+  composio: ["gmail"],
+  imap: true,
+  presets: [
+    {
+      id: "gmail",
+      label: "Gmail",
+      host: "imap.gmail.com",
+      port: 993,
+      appPasswordGuide: "https://myaccount.google.com/apppasswords",
+    },
+    { id: "other", label: "Other", host: "", port: 993, appPasswordGuide: null },
+  ],
+};
+const MAIL_ACTIONS = new Set([
+  "search",
+  "read",
+  "folders",
+  "draft",
+  "organize",
+  "send",
+  "reply",
+  "forward",
+  "delete",
+]);
+const DB_ACTIONS = new Set(["tables", "describe", "query"]);
+const PROVIDERS = new Set<T.DatabaseProvider>(["neon", "other", "railway", "rds", "render", "supabase"]);
+
 export class FakeConnections {
   servers: FakeMcpServer[] = [];
+  mail: FakeMailAccount[] = [];
+  databases: FakeDatabase[] = [];
   installations: FakeInstallation[] = [];
   /** Whether this server has a GitHub App set up. */
   githubInstallable = true;
@@ -59,6 +93,8 @@ export class FakeConnections {
 
   clear(): void {
     this.servers = [];
+    this.mail = [];
+    this.databases = [];
     this.installations = [];
     this.githubInstallable = true;
     this.keyServers = new Set();
@@ -79,7 +115,181 @@ export class FakeConnections {
     const view = ({ workspaceId: _w, needsKey: _k, oauth: _o, ...server }: FakeMcpServer): T.CustomServer =>
       server;
 
+    const mailOf = (scope: Scope, id: unknown) =>
+      this.mail.find((each) => each.workspaceId === scope.workspaceId && each.id === text(id));
+    const databaseOf = (scope: Scope, id: unknown) =>
+      this.databases.find((each) => each.workspaceId === scope.workspaceId && each.id === text(id));
+    const mailView = ({ workspaceId: _w, ...account }: FakeMailAccount): T.MailAccount => account;
+    const databaseView = ({
+      workspaceId: _w,
+      sslmode: _s,
+      port: _p,
+      ...db
+    }: FakeDatabase): T.DatabaseConnection => db;
+    const actions = (value: unknown, known: Set<string>) =>
+      Array.isArray(value) && value.every((each) => typeof each === "string" && known.has(each))
+        ? [...new Set(value as string[])]
+        : undefined;
+
     return {
+      listMailProviders: within(() => reply(200, FAKE_MAIL_PROVIDERS)),
+      listMailAccounts: within((scope) =>
+        reply(200, {
+          accounts: this.mail.filter((each) => each.workspaceId === scope.workspaceId).map(mailView),
+        }),
+      ),
+      createMailAccountImap: within((scope, params) => {
+        const address = text(params.address)?.trim() ?? "";
+        const preset = text(params.preset) ?? "";
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(address)) {
+          return fail(400, "mail.invalid_address", "Use a full e-mail address");
+        }
+        if (!FAKE_MAIL_PROVIDERS.presets.some((each) => each.id === preset)) {
+          return fail(400, "mail.unknown_preset", "Unknown provider");
+        }
+        if (preset === "other" && (params.imapHost === undefined || params.smtpHost === undefined)) {
+          return fail(400, "mail.servers_required", "Enter the IMAP and SMTP servers");
+        }
+        if (text(params.password) === "wrong-password") {
+          return fail(400, "mail.auth", "The mail server rejected the password");
+        }
+        if (this.mail.some((each) => each.workspaceId === scope.workspaceId && each.address === address)) {
+          return fail(409, "mail.exists", "This address is already connected");
+        }
+        const account: FakeMailAccount = {
+          id: this.host.id("mail"),
+          workspaceId: scope.workspaceId,
+          address,
+          label: address,
+          preset,
+          provider: preset,
+          via: "imap",
+          status: "active",
+          agents: [],
+          confirmActions: [],
+          disabledActions: [],
+        };
+        this.mail.push(account);
+        return reply(201, { account: mailView(account) });
+      }, true),
+      createMailAccountComposio: within((_scope, params) => {
+        const provider = text(params.provider);
+        if (provider === undefined || !FAKE_MAIL_PROVIDERS.composio.some((each) => each === provider)) {
+          return fail(400, "mail.composio_unavailable", "Composio is not set up on this server");
+        }
+        return reply(200, {
+          accountId: this.host.id("mail"),
+          redirectUrl: `https://${provider}.example/consent`,
+        });
+      }, true),
+      updateMailAccount: within((scope, params) => {
+        const account = mailOf(scope, params.accountId);
+        if (account === undefined) return fail(404, "not_found", "Mail account not found");
+        const disabled =
+          params.disabledActions === undefined ? [] : actions(params.disabledActions, MAIL_ACTIONS);
+        const confirm =
+          params.confirmActions === undefined ? [] : actions(params.confirmActions, MAIL_ACTIONS);
+        if (disabled === undefined || confirm === undefined) return fail(400, "validation", "Invalid body");
+        if (text(params.label) !== undefined) account.label = text(params.label)?.trim() ?? account.label;
+        if (params.disabledActions !== undefined) account.disabledActions = disabled;
+        if (params.confirmActions !== undefined) account.confirmActions = confirm;
+        if (text(params.password) !== undefined) {
+          if (params.password === "wrong-password") {
+            return fail(400, "mail.auth", "The mail server rejected the password");
+          }
+          account.status = "active";
+        }
+        return reply(200, { account: mailView(account) });
+      }, true),
+      deleteMailAccount: within((scope, params) => {
+        const account = mailOf(scope, params.accountId);
+        if (account === undefined) return fail(404, "not_found", "Mail account not found");
+        this.mail = this.mail.filter((each) => each !== account);
+        return reply(204, null);
+      }, true),
+
+      listDatabases: within((scope) =>
+        reply(200, {
+          connections: this.databases
+            .filter((each) => each.workspaceId === scope.workspaceId)
+            .map(databaseView),
+        }),
+      ),
+      createDatabase: within((scope, params) => {
+        let host = text(params.host)?.trim();
+        let database = text(params.database)?.trim();
+        let username = text(params.username)?.trim();
+        let password = text(params.password);
+        let sslmode = text(params.sslmode) ?? "require";
+        let port = typeof params.port === "number" ? params.port : 5432;
+        const url = text(params.url)?.trim();
+        if (url !== undefined && url !== "") {
+          let parsed: URL;
+          try {
+            parsed = new URL(url);
+          } catch {
+            return fail(400, "database.invalid_url", "That is not a valid connection URL");
+          }
+          if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
+            return fail(400, "database.invalid_url", "Use a postgres:// URL");
+          }
+          host = parsed.hostname;
+          port = parsed.port === "" ? 5432 : Number(parsed.port);
+          database = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
+          username = decodeURIComponent(parsed.username);
+          password = password ?? decodeURIComponent(parsed.password);
+          sslmode = parsed.searchParams.get("sslmode") ?? sslmode;
+        }
+        if (!host || !database || !username || password === undefined) {
+          return fail(400, "database.fields_required", "Enter host, database, user and password");
+        }
+        if (password === "wrong-password") {
+          return fail(400, "database.auth", "The database rejected the user or password");
+        }
+        const provider = text(params.provider);
+        const connection: FakeDatabase = {
+          id: this.host.id("dbc"),
+          workspaceId: scope.workspaceId,
+          label: text(params.label)?.trim() || `${database} @ ${host}`,
+          provider: PROVIDERS.has(provider as T.DatabaseProvider)
+            ? (provider as T.DatabaseProvider)
+            : "other",
+          host,
+          port,
+          database,
+          username,
+          sslmode,
+          status: "active",
+          canWrite: false,
+          hiddenSuggestion: ['public.customers."email"'],
+          disabledActions: [],
+          agents: [],
+        };
+        this.databases.push(connection);
+        return reply(201, { connection: databaseView(connection) });
+      }, true),
+      updateDatabase: within((scope, params) => {
+        const connection = databaseOf(scope, params.databaseId);
+        if (connection === undefined) return fail(404, "not_found", "Database not found");
+        const disabled =
+          params.disabledActions === undefined ? [] : actions(params.disabledActions, DB_ACTIONS);
+        if (disabled === undefined) return fail(400, "validation", "Invalid body");
+        if (text(params.password) === "wrong-password") {
+          return fail(400, "database.auth", "The database rejected the user or password");
+        }
+        if (text(params.label) !== undefined)
+          connection.label = text(params.label)?.trim() ?? connection.label;
+        if (params.disabledActions !== undefined) connection.disabledActions = disabled;
+        if (text(params.password) !== undefined) connection.status = "active";
+        return reply(200, { connection: databaseView(connection) });
+      }, true),
+      deleteDatabase: within((scope, params) => {
+        const connection = databaseOf(scope, params.databaseId);
+        if (connection === undefined) return fail(404, "not_found", "Database not found");
+        this.databases = this.databases.filter((each) => each !== connection);
+        return reply(204, null);
+      }, true),
+
       createConnector: within((scope, params) => {
         const def = FAKE_CATALOG.connectors.find((each) => each.id === text(params.connector));
         if (def === undefined) return fail(400, "connector.unknown", "Unknown connector");

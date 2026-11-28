@@ -24,6 +24,14 @@ export const KEY_MIN = 8;
 export const KEY_MAX = 2000;
 export const ADDRESS_MAX = 500;
 
+/** A port as typed: a whole number from 1 to 65535, or null. */
+export function portOf(text: string): number | null {
+  const typed = text.trim();
+  if (!/^\d{1,5}$/.test(typed)) return null;
+  const port = Number(typed);
+  return port >= 1 && port <= 65_535 ? port : null;
+}
+
 /** Where a sign-in on another site sends the person back: a section of this workspace's settings. */
 export const comeBackTo = (workspaceId: string, section: SettingsSection) =>
   href("settings", { workspaceId, section });
