@@ -532,4 +532,19 @@ describe("the fake follows the server", () => {
     expect(call("createDebateIssue", { debateId: "deb_logo", items: [{ title: long }] }).status).toBe(400);
     expect(call("createDebateIssue", { debateId: "deb_logo", items: [] }).status).toBe(400);
   });
+
+  test("each issue is linked to the debate as soon as it is made", () => {
+    const logo = server.debates.debates.find((row) => row.id === "deb_logo");
+    if (logo === undefined) throw new Error("the seed has no logo debate");
+    expect(logo.format).toBe("plan");
+    const before = logo.issues.length;
+    // The second title passes the debate's count (code points) but not the issue store's (UTF-16 units).
+    const answer = call("createDebateIssue", {
+      debateId: "deb_logo",
+      items: [{ title: "Book the sign maker" }, { title: "😀".repeat(151) }],
+    });
+    expect(answer.status).toBe(400);
+    expect(logo.issues.length).toBe(before + 1);
+    expect(logo.issues.at(-1)?.title).toBe("Book the sign maker");
+  });
 });

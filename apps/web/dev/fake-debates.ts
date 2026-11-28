@@ -65,6 +65,19 @@ export class FakeDebates {
     this.picks = new Map();
   }
 
+  /** The majority of a round's positions (agents' turns and people's answers), as the server counts it. */
+  roundMajority(row: StoredDebate, ids: readonly string[]): T.DebateMajority | null {
+    const counts = new Map<string, number>();
+    for (const post of row.posts)
+      if (
+        ids.includes(post.id) &&
+        post.claimData !== null &&
+        (post.kind === "turn" || post.kind === "speaker")
+      )
+        counts.set(post.claimData.answer, (counts.get(post.claimData.answer) ?? 0) + 1);
+    return counts.size === 0 ? null : this.majority([...counts.entries()]);
+  }
+
   /** Closes the debate with a synthesis from the last round's majority, revealing who spoke. */
   synthesize(workspaceId: string, row: StoredDebate): void {
     if (row.status !== "open" || row.phase !== "concluding") return;
@@ -73,8 +86,11 @@ export class FakeDebates {
       row.posts.push(...row.sealed);
       const ids = row.sealed.map((post) => post.id);
       const current = row.track.roundLimit.find((view) => view.round === row.round);
-      if (current === undefined) row.track.roundLimit.push({ round: row.round, posts: ids, majority: null });
-      else current.posts.push(...ids);
+      const view = current ?? { round: row.round, posts: [], majority: null };
+      if (current === undefined) row.track.roundLimit.push(view);
+      view.posts.push(...ids);
+      // The round's majority now counts what was just published.
+      view.majority = this.roundMajority(row, view.posts);
       row.sealed = [];
       row.sealedCount = 0;
     }
@@ -179,6 +195,7 @@ export class FakeDebates {
       }),
       this.make("workspace_birchwood", {
         id: "deb_logo",
+        format: "plan",
         title: "Which logo goes on the new sign?",
         goal: "Pick the logo for the shop front.",
         createdBy: ana,
@@ -238,7 +255,18 @@ export class FakeDebates {
         ],
         synthesis: null,
       };
-      paper.sealedCount = 1;
+      // Scout already answered round 1: sealed (counted, not shown) until the round closes.
+      paper.sealed = [
+        this.post(
+          "pst_p4",
+          1,
+          { type: "agent", id: "agt_scout" },
+          "A",
+          "Still Northpaper.",
+          this.claim("Northpaper", 0.8),
+        ),
+      ];
+      paper.sealedCount = paper.sealed.length;
     }
     const logo = this.debates[3];
     if (logo !== undefined) {
@@ -619,8 +647,9 @@ export class FakeDebates {
           });
           if ("status" in made) return made;
           issues.push(made);
+          // Linked at once: a later item that fails leaves the ones made already on the debate.
+          row.issues.push(made);
         }
-        row.issues.push(...issues);
         return reply(201, { numbers: issues.map((issue) => issue.number), issues });
       }, "host"),
       reviewDebate: withOne((scope, row) => {

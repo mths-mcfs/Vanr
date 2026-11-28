@@ -67,6 +67,27 @@ describe("an open debate", () => {
     expect(await screen.findByText("Speed beats price.")).toBeDefined();
   });
 
+  test("the round's majority counts the positions published when it closes", async () => {
+    const server = newServer();
+    const asAna = await renderApp({ path: PAGE("deb_paper"), signedInAs: "usr_ana", server });
+    const turn = within(await screen.findByRole("region", { name: "It's your turn" }));
+    await chooseOption(asAna, turn.getByRole("combobox", { name: "Your answer" }), "Mill & Co");
+    await asAna.user.type(turn.getByRole("textbox", { name: "Your argument" }), "Cheaper wins.");
+    await asAna.user.click(turn.getByRole("button", { name: "Give my position" }));
+    expect(await screen.findByText("Your position is in")).toBeDefined();
+    asAna.unmount();
+
+    const asJonas = await renderApp({ path: PAGE("deb_paper"), signedInAs: "usr_jonas", server });
+    await asJonas.user.click(await screen.findByRole("button", { name: "Conclude now" }));
+    const synthesis = within(await screen.findByRole("region", { name: "Synthesis" }));
+    // Scout's sealed Northpaper and Ana's Mill & Co both count: round 1 is split, not Scout's alone.
+    expect(synthesis.getByText("The table did not settle.")).toBeDefined();
+    expect(grid().getByText("Split, Northpaper 1, Mill & Co 1")).toBeDefined();
+    const paper = server.debates.debates.find((row) => row.id === "deb_paper");
+    expect(paper?.sealedCount).toBe(0);
+    expect(paper?.sealed.length).toBe(0);
+  });
+
   test("skipping the turn", async () => {
     const app = await renderApp({ path: PAGE("deb_paper"), signedInAs: "usr_ana" });
     const turn = within(await screen.findByRole("region", { name: "It's your turn" }));
