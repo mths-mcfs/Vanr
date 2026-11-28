@@ -27,8 +27,8 @@ export function RoutineDetails({
   const t = useMessages("work");
   return (
     <div className="work-routine__details">
-      <section className="work-section" aria-label={t("routines.instruction")}>
-        <h3 className="work-subhead">{t("routines.instruction")}</h3>
+      <section className="work-section" aria-label={t("recur.instruction")}>
+        <h3 className="work-subhead">{t("recur.instruction")}</h3>
         <p className="work-routine__full">{routine.prompt}</p>
       </section>
       <Cost workspaceId={workspaceId} routineId={routine.id} />
@@ -50,7 +50,7 @@ function Cost({ workspaceId, routineId }: { workspaceId: string; routineId: stri
   else if (estimate.isError && estimate.data === undefined)
     body = (
       <PartError
-        title={t("routines.cost.failed")}
+        title={t("recur.cost.failed")}
         error={estimate.error}
         onRetry={() => void estimate.refetch()}
       />
@@ -58,22 +58,22 @@ function Cost({ workspaceId, routineId }: { workspaceId: string; routineId: stri
   else {
     const { upToUsd, recent } = estimate.data;
     const parts = [
-      ...(upToUsd === null ? [] : [t("routines.cost.upTo", { value: usd.format(upToUsd) })]),
+      ...(upToUsd === null ? [] : [t("recur.cost.upTo", { value: usd.format(upToUsd) })]),
       ...(recent === null || recent.runs === 0
         ? []
         : [
-            t("routines.cost.recent", {
+            t("recur.cost.recent", {
               count: recent.runs,
               avg: usd.format(recent.avgUsd),
               max: usd.format(recent.maxUsd),
             }),
           ]),
     ];
-    body = <p>{parts.length === 0 ? t("routines.cost.unknown") : parts.join(" ")}</p>;
+    body = <p>{parts.length === 0 ? t("recur.cost.unknown") : parts.join(" ")}</p>;
   }
   return (
-    <section className="work-section" aria-label={t("routines.cost")}>
-      <h3 className="work-subhead">{t("routines.cost")}</h3>
+    <section className="work-section" aria-label={t("recur.cost")}>
+      <h3 className="work-subhead">{t("recur.cost")}</h3>
       {body}
     </section>
   );
@@ -103,12 +103,12 @@ function Runs({ workspaceId, routine }: { workspaceId: string; routine: Routine 
   if (runs.isPending) body = <PartLoading />;
   else if (runs.isError && runs.data === undefined)
     body = (
-      <PartError title={t("routines.runs.failed")} error={runs.error} onRetry={() => void runs.refetch()} />
+      <PartError title={t("recur.runs.failed")} error={runs.error} onRetry={() => void runs.refetch()} />
     );
-  else if (runs.data.length === 0) body = <p className="page__muted">{t("routines.runs.none")}</p>;
+  else if (runs.data.length === 0) body = <p className="page__muted">{t("recur.runs.none")}</p>;
   else {
     body = (
-      <ol className="work-runs" aria-label={t("routines.runs")}>
+      <ol className="work-runs" aria-label={t("recur.runs")}>
         {runs.data.slice(0, RUNS_SHOWN).map((run) => {
           const late =
             run.scheduledFor !== null && run.startedAt !== null
@@ -116,18 +116,16 @@ function Runs({ workspaceId, routine }: { workspaceId: string; routine: Routine 
               : 0;
           return (
             <li key={run.id} className={`work-run work-run--${run.status}`}>
-              <Chip>{t(`routines.status.${run.status}`)}</Chip>
+              <Chip>{t(`recur.status.${run.status}`)}</Chip>
               <time dateTime={run.at}>{when.format(new Date(run.at))}</time>
-              {run.trigger !== null && (
-                <span className="page__muted">{t(`routines.via.${run.trigger}`)}</span>
-              )}
+              {run.trigger !== null && <span className="page__muted">{t(`recur.via.${run.trigger}`)}</span>}
               {run.attempt > 1 && (
-                <span className="page__muted">{t("routines.run.attempt", { count: run.attempt })}</span>
+                <span className="page__muted">{t("recur.run.attempt", { count: run.attempt })}</span>
               )}
-              {late >= 2 && <span className="page__muted">{t("routines.run.late", { minutes: late })}</span>}
+              {late >= 2 && <span className="page__muted">{t("recur.run.late", { minutes: late })}</span>}
               {run.status === "queued" && run.notBefore !== null && (
                 <span className="page__muted">
-                  {t("routines.run.queued", { when: when.format(new Date(run.notBefore)) })}
+                  {t("recur.run.queued", { when: when.format(new Date(run.notBefore)) })}
                 </span>
               )}
               {summaryOf(run) !== "" && <p className="work-run__summary">{summaryOf(run)}</p>}
@@ -138,7 +136,7 @@ function Runs({ workspaceId, routine }: { workspaceId: string; routine: Routine 
                     route="thread"
                     params={{ workspaceId, threadId: run.threadId }}
                   >
-                    {t("routines.run.session")}
+                    {t("recur.run.session")}
                   </AppLink>
                 ) : (
                   <AppLink
@@ -146,7 +144,7 @@ function Runs({ workspaceId, routine }: { workspaceId: string; routine: Routine 
                     route="channel"
                     params={{ workspaceId, channelId: run.channelId }}
                   >
-                    {t("routines.run.session")}
+                    {t("recur.run.session")}
                   </AppLink>
                 ))}
             </li>
@@ -156,8 +154,8 @@ function Runs({ workspaceId, routine }: { workspaceId: string; routine: Routine 
     );
   }
   return (
-    <section className="work-section" aria-label={t("routines.runs")}>
-      <h3 className="work-subhead">{t("routines.runs")}</h3>
+    <section className="work-section" aria-label={t("recur.runs")}>
+      <h3 className="work-subhead">{t("recur.runs")}</h3>
       {body}
     </section>
   );
@@ -181,10 +179,10 @@ function Webhook({
     onError: (error) => outcome.failed(error),
   });
   return (
-    <section className="work-section" aria-label={t("routines.webhook")}>
-      <h3 className="work-subhead">{t("routines.webhook")}</h3>
+    <section className="work-section" aria-label={t("recur.webhook")}>
+      <h3 className="work-subhead">{t("recur.webhook")}</h3>
       {routine.webhookUrl !== null && <code className="work-code">{routine.webhookUrl}</code>}
-      {!routine.webhookHasSecret && <p className="work-note">{t("routines.webhook.noSecret")}</p>}
+      {!routine.webhookHasSecret && <p className="work-note">{t("recur.webhook.noSecret")}</p>}
       {mayEdit && (
         <Button
           size="sm"
@@ -196,26 +194,26 @@ function Webhook({
             )
           }
         >
-          {t(routine.webhookHasSecret ? "routines.webhook.replace" : "routines.webhook.make")}
+          {t(routine.webhookHasSecret ? "recur.webhook.replace" : "recur.webhook.make")}
         </Button>
       )}
       {secret !== null && (
         <Dialog open onOpenChange={(next) => !next && setSecret(null)}>
           <DialogContent
-            title={t("routines.webhook.title")}
-            description={t("routines.webhook.once")}
+            title={t("recur.webhook.title")}
+            description={t("recur.webhook.once")}
             closeLabel={common("action.close")}
             footer={
               <Button
                 variant="primary"
                 onClick={() =>
                   void navigator.clipboard.writeText(secret).then(
-                    () => outcome.done(t("routines.webhook.copied")),
+                    () => outcome.done(t("recur.webhook.copied")),
                     (error: unknown) => outcome.failed(error),
                   )
                 }
               >
-                {t("routines.webhook.copy")}
+                {t("recur.webhook.copy")}
               </Button>
             }
           >

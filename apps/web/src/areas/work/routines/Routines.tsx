@@ -44,7 +44,7 @@ function RoutinesView({ workspaceId }: { workspaceId: string }) {
   if (routines.isError && routines.data === undefined) {
     return (
       <ScreenError
-        title={t("routines.failed")}
+        title={t("recur.failed")}
         error={routines.error}
         onRetry={() => void routines.refetch()}
         namespace="work"
@@ -54,7 +54,7 @@ function RoutinesView({ workspaceId }: { workspaceId: string }) {
   const noAgent = actors.reachable.length === 0;
   const add = (
     <Button variant="primary" icon={<Plus size={16} />} disabled={noAgent} onClick={() => setCreating(true)}>
-      {t("routines.new")}
+      {t("recur.new")}
     </Button>
   );
   const channelName = (id: string) => channels.data?.find((channel) => channel.id === id)?.name;
@@ -64,20 +64,20 @@ function RoutinesView({ workspaceId }: { workspaceId: string }) {
       <header className="work__head">
         <div>
           <h1 className="page__title">{shell("route.routines")}</h1>
-          <p className="page__muted">{t("routines.lead")}</p>
+          <p className="page__muted">{t("recur.lead")}</p>
         </div>
         {add}
       </header>
-      {noAgent && <p className="work-note">{t("routines.noAgent")}</p>}
+      {noAgent && <p className="work-note">{t("recur.noAgent")}</p>}
       {routines.data.length === 0 ? (
         <EmptyState
           className="page__narrow"
-          title={t("routines.empty.title")}
-          description={t("routines.empty.body")}
+          title={t("recur.empty.title")}
+          description={t("recur.empty.body")}
           action={noAgent ? undefined : add}
         />
       ) : (
-        <ul className="work-routines" aria-label={t("routines.list")}>
+        <ul className="work-routines" aria-label={t("recur.list")}>
           {routines.data.map((routine) => (
             <li key={routine.id}>
               <RoutineCard
@@ -151,16 +151,16 @@ function RoutineCard({
     <article className={routine.active ? "work-routine" : "work-routine is-paused"} aria-label={routine.name}>
       <header className="work-routine__head">
         <h2 className="work-routine__name">{routine.name}</h2>
-        {routine.running && <Chip>{t("routines.running")}</Chip>}
+        {routine.running && <Chip>{t("recur.running")}</Chip>}
         {routine.pausedReason === "failures" ? (
-          <Chip>{t("routines.pausedFailures", { count: routine.policy.pauseAfterFailures })}</Chip>
+          <Chip>{t("recur.pausedFailures", { count: routine.policy.pauseAfterFailures })}</Chip>
         ) : (
-          !routine.active && <Chip>{t("routines.paused")}</Chip>
+          !routine.active && <Chip>{t("recur.paused")}</Chip>
         )}
         {mayEdit && (
           <Switch
             className="work-routine__switch"
-            label={t("routines.active", { name: routine.name })}
+            label={t("recur.active", { name: routine.name })}
             checked={routine.active}
             disabled={toggle.isPending}
             onCheckedChange={(active) =>
@@ -168,9 +168,7 @@ function RoutineCard({
                 { workspaceId, routineId: routine.id, body: { active } },
                 {
                   onSuccess: () =>
-                    outcome.done(
-                      t(active ? "routines.enabled" : "routines.disabled", { name: routine.name }),
-                    ),
+                    outcome.done(t(active ? "recur.enabled" : "recur.disabled", { name: routine.name })),
                 },
               )
             }
@@ -178,23 +176,23 @@ function RoutineCard({
         )}
       </header>
       <dl className="work-facts work-facts--inline">
-        <dt>{t("routines.agent")}</dt>
+        <dt>{t("recur.agent")}</dt>
         <dd>{agentName}</dd>
-        <dt>{t("routines.trigger")}</dt>
+        <dt>{t("recur.trigger")}</dt>
         <dd>{triggerText(routine.trigger)}</dd>
-        <dt>{t("routines.target")}</dt>
+        <dt>{t("recur.target")}</dt>
         <dd>{targetText(routine.target, channelName)}</dd>
       </dl>
       <p className="work-routine__prompt">{routine.prompt}</p>
       <p className="work-routine__times">
         {routine.nextFireAt === null
-          ? t("routines.noNext")
-          : t("routines.next", { when: when.format(new Date(routine.nextFireAt)) })}
+          ? t("recur.noNext")
+          : t("recur.next", { when: when.format(new Date(routine.nextFireAt)) })}
         {routine.lastRun !== null && (
           <span>
-            {t("routines.last", {
+            {t("recur.last", {
               when: ago(routine.lastRun.at),
-              status: t(`routines.status.${routine.lastRun.status}`),
+              status: t(`recur.status.${routine.lastRun.status}`),
             })}
           </span>
         )}
@@ -210,13 +208,13 @@ function RoutineCard({
                 {
                   onSuccess: () => {
                     setOpen(true);
-                    outcome.done(t("routines.started", { name: routine.name }));
+                    outcome.done(t("recur.started", { name: routine.name }));
                   },
                 },
               )
             }
           >
-            {t("routines.runNow")}
+            {t("recur.runNow")}
           </Button>
         )}
         {mayDuplicate && (
@@ -227,11 +225,11 @@ function RoutineCard({
             onClick={() =>
               duplicate.mutate(
                 { workspaceId, routineId: routine.id, body: {} },
-                { onSuccess: () => outcome.done(t("routines.duplicated", { name: routine.name })) },
+                { onSuccess: () => outcome.done(t("recur.duplicated", { name: routine.name })) },
               )
             }
           >
-            {t("routines.duplicate")}
+            {t("recur.duplicate")}
           </Button>
         )}
         {mayEdit && (
@@ -240,12 +238,12 @@ function RoutineCard({
             onOpenChange={setDeleting}
             trigger={
               <Button size="sm" variant="ghost">
-                {t("routines.delete")}
+                {t("recur.delete")}
               </Button>
             }
-            title={t("routines.deleteTitle", { name: routine.name })}
-            description={t("routines.deleteBody")}
-            confirmLabel={t("routines.delete")}
+            title={t("recur.deleteTitle", { name: routine.name })}
+            description={t("recur.deleteBody")}
+            confirmLabel={t("recur.delete")}
             cancelLabel={common("action.cancel")}
             tone="danger"
             confirming={remove.isPending}
@@ -255,7 +253,7 @@ function RoutineCard({
                 {
                   onSuccess: () => {
                     setDeleting(false);
-                    outcome.done(t("routines.deleted", { name: routine.name }));
+                    outcome.done(t("recur.deleted", { name: routine.name }));
                   },
                 },
               )
@@ -270,7 +268,7 @@ function RoutineCard({
           aria-expanded={open}
           onClick={() => setOpen(!open)}
         >
-          {t("routines.details", { name: routine.name })}
+          {t("recur.details", { name: routine.name })}
         </Button>
       </div>
       {open && <RoutineDetails workspaceId={workspaceId} routine={routine} mayEdit={mayEdit} />}

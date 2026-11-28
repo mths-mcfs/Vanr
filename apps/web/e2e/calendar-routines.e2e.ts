@@ -45,7 +45,7 @@ test.describe("the calendar", () => {
     await signIn(owner);
     await page.goto(`/workspace/${owner.workspace.id}/calendar`);
 
-    await page.getByRole("button", { name: t("work", "calendar.new") }).click();
+    await page.getByRole("button", { name: t("work", "week.new") }).click();
     const dialog = page.getByRole("dialog", { name: t("work", "cal.new.title") });
     await dialog.getByRole("textbox", { name: t("work", "cal.field.title") }).fill(title);
     await dialog.getByRole("combobox", { name: t("work", "cal.field.repeat") }).click();
@@ -57,7 +57,7 @@ test.describe("the calendar", () => {
     ).toBeVisible();
 
     // A week later, the same weekday has it too.
-    await page.getByRole("button", { name: t("work", "calendar.next") }).click();
+    await page.getByRole("button", { name: t("work", "week.next") }).click();
     const later = dayRegion(page, locale, nextWeek).getByRole("button", { name: new RegExp(title) });
     await expect(later).toBeVisible();
 
@@ -71,7 +71,7 @@ test.describe("the calendar", () => {
     await expect(
       dayRegion(page, locale, nextWeek).getByRole("button", { name: new RegExp(title) }),
     ).toHaveCount(0);
-    await page.getByRole("button", { name: t("work", "calendar.today") }).click();
+    await page.getByRole("button", { name: t("work", "week.today") }).click();
     await expect(
       dayRegion(page, locale, today).getByRole("button", { name: new RegExp(title) }),
     ).toBeVisible();
@@ -123,35 +123,35 @@ test.describe("the routines", () => {
     await signIn(owner);
     await page.goto(`/workspace/${owner.workspace.id}/routines`);
 
-    await expect(page.getByText(t("work", "routines.empty.title"))).toBeVisible();
+    await expect(page.getByText(t("work", "recur.empty.title"))).toBeVisible();
     await page
-      .getByRole("button", { name: t("work", "routines.new") })
+      .getByRole("button", { name: t("work", "recur.new") })
       .first()
       .click();
-    const dialog = page.getByRole("dialog", { name: t("work", "routines.new") });
-    await dialog.getByRole("textbox", { name: t("work", "routines.form.name") }).fill("Paper count");
+    const dialog = page.getByRole("dialog", { name: t("work", "recur.new") });
+    await dialog.getByRole("textbox", { name: t("work", "recur.form.name") }).fill("Paper count");
     await dialog
-      .getByRole("textbox", { name: t("work", "routines.form.instruction") })
+      .getByRole("textbox", { name: t("work", "recur.form.instruction") })
       .fill("Count the paper left.");
-    await dialog.getByRole("combobox", { name: t("work", "routines.form.trigger") }).click();
-    await page.getByRole("option", { name: t("work", "routines.form.trigger.webhook") }).click();
-    await dialog.getByRole("button", { name: t("work", "routines.form.create") }).click();
+    await dialog.getByRole("combobox", { name: t("work", "recur.form.trigger") }).click();
+    await page.getByRole("option", { name: t("work", "recur.form.trigger.webhook") }).click();
+    await dialog.getByRole("button", { name: t("work", "recur.form.create") }).click();
     await expect(
-      page.getByText(t("work", "routines.form.created", { name: "Paper count" }), { exact: true }),
+      page.getByText(t("work", "recur.form.created", { name: "Paper count" }), { exact: true }),
     ).toBeVisible();
 
     const routine = page.getByRole("article", { name: "Paper count" });
-    await expect(routine.getByText(t("work", "routines.paused"), { exact: true })).toBeVisible();
-    await routine.getByRole("button", { name: t("work", "routines.runNow") }).click();
+    await expect(routine.getByText(t("work", "recur.paused"), { exact: true })).toBeVisible();
+    await routine.getByRole("button", { name: t("work", "recur.runNow") }).click();
     await expect(
-      page.getByText(t("work", "routines.started", { name: "Paper count" }), { exact: true }),
+      page.getByText(t("work", "recur.started", { name: "Paper count" }), { exact: true }),
     ).toBeVisible();
-    const runs = routine.getByRole("list", { name: t("work", "routines.runs") });
-    await expect(runs.getByText(t("work", "routines.status.ok"), { exact: true })).toBeVisible({
+    const runs = routine.getByRole("list", { name: t("work", "recur.runs") });
+    await expect(runs.getByText(t("work", "recur.status.ok"), { exact: true })).toBeVisible({
       timeout: 60_000,
     });
-    await expect(runs.getByText(t("work", "routines.via.manual"), { exact: true })).toBeVisible();
-    await expect(runs.getByRole("link", { name: t("work", "routines.run.session") })).toHaveAttribute(
+    await expect(runs.getByText(t("work", "recur.via.manual"), { exact: true })).toBeVisible();
+    await expect(runs.getByRole("link", { name: t("work", "recur.run.session") })).toHaveAttribute(
       "href",
       new RegExp(`/workspace/${owner.workspace.id}/(channel|threads)/`),
     );

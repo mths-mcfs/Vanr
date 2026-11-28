@@ -104,7 +104,7 @@ function CalendarView({ workspaceId }: { workspaceId: string }) {
       <div>
         <h1 className="page__title">{shell("route.calendar")}</h1>
         <p className="page__muted" aria-live="polite">
-          {t("calendar.range", {
+          {t("week.range", {
             from: short.format(monday),
             to: shortWithYear.format(addDays(monday, 6)),
           })}
@@ -114,14 +114,14 @@ function CalendarView({ workspaceId }: { workspaceId: string }) {
         <Button
           variant="ghost"
           icon={<ChevronLeft size={16} />}
-          aria-label={t("calendar.previous")}
+          aria-label={t("week.previous")}
           onClick={() => setMonday(addDays(monday, -7))}
         />
-        <Button onClick={() => setMonday(startOfWeek(new Date(clock.now())))}>{t("calendar.today")}</Button>
+        <Button onClick={() => setMonday(startOfWeek(new Date(clock.now())))}>{t("week.today")}</Button>
         <Button
           variant="ghost"
           icon={<ChevronRight size={16} />}
-          aria-label={t("calendar.next")}
+          aria-label={t("week.next")}
           onClick={() => setMonday(addDays(monday, 7))}
         />
         <Button
@@ -129,7 +129,7 @@ function CalendarView({ workspaceId }: { workspaceId: string }) {
           icon={<Plus size={16} />}
           onClick={() => setCreatingOn(new Date(clock.now()))}
         >
-          {t("calendar.new")}
+          {t("week.new")}
         </Button>
       </div>
     </header>
@@ -138,16 +138,14 @@ function CalendarView({ workspaceId }: { workspaceId: string }) {
   let body: ReactNode;
   if (range.isPending) body = <PartLoading />;
   else if (range.isError && range.data === undefined) {
-    body = (
-      <PartError title={t("calendar.failed")} error={range.error} onRetry={() => void range.refetch()} />
-    );
+    body = <PartError title={t("week.failed")} error={range.error} onRetry={() => void range.refetch()} />;
   } else {
     const byDay = entriesByDay(range.data, days);
     const nothing = [...byDay.values()].every((list) => list.length === 0);
     body = (
       <>
         <Proposals workspaceId={workspaceId} range={range.data} actors={actors} />
-        {nothing && <p className="work-cal__empty">{t("calendar.empty")}</p>}
+        {nothing && <p className="work-cal__empty">{t("week.empty")}</p>}
         <div className="work-week">
           {days.map((day) => {
             const key = dayKey(day);
@@ -167,12 +165,12 @@ function CalendarView({ workspaceId }: { workspaceId: string }) {
                     </span>
                     <span className="work-day__date">{day.getDate()}</span>
                   </h2>
-                  {key === today && <span className="work-day__today">{t("calendar.todayMark")}</span>}
+                  {key === today && <span className="work-day__today">{t("week.todayMark")}</span>}
                   <Button
                     variant="ghost"
                     size="sm"
                     icon={<Plus size={14} />}
-                    aria-label={t("calendar.addOn", { day: label })}
+                    aria-label={t("week.addOn", { day: label })}
                     onClick={() => setCreatingOn(day)}
                   />
                 </header>
@@ -226,7 +224,7 @@ function DayEntry({
         route="issue"
         params={{ workspaceId, issueSeq: String(entry.number) }}
       >
-        {t("calendar.dueOn", { number: entry.number, title: entry.title })}
+        {t("week.dueOn", { number: entry.number, title: entry.title })}
       </AppLink>
     );
   }
@@ -234,7 +232,7 @@ function DayEntry({
     return (
       <AppLink className="work-entry work-entry--routine" route="routines" params={{ workspaceId }}>
         <span className="work-entry__time">{time.format(entry.at)}</span>
-        <span>{t("calendar.routineAt", { name: entry.name })}</span>
+        <span>{t("week.routineAt", { name: entry.name })}</span>
       </AppLink>
     );
   }
@@ -244,7 +242,7 @@ function DayEntry({
       className={entry.allDay ? "work-entry work-entry--event is-all-day" : "work-entry work-entry--event"}
       onClick={() => onOpen(entry.event)}
     >
-      <span className="work-entry__time">{entry.allDay ? t("calendar.allDay") : time.format(entry.at)}</span>
+      <span className="work-entry__time">{entry.allDay ? t("week.allDay") : time.format(entry.at)}</span>
       <span className="work-entry__title">{entry.event.title}</span>
       {entry.event.rule !== null && <Repeat size={12} aria-hidden="true" className="work-entry__repeat" />}
     </button>
@@ -281,8 +279,8 @@ function Proposals({
     minute: "2-digit",
   });
   return (
-    <section className="work-proposals" aria-label={t("calendar.proposals")}>
-      <h2 className="page__heading">{t("calendar.proposals")}</h2>
+    <section className="work-proposals" aria-label={t("week.proposals")}>
+      <h2 className="page__heading">{t("week.proposals")}</h2>
       <ul>
         {range.proposals.map((proposal) => {
           const busy =
@@ -291,7 +289,7 @@ function Proposals({
           return (
             <li key={proposal.id} className="work-proposal" aria-label={proposal.title}>
               <p className="work-proposal__by">
-                {t("calendar.proposalBy", { name: actors.name({ type: "agent", id: proposal.agentId }) })}
+                {t("week.proposalBy", { name: actors.name({ type: "agent", id: proposal.agentId }) })}
               </p>
               <p className="work-proposal__title">{proposal.title}</p>
               <p className="page__muted">
@@ -306,11 +304,11 @@ function Proposals({
                   onClick={() =>
                     confirm.mutate(
                       { workspaceId, proposalId: proposal.id },
-                      { onSuccess: () => outcome.done(t("calendar.confirmed", { title: proposal.title })) },
+                      { onSuccess: () => outcome.done(t("week.confirmed", { title: proposal.title })) },
                     )
                   }
                 >
-                  {t("calendar.confirm")}
+                  {t("week.confirm")}
                 </Button>
                 <Button
                   variant="ghost"
@@ -319,11 +317,11 @@ function Proposals({
                   onClick={() =>
                     dismiss.mutate(
                       { workspaceId, proposalId: proposal.id },
-                      { onSuccess: () => outcome.done(t("calendar.dismissed")) },
+                      { onSuccess: () => outcome.done(t("week.dismissed")) },
                     )
                   }
                 >
-                  {t("calendar.dismiss")}
+                  {t("week.dismiss")}
                 </Button>
               </div>
             </li>
