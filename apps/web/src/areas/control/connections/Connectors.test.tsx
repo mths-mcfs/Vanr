@@ -260,6 +260,21 @@ describe("services", () => {
     expect(app.address()).toBe(BACK);
   });
 
+  test("a sign-in link naming a service that is not available announces nothing", async () => {
+    const server = newServer();
+    const catalog = (await import("../../../../dev/fake-agent-access.ts")).FAKE_CATALOG;
+    const stripe = catalog.connectors.find((each) => each.id === "stripe");
+    if (stripe === undefined) throw new Error("no Stripe in the fake catalog");
+    stripe.available = false;
+    try {
+      await renderApp({ path: `${PATH}?connected=stripe`, signedInAs: "usr_jonas", server });
+      expect(await toast("A sign-in came back. The list below shows what is connected now.")).toBeDefined();
+      expect(screen.queryByText("Stripe is connected.") === null).toBe(true);
+    } finally {
+      stripe.available = true;
+    }
+  });
+
   test("a sign-in link naming an MCP server the workspace doesn't have announces nothing", async () => {
     await renderApp({ path: `${PATH}?connected=custom:con_nowhere`, signedInAs: "usr_jonas" });
     expect(await toast("A sign-in came back. The list below shows what is connected now.")).toBeDefined();

@@ -124,7 +124,8 @@ function ComeBack({
         onServerBack(server.id);
       }
     } else if (connected !== undefined) {
-      const service = catalog.data?.connectors.find((each) => each.id === connected)?.label;
+      // Only a service this server offers can have just been connected.
+      const service = catalog.data?.connectors.find((each) => each.id === connected && each.available)?.label;
       toast.push(
         service === undefined
           ? { tone: "info", title: t("back.unknown") }
