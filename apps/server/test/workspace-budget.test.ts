@@ -112,6 +112,60 @@ describe("the workspace's month budget", () => {
   );
 
   test(
+    "the platform's embeddings never spend it; a run from before the ledger does, once",
+    async () => {
+      const { ana, me, workspaceId } = await team(1);
+      const emb = await seedAgent(server, workspaceId, ana, `emb${n}`);
+      const embed = (source: "embedding" | "search") =>
+        server.deps.ledger.record(
+          {
+            workspaceId,
+            agentId: null,
+            userId: null,
+            runId: null,
+            source,
+            model: "voyage-4",
+            usage: { inputTokens: 50_000_000, cachedTokens: 0, cacheWriteTokens: 0, outputTokens: 0 },
+            at: server.deps.now(),
+          },
+          [],
+        );
+      // $3 of embeddings each way (the new source, and an old row written as search with nobody behind it).
+      await embed("embedding");
+      await embed("search");
+      expect(
+        (await askSources(paid, me, "where is the onboarding checklist?")).blocks.length,
+      ).toBeGreaterThan(0);
+      // A run whose cost is only on the run (no ledger row) counts: $1 fills the $1 budget. It is a turn of a debate
+      // still anonymous, which the per-agent numbers leave out and the month's total doesn't.
+      const debateId = `deb_open${n}`;
+      await server.deps.db.insert(schema.debates).values({
+        id: debateId,
+        workspaceId,
+        title: "Open",
+        goal: "g",
+        createdBy: { type: "person", id: me.userId },
+      });
+      await server.deps.db.insert(schema.runs).values({
+        debateId,
+        id: `run_legacy${n}`,
+        workspaceId,
+        agentId: emb.id,
+        status: "done",
+        model: "claude-haiku-5-5",
+        costUsd: 1,
+        createdAt: server.deps.now(),
+      });
+      await expect(askSources(paid, me, "where is the onboarding checklist?")).rejects.toMatchObject(refused);
+      // The overview reads the very same spend: the budget is used up.
+      expect(
+        (await call(ana, "GET", `${ws(workspaceId)}/overview`)).body.budgetSpentPct,
+      ).toBeGreaterThanOrEqual(100);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "a wiki check asks pair by pair on it, and stops asking once it is spent",
     async () => {
       const { ana, workspaceId } = await team(20);

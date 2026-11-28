@@ -63,6 +63,26 @@ describe("adding an agent to a channel", () => {
   );
 });
 
+describe("adding to an archived channel", () => {
+  test("is refused, even by someone whose membership a leave raced past", async () => {
+    const { w, beto, caio } = await team();
+    const id = (await call(beto, "POST", `${w}/channels`, { name: `raced-${n}`, visibility: "private" })).body
+      .id;
+    // The state a lost race would leave: the channel archived while the adder's row was still read as a member.
+    await server.deps.db
+      .update(schema.channels)
+      .set({ archivedAt: new Date() })
+      .where(eq(schema.channels.id, id));
+    const added = await call(beto, "POST", `${w}/channels/${id}/members`, { userId: caio.user.id });
+    expect([added.status, added.body.error.code]).toEqual([409, "channel.archived"]);
+    const people = await server.deps.db
+      .select()
+      .from(schema.channelMemberships)
+      .where(eq(schema.channelMemberships.channelId, id));
+    expect(people.map((p) => p.memberId)).toEqual([beto.user.id]);
+  });
+});
+
 describe("a private channel nobody is left in", () => {
   test(
     "is archived with the last leave, frees its name, and only the workspace's owner sees and restores it",

@@ -88,19 +88,38 @@ async function legacySpent(tx: Tx, scope: BudgetScope, at: Date): Promise<number
 }
 
 /**
- * What the workspace scope counts: every ledger row of the workspace in the month, whatever scopes its call went
- * through (an agent's run reserves only its own). Its counter row is only the lock that makes the reservations of
- * the scope go one at a time.
+ * What the workspace scope counts, in micros: every ledger row of the workspace in the month whatever scopes its call
+ * went through (an agent's run reserves only its own), but the platform's embeddings (`platformEmbedding`); and a
+ * run of the month with a cost and no ledger row (from before the ledger), once. Its counter row is only the lock
+ * that makes the reservations of the scope go one at a time.
  */
-async function workspaceSpent(tx: Tx | Db, scope: BudgetScope, at: Date): Promise<number> {
+export async function workspaceSpent(tx: Tx | Db, scope: BudgetScope, at: Date): Promise<number> {
   const from = periodStart(scope, at) ?? new Date(0);
   const to =
     scope.period === "month" ? new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth() + 1, 1)) : null;
   const [row] = await tx
     .select({ cost: sql<number | string | null>`sum(${lines.costMicros})` })
     .from(lines)
-    .where(and(eq(lines.workspaceId, scope.id), gte(lines.at, from), to ? lt(lines.at, to) : undefined));
-  return Number(row?.cost ?? 0);
+    .where(
+      and(
+        eq(lines.workspaceId, scope.id),
+        gte(lines.at, from),
+        to ? lt(lines.at, to) : undefined,
+        sql`not (${lines.source} = 'embedding' or (${lines.source} = 'search' and ${lines.userId} is null))`,
+      ),
+    );
+  const [legacy] = await tx
+    .select({ cost: sql<number | string | null>`sum(${runs.costUsd})` })
+    .from(runs)
+    .where(
+      and(
+        eq(runs.workspaceId, scope.id),
+        gte(runs.createdAt, from),
+        to ? lt(runs.createdAt, to) : undefined,
+        sql`not exists (select 1 from ${lines} where ${lines.runId} = ${runs.id})`,
+      ),
+    );
+  return Number(row?.cost ?? 0) + toMicros(Number(legacy?.cost ?? 0));
 }
 
 /** Counter of the scope in the period, locked until the end of the transaction; born with the legacy spending. */

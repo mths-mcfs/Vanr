@@ -200,6 +200,9 @@ describe("workspaces", () => {
       // A list of validators, and a weak one, match too; another ETag gets the image.
       expect((await browser.fetch(url, { headers: { "if-none-match": `"x", W/${etag}` } })).status).toBe(304);
       expect((await browser.fetch(url, { headers: { "if-none-match": '"other"' } })).status).toBe(200);
+      // A comma inside a quoted tag is part of it: `"a,*,b"` is one tag, not a wildcard.
+      expect((await browser.fetch(url, { headers: { "if-none-match": '"a,*,b"' } })).status).toBe(200);
+      expect((await browser.fetch(url, { headers: { "if-none-match": "*" } })).status).toBe(304);
       // Revalidating isn't a way in: whoever isn't a member gets a 404, ETag or not.
       const outsider = await signedIn(server, "Peek", `peek${url.length}@space.test`);
       expect((await outsider.browser.fetch(url, { headers: { "if-none-match": etag } })).status).toBe(404);

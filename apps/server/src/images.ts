@@ -36,13 +36,14 @@ export function decodeImage(input: { imageBase64: string; contentType: string })
 const etagOf = (bytes: Uint8Array) =>
   `"${createHash("sha256").update(bytes).digest("base64url").slice(0, 32)}"`;
 
-/** Whether an `If-None-Match` header names this ETag (a list, weak validators and `*` included). */
+/**
+ * Whether an `If-None-Match` header names this ETag: `*` alone, or a list of entity-tags, weak ones included. A tag
+ * is read whole between its quotes (a comma inside one doesn't split it).
+ */
 function matches(ifNoneMatch: string | undefined, etag: string): boolean {
   if (!ifNoneMatch) return false;
-  return ifNoneMatch.split(",").some((tag) => {
-    const t = tag.trim();
-    return t === "*" || t.replace(/^W\//, "") === etag;
-  });
+  if (ifNoneMatch.trim() === "*") return true;
+  return [...ifNoneMatch.matchAll(/(?:W\/)?("[^"]*")/g)].some((m) => m[1] === etag);
 }
 
 /**

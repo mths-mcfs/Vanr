@@ -167,6 +167,26 @@ export function ledgerContract(name: string, make: () => Promise<UsageLedger> | 
       expect(await ledger.spent(workspace, at)).toBeCloseTo(0.9, 6);
     });
 
+    test("the workspace scope leaves out the platform's embeddings, old rows and new ones", async () => {
+      const ledger = await make();
+      const workspace: BudgetScope = { kind: "workspace", id: "o1", limitUsd: 1, period: "month" };
+      const embedding = (source: "embedding" | "search", n: number): ModelCall => ({
+        ...call(n),
+        agentId: null,
+        userId: null,
+        runId: null,
+        source,
+      });
+      await ledger.record(embedding("embedding", 5), []);
+      await ledger.record(embedding("search", 5), []);
+      // A search answer (it has its asker) counts.
+      await ledger.record({ ...call(0.4), agentId: null, runId: null, source: "search" }, []);
+      expect(await ledger.spent(workspace, at)).toBeCloseTo(0.4, 6);
+      expect(
+        (await ledger.reserve({ workspaceId: "o1", scopes: [workspace], estimateUsd: 0.5, at })).ok,
+      ).toBe(true);
+    });
+
     test("last month's spend does not count in the current month", async () => {
       const ledger = await make();
       const before = new Date("2026-09-30T23:00:00Z");

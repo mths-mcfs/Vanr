@@ -14,12 +14,13 @@ import {
   seesSpend,
   usageSince,
   workspaceBudgetDefaults,
+  workspaceBudgetScope,
   workspaceCallsSince,
-  workspaceMonthBudget,
 } from "../agents";
 import { type AppEnv, type Ctx, requireUser } from "../context";
 import { approvalsWaitingFor } from "../control";
 import { isUniqueViolation } from "../db-errors";
+import { releaseSeats } from "../debates";
 import { badRequest, conflict, forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
 import { decodeImage, imageResponse } from "../images";
 import {
@@ -131,7 +132,7 @@ export function registerWorkspaces(app: Hono<AppEnv>) {
   app.get(`${WORKSPACE}/overview`, async (c) => {
     const me = requireMember(c);
     const { workspaceId } = me;
-    const { db, now } = c.get("deps");
+    const { db, now, ledger } = c.get("deps");
     const [people] = await db
       .select({ n: count() })
       .from(members)
@@ -140,13 +141,11 @@ export function registerWorkspaces(app: Hono<AppEnv>) {
       .select()
       .from(agents)
       .where(and(eq(agents.workspaceId, workspaceId), isNull(agents.archivedAt)));
-    const since = monthStart(now());
-    const usage = await usageSince(db, workspaceId, since);
-    // The same budget the calls with no agent reserve against (`workspaceBudgetScope`), and their spend with it.
-    const budget = await workspaceMonthBudget(db, workspaceId);
-    const spent =
-      [...usage.values()].reduce((total, u) => total + u.costUsd, 0) +
-      (await workspaceCallsSince(db, workspaceId, since)).reduce((total, k) => total + k.costUsd, 0);
+    // The very numbers the month's cap uses (`workspaceBudgetScope`): its budget, and its spend, a total that names
+    // no agent (an anonymous debate's runs count without saying whose they are).
+    const scope = await workspaceBudgetScope(db, workspaceId);
+    const budget = scope.limitUsd;
+    const spent = await ledger.spent(scope, now());
     const overview: WorkspaceOverview = {
       myApprovalQueue: (await approvalsWaitingFor(db, me)).length,
       // Spend follows view_usage, as GET /usage: whoever doesn't have it gets null.
@@ -187,6 +186,8 @@ export function registerWorkspaces(app: Hono<AppEnv>) {
     if (target !== me.userId && !can(me.role, "manage_members")) throw forbidden();
     const { db, now } = c.get("deps");
     await removeMember(db, { workspaceId: me.workspaceId, actorId: me.userId, target, at: now() });
+    // The debates whose round waited on them go on without them.
+    await releaseSeats(c.get("deps"), { workspaceId: me.workspaceId, userId: target });
     // Whoever left the workspace loses their open connections to it.
     c.get("deps").hub.dropUser(me.workspaceId, target);
     return c.body(null, 204);

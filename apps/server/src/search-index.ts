@@ -129,7 +129,7 @@ class ServerSearchIndex extends PgSearchIndex {
   }
 }
 
-/** The server's index. Embeddings go into the ledger as `search`, paid by the platform. */
+/** The server's index. Embeddings go into the ledger as `embedding`, paid by the platform, outside the month's budget. */
 export function createSearchIndex(
   deps: Pick<AppDeps, "db" | "config" | "ledger" | "now">,
   fetchImpl?: typeof fetch,
@@ -145,7 +145,7 @@ export function createSearchIndex(
           agentId: null,
           userId: null,
           runId: null,
-          source: "search",
+          source: "embedding",
           model: e.model,
           usage: { inputTokens: e.tokens, cachedTokens: 0, cacheWriteTokens: 0, outputTokens: 0 },
           at: deps.now(),

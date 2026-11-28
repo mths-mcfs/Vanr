@@ -79,6 +79,7 @@ export const SERVER_ERROR_CODES = [
   "calendar.range",
   "canceled",
   "cell_too_long",
+  "channel.archived",
   "channel.general",
   "channel.name_taken",
   "channel.not_archived",

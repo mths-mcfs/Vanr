@@ -934,11 +934,67 @@ async function liveAgents(db: Db, ids: readonly string[]): Promise<AgentRow[]> {
     .where(and(inArray(agents.id, [...ids]), isNull(agents.archivedAt)));
 }
 
+/** The people the round waits on who no longer read the debate: out of its private channel, or of the workspace. */
+async function pendingOutside(db: Db, row: DebateRow): Promise<string[]> {
+  const people = row.pendingSpeakers.filter((s) => s.type === "person").map((s) => s.id);
+  if (!people.length) return [];
+  const inWorkspace = new Set(
+    (
+      await db
+        .select({ id: schema.members.userId })
+        .from(schema.members)
+        .where(and(eq(schema.members.workspaceId, row.workspaceId), inArray(schema.members.userId, people)))
+    ).map((m) => m.id),
+  );
+  const out: string[] = [];
+  for (const id of people) if (!inWorkspace.has(id) || !(await canSeeDebate(db, row, id))) out.push(id);
+  return out;
+}
+
+/**
+ * Someone who no longer reads the debate leaves the round's queue, so the round goes on without them. Their seat
+ * stays: back in the channel, they speak again from the next round on.
+ */
+async function dropOutside(deps: AppDeps, row: DebateRow): Promise<boolean> {
+  const gone = new Set(await pendingOutside(deps.db, row));
+  if (!gone.size) return false;
+  const changed = await changeDebate(deps, row.id, (locked) =>
+    locked.status === "open" && locked.round === row.round
+      ? { pendingSpeakers: locked.pendingSpeakers.filter((s) => !(s.type === "person" && gone.has(s.id))) }
+      : null,
+  );
+  return changed !== null;
+}
+
+/**
+ * After someone left a channel (or the workspace), the open debates whose round waited on them and that they no
+ * longer read go on without them.
+ */
+export async function releaseSeats(
+  deps: AppDeps,
+  input: { workspaceId: string; userId: string; channelIds?: readonly string[] },
+): Promise<void> {
+  const rows = await deps.db
+    .select()
+    .from(debates)
+    .where(
+      and(
+        eq(debates.workspaceId, input.workspaceId),
+        eq(debates.status, "open"),
+        input.channelIds ? inArray(debates.channelId, [...input.channelIds]) : undefined,
+        sql`${debates.pendingSpeakers} @> ${JSON.stringify([{ type: "person", id: input.userId }])}::jsonb`,
+      ),
+    );
+  for (const row of rows) if (await dropOutside(deps, row)) scheduleAdvance(deps, row.id);
+}
+
 /** One step. Returns false when the debate stopped (a person's turn, stalled, closed). */
 async function step(deps: AppDeps, debateId: string): Promise<boolean> {
   const { db } = deps;
   const [row] = await db.select().from(debates).where(eq(debates.id, debateId));
   if (row?.status !== "open") return false;
+  // A round never waits on someone who can't read the debate anymore (a new round seats everyone again).
+  if (row.phase !== "concluding" && (await dropOutside(deps, row))) return true;
   const expect = { pendingSpeakers: row.pendingSpeakers, round: row.round };
 
   if (row.phase === "concluding") {

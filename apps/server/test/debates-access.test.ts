@@ -164,6 +164,53 @@ describe("a debate in a private channel", () => {
   );
 });
 
+describe("a seat someone can no longer read", () => {
+  test(
+    "doesn't hold the round: leaving the channel, or the workspace, lets it go on without them",
+    async () => {
+      const { workspaceId, base, ana, beto } = await team();
+      const caio = await memberOf(server, workspaceId, "Caio", email("caio"));
+      const lia = await seedAgent(server, workspaceId, ana, `lia${n}`);
+      const board = await seedChannel(server, workspaceId, {
+        name: `seat${n}`,
+        visibility: "private",
+        members: [ana, beto],
+      });
+      const open = (channelId: string | undefined, other: Person) =>
+        call(ana, "POST", base, {
+          title: "Seat",
+          goal: "g",
+          agentIds: [lia.id],
+          rounds: 0,
+          ...(channelId ? { channelId } : {}),
+          speakers: [
+            { type: "person", id: ana.user.id },
+            { type: "person", id: other.user.id },
+            { type: "agent", id: lia.id },
+          ],
+        });
+      const inBoard = (await open(board, beto)).body.id;
+      const anywhere = (await open(undefined, caio)).body.id;
+      for (const id of [inBoard, anywhere])
+        expect((await call(ana, "POST", `${base}/${id}/posts`, { body: "Yes", answer: "yes" })).status).toBe(
+          201,
+        );
+      const phase = async (id: string) => (await call(ana, "GET", `${base}/${id}`)).body;
+      await waitFor(async () => (await phase(inBoard)).phase === "human_turn");
+      await waitFor(async () => (await phase(anywhere)).phase === "human_turn");
+      // Beto leaves the private channel; Caio leaves the workspace. Neither round waits on them anymore.
+      const w = ws(workspaceId);
+      expect(
+        (await call(beto, "DELETE", `${w}/channels/${board}/members/people/${beto.user.id}`)).status,
+      ).toBe(204);
+      expect((await call(caio, "DELETE", `${w}/members/${caio.user.id}`)).status).toBe(204);
+      await waitFor(async () => (await phase(inBoard)).status === "done");
+      await waitFor(async () => (await phase(anywhere)).status === "done");
+    },
+    SERVER_TEST_MS,
+  );
+});
+
 describe("a stall while the debate is anonymous", () => {
   test(
     "names the stalled turn by its pseudonym, never by the agent's id or name, until the reveal",

@@ -22,6 +22,8 @@ export type UsageSource =
   | "wiki"
   /** The model reviewer of approvals. */
   | "review"
+  /** Search embeddings, paid by the platform: outside the workspace's month budget. */
+  | "embedding"
   | "other";
 
 /** Who pays for the call: the platform key, the workspace key (`credentialId`) or the environment's plan. */
@@ -68,8 +70,9 @@ export interface UsageLine extends Omit<ModelCall, "usage"> {
 
 /**
  * A cap scope. `month`: spend counts in the calendar month (UTC) of `at`. The `workspace` scope (its id is the
- * workspace's) counts everything the workspace spent, whatever scopes each call went through: it caps the calls
- * that no agent pays (search answers, wiki checks, agent drafts) by the whole month's spend.
+ * workspace's) counts all of the workspace's model spend, whatever scopes each call went through, except the
+ * platform-paid embeddings (`platformEmbedding`): it caps the calls that no agent pays (search answers, wiki checks,
+ * agent drafts) by the whole month's spend.
  */
 export interface BudgetScope {
   kind: "agent" | "channel" | "assignment" | "routine_run" | "debate" | "workspace";
@@ -300,6 +303,13 @@ export function periodKey(scope: Pick<BudgetScope, "period">, at: Date): string 
 
 const scopeKey = (s: BudgetScope) => `${s.kind}:${s.id}`;
 
+/**
+ * A search embedding the platform paid: `embedding`, or (rows from before that source) a `search` row with no person
+ * behind it, which only the embedder writes (a search answer always has its asker).
+ */
+export const platformEmbedding = (line: Pick<UsageLine, "source" | "userId">) =>
+  line.source === "embedding" || (line.source === "search" && line.userId === null);
+
 /** In-memory ledger: the contract's reference and the double in tests of code that only uses the interface. */
 export function memoryLedger(book: PriceBook): UsageLedger & { lines: UsageLine[] } {
   const lines: (UsageLine & { scopes: readonly BudgetScope[] })[] = [];
@@ -309,7 +319,7 @@ export function memoryLedger(book: PriceBook): UsageLedger & { lines: UsageLine[
 
   const counts = (scope: BudgetScope, l: (typeof lines)[number]) =>
     scope.kind === "workspace"
-      ? l.workspaceId === scope.id
+      ? l.workspaceId === scope.id && !platformEmbedding(l)
       : l.scopes.some((s) => scopeKey(s) === scopeKey(scope));
   const spentIn = (scope: BudgetScope, at: Date) => {
     return lines

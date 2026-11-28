@@ -30,6 +30,7 @@ import {
 } from "../channels";
 import type { AppEnv, Ctx } from "../context";
 import { isUniqueViolation } from "../db-errors";
+import { releaseSeats } from "../debates";
 import { fileFor } from "../drive";
 import { badRequest, conflict, forbidden, notFound, param, readJson, readQuery } from "../http";
 import { log } from "../logger";
@@ -486,14 +487,28 @@ export function registerChat(app: Hono<AppEnv>) {
     if (channel.kind === "dm") throw forbidden("Direct messages have fixed members");
     if (!isMember) throw forbidden("Join the channel to add people");
     const target = await readJson(c, memberTarget);
+    // Checked again under the channel's lock, which the last leave also takes: an add either lands before it (and
+    // the channel isn't empty) or finds the channel archived, never an archived channel with someone in it.
+    const add = (memberType: "person" | "agent", memberId: string) =>
+      db.transaction(async (tx) => {
+        await lockPrivateChannels(tx, [channel.id]);
+        const [fresh] = await tx
+          .select({ archivedAt: channels.archivedAt })
+          .from(channels)
+          .where(eq(channels.id, channel.id));
+        if (!fresh || fresh.archivedAt) throw conflict("channel.archived", "This channel was archived");
+        if (!(await isChannelMember(tx, channel.id, { type: "person", id: me.userId })))
+          throw forbidden("Join the channel to add people");
+        await tx
+          .insert(channelMemberships)
+          .values({ channelId: channel.id, memberType, memberId })
+          .onConflictDoNothing();
+      });
     if ("agentId" in target) {
       const agent = await agentInWorkspace(db, me.workspaceId, target.agentId);
       if (agent.archivedAt) throw notFound("Agent not found");
       await requirePlacesAgent(db, me, agent);
-      await db
-        .insert(channelMemberships)
-        .values({ channelId: channel.id, memberType: "agent", memberId: agent.id })
-        .onConflictDoNothing();
+      await add("agent", agent.id);
       return c.body(null, 204);
     }
     const [person] = await db
@@ -501,10 +516,7 @@ export function registerChat(app: Hono<AppEnv>) {
       .from(members)
       .where(and(eq(members.workspaceId, me.workspaceId), eq(members.userId, target.userId)));
     if (!person) throw notFound("Member not found");
-    await db
-      .insert(channelMemberships)
-      .values({ channelId: channel.id, memberType: "person", memberId: person.userId })
-      .onConflictDoNothing();
+    await add("person", person.userId);
     return c.body(null, 204);
   });
 
@@ -540,6 +552,13 @@ export function registerChat(app: Hono<AppEnv>) {
     });
     if (removed.length === 0) throw notFound("Member not found");
     if (type === "person" && channel.visibility === "private") hub.dropUser(me.workspaceId, id, channel.id);
+    // A debate of the channel whose round waited on them goes on without them.
+    if (type === "person")
+      await releaseSeats(c.get("deps"), {
+        workspaceId: me.workspaceId,
+        userId: id,
+        channelIds: [channel.id],
+      });
     return c.body(null, 204);
   };
   app.delete(`${WORKSPACE}/channels/:channelId/members/people/:personId`, (c) =>

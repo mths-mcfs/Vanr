@@ -54,7 +54,7 @@ export async function channelInWorkspace(
 }
 
 export async function isChannelMember(
-  db: Db,
+  db: Db | Tx,
   channelId: string,
   member: { type: ActorType; id: string },
 ): Promise<boolean> {

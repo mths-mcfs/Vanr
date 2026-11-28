@@ -97,6 +97,76 @@ describe("the migrations", () => {
     expect(journal.entries.length).toBe(1 + additions.length);
   });
 
+  test("0005 confines the old feedback lessons of a private channel or a DM, and only those, and drops people from private debates' search readers, once", async () => {
+    const pg = new PGlite({ extensions: { pg_trgm } });
+    try {
+      const journal = await Bun.file(join(MIGRATIONS_DIR, "meta", "_journal.json")).json();
+      const tags: string[] = journal.entries.map((e: { tag: string }) => e.tag);
+      const run = async (tag: string) => {
+        const text = await Bun.file(join(MIGRATIONS_DIR, `${tag}.sql`)).text();
+        for (const statement of text.split("--> statement-breakpoint"))
+          if (statement.trim()) await pg.exec(statement);
+      };
+      const backfill = tags.find((t) => t.startsWith("0005_")) ?? "";
+      for (const tag of tags.slice(0, tags.indexOf(backfill))) await run(tag);
+      await pg.exec(`
+        insert into workspaces (id, name) values ('w', 'W');
+        insert into channels (id, workspace_id, name, visibility) values
+          ('ch_open', 'w', 'open', 'public'), ('ch_secret', 'w', 'secret', 'private');
+        insert into channels (id, workspace_id, name, kind, dm_key) values ('ch_dm', 'w', 'dm', 'dm', 'a|b');
+        insert into agents (id, workspace_id, name, handle, model, owner_user_id, appearance)
+          values ('ag', 'w', 'Lia', 'lia', 'm', 'u', '{}');
+        insert into messages (id, workspace_id, channel_id, author_kind, author_id, body) values
+          ('m_open', 'w', 'ch_open', 'person', 'u', 'x'), ('m_secret', 'w', 'ch_secret', 'person', 'u', 'x'),
+          ('m_dm', 'w', 'ch_dm', 'person', 'u', 'x');
+        insert into memories (id, workspace_id, agent_id, text, source, origin_message_id) values
+          ('l_open', 'w', 'ag', 'a', 'feedback', 'm_open'), ('l_secret', 'w', 'ag', 'b', 'feedback', 'm_secret'),
+          ('l_dm', 'w', 'ag', 'c', 'feedback', 'm_dm'), ('l_gone', 'w', 'ag', 'd', 'feedback', 'm_deleted'),
+          ('n_secret', 'w', 'ag', 'e', 'conversation', 'm_secret');
+        insert into search_chunks (workspace_id, source_kind, source_id, ordinal, title, title_fold, text, tsv, url,
+          scope_kind, channel_id, principals, created_at, updated_at, text_hash) values
+          ('w', 'debate', 'deb', 0, 't', 't', 'x', ''::tsvector, '/d', 'channel', 'ch_secret',
+            '{user:u1,agent:ag,user:u2}', now(), now(), 'h'),
+          ('w', 'file', 'f', 0, 't', 't', 'x', ''::tsvector, '/f', 'private', null, '{user:u1}', now(), now(), 'h');
+      `);
+      await run(backfill);
+      const confined = async () =>
+        (
+          await pg.query<{ id: string; channel_id: string | null }>(
+            "select id, channel_id from memories order by id",
+          )
+        ).rows;
+      const want = [
+        { id: "l_dm", channel_id: "ch_dm" },
+        { id: "l_gone", channel_id: null },
+        { id: "l_open", channel_id: null },
+        { id: "l_secret", channel_id: "ch_secret" },
+        { id: "n_secret", channel_id: null },
+      ];
+      expect(await confined()).toEqual(want);
+      // A private channel's debate keeps only its agents as readers from outside; a file's readers stay.
+      const readers = async () =>
+        (
+          await pg.query<{ source_kind: string; principals: string[] }>(
+            "select source_kind, principals from search_chunks order by source_kind",
+          )
+        ).rows;
+      const readersWant = [
+        { source_kind: "debate", principals: ["agent:ag"] },
+        { source_kind: "file", principals: ["user:u1"] },
+      ];
+      expect(await readers()).toEqual(readersWant);
+      // Run again (the updates alone, the column being there): nothing changes.
+      const text = await Bun.file(join(MIGRATIONS_DIR, `${backfill}.sql`)).text();
+      for (const update of text.split("--> statement-breakpoint").filter((st) => st.includes("UPDATE")))
+        await pg.exec(update);
+      expect(await confined()).toEqual(want);
+      expect(await readers()).toEqual(readersWant);
+    } finally {
+      await pg.close();
+    }
+  });
+
   // The comparison has to see these drifts; each one leaves every other part of the catalog alone.
   const drifts = [
     ["a disabled trigger", "alter table browser_log_entries disable trigger user"],
