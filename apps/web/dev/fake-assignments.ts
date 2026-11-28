@@ -360,6 +360,9 @@ export class FakeAssignments {
           return fail(404, "not_found", "Channel not found");
         if (this.host.isDm(channelId, scope.workspaceId))
           return fail(400, "invalid_request", "Assignments live in channels");
+        // The agent is this workspace's (another one's id is no agent here) and in the channel.
+        const ours = this.host.agents(scope.workspaceId).some((agent) => agent.id === agentId);
+        if (!ours) return fail(404, "not_found", "Agent not found");
         if (!this.host.agentIn(agentId, channelId))
           return fail(409, "assignment.agent_not_in_channel", "Add the agent to this channel first");
         this.host.join(scope.user.id, channelId);

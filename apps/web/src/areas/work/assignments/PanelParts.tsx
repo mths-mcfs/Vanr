@@ -168,7 +168,8 @@ export function Trail({ workspaceId, assignment, actors }: Part & { actors: Acto
   const ago = useRelativeTime();
   const who = useActorName(actors);
   const [before, setBefore] = useState<number | undefined>(undefined);
-  const [older, setOlder] = useState<AssignmentEvent[]>([]);
+  // Every event shown so far: a newer latest page that no longer reaches one keeps it on screen.
+  const [kept, setKept] = useState<AssignmentEvent[]>([]);
   const latest = useApiQuery("listAssignmentEvents", {
     workspaceId,
     assignmentId: assignment.id,
@@ -195,12 +196,12 @@ export function Trail({ workspaceId, assignment, actors }: Part & { actors: Acto
     markSeen({ workspaceId, assignmentId: assignment.id, body: { seq: lastSeq } });
   }, [lastSeq, seenSeq, workspaceId, assignment.id, markSeen]);
   useEffect(() => {
-    if (page.data === undefined || before === undefined) return;
-    setOlder((current) => [
-      ...page.data.events.filter((event) => !current.some((each) => each.seq === event.seq)),
-      ...current,
-    ]);
-  }, [page.data, before]);
+    const got = [...(latest.data?.events ?? []), ...(before === undefined ? [] : (page.data?.events ?? []))];
+    setKept((current) => {
+      const fresh = got.filter((event) => !current.some((each) => each.seq === event.seq));
+      return fresh.length === 0 ? current : [...current, ...fresh];
+    });
+  }, [latest.data, page.data, before]);
 
   if (latest.isPending) return <PartLoading />;
   if (latest.isError && latest.data === undefined) {
@@ -209,8 +210,8 @@ export function Trail({ workspaceId, assignment, actors }: Part & { actors: Acto
     );
   }
   const events = [
-    ...older,
-    ...latest.data.events.filter((event) => !older.some((each) => each.seq === event.seq)),
+    ...kept,
+    ...latest.data.events.filter((event) => !kept.some((each) => each.seq === event.seq)),
   ].sort((a, b) => b.seq - a.seq);
   if (events.length === 0) return <p className="page__muted">{t("asg.trail.empty")}</p>;
   const first = events[events.length - 1]?.seq ?? 0;

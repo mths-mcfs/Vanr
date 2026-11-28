@@ -67,6 +67,18 @@ describe("where a new assignment can live", () => {
     expect(sent.status).toBe(400);
   });
 
+  test("an agent of another workspace is no agent here", async () => {
+    const server = newServer();
+    const other = server.agents.find((agent) => agent.workspaceId !== WS);
+    if (other === undefined) throw new Error("the seed has no agent in another workspace");
+    const sent = await call(server, "usr_jonas", "POST", "/assignments", {
+      goal: "Borrow an agent",
+      agentId: other.id,
+      channelId: "ch_general",
+    });
+    expect(sent.status).toBe(404);
+  });
+
   test("the agent has to be in the channel", async () => {
     const server = newServer();
     server.state.channels.push(room("ch_ops", "ops", "public", ["usr_ana"]));
@@ -244,6 +256,22 @@ describe("the trail of an assignment", () => {
     await app.user.click(panel.getByRole("tab", { name: /^Trail/ }));
     await waitFor(() => expect(panel.getAllByRole("listitem").length).toBeGreaterThanOrEqual(13));
     expect(panel.queryByRole("button", { name: "Show older" }) === null).toBe(true);
+  });
+
+  test("an event already shown stays when a new one pushes it out of the latest page", async () => {
+    const server = newServer();
+    paperOf(server).events = Array.from({ length: 55 }, (_, at) => event(1 + at));
+    const app = await renderApp({ path: PAGE("asg_paper"), signedInAs: "usr_ana", server });
+    const panel = within(await screen.findByRole("region", { name: "Assignment" }));
+    await app.user.click(panel.getByRole("tab", { name: /^Trail/ }));
+    const timeline = () =>
+      panel.getAllByRole("list").find((list) => list.classList.contains("work-timeline"));
+    await waitFor(() => expect(timeline()?.children.length).toBe(50));
+    // Pausing adds an event: the latest page now starts one later, and the one it left stays.
+    await app.user.click(panel.getByRole("button", { name: "Pause" }));
+    await waitFor(() => expect(timeline()?.children.length).toBe(51));
+    await app.user.click(panel.getByRole("button", { name: "Show older" }));
+    await waitFor(() => expect(timeline()?.children.length).toBe(56));
   });
 
   test("a long trail loads its older events on request, then offers no more", async () => {
