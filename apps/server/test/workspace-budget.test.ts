@@ -172,15 +172,13 @@ describe("the workspace's month budget", () => {
       const agent = await seedAgent(server, workspaceId, ana, `ov${n}`);
       const scope = { kind: "workspace" as const, id: workspaceId, limitUsd: 1, period: "month" as const };
       const debateId = `deb_anon${n}`;
-      await server.deps.db
-        .insert(schema.debates)
-        .values({
-          id: debateId,
-          workspaceId,
-          title: "A",
-          goal: "g",
-          createdBy: { type: "person", id: me.userId },
-        });
+      await server.deps.db.insert(schema.debates).values({
+        id: debateId,
+        workspaceId,
+        title: "A",
+        goal: "g",
+        createdBy: { type: "person", id: me.userId },
+      });
       await server.deps.db.insert(schema.runs).values({
         debateId,
         id: `run_anon${n}`,

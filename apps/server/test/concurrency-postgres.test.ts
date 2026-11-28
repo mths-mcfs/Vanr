@@ -325,15 +325,13 @@ describe.skipIf(!TEST_POSTGRES_URL)(
           role: "member",
         });
         const channelId = `ch_forced_${Date.now()}`;
-        await server.deps.db
-          .insert(schema.channels)
-          .values({
-            id: channelId,
-            workspaceId,
-            name: "vault",
-            visibility: "private",
-            createdBy: ana.user.id,
-          });
+        await server.deps.db.insert(schema.channels).values({
+          id: channelId,
+          workspaceId,
+          name: "vault",
+          visibility: "private",
+          createdBy: ana.user.id,
+        });
         await server.deps.db
           .insert(schema.channelMemberships)
           .values({ channelId, memberType: "person", memberId: ana.user.id });
