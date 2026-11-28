@@ -312,6 +312,7 @@ export default {
   "svc.disconnect": "Disconnect",
   "svc.disconnectNamed": "Disconnect {service}",
   "svc.disconnectOne": "Disconnect {service} ({account})",
+  "svc.nth": "{name}, {n}",
   "svc.since": "Connected {date}",
   "svc.disconnectTitle": "Disconnect {service}?",
   "svc.disconnectBody":
@@ -557,6 +558,12 @@ export default {
     "Agents lose this database at once, and its saved password is deleted. Nothing in the database changes.",
   "db.disconnected": "{name} is disconnected.",
 
+  "db.tlsRefused":
+    "This server only connects to databases over an encrypted (TLS) connection. Pick Encrypted.",
+  "error.mail.tls_required":
+    "This server only connects to mail servers over an encrypted (TLS) connection. Use the encrypted ports, such as 993 and 465.",
+  "error.mail.blocked_host": "That mail server is on a private network, which this server does not allow.",
+  "error.mail.composio_failed": "The sign-in with the provider could not start. Try again in a moment.",
   "error.mail.invalid_address": "Use a full email address.",
   "error.mail.unknown_preset": "Pick a provider from the list.",
   "error.mail.servers_required": "Type both the incoming and the outgoing server.",

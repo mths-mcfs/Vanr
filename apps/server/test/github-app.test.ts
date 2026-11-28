@@ -72,12 +72,23 @@ function fakeGitHub() {
     const claims = JSON.parse(Buffer.from(body, "base64url").toString());
     return ok && claims.iss === "4242" && claims.exp - claims.iat <= 600 ? "valid" : "invalid";
   };
+  /** Requests that reached another origin after a redirect (the exchange must never send its body there). */
+  const elsewhere: string[] = [];
   const fn = async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = new URL(String(input));
     const method = init.method ?? "GET";
+    if (url.origin === "https://elsewhere.test") {
+      elsewhere.push(`${method} ${url.pathname} ${String(init.body ?? "")}`);
+      return Response.json({ access_token: "user-ana", token_type: "bearer" });
+    }
     if (url.origin === "https://github.test" && url.pathname === "/login/oauth/access_token") {
       const body = JSON.parse(String(init.body));
       seen.push({ method, path: url.pathname, jwt: "user" });
+      if (body.code === "code-redirect")
+        return new Response(null, {
+          status: 307,
+          headers: { location: "https://elsewhere.test/login/oauth/access_token" },
+        });
       const user = codes.get(body.code);
       codes.delete(body.code);
       if (body.client_id !== CLIENT.id || body.client_secret !== CLIENT.secret || !user)
@@ -112,7 +123,7 @@ function fakeGitHub() {
       return Response.json({ total_count: 1, repositories: [{ full_name: "acme/site", private: true }] });
     return new Response("not found", { status: 404 });
   };
-  return { fetch: Object.assign(fn, { preconnect: () => {} }) as typeof fetch, seen };
+  return { fetch: Object.assign(fn, { preconnect: () => {} }) as typeof fetch, seen, elsewhere };
 }
 
 let clock = new Date("2026-11-14T12:00:00Z");
@@ -242,6 +253,16 @@ describe("GitHub App installation", () => {
       expect((await repositoriesOf(server.deps, ana.workspaceId)).accounts.map((a) => a.login)).toEqual([
         "acme",
       ]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a redirected code exchange fails and its body, with the client secret, never reaches the second origin",
+    async () => {
+      const state = stateOf(await installUrl(server.deps, ana, "/back"));
+      expect(await install(ana, state, "101", "code-redirect")).toBe("/back?github_app=unverified");
+      expect(github.elsewhere).toEqual([]);
     },
     SERVER_TEST_MS,
   );
