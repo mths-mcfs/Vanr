@@ -53,7 +53,7 @@ import { badRequest, conflict, forbidden, HttpError, notFound, param, readJson, 
 import { repoReadToken } from "../integrations/github-app";
 import { takenHandles } from "../members";
 import { platformKeyAvailable } from "../models";
-import { readableRun, readableRuns } from "../run-access";
+import { mayStopRun, readableRun, readableRuns } from "../run-access";
 import { type Executor, executorModelOk, harnessView, withPlanOwner, withPlanOwners } from "../runners/plans";
 import { requireMember, requirePermission, WORKSPACE } from "../workspace-scope";
 import { toSkill } from "./skills";
@@ -790,9 +790,7 @@ export function registerAgents(app: Hono<AppEnv>) {
     const row = await readableRun(me.workspaceId, me.userId, param(c, "runId"), db);
     const info = runtime.liveInfo(row.id);
     if (!info) throw conflict("run.already_ended", "This run already finished");
-    const allowed =
-      can(me.role, "manage_agents") || info.ownerUserId === me.userId || info.triggerAuthorId === me.userId;
-    if (!allowed) throw forbidden();
+    if (!mayStopRun(me, info)) throw forbidden();
     runtime.cancel(row.id, me.userId);
     return c.body(null, 204);
   });

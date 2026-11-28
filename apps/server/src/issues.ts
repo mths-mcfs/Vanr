@@ -5,7 +5,7 @@ import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { and, asc, desc, eq, gte, inArray, isNull, lt, max, ne, type SQL, sql } from "drizzle-orm";
 import { z } from "zod";
-import { canReadChannel, readableChannelsSql } from "./channels";
+import { agentChannelsSql, canReadChannel, isChannelMember, readableChannelsSql } from "./channels";
 import type { AppDeps } from "./context";
 import { HttpError, notFound } from "./http";
 import { log } from "./logger";
@@ -193,18 +193,39 @@ export function deleteColumn(
 export type IssueViewer = { workspaceId: string; userId: string };
 
 /**
- * The issues the person sees: those of no channel belong to the whole workspace, and one opened in a channel
- * (an agent's issue carries the channel it was asked in) is seen by whoever reads that channel. A private channel
- * or a DM the person isn't in hides its issues, as it hides its messages.
+ * Who reads issues: a person, an agent, or an agent for a person (a run), who then sees only what both see, as
+ * for the wiki (`wikiViewer`). With neither, only the workspace's issues.
  */
-export function visibleIssuesSql(viewer: IssueViewer): SQL {
-  return sql`(${issues.channelId} is null or ${issues.channelId} in ${readableChannelsSql(viewer)})`;
+export type IssueReader = { workspaceId: string; userId?: string; agentId?: string };
+
+/**
+ * The issues the reader sees: those of no channel belong to the whole workspace, and one opened in a channel
+ * (an agent's issue carries the channel it was asked in) is seen by whoever reads that channel. A private channel
+ * or a DM the person isn't in hides its issues, as it hides its messages; an agent reads its own channels' issues,
+ * as it reads their files.
+ */
+export function visibleIssuesSql(reader: IssueReader): SQL {
+  const reads: SQL[] = [];
+  if (reader.userId)
+    reads.push(
+      sql`${issues.channelId} in ${readableChannelsSql({ workspaceId: reader.workspaceId, userId: reader.userId })}`,
+    );
+  if (reader.agentId) reads.push(sql`${issues.channelId} in ${agentChannelsSql(reader.agentId)}`);
+  if (reads.length === 0) return sql`(${issues.channelId} is null)`;
+  return sql`(${issues.channelId} is null or (${sql.join(reads, sql` and `)}))`;
 }
 
-/** Whether the person sees this issue (the same rule as `visibleIssuesSql`, for one row already read). */
-export async function seesIssue(db: Db, row: IssueRow, userId: string): Promise<boolean> {
+/** Whether the reader sees this issue (the same rule as `visibleIssuesSql`, for one row already read). */
+export async function seesIssue(db: Db, row: IssueRow, reader: IssueReader): Promise<boolean> {
   if (row.channelId === null) return true;
-  return canReadChannel(db, { workspaceId: row.workspaceId, userId, channelId: row.channelId });
+  if (row.workspaceId !== reader.workspaceId || (!reader.userId && !reader.agentId)) return false;
+  const { channelId } = row;
+  if (
+    reader.userId &&
+    !(await canReadChannel(db, { workspaceId: row.workspaceId, userId: reader.userId, channelId }))
+  )
+    return false;
+  return !reader.agentId || isChannelMember(db, channelId, { type: "agent", id: reader.agentId });
 }
 
 async function oneIssue(db: Db, where: SQL | undefined): Promise<IssueRow> {
@@ -222,15 +243,15 @@ export function issueByNumber(db: Db, workspaceId: string, number: number): Prom
   return oneIssue(db, and(eq(issues.number, number), eq(issues.workspaceId, workspaceId)));
 }
 
-/** The issue if the person sees it: one of a channel they don't read is the same 404 as a missing one. */
-export function issueSeenBy(db: Db, viewer: IssueViewer, id: string): Promise<IssueRow> {
+/** The issue if the reader sees it: one of a channel they don't read is the same 404 as a missing one. */
+export function issueSeenBy(db: Db, viewer: IssueReader, id: string): Promise<IssueRow> {
   return oneIssue(
     db,
     and(eq(issues.id, id), eq(issues.workspaceId, viewer.workspaceId), visibleIssuesSql(viewer)),
   );
 }
 
-export function issueNumberSeenBy(db: Db, viewer: IssueViewer, number: number): Promise<IssueRow> {
+export function issueNumberSeenBy(db: Db, viewer: IssueReader, number: number): Promise<IssueRow> {
   return oneIssue(
     db,
     and(eq(issues.number, number), eq(issues.workspaceId, viewer.workspaceId), visibleIssuesSql(viewer)),
@@ -728,7 +749,7 @@ async function notifyAssigned(deps: AppDeps, row: IssueRow, by: ActorRef) {
   const a = row.assignee;
   if (a?.type !== "person" || (by.type === "person" && by.id === a.id)) return;
   // A notice carries the title: never to someone the issue's channel hides it from.
-  if (!(await seesIssue(deps.db, row, a.id))) return;
+  if (!(await seesIssue(deps.db, row, { workspaceId: row.workspaceId, userId: a.id }))) return;
   await notify(deps, {
     workspaceId: row.workspaceId,
     userId: a.id,
@@ -749,7 +770,8 @@ async function watchers(db: Db, row: IssueRow, by: ActorRef): Promise<string[]> 
   for (const a of [row.assignee, row.createdBy]) if (a?.type === "person") out.add(a.id);
   if (by.type === "person") out.delete(by.id);
   const seen: string[] = [];
-  for (const userId of out) if (await seesIssue(db, row, userId)) seen.push(userId);
+  for (const userId of out)
+    if (await seesIssue(db, row, { workspaceId: row.workspaceId, userId })) seen.push(userId);
   return seen;
 }
 

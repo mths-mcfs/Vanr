@@ -8,6 +8,7 @@ import type { CalendarRange, FileDetail, Issue, IssueActivity } from "@vanr/cont
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { and, eq } from "drizzle-orm";
+import { createIssue } from "../src/issues";
 import type { RunningServer } from "../src/server";
 import { body, SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
 import { memberOf, type Person, seedChannel, seedWorkspace } from "./seed";
@@ -436,6 +437,77 @@ describe("content tools", () => {
       expect((await api<Issue>(beto, ws, "GET", "/issues/seq/1")).status).toBe("canceled");
       expect((await undo(beto, ws, created, "redo")).status).toBe(200);
       expect((await api<Issue>(beto, ws, "GET", "/issues/seq/1")).status).toBe("todo");
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "Issues: the agent reads, edits and comments only on what both it and the person it acts for see",
+    async () => {
+      const { workspaceId: ws, ana, beto, lia, call, as } = await team();
+      const { db } = server.deps;
+      const withLia = async (channelId: string) =>
+        db.insert(schema.channelMemberships).values({ channelId, memberType: "agent", memberId: lia.id });
+      // Neither reads #vault; only Lia reads #lia-only; only Beto reads #beto-only; both read #shared.
+      const vault = await seedChannel(server, ws, { name: "vault", visibility: "private", members: [ana] });
+      const liaOnly = await seedChannel(server, ws, {
+        name: "lia-only",
+        visibility: "private",
+        members: [ana],
+      });
+      await withLia(liaOnly);
+      const betoOnly = await seedChannel(server, ws, {
+        name: "beto-only",
+        visibility: "private",
+        members: [ana, beto],
+      });
+      const shared = await seedChannel(server, ws, {
+        name: "shared",
+        visibility: "private",
+        members: [ana, beto],
+      });
+      await withLia(shared);
+      const author = { type: "person" as const, id: ana.user.id };
+      const open = (title: string, channelId: string | null) =>
+        createIssue(server.deps, { workspaceId: ws, title: `${title} payroll`, channelId, author });
+      const hidden = [
+        await open("Vault", vault),
+        await open("Lia only", liaOnly),
+        await open("Beto only", betoOnly),
+      ];
+      const seen = [await open("Shared", shared), await open("Everyone", null)];
+
+      const listed = (await call("list_issues", { q: "payroll" })).content;
+      for (const i of seen) expect(listed).toContain(`#${i.number} ${i.title}`);
+      for (const i of hidden) {
+        expect(listed).not.toContain(i.title);
+        expect((await call("list_issues", { number: i.number })).content).toBe("Issue not found");
+        expect((await call("update_issue", { number: i.number, title: "renamed" })).content).toBe(
+          "Issue not found",
+        );
+        expect((await call("comment_issue", { number: i.number, text: "seen it" })).content).toBe(
+          "Issue not found",
+        );
+      }
+      for (const i of seen)
+        expect((await call("list_issues", { number: i.number })).content).toContain(i.title);
+      // Nothing of the hidden ones changed.
+      const after = await db.select().from(schema.issues).where(eq(schema.issues.workspaceId, ws));
+      for (const i of hidden) expect(after.find((r) => r.id === i.id)?.title).toBe(i.title);
+      const comments = await db.select().from(schema.issueTimeline);
+      expect(comments.some((c) => hidden.some((i) => i.id === c.issueId) && c.kind === "comment")).toBe(
+        false,
+      );
+
+      // With Ana asking, the Lia-only channel's issue shows: Ana reads it too.
+      const { call: forAna } = await as(ana);
+      expect((await forAna("list_issues", { number: hidden[1]?.number ?? 0 })).content).toContain("Lia only");
+      // Without a person (a routine), the agent alone: its own channels' issues, never one it isn't in.
+      const { call: alone } = await as(null);
+      expect((await alone("list_issues", { number: hidden[1]?.number ?? 0 })).content).toContain("Lia only");
+      expect((await alone("list_issues", { number: hidden[2]?.number ?? 0 })).content).toBe(
+        "Issue not found",
+      );
     },
     SERVER_TEST_MS,
   );

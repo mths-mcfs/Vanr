@@ -87,7 +87,9 @@ async function listThreads(db: Db, viewer: Viewer, q: z.infer<typeof ThreadQuery
   }
   if (q.q) {
     const like = `%${q.q.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
-    const rootMatches = sql`exists (select 1 from ${messages} m where m.id = ${threads.id} and m.body ilike ${like})`;
+    // A retracted root's text matches nothing: a search would tell what it said.
+    const rootMatches = sql`exists (select 1 from ${messages} m where m.id = ${threads.id}
+      and m.meta -> 'retracted' is null and m.body ilike ${like})`;
     const titleMatches = ilike(threads.title, like);
     const either = or(titleMatches, rootMatches);
     if (either) where.push(either);

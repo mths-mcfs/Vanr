@@ -13,15 +13,14 @@ import type {
   RoutineTarget,
   RoutineTrigger,
 } from "@vanr/contract";
-import { can } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { occurrences, validateRule } from "@vanr/engine/recurrence";
 import { PRODUCT } from "@vanr/product";
-import { and, asc, desc, eq, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, lte, or, type SQL, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { AgentRow } from "./agents";
-import { canReadChannel, channelInWorkspace, openDm } from "./channels";
+import { canReadChannel, channelInWorkspace, openDm, readableChannelsSql } from "./channels";
 import type { AppDeps, WorkspaceMember } from "./context";
 import { openDebate } from "./debates";
 import { createFile } from "./drive";
@@ -211,7 +210,23 @@ export function webhookUrl(deps: AppDeps, row: RoutineRow): string | null {
     : null;
 }
 
-async function recentFires(db: Db, ids: string[]): Promise<Map<string, ExecutionRow[]>> {
+/**
+ * The runs of a routine the person may see, beyond seeing the routine: each run follows the channel it answered
+ * in, which can differ from the routine's target now (the target moved from a private channel). A run of a
+ * channel they don't read doesn't show at all, not its reply, its channel or when and how it went.
+ */
+export function visibleRunsSql(
+  viewer: { workspaceId: string; userId: string },
+  column: SQL | typeof routineExecutions.channelId = routineExecutions.channelId,
+): SQL {
+  return sql`(${column} is null or ${column} in ${readableChannelsSql(viewer)})`;
+}
+
+async function recentFires(
+  db: Db,
+  viewer: { workspaceId: string; userId: string },
+  ids: string[],
+): Promise<Map<string, ExecutionRow[]>> {
   const out = new Map<string, ExecutionRow[]>();
   if (ids.length === 0) return out;
   const rows = await db
@@ -220,7 +235,8 @@ async function recentFires(db: Db, ids: string[]): Promise<Map<string, Execution
     .where(
       and(
         inArray(routineExecutions.routineId, ids),
-        sql`${routineExecutions.id} in (select id from routine_executions r2 where r2.routine_id = ${routineExecutions.routineId} order by r2.at desc limit ${RECENT})`,
+        sql`${routineExecutions.id} in (select id from routine_executions r2 where r2.routine_id = ${routineExecutions.routineId}
+          and ${visibleRunsSql(viewer, sql.raw("r2.channel_id"))} order by r2.at desc limit ${RECENT})`,
       ),
     )
     .orderBy(desc(routineExecutions.at));
@@ -256,9 +272,15 @@ async function withMailStatus(db: Db, rows: RoutineRow[]): Promise<Map<string, R
   return out;
 }
 
-export async function toRoutines(deps: AppDeps, rows: RoutineRow[]): Promise<Routine[]> {
+/** The routines as the person sees them: their recent runs only as far as `visibleRunsSql` lets. */
+export async function toRoutines(
+  deps: AppDeps,
+  viewer: { workspaceId: string; userId: string },
+  rows: RoutineRow[],
+): Promise<Routine[]> {
   const byRoutine = await recentFires(
     deps.db,
+    viewer,
     rows.map((r) => r.id),
   );
   const triggers = await withMailStatus(deps.db, rows);
@@ -286,8 +308,12 @@ export async function toRoutines(deps: AppDeps, rows: RoutineRow[]): Promise<Rou
   });
 }
 
-export async function toRoutine(deps: AppDeps, row: RoutineRow): Promise<Routine> {
-  const [r] = await toRoutines(deps, [row]);
+export async function toRoutine(
+  deps: AppDeps,
+  viewer: { workspaceId: string; userId: string },
+  row: RoutineRow,
+): Promise<Routine> {
+  const [r] = await toRoutines(deps, viewer, [row]);
   if (!r) throw new Error("toRoutines returned nothing");
   return r;
 }
@@ -1311,9 +1337,13 @@ async function contextReaches(db: Db, row: RoutineRow, channelId: string): Promi
   return canReadChannel(db, { workspaceId: row.workspaceId, userId: row.createdBy, channelId });
 }
 
-/** Who sees it: whoever created it; and everyone who reads the target channel or sees the workspace's Drive and debates. */
+/**
+ * Who sees it and its runs: whoever created it; and everyone who reads the target channel or sees the workspace's
+ * Drive and debates. A routine that answers in its creator's DM with the agent (`dm`, `conversation`) is the
+ * creator's alone. Configuring the workspace doesn't open another person's DM or a private channel one doesn't read.
+ */
 export async function canSeeRoutine(deps: AppDeps, me: WorkspaceMember, row: RoutineRow): Promise<boolean> {
-  if (row.createdBy === me.userId || can(me.role, "configure")) return true;
+  if (row.createdBy === me.userId) return true;
   const target = targetOf(row);
   if (target.kind === "channel")
     return canReadChannel(deps.db, {

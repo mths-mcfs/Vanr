@@ -4,6 +4,7 @@ import { type Db, schema } from "@vanr/engine/db";
 import { and, desc, eq } from "drizzle-orm";
 import { type ChannelRow, canReadChannel } from "./channels";
 import type { AppDeps } from "./context";
+import { shownBody } from "./messages";
 import { notify, shrinkGroup } from "./notifications";
 
 const { channelMemberships, threadSubscriptions, messages, emojiReactions } = schema;
@@ -142,6 +143,6 @@ export async function notifyReaction(
       messageId: message.id,
       ...(message.threadId ? { threadId: message.threadId } : {}),
     },
-    latest: { quote: excerpt(message.body), emojis: [input.reaction] },
+    latest: { quote: excerpt(shownBody(message)), emojis: [input.reaction] },
   });
 }

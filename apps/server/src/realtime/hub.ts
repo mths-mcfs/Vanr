@@ -81,11 +81,16 @@ export class Hub implements Publisher {
   /**
    * Removes a channel from someone who lost access (left the private channel), or every socket of a person who
    * left the workspace. Whoever removes a member or changes a role (routes/workspaces) calls it in the same path.
+   * Each socket that followed a channel it loses is told (`unsubscribed`), so the browser drops what it cached.
    */
   dropUser(workspaceId: string, userId: string, channelId?: string): void {
     for (const ws of [...(this.byUser.get(`${workspaceId}:${userId}`) ?? [])]) {
-      if (channelId) this.unsubscribe(ws, channelId);
-      else this.cut(ws, 4003, "removed");
+      for (const lost of channelId ? [channelId] : [...ws.data.channels]) {
+        if (!ws.data.channels.has(lost)) continue;
+        this.unsubscribe(ws, lost);
+        send(ws, JSON.stringify({ type: "unsubscribed", channelId: lost }));
+      }
+      if (!channelId) this.cut(ws, 4003, "removed");
     }
   }
 
