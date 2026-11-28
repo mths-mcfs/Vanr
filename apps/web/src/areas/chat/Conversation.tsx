@@ -27,7 +27,7 @@ import {
 } from "./hooks.ts";
 import { LiveRuns } from "./LiveRuns.tsx";
 import { LANDING_MS, type LiveRun, showing } from "./live.ts";
-import { MessageItem } from "./Message.tsx";
+import { isHeldReason, MessageItem } from "./Message.tsx";
 
 /** Two messages of one author closer than this read as one. */
 const RUN_OF_MESSAGES_MS = 5 * 60_000;
@@ -396,7 +396,7 @@ function AgentNotices() {
       {here.map((notice) => {
         const agent = directory.agentName(notice.agentId);
         const text =
-          lookup(`blocked.${notice.reason}`, { agent }) ??
+          (isHeldReason(notice.reason) ? lookup(`blocked.${notice.reason}`, { agent }) : undefined) ??
           (notice.text !== "" ? notice.text : t("blocked.other", { agent }));
         return (
           <p key={notice.key} className="chat-note chat-note--warning" role="status">

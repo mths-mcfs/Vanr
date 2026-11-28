@@ -26,6 +26,13 @@ import { MessageBody } from "./body.tsx";
 import { useConversation } from "./context.tsx";
 import { SavedSteps } from "./Steps.tsx";
 
+/** The reason codes the server holds an agent back with, each worded in the catalog. */
+export const HELD_REASONS = ["not_in_channel", "audience", "personal_plan", "budget"] as const;
+
+/** A known reason code; any other is worded only as "held back", never looked up. */
+export const isHeldReason = (reason: string): reason is (typeof HELD_REASONS)[number] =>
+  (HELD_REASONS as readonly string[]).includes(reason);
+
 /** The quick reactions, in the order they are offered. */
 export const QUICK_REACTIONS = ["👍", "❤️", "😄", "🎉", "👀", "✅"] as const;
 
@@ -143,11 +150,15 @@ function Receipts({ message }: { message: Message }) {
       text:
         (message.author.id === me.userId
           ? undefined
-          : lookup(`receipt.held.${entry.reason}`, {
-              agent: directory.agentName(entry.agentId),
-              name: directory.personName(message.author.id),
-            })) ??
-        lookup(`blocked.${entry.reason}`, { agent: directory.agentName(entry.agentId) }) ??
+          : !isHeldReason(entry.reason)
+            ? undefined
+            : lookup(`receipt.held.${entry.reason}`, {
+                agent: directory.agentName(entry.agentId),
+                name: directory.personName(message.author.id),
+              })) ??
+        (isHeldReason(entry.reason)
+          ? lookup(`blocked.${entry.reason}`, { agent: directory.agentName(entry.agentId) })
+          : undefined) ??
         t("receipt.blocked", { agent: directory.agentName(entry.agentId) }),
       tone: "danger" as const,
     })),

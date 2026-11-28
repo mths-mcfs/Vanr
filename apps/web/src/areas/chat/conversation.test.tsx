@@ -487,6 +487,8 @@ describe("a receipt for an agent that was held back", () => {
       held("usr_ana", [
         { agentId: "agt_scout", reason: "not_in_channel" },
         { agentId: "agt_ledger", reason: "something_new" },
+        // A code that happens to match another key of the catalog is still only "held back".
+        { agentId: "agt_tally", reason: "dismiss" },
       ]),
     );
     await open("/channel/ch_general", "usr_ana", server);
@@ -494,6 +496,7 @@ describe("a receipt for an agent that was held back", () => {
       await screen.findByText("Scout isn't in this conversation. Add it to the channel to bring it in."),
     ).toBeDefined();
     expect(screen.getByText("Ledger was held back")).toBeDefined();
+    expect(screen.getByText("Tally was held back")).toBeDefined();
     expect(screen.queryByText(/not_in_channel|something_new/) === null).toBe(true);
   });
 
@@ -511,4 +514,22 @@ describe("a receipt for an agent that was held back", () => {
     await open("/channel/ch_general", "usr_ana", server);
     expect(await screen.findByText("Scout doesn't take requests from you here.")).toBeDefined();
   });
+});
+
+test("an author notice with a code that matches another catalog key shows the server's sentence", async () => {
+  const server = newServer();
+  await open("/channel/ch_general", "usr_ana", server);
+  await screen.findByRole("textbox", { name: "Write in #general" });
+  await act(async () =>
+    server.emit(WS, {
+      type: "run.agent_unavailable",
+      agentId: "agt_scout",
+      channelId: "ch_general",
+      threadId: null,
+      messageId: "msg_9",
+      reason: "dismiss",
+      text: "Scout can't take this one.",
+    }),
+  );
+  expect(await screen.findByText("Scout can't take this one.")).toBeDefined();
 });
