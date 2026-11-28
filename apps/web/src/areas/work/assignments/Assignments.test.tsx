@@ -165,4 +165,23 @@ describe("an assignment's page", () => {
     await waitFor(() => expect(review.getByText("Approved")).toBeDefined());
     expect(row?.reviews[0]?.note).toBe("Looks right");
   });
+  test("the owner sets the limits and resumes jobs on their own", async () => {
+    const app = await renderApp({ path: PAGE("asg_paper"), signedInAs: "usr_ana" });
+    const panel = within(await screen.findByRole("region", { name: "Assignment" }));
+    await app.user.click(panel.getByRole("tab", { name: "Settings" }));
+    expect(await panel.findByText("lpstat *")).toBeDefined();
+    const steps = panel.getByRole("spinbutton", { name: "Step limit" });
+    await app.user.type(steps, "40");
+    await app.user.click(panel.getByRole("button", { name: "Save limits" }));
+    await waitFor(() => expect(app.server.assignments.assignments[0]?.limits.steps).toBe(40));
+    await app.user.click(panel.getByRole("switch", { name: "Resume interrupted jobs on their own" }));
+    await waitFor(() => expect(app.server.assignments.assignments[0]?.resumeJobs).toBe(true));
+  });
+
+  test("someone who doesn't own it is told only the owner changes how it runs", async () => {
+    const app = await renderApp({ path: PAGE("asg_paper"), signedInAs: "usr_iris" });
+    const panel = within(await screen.findByRole("region", { name: "Assignment" }));
+    await app.user.click(panel.getByRole("tab", { name: "Settings" }));
+    expect(await panel.findByText("Only the owner changes how this assignment runs.")).toBeDefined();
+  });
 });

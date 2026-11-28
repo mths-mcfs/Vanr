@@ -26,7 +26,7 @@ import { useLocale, useMessages } from "../../../i18n/react.tsx";
 import { useChannelSubscription } from "../../../realtime/react.tsx";
 import { type Actors, useActors, useOutcome } from "../issues/shared.tsx";
 import { PartError, PartLoading } from "../parts.tsx";
-import { Files, People, Plan, Summary, Trail, Waiting } from "./PanelParts.tsx";
+import { Files, People, Plan, Settings, Summary, Trail, Waiting } from "./PanelParts.tsx";
 import { assignmentKeys, CLOSE_NOTE_MAX, isClosedAssignment } from "./shared.tsx";
 
 export function AssignmentPanel({
@@ -159,6 +159,7 @@ function PanelBody({
           <TabsTrigger value="waiting">{t("asg.tab.waiting")}</TabsTrigger>
           <TabsTrigger value="people">{t("asg.tab.people")}</TabsTrigger>
           <TabsTrigger value="files">{t("asg.tab.files")}</TabsTrigger>
+          <TabsTrigger value="settings">{t("asg.tab.settings")}</TabsTrigger>
         </TabsList>
         <TabsContent value="summary">
           <Summary workspaceId={workspaceId} assignment={assignment} />
@@ -177,6 +178,9 @@ function PanelBody({
         </TabsContent>
         <TabsContent value="files">
           <Files workspaceId={workspaceId} assignment={assignment} />
+        </TabsContent>
+        <TabsContent value="settings">
+          <Settings workspaceId={workspaceId} assignment={assignment} />
         </TabsContent>
       </Tabs>
       {closing && (

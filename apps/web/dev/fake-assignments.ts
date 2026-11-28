@@ -509,6 +509,30 @@ export class FakeAssignments {
           row.people.push({ userId: request.userId, role: params.role === "decide" ? "decide" : "comment" });
         return reply(200, request);
       }, "manage"),
+      getAssignmentSettings: withOne(
+        (_scope, row) =>
+          reply(200, {
+            agentBaseline: { adjustable: true, commandPolicy: "when_safe" },
+            rules:
+              row.id === "asg_paper"
+                ? [{ id: "rule_1", by: "usr_ana", createdAt: row.createdAt, rule: "lpstat *" }]
+                : [],
+            stats: { asked: 1, auto: 0, blocked: 0 },
+          }),
+        "manage",
+      ),
+      setAssignmentCommandApproval: withOne((_scope, row, params) => {
+        row.commandPolicy = (params.commandPolicy as T.CommandPolicy | undefined) ?? row.commandPolicy;
+        return reply(200, { commandPolicy: row.commandPolicy });
+      }, "manage"),
+      updateAssignment: withOne((scope, row, params) => {
+        if (typeof params.resumeJobs === "boolean") row.resumeJobs = params.resumeJobs;
+        if (params.limits !== undefined)
+          row.limits = { ...row.limits, ...(params.limits as T.AssignmentLimits) };
+        if ("dueAt" in params) row.dueAt = (params.dueAt as string | null) ?? null;
+        return answer(scope, row);
+      }, "manage"),
+      deleteAssignmentCommandRule: withOne(() => reply(200, { rules: [] }), "manage"),
       listAssignmentFiles: withOne(() =>
         reply(200, {
           files: [

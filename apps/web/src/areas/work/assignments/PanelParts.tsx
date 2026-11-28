@@ -3,8 +3,14 @@
 // that stalled or didn't pass the check, the trail (read up to its end once seen, older events on request),
 // what waits on the person as cards, the people on it and their requests, and the files the agent wrote.
 import { useApiMutation, useApiQuery } from "@vanr/client/react";
-import type { Assignment, AssignmentEvent, AssignmentEventKind, ParticipantRole } from "@vanr/contract";
-import { Button, Chip, Select, SelectItem } from "@vanr/ui";
+import type {
+  Assignment,
+  AssignmentEvent,
+  AssignmentEventKind,
+  CommandPolicy,
+  ParticipantRole,
+} from "@vanr/contract";
+import { Button, Chip, Field, Input, Select, SelectItem, Switch } from "@vanr/ui";
 import { useEffect, useState } from "react";
 import { useLocale, useMessages } from "../../../i18n/react.tsx";
 import { useRelativeTime } from "../../../i18n/relative-time.tsx";
@@ -413,6 +419,126 @@ export function Files({ workspaceId, assignment }: Part) {
           <pre className="work-code">{file.text}</pre>
         </details>
       ))}
+    </div>
+  );
+}
+
+const POLICIES = ["when_safe", "always", "never"] as const satisfies readonly CommandPolicy[];
+const LIMITS = ["dollars", "steps", "minutes"] as const;
+
+/** How the assignment runs: command approval on the runner, its limits and due date, and resuming jobs. */
+export function Settings({ workspaceId, assignment }: Part) {
+  const t = useMessages("work");
+  const outcome = useOutcome();
+  const args = { workspaceId, assignmentId: assignment.id };
+  const settings = useApiQuery("getAssignmentSettings", args, { enabled: assignment.manageable });
+  const refresh = {
+    invalidates: () => [
+      ...assignmentKeys(workspaceId, assignment.id),
+      { method: "getAssignmentSettings" as const, args },
+    ],
+    onError: (error: unknown) => outcome.failed(error),
+    onSuccess: () => outcome.done(t("asg.people.changed")),
+  };
+  const policy = useApiMutation("setAssignmentCommandApproval", refresh);
+  const update = useApiMutation("updateAssignment", refresh);
+  const dropRule = useApiMutation("deleteAssignmentCommandRule", refresh);
+  const [limits, setLimits] = useState(() => ({
+    dollars: assignment.limits.dollars === null ? "" : String(assignment.limits.dollars),
+    steps: assignment.limits.steps === null ? "" : String(assignment.limits.steps),
+    minutes: assignment.limits.minutes === null ? "" : String(assignment.limits.minutes),
+  }));
+  if (!assignment.manageable) return <p className="page__muted">{t("asg.settings.owner")}</p>;
+  const parsed = (value: string) => (value.trim() === "" ? null : Number(value));
+  const valid = LIMITS.every((key) => {
+    const value = parsed(limits[key]);
+    return value === null || (Number.isFinite(value) && value >= 0 && value <= 1_000_000);
+  });
+  return (
+    <div className="work-section">
+      <Field label={t("asg.form.policy")}>
+        <Select
+          value={assignment.commandPolicy}
+          onValueChange={(value) => {
+            const next = POLICIES.find((each) => each === value);
+            if (next !== undefined) policy.mutate({ ...args, body: { commandPolicy: next } });
+          }}
+        >
+          {POLICIES.map((each) => (
+            <SelectItem key={each} value={each}>
+              {t(`asg.form.policy.${each}`)}
+            </SelectItem>
+          ))}
+        </Select>
+      </Field>
+      <form
+        className="work-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!valid) return;
+          update.mutate({
+            ...args,
+            body: {
+              limits: {
+                dollars: parsed(limits.dollars),
+                steps: parsed(limits.steps),
+                minutes: parsed(limits.minutes),
+              },
+            },
+          });
+        }}
+      >
+        <div className="work-form__row">
+          {LIMITS.map((key) => (
+            <Field key={key} label={t(`asg.settings.${key}`)} hint={t("asg.settings.noLimit")}>
+              <Input
+                type="number"
+                min={0}
+                step="any"
+                value={limits[key]}
+                onChange={(event) => setLimits({ ...limits, [key]: event.target.value })}
+              />
+            </Field>
+          ))}
+        </div>
+        <div>
+          <Button type="submit" size="sm" disabled={!valid} loading={update.isPending}>
+            {t("asg.settings.saveLimits")}
+          </Button>
+        </div>
+      </form>
+      <Switch
+        label={t("asg.settings.resumeJobs")}
+        checked={assignment.resumeJobs}
+        onCheckedChange={(resumeJobs) => update.mutate({ ...args, body: { resumeJobs } })}
+      />
+      {settings.isError && settings.data === undefined ? (
+        <PartError
+          title={t("asg.settings.failed")}
+          error={settings.error}
+          onRetry={() => void settings.refetch()}
+        />
+      ) : (
+        (settings.data?.rules.length ?? 0) > 0 && (
+          <>
+            <h3 className="work-subhead">{t("asg.settings.rules")}</h3>
+            <ul className="work-people">
+              {settings.data?.rules.map((rule) => (
+                <li key={rule.id}>
+                  <code className="work-code">{rule.rule}</code>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => dropRule.mutate({ ...args, commandRuleId: rule.id })}
+                  >
+                    {t("asg.settings.dropRule")}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          </>
+        )
+      )}
     </div>
   );
 }
