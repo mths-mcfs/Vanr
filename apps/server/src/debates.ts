@@ -1170,15 +1170,25 @@ function buildSynthesis(
   };
 }
 
+/** A candidate signer turned out archived: its savepoint rolls back, and with it the row lock it took. */
+class NotSigner extends Error {}
+
 async function synthesize(deps: AppDeps, row: DebateRow) {
   const { db } = deps;
   const leadId = leadOf(row);
   const [lead] = leadId ? await liveAgents(db, [leadId]) : [];
   await publishRevealed(deps, row, await revealHidden(db, deps, row.id));
   const posts = await postsOf(db, row.id);
+  /** The last round's majority as the synthesis, without a model: no lead to write it, or no balance for it. */
+  const onVotes = (on: DebateRow): DivergenceSynthesis => {
+    const final = buildSynthesis(on, posts, { summary: "" }, null).final;
+    return final ? voteSynthesis(final) : { summary: "" };
+  };
   let structured: DivergenceSynthesis;
   let fallback: "budget" | null = null;
   let runId: string | null = null;
+  // Whether the text is the lead's own (it then signs it while it is still active).
+  let leadWrote = false;
   if (lead) {
     const names = await promptNames(deps, row, posts);
     const result = await deps.runtime.complete({
@@ -1194,11 +1204,13 @@ async function synthesize(deps: AppDeps, row: DebateRow) {
     if (result.ok) {
       structured = parseDivergenceSynthesis(result.text);
       runId = result.runId;
+      leadWrote = true;
     } else if (result.code === "budget") {
-      // No balance for the synthesis: it closes with the last round's majority, without a model.
-      const final = buildSynthesis(row, posts, { summary: "" }, null).final;
-      structured = final ? voteSynthesis(final) : { summary: "" };
+      structured = onVotes(row);
       fallback = "budget";
+    } else if (!(await liveAgents(db, [lead.id])).length) {
+      // The call failed because the lead was archived (`complete` refuses one): the debate closes on the votes.
+      structured = onVotes(row);
     } else {
       const reason = result.error.slice(0, 300);
       const agentId = lead.id;
@@ -1210,37 +1222,51 @@ async function synthesize(deps: AppDeps, row: DebateRow) {
       return;
     }
   } else {
-    structured = { summary: "" };
+    // A lead archived before the synthesis started closes on the votes as one archived during it; people only, empty.
+    structured = leadId ? onVotes(row) : { summary: "" };
   }
   // It closes only if nobody canceled or reopened it while the lead wrote. Who signs is read in the same transaction
-  // that writes the synthesis, under each agent's row lock (`archiveAgent` takes it FOR UPDATE): the lead while it is
-  // active; if the lead was archived while it wrote, its text goes and the debate closes on the votes, signed by the
-  // first active agent in `agentIds` order. With none of its agents active, the synthesis stays on the debate and no
-  // post is written: it is never signed by an archived agent.
+  // that writes the synthesis: the lead, if it wrote the text and is still active; else the first active agent in
+  // `agentIds` order, over the votes. Each candidate is locked FOR SHARE alone, in a savepoint that rolls back (and
+  // lets its lock go) when it turns out archived: no more than one agent row is ever held, so the batch updates of
+  // agents (a credential, a runner) can't deadlock with it. With none of its agents active, the synthesis stays on
+  // the debate and no post is written: it is never signed by an archived agent.
   let signer: string | null = null;
   let post: DebatePostRow | null = null;
   const done = await changeDebate(deps, row.id, async (fresh, tx) => {
     if (!(fresh.status === "open" && fresh.phase === "concluding" && fresh.round === row.round)) return null;
-    const active = async (id: string) => {
-      const [a] = await tx
-        .select({ archivedAt: agents.archivedAt })
-        .from(agents)
-        .where(eq(agents.id, id))
-        .for("share");
-      return !!a && a.archivedAt === null;
+    const holds = async (id: string) => {
+      try {
+        await tx.transaction(async (sp) => {
+          const [a] = await sp
+            .select({ archivedAt: agents.archivedAt })
+            .from(agents)
+            .where(eq(agents.id, id))
+            .for("share");
+          if (!a || a.archivedAt) throw new NotSigner();
+        });
+        return true;
+      } catch (err) {
+        if (err instanceof NotSigner) return false;
+        throw err;
+      }
     };
-    if (lead && !(await active(lead.id))) {
-      const final = buildSynthesis(fresh, posts, { summary: "" }, null).final;
-      structured = final ? voteSynthesis(final) : { summary: "" };
-      fallback = null;
-      runId = null;
-    } else if (lead) signer = lead.id;
+    if (lead && leadWrote) {
+      if (await holds(lead.id)) signer = lead.id;
+      else {
+        // Archived while it wrote: its text goes, and the debate closes on the votes.
+        structured = onVotes(fresh);
+        fallback = null;
+        runId = null;
+      }
+    }
     if (!signer)
       for (const id of fresh.agentIds)
-        if (id !== lead?.id && (await active(id))) {
-          signer = id;
-          break;
-        }
+        if (id !== lead?.id || !leadWrote)
+          if (await holds(id)) {
+            signer = id;
+            break;
+          }
     const synthesis = { ...buildSynthesis(fresh, posts, structured, fallback) };
     // A debate of people only has no agent to sign: its post goes out as it always did. One whose agents were all
     // archived gets none.
