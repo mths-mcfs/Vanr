@@ -1,6 +1,6 @@
 // Who seats which agent at a debate, who reads a private channel's debate, what a stalled turn tells while the
 // debate is anonymous, and the estimate's amount, on the real server (PGlite). Rui's model call fails with a message
-// that names him; Gate's turns wait for the test.
+// that names him; Gate's turns wait for the test; Syn fails only the synthesis.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { fakeProvider } from "@vanr/engine/models/fake";
@@ -28,6 +28,8 @@ beforeAll(async () => {
     const agent = /^You are (\S+)/.exec(req.system)?.[1] ?? "?";
     if (agent.startsWith("Rui")) throw new Error(`${agent} could not reach the model`);
     if (agent.startsWith("Gate")) await gate;
+    if (agent.startsWith("Syn") && lastText(req).startsWith("Write the synthesis"))
+      throw new Error(`${agent} synthesis failed`);
     return position(agent.toLowerCase());
   });
   const fake = fakeProvider();
@@ -220,14 +222,33 @@ describe("a stall of the lead's own turn", () => {
       const seen = (await call(beto, "GET", `${base}/${id}`)).body;
       expect(seen.anonymous).toBe(true);
       expect(seen.stallInfo).toMatchObject({ agentId: null, pseudonym: row?.pseudonyms[rui.id], round: 0 });
-      // A synthesis stall keeps the lead's id, never its letter.
-      await server.deps.db
-        .update(schema.debates)
-        .set({ stallInfo: { agentId: rui.id, round: 1, reason: "failed", synthesis: true } })
-        .where(eq(schema.debates.id, id));
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a stalled synthesis is marked as one and keeps the lead's id without its letter, until the reveal",
+    async () => {
+      const { workspaceId, base, ana, beto } = await team();
+      const syn = await seedAgent(server, workspaceId, ana, `syn${n}`);
+      const lia = await seedAgent(server, workspaceId, ana, `lia${n}`);
+      const made = await call(ana, "POST", base, {
+        title: "Synth",
+        goal: "g",
+        agentIds: [syn.id, lia.id],
+        rounds: 0,
+      });
+      const id = made.body.id;
+      await waitFor(async () => (await call(beto, "GET", `${base}/${id}`)).body.status === "stalled");
+      const [row] = await server.deps.db.select().from(schema.debates).where(eq(schema.debates.id, id));
+      expect(row?.stallInfo?.synthesis).toBe(true);
+      const seen = (await call(beto, "GET", `${base}/${id}`)).body;
+      expect(seen.stallInfo).toMatchObject({ agentId: syn.id, pseudonym: null });
+      expect(JSON.stringify(seen.stallInfo).includes(`Participant ${row?.pseudonyms[syn.id]}`)).toBe(false);
+      await call(ana, "POST", `${base}/${id}/cancel`);
       expect((await call(beto, "GET", `${base}/${id}`)).body.stallInfo).toMatchObject({
-        agentId: rui.id,
-        pseudonym: null,
+        agentId: syn.id,
+        pseudonym: row?.pseudonyms[syn.id],
       });
     },
     SERVER_TEST_MS,
