@@ -11,6 +11,7 @@ import { useOutcome } from "../shared.tsx";
 import {
   Block,
   comeBackTo,
+  isLost,
   leaveFor,
   PartError,
   PartLoading,
@@ -38,7 +39,8 @@ export function GitHubApp({ workspaceId }: { workspaceId: string }) {
       { method: "listGithubRepositories" as const, args: { workspaceId } },
     ],
   });
-  useForgetReadOnLoss(workspaceId, READS, app.error ?? repositories.error);
+  // Either read may be the one that says the workspace lost it, while the other fails for another reason.
+  useForgetReadOnLoss(workspaceId, READS, isLost(app.error) ? app.error : repositories.error);
   // A suspended account lists nothing; an account missing from the answer is not known yet. Counts from
   // before a failed read are not shown as if they were current.
   const counts = repositories.isError ? undefined : repositories.data;
