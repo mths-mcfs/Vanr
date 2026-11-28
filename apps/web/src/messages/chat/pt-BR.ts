@@ -61,7 +61,7 @@ export default {
   "receipt.failed": "{agent} não conseguiu responder",
   "receipt.canceled": "{agent} foi interrompido",
   "receipt.blocked": "{agent} foi impedido",
-  "receipt.blockedBecause": "{agent} foi impedido: {reason}",
+  "receipt.held.audience": "{agent} não atende pedidos de {name} aqui.",
 
   "reaction.label": "{reaction} de {names}",
   "reaction.you": "você",

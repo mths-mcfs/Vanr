@@ -471,3 +471,44 @@ describe("what the second round of review found", () => {
     await waitFor(() => expect(follows()).toBe(false));
   });
 });
+
+describe("a receipt for an agent that was held back", () => {
+  const held = (author: string, blocked: { agentId: string; reason: string }[]) =>
+    message({
+      id: "msg_held",
+      body: "@scout check this",
+      author: { type: "person", id: author },
+      receipts: { claimedBy: [], handled: [], viewedBy: [], blocked },
+    });
+
+  test("reads in the person's words, never the reason's code", async () => {
+    const server = newServer();
+    server.state.messages.push(
+      held("usr_ana", [
+        { agentId: "agt_scout", reason: "not_in_channel" },
+        { agentId: "agt_ledger", reason: "something_new" },
+      ]),
+    );
+    await open("/channel/ch_general", "usr_ana", server);
+    expect(
+      await screen.findByText("Scout isn't in this conversation. Add it to the channel to bring it in."),
+    ).toBeDefined();
+    expect(screen.getByText("Ledger was held back")).toBeDefined();
+    expect(screen.queryByText(/not_in_channel|something_new/) === null).toBe(true);
+  });
+
+  test("names the author for anyone else, instead of saying you", async () => {
+    const server = newServer();
+    server.state.messages.push(held("usr_jonas", [{ agentId: "agt_scout", reason: "audience" }]));
+    await open("/channel/ch_general", "usr_tomas", server);
+    expect(await screen.findByText("Scout doesn't take requests from Jonas Lind here.")).toBeDefined();
+    expect(screen.queryByText("Scout doesn't take requests from you here.") === null).toBe(true);
+  });
+
+  test("tells the author themselves with you", async () => {
+    const server = newServer();
+    server.state.messages.push(held("usr_ana", [{ agentId: "agt_scout", reason: "audience" }]));
+    await open("/channel/ch_general", "usr_ana", server);
+    expect(await screen.findByText("Scout doesn't take requests from you here.")).toBeDefined();
+  });
+});

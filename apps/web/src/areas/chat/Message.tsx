@@ -120,7 +120,7 @@ const HANDLED: Record<HandledStatus, string> = {
 function Receipts({ message }: { message: Message }) {
   const lookup = useLookup("chat");
   const t = useMessages("chat");
-  const { directory } = useConversation();
+  const { directory, me } = useConversation();
   const { receipts } = message;
   const handled = new Set(receipts.handled.map((entry) => entry.agentId));
   const blocked = receipts.blocked ?? [];
@@ -138,7 +138,17 @@ function Receipts({ message }: { message: Message }) {
     })),
     ...blocked.map((entry) => ({
       key: `blocked-${entry.agentId}`,
-      text: t("receipt.blockedBecause", { agent: directory.agentName(entry.agentId), reason: entry.reason }),
+      // The reason is a code: it reads in words, for who reads it. The author is told "you"; anyone else
+      // reads the author's name. A code the web doesn't know yet says only that the agent was held back.
+      text:
+        (message.author.id === me.userId
+          ? undefined
+          : lookup(`receipt.held.${entry.reason}`, {
+              agent: directory.agentName(entry.agentId),
+              name: directory.personName(message.author.id),
+            })) ??
+        lookup(`blocked.${entry.reason}`, { agent: directory.agentName(entry.agentId) }) ??
+        t("receipt.blocked", { agent: directory.agentName(entry.agentId) }),
       tone: "danger" as const,
     })),
   ];
