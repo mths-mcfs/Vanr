@@ -310,16 +310,14 @@ export class FakeAssignments {
       }),
       listAssignmentEligibleAgents: within((scope) =>
         reply(200, {
-          agents: this.host
-            .agents(scope.workspaceId)
-            .map((agent) => ({
-              agentId: agent.id,
-              executors: ["agent"],
-              manageable: true,
-              qualifies: agent.reachable,
-              reason: null,
-              runner: null,
-            })),
+          agents: this.host.agents(scope.workspaceId).map((agent) => ({
+            agentId: agent.id,
+            executors: ["agent"],
+            manageable: true,
+            qualifies: agent.reachable,
+            reason: null,
+            runner: null,
+          })),
         }),
       ),
       createAssignment: within((scope, params) => {

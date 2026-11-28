@@ -169,7 +169,7 @@ function AssignmentRow({
         <span>{actors.name({ type: "agent", id: assignment.agentId })}</span>
         <span>{channel === undefined ? t("asg.where.hidden") : t("asg.where.channel", { channel })}</span>
         {assignment.plan.total > 0 && (
-          <span>{t("asg.progress", { done: assignment.plan.done, total: assignment.plan.total })}</span>
+          <span>{t("asg.progress", { done: assignment.plan.done, count: assignment.plan.total })}</span>
         )}
         {assignment.runningJobs > 0 && <span>{t("asg.jobs", { count: assignment.runningJobs })}</span>}
         {waiting > 0 && (

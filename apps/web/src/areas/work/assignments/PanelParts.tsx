@@ -46,7 +46,7 @@ export function Summary({ workspaceId, assignment }: Part) {
       <p>
         {t("asg.summary.plan", {
           done: plan.done,
-          total: plan.total,
+          count: plan.total,
           doing: plan.inProgress,
           waiting: plan.waiting,
         })}
@@ -173,13 +173,12 @@ export function Trail({ workspaceId, assignment, actors }: Part & { actors: Acto
   });
   const lastSeq = latest.data?.lastSeq;
   const seenSeq = latest.data?.seenSeq;
+  const markSeen = seen.mutate;
   // Opening the trail reads it up to its end.
   useEffect(() => {
     if (lastSeq === undefined || seenSeq === undefined || lastSeq <= seenSeq) return;
-    seen.mutate({ workspaceId, assignmentId: assignment.id, body: { seq: lastSeq } });
-    // `seen` is a new object each render; the read point is what matters.
-    // biome-ignore lint/correctness/useExhaustiveDependencies: marking once per new end of the trail
-  }, [lastSeq, seenSeq, workspaceId, assignment.id]);
+    markSeen({ workspaceId, assignmentId: assignment.id, body: { seq: lastSeq } });
+  }, [lastSeq, seenSeq, workspaceId, assignment.id, markSeen]);
   useEffect(() => {
     if (page.data === undefined || before === undefined) return;
     setOlder((current) => [
@@ -410,7 +409,7 @@ export function Files({ workspaceId, assignment }: Part) {
     <div className="work-section">
       {all.map((file) => (
         <details key={file.name} className="work-file">
-          <summary>{file.name}</summary>
+          <summary className="work-file__name">{file.name}</summary>
           <pre className="work-code">{file.text}</pre>
         </details>
       ))}

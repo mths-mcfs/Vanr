@@ -1103,7 +1103,7 @@
     gap: var(--vr-space-2) var(--vr-space-3);
   }
 
-  .work-file summary {
+  .work-file__name {
     cursor: pointer;
     font-family: var(--vr-font-mono);
     font-size: var(--vr-text-sm);
