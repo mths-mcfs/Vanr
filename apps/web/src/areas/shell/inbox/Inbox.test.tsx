@@ -22,8 +22,8 @@ const notice = (server: ReturnType<typeof newServer>, id: string) =>
 describe("the inbox", () => {
   test("Action needed: open requests first, then the rest by day, with the counts on the tabs", async () => {
     await renderApp({ path: PATH, signedInAs: "usr_ana" });
-    await screen.findByRole("region", { name: "Waiting on you" });
-    expect(headlines("Waiting on you")).toEqual([
+    await screen.findByRole("region", { name: "Awaiting your answer" });
+    expect(headlines("Awaiting your answer")).toEqual([
       "Unread: Ledger asked for your approval",
       "Unread: Scout has a question for you",
     ]);
@@ -81,10 +81,18 @@ describe("the inbox", () => {
   test("FYI groups by day; All has filters", async () => {
     const app = await renderApp({ path: `${PATH}?filter=fyi`, signedInAs: "usr_ana" });
     await screen.findByRole("region", { name: "Yesterday" });
-    expect(screen.getByRole("region", { name: "This week" })).toBeDefined();
-    expect(screen.getByRole("region", { name: "Older" })).toBeDefined();
+    expect(screen.getByRole("region", { name: "Last 7 days" })).toBeDefined();
+    expect(screen.getByRole("region", { name: "Earlier" })).toBeDefined();
     await app.user.click(screen.getByRole("tab", { name: "All" }));
     await waitFor(() => expect(app.address()).toBe(`${PATH}?filter=all`));
+    const chips = within(await screen.findByRole("group", { name: "Show" })).getAllByRole("button");
+    expect(chips.map((chip) => chip.textContent?.replace(/ \(\d+\)$/, ""))).toEqual([
+      "Everything",
+      "Unread",
+      "Awaiting your answer",
+      "Mentions",
+      "Reactions",
+    ]);
     await app.user.click(await screen.findByRole("button", { name: "Mentions (1)" }));
     await waitFor(() => expect(app.address()).toBe(`${PATH}?filter=mentions`));
     await waitFor(() =>
@@ -118,7 +126,7 @@ describe("the inbox", () => {
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("The inbox could not be loaded");
     await app.user.click(within(alert).getByRole("button", { name: "Retry" }));
-    await screen.findByRole("region", { name: "Waiting on you" });
+    await screen.findByRole("region", { name: "Awaiting your answer" });
   });
 
   test("older pages are added below, each notice once", async () => {
@@ -129,7 +137,7 @@ describe("the inbox", () => {
       server.notifications.push({ ...sample, id: `ntf_old_${n}`, latest: { title: `Report ${n}` } });
     }
     const app = await renderApp({ path: `${PATH}?filter=fyi`, signedInAs: "usr_ana", server });
-    await screen.findByRole("region", { name: "Older" });
+    await screen.findByRole("region", { name: "Earlier" });
     const notices = () => within(screen.getByRole("main")).getAllByRole("listitem");
     const before = notices().length;
     expect(before).toBe(50);

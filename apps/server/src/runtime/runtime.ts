@@ -198,6 +198,14 @@ class StepLimit extends Error {
   }
 }
 
+/** The server is stopping: no run starts. */
+class RuntimeStopping extends Error {
+  constructor() {
+    super("The agent runtime is stopping");
+    this.name = "RuntimeStopping";
+  }
+}
+
 /** The run went past the time the caller allowed (`RunLimits.timeoutMs`). */
 class TimeLimit extends Error {
   constructor(ms: number) {
@@ -291,6 +299,25 @@ interface Live {
   fence?: RunFence;
 }
 
+/**
+ * The run takes no more messages: its last turn already looked at the inbox, or it was stopped (the abort lands at
+ * its next await). What comes now is the next run's.
+ */
+const ending = (live: Pick<Live, "closing" | "controller">) => live.closing || live.controller.signal.aborted;
+
+/**
+ * The run reads its inbox no more (it is closing): what waits there wasn't heard by any turn, so it goes to the
+ * next run instead of being marked handled with this one. No await around it, so a steer after it sees `closing`.
+ */
+function deferUnheard(live: Pick<Live, "closing" | "inbox" | "handles" | "after">) {
+  live.closing = true;
+  const unheard = live.inbox.splice(0);
+  if (!unheard.length) return;
+  const ids = new Set(unheard.map((m) => m.id));
+  live.handles = live.handles.filter((id) => !ids.has(id));
+  live.after.unshift(...unheard);
+}
+
 const personOf = (row: Pick<MessageRow, "authorKind" | "authorId">) =>
   row.authorKind === "person" ? row.authorId : null;
 /**
@@ -336,6 +363,8 @@ export class AgentRuntime implements RuntimePort {
   private readonly runEndListeners: ((end: RunEnd) => void)[] = [];
   /** The highest token seen per fence key (`runFor`). */
   private readonly fences = new Map<string, number>();
+  /** The tail of each conversation key's admissions (`admit`). */
+  private readonly admissions = new Map<string, Promise<void>>();
 
   constructor(
     private readonly getDeps: () => AppDeps,
@@ -355,10 +384,9 @@ export class AgentRuntime implements RuntimePort {
     const at = this.deps.now();
     const { db } = this.deps;
     const dead = await db
-      .update(runs)
-      .set({ status: "failed", errorCode: "interrupted", error: "Server restarted", finishedAt: at })
-      .where(inArray(runs.status, [...ACTIVE_STATUSES]))
-      .returning({ id: runs.id, workspaceId: runs.workspaceId });
+      .select({ id: runs.id, workspaceId: runs.workspaceId })
+      .from(runs)
+      .where(inArray(runs.status, [...ACTIVE_STATUSES]));
     await this.closeWaits(null);
     // Work that waited on one of these runs ("Ask an agent") is blocked, not working forever.
     for (const run of dead) {
@@ -373,6 +401,20 @@ export class AgentRuntime implements RuntimePort {
         { state: "blocked", reason: "interrupted", runId: run.id },
       );
     }
+    // Last: a fall before this leaves the runs active, and the next boot does all of the above again for them.
+    if (dead.length)
+      await db
+        .update(runs)
+        .set({ status: "failed", errorCode: "interrupted", error: "Server restarted", finishedAt: at })
+        .where(
+          and(
+            inArray(
+              runs.id,
+              dead.map((r) => r.id),
+            ),
+            inArray(runs.status, [...ACTIVE_STATUSES]),
+          ),
+        );
     // A debate open in the middle of a round moves again (the rounds run in memory).
     await resumeDebates(this.deps);
     // A Drive migration to S3 that the restart cut.
@@ -399,6 +441,8 @@ export class AgentRuntime implements RuntimePort {
   /** Waits until every run and the background work ended (tests and shutdown). */
   async settle(): Promise<void> {
     do {
+      // An admission under way may still write a run or a claim (it never waits for a run to end).
+      await Promise.allSettled([...this.admissions.values()]);
       await Promise.allSettled([...this.live.values()].map((l) => l.done));
       await this.background.settle();
     } while (this.live.size > 0);
@@ -841,6 +885,23 @@ export class AgentRuntime implements RuntimePort {
     const routing = await routeMessage(this.deps, channel, row);
     if (!routing) return;
     const { mentioned, threadAgentIds, byId, talker, routed } = routing;
+    // A resend of a post whose routing already reached an agent (a run claimed or answered it) doesn't reach it
+    // again; a claim of a run the boot found fallen (interrupted) doesn't count.
+    const reached = new Set(
+      (
+        await db
+          .select({ agentId: messageDispatches.agentId })
+          .from(messageDispatches)
+          .leftJoin(runs, eq(runs.id, messageDispatches.runId))
+          .where(
+            and(
+              eq(messageDispatches.messageId, row.id),
+              // An answer counts whatever happened to its run after; a claim, unless the boot found its run fallen.
+              sql`(${messageDispatches.state} = 'handled' or (${messageDispatches.state} = 'claimed' and not (${runs.status} is not distinct from 'failed' and ${runs.errorCode} is not distinct from 'interrupted')))`,
+            ),
+          )
+      ).map((d) => d.agentId),
+    );
 
     // No budget left this month also blocks (a run in progress keeps receiving the message).
     const threadId = row.threadId ?? (row.meta.spawnsThread ? row.id : null);
@@ -848,7 +909,7 @@ export class AgentRuntime implements RuntimePort {
     const plan: { agent: AgentRow; key: string; live: Live | undefined }[] = [];
     for (const target of routed.targets) {
       const agent = byId.get(target.id);
-      if (!agent) continue;
+      if (!agent || reached.has(agent.id)) continue;
       const key = `${agent.id}:${channel.id}:${threadId ?? "-"}`;
       const running = this.byKey.get(key);
       const live = running ? this.live.get(running) : undefined;
@@ -876,21 +937,47 @@ export class AgentRuntime implements RuntimePort {
     });
     // Nobody called (no mention, outside a DM and a thread with the agent): whoever answers joined on its own.
     const volunteered = mentioned.length === 0 && channel.kind !== "dm" && threadAgentIds.length === 0;
-    for (const p of plan) {
-      // Look again: there was an await between the plan and here, and the run may have ended.
-      const runId = this.byKey.get(p.key);
-      const live = runId ? this.live.get(runId) : undefined;
-      if (live) await this.steer(live, row);
-      else
-        await this.startRun({
-          agent: p.agent,
-          channel,
-          threadId,
-          key: p.key,
-          trigger: row,
-          replyMeta: volunteered ? { joined: true } : undefined,
-        });
-    }
+    for (const p of plan)
+      await this.admit(p.key, async () => {
+        // Look again: there was an await between the plan and here, and the run may have ended.
+        const live = this.liveOf(p.key);
+        // It already put the message off to its next run (its dispatch still `routed`): a resend doesn't add it twice.
+        if (live?.after.some((m) => m.id === row.id)) return;
+        if (live) await this.steer(live, row);
+        else
+          await this.startRun({
+            agent: p.agent,
+            channel,
+            threadId,
+            key: p.key,
+            trigger: row,
+            replyMeta: volunteered ? { joined: true } : undefined,
+          });
+      });
+  }
+
+  /**
+   * Runs `work` alone among this conversation key's admissions. Whatever looks up the conversation's live run and
+   * then steers a message into it or starts one (a person's message, a routine's, a run's follow-up and the end
+   * that takes the run out) goes through here, so two of them can't both find no run and each start one, and a
+   * run isn't taken out between a message's look-up and its steer. Nothing here waits for a run to end.
+   */
+  private admit<T>(key: string, work: () => Promise<T>): Promise<T> {
+    const turn = (this.admissions.get(key) ?? Promise.resolve()).then(work);
+    const tail = turn.then(
+      () => {},
+      () => {},
+    );
+    this.admissions.set(key, tail);
+    void tail.then(() => {
+      if (this.admissions.get(key) === tail) this.admissions.delete(key);
+    });
+    return turn;
+  }
+
+  private liveOf(key: string): Live | undefined {
+    const runId = this.byKey.get(key);
+    return runId ? this.live.get(runId) : undefined;
   }
 
   /**
@@ -933,40 +1020,66 @@ export class AgentRuntime implements RuntimePort {
     const threadId = trigger.threadId ?? (trigger.meta.spawnsThread ? trigger.id : null);
     const key = `${agent.id}:${channel.id}:${threadId ?? "-"}`;
     for (;;) {
-      const runningId = this.byKey.get(key);
-      const running = runningId ? this.live.get(runningId) : undefined;
-      if (!running) break;
-      // The live run doesn't have this request's caps: instead of joining it, the caller tries later.
-      if (input.limits) return { ok: false, code: "busy" };
-      if (fence && (await this.defers(running, trigger))) {
+      const entry = await this.admit(key, async () => {
+        // A later attempt went while this one waited for the admission.
+        if (stale()) return { kind: "fenced" as const };
+        const running = this.liveOf(key);
+        if (!running) {
+          if (apiBudgetGates(agent) && (await this.budgetCheck(agent)) === "exhausted")
+            return { kind: "budget" as const };
+          const runId = await this.startRun({
+            agent,
+            channel,
+            threadId,
+            key,
+            trigger,
+            replyMeta: input.replyMeta,
+            limits: input.limits,
+          });
+          return { kind: "started" as const, runId };
+        }
+        // The live run doesn't have this request's caps: instead of joining it, the caller tries later.
+        if (input.limits) return { kind: "busy" as const };
         // A fenced attempt goes into the run that answers it: a run that would put it off to the next one is
-        // waited out first, so the run returned (and the one its fence stops) is that one.
-        await running.done;
+        // waited out first (outside the admission), so the run returned (and the one its fence stops) is that one.
+        if (fence && (await this.defers(running, trigger)))
+          return { kind: "wait" as const, done: running.done };
+        if (fence) running.fence = fence;
+        // A fenced attempt the run put off during its write isn't left for the next run: it waits that run out
+        // and comes back, as above.
+        const steered = await this.steer(running, trigger, !fence);
+        if (steered === null && fence) return { kind: "wait" as const, done: running.done };
+        const took = steered ?? running.runId;
+        const into = this.live.get(took);
+        if (fence && into) into.fence = fence;
+        return { kind: "joined" as const, took, done: into?.done ?? running.done };
+      });
+      if (entry.kind === "budget" || entry.kind === "busy" || entry.kind === "fenced")
+        return { ok: false, code: entry.kind };
+      if (entry.kind === "wait") {
+        await entry.done;
         if (stale()) return { ok: false, code: "fenced" };
         continue;
       }
-      if (fence) running.fence = fence;
-      const took = (await this.steer(running, trigger)) ?? running.runId;
-      const into = this.live.get(took);
-      if (fence && into) into.fence = fence;
-      if (!(await this.admitted(input.admit, took, fence))) {
-        // Gone stale while it went in (the work ended, the assignment closed): its turn in the run stops.
-        this.cancel(took, null, fence);
-        return { ok: false, code: "fenced" };
+      if (entry.kind === "joined") {
+        if (!(await this.admitted(input.admit, entry.took, fence))) {
+          // Gone stale while it went in (the work ended, the assignment closed): its turn in the run stops.
+          this.cancel(entry.took, null, fence);
+          return { ok: false, code: "fenced" };
+        }
+        return { ok: true, runId: entry.took, done: entry.done };
       }
-      return { ok: true, runId: took, done: into?.done ?? running.done };
+      return this.started(entry.runId, input.admit, fence, stale);
     }
-    if (apiBudgetGates(agent) && (await this.budgetCheck(agent)) === "exhausted")
-      return { ok: false, code: "budget" };
-    const runId = await this.startRun({
-      agent,
-      channel,
-      threadId,
-      key,
-      trigger,
-      replyMeta: input.replyMeta,
-      limits: input.limits,
-    });
+  }
+
+  /** The end of `runFor` for a run it started: the fence and the caller's `admit` decide whether it stays. */
+  private async started(
+    runId: string,
+    admit: (() => Promise<boolean>) | undefined,
+    fence: RunFence | undefined,
+    stale: () => boolean,
+  ): Promise<{ ok: true; runId: string; done: Promise<void> } | { ok: false; code: "fenced" }> {
     const started = this.live.get(runId);
     if (started && fence) {
       // A later attempt went while this run was starting: the run is this stale attempt's alone, and nobody
@@ -977,7 +1090,7 @@ export class AgentRuntime implements RuntimePort {
       }
       started.fence = fence;
     }
-    if (!(await this.admitted(input.admit, runId, fence))) {
+    if (!(await this.admitted(admit, runId, fence))) {
       // The run is on the air, but the work is no longer this attempt's (it ended, or the assignment closed
       // while the run was starting): it stops here.
       this.cancel(runId, null, fence);
@@ -1047,7 +1160,7 @@ export class AgentRuntime implements RuntimePort {
       who !== requesterOf(live.trigger) &&
       !isStopRequest(row.body) &&
       !(await this.mayUseRunner(live.workspaceId, who, live.runner));
-    if (live.closing) return true;
+    if (ending(live)) return true;
     if (live.plan && !canUsePlan(who, live.plan)) return true;
     if (who !== null && who !== live.person.id && live.person.pinned) return true;
     return barred;
@@ -1063,29 +1176,35 @@ export class AgentRuntime implements RuntimePort {
 
   /**
    * Puts the message into the live run, or off to its next run. Returns the run that took it now (null when it
-   * waits for the next run).
+   * waits for the next run). Called only inside the conversation's admission (`admit`): the run's end takes it out
+   * and starts the next run under the same admission, so `live.after` is still read after this.
    */
-  private async steer(live: Live, row: MessageRow): Promise<string | null> {
-    const { db, hub } = this.deps;
+  private async steer(live: Live, row: MessageRow, keep = true): Promise<string | null> {
+    const { db } = this.deps;
     const stop = isStopRequest(row.body);
-    const deferred = await this.defers(live, row);
-    // The run ended during the check: its end already looked at what waited for it, so the message goes in again.
-    if (this.live.get(live.runId) !== live) return this.readmit(live, row);
-    if (deferred) {
-      // "stop" for a run that is already ending changes nothing; anything else becomes the next run.
-      if (!(live.closing && stop)) live.after.push(row);
-      return null;
+    if (!(await this.defers(live, row))) {
+      await db
+        .insert(messageDispatches)
+        .values({ messageId: row.id, agentId: live.agent.id, state: "claimed", runId: live.runId })
+        .onConflictDoUpdate({
+          target: [messageDispatches.messageId, messageDispatches.agentId],
+          set: { state: "claimed", runId: live.runId },
+        });
+      if (!ending(live)) return this.into(live, row, stop);
+      // Its last turn looked at the inbox during the write, or it was stopped: a "stop" for it is done with.
+      if (stop) await this.markHandled(live, [row.id], "canceled");
     }
+    // "stop" for a run that is already ending changes nothing; anything else becomes the next run (unless the
+    // caller takes it back: `keep` false).
+    if (keep && !(ending(live) && stop)) live.after.push(row);
+    return null;
+  }
+
+  /** The message joins the live run (its inbox, its answer to a question, or its stop). */
+  private async into(live: Live, row: MessageRow, stop: boolean): Promise<string> {
     const who = personOf(row);
     if (who !== null && who !== live.person.id) live.person.id = null;
-    await db
-      .insert(messageDispatches)
-      .values({ messageId: row.id, agentId: live.agent.id, state: "claimed", runId: live.runId })
-      .onConflictDoUpdate({
-        target: [messageDispatches.messageId, messageDispatches.agentId],
-        set: { state: "claimed", runId: live.runId },
-      });
-    hub.toChannel(live.channel.id, {
+    this.deps.hub.toChannel(live.channel.id, {
       type: "run.steered",
       runId: live.runId,
       agentId: live.agent.id,
@@ -1110,24 +1229,6 @@ export class AgentRuntime implements RuntimePort {
     return live.runId;
   }
 
-  /** A message for a run that ended while it was being let in: the conversation's next run takes it. */
-  private async readmit(gone: Live, row: MessageRow): Promise<string | null> {
-    // "stop" for a run that already ended changes nothing.
-    if (isStopRequest(row.body)) return null;
-    // Its end is over, including the start of the run that took what waited for it.
-    await gone.done;
-    const id = this.byKey.get(gone.key);
-    const current = id ? this.live.get(id) : undefined;
-    if (current) return this.steer(current, row);
-    return this.startRun({
-      agent: gone.agent,
-      channel: gone.channel,
-      threadId: gone.threadId,
-      key: gone.key,
-      trigger: row,
-    });
-  }
-
   // ---- execution ----
 
   private async startRun(input: {
@@ -1141,6 +1242,7 @@ export class AgentRuntime implements RuntimePort {
   }): Promise<string> {
     const { db, hub } = this.deps;
     const { agent, channel, trigger } = input;
+    if (this.stopped) throw new RuntimeStopping();
     const runId = newId("run");
     const at = this.deps.now();
     const [runner] = agent.environmentId
@@ -1195,41 +1297,66 @@ export class AgentRuntime implements RuntimePort {
       errorCode: null,
       limits: input.limits,
     };
+    // The stop began during the writes above and already stopped every run it saw: this one doesn't start (the
+    // next boot fails its row as interrupted, as after a fall).
+    if (this.stopped) throw new RuntimeStopping();
     this.live.set(runId, live);
     this.byKey.set(input.key, runId);
     live.done = this.execute(live)
       .catch((err) => log.error("runtime.run_crashed", { runId, err }))
-      .finally(async () => {
-        this.live.delete(runId);
-        if (this.byKey.get(live.key) === runId) this.byKey.delete(live.key);
-        const end: RunEnd = {
-          runId,
-          workspaceId: live.workspaceId,
-          agentId: agent.id,
-          channelId: channel.id,
-          threadId: live.threadId,
-          status: live.status === "done" || live.status === "canceled" ? live.status : "failed",
-          errorCode: live.errorCode ?? null,
-        };
-        for (const listener of this.runEndListeners) {
-          try {
-            listener(end);
-          } catch (err) {
-            log.error("runtime.run_end_listener_failed", { runId, err });
-          }
-        }
-        const [next, ...rest] = live.after;
-        if (!next || this.stopped) return;
-        try {
-          await this.startRun({ ...live, trigger: next, replyMeta: undefined, limits: undefined });
-          const nextId = this.byKey.get(live.key);
-          const nextLive = nextId ? this.live.get(nextId) : undefined;
-          for (const row of rest) if (nextLive) await this.steer(nextLive, row);
-        } catch (err) {
-          log.error("runtime.followup_failed", { runId, err });
-        }
-      });
+      .finally(() => this.ended(live));
     return runId;
+  }
+
+  /**
+   * Takes the ended run out and starts the next one with what waited for it, inside the conversation's
+   * admission: a message steered meanwhile either went in before (into `after`, read here) or finds the next run.
+   */
+  private ended(live: Live): Promise<void> {
+    const { runId, agent, channel } = live;
+    return this.admit(live.key, async () => {
+      this.live.delete(runId);
+      if (this.byKey.get(live.key) === runId) this.byKey.delete(live.key);
+      const end: RunEnd = {
+        runId,
+        workspaceId: live.workspaceId,
+        agentId: agent.id,
+        channelId: channel.id,
+        threadId: live.threadId,
+        status: live.status === "done" || live.status === "canceled" ? live.status : "failed",
+        errorCode: live.errorCode ?? null,
+      };
+      for (const listener of this.runEndListeners) {
+        try {
+          listener(end);
+        } catch (err) {
+          log.error("runtime.run_end_listener_failed", { runId, err });
+        }
+      }
+      const [next, ...rest] = live.after;
+      if (!next) return;
+      let taken = 0;
+      try {
+        await this.startRun({ ...live, trigger: next, replyMeta: undefined, limits: undefined });
+        taken = 1;
+        const nextLive = this.liveOf(live.key);
+        if (!nextLive) return;
+        for (const row of rest) {
+          await this.steer(nextLive, row);
+          taken++;
+        }
+      } catch (err) {
+        if (!(err instanceof RuntimeStopping)) log.error("runtime.followup_failed", { runId, err });
+        // What no next run took is left as a fall leaves it: handled with this run as failed, its work blocked.
+        const left = live.after.slice(taken).map((m) => m.id);
+        await this.markHandled(live, left, "failed");
+        await settleIssueWork(this.deps.db, live.workspaceId, left, {
+          state: "blocked",
+          reason: "interrupted",
+          runId: live.runId,
+        });
+      }
+    });
   }
 
   private emit(live: Live, event: Record<string, unknown> & { type: string }) {
@@ -1821,13 +1948,21 @@ export class AgentRuntime implements RuntimePort {
             runId: live.runId,
           });
           history.push({ role: "assistant", content: result.content, raw: result.raw });
+          // An answer on the last allowed turn finishes the run; what came in during it is the next run's.
+          if (turn + 1 >= maxTurns) {
+            finished = true;
+            break;
+          }
           continue;
         }
-        live.closing = true;
         finalText = text;
         finished = true;
         break;
       }
+      // From here no turn reads the inbox. What a person steered in on the last allowed turn wasn't heard: it waits
+      // for the next run instead of being marked handled with this one (no await in between, so a steer that
+      // comes after sees `closing`).
+      deferUnheard(live);
       // A routine: running out of turns while still asking for tools is stopping at the cap, not finishing the work.
       if (!finished && live.limits) throw new StepLimit(maxTurns);
 
@@ -1841,13 +1976,16 @@ export class AgentRuntime implements RuntimePort {
       await this.budgetNotices(live.agent, live.channel.id, personOf(live.trigger));
     } catch (caught) {
       live.closing = true;
-      clearInterval(beat);
-      if (deadline) clearTimeout(deadline);
       // The time cap aborts through the controller: the error that comes up is the stream's; the cause is the TimeLimit.
       const reason: unknown = live.controller.signal.reason;
       const err = reason instanceof TimeLimit ? reason : caught;
       const canceled =
         !(err instanceof TimeLimit) && (err instanceof RunCanceled || live.controller.signal.aborted);
+      // A run that fails or is stopped mid-turn didn't hear its inbox: the next run takes it. A person's stop
+      // cancels it with the run instead (it stays in `handles`, handled as canceled).
+      if (!(canceled && live.canceledBy !== null)) deferUnheard(live);
+      clearInterval(beat);
+      if (deadline) clearTimeout(deadline);
       if (canceled) {
         if (partial.trim()) await post(partial.trim(), { canceled: true }).catch(() => null);
         await this.finish(live, { status: "canceled", handled: "canceled", messageId: null });
@@ -2561,7 +2699,11 @@ export class AgentRuntime implements RuntimePort {
 
   // ---- sweep ----
 
-  /** Posts the reminders that came due. Each one is claimed first (status sent), so two ticks don't duplicate. */
+  /**
+   * Posts the reminders that came due, then marks each one sent. The post's client id is the reminder's, so a
+   * fall between the two posts nothing twice: the next sweep's post finds the message (and finishes what its post
+   * left undone) and marks the reminder then.
+   */
   async tick(): Promise<number> {
     if (this.ticking || this.stopped) return 0;
     this.ticking = true;
@@ -2585,27 +2727,27 @@ export class AgentRuntime implements RuntimePort {
         .limit(50);
       let sent = 0;
       for (const r of due) {
-        const claimed = await db
-          .update(reminders)
-          .set({ status: "sent", sentAt: this.deps.now() })
-          .where(and(eq(reminders.id, r.id), eq(reminders.status, "scheduled")))
-          .returning({ id: reminders.id });
-        if (claimed.length === 0) continue;
         const [channel] = await db.select().from(channels).where(eq(channels.id, r.channelId));
-        if (!channel || channel.archivedAt) continue;
         const author =
           r.agentId !== null
             ? ({ type: "agent", id: r.agentId } as const)
             : ({ type: "person", id: r.createdById } as const);
-        await postMessage(this.deps, {
-          workspaceId: r.workspaceId,
-          channel,
-          author,
-          body: r.text,
-          clientId: `reminder:${r.id}`,
-          threadId: r.threadId,
-          meta: { reminder: { reminderId: r.id } },
-        });
+        if (channel && !channel.archivedAt)
+          await postMessage(this.deps, {
+            workspaceId: r.workspaceId,
+            channel,
+            author,
+            body: r.text,
+            clientId: `reminder:${r.id}`,
+            threadId: r.threadId,
+            meta: { reminder: { reminderId: r.id } },
+          });
+        const marked = await db
+          .update(reminders)
+          .set({ status: "sent", sentAt: this.deps.now() })
+          .where(and(eq(reminders.id, r.id), eq(reminders.status, "scheduled")))
+          .returning({ id: reminders.id });
+        if (marked.length === 0 || !channel || channel.archivedAt) continue;
         sent++;
       }
       return sent;

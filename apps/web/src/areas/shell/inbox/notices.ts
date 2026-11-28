@@ -36,8 +36,18 @@ export function destinationOf(notice: AppNotification, workspaceId: string): Des
   return undefined;
 }
 
-export type DayGroup = "today" | "yesterday" | "week" | "older";
-export const DAY_GROUPS: readonly DayGroup[] = ["today", "yesterday", "week", "older"];
+/**
+ * The list's day sections, newest first. `daysBack` is how many calendar days before today a section starts,
+ * at local midnight: "last7" starts six days back, so together with today and yesterday it spans seven days.
+ * "earlier" takes everything older.
+ */
+export const NOTICE_DAYS = [
+  { day: "today", daysBack: 0 },
+  { day: "yesterday", daysBack: 1 },
+  { day: "last7", daysBack: 6 },
+  { day: "earlier", daysBack: null },
+] as const;
+export type NoticeDay = (typeof NOTICE_DAYS)[number]["day"];
 
 /** Local midnight of the day `at` falls on. */
 function startOfDay(at: number): Date {
@@ -53,13 +63,11 @@ function dayStart(at: number, days: number): number {
   return day.getTime();
 }
 
-/** The day group a notice falls in, by when it last changed, in the browser's time zone. */
-export function dayGroupOf(iso: string, now: number): DayGroup {
+/** The day section a notice falls in, by when it last changed, in the browser's time zone. */
+export function noticeDayOf(iso: string, now: number): NoticeDay {
   const at = Date.parse(iso);
-  if (at >= dayStart(now, 0)) return "today";
-  if (at >= dayStart(now, -1)) return "yesterday";
-  if (at >= dayStart(now, -6)) return "week";
-  return "older";
+  const section = NOTICE_DAYS.find(({ daysBack }) => daysBack === null || at >= dayStart(now, -daysBack));
+  return section?.day ?? "earlier";
 }
 
 export type LaterOption = "hour" | "tomorrow" | "monday";
@@ -80,10 +88,18 @@ export function laterOptions(now: number): readonly { key: LaterOption; at: Date
   ];
 }
 
-/** The tabs, and the filters inside "All". */
+/** The tabs. */
 export const TABS = ["action_needed", "fyi", "all"] as const;
 export type Tab = (typeof TABS)[number];
-export const ALL_FILTERS = ["all", "mentions", "waiting", "unread", "reactions"] as const;
+
+/** What the "All" tab can narrow to, in the order its chips show. */
+export const ALL_TAB_FILTERS = [
+  "all",
+  "unread",
+  "waiting",
+  "mentions",
+  "reactions",
+] as const satisfies readonly NotificationFilter[];
 
 export const tabOf = (filter: NotificationFilter): Tab =>
   filter === "action_needed" || filter === "fyi" ? filter : "all";

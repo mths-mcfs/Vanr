@@ -24,7 +24,11 @@ describe("em português", () => {
       languages,
     });
     expect(await screen.findByRole("heading", { level: 3, name: "4 membros" })).toBeDefined();
-    await chooseOption(app, screen.getByRole("combobox", { name: "Papel de Tomás Eriksen" }), "Admin");
+    await chooseOption(
+      app,
+      screen.getByRole("combobox", { name: "Mudar o papel de Tomás Eriksen" }),
+      "Admin",
+    );
     expect(await screen.findByText("Tomás Eriksen agora é Admin.")).toBeDefined();
   });
 
@@ -34,7 +38,7 @@ describe("em português", () => {
       signedInAs: "usr_ana",
       languages,
     });
-    expect(await screen.findByRole("region", { name: "Esperando você" })).toBeDefined();
+    expect(await screen.findByRole("region", { name: "Aguardando sua resposta" })).toBeDefined();
     const mention = screen.getByRole("button", {
       name: /^Não lido:\s*Jonas Lind mencionou você em #print-queue$/,
     });

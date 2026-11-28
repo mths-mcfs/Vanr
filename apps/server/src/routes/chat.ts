@@ -26,11 +26,12 @@ import {
   byClientId,
   ensureThread,
   hydrate,
-  hydrateOne,
   listMessages,
   messageInWorkspace,
+  type PostEffects,
   postMessage,
   reactionsFor,
+  resumePost,
 } from "../messages";
 import { notifyReaction } from "../notify-sources";
 import { requireCanTalk } from "../runners/plans";
@@ -503,13 +504,22 @@ export function registerChat(app: Hono<AppEnv>) {
       userId: me.userId,
       channelId: param(c, "channelId"),
     });
-    // A resend of a post already accepted answers it as it is, whatever changed in the channel since.
-    const resent = await byClientId(deps.db, channel.id, me.userId, input.clientId);
-    if (resent) {
-      // The first request may have failed after the post was written: the resend finishes joining.
+    // The person's part of the post, after its own effects: the join (a public channel, only once the post was
+    // accepted) and the routing. A routing failure doesn't fail the post; it leaves it unsettled for a resend.
+    const then: PostEffects = async (message) => {
       if (!isMember) await joinChannel(deps.db, channel.id, me.userId);
-      return c.json(await hydrateOne(deps.db, resent), 200);
-    }
+      try {
+        await deps.runtime.onPersonMessage({ workspaceId: me.workspaceId, channel, message });
+        return true;
+      } catch (err) {
+        log.error("runtime.route_failed", { messageId: message.id, err });
+        return false;
+      }
+    };
+    // A resend of a post already accepted answers it as it is, whatever changed in the channel since; what the
+    // first request left undone (it failed after the post was written) runs now, the join and the routing too.
+    const resent = await byClientId(deps.db, channel.id, me.userId, input.clientId);
+    if (resent) return c.json(await resumePost(deps, resent, channel, then), 200);
     const assignment = await assignmentPostMeta(deps, me, input.threadId, body);
     // An attachment is a file of this channel (or of the whole workspace): whoever reads the message can open it.
     const attached: FileRef[] = [];
@@ -532,13 +542,8 @@ export function registerChat(app: Hono<AppEnv>) {
         ...(attached.length ? { files: attached } : {}),
         ...assignment,
       },
+      then,
     });
-    if (!isMember) await joinChannel(deps.db, channel.id, me.userId);
-    // A resend of the same clientId doesn't route again. A routing failure doesn't fail the post.
-    if (created)
-      await deps.runtime
-        .onPersonMessage({ workspaceId: me.workspaceId, channel, message })
-        .catch((err) => log.error("runtime.route_failed", { messageId: message.id, err }));
     return c.json(message, created ? 201 : 200);
   });
 

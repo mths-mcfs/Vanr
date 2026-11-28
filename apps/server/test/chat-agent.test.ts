@@ -24,6 +24,7 @@ import {
   startTestServer,
   TestSocket,
 } from "./harness";
+import { gate, wrapQuery } from "./lock-double";
 import { addToChannel, call, seedAgent, ws } from "./route-calls";
 import { memberOf, type Person, seedChannel, seedWorkspace } from "./seed";
 
@@ -242,7 +243,7 @@ describe("a conversation with an agent", () => {
   );
 
   test(
-    "forced: a double submit while the first post is still routing gives the same message and routes once",
+    "forced: a double submit while the first post is still routing waits for it, gives the same message and routes once",
     async () => {
       const { w, general, ana, lia } = await team();
       let entered!: () => void;
@@ -268,7 +269,27 @@ describe("a conversation with an agent", () => {
             throw new Error("the first post ended without reaching the runtime");
           }),
         ]);
-        second = await post(ana, w, general, `@${lia.handle} once`, "dup-1");
+        // The resend waits for the first send, still routing: it is let go once the resend looked its post up.
+        const looked = gate();
+        const real = server.deps.db;
+        server.deps.db = new Proxy(real, {
+          get(target, prop) {
+            const value = Reflect.get(target, prop, target);
+            if (prop !== "select") return typeof value === "function" ? value.bind(target) : value;
+            return (...args: Parameters<typeof real.select>) =>
+              wrapQuery(target.select(...args), async (q) => {
+                if (q.toSQL().sql.includes('"client_id"')) looked.open();
+              });
+          },
+        });
+        const resend = post(ana, w, general, `@${lia.handle} once`, "dup-1");
+        try {
+          await looked.opened;
+        } finally {
+          server.deps.db = real;
+        }
+        release();
+        second = await resend;
       } finally {
         runtime.before = undefined;
         release();
@@ -502,10 +523,15 @@ describe("who answers a post", () => {
       expect([again.status, again.body.id]).toEqual([200, accepted.body.id]);
       await settle(server);
       expect(await answeredBy(server, accepted.body.id)).toEqual([]);
-      // A first request that failed after the post was written left Beto outside: the resend has him join.
+      // A first request that failed after the post was written (before its join and routing) left Beto outside
+      // and the post unsettled: the resend has him join, and routes it then.
       await server.deps.db
         .delete(schema.channelMemberships)
         .where(eq(schema.channelMemberships.memberId, beto.user.id));
+      await server.deps.db
+        .update(schema.messages)
+        .set({ effectsPending: true })
+        .where(eq(schema.messages.id, accepted.body.id));
       const resent = await call(beto, "POST", `${w}/channels/${open}/messages`, {
         body: "hi all",
         clientId: "r-1",
@@ -513,6 +539,8 @@ describe("who answers a post", () => {
       expect(resent.status).toBe(200);
       const joined = (await call(ana, "GET", `${w}/channels/${open}/members`)).body.members;
       expect(joined.map((m: { id: string }) => m.id)).toContain(beto.user.id);
+      await settle(server);
+      expect(await answeredBy(server, accepted.body.id)).toEqual([lia.id]);
 
       const other = await seedChannel(server, workspaceId, { name: "other", members: [ana] });
       const caio = await memberOf(server, workspaceId, "Caio", email("caio"));
