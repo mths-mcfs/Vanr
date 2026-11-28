@@ -223,16 +223,9 @@ function Services({ workspaceId }: { workspaceId: string }) {
             const base =
               connection.accountDisplayName ??
               (own.length > 1 && connection.label === def.label ? since : connection.label);
-            // Still the same as another one (made in the same minute): its place in the list tells them apart.
-            const twins = own.filter(
-              (each) =>
-                (each.accountDisplayName ??
-                  (each.label === def.label
-                    ? t("svc.since", { date: when.format(new Date(each.createdAt)) })
-                    : each.label)) === base,
-            );
-            const who =
-              twins.length > 1 ? t("svc.nth", { name: base, n: twins.indexOf(connection) + 1 }) : base;
+            // With more than one connection of the service, each name ends with its place in the list:
+            // two names can't end with the same place, so no two buttons share a name.
+            const who = own.length > 1 ? t("svc.nth", { name: base, n: own.indexOf(connection) + 1 }) : base;
             return (
               <li key={connection.id} className="wire-row" data-state={connection.status}>
                 <div className="wire-row__who">

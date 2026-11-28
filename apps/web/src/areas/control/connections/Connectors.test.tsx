@@ -169,7 +169,7 @@ describe("services", () => {
     expect(linear.map((item) => item.getAttribute("data-state"))).toEqual(["reauth_required", "active"]);
     // With a working connection beside it, the refused one only offers to be disconnected.
     expect(within(list).queryByRole("button", { name: "Connect again" }) === null).toBe(true);
-    await app.user.click(within(list).getByRole("button", { name: "Disconnect Linear (old@birch)" }));
+    await app.user.click(within(list).getByRole("button", { name: "Disconnect Linear (old@birch, 1)" }));
     const confirm = await screen.findByRole("alertdialog", { name: "Disconnect Linear?" });
     await app.user.click(within(confirm).getByRole("button", { name: "Disconnect" }));
     expect(await toast("Linear is disconnected.")).toBeDefined();
@@ -295,6 +295,36 @@ describe("services", () => {
       .map((button) => button.getAttribute("aria-label"));
     expect(names.length).toBe(2);
     expect(new Set(names).size).toBe(2);
+  });
+
+  test("an account already named like a numbered one never shares its button's name", async () => {
+    const server = newServer();
+    server.agentAccess.shared.push(
+      connection("stripe", { id: "con_a", accountDisplayName: "Team" }),
+      connection("stripe", { id: "con_b", accountDisplayName: "Team, 1" }),
+      connection("stripe", { id: "con_c", accountDisplayName: "Team" }),
+    );
+    await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const names = within(await services())
+      .getAllByRole("button", { name: /^Disconnect Stripe/ })
+      .map((button) => button.getAttribute("aria-label"));
+    expect(names.length).toBe(3);
+    expect(new Set(names).size).toBe(3);
+  });
+
+  test("an account already named like a numbered one never shares its button's name", async () => {
+    const server = newServer();
+    server.agentAccess.shared.push(
+      connection("stripe", { id: "con_a", accountDisplayName: "Team" }),
+      connection("stripe", { id: "con_b", accountDisplayName: "Team, 1" }),
+      connection("stripe", { id: "con_c", accountDisplayName: "Team" }),
+    );
+    await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const names = within(await services())
+      .getAllByRole("button", { name: /^Disconnect Stripe/ })
+      .map((button) => button.getAttribute("aria-label"));
+    expect(names.length).toBe(3);
+    expect(new Set(names).size).toBe(3);
   });
 
   test("a list that fails to load offers a retry", async () => {
