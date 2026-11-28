@@ -60,6 +60,18 @@ function DayLabel({ iso, now }: { iso: string; now: number }) {
   );
 }
 
+/** Draws again at the next local midnight, so "today" and "yesterday" stay true in an idle conversation. */
+function useMidnight() {
+  const clock = useClock();
+  const [, setDay] = useState(0);
+  const at = clock.now();
+  useEffect(() => {
+    const next = new Date(at);
+    next.setHours(24, 0, 0, 0);
+    return clock.setTimer(() => setDay((day) => day + 1), next.getTime() - at + 1);
+  }, [at, clock]);
+}
+
 function TypingLine({ userIds }: { userIds: string[] }) {
   const t = useMessages("chat");
   const { directory } = useConversation();
@@ -202,6 +214,7 @@ function History({
   const clockNow = useClock().now();
   const moving = runs.some((run) => run.endedAt === null || clockNow - run.endedAt < LANDING_MS);
   const now = useTicker(moving, 1000);
+  useMidnight();
   const live = showing(runs, answers, now);
   const jumpTo = useCallback(() => {
     root.current?.querySelector(".chat-live")?.scrollIntoView({ block: "nearest" });

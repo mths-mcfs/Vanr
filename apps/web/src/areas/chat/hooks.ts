@@ -213,7 +213,13 @@ export function useLiveRuns(workspaceId: string, channelId: string) {
     store?.snapshot ?? noRuns,
     store?.snapshot ?? noRuns,
   );
-  const active = useApiQuery("listChannelActiveRuns", { workspaceId, channelId });
+  // Every answer is a new value, even one equal to the last: an empty list read again after a
+  // reconnect still ends the runs heard of in between.
+  const active = useApiQuery(
+    "listChannelActiveRuns",
+    { workspaceId, channelId },
+    { structuralSharing: false },
+  );
   const { data, fetchStatus } = active;
   // When the list was asked for: a run heard from after that may be missing from it and still be live.
   const askedAt = useRef(clock.now());

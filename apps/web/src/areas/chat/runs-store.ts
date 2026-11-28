@@ -49,6 +49,8 @@ export class ChannelRuns {
   snapshot = () => this.runs;
 
   apply(base: RunEventBase, event: RunEvent): void {
+    // A late event of a run that ended never brings it back.
+    if (base.runId !== undefined && this.ended.has(base.runId)) return;
     if (base.runId !== undefined && ENDING.has(event.type)) this.ended.add(base.runId);
     this.set(applyRunEvent(this.runs, base, event, this.clock.now()));
   }

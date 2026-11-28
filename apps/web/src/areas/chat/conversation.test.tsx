@@ -260,3 +260,56 @@ describe("a direct message with an agent", () => {
     expect(within(facts).getByText(/^Runs on /)).toBeDefined();
   });
 });
+
+describe("what CodeRabbit found on the second head", () => {
+  const base = { runId: "run_late", agentId: "agt_scout", channelId: "ch_general", threadId: null };
+
+  test("a late event of a run that stopped does not bring it back", async () => {
+    const server = newServer();
+    await open("/channel/ch_general", "usr_ana", server);
+    await screen.findByRole("textbox", { name: "Write in #general" });
+    await act(async () => {
+      server.emit(WS, { type: "run.status_changed", ...base, status: "running" }, "ch_general");
+    });
+    expect(await screen.findByRole("region", { name: "Scout at work" })).toBeDefined();
+    await act(async () => {
+      server.emit(WS, { type: "run.stopped", ...base }, "ch_general");
+      server.emit(WS, { type: "run.text_delta", ...base, seq: 0, text: "late words" }, "ch_general");
+    });
+    expect(screen.queryByRole("region", { name: "Scout at work" }) === null).toBe(true);
+    expect(screen.queryByText("late words") === null).toBe(true);
+  });
+
+  test("the same empty list read again still ends a run heard of in between", async () => {
+    const server = newServer();
+    const app = await open("/channel/ch_general", "usr_ana", server);
+    await screen.findByRole("textbox", { name: "Write in #general" });
+    const lists = () => server.calls.filter((call) => call.method === "listChannelActiveRuns").length;
+    await waitFor(() => expect(lists()).toBe(1));
+    await act(async () => {
+      server.emit(WS, { type: "run.status_changed", ...base, status: "running" }, "ch_general");
+    });
+    expect(await screen.findByRole("region", { name: "Scout at work" })).toBeDefined();
+    await app.advance(1000);
+    const before = lists();
+    // A reconnect reads the list again; the run ended while the connection was down.
+    await act(async () => {
+      await app.runtime.queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[2] === "listChannelActiveRuns",
+      });
+    });
+    await waitFor(() => expect(lists()).toBeGreaterThan(before));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Scout at work" }) === null).toBe(true));
+  });
+
+  test("an idle conversation left open past midnight moves today to yesterday", async () => {
+    const server = newServer();
+    server.state.messages.push(message({ id: "msg_noon", body: "Proofs at noon", createdAt: at(-1) }));
+    const app = await open("/channel/ch_general", "usr_ana", server);
+    expect(await screen.findByRole("heading", { name: "Today" })).toBeDefined();
+    const midnight = new Date(TEST_NOW);
+    midnight.setHours(24, 0, 0, 0);
+    await app.advance(midnight.getTime() - TEST_NOW.getTime() + 1000);
+    expect(await screen.findByRole("heading", { name: "Yesterday" })).toBeDefined();
+  });
+});
