@@ -1704,9 +1704,11 @@ export class AgentRuntime implements RuntimePort {
           await this.setStatus(live, "running");
           return answer;
         },
-        recordAction: async (action) => {
+        recordAction: async (action, tx) => {
           const created = this.deps.now();
-          await db.insert(reversibleActions).values({
+          // Inside the caller's transaction when it gives one (the outbox's): the queued send and its receipt
+          // exist together, and on a single connection a write outside it would wait on that transaction.
+          await (tx ?? db).insert(reversibleActions).values({
             id: newId("act"),
             workspaceId: live.workspaceId,
             agentId: live.agent.id,

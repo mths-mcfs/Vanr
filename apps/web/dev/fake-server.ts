@@ -14,6 +14,7 @@ import { can } from "@vanr/contract";
 import { z } from "zod";
 import { AUTH_ROUTES, type AuthMethod } from "../src/api/auth.ts";
 import { FakeBases } from "./fake-bases.ts";
+import { FakeControl } from "./fake-control.ts";
 import { FakeFiles } from "./fake-files.ts";
 import { FakeWiki } from "./fake-wiki.ts";
 
@@ -282,6 +283,7 @@ export class FakeServer {
   readonly files: FakeFiles;
   readonly bases: FakeBases;
   readonly wiki: FakeWiki;
+  readonly control: FakeControl;
   private readonly fileOperations: ReturnType<FakeFiles["operations"]>;
   private readonly accounts = new Map<string, Account>();
   private readonly now: () => Date;
@@ -316,10 +318,22 @@ export class FakeServer {
     this.files = new FakeFiles(host);
     this.bases = new FakeBases(host);
     this.wiki = new FakeWiki(host);
+    this.control = new FakeControl({
+      ...host,
+      agentOwner: (agentId) => this.agents.find((candidate) => candidate.id === agentId)?.ownerUserId,
+      agentWorkspace: (agentId) => this.agents.find((candidate) => candidate.id === agentId)?.workspaceId,
+      isMember: (workspaceId, userId) => this.memberOf(workspaceId, userId) !== undefined,
+      channel: (channelId) => this.state.channels.find((candidate) => candidate.id === channelId),
+      channelWorkspace: (channelId) =>
+        this.state.channels.find((candidate) => candidate.id === channelId)?.workspaceId,
+      messages: () => this.state.messages,
+      emitTo: (workspaceId, event, channelId) => this.emit(workspaceId, event, channelId),
+    });
     this.fileOperations = {
       ...this.files.operations(),
       ...this.bases.operations(),
       ...this.wiki.operations(),
+      ...this.control.operations(),
     };
     this.seed(options.seed ?? "team");
   }
@@ -339,6 +353,13 @@ export class FakeServer {
     this.wiki.pages = [];
     this.wiki.reads = [];
     this.wiki.defs = new Map();
+    this.control.approvals = [];
+    this.control.rules = [];
+    this.control.proposals = [];
+    this.control.stats = [];
+    this.control.questions = [];
+    this.control.testCases = new Map();
+    this.control.evals = [];
     if (name === "empty") return;
     const inDays = (days: number) => new Date(this.now().getTime() + days * DAY_MS);
     const people: [string, string, string][] = [
@@ -416,6 +437,7 @@ export class FakeServer {
       run("agt_scout", "workspace_birchwood", "Drafting the release notes"),
       run("agt_ledger", "workspace_birchwood", "Reconciling the October invoices"),
     ];
+    this.control.seed();
     const invitation = (
       token: string,
       address: string | null,
