@@ -7,15 +7,20 @@ import {
   AgentSigil,
   Avatar,
   Button,
+  Dialog,
+  DialogClose,
+  DialogContent,
+  Field,
   Icon,
   Menu,
   MenuContent,
   MenuItem,
   MenuTrigger,
   Skeleton,
+  Textarea,
   Tooltip,
 } from "@vanr/ui";
-import { FileText, Quote, SmilePlus, TriangleAlert } from "lucide-react";
+import { FileText, GraduationCap, MessageSquareReply, Quote, SmilePlus, TriangleAlert } from "lucide-react";
 import { memo, useState } from "react";
 import { AppLink } from "../../app/navigation.tsx";
 import { useErrorMessage } from "../../app/screens.tsx";
@@ -259,11 +264,20 @@ function Files({ message }: { message: Message }) {
   );
 }
 
-function Actions({ message, onQuote }: { message: Message; onQuote: (message: Message) => void }) {
+function Actions({
+  message,
+  onQuote,
+  onOpenThread,
+}: {
+  message: Message;
+  onQuote: (message: Message) => void;
+  onOpenThread: ((rootId: string) => void) | undefined;
+}) {
   const t = useMessages("chat");
   const describe = useErrorMessage("chat");
   const outcome = useOutcome();
   const { workspaceId, member } = useConversation();
+  const [correcting, setCorrecting] = useState(false);
   const react = useApiMutation("createMessageReaction", {
     invalidates: () => [
       { method: "listChannelMessages", args: { workspaceId, channelId: message.channelId } },
@@ -303,7 +317,99 @@ function Actions({ message, onQuote }: { message: Message; onQuote: (message: Me
       >
         <Icon icon={Quote} size="sm" />
       </button>
+      {onOpenThread !== undefined && message.threadId === null && (
+        <button
+          type="button"
+          className="chat-icon-button"
+          aria-label={t("tools.thread")}
+          onClick={() => onOpenThread(message.id)}
+        >
+          <Icon icon={MessageSquareReply} size="sm" />
+        </button>
+      )}
+      {message.author.type === "agent" && (
+        <button
+          type="button"
+          className="chat-icon-button"
+          aria-label={t("tools.correct")}
+          onClick={() => setCorrecting(true)}
+        >
+          <Icon icon={GraduationCap} size="sm" />
+        </button>
+      )}
+      {correcting && <Correction message={message} onClose={() => setCorrecting(false)} />}
     </div>
+  );
+}
+
+/** The most a correction may say: the agent keeps it as a lesson. */
+export const CORRECTION_MAX = 4000;
+
+/** Tells the agent what was wrong with an answer; it keeps the correction as a lesson. */
+function Correction({ message, onClose }: { message: Message; onClose: () => void }) {
+  const t = useMessages("chat");
+  const common = useMessages("common");
+  const describe = useErrorMessage("chat");
+  const { workspaceId, directory } = useConversation();
+  const outcome = useOutcome();
+  const [text, setText] = useState("");
+  const send = useApiMutation("createMessageFeedback", {
+    invalidates: () => [
+      { method: "listChannelMessages", args: { workspaceId, channelId: message.channelId } },
+    ],
+  });
+  const agent = directory.agentName(message.author.id);
+  const body = text.trim();
+  const tooLong = body.length > CORRECTION_MAX;
+  const submit = () => {
+    if (body === "" || tooLong) return;
+    send.mutate(
+      { workspaceId, messageId: message.id, body: { body } },
+      {
+        onSuccess: () => {
+          outcome.done(t("correct.sent", { agent }));
+          onClose();
+        },
+      },
+    );
+  };
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent
+        closeLabel={common("action.close")}
+        title={t("correct.title", { agent })}
+        description={t("correct.lead", { agent })}
+        footer={
+          <>
+            <DialogClose asChild>
+              <Button variant="ghost">{common("action.cancel")}</Button>
+            </DialogClose>
+            <Button
+              variant="primary"
+              loading={send.isPending}
+              disabled={body === "" || tooLong}
+              onClick={submit}
+            >
+              {t("correct.send")}
+            </Button>
+          </>
+        }
+      >
+        <Field
+          label={t("correct.label")}
+          hint={t("correct.count", { count: body.length, max: CORRECTION_MAX })}
+          error={
+            tooLong
+              ? t("correct.tooLong", { max: CORRECTION_MAX })
+              : send.isError
+                ? describe(send.error)
+                : undefined
+          }
+        >
+          <Textarea value={text} rows={5} onChange={(event) => setText(event.target.value)} />
+        </Field>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -313,9 +419,11 @@ export type MessageItemProps = {
   continued: boolean;
   onQuote: (message: Message) => void;
   onRetry: (message: Message) => void;
+  /** Opens the thread of a message; left out inside a thread. */
+  onOpenThread?: (rootId: string) => void;
 };
 
-function MessageItemView({ message, continued, onQuote, onRetry }: MessageItemProps) {
+function MessageItemView({ message, continued, onQuote, onRetry, onOpenThread }: MessageItemProps) {
   const t = useMessages("chat");
   const lookup = useLookup("chat");
   const { locale } = useLocale();
@@ -389,6 +497,11 @@ function MessageItemView({ message, continued, onQuote, onRetry }: MessageItemPr
             )}
             {message.author.type === "person" && <Receipts message={message} />}
             <Reactions message={message} />
+            {onOpenThread !== undefined && message.replyCount > 0 && (
+              <button type="button" className="chat-replies" onClick={() => onOpenThread(message.id)}>
+                {t("thread.replies", { count: message.replyCount })}
+              </button>
+            )}
           </>
         )}
         {sending && (
@@ -407,7 +520,7 @@ function MessageItemView({ message, continued, onQuote, onRetry }: MessageItemPr
         )}
       </div>
       {message.local === undefined && retracted === undefined && (
-        <Actions message={message} onQuote={onQuote} />
+        <Actions message={message} onQuote={onQuote} onOpenThread={onOpenThread} />
       )}
     </article>
   );

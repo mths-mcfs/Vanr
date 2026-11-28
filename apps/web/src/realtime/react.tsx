@@ -6,14 +6,16 @@
 // client leaves to the app: the connection's status, a reconnect on request, counted channel
 // subscriptions, and refetching a call the invalidation table does not tie to an event.
 
-import { useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import {
   type BrowserEventName,
   createRealtime,
   type RealtimeClient,
   type RealtimeStatus,
+  type VanrClient,
 } from "@vanr/client";
 import {
+  KEY_ROOT,
   type KeyPrefix,
   prefixKey,
   useRealtime,
@@ -42,26 +44,8 @@ export function WorkspaceRealtime({ workspaceId, children }: { workspaceId: stri
         followers.get(created)?.delete(channelId);
         for (const listener of lostListeners.get(created) ?? []) listener(channelId);
         // What was cached about it goes, open or not; an open conversation reads again and is told.
-        for (const method of CHANNEL_QUERIES)
-          queryClient.removeQueries({
-            queryKey: prefixKey(client, { method, args: { workspaceId, channelId } }),
-          });
-        // Its threads (one moved out of it too) are keyed by thread: they go by what they say they belong to,
-        // and the workspace's thread lists start over.
-        const lostThreads = queryClient
-          .getQueriesData<ThreadInfo>({
-            queryKey: prefixKey(client, { method: "getThread", args: { workspaceId } }),
-          })
-          .flatMap(([, thread]) =>
-            thread !== undefined && (thread.channelId === channelId || thread.context.channelId === channelId)
-              ? [thread.id]
-              : [],
-          );
-        for (const threadId of lostThreads)
-          for (const method of ["getThread", "getThreadAssignment"] as const)
-            queryClient.removeQueries({
-              queryKey: prefixKey(client, { method, args: { workspaceId, threadId } }),
-            });
+        forgetChannelQueries(queryClient, client, workspaceId, channelId);
+        // The workspace's thread lists start over; the channel's list and direct messages read again.
         void queryClient.resetQueries({
           queryKey: prefixKey(client, { method: "listThreads", args: { workspaceId } }),
         });
@@ -129,6 +113,69 @@ const CHANNEL_QUERIES = [
   "listChannelMembers",
   "listChannelPinnedMessages",
 ] as const;
+
+/**
+ * Drops what the cache holds about a channel: the queries made for it, and any answer that says it
+ * belongs to it (a thread, say). Shared by the connection and by a screen that finds the channel lost.
+ */
+export function forgetChannelQueries(
+  queryClient: QueryClient,
+  client: VanrClient,
+  workspaceId: string,
+  channelId: string,
+): void {
+  for (const method of CHANNEL_QUERIES)
+    queryClient.removeQueries({ queryKey: prefixKey(client, { method, args: { workspaceId, channelId } }) });
+  // Its threads (one moved out of it too) are keyed by thread: they go by what they say they belong to,
+  // with their assignments.
+  const lostThreads = queryClient
+    .getQueriesData<ThreadInfo>({
+      queryKey: prefixKey(client, { method: "getThread", args: { workspaceId } }),
+    })
+    .flatMap(([, thread]) =>
+      thread !== undefined && (thread.channelId === channelId || thread.context.channelId === channelId)
+        ? [thread.id]
+        : [],
+    );
+  for (const threadId of lostThreads)
+    for (const method of ["getThread", "getThreadAssignment"] as const)
+      queryClient.removeQueries({ queryKey: prefixKey(client, { method, args: { workspaceId, threadId } }) });
+  // A list of threads keeps its other rows; the lost channel's leave it at once, before any refetch.
+  queryClient.setQueriesData<unknown>(
+    { queryKey: prefixKey(client, { method: "listThreads", args: { workspaceId } }) },
+    (data: unknown) => withoutChannel(data, channelId),
+  );
+  queryClient.removeQueries({
+    queryKey: [KEY_ROOT],
+    predicate: (query) => {
+      const data: unknown = query.state.data;
+      return typeof data === "object" && data !== null && "channelId" in data && data.channelId === channelId;
+    },
+  });
+}
+
+/** A page of threads, or pages of them, without the threads of one channel. */
+function withoutChannel(data: unknown, channelId: string): unknown {
+  const keep = (page: unknown): unknown => {
+    if (typeof page !== "object" || page === null || !("threads" in page) || !Array.isArray(page.threads))
+      return page;
+    return {
+      ...page,
+      threads: page.threads.filter(
+        (thread: unknown) =>
+          !(
+            typeof thread === "object" &&
+            thread !== null &&
+            "channelId" in thread &&
+            thread.channelId === channelId
+          ),
+      ),
+    };
+  };
+  if (typeof data === "object" && data !== null && "pages" in data && Array.isArray(data.pages))
+    return { ...data, pages: data.pages.map(keep) };
+  return keep(data);
+}
 
 /** Calls `listener` with each channel whose subscription the server ends on this connection. */
 export function onChannelLost(realtime: RealtimeClient, listener: (channelId: string) => void): () => void {

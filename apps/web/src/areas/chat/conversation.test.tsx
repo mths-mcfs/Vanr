@@ -396,7 +396,7 @@ describe("what the second round of review found", () => {
     ).toBe(true);
   });
 
-  test("receipts on older pages follow the events (the reply count is drawn with threads)", async () => {
+  test("reply counts and receipts on older pages follow the events", async () => {
     const server = newServer();
     for (let i = 1; i <= 120; i += 1)
       server.state.messages.push(message({ id: `msg_${i}`, body: `line ${i}`, createdAt: at(-200 + i) }));
@@ -425,6 +425,7 @@ describe("what the second round of review found", () => {
     });
     expect(await screen.findByText("Scout picked this up")).toBeDefined();
     expect(screen.getByText("Ledger answered")).toBeDefined();
+    expect(screen.getByRole("button", { name: "2 replies" })).toBeDefined();
   });
 
   test("a quick reaction that fails says so", async () => {
