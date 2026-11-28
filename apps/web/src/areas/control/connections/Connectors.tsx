@@ -220,7 +220,19 @@ function Services({ workspaceId }: { workspaceId: string }) {
           return own.map((connection) => {
             // Two connections of one service with the same name are told apart by when they were made.
             const since = t("svc.since", { date: when.format(new Date(connection.createdAt)) });
-            const who = connection.accountDisplayName ?? (own.length > 1 ? since : connection.label);
+            const base =
+              connection.accountDisplayName ??
+              (own.length > 1 && connection.label === def.label ? since : connection.label);
+            // Still the same as another one (made in the same minute): its place in the list tells them apart.
+            const twins = own.filter(
+              (each) =>
+                (each.accountDisplayName ??
+                  (each.label === def.label
+                    ? t("svc.since", { date: when.format(new Date(each.createdAt)) })
+                    : each.label)) === base,
+            );
+            const who =
+              twins.length > 1 ? t("svc.nth", { name: base, n: twins.indexOf(connection) + 1 }) : base;
             return (
               <li key={connection.id} className="wire-row" data-state={connection.status}>
                 <div className="wire-row__who">

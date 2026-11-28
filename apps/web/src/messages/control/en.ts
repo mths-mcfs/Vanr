@@ -311,6 +311,7 @@ export default {
   "svc.disconnect": "Disconnect",
   "svc.disconnectNamed": "Disconnect {service}",
   "svc.disconnectOne": "Disconnect {service} ({account})",
+  "svc.nth": "{name}, {n}",
   "svc.since": "Connected {date}",
   "svc.disconnectTitle": "Disconnect {service}?",
   "svc.disconnectBody":

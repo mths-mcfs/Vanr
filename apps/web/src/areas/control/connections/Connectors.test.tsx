@@ -283,6 +283,20 @@ describe("services", () => {
     expect(names.every((name) => name?.startsWith("Disconnect Stripe (Connected Nov"))).toBe(true);
   });
 
+  test("two connections made in the same minute still get different names", async () => {
+    const server = newServer();
+    server.agentAccess.shared.push(
+      connection("stripe", { id: "con_a", label: "Stripe", createdAt: "2026-11-10T15:30:01.000Z" }),
+      connection("stripe", { id: "con_b", label: "Stripe", createdAt: "2026-11-10T15:30:45.000Z" }),
+    );
+    await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const names = within(await services())
+      .getAllByRole("button", { name: /^Disconnect Stripe/ })
+      .map((button) => button.getAttribute("aria-label"));
+    expect(names.length).toBe(2);
+    expect(new Set(names).size).toBe(2);
+  });
+
   test("a list that fails to load offers a retry", async () => {
     const server = newServer();
     server.force("listConnectors", { kind: "error", status: 500, code: "internal" }, 4);
@@ -477,6 +491,10 @@ describe("own MCP servers", () => {
     const review = await screen.findByRole("dialog", { name: "Tools of Helpdesk" });
     expect(within(review).getByText("The server lists no tools. Refresh it once it has some.")).toBeDefined();
     expect(app.address()).toBe(BACK);
+    // Nothing on the page opened it: closing it leaves the focus on its block's heading.
+    await app.user.keyboard("{Escape}");
+    await act(async () => {});
+    expect(document.activeElement?.textContent).toBe("Your MCP servers");
   });
 });
 
