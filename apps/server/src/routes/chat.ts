@@ -1,4 +1,5 @@
 import type {
+  ArchivedChannel,
   Channel,
   ChannelMember,
   DirectMessage,
@@ -11,23 +12,27 @@ import { can } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { channelName } from "@vanr/engine/text";
-import { and, asc, count, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
-import { agentInWorkspace, agentNames, seesSpend } from "../agents";
+import { agentInWorkspace, agentNames, requirePlacesAgent, seesSpend } from "../agents";
 import { assignmentPostMeta } from "../assignments/tools";
 import {
+  addChannelMember,
   type ChannelRow,
   canReadChannel,
   isChannelMember,
+  joinChannel,
   openDm,
   readableChannel,
+  removeChannelMember,
   writableChannel,
 } from "../channels";
 import type { AppEnv, Ctx } from "../context";
 import { isUniqueViolation } from "../db-errors";
+import { releaseSeats } from "../debates";
 import { fileFor } from "../drive";
-import { badRequest, conflict, forbidden, notFound, param, readJson, readQuery } from "../http";
+import { badRequest, conflict, forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
 import { log } from "../logger";
 import {
   byClientId,
@@ -190,14 +195,6 @@ async function pinsOf(db: Db, rows: (typeof pins.$inferSelect)[]): Promise<Messa
   });
 }
 
-/** The person joins the channel (nothing when they already are a member). */
-async function joinChannel(db: Db, channelId: string, userId: string) {
-  await db
-    .insert(channelMemberships)
-    .values({ channelId, memberType: "person", memberId: userId })
-    .onConflictDoNothing();
-}
-
 /**
  * A message the person can read (its channel must be readable). A missing message and one of a channel they don't
  * read answer the same 404, text included.
@@ -248,6 +245,13 @@ async function dmPartner(db: Db, channelId: string, userId: string): Promise<Dir
     return { type: "agent", id: other.id, name: info.get(other.id)?.name ?? "" };
   }
   return { type: "person", id: other.id, name: other.name ?? "" };
+}
+
+/** The workspace's owners only (archived channels are theirs to see and bring back). */
+function requireWorkspaceOwner(c: Ctx) {
+  const me = requireMember(c);
+  if (me.role !== "owner") throw forbidden("Only the workspace's owners can do that");
+  return me;
 }
 
 export function registerChat(app: Hono<AppEnv>) {
@@ -311,6 +315,70 @@ export function registerChat(app: Hono<AppEnv>) {
     const [row] = await db.select().from(channels).where(eq(channels.id, id));
     if (!row) throw notFound("Channel not found");
     return c.json(toChannel(row, true, null), 201);
+  });
+
+  // Private channels archived when their last member left: only the workspace's owners see them and bring them back.
+  app.get(`${WORKSPACE}/archived-channels`, async (c) => {
+    const me = requireWorkspaceOwner(c);
+    const rows = await c
+      .get("deps")
+      .db.select()
+      .from(channels)
+      .where(
+        and(
+          eq(channels.workspaceId, me.workspaceId),
+          eq(channels.kind, "channel"),
+          isNotNull(channels.archivedAt),
+        ),
+      )
+      .orderBy(desc(channels.archivedAt));
+    return c.json({
+      channels: rows.map(
+        (r): ArchivedChannel => ({
+          id: r.id,
+          name: r.name,
+          topic: r.topic,
+          createdAt: r.createdAt.toISOString(),
+          archivedAt: (r.archivedAt ?? r.createdAt).toISOString(),
+        }),
+      ),
+    });
+  });
+
+  // Restoring makes the owner its member (otherwise nobody could read it). A name another channel took since is a
+  // 409 channel.name_taken: the owner renames that one first, nothing is renamed behind their back.
+  app.post(`${WORKSPACE}/archived-channels/:channelId/restore`, async (c) => {
+    const me = requireWorkspaceOwner(c);
+    const { db } = c.get("deps");
+    const channelId = param(c, "channelId");
+    let name = "";
+    try {
+      await db.transaction(async (tx) => {
+        const [row] = await tx
+          .select()
+          .from(channels)
+          .where(
+            and(
+              eq(channels.id, channelId),
+              eq(channels.workspaceId, me.workspaceId),
+              eq(channels.kind, "channel"),
+            ),
+          )
+          .for("update");
+        if (!row) throw notFound("Channel not found");
+        if (!row.archivedAt) throw conflict("channel.not_archived", "This channel isn't archived");
+        name = row.name;
+        await tx.update(channels).set({ archivedAt: null }).where(eq(channels.id, row.id));
+        await joinChannel(tx, row.id, me.userId);
+      });
+    } catch (err) {
+      if (isUniqueViolation(err))
+        throw conflict("channel.name_taken", "A channel with this name already exists", { name });
+      throw err;
+    }
+    const [row] = await db.select().from(channels).where(eq(channels.id, channelId));
+    if (!row) throw notFound("Channel not found");
+    return c.json(toChannel(row, true, await defaultChannelId(db, me.workspaceId)));
   });
 
   app.post(`${WORKSPACE}/channels/:channelId/join`, async (c) => {
@@ -411,21 +479,24 @@ export function registerChat(app: Hono<AppEnv>) {
   app.post(`${WORKSPACE}/channels/:channelId/members`, async (c) => {
     const me = requireMember(c);
     const { db } = c.get("deps");
-    const { channel, isMember } = await readableChannel(db, {
+    const { channel } = await readableChannel(db, {
       workspaceId: me.workspaceId,
       userId: me.userId,
       channelId: param(c, "channelId"),
     });
     if (channel.kind === "dm") throw forbidden("Direct messages have fixed members");
-    if (!isMember) throw forbidden("Join the channel to add people");
     const target = await readJson(c, memberTarget);
+    const add = (memberType: "person" | "agent", memberId: string) =>
+      addChannelMember(db, {
+        channelId: channel.id,
+        adderId: me.userId,
+        member: { type: memberType, id: memberId },
+      });
     if ("agentId" in target) {
       const agent = await agentInWorkspace(db, me.workspaceId, target.agentId);
       if (agent.archivedAt) throw notFound("Agent not found");
-      await db
-        .insert(channelMemberships)
-        .values({ channelId: channel.id, memberType: "agent", memberId: agent.id })
-        .onConflictDoNothing();
+      await requirePlacesAgent(db, me, agent);
+      await add("agent", agent.id);
       return c.body(null, 204);
     }
     const [person] = await db
@@ -433,20 +504,28 @@ export function registerChat(app: Hono<AppEnv>) {
       .from(members)
       .where(and(eq(members.workspaceId, me.workspaceId), eq(members.userId, target.userId)));
     if (!person) throw notFound("Member not found");
-    await db
-      .insert(channelMemberships)
-      .values({ channelId: channel.id, memberType: "person", memberId: person.userId })
-      .onConflictDoNothing();
+    await add("person", person.userId);
     return c.body(null, 204);
   });
 
   const removeMember = async (c: Ctx, type: "person" | "agent", id: string) => {
     const me = requireMember(c);
-    const { db, hub } = c.get("deps");
+    const { db, hub, now } = c.get("deps");
+    const channelId = param(c, "channelId");
     const { channel } = await readableChannel(db, {
       workspaceId: me.workspaceId,
       userId: me.userId,
-      channelId: param(c, "channelId"),
+      channelId,
+    }).catch(async (err: unknown) => {
+      // Leaving again a private channel one already left (a retry after the seats weren't let go): it is a 404 as
+      // for anyone outside it, and the rounds of its debates that still wait on them go on.
+      if (err instanceof HttpError && err.status === 404 && type === "person" && id === me.userId)
+        await releaseSeats(c.get("deps"), {
+          workspaceId: me.workspaceId,
+          userId: id,
+          channelIds: [channelId],
+        });
+      throw err;
     });
     if (channel.kind === "dm") throw forbidden("Direct messages have fixed members");
     const self = type === "person" && id === me.userId;
@@ -454,18 +533,18 @@ export function registerChat(app: Hono<AppEnv>) {
     if (type === "person" && (await defaultChannelId(db, me.workspaceId)) === channel.id) {
       throw conflict("channel.general", "Everyone stays in #general");
     }
-    const removed = await db
-      .delete(channelMemberships)
-      .where(
-        and(
-          eq(channelMemberships.channelId, channel.id),
-          eq(channelMemberships.memberType, type),
-          eq(channelMemberships.memberId, id),
-        ),
-      )
-      .returning({ id: channelMemberships.memberId });
-    if (removed.length === 0) throw notFound("Member not found");
-    if (type === "person" && channel.visibility === "private") hub.dropUser(me.workspaceId, id, channel.id);
+    const removed = await removeChannelMember(db, { channelId: channel.id, member: { type, id }, at: now() });
+    if (removed && type === "person" && channel.visibility === "private")
+      hub.dropUser(me.workspaceId, id, channel.id);
+    // A debate of the channel whose round waited on them goes on without them. Also when they were already out (a
+    // retry after this failed): it touches only the rounds still waiting on someone who can't read the debate.
+    if (type === "person")
+      await releaseSeats(c.get("deps"), {
+        workspaceId: me.workspaceId,
+        userId: id,
+        channelIds: [channel.id],
+      });
+    if (!removed) throw notFound("Member not found");
     return c.body(null, 204);
   };
   app.delete(`${WORKSPACE}/channels/:channelId/members/people/:personId`, (c) =>

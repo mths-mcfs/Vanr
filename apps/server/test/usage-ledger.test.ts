@@ -7,14 +7,20 @@ import { sql } from "drizzle-orm";
 import { postgresLedger } from "../src/usage-ledger";
 import { NO_POSTGRES, TEST_POSTGRES_URL, testDatabaseUrl } from "./postgres";
 
-/** One database per implementation; every contract test starts with an empty ledger and workspace `o1`. */
+/** One database per implementation; every contract test starts with an empty ledger and workspaces `o1`, `o2`. */
 function fresh(open: () => Promise<Db>) {
   let db: Promise<Db> | null = null;
   return async () => {
     db ??= open();
     const d = await db;
     await d.execute(sql`truncate usage_lines, usage_reservation_scopes, usage_reservations, budget_counters`);
-    await d.insert(schema.workspaces).values({ id: "o1", name: "Workspace" }).onConflictDoNothing();
+    await d
+      .insert(schema.workspaces)
+      .values([
+        { id: "o1", name: "Workspace" },
+        { id: "o2", name: "Other workspace" },
+      ])
+      .onConflictDoNothing();
     return postgresLedger(d, CONTRACT_PRICES);
   };
 }

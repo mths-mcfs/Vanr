@@ -39,7 +39,10 @@ export const channels = pgTable(
     budgetNotice: text("budget_notice"),
   },
   (t) => [
-    uniqueIndex("channels_name_uq").on(t.workspaceId, t.name).where(sql`kind = 'channel'`),
+    // An archived channel lets go of its name: a new one may take it, and restoring it then asks for another.
+    uniqueIndex("channels_name_uq")
+      .on(t.workspaceId, t.name)
+      .where(sql`kind = 'channel' and archived_at is null`),
     uniqueIndex("channels_dm_uq").on(t.workspaceId, t.dmKey),
     index("channels_workspace_idx").on(t.workspaceId),
   ],

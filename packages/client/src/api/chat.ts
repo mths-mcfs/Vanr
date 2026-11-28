@@ -46,6 +46,16 @@ export const chat = {
     topic?: string;
     budgetPerMonthUsd?: number | null;
   }>(),
+  listArchivedChannels: e(
+    "GET",
+    "/api/v1/workspaces/:workspaceId/archived-channels",
+    s.field("channels", s.array(C.ArchivedChannel)),
+  ),
+  restoreChannel: e(
+    "POST",
+    "/api/v1/workspaces/:workspaceId/archived-channels/:channelId/restore",
+    C.Channel,
+  ),
   joinChannel: e("POST", "/api/v1/workspaces/:workspaceId/channels/:channelId/join", NOTHING),
   markChannelRead: e("POST", "/api/v1/workspaces/:workspaceId/channels/:channelId/read", NOTHING),
   getChannelDirectory: e(

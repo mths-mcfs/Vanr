@@ -2282,6 +2282,7 @@ export class AgentRuntime implements RuntimePort {
       workspaceId: live.workspaceId,
       agentId: agent.id,
       personId: requesterOf(live.trigger),
+      channelId: channel.id,
     });
     const skillRows = await db
       .select({ name: skills.name, description: skills.description })

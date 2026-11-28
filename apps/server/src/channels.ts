@@ -2,9 +2,11 @@
 import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import type { BudgetScope } from "@vanr/engine/usage";
-import { and, eq, type SQL, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, notExists, type SQL, sql } from "drizzle-orm";
 import { isUniqueViolation } from "./db-errors";
-import { notFound } from "./http";
+import { conflict, forbidden, notFound } from "./http";
+
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
 const { channels, channelMemberships } = schema;
 
@@ -52,7 +54,7 @@ export async function channelInWorkspace(
 }
 
 export async function isChannelMember(
-  db: Db,
+  db: Db | Tx,
   channelId: string,
   member: { type: ActorType; id: string },
 ): Promise<boolean> {
@@ -134,19 +136,37 @@ export async function readableChannel(
   return { channel, isMember };
 }
 
+/** The person joins the channel (already in: nothing changes). */
+export async function joinChannel(db: Db | Tx, channelId: string, userId: string): Promise<void> {
+  await db
+    .insert(channelMemberships)
+    .values({ channelId, memberType: "person", memberId: userId })
+    .onConflictDoNothing();
+}
+
 /** To write: a channel member. In a public channel, someone who hasn't joined yet joins by writing. */
 export async function writableChannel(
   db: Db,
   input: { workspaceId: string; userId: string; channelId: string },
 ): Promise<ChannelRow> {
   const { channel, isMember } = await readableChannel(db, input);
-  if (!isMember) {
-    await db
-      .insert(channelMemberships)
-      .values({ channelId: channel.id, memberType: "person", memberId: input.userId })
-      .onConflictDoNothing();
-  }
+  if (!isMember) await joinChannel(db, channel.id, input.userId);
   return channel;
+}
+
+/** Whether the agent is a member of the channel; `share` holds its row until the transaction ends. */
+export async function agentInChannel(db: Db | Tx, channelId: string, agentId: string, share = false) {
+  const q = db
+    .select({ id: channelMemberships.memberId })
+    .from(channelMemberships)
+    .where(
+      and(
+        eq(channelMemberships.channelId, channelId),
+        eq(channelMemberships.memberType, "agent"),
+        eq(channelMemberships.memberId, agentId),
+      ),
+    );
+  return (await (share ? q.for("share") : q)).length > 0;
 }
 
 type DmOf = { workspaceId: string; userId: string; other: { type: ActorType; id: string } };
@@ -197,4 +217,100 @@ export async function openDm(db: Db, input: DmOf): Promise<string> {
     throw err;
   }
   return id;
+}
+
+/**
+ * Locks the private channels (DMs aside) among `ids` until the transaction ends, so two people who leave together
+ * see each other's leave: the second one to go finds the channel empty and archives it.
+ */
+export async function lockPrivateChannels(tx: Tx, ids: readonly string[]): Promise<void> {
+  if (ids.length === 0) return;
+  await tx
+    .select({ id: channels.id })
+    .from(channels)
+    .where(
+      and(inArray(channels.id, [...ids]), eq(channels.kind, "channel"), eq(channels.visibility, "private")),
+    )
+    .orderBy(asc(channels.id))
+    .for("update");
+}
+
+/**
+ * A private channel nobody is left in is archived, and so lets go of its name: no one could read it anymore, and a
+ * new channel may take the name. Its agents stay members and its history stays; the workspace's owner can bring it
+ * back (`POST /archived-channels/:id/restore`). Call it under `lockPrivateChannels`, after the leave.
+ */
+export async function archiveOrphans(tx: Tx, ids: readonly string[], at: Date): Promise<string[]> {
+  if (ids.length === 0) return [];
+  const archived = await tx
+    .update(channels)
+    .set({ archivedAt: at })
+    .where(
+      and(
+        inArray(channels.id, [...ids]),
+        eq(channels.kind, "channel"),
+        eq(channels.visibility, "private"),
+        isNull(channels.archivedAt),
+        notExists(
+          tx
+            .select({ one: sql`1` })
+            .from(channelMemberships)
+            .where(
+              and(eq(channelMemberships.channelId, channels.id), eq(channelMemberships.memberType, "person")),
+            ),
+        ),
+      ),
+    )
+    .returning({ id: channels.id });
+  return archived.map((r) => r.id);
+}
+
+/**
+ * Adds a person or an agent to the channel, by someone in it. Checked under the channel's lock, which the last leave
+ * also takes: the add lands before the leave (and the channel isn't empty), or it finds the channel archived (409
+ * channel.archived) or the adder gone (403), never an archived channel with someone in it.
+ */
+export async function addChannelMember(
+  db: Db,
+  input: { channelId: string; adderId: string; member: { type: "person" | "agent"; id: string } },
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    await lockPrivateChannels(tx, [input.channelId]);
+    const [fresh] = await tx
+      .select({ archivedAt: channels.archivedAt })
+      .from(channels)
+      .where(eq(channels.id, input.channelId));
+    if (!fresh || fresh.archivedAt) throw conflict("channel.archived", "This channel was archived");
+    if (!(await isChannelMember(tx, input.channelId, { type: "person", id: input.adderId })))
+      throw forbidden("Join the channel to add people");
+    await tx
+      .insert(channelMemberships)
+      .values({ channelId: input.channelId, memberType: input.member.type, memberId: input.member.id })
+      .onConflictDoNothing();
+  });
+}
+
+/**
+ * Takes a person or an agent out of the channel; the last person out of a private channel archives it, in the same
+ * transaction. False when they weren't in it.
+ */
+export async function removeChannelMember(
+  db: Db,
+  input: { channelId: string; member: { type: "person" | "agent"; id: string }; at: Date },
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    await lockPrivateChannels(tx, [input.channelId]);
+    const gone = await tx
+      .delete(channelMemberships)
+      .where(
+        and(
+          eq(channelMemberships.channelId, input.channelId),
+          eq(channelMemberships.memberType, input.member.type),
+          eq(channelMemberships.memberId, input.member.id),
+        ),
+      )
+      .returning({ id: channelMemberships.memberId });
+    if (gone.length && input.member.type === "person") await archiveOrphans(tx, [input.channelId], input.at);
+    return gone.length > 0;
+  });
 }

@@ -1,0 +1,25 @@
+{
+  "extensions": [],
+  "tables": [],
+  "columns": [
+    {
+      "table": "memories",
+      "name": "channel_id",
+      "type": "text",
+      "notNull": false,
+      "default": null,
+      "collation": null
+    }
+  ],
+  "constraints": [],
+  "indexes": [
+    {
+      "table": "channels",
+      "name": "channels_name_uq",
+      "definition": "CREATE UNIQUE INDEX channels_name_uq ON public.channels USING btree (workspace_id, name) WHERE ((kind = 'channel'::text) AND (archived_at IS NULL))"
+    }
+  ],
+  "sequences": [],
+  "triggers": [],
+  "functions": []
+}

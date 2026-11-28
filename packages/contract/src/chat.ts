@@ -24,6 +24,19 @@ export interface Channel {
   visibility: ChannelVisibility;
 }
 
+/**
+ * A private channel archived when its last member left: its name is free again. Only the workspace's owners list
+ * it and bring it back; restoring it makes the owner its member, and a name another channel took since is a 409
+ * `channel.name_taken` (rename that one first).
+ */
+export interface ArchivedChannel {
+  archivedAt: string;
+  createdAt: string;
+  id: string;
+  name: string;
+  topic: string;
+}
+
 export interface DirectMessage {
   channelId: string;
   unread: number;

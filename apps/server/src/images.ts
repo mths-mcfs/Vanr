@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { badRequest } from "./http";
 
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
@@ -32,13 +33,35 @@ export function decodeImage(input: { imageBase64: string; contentType: string })
   return { bytes, contentType: input.contentType };
 }
 
-export function imageResponse(blob: { bytes: Uint8Array; contentType: string }): Response {
-  return new Response(blob.bytes, {
-    headers: {
-      "content-type": blob.contentType,
-      "cache-control": "private, max-age=86400",
-      "x-content-type-options": "nosniff",
-      "content-security-policy": "default-src 'none'",
-    },
-  });
+const etagOf = (bytes: Uint8Array) =>
+  `"${createHash("sha256").update(bytes).digest("base64url").slice(0, 32)}"`;
+
+/**
+ * Whether an `If-None-Match` header names this ETag: `*` alone, or a list of entity-tags, weak ones included. A tag
+ * is read whole between its quotes (a comma inside one doesn't split it).
+ */
+function matches(ifNoneMatch: string | undefined, etag: string): boolean {
+  if (!ifNoneMatch) return false;
+  if (ifNoneMatch.trim() === "*") return true;
+  return [...ifNoneMatch.matchAll(/(?:W\/)?("[^"]*")/g)].some((m) => m[1] === etag);
+}
+
+/**
+ * A protected image (an avatar, the logo). `no-cache`: the browser asks again every time, so whoever lost access
+ * (signed out, removed) gets nothing from its cache; an unchanged image costs a 304, never a second download. The
+ * route checks access before it gets here, so a 304 also goes only to whoever may still see the image.
+ */
+export function imageResponse(
+  blob: { bytes: Uint8Array; contentType: string },
+  ifNoneMatch: string | undefined,
+): Response {
+  const etag = etagOf(blob.bytes);
+  const headers = {
+    etag,
+    "cache-control": "private, no-cache",
+    "x-content-type-options": "nosniff",
+    "content-security-policy": "default-src 'none'",
+  };
+  if (matches(ifNoneMatch, etag)) return new Response(null, { status: 304, headers });
+  return new Response(blob.bytes, { headers: { ...headers, "content-type": blob.contentType } });
 }

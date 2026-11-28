@@ -22,6 +22,7 @@ import {
   memoryVersionsOf,
   restoreMemory,
   storeWhere,
+  visibleTo,
 } from "../agent-memory";
 import { agentInWorkspace, requireActiveAgent } from "../agents";
 import { canReadChannel, readableChannel, writableChannel } from "../channels";
@@ -52,10 +53,11 @@ export const REMINDER_LIST_LIMIT = 500;
  * in their own store (only its owner; for anyone else, 404). `editable` says whether they may also change it.
  */
 async function memoryFor(deps: AppDeps, me: WorkspaceMember, id: string) {
+  // A lesson confined to a channel the person doesn't read is a 404, as if it weren't there.
   const [row] = await deps.db
     .select()
     .from(memories)
-    .where(and(eq(memories.id, id), eq(memories.workspaceId, me.workspaceId)));
+    .where(and(eq(memories.id, id), eq(memories.workspaceId, me.workspaceId), visibleTo(me)));
   if (!row) throw notFound("Memory not found");
   if (row.scope === "person") {
     if (row.ownerUserId !== me.userId) throw notFound("Memory not found");
@@ -159,6 +161,7 @@ export function registerMemories(app: Hono<AppEnv>) {
         and(
           eq(memories.agentId, agent.id),
           eq(memories.scope, "agent"),
+          visibleTo(me),
           about ? eq(memories.about, about) : undefined,
         ),
       )
@@ -385,6 +388,9 @@ export function registerMemories(app: Hono<AppEnv>) {
     const viewer = { workspaceId: me.workspaceId, userId: me.userId, channelId: target.channelId };
     // The right to write, without joining the channel yet (joining is an effect).
     const { channel } = await readableChannel(db, viewer);
+    // Feedback given where not everyone reads (a private channel, a DM) stays there: the lesson is used in that
+    // channel's runs and shown only to its readers.
+    const confined = channel.kind === "dm" || channel.visibility === "private";
     const at = deps.now();
     const lesson = await createMemory(
       db,
@@ -396,6 +402,7 @@ export function registerMemories(app: Hono<AppEnv>) {
         text: input.body,
         kind: "lesson",
         source: "feedback",
+        channelId: confined ? channel.id : null,
         verified: true,
         origin: {
           by: { type: "person", id: me.userId },

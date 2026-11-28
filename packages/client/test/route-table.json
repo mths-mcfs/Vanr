@@ -791,6 +791,11 @@
     { "name": "listApprovalStats", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/approvals/stats" },
     { "name": "listApprovals", "verb": "GET", "path": "/api/v1/workspaces/:workspaceId/approvals" },
     {
+      "name": "listArchivedChannels",
+      "verb": "GET",
+      "path": "/api/v1/workspaces/:workspaceId/archived-channels"
+    },
+    {
       "name": "listAssignmentCommands",
       "verb": "GET",
       "path": "/api/v1/workspaces/:workspaceId/assignments/:assignmentId/commands"
@@ -1113,6 +1118,11 @@
       "name": "restoreAgentInstructionVersion",
       "verb": "POST",
       "path": "/api/v1/workspaces/:workspaceId/agents/:agentId/instruction-versions/:instructionVersionId/restore"
+    },
+    {
+      "name": "restoreChannel",
+      "verb": "POST",
+      "path": "/api/v1/workspaces/:workspaceId/archived-channels/:channelId/restore"
     },
     {
       "name": "restoreFile",

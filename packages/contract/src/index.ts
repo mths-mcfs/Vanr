@@ -152,6 +152,7 @@ export type {
   SeriesScope,
 } from "./calendar.ts";
 export type {
+  ArchivedChannel,
   Channel,
   ChannelMember,
   ChannelVisibility,

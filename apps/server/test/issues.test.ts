@@ -1310,14 +1310,15 @@ describe("issues of a private channel", () => {
       ).then((r) => ({ general: r.channels.find((c) => c.isGeneral)?.id ?? "" }));
       const wider = await open({ channelId: general });
       expect([wider.status, wider.json.error.code]).toEqual([400, "debate.issue_channel"]);
-      // Beto takes part in a debate of the channel without being in it: the issue's title stays hidden from him.
-      const shared = await ok<{ id: string }>(open({ channelId: secret, userIds: [beto.user.id] }), 201);
+      // Beto isn't in the channel: he can't be called to its table, and the debate (with its issue) is a 404 to him.
+      const called = await open({ channelId: secret, userIds: [beto.user.id] });
+      expect(called.status).toBe(400);
       await settle(server);
+      expect((await call(beto, workspaceId, "GET", `/debates/${inherited.id}`)).status).toBe(404);
       const issuesOf = async (who: Person) =>
         (
-          await ok<{ issues: { id: string }[] }>(call(who, workspaceId, "GET", `/debates/${shared.id}`))
+          await ok<{ issues: { id: string }[] }>(call(who, workspaceId, "GET", `/debates/${inherited.id}`))
         ).issues.map((i) => i.id);
-      expect(await issuesOf(beto)).toEqual([]);
       expect(await issuesOf(ana)).toEqual([issue.id]);
     },
     SERVER_TEST_MS,

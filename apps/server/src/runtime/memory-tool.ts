@@ -63,7 +63,9 @@ const REMEMBERED = /^remembered\/(mem_[A-Za-z0-9_-]+)\.md$/;
  * person joined the run's conversation, there is no `you`. Opening the person's store pins the run to them.
  */
 function storeFor(ctx: ToolContext, scope: MemoryScope): Store | null {
-  if (scope === "agent") return { scope: "agent", workspaceId: ctx.workspaceId, agentId: ctx.agent.id };
+  // The agent's store as this run's channel sees it: a lesson confined to another channel isn't there.
+  if (scope === "agent")
+    return { scope: "agent", workspaceId: ctx.workspaceId, agentId: ctx.agent.id, seenFrom: ctx.channel.id };
   if (scope === "workspace") return { scope: "workspace", workspaceId: ctx.workspaceId };
   const personId = ctx.personStore?.() ?? null;
   return personId ? { scope: "person", workspaceId: ctx.workspaceId, userId: personId } : null;

@@ -298,8 +298,8 @@ export function People({ workspaceId, assignment }: Part) {
   const outcome = useOutcome();
   const me = useMyId();
   const args = { workspaceId, assignmentId: assignment.id };
-  // Requests are listed to who may act and manages (the server lists them only to who may act).
-  const answers = assignment.manageable && assignment.actionable;
+  // Requests are listed to who manages (the owner or an admin), as the server lists and answers them.
+  const answers = assignment.manageable;
   const people = useApiQuery("listAssignmentParticipants", args, { refetchOnWindowFocus: true });
   const requests = useApiQuery("listAssignmentJoinRequests", args, {
     enabled: answers,

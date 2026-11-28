@@ -215,6 +215,11 @@ export const memories = pgTable(
     source: text("source"),
     origin: jsonb("origin").$type<MemoryOrigin>(),
     originMessageId: text("origin_message_id"),
+    /**
+     * A lesson confined to the channel it was learned in (feedback given in a private channel or a DM): it is used
+     * in that channel's runs and shown only to whoever reads it. Null: the whole store sees it.
+     */
+    channelId: text("channel_id"),
     replaces: text("replaces"),
     /** Text before a person's last edit: "revert" goes back to it. */
     textBefore: text("text_before"),
