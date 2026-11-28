@@ -175,7 +175,9 @@ export class FakeChat {
         list = list.slice(-limit);
         // In a thread, its first message comes before the first page.
         const root = threadId === null ? undefined : this.host.messages().find((m) => m.id === threadId);
-        if (root !== undefined && params.before === undefined) list = [root, ...list];
+        // As on the server: only a root of this very channel, and only a root (not a reply).
+        if (root !== undefined && root.channelId === room.id && root.threadId === null && params.before === undefined)
+          list = [root, ...list];
         return reply(200, { messages: list });
       }),
       getThread: within((scope, params) => {

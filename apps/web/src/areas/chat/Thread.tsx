@@ -2,11 +2,13 @@
 // answers inside it. It opens beside the channel or as a page of its own. Following it is anyone's
 // choice; closing, reopening and taking it out of the archive belong to whoever may manage it. A
 // thread nobody answered or followed yet has no record on the server: the panel still opens.
-import { useApiMutation, useApiQuery } from "@vanr/client/react";
+
+import { useQueryClient } from "@tanstack/react-query";
+import { prefixKey, useApiMutation, useApiQuery, useVanrClient } from "@vanr/client/react";
 import type { Message, ThreadInfo, ThreadState } from "@vanr/contract";
 import { Button, Chip, Icon, Skeleton } from "@vanr/ui";
 import { ArrowLeft, Bell, BellOff, Maximize2, X } from "lucide-react";
-import { Fragment, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { AppLink, useRouteParams } from "../../app/navigation.tsx";
 import { ScreenLoading, useDocumentTitle, useErrorMessage } from "../../app/screens.tsx";
 import { useMessages } from "../../i18n/react.tsx";
@@ -14,7 +16,7 @@ import { useChannelSubscription } from "../../realtime/react.tsx";
 import { useOutcome } from "../control/shared.tsx";
 import { Composer } from "./Composer.tsx";
 import { ConversationProvider, useConversation } from "./context.tsx";
-import { useHistory, useLiveRuns, useTicker, useTypingSignal } from "./hooks.ts";
+import { useForgetChannel, useHistory, useLiveRuns, useTicker, useTypingSignal } from "./hooks.ts";
 import { LiveRuns } from "./LiveRuns.tsx";
 import { showing } from "./live.ts";
 import { MessageItem } from "./Message.tsx";
@@ -82,11 +84,14 @@ export function ThreadPanel({
   rootId,
   member,
   onClose,
+  onLost,
 }: {
   rootId: string;
   member: boolean;
   /** Beside the channel: closes the panel. Left out on the thread's own page. */
   onClose?: () => void;
+  /** The person can no longer read the thread's channel. */
+  onLost?: () => void;
 }) {
   const t = useMessages("chat");
   const common = useMessages("common");
@@ -100,7 +105,10 @@ export function ThreadPanel({
   const now = useTicker(runs.length > 0, 1000);
   const [quoting, setQuoting] = useState<Message | null>(null);
 
-  const { messages } = history;
+  const { messages, lost } = history;
+  useEffect(() => {
+    if (lost) onLost?.();
+  }, [lost, onLost]);
   const root = messages.find((message) => message.id === rootId);
   const replies = messages.filter((message) => message.id !== rootId);
   const live = showing(
@@ -145,14 +153,17 @@ export function ThreadPanel({
         <Controls rootId={rootId} info={data} />
         {onClose !== undefined && (
           <div className="chat-thread__window">
-            <AppLink
-              className="chat-icon-button"
-              route="thread"
-              params={{ workspaceId, threadId: rootId }}
-              aria-label={t("thread.page")}
-            >
-              <Icon icon={Maximize2} size="sm" />
-            </AppLink>
+            {/* A thread with no record yet has no page of its own: it lives beside its channel. */}
+            {data !== undefined && (
+              <AppLink
+                className="chat-icon-button"
+                route="thread"
+                params={{ workspaceId, threadId: rootId }}
+                aria-label={t("thread.page")}
+              >
+                <Icon icon={Maximize2} size="sm" />
+              </AppLink>
+            )}
             <button
               type="button"
               className="chat-icon-button"
@@ -164,6 +175,14 @@ export function ThreadPanel({
           </div>
         )}
       </header>
+      {info.isError && info.error.status !== 404 && (
+        <p className="chat-note chat-note--danger chat-thread__problem" role="alert">
+          {t("thread.infoFailed")}{" "}
+          <button type="button" className="app-link-button" onClick={() => void info.refetch()}>
+            {common("action.retry")}
+          </button>
+        </p>
+      )}
       <div className="chat-thread__scroll">
         {history.latest.isPending ? (
           <div aria-busy="true">
@@ -233,14 +252,26 @@ export function ThreadScreen() {
   const { workspaceId, threadId } = useRouteParams("thread");
   const info = useApiQuery("getThread", { workspaceId, threadId });
   const channels = useApiQuery("listChannels", { workspaceId });
-  const channelId = info.data?.channelId;
+  const [lostHere, setLostHere] = useState(false);
+  const onLost = useCallback(() => setLostHere(true), []);
+  // Gone: the server says so, the panel lost its channel, or the channel is no longer listed. A
+  // cached copy of the thread never draws once the person may not read it.
+  const refused = info.isError && (info.error.status === 404 || info.error.status === 403);
+  const unlisted =
+    info.data !== undefined &&
+    channels.data !== undefined &&
+    !channels.data.some((c) => c.id === info.data.channelId);
+  // Once gone it stays gone for this thread: forgetting the cache must not bring a loading state back.
+  const goneFor = useRef<string | null>(null);
+  if (refused || lostHere || unlisted) goneFor.current = threadId;
+  const missing = goneFor.current === threadId;
+  const channelId = missing ? undefined : info.data?.channelId;
   useChannelSubscription(channelId);
-  const missing = info.isError && info.error.status === 404;
   useDocumentTitle(
-    info.data !== undefined
-      ? info.data.title || t("thread.untitled")
-      : missing
-        ? t("thread.gone")
+    missing
+      ? t("thread.gone")
+      : info.data !== undefined
+        ? info.data.title || t("thread.untitled")
         : info.isError
           ? t("thread.pageFailed")
           : undefined,
@@ -251,15 +282,22 @@ export function ThreadScreen() {
       {t("thread.back")}
     </AppLink>
   );
+  if (missing)
+    return (
+      <div className="page">
+        {back}
+        <ForgetThread workspaceId={workspaceId} threadId={threadId} channelId={info.data?.channelId} />
+        <h1 className="page__title">{t("thread.gone")}</h1>
+        <p className="page__lead">{t("thread.goneText")}</p>
+      </div>
+    );
   if (info.isPending || channels.isPending) return <ScreenLoading />;
   if (info.isError || channels.isError)
     return (
       <div className="page">
         {back}
-        <h1 className="page__title">{missing ? t("thread.gone") : t("thread.pageFailed")}</h1>
-        {missing ? (
-          <p className="page__lead">{t("thread.goneText")}</p>
-        ) : (
+        <h1 className="page__title">{t("thread.pageFailed")}</h1>
+        {
           <p className="page__lead">
             {describe(info.isError ? info.error : channels.error)}{" "}
             <Button
@@ -271,7 +309,7 @@ export function ThreadScreen() {
               {common("action.retry")}
             </Button>
           </p>
-        )}
+        }
       </div>
     );
   const thread = info.data;
@@ -292,8 +330,33 @@ export function ThreadScreen() {
             </AppLink>
           )}
         </header>
-        <ThreadPanel rootId={thread.id} member={member} />
+        <ThreadPanel rootId={thread.id} member={member} onLost={onLost} />
       </div>
     </ConversationProvider>
   );
+}
+
+/** Drops the thread, and its channel when known, from the cache: the person can't read them now. */
+function ForgetThread({
+  workspaceId,
+  threadId,
+  channelId,
+}: {
+  workspaceId: string;
+  threadId: string;
+  channelId: string | undefined;
+}) {
+  const queryClient = useQueryClient();
+  const client = useVanrClient();
+  useEffect(() => {
+    queryClient.removeQueries({
+      queryKey: prefixKey(client, { method: "getThread", args: { workspaceId, threadId } }),
+    });
+  }, [queryClient, client, workspaceId, threadId]);
+  return channelId === undefined ? null : <ForgetChannel workspaceId={workspaceId} channelId={channelId} />;
+}
+
+function ForgetChannel({ workspaceId, channelId }: { workspaceId: string; channelId: string }) {
+  useForgetChannel(workspaceId, channelId);
+  return null;
 }

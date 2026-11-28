@@ -115,8 +115,8 @@ export function ThreadsScreen() {
     retry: shouldRetry,
   });
   const threads = pages.data?.pages.flatMap((page) => page.threads) ?? [];
-  // A later page that failed keeps the pages already shown, with a note under them.
-  const moreFailed = pages.isFetchNextPageError ? pages.error : null;
+  // A later page or a refresh that failed keeps the pages already shown, with a note under them.
+  const moreFailed = pages.isError && pages.data !== undefined ? pages.error : null;
 
   return (
     <div className="page chat-threads">
@@ -155,7 +155,7 @@ export function ThreadsScreen() {
       </div>
       {pages.isPending ? (
         <ScreenLoading />
-      ) : pages.isError ? (
+      ) : pages.data === undefined ? (
         <ScreenError
           title={t("threads.failed")}
           error={pages.error}

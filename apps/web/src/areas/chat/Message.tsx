@@ -125,7 +125,7 @@ const HANDLED: Record<HandledStatus, string> = {
 function Receipts({ message }: { message: Message }) {
   const lookup = useLookup("chat");
   const t = useMessages("chat");
-  const { directory } = useConversation();
+  const { directory, me } = useConversation();
   const { receipts } = message;
   const handled = new Set(receipts.handled.map((entry) => entry.agentId));
   const blocked = receipts.blocked ?? [];
@@ -144,7 +144,14 @@ function Receipts({ message }: { message: Message }) {
     ...blocked.map((entry) => ({
       key: `blocked-${entry.agentId}`,
       // The reason is a code: it reads in the person's words, and an unknown one says only that it was held.
+      // Worded for who reads it: the author is told "you", anyone else reads the author's name.
       text:
+        (message.author.id === me.userId
+          ? undefined
+          : lookup(`receipt.held.${entry.reason}`, {
+              agent: directory.agentName(entry.agentId),
+              name: directory.personName(message.author.id),
+            })) ??
         lookup(`blocked.${entry.reason}`, { agent: directory.agentName(entry.agentId) }) ??
         t("receipt.blocked", { agent: directory.agentName(entry.agentId) }),
       tone: "danger" as const,

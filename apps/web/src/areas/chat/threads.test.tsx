@@ -1,7 +1,7 @@
 // Threads against the fake server: beside a channel and on their own page, following and managing
 // them, the list with its tabs, filters and search, and correcting an agent's answer.
 import { describe, expect, test } from "bun:test";
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import type { Message } from "@vanr/contract";
 import type { FakeServer } from "../../../dev/fake-server.ts";
 import { newServer, renderApp, TEST_NOW } from "../../../test/app.tsx";
@@ -209,5 +209,181 @@ describe("correcting an agent's answer", () => {
       expect(server.chat.feedback).toEqual([{ messageId: "msg_wrong", body: "Hartley always takes matte." }]),
     );
     await waitFor(() => expect(screen.queryByRole("dialog") === null).toBe(true));
+  });
+});
+
+/** A private board-room with a thread: its root and one reply. Íris is in it, then is taken out. */
+function seedBoard(server: FakeServer) {
+  server.state.channels.push({
+    id: "ch_board",
+    workspaceId: WS,
+    name: "board-room",
+    topic: "",
+    isGeneral: false,
+    visibility: "private",
+    budgetPerMonthUsd: null,
+    createdAt: at(-60),
+    memberIds: ["usr_ana", "usr_iris"],
+  });
+  server.state.messages.push(
+    message({ id: "msg_broot", channelId: "ch_board", body: "Secret pricing", replyCount: 1 }),
+    message({
+      id: "msg_breply",
+      channelId: "ch_board",
+      body: "Agreed, quietly",
+      threadId: "msg_broot",
+      createdAt: at(-9),
+    }),
+  );
+  server.chat.thread("msg_broot", "usr_ana", {
+    title: "Secret pricing",
+    channelId: "ch_board",
+    channelName: "board-room",
+  });
+  return () => {
+    const board = server.state.channels.find((channel) => channel.id === "ch_board");
+    if (board !== undefined) board.memberIds = ["usr_ana"];
+    server.dropFromChannel("usr_iris", "ch_board");
+  };
+}
+
+describe("losing a thread's channel", () => {
+  test("on the thread's page, nothing of it stays: title, channel, controls", async () => {
+    const server = newServer();
+    const remove = seedBoard(server);
+    await open("/threads/msg_broot", "usr_iris", server);
+    expect(await screen.findByText("Agreed, quietly")).toBeDefined();
+    await act(async () => remove());
+    expect(await screen.findByRole("heading", { name: "There's no thread here" })).toBeDefined();
+    expect(screen.queryAllByText(/Secret pricing|board-room|Agreed/).length).toBe(0);
+    expect(screen.queryByRole("button", { name: "Follow" }) === null).toBe(true);
+  });
+
+  test("beside the channel, the thread leaves the cache too, so its page later draws nothing of it", async () => {
+    const server = newServer();
+    const remove = seedBoard(server);
+    const app = await open("/channel/ch_board?thread=msg_broot", "usr_iris", server);
+    expect(await screen.findByText("Agreed, quietly")).toBeDefined();
+    await act(async () => remove());
+    expect(await screen.findByText("There's no conversation here")).toBeDefined();
+    const cachedThreads = () =>
+      app.runtime.queryClient
+        .getQueryCache()
+        .findAll()
+        .filter((query) => query.queryKey[2] === "getThread" && query.state.data !== undefined).length;
+    expect(cachedThreads()).toBe(0);
+    // The server's answer is held back: whatever shows now could only come from the cache.
+    server.force("getThread", { kind: "offline" }, 2);
+    await act(() => app.runtime.router.navigate({ to: `/workspace/${WS}/threads/msg_broot` }));
+    expect(screen.queryAllByText(/Secret pricing|board-room/).length).toBe(0);
+  });
+
+  test("a root of another channel never shows in a readable channel's panel", async () => {
+    const server = newServer();
+    seedBoard(server);
+    await open("/channel/ch_general?thread=msg_broot", "usr_tomas", server);
+    const panel = await screen.findByRole("region", { name: "Thread" });
+    expect(
+      await within(panel).findByText("The message that started this thread isn't here anymore."),
+    ).toBeDefined();
+    expect(screen.queryAllByText(/Secret pricing|Agreed/).length).toBe(0);
+  });
+});
+
+describe("the thread list holds what it showed", () => {
+  const seed31 = () => {
+    const server = newServer();
+    for (let i = 0; i < 31; i += 1)
+      server.chat.thread(`msg_${i}`, "usr_ana", {
+        title: `Thread ${i}`,
+        channelId: "ch_general",
+        channelName: "general",
+      });
+    return server;
+  };
+
+  test("a failed next page keeps the list and says so under it", async () => {
+    const server = seed31();
+    const app = await open("/threads", "usr_ana", server);
+    const list = await screen.findByRole("list", { name: "Threads" });
+    server.force("listThreads", { kind: "error", status: 500, code: "internal" }, 8);
+    await app.user.click(screen.getByRole("button", { name: "Show more threads" }));
+    expect(await screen.findByText(/^Part of the list didn't load:/)).toBeDefined();
+    expect(within(list).getAllByRole("listitem")).toHaveLength(30);
+    expect(screen.queryByText("Threads didn't load") === null).toBe(true);
+  });
+
+  test("a failed refresh keeps the list too", async () => {
+    const server = seed31();
+    const app = await open("/threads", "usr_ana", server);
+    await screen.findByRole("list", { name: "Threads" });
+    server.force("listThreads", { kind: "error", status: 500, code: "internal" }, 8);
+    await act(async () => {
+      await app.runtime.queryClient.refetchQueries({
+        predicate: (query) => query.queryKey[2] === "listThreads",
+      });
+    });
+    expect(await screen.findByText(/^Part of the list didn't load:/)).toBeDefined();
+    expect(screen.getByRole("list", { name: "Threads" })).toBeDefined();
+  });
+
+  test("Closed shows the closed threads and not the open ones", async () => {
+    const server = newServer();
+    server.chat.thread("msg_open", "usr_ana", {
+      title: "Still going",
+      channelId: "ch_general",
+      channelName: "general",
+    });
+    server.chat.thread("msg_done", "usr_ana", {
+      title: "All wrapped up",
+      channelId: "ch_general",
+      channelName: "general",
+      state: "closed",
+    });
+    const app = await open("/threads", "usr_ana", server);
+    // All holds both (only the archive leaves it); Closed holds only the closed one.
+    const list = await screen.findByRole("list", { name: "Threads" });
+    expect(within(list).getByRole("link", { name: "Still going" })).toBeDefined();
+    await app.user.click(screen.getByRole("tab", { name: "Closed" }));
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole("list", { name: "Threads" })).getByRole("link", { name: "All wrapped up" }),
+      ).toBeDefined(),
+    );
+    expect(screen.queryByRole("link", { name: "Still going" }) === null).toBe(true);
+  });
+});
+
+describe("a thread with no record yet", () => {
+  test("opens beside its channel, without a page of its own to go to", async () => {
+    const server = newServer();
+    server.state.messages.push(message({ id: "msg_fresh", body: "Anyone checked the kiln?" }));
+    await open("/channel/ch_general?thread=msg_fresh", "usr_ana", server);
+    const panel = await screen.findByRole("region", { name: "Thread" });
+    await within(panel).findByRole("log", { name: "Messages in this thread" });
+    expect(within(panel).queryByRole("link", { name: "Open the thread on its own page" }) === null).toBe(
+      true,
+    );
+  });
+});
+
+describe("a held-back receipt read by someone else", () => {
+  test("names the author instead of saying you", async () => {
+    const server = newServer();
+    server.state.messages.push(
+      message({
+        id: "msg_held",
+        body: "@scout price it",
+        receipts: {
+          claimedBy: [],
+          handled: [],
+          viewedBy: [],
+          blocked: [{ agentId: "agt_scout", reason: "audience" }],
+        },
+      }),
+    );
+    await open("/channel/ch_general", "usr_tomas", server);
+    expect(await screen.findByText("Scout doesn't take requests from Jonas Lind here.")).toBeDefined();
+    expect(screen.queryByText("Scout doesn't take requests from you here.") === null).toBe(true);
   });
 });

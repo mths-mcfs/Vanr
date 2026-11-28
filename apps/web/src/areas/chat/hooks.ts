@@ -13,6 +13,7 @@ import {
 import type { Message } from "@vanr/contract";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useClock } from "../../platform/clock.tsx";
+import { forgetChannelQueries } from "../../realtime/react.tsx";
 import type { LiveRun } from "./live.ts";
 import { channelRuns, forgetChannelRuns } from "./runs-store.ts";
 
@@ -394,17 +395,8 @@ export function useForgetChannel(workspaceId: string, channelId: string) {
   const queryClient = useQueryClient();
   const realtime = useRealtime();
   useEffect(() => {
-    for (const method of [
-      "listChannelMessages",
-      "getChannelDirectory",
-      "listChannelActiveRuns",
-      "listChannelMembers",
-      "listChannelPinnedMessages",
-    ] as const)
-      queryClient.removeQueries({
-        queryKey: prefixKey(client, { method, args: { workspaceId, channelId } }),
-      });
-    for (const method of ["listChannels", "getDms"] as const)
+    forgetChannelQueries(queryClient, client, workspaceId, channelId);
+    for (const method of ["listChannels", "getDms", "listThreads"] as const)
       void queryClient.invalidateQueries({ queryKey: prefixKey(client, { method, args: { workspaceId } }) });
     if (realtime !== null) forgetChannelRuns(realtime, channelId);
   }, [queryClient, client, workspaceId, channelId, realtime]);

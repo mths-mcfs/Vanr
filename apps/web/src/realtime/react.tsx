@@ -6,14 +6,16 @@
 // client leaves to the app: the connection's status, a reconnect on request, counted channel
 // subscriptions, and refetching a call the invalidation table does not tie to an event.
 
-import { useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import {
   type BrowserEventName,
   createRealtime,
   type RealtimeClient,
   type RealtimeStatus,
+  type VanrClient,
 } from "@vanr/client";
 import {
+  KEY_ROOT,
   type KeyPrefix,
   prefixKey,
   useRealtime,
@@ -41,11 +43,8 @@ export function WorkspaceRealtime({ workspaceId, children }: { workspaceId: stri
         followers.get(created)?.delete(channelId);
         for (const listener of lostListeners.get(created) ?? []) listener(channelId);
         // What was cached about it goes, open or not; an open conversation reads again and is told.
-        for (const method of CHANNEL_QUERIES)
-          queryClient.removeQueries({
-            queryKey: prefixKey(client, { method, args: { workspaceId, channelId } }),
-          });
-        for (const method of ["listChannels", "getDms"] as const)
+        forgetChannelQueries(queryClient, client, workspaceId, channelId);
+        for (const method of ["listChannels", "getDms", "listThreads"] as const)
           void queryClient.invalidateQueries({
             queryKey: prefixKey(client, { method, args: { workspaceId } }),
           });
@@ -108,6 +107,27 @@ const CHANNEL_QUERIES = [
   "listChannelMembers",
   "listChannelPinnedMessages",
 ] as const;
+
+/**
+ * Drops what the cache holds about a channel: the queries made for it, and any answer that says it
+ * belongs to it (a thread, say). Shared by the connection and by a screen that finds the channel lost.
+ */
+export function forgetChannelQueries(
+  queryClient: QueryClient,
+  client: VanrClient,
+  workspaceId: string,
+  channelId: string,
+): void {
+  for (const method of CHANNEL_QUERIES)
+    queryClient.removeQueries({ queryKey: prefixKey(client, { method, args: { workspaceId, channelId } }) });
+  queryClient.removeQueries({
+    queryKey: [KEY_ROOT],
+    predicate: (query) => {
+      const data: unknown = query.state.data;
+      return typeof data === "object" && data !== null && "channelId" in data && data.channelId === channelId;
+    },
+  });
+}
 
 /** Calls `listener` with each channel whose subscription the server ends on this connection. */
 export function onChannelLost(realtime: RealtimeClient, listener: (channelId: string) => void): () => void {
