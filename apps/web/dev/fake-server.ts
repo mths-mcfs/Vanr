@@ -5,7 +5,7 @@
 // settings, members' roles and storage, the inbox and its preferences, agents and their runs,
 // sessions by cookie, the server's side of the real-time
 // socket, and a way to force any state (an error, a held answer, a busy server, an ended session,
-// a dropped connection). The Drive and the search live in `fake-files.ts`, bases in `fake-bases.ts`, the wiki in `fake-wiki.ts`, the agents' team, profile, lab and skills in `fake-agents.ts`, their memory and identity in `fake-agent-access.ts`, runners and pairing in `fake-runners.ts`, issues in `fake-work.ts`. It is never part of the
+// a dropped connection). The Drive and the search live in `fake-files.ts`, bases in `fake-bases.ts`, the wiki in `fake-wiki.ts`, the agents' team, profile, lab and skills in `fake-agents.ts`, their memory and identity in `fake-agent-access.ts`, runners and pairing in `fake-runners.ts`, issues, the calendar and routines in `fake-work.ts`, assignments in `fake-assignments.ts`. It is never part of the
 // production build.
 import { endpoints, type FetchLike, type MethodName, type SocketLike } from "@vanr/client";
 import { type FakeServer as ClientFake, createFakeServer, FakeSocket } from "@vanr/client/testing";
@@ -15,6 +15,7 @@ import { z } from "zod";
 import { AUTH_ROUTES, type AuthMethod } from "../src/api/auth.ts";
 import { FakeAgentAccess } from "./fake-agent-access.ts";
 import { FakeAgents } from "./fake-agents.ts";
+import { FakeAssignments } from "./fake-assignments.ts";
 import { FakeBases } from "./fake-bases.ts";
 import { FakeControl } from "./fake-control.ts";
 import { FakeFiles } from "./fake-files.ts";
@@ -294,6 +295,7 @@ export class FakeServer {
   readonly agentAccess: FakeAgentAccess;
   readonly runnerWork: FakeRunners;
   readonly work: FakeWork;
+  readonly assignments: FakeAssignments;
   private readonly fileOperations: ReturnType<FakeFiles["operations"]>;
   private readonly accounts = new Map<string, Account>();
   private readonly now: () => Date;
@@ -387,9 +389,21 @@ export class FakeServer {
         );
       },
     });
+    this.assignments = new FakeAssignments({
+      ...host,
+      agents: (workspaceId) => this.agents.filter((candidate) => candidate.workspaceId === workspaceId),
+      readsChannel: (userId, channelId) => {
+        const channel = this.state.channels.find((candidate) => candidate.id === channelId);
+        return (
+          channel !== undefined && (channel.visibility === "public" || channel.memberIds.includes(userId))
+        );
+      },
+      nameOf: (userId) => this.state.users.find((user) => user.id === userId)?.name ?? userId,
+    });
     this.fileOperations = {
       ...this.files.operations(),
       ...this.work.operations(),
+      ...this.assignments.operations(),
       ...this.bases.operations(),
       ...this.wiki.operations(),
       ...this.control.operations(),
@@ -433,6 +447,7 @@ export class FakeServer {
     this.agentAccess.clear();
     this.runnerWork.clear();
     this.work.clear();
+    this.assignments.clear();
     if (name === "empty") return;
     const inDays = (days: number) => new Date(this.now().getTime() + days * DAY_MS);
     const people: [string, string, string][] = [
@@ -515,6 +530,7 @@ export class FakeServer {
     ];
     this.control.seed();
     this.work.seed();
+    this.assignments.seed();
     const invitation = (
       token: string,
       address: string | null,

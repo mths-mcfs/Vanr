@@ -54,3 +54,25 @@ test("the calendar and the routines, in Portuguese", async () => {
   expect(digest.getByRole("button", { name: "Executar agora" })).toBeDefined();
   expect(within(screen.getByRole("article", { name: "Invoice watcher" })).getByText("Pausada")).toBeDefined();
 });
+
+test("the assignments, in Portuguese", async () => {
+  const app = await renderApp({
+    path: "/workspace/workspace_birchwood/assignments",
+    signedInAs: "usr_ana",
+    languages: ["pt-BR"],
+  });
+  await screen.findByRole("heading", { level: 1, name: "Atribuições" });
+  const paper = within(screen.getByRole("article", { name: "Restock the paper room" }));
+  expect(paper.getByText("Trabalhando")).toBeDefined();
+  expect(paper.getByText("1 de 2 passos")).toBeDefined();
+  expect(paper.getByText("3 coisas esperam você")).toBeDefined();
+  expect(screen.getByRole("tab", { name: "Encerradas (1)" })).toBeDefined();
+  await app.user.click(paper.getByRole("link", { name: "Restock the paper room" }));
+  const panel = within(await screen.findByRole("region", { name: "Atribuição" }));
+  expect(panel.getByText("Você é o dono")).toBeDefined();
+  expect(panel.getByRole("button", { name: "Pausar" })).toBeDefined();
+  await app.user.click(panel.getByRole("tab", { name: "Esperando você" }));
+  const decision = within(await panel.findByRole("article", { name: "Decisão" }));
+  expect(decision.getByRole("button", { name: "Escolher Northpaper" })).toBeDefined();
+  expect(decision.getByText("Recomendada")).toBeDefined();
+});

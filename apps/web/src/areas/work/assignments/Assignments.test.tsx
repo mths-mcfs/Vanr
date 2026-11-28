@@ -1,0 +1,168 @@
+import { describe, expect, test } from "bun:test";
+import { screen, waitFor, within } from "@testing-library/react";
+import { newServer, renderApp } from "../../../../test/app.tsx";
+
+const LIST = "/workspace/workspace_birchwood/assignments";
+const PAGE = (id: string) => `/workspace/workspace_birchwood/assignments/${id}`;
+
+describe("the assignments", () => {
+  test("open ones with their agent, place, progress and what waits on the person; closed ones apart", async () => {
+    const app = await renderApp({ path: LIST, signedInAs: "usr_ana" });
+    await screen.findByRole("heading", { level: 1, name: "Assignments" });
+    const paper = within(screen.getByRole("article", { name: "Restock the paper room" }));
+    expect(paper.getByText("Working")).toBeDefined();
+    expect(paper.getByText("Scout")).toBeDefined();
+    expect(paper.getByText("#general")).toBeDefined();
+    expect(paper.getByText("1 of 2 steps")).toBeDefined();
+    expect(paper.getByText("1 job running")).toBeDefined();
+    expect(paper.getByText("3 things wait on you")).toBeDefined();
+    expect(screen.queryByRole("article", { name: "Archive last year's jobs" }) === null).toBe(true);
+    await app.user.click(screen.getByRole("tab", { name: "Closed (1)" }));
+    expect(await screen.findByRole("article", { name: "Archive last year's jobs" })).toBeDefined();
+  });
+
+  test("a new assignment opens on its page, not started", async () => {
+    const app = await renderApp({ path: LIST, signedInAs: "usr_ana" });
+    await app.user.click(await screen.findByRole("button", { name: "New assignment" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "New assignment" }));
+    await app.user.type(await dialog.findByRole("textbox", { name: "Goal" }), "Label every shelf");
+    await app.user.click(dialog.getByRole("button", { name: "Create assignment" }));
+    expect(await screen.findByRole("heading", { level: 1, name: "Label every shelf" })).toBeDefined();
+    const panel = within(screen.getByRole("region", { name: "Assignment" }));
+    expect(panel.getByText("Not started")).toBeDefined();
+    expect(panel.getByText("You own it")).toBeDefined();
+    await app.user.click(panel.getByRole("button", { name: "Start" }));
+    expect(await screen.findByText("Started")).toBeDefined();
+    await waitFor(() => expect(panel.getByText("Working")).toBeDefined());
+  });
+
+  test("no assignments yet: what one is", async () => {
+    const server = newServer();
+    server.assignments.assignments = [];
+    await renderApp({ path: LIST, signedInAs: "usr_ana", server });
+    expect(await screen.findByText("No assignments yet")).toBeDefined();
+  });
+
+  test("a list that did not load says so and loads on retry", async () => {
+    const server = newServer();
+    server.force("listAssignments", { kind: "error", status: 503, code: "unavailable" }, 4);
+    const app = await renderApp({ path: LIST, signedInAs: "usr_ana", server });
+    expect(await screen.findByText("The assignments could not be loaded")).toBeDefined();
+    await app.user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("article", { name: "Restock the paper room" })).toBeDefined();
+  });
+});
+
+describe("an assignment's page", () => {
+  test("pause, resume and close it as done, with a warning for the running job", async () => {
+    const app = await renderApp({ path: PAGE("asg_paper"), signedInAs: "usr_ana" });
+    const panel = within(await screen.findByRole("region", { name: "Assignment" }));
+    await app.user.click(panel.getByRole("button", { name: "Pause" }));
+    await waitFor(() => expect(panel.getByRole("button", { name: "Resume" })).toBeDefined());
+    await app.user.click(panel.getByRole("button", { name: "Resume" }));
+    await waitFor(() => expect(panel.getByRole("button", { name: "Pause" })).toBeDefined());
+    await app.user.click(panel.getByRole("button", { name: "Close" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "Close the assignment" }));
+    expect(dialog.getByText("1 job is still running: closing stops it.")).toBeDefined();
+    await app.user.click(dialog.getByRole("button", { name: "Close assignment" }));
+    expect(await screen.findByText("Assignment closed")).toBeDefined();
+    await waitFor(() => expect(panel.getByText("Done")).toBeDefined());
+    expect(app.server.assignments.assignments.find((row) => row.id === "asg_paper")?.outcome).toBe("done");
+  });
+
+  test("what waits on the owner: a decision, a result and a command, each acted on", async () => {
+    const app = await renderApp({ path: PAGE("asg_paper"), signedInAs: "usr_ana" });
+    const panel = within(await screen.findByRole("region", { name: "Assignment" }));
+    await app.user.click(panel.getByRole("tab", { name: "Waiting on you" }));
+    const decision = within(await panel.findByRole("article", { name: "Decision" }));
+    expect(decision.getByText("Which supplier?")).toBeDefined();
+    expect(decision.getByText("Recommended")).toBeDefined();
+    await app.user.click(decision.getByRole("button", { name: "Choose Northpaper" }));
+    await waitFor(() => expect(decision.getByText("Chose Northpaper")).toBeDefined());
+    const command = within(panel.getByRole("article", { name: "Command waiting" }));
+    await app.user.click(command.getByRole("button", { name: "Deny" }));
+    await waitFor(() => expect(command.getByText("Denied")).toBeDefined());
+    const result = within(panel.getByRole("article", { name: "Result to accept" }));
+    expect((await result.findByText("six")).tagName).toBe("STRONG");
+    await app.user.click(result.getByRole("checkbox", { name: "Every printer counted" }));
+    await waitFor(() =>
+      expect(app.server.assignments.assignments[0]?.submissions[0]?.checklist[0]?.verifiedBy).toBe("usr_ana"),
+    );
+    await app.user.click(result.getByRole("button", { name: "Accept" }));
+    await waitFor(() => expect(result.getByText("Accepted")).toBeDefined());
+  });
+
+  test("someone who only views it sees no actions and can ask to take part", async () => {
+    const app = await renderApp({ path: PAGE("asg_paper"), signedInAs: "usr_iris" });
+    const panel = within(await screen.findByRole("region", { name: "Assignment" }));
+    expect(panel.getByText(/You can follow this assignment/)).toBeDefined();
+    expect(panel.queryByRole("button", { name: "Pause" }) === null).toBe(true);
+    await app.user.click(panel.getByRole("tab", { name: "Waiting on you" }));
+    const decision = within(await panel.findByRole("article", { name: "Decision" }));
+    expect(decision.queryByRole("button", { name: /Choose/ }) === null).toBe(true);
+    await app.user.click(panel.getByRole("tab", { name: "People" }));
+    await app.user.click(await panel.findByRole("button", { name: "Ask to take part" }));
+    expect(await panel.findByText("Your request is waiting for the owner")).toBeDefined();
+    expect(panel.queryByRole("button", { name: "Ask to take part" }) === null).toBe(true);
+  });
+
+  test("the plan, the trail read to its end, and the files", async () => {
+    const app = await renderApp({ path: PAGE("asg_paper"), signedInAs: "usr_ana" });
+    const panel = within(await screen.findByRole("region", { name: "Assignment" }));
+    await app.user.click(panel.getByRole("tab", { name: "Plan" }));
+    expect(await panel.findByText("Count what is left")).toBeDefined();
+    expect(panel.getByText("Checked")).toBeDefined();
+    await app.user.click(panel.getByRole("tab", { name: /^Trail/ }));
+    expect(await panel.findByText("Scout: asked for a decision")).toBeDefined();
+    expect(panel.getByText("Ana Beatriz Souza: started the work")).toBeDefined();
+    await waitFor(() => expect(app.server.assignments.assignments[0]?.seen.get("usr_ana")).toBe(3));
+    await app.user.click(panel.getByRole("tab", { name: "Files" }));
+    expect(await panel.findByText("assignment.md")).toBeDefined();
+  });
+
+  test("an assignment of a channel the person can't read shows as not here", async () => {
+    const server = newServer();
+    server.state.channels.push({
+      id: "ch_board",
+      workspaceId: "workspace_birchwood",
+      name: "board",
+      topic: "",
+      isGeneral: false,
+      visibility: "private",
+      budgetPerMonthUsd: null,
+      createdAt: "2026-11-02T09:00:00.000Z",
+      memberIds: ["usr_ana"],
+    });
+    const row = server.assignments.assignments.find((each) => each.id === "asg_paper");
+    if (row !== undefined) row.channelId = "ch_board";
+    await renderApp({ path: PAGE("asg_paper"), signedInAs: "usr_iris", server });
+    expect(await screen.findByText("This assignment isn't here")).toBeDefined();
+    expect(screen.getByRole("heading", { level: 1, name: "Assignment" })).toBeDefined();
+  });
+  test("a review is approved with a note, and its pull request opens only as a web address", async () => {
+    const server = newServer();
+    const row = server.assignments.assignments.find((each) => each.id === "asg_paper");
+    row?.reviews.push({
+      id: "rev_1",
+      decidedAt: null,
+      decidedBy: null,
+      fileIds: [],
+      note: null,
+      prUrl: "https://git.example/pr/9",
+      status: "pending",
+      summary: "Adds the order form.",
+      title: "Order form",
+    });
+    const app = await renderApp({ path: PAGE("asg_paper"), signedInAs: "usr_jonas", server });
+    const panel = within(await screen.findByRole("region", { name: "Assignment" }));
+    await app.user.click(panel.getByRole("tab", { name: "Waiting on you" }));
+    const review = within(await panel.findByRole("article", { name: "Review: Order form" }));
+    expect(review.getByRole("link", { name: "Open the pull request" }).getAttribute("href")).toBe(
+      "https://git.example/pr/9",
+    );
+    await app.user.type(review.getByRole("textbox", { name: "Note for the agent" }), "Looks right");
+    await app.user.click(review.getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(review.getByText("Approved")).toBeDefined());
+    expect(row?.reviews[0]?.note).toBe("Looks right");
+  });
+});
