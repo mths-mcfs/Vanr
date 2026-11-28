@@ -21,7 +21,7 @@ import { and, desc, eq, gte, ne, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
 import { createMemory } from "../agent-memory";
-import { canReadChannel, readableChannel } from "../channels";
+import { canReadChannel, readableChannel, readableChannelsSql } from "../channels";
 import type { AppEnv, WorkspaceMember } from "../context";
 import {
   type ActionRow,
@@ -55,7 +55,7 @@ import { requireMember, requirePermission, WORKSPACE } from "../workspace-scope"
 const rememberedEntry = (at: Date, name: string, label: string) =>
   trailEntry(at, "remembered", `${name} allowed this for 30 days (${label})`, { name, label });
 
-const { approvals, proposals, questions, reversibleActions, gateDecisions, messages } = schema;
+const { approvals, proposals, questions, reversibleActions, gateDecisions, messages, runs } = schema;
 
 const decideBody = z.object({
   reason: z.string().trim().max(1000).optional(),
@@ -176,6 +176,7 @@ export function registerControl(app: Hono<AppEnv>) {
     const { db, now } = c.get("deps");
     const { days } = readQuery(c, z.object({ days: z.coerce.number().int().min(1).max(365).default(30) }));
     const since = new Date(now().getTime() - days * 86_400_000);
+    const decisionChannel = sql`coalesce(${runs.channelId}, ${runs.sourceChannelId}, ${approvals.channelId})`;
     const decideMs = sql<number>`extract(epoch from (${approvals.decidedAt} - ${approvals.createdAt})) * 1000`;
     const rows = await db
       .select({
@@ -197,7 +198,16 @@ export function registerControl(app: Hono<AppEnv>) {
       })
       .from(gateDecisions)
       .leftJoin(approvals, eq(approvals.id, gateDecisions.approvalId))
-      .where(and(eq(gateDecisions.workspaceId, me.workspaceId), gte(gateDecisions.createdAt, since)))
+      .leftJoin(runs, eq(runs.id, gateDecisions.runId))
+      .where(
+        and(
+          eq(gateDecisions.workspaceId, me.workspaceId),
+          gte(gateDecisions.createdAt, since),
+          // Only calls made in conversations the viewer reads (or in none): seeing usage is not reading every
+          // private channel and DM.
+          sql`(${decisionChannel} is null or ${decisionChannel} in ${readableChannelsSql(me)})`,
+        ),
+      )
       .groupBy(gateDecisions.effect)
       .orderBy(gateDecisions.effect);
     const round = (v: number | string | null) => (v === null ? null : Math.round(Number(v)));
@@ -308,7 +318,8 @@ export function registerControl(app: Hono<AppEnv>) {
       throw new HttpError(400, "invalid_request", "This request can't be edited", { field: "input" });
     const revised = await runtime.reviseApproval(row.id, body.input);
     if (!revised) throw conflict("approval.gone", "The agent is no longer waiting for this");
-    if ("error" in revised) throw new HttpError(400, "invalid_request", revised.error, { field: "input" });
+    if ("error" in revised)
+      throw new HttpError(400, revised.code ?? "invalid_request", revised.error, { field: "input" });
     // The edit may change the predicate (or the class): the edited effect's one counts.
     const rule = revised.rule;
     if (body.remember) rememberCheck({ ruleKey: rule?.key ?? null, effect: revised.effect });
