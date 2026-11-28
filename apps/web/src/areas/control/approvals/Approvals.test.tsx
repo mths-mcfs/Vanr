@@ -18,7 +18,7 @@ describe("the approvals page", () => {
     expect(within(post).getByText("The Hartley proofs are ready for pickup.")).toBeDefined();
     expect(within(post).getByText("The workspace asks a person before this kind of action.")).toBeDefined();
     expect(within(post).getByText("Scout asks")).toBeDefined();
-    expect(within(post).getByRole("button", { name: "Approve sending" })).toBeDefined();
+    expect(within(post).getByRole("button", { name: "Let it send" })).toBeDefined();
     expect(within(post).getByRole("checkbox", { name: /Always allow for 30 days/ })).toBeDefined();
     expect(within(post).getByText(/Posts in #print-queue/)).toBeDefined();
 
@@ -29,7 +29,7 @@ describe("the approvals page", () => {
     expect(within(mail).getByText("The text shows one address and the link goes to another.")).toBeDefined();
     expect(within(mail).getByText("Read outside content: email from billing@hartley.example")).toBeDefined();
     expect(within(mail).getByText("Waiting for Jonas Lind to decide.")).toBeDefined();
-    expect(absent(within(mail).queryByRole("button", { name: /Approve/ }))).toBe(true);
+    expect(absent(within(mail).queryByRole("button", { name: /Let it|Allow it/ }))).toBe(true);
 
     expect(screen.getByText("1 waits for a decision.")).toBeDefined();
     expect(document.title).toBe("Approvals | Birchwood Labs | Vanr");
@@ -45,7 +45,7 @@ describe("the approvals page", () => {
     const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
     const post = await card("Post in #print-queue");
     await app.user.click(within(post).getByRole("checkbox", { name: /Always allow for 30 days/ }));
-    await app.user.click(within(post).getByRole("button", { name: "Approve sending" }));
+    await app.user.click(within(post).getByRole("button", { name: "Let it send" }));
 
     expect(await within(post).findByText("Approved by Ana Beatriz Souza.")).toBeDefined();
     expect(await screen.findByText("Approved. It won't ask again for this for 30 days.")).toBeDefined();
@@ -103,7 +103,7 @@ describe("the approvals page", () => {
     if (stored === undefined || stored.preview === null) throw new Error("no approval");
     stored.payloadHash = "hash_post_2";
     stored.preview = { ...stored.preview, body: "The Hartley proofs are delayed." };
-    await app.user.click(within(post).getByRole("button", { name: "Approve sending" }));
+    await app.user.click(within(post).getByRole("button", { name: "Let it send" }));
     expect(
       await screen.findByText("The request changed since you opened it. Look at it again before you decide."),
     ).toBeDefined();
@@ -143,7 +143,7 @@ describe("the approvals page", () => {
     expect(await within(post).findByText(/Posts in #design/)).toBeDefined();
     const box = within(post).getByRole("checkbox", { name: /Always allow for 30 days/ });
     expect(box.getAttribute("aria-checked")).toBe("false");
-    await app.user.click(within(post).getByRole("button", { name: "Approve sending" }));
+    await app.user.click(within(post).getByRole("button", { name: "Let it send" }));
     expect(await within(post).findByText("Approved by Ana Beatriz Souza.")).toBeDefined();
     expect(app.server.control.rules.map((rule) => rule.rule.label)).toEqual(["#design"]);
   });
@@ -154,7 +154,7 @@ describe("the approvals page", () => {
     expect(within(mail).getByText("Decide within 40 min")).toBeDefined();
     await app.advance(41 * 60_000);
     expect(await within(mail).findByText("Nobody decided in time, so nothing ran.")).toBeDefined();
-    expect(within(mail).queryByRole("button", { name: /Approve|Reject/ }) === null).toBe(true);
+    expect(within(mail).queryByRole("button", { name: /Let it|Allow it|Reject/ }) === null).toBe(true);
   });
 
   test("a decision made elsewhere closes the open dialog", async () => {
@@ -177,7 +177,7 @@ describe("the approvals page", () => {
     const app = await renderApp({ path: PATH, signedInAs: "usr_iris" });
     const post = await card("Post in #print-queue");
     expect(within(post).getByText("Waiting for Ana Beatriz Souza to decide.")).toBeDefined();
-    expect(absent(within(post).queryByRole("button", { name: /Approve|Reject/ }))).toBe(true);
+    expect(absent(within(post).queryByRole("button", { name: /Let it|Allow it|Reject/ }))).toBe(true);
     expect(absent(within(post).queryByRole("checkbox"))).toBe(true);
     expect(absent(screen.queryByRole("region", { name: "The gate, last 30 days" }))).toBe(true);
     expect(await screen.findByText(/No rules yet/)).toBeDefined();

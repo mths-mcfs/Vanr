@@ -39,16 +39,21 @@ export function trailText(
   return lookup(`${kind}.trail.${entry.code}`, entry.params) ?? entry.text;
 }
 
-const VERBS = ["merge", "deploy", "rollback", "publish", "delete", "send"] as const;
-export type Verb = (typeof VERBS)[number] | "other";
+/** What the person lets happen, by the words in the tool's name; the first match wins. */
+const ALLOWANCES = [
+  ["send", ["post", "send", "mail"]],
+  ["ship", ["deploy"]],
+  ["revert", ["rollback"]],
+  ["merge", ["merge"]],
+  ["release", ["publish"]],
+  ["removal", ["delete"]],
+] as const;
+export type Allowance = (typeof ALLOWANCES)[number][0] | "anything";
 
-/** What the approve button says will happen: "Approve sending", "Approve deploy". */
-export function approvalVerb(tool: string): Verb {
+/** The approve button names what it lets the agent do: "Let it send", "Let it deploy". */
+export function allowanceFor(tool: string): Allowance {
   const name = tool.toLowerCase();
-  if (name.includes("post") || name.includes("send") || name.includes("email") || name.includes("mail")) {
-    return "send";
-  }
-  return VERBS.find((verb) => name.includes(verb)) ?? "other";
+  return ALLOWANCES.find(([, words]) => words.some((word) => name.includes(word)))?.[0] ?? "anything";
 }
 
 /** The badge an approval's status wears. */

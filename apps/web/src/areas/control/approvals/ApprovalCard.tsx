@@ -16,8 +16,8 @@ import { useChannelSubscription } from "../../../realtime/react.tsx";
 import { ActionReceipt } from "../actions/Receipt.tsx";
 import {
   APPROVAL_BADGE,
+  allowanceFor,
   approvalTitle,
-  approvalVerb,
   isMisleading,
   ruleText,
   shortDateTime,
@@ -292,7 +292,7 @@ export function ApprovalCard({
               disabled={busy}
               onClick={onApprove}
             >
-              {t(`verb.${approvalVerb(approval.tool)}`)}
+              {t(`allow.${allowanceFor(approval.tool)}`)}
             </Button>
           </div>
         ) : (

@@ -5,8 +5,8 @@ import type { Approval } from "@vanr/contract";
 import { formatMessage } from "../../i18n/format.ts";
 import en from "../../messages/control/en.ts";
 import {
+  allowanceFor,
   approvalTitle,
-  approvalVerb,
   type Lookup,
   lineDiff,
   ruleText,
@@ -75,10 +75,11 @@ describe("text from the server's codes", () => {
   });
 
   test("the approve button says what happens", () => {
-    expect(approvalVerb("post_message")).toBe("send");
-    expect(approvalVerb("send_email")).toBe("send");
-    expect(approvalVerb("github_merge")).toBe("merge");
-    expect(approvalVerb("run_command")).toBe("other");
+    expect(allowanceFor("post_message")).toBe("send");
+    expect(allowanceFor("send_email")).toBe("send");
+    expect(allowanceFor("github_merge")).toBe("merge");
+    expect(allowanceFor("vercel_deploy")).toBe("ship");
+    expect(allowanceFor("run_command")).toBe("anything");
   });
 
   test("time left: hours above one, whole minutes under it, never zero", () => {

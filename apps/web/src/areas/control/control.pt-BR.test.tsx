@@ -21,7 +21,7 @@ test("the approvals page, in Portuguese", async () => {
   expect(within(mail).getByText("Esperando Jonas Lind decidir.")).toBeDefined();
 
   await app.user.click(within(post).getByRole("checkbox", { name: /Permitir sempre por 30 dias/ }));
-  await app.user.click(within(post).getByRole("button", { name: "Aprovar envio" }));
+  await app.user.click(within(post).getByRole("button", { name: "Pode enviar" }));
   expect(await within(post).findByText("Aprovada por Ana Beatriz Souza.")).toBeDefined();
   const receipt = await within(post).findByRole("region", { name: "O que o agente mudou" });
   expect(within(receipt).getByRole("timer").textContent).toBe("Sai em 30 segundos");

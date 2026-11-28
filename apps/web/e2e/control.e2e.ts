@@ -72,7 +72,7 @@ test.describe("the control center", () => {
     ).toBeVisible();
 
     // Approve: the card says who approved, and the run carries it out.
-    await card.getByRole("button", { name: t("control", "verb.send") }).click();
+    await card.getByRole("button", { name: t("control", "allow.send") }).click();
     await expect(
       card.getByText(
         t("control", "card.decidedBy", { status: t("control", "status.approved"), name: owner.name }),
@@ -125,7 +125,7 @@ test.describe("the control center", () => {
     });
     await expect(card).toBeVisible({ timeout: 30_000 });
     await card.getByRole("checkbox", { name: new RegExp(t("control", "remember.label")) }).click();
-    await card.getByRole("button", { name: t("control", "verb.send") }).click();
+    await card.getByRole("button", { name: t("control", "allow.send") }).click();
     await expect(page.getByText(t("control", "toast.remembered"), { exact: true })).toBeVisible();
     const list = page.getByRole("list", { name: t("control", "rules.list") });
     await expect(list.getByText(t("control", "rule.post_message", { label: "#announce" }))).toBeVisible();
@@ -184,7 +184,7 @@ test.describe("the control center", () => {
     });
     await expect(card).toBeVisible({ timeout: 30_000 });
     await expect(card.getByText(t("control", "card.waitingFor", { name: owner.name }))).toBeVisible();
-    await expect(card.getByRole("button", { name: t("control", "verb.send") })).toHaveCount(0);
+    await expect(card.getByRole("button", { name: t("control", "allow.send") })).toHaveCount(0);
     await expect(card.getByRole("checkbox")).toHaveCount(0);
   });
 });
