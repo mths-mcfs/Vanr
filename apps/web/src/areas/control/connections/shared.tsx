@@ -1,0 +1,125 @@
+// What the connection sections of the settings share (connectors, data sources, access, usage): a
+// titled block, its loading and failed states, the latch that keeps an action from starting twice, the
+// rule for answers that say the thing is gone or no longer the person's to see, and the options every
+// call that carries a secret uses. The server decides every change; the role here only hides controls.
+
+import { useQueryClient } from "@tanstack/react-query";
+import type { MethodName } from "@vanr/client";
+import { isApiError } from "@vanr/client";
+import { prefixKey, useVanrClient } from "@vanr/client/react";
+import { Button, ErrorState, Skeleton } from "@vanr/ui";
+import { type ReactNode, useCallback, useRef } from "react";
+import { useErrorMessage } from "../../../app/screens.tsx";
+import { useMessages } from "../../../i18n/react.tsx";
+import { href, type SettingsSection } from "../../../routes.ts";
+
+/**
+ * Options for a mutation whose arguments hold a key, a password or a connection string: the cache
+ * forgets the call (and so what was typed) as soon as nothing on screen watches it.
+ */
+export const SECRET = { gcTime: 0 } as const;
+
+// The server's limits for a key and an address (routes/connectors.ts, keyInput and customInput).
+export const KEY_MIN = 8;
+export const KEY_MAX = 2000;
+export const ADDRESS_MAX = 500;
+
+/** Where a sign-in on another site sends the person back: a section of this workspace's settings. */
+export const comeBackTo = (workspaceId: string, section: SettingsSection) =>
+  href("settings", { workspaceId, section });
+
+/** Leaves the app for a sign-in or an install on another site. */
+export function leaveFor(url: string): void {
+  window.location.assign(url);
+}
+
+/** One part of a section, under its own heading. */
+export function Block({
+  title,
+  lead,
+  action,
+  children,
+}: {
+  title: string;
+  lead?: ReactNode;
+  action?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <section className="wire-block" aria-label={title}>
+      <header className="wire-block__head">
+        <div className="wire-block__title">
+          <h3 className="page__heading">{title}</h3>
+          {lead !== undefined && <p className="page__muted">{lead}</p>}
+        </div>
+        {action}
+      </header>
+      {children}
+    </section>
+  );
+}
+
+export function PartLoading() {
+  const common = useMessages("common");
+  return (
+    <div className="page__loading" aria-busy="true">
+      <span className="vr-visually-hidden" role="status">
+        {common("state.loading")}
+      </span>
+      <Skeleton shape="block" />
+      <Skeleton />
+    </div>
+  );
+}
+
+export function PartError({ title, error, onRetry }: { title: string; error: unknown; onRetry: () => void }) {
+  const common = useMessages("common");
+  const describe = useErrorMessage("control");
+  return (
+    <ErrorState
+      title={title}
+      description={describe(error)}
+      action={<Button onClick={onRetry}>{common("action.retry")}</Button>}
+    />
+  );
+}
+
+/**
+ * A latch for an action that must start once: a second press before the screen redraws (when the
+ * pending flag would disable the button) is dropped. The work runs to its end, then the latch opens.
+ */
+export function useLatch(): (work: () => Promise<unknown>) => void {
+  const held = useRef(false);
+  return useCallback((work) => {
+    if (held.current) return;
+    held.current = true;
+    void work()
+      .catch(() => {})
+      .finally(() => {
+        held.current = false;
+      });
+  }, []);
+}
+
+/** The thing is gone (404), or the person may no longer see it (403). */
+export const isLost = (error: unknown) => isApiError(error) && (error.status === 404 || error.status === 403);
+
+/**
+ * When an answer says the thing is gone or not the person's any more, what the screen kept of these
+ * reads is dropped: the ones on screen load again from the server, the others are removed.
+ */
+export function useForgetOnLoss(workspaceId: string, methods: readonly MethodName[]) {
+  const client = useVanrClient();
+  const queryClient = useQueryClient();
+  return useCallback(
+    (error: unknown) => {
+      if (!isLost(error)) return;
+      for (const method of methods) {
+        const queryKey = prefixKey(client, { method, args: { workspaceId } });
+        queryClient.removeQueries({ queryKey, type: "inactive" });
+        void queryClient.resetQueries({ queryKey, type: "active" });
+      }
+    },
+    [client, queryClient, workspaceId, methods],
+  );
+}

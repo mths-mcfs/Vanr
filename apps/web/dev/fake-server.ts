@@ -18,6 +18,7 @@ import { FakeAgents } from "./fake-agents.ts";
 import { FakeAssignments } from "./fake-assignments.ts";
 import { FakeBases } from "./fake-bases.ts";
 import { FakeChat } from "./fake-chat.ts";
+import { FakeConnections } from "./fake-connections.ts";
 import { FakeControl } from "./fake-control.ts";
 import { FakeDebates } from "./fake-debates.ts";
 import { FakeFiles } from "./fake-files.ts";
@@ -296,6 +297,7 @@ export class FakeServer {
   readonly agentWork: FakeAgents;
   readonly chat: FakeChat;
   readonly agentAccess: FakeAgentAccess;
+  readonly connections: FakeConnections;
   readonly runnerWork: FakeRunners;
   readonly work: FakeWork;
   readonly assignments: FakeAssignments;
@@ -391,6 +393,7 @@ export class FakeServer {
       },
       channelExists: (channelId) => this.state.channels.some((candidate) => candidate.id === channelId),
     });
+    this.connections = new FakeConnections({ ...host, shared: () => this.agentAccess.shared });
     this.runnerWork = new FakeRunners({
       ...host,
       agents: () => this.agents,
@@ -477,6 +480,7 @@ export class FakeServer {
       ...this.control.operations(),
       ...this.agentWork.operations(),
       ...this.agentAccess.operations(),
+      ...this.connections.operations(),
       ...this.runnerWork.operations(),
     };
     // A proposal's evaluation stays the control fake's; the lab's own run (a candidate text) is the agents'.
@@ -513,6 +517,7 @@ export class FakeServer {
     this.control.evals = [];
     this.agentWork.clear();
     this.agentAccess.clear();
+    this.connections.clear();
     this.runnerWork.clear();
     this.work.clear();
     this.assignments.clear();
