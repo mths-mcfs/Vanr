@@ -748,6 +748,10 @@ export default {
   "dbx.noTables": "Nenhuma tabela escolhida.",
   "dbx.noTablesThere": "O banco não tem tabelas que este usuário consiga ver.",
   "dbx.notListed": "(salva, fora da lista atual)",
+  "dbx.suggested":
+    "Este agente não tem configuração própria para este banco, então a sugerida já vem preenchida: todas as tabelas, as colunas ocultas sugeridas e 200 consultas por dia. Ao salvar, ela fica valendo.",
+  "dbx.changedMeanwhile":
+    "Nesse meio-tempo, alguém mudou a configuração deste banco para o agente. Nada foi salvo: confira o formulário e salve de novo.",
   "dbx.hidden": "Colunas escondidas",
   "dbx.hiddenHint": "tabela.coluna ou schema.tabela.coluna, uma por linha. Voltam vazias em toda resposta.",
   "dbx.queries": "Consultas por dia",

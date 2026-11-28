@@ -508,6 +508,33 @@ describe("databases", () => {
     expect((within(form).getByLabelText(/^Hidden columns/) as HTMLTextAreaElement).value).toBe("");
   });
 
+  test("a setup changed meanwhile from its own to none is not saved over, and the form says so", async () => {
+    const server = seeded();
+    server.connections.agentDatabases.set("agt_scout", [dbLink({ tables: ["public.orders"] }, "none")]);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "Shop" });
+    // Another admin leaves it at none with the empty policy after this form loaded.
+    server.connections.agentDatabases.set("agt_scout", [dbLink({ tables: [] }, "none")]);
+    await app.user.click(within(form).getByRole("checkbox", { name: "May query Shop" }));
+    await within(form).findByRole("list", { name: "Tables" });
+    await app.user.click(within(form).getByRole("button", { name: "Save database access" }));
+    expect(await within(form).findByText(/Meanwhile someone changed this database's setup/)).toBeDefined();
+    expect(count(server, "replaceAgentDatabase")).toBe(0);
+    expect(server.connections.agentDatabases.get("agt_scout")?.[0]).toEqual(dbLink({ tables: [] }, "none"));
+    // Loaded again, the form now shows the suggested setup, and says so.
+    expect(await within(form).findByText(/so the suggested one is filled in/)).toBeDefined();
+  });
+
+  test("raising a link that has no setup of its own says the suggested one is filled in", async () => {
+    const server = seeded();
+    server.connections.agentDatabases.set("agt_scout", [dbLink({ tables: [] }, "none")]);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "Shop" });
+    expect(within(form).queryByText(/so the suggested one is filled in/) === null).toBe(true);
+    await app.user.click(within(form).getByRole("checkbox", { name: "May query Shop" }));
+    expect(within(form).getByText(/so the suggested one is filled in/)).toBeDefined();
+  });
+
   test("a saved table the list no longer has shows as saved, and can be taken away", async () => {
     const server = seeded();
     server.connections.agentDatabases.set("agt_scout", [
@@ -851,6 +878,61 @@ describe("GitHub repositories", () => {
     );
   });
 
+  test("narrowing from no limit while someone set a limit shows their limit before anything is saved", async () => {
+    const server = seeded();
+    birchwoodGitHub(server);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "GitHub repositories" });
+    await narrow(app, form);
+    await app.user.click(within(form).getByRole("checkbox", { name: /birchwood-labs\/site/ }));
+    server.connections.repositories.set("agt_scout", ["birchwood-labs/print-shop"]);
+    await app.user.click(within(form).getByRole("button", { name: "Save repositories" }));
+    expect(await within(form).findByText(/Meanwhile someone limited this agent/)).toBeDefined();
+    expect(count(server, "setAgentRepositories")).toBe(0);
+    await waitFor(() =>
+      expect(
+        within(form)
+          .getByRole("checkbox", { name: /birchwood-labs\/print-shop/ })
+          .getAttribute("aria-checked"),
+      ).toBe("true"),
+    );
+    expect(
+      within(form)
+        .getByRole("checkbox", { name: /birchwood-labs\/site/ })
+        .getAttribute("aria-checked"),
+    ).toBe("true");
+    await app.user.click(within(form).getByRole("button", { name: "Save repositories" }));
+    expect(await screen.findByText("The repositories are saved.")).toBeDefined();
+    expect(server.connections.repositories.get("agt_scout")).toEqual([
+      "birchwood-labs/print-shop",
+      "birchwood-labs/site",
+    ]);
+  });
+
+  test("a save that would leave nothing ticked, after someone removed the other one, loads the list again", async () => {
+    const server = seeded();
+    birchwoodGitHub(server);
+    server.connections.repositories.set("agt_scout", ["birchwood-labs/print-shop", "birchwood-labs/site"]);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "GitHub repositories" });
+    await app.user.click(within(form).getByRole("checkbox", { name: /birchwood-labs\/print-shop/ }));
+    server.connections.repositories.set("agt_scout", ["birchwood-labs/print-shop"]);
+    await app.user.click(within(form).getByRole("button", { name: "Save repositories" }));
+    expect(await within(form).findByText(/Keep at least one repository ticked/)).toBeDefined();
+    expect(count(server, "setAgentRepositories")).toBe(0);
+    // The screen catches up: site is gone from what is saved.
+    await waitFor(() =>
+      expect(
+        within(form)
+          .getByRole("checkbox", { name: /birchwood-labs\/site/ })
+          .getAttribute("aria-checked"),
+      ).toBe("false"),
+    );
+    expect(within(form).getByRole("button", { name: "Save repositories" }).hasAttribute("disabled")).toBe(
+      true,
+    );
+  });
+
   test("ticks survive a refresh, and another's change shows in the entries left alone", async () => {
     const server = seeded();
     birchwoodGitHub(server);
@@ -919,6 +1001,14 @@ describe("GitHub repositories", () => {
         .getByRole("checkbox", { name: /birchwood-labs\/site/ })
         .getAttribute("aria-checked"),
     ).toBe("true");
+    expect(
+      within(form).getByRole("radio", { name: "Only the ones ticked below" }).getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(
+      within(form)
+        .getByRole("checkbox", { name: /birchwood-labs\/print-shop/ })
+        .getAttribute("aria-checked"),
+    ).toBe("false");
   });
 
   test("repositories that fail to load offer a retry", async () => {
@@ -1073,6 +1163,52 @@ describe("the fake server's source rules, as the server's", () => {
     expect(
       await statusOf(database(client, { level: "read", policy: { tables: [`${" ".repeat(295)}orders`] } })),
     ).toBe("400 validation");
+  });
+
+  test("the policy takes only the server's keys and values, each list once", async () => {
+    const { server, client } = admin();
+    const sent = (policy: Record<string, unknown>) =>
+      statusOf(database(client, { level: "read", policy } as T.SetAgentDatabaseInput));
+    expect(await sent({ shadow: true })).toBe("400 validation");
+    expect(await sent({ queriesPerDay: 0 })).toBe("400 validation");
+    expect(await sent({ queriesPerDay: 1.5 })).toBe("400 validation");
+    expect(await sent({ queriesPerDay: 100_001 })).toBe("400 validation");
+    expect(await sent({ timeoutSeconds: 45 })).toBe("400 validation");
+    expect(await sent({ queriesPerDay: null, timeoutSeconds: 60, tables: ["orders", "public.orders"] })).toBe(
+      "ok",
+    );
+    const policy = server.connections.agentDatabases.get("agt_scout")?.[0]?.policy;
+    expect([policy?.tables, policy?.queriesPerDay, policy?.timeoutSeconds]).toEqual([
+      ["public.orders"],
+      null,
+      60,
+    ]);
+  });
+
+  test("repositories are trimmed and their parts capped at 100 characters", async () => {
+    const { server, client } = admin();
+    const send = (repositories: string[]) => () =>
+      client.call("setAgentRepositories", { workspaceId: WS, agentId: "agt_scout", body: { repositories } });
+    expect(await statusOf(send([`acme/${"r".repeat(101)}`]))).toBe("400 validation");
+    expect(await statusOf(send([" acme/api ", "acme/api"]))).toBe("ok");
+    expect(server.connections.repositories.get("agt_scout")).toEqual(["acme/api"]);
+  });
+
+  test("a write to an archived agent is refused before the permission is checked", async () => {
+    const server = seeded();
+    const scout = server.agents.find((agent) => agent.id === "agt_scout");
+    if (scout === undefined) throw new Error("no Scout");
+    scout.archivedAt = new Date().toISOString();
+    const { runtime } = newTestRuntime({ path: "/", signedInAs: "usr_iris", server });
+    expect(
+      await statusOf(() =>
+        runtime.api.client.call("setAgentRepositories", {
+          workspaceId: WS,
+          agentId: "agt_scout",
+          body: { repositories: [] },
+        }),
+      ),
+    ).toBe("409 agent.archived");
   });
 
   test("a first save at none keeps an empty policy", async () => {

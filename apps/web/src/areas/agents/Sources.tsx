@@ -526,6 +526,7 @@ function DatabaseForm({
   const client = useVanrClient();
   const change = useOneChange();
   const failure = useSaveFailure(workspaceId, DATABASE_READS);
+  const [changedMeanwhile, setChangedMeanwhile] = useState(false);
   const form = usePicks(databaseFields(link, connection));
   const { reads, hidden, queries, timeout } = form.shown;
   // The list of tables reads the customer's database, so it is only asked of someone who may change this.
@@ -606,12 +607,20 @@ function DatabaseForm({
   const submit = () =>
     change.run(async () => {
       failure.clear();
+      setChangedMeanwhile(false);
       try {
         const fresh = (await client.call("listAgentDatabases", { workspaceId, agentId })).find(
           (each) => each.connectionId === connection.id,
         );
         const reading = picks.reads ?? fresh?.level === "read";
         // A link with no policy yet gets the whole form; the server would otherwise keep an empty one.
+        // The form was built for a link with a setup of its own, or without one. If that changed meanwhile,
+        // what the person sees is not what a save would keep: nothing is sent, and the form loads again.
+        if (reading && unset(link) !== unset(fresh)) {
+          setChangedMeanwhile(true);
+          await failure.reload();
+          return;
+        }
         const whole = unset(fresh);
         const policy = whole
           ? {
@@ -711,6 +720,16 @@ function DatabaseForm({
               </Field>
             </div>
           </>
+        )}
+        {reads && edit && link !== undefined && unset(link) && (
+          <Callout tone="info" role="status">
+            {t("dbx.suggested")}
+          </Callout>
+        )}
+        {changedMeanwhile && (
+          <Callout tone="warning" role="status">
+            {t("dbx.changedMeanwhile")}
+          </Callout>
         )}
         {failure.error !== null && (
           <Callout tone="danger" role="alert">
@@ -875,10 +894,18 @@ function RepositoryForm({
             await failure.reload();
             return;
           }
+          // Narrowing from no limit while someone else set a limit: their limit joins the person's ticks on
+          // screen, and nothing is sent until the person has seen both and saves again.
+          if (savedScope === "all" && scopeOf(fresh) === "some") {
+            setNotice("becameSome");
+            await failure.reload();
+            return;
+          }
           // The person's ticks over the repositories saved now, not over the ones this screen loaded with.
           repositories = [...picked.over(scopeOf(fresh) === "some" ? fresh : [])];
           if (repositories.length === 0) {
             setNotice("keepOne");
+            await failure.reload();
             return;
           }
         }

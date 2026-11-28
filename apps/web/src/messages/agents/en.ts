@@ -757,6 +757,10 @@ export default {
   "dbx.noTables": "No tables chosen.",
   "dbx.noTablesThere": "The database has no tables this login can see.",
   "dbx.notListed": "(saved, not in the list now)",
+  "dbx.suggested":
+    "This agent has no setup of its own for this database, so the suggested one is filled in: every table, the suggested hidden columns and 200 queries a day. Saving keeps it.",
+  "dbx.changedMeanwhile":
+    "Meanwhile someone changed this database's setup for the agent. Nothing was saved: check the form, then save again.",
   "dbx.hidden": "Hidden columns",
   "dbx.hiddenHint":
     "table.column or schema.table.column, one per line. They come back empty in every answer.",

@@ -317,14 +317,15 @@ export class FakeConnections {
       manage = false,
     ) =>
       within((scope, params) => {
-        // As on the server: the permission first, then the agent.
-        if (manage && !can(scope.role, "manage_agents")) return fail(403, "forbidden", "Forbidden");
         const agent = this.host
           .agents()
           .find((each) => each.workspaceId === scope.workspaceId && each.id === text(params.agentId));
+        // As on the server: a write to an archived agent is refused before the route runs
+        // (registerArchivedAgentGuard), then the permission, then the agent.
+        if (manage && agent !== undefined && agent.archivedAt !== null)
+          return fail(409, "agent.archived", "The agent is archived");
+        if (manage && !can(scope.role, "manage_agents")) return fail(403, "forbidden", "Forbidden");
         if (agent === undefined) return fail(404, "not_found", "Agent not found");
-        // As on the server (registerArchivedAgentGuard): every write to an archived agent is refused.
-        if (manage && agent.archivedAt !== null) return fail(409, "agent.archived", "The agent is archived");
         return handler(scope, agent, params);
       });
 
@@ -412,7 +413,26 @@ export class FakeConnections {
               : [null];
         const tables = keys(asked.tables, "table", 500);
         const masked = keys(asked.maskedColumns, "column", 1000);
-        if (tables?.includes(null) || masked?.includes(null)) return fail(400, "validation", "Invalid body");
+        const known = new Set(["tables", "maskedColumns", "queriesPerDay", "timeoutSeconds"]);
+        const { queriesPerDay, timeoutSeconds } = asked as Record<string, unknown>;
+        if (
+          tables?.includes(null) ||
+          masked?.includes(null) ||
+          // .strict(): no key the server doesn't know.
+          Object.keys(asked).some((key) => !known.has(key)) ||
+          (queriesPerDay !== undefined &&
+            queriesPerDay !== null &&
+            !(
+              Number.isInteger(queriesPerDay) &&
+              Number(queriesPerDay) >= 1 &&
+              Number(queriesPerDay) <= 100_000
+            )) ||
+          (timeoutSeconds !== undefined &&
+            timeoutSeconds !== 15 &&
+            timeoutSeconds !== 30 &&
+            timeoutSeconds !== 60)
+        )
+          return fail(400, "validation", "Invalid body");
         if (tables !== undefined) asked.tables = tables as string[];
         if (masked !== undefined) asked.maskedColumns = masked as string[];
         // The first time, as the server: reading starts from every table there is and the suggested
@@ -430,7 +450,15 @@ export class FakeConnections {
         const link: T.AgentDatabase = {
           connectionId: connection.id,
           level,
-          policy: { ...(current?.policy ?? first), ...asked },
+          policy: (() => {
+            // As the server: the saved policy (or the first one) with what was asked, each list once.
+            const merged = { ...(current?.policy ?? first), ...asked };
+            return {
+              ...merged,
+              tables: [...new Set(merged.tables)],
+              maskedColumns: [...new Set(merged.maskedColumns)],
+            };
+          })(),
         };
         this.agentDatabases.set(agent.id, [
           ...own.filter((each) => each.connectionId !== connection.id),
@@ -446,11 +474,16 @@ export class FakeConnections {
         reply(200, { repositories: this.repositories.get(agent.id) ?? [] }),
       ),
       setAgentRepositories: withAgent((_scope, agent, params) => {
-        const asked = params.repositories;
+        // As the server: up to 200 entries, each trimmed, `owner/repo` or `owner/*` with parts of up to 100
+        // characters (github-app.ts isRepoPattern), each kept once.
+        const asked = Array.isArray(params.repositories)
+          ? params.repositories.map((each) => (typeof each === "string" ? each.trim() : null))
+          : null;
+        const pattern = /^[A-Za-z0-9_.-]{1,100}\/(?:[A-Za-z0-9_.-]{1,100}|\*)$/;
         if (
-          !Array.isArray(asked) ||
+          asked === null ||
           asked.length > 200 ||
-          !asked.every((each) => typeof each === "string" && /^[\w.-]+\/(?:\*|[\w.-]+)$/.test(each))
+          !asked.every((each) => each !== null && pattern.test(each))
         ) {
           return fail(400, "validation", "Use owner/repo or owner/*");
         }
