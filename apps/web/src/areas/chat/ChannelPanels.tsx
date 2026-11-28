@@ -2,6 +2,7 @@
 // topic, the monthly budget), and its pinned messages. The server decides each action; a control is
 // offered only to who it allows. Members and pins send no event, so both are read again each minute.
 import { useQueryClient } from "@tanstack/react-query";
+import { useRouter } from "@tanstack/react-router";
 import { useApiMutation, useApiQuery, useVanrClient } from "@vanr/client/react";
 import { type Channel, can } from "@vanr/contract";
 import {
@@ -16,12 +17,13 @@ import {
   Skeleton,
   Textarea,
 } from "@vanr/ui";
-import { useState } from "react";
-import { useGo } from "../../app/navigation.tsx";
+import { useRef, useState } from "react";
 import { useErrorMessage } from "../../app/screens.tsx";
 import { useMessages } from "../../i18n/react.tsx";
 import { forgetChannelQueries } from "../../realtime/react.tsx";
+import { ROUTES } from "../../routes.ts";
 import { useOutcome } from "../control/shared.tsx";
+import { readLimit } from "../work/routines/NewRoutine.tsx";
 import { NAME_MAX, TOPIC_MAX } from "./Channels.tsx";
 import { useConversation } from "./context.tsx";
 import { useAuthorName } from "./Message.tsx";
@@ -70,7 +72,6 @@ export function MembersDialog({ channel, onClose }: { channel: Channel; onClose:
   const common = useMessages("common");
   const describe = useErrorMessage("chat");
   const outcome = useOutcome();
-  const go = useGo();
   const queryClient = useQueryClient();
   const client = useVanrClient();
   const { workspaceId, channelId, me, directory, member } = useConversation();
@@ -86,21 +87,33 @@ export function MembersDialog({ channel, onClose }: { channel: Channel; onClose:
   ];
   const add = useApiMutation("createChannelMember", { invalidates: stale });
   const removePerson = useApiMutation("deleteChannelMemberPerson", { invalidates: stale });
+  // Leaving finishes even when the dialog is gone before the answer (closed, or the channel page lost
+  // the channel first, as the server stops sending it): out of a private channel nothing of it may stay,
+  // and someone still on the channel's page goes home. Someone who moved on stays where they are.
+  const router = useRouter();
+  const leftFrom = useRef<string | null>(null);
+  const leave = useApiMutation("deleteChannelMemberPerson", {
+    invalidates: stale,
+    onSuccess: () => {
+      outcome.done(t("people.left", { channel: channel.name }));
+      if (channel.visibility === "private") forgetChannelQueries(queryClient, client, workspaceId, channelId);
+      if (router.state.location.pathname === leftFrom.current)
+        void router.navigate({ to: ROUTES.home.path, params: { workspaceId } });
+    },
+  });
   const removeAgent = useApiMutation("deleteChannelMemberAgent", { invalidates: stale });
   const managesMembers = can(me.role, "manage_members");
   const inside = new Set((members.data ?? []).map((entry) => `${entry.type}:${entry.id}`));
   const q = query.trim().toLowerCase();
-  const fits = (name: string, handle: string) =>
-    q !== "" && (name.toLowerCase().includes(q) || handle.toLowerCase().includes(q));
-  const candidates = [
+  const fits = (entry: { name: string; handle: string }) =>
+    entry.name.toLowerCase().includes(q) || entry.handle.toLowerCase().includes(q);
+  // Who could be added: people and the agents this person can talk to, not already in.
+  const pool = [
     ...(agents.data ?? [])
-      .filter(
-        (agent) =>
-          agent.archivedAt === null && !inside.has(`agent:${agent.id}`) && fits(agent.name, agent.handle),
-      )
+      .filter((agent) => agent.archivedAt === null && agent.reachable && !inside.has(`agent:${agent.id}`))
       .map((agent) => ({ type: "agent" as const, id: agent.id, name: agent.name, handle: agent.handle })),
     ...(people.data ?? [])
-      .filter((person) => !inside.has(`person:${person.userId}`) && fits(person.name, person.handle))
+      .filter((person) => !inside.has(`person:${person.userId}`))
       .map((person) => ({
         type: "person" as const,
         id: person.userId,
@@ -108,6 +121,9 @@ export function MembersDialog({ channel, onClose }: { channel: Channel; onClose:
         handle: person.handle,
       })),
   ];
+  const candidates = q === "" ? [] : pool.filter(fits);
+  const targetOf = (body: { agentId: string } | { userId: string } | undefined) =>
+    body === undefined ? undefined : "agentId" in body ? body.agentId : body.userId;
   // Adding is for who is already in; a direct message keeps its people.
   const mayAdd = member;
   const name = (entry: { type: "agent" | "person"; id: string }) =>
@@ -144,6 +160,12 @@ export function MembersDialog({ channel, onClose }: { channel: Channel; onClose:
                     <Button
                       size="sm"
                       variant="ghost"
+                      // One removal at a time per row: a second click would only find them gone.
+                      loading={
+                        entry.type === "agent"
+                          ? removeAgent.isPending && removeAgent.variables?.agentId === entry.id
+                          : removePerson.isPending && removePerson.variables?.personId === entry.id
+                      }
                       aria-label={t("people.removeNamed", { name: name(entry) })}
                       onClick={() =>
                         entry.type === "agent"
@@ -164,23 +186,14 @@ export function MembersDialog({ channel, onClose }: { channel: Channel; onClose:
                     <Button
                       size="sm"
                       variant="ghost"
-                      loading={removePerson.isPending}
-                      onClick={() =>
-                        removePerson.mutate(
+                      loading={leave.isPending}
+                      onClick={() => {
+                        leftFrom.current = router.state.location.pathname;
+                        leave.mutate(
                           { ...args, personId: me.userId },
-                          {
-                            onSuccess: () => {
-                              outcome.done(t("people.left", { channel: channel.name }));
-                              onClose();
-                              void go("home", { workspaceId });
-                              // Out of a private channel nothing of it may stay: the server says no more.
-                              if (channel.visibility === "private")
-                                forgetChannelQueries(queryClient, client, workspaceId, channelId);
-                            },
-                            onError: (error) => outcome.failed(error),
-                          },
-                        )
-                      }
+                          { onSuccess: onClose, onError: (error) => outcome.failed(error) },
+                        );
+                      }}
                     >
                       {t("people.leave")}
                     </Button>
@@ -205,6 +218,8 @@ export function MembersDialog({ channel, onClose }: { channel: Channel; onClose:
                   void agents.refetch();
                 }}
               />
+            ) : pool.length === 0 ? (
+              <p className="chat-note">{t("people.none")}</p>
             ) : q === "" ? null : candidates.length === 0 ? (
               <p className="chat-note">{t("people.noMatch", { query: query.trim() })}</p>
             ) : (
@@ -217,7 +232,7 @@ export function MembersDialog({ channel, onClose }: { channel: Channel; onClose:
                     </span>
                     <Button
                       size="sm"
-                      loading={add.isPending && add.variables?.body !== undefined}
+                      loading={add.isPending && targetOf(add.variables?.body) === entry.id}
                       aria-label={t("people.addNamed", { name: entry.name })}
                       onClick={() =>
                         add.mutate(
@@ -252,6 +267,9 @@ export function MembersDialog({ channel, onClose }: { channel: Channel; onClose:
   );
 }
 
+/** A channel's monthly budget for agents, in USD. */
+const BUDGET = { min: 0, max: 100_000, step: "any" } as const;
+
 export function SettingsDialog({ channel, onClose }: { channel: Channel; onClose: () => void }) {
   const t = useMessages("chat");
   const common = useMessages("common");
@@ -274,9 +292,9 @@ export function SettingsDialog({ channel, onClose }: { channel: Channel; onClose
   const save = useApiMutation("updateChannel", {
     invalidates: () => [{ method: "listChannels", args: { workspaceId } }],
   });
-  const budgetValue = budget.trim() === "" ? null : Number(budget);
-  const budgetBad =
-    budgetValue !== null && (!Number.isFinite(budgetValue) || budgetValue < 0 || budgetValue > 100_000);
+  // An amount as typed in either language ("1.5" or "1,5"), or nothing for no limit of its own.
+  const budgetValue = budget.trim() === "" ? null : (readLimit(budget, BUDGET) ?? Number.NaN);
+  const budgetBad = budgetValue !== null && Number.isNaN(budgetValue);
   const nameBad = name.trim() === "" || name.length > NAME_MAX;
   const topicBad = topic.length > TOPIC_MAX;
   const ready = !budgetBad && !nameBad && !topicBad;
@@ -403,12 +421,16 @@ export function PinsDialog({ onClose }: { onClose: () => void }) {
 }
 
 /** Pins a message to its channel, or takes the pin off. */
-export function usePinToggle() {
+/** Pins of the open channel, where they apply: not in a direct message, nor for someone not in it. */
+export function usePinToggle(applies: boolean) {
   const { workspaceId, channelId } = useConversation();
   const outcome = useOutcome();
   const t = useMessages("chat");
   const args = { workspaceId, channelId };
-  const pins = useApiQuery("listChannelPinnedMessages", args, { refetchInterval: PANEL_REFRESH_MS });
+  const pins = useApiQuery("listChannelPinnedMessages", args, {
+    refetchInterval: PANEL_REFRESH_MS,
+    enabled: applies,
+  });
   const stale = () => [{ method: "listChannelPinnedMessages" as const, args }];
   const pin = useApiMutation("updateChannelPinnedMessage", { invalidates: stale });
   const unpin = useApiMutation("deleteChannelPinnedMessage", { invalidates: stale });
@@ -420,7 +442,13 @@ export function usePinToggle() {
         { ...args, messageId },
         {
           onSuccess: () => outcome.done(pinned.has(messageId) ? t("pins.removed") : t("pins.added")),
-          onError: (error) => outcome.failed(error),
+          onError: (error) => {
+            // Someone else unpinned it first: it is no longer pinned, which is what was asked.
+            if (pinned.has(messageId) && error.status === 404) {
+              void pins.refetch();
+              outcome.done(t("pins.removed"));
+            } else outcome.failed(error);
+          },
         },
       ),
   };

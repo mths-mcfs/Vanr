@@ -260,7 +260,7 @@ function History({
   };
 
   const onQuote = useCallback((message: Message) => setQuoting(message), []);
-  const pin = usePinToggle();
+  const pin = usePinToggle(target.kind === "channel" && member);
   const onRetry = history.retry;
 
   const placeholder =

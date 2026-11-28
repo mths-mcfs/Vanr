@@ -159,6 +159,10 @@ export class FakeChat {
     stored.run = { ...stored.run, status: "done", finishedAt: this.host.now().toISOString() };
   }
 
+  private isDm(scope: Scope, channelId: string): boolean {
+    return this.host.dms(scope.workspaceId).some((dm) => dm.channelId === channelId);
+  }
+
   private room(scope: Scope, channelId: unknown): Room | undefined {
     const room = this.host
       .channels()
@@ -275,29 +279,42 @@ export class FakeChat {
       createChannelMember: within((scope, params) => {
         const room = this.room(scope, params.channelId);
         if (room === undefined) return notFound();
+        // As on the server: a direct message keeps its two, and only someone in the channel adds.
+        if (this.isDm(scope, room.id)) return fail(403, "forbidden", "Direct messages have fixed members");
         if (!room.memberIds.includes(scope.user.id))
           return fail(403, "forbidden", "Join the channel to add people");
         if (typeof params.agentId === "string") {
-          const set = this.roster(scope.workspaceId, room.id);
-          set.add(params.agentId);
-        } else if (typeof params.userId === "string" && !room.memberIds.includes(params.userId))
-          room.memberIds.push(params.userId);
+          const agent = this.host.agents(scope.workspaceId).find((each) => each.id === params.agentId);
+          if (agent === undefined || agent.archivedAt !== null)
+            return fail(404, "not_found", "Agent not found");
+          this.roster(scope.workspaceId, room.id).add(agent.id);
+          return reply(204, null);
+        }
+        const person = this.host.people(scope.workspaceId).find((each) => each.userId === params.userId);
+        if (person === undefined) return fail(404, "not_found", "Member not found");
+        if (!room.memberIds.includes(person.userId)) room.memberIds.push(person.userId);
         return reply(204, null);
       }),
       deleteChannelMemberPerson: within((scope, params) => {
         const room = this.room(scope, params.channelId);
         if (room === undefined) return notFound();
+        if (this.isDm(scope, room.id)) return fail(403, "forbidden", "Direct messages have fixed members");
         const self = params.personId === scope.user.id;
         if (!self && !manages(scope.role)) return fail(403, "forbidden", "Forbidden");
         const general = this.host.channels().find((each) => each.id === room.id)?.isGeneral ?? false;
         if (general) return fail(409, "channel.general", "Everyone stays in #general");
+        if (!room.memberIds.includes(String(params.personId)))
+          return fail(404, "not_found", "Member not found");
         room.memberIds = room.memberIds.filter((id) => id !== params.personId);
         return reply(204, null);
       }),
       deleteChannelMemberAgent: within((scope, params) => {
         const room = this.room(scope, params.channelId);
         if (room === undefined) return notFound();
+        if (this.isDm(scope, room.id)) return fail(403, "forbidden", "Direct messages have fixed members");
         if (!manages(scope.role)) return fail(403, "forbidden", "Forbidden");
+        if (!this.agentsIn(scope.workspaceId, room.id).has(String(params.agentId)))
+          return fail(404, "not_found", "Member not found");
         this.roster(scope.workspaceId, room.id).delete(String(params.agentId));
         return reply(204, null);
       }),

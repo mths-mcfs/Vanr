@@ -254,7 +254,7 @@ export function NewMessageDialog({ workspaceId, onClose }: { workspaceId: string
                     {person.userId === me?.user.id ? t("side.you", { name: person.name }) : person.name}
                   </span>
                   <span className="chat-mentions__handle">@{person.handle}</span>
-                  <span className="vr-visually-hidden">
+                  <span className="chat-pick__presence" data-online={person.online || undefined}>
                     {person.online ? t("side.online") : t("side.away")}
                   </span>
                 </button>

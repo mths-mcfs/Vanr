@@ -1051,6 +1051,30 @@
     cursor: pointer;
   }
 
+  /* Presence beside the name, in words and a dot: seen, not only read out. */
+  .chat-pick__presence {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--vr-space-1);
+    margin-inline-start: auto;
+    color: var(--vr-fg-muted);
+    font-size: var(--vr-text-sm);
+    line-height: var(--vr-text-sm-lh);
+  }
+
+  .chat-pick__presence::before {
+    content: "";
+    width: var(--vr-space-2);
+    height: var(--vr-space-2);
+    border: var(--vr-border) solid var(--vr-fg-muted);
+    border-radius: 50%;
+  }
+
+  .chat-pick__presence[data-online]::before {
+    border-color: var(--vr-success-fg);
+    background-color: var(--vr-success-fg);
+  }
+
   .chat-pick__person:hover {
     background-color: var(--vr-bg-hover);
   }

@@ -308,3 +308,243 @@ describe("what CodeRabbit found on the channels round", () => {
     expect(screen.queryByText("Scout will answer") === null).toBe(true);
   });
 });
+
+describe("a sidebar dialog and a workspace switch", () => {
+  for (const [button, title] of [
+    ["Make a channel", "Make a channel"],
+    ["Browse channels", "Browse channels"],
+    ["Message someone", "Message someone"],
+  ] as const)
+    test(`"${button}" opened in one workspace closes when another opens`, async () => {
+      const server = newServer();
+      const app = await open("/channel/ch_general", "usr_ana", server);
+      const sidebar = await screen.findByRole("complementary");
+      await app.user.click(await within(sidebar).findByRole("button", { name: button }));
+      const dialog = await screen.findByRole("dialog", { name: title });
+      if (button === "Make a channel")
+        await app.user.type(within(dialog).getByRole("textbox", { name: "Name" }), "birch-only");
+      await act(() => app.runtime.router.navigate({ to: "/workspace/workspace_nightshift" }));
+      await waitFor(() => expect(app.address()).toBe("/workspace/workspace_nightshift"));
+      expect(screen.queryByRole("dialog", { name: title }) === null).toBe(true);
+      expect(server.state.channels.some((channel) => channel.name === "birch-only")).toBe(false);
+    });
+});
+
+describe("the dev fake answers members as the server does", () => {
+  test("adds and removals the server refuses are refused", async () => {
+    const server = newServer();
+    const app = await open("/channel/ch_general", "usr_ana", server);
+    await screen.findByRole("complementary");
+    const { client } = app.runtime.api;
+    const status = async (call: () => Promise<unknown>) => {
+      try {
+        await call();
+        return 204;
+      } catch (error) {
+        return (error as { status?: number }).status;
+      }
+    };
+    const add = (channelId: string, body: { agentId: string } | { userId: string }) =>
+      status(() => client.call("createChannelMember", { workspaceId: WS, channelId, body }));
+    // Another workspace's agent, one that doesn't exist, a person who isn't in the workspace.
+    expect(await add("ch_general", { agentId: "agt_fjell" })).toBe(404);
+    expect(await add("ch_general", { agentId: "agt_nope" })).toBe(404);
+    expect(await add("ch_general", { userId: "usr_nobody" })).toBe(404);
+    // An archived agent.
+    const tally = server.agents.find((agent) => agent.id === "agt_tally");
+    if (tally !== undefined) tally.archivedAt = new Date(TEST_NOW.getTime() - 60_000).toISOString();
+    expect(await add("ch_general", { agentId: "agt_tally" })).toBe(404);
+    // Someone not in the channel can't be removed.
+    const remove = (kind: "Person" | "Agent", channelId: string, id: string) =>
+      status(() =>
+        kind === "Person"
+          ? client.call("deleteChannelMemberPerson", { workspaceId: WS, channelId, personId: id })
+          : client.call("deleteChannelMemberAgent", { workspaceId: WS, channelId, agentId: id }),
+      );
+    expect(await remove("Person", "ch_print", "usr_nobody")).toBe(404);
+    expect(await remove("Agent", "ch_print", "agt_nope")).toBe(404);
+    // A direct message keeps its two.
+    const { channelId: dm } = await client.call("createDm", {
+      workspaceId: WS,
+      body: { userId: "usr_iris" },
+    });
+    expect(await add(dm, { userId: "usr_tomas" })).toBe(403);
+    expect(await remove("Person", dm, "usr_iris")).toBe(403);
+    expect(await remove("Agent", dm, "agt_scout")).toBe(403);
+    // What the server takes, the fake still takes.
+    expect(await add("ch_print", { agentId: "agt_ledger" })).toBe(204);
+    expect(await remove("Agent", "ch_print", "agt_ledger")).toBe(204);
+  });
+});
+
+describe("a channel's people, round one of the access check", () => {
+  const board = (server: ReturnType<typeof newServer>) => {
+    server.state.channels.push({
+      id: "ch_board",
+      workspaceId: WS,
+      name: "board-room",
+      topic: "",
+      isGeneral: false,
+      visibility: "private",
+      budgetPerMonthUsd: null,
+      createdAt: new Date(TEST_NOW.getTime() - 3_600_000).toISOString(),
+      memberIds: ["usr_ana", "usr_iris"],
+    });
+    server.state.messages.push({ ...message("msg_secret", "Raise it 4%"), channelId: "ch_board" });
+  };
+
+  test("offers only the agents this person can talk to", async () => {
+    const server = newServer();
+    server.chat.agentMembers.set("ch_print", new Set());
+    const tally = server.agents.find((agent) => agent.id === "agt_tally");
+    if (tally !== undefined) tally.reachable = false;
+    const app = await open("/channel/ch_print", "usr_ana", server);
+    await app.user.click(await screen.findByRole("button", { name: /in the channel/ }));
+    const dialog = await screen.findByRole("dialog", { name: "People in #print-queue" });
+    const search = within(dialog).getByRole("searchbox", { name: "Add someone" });
+    await app.user.type(search, "ledger");
+    expect(await within(dialog).findByRole("button", { name: "Add Ledger" })).toBeDefined();
+    await app.user.clear(search);
+    await app.user.type(search, "tally");
+    expect(await within(dialog).findByText("Nobody outside the channel matches “tally”.")).toBeDefined();
+  });
+
+  test("leaving a private channel forgets it even when the dialog is closed before the answer", async () => {
+    const server = newServer();
+    board(server);
+    const app = await open("/channel/ch_board", "usr_iris", server);
+    expect(await screen.findByText("Raise it 4%")).toBeDefined();
+    await app.user.click(screen.getByRole("button", { name: /in the channel/ }));
+    const dialog = await screen.findByRole("dialog", { name: "People in #board-room" });
+    server.force("listChannels", { kind: "offline" }, 20);
+    const held = server.hold("deleteChannelMemberPerson");
+    await app.user.click(await within(dialog).findByRole("button", { name: "Leave channel" }));
+    await app.user.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "People in #board-room" }) === null).toBe(true),
+    );
+    await act(async () => held.release());
+    // The dialog is gone, so nothing leads away; what the channel held is forgotten all the same.
+    await waitFor(() => expect(screen.queryByText("Raise it 4%") === null).toBe(true));
+    const left = app.runtime.queryClient
+      .getQueryCache()
+      .findAll()
+      .filter((query) => {
+        const args = query.queryKey[3];
+        return (
+          typeof args === "object" && args !== null && "channelId" in args && args.channelId === "ch_board"
+        );
+      })
+      .filter((query) => query.state.data !== undefined);
+    expect(left.length).toBe(0);
+  });
+
+  test("the channel lost on the socket before the leave answers still takes the person home", async () => {
+    const server = newServer();
+    board(server);
+    const app = await open("/channel/ch_board", "usr_iris", server);
+    expect(await screen.findByText("Raise it 4%")).toBeDefined();
+    await app.user.click(screen.getByRole("button", { name: /in the channel/ }));
+    const dialog = await screen.findByRole("dialog", { name: "People in #board-room" });
+    // The leave is done at once but answered late; the server stops sending the channel in between,
+    // so the page finds it lost and the dialog goes with it.
+    const held = server.delay("deleteChannelMemberPerson");
+    await app.user.click(await within(dialog).findByRole("button", { name: "Leave channel" }));
+    await waitFor(() =>
+      expect(server.state.channels.find((c) => c.id === "ch_board")?.memberIds).toEqual(["usr_ana"]),
+    );
+    await act(async () => server.dropFromChannel("usr_iris", "ch_board"));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "People in #board-room" }) === null).toBe(true),
+    );
+    await act(async () => held.release());
+    await waitFor(() => expect(app.address()).toBe(`/workspace/${WS}`));
+  });
+
+  test("a second click on Remove sends nothing more", async () => {
+    const server = newServer();
+    const app = await open("/channel/ch_print", "usr_ana", server);
+    await app.user.click(await screen.findByRole("button", { name: /in the channel/ }));
+    const dialog = await screen.findByRole("dialog", { name: "People in #print-queue" });
+    const remove = await within(dialog).findByRole("button", { name: "Remove Scout from the channel" });
+    const held = server.hold("deleteChannelMemberAgent");
+    await app.user.click(remove);
+    await app.user.click(remove);
+    await act(async () => held.release());
+    await waitFor(() => expect(within(dialog).queryByText("Scout") === null).toBe(true));
+    expect(server.calls.filter((call) => call.method === "deleteChannelMemberAgent").length).toBe(1);
+  });
+
+  test("adding one shows only that one as busy", async () => {
+    const server = newServer();
+    server.chat.agentMembers.set("ch_print", new Set());
+    const app = await open("/channel/ch_print", "usr_ana", server);
+    await app.user.click(await screen.findByRole("button", { name: /in the channel/ }));
+    const dialog = await screen.findByRole("dialog", { name: "People in #print-queue" });
+    await app.user.type(within(dialog).getByRole("searchbox", { name: "Add someone" }), "l");
+    const ledger = await within(dialog).findByRole("button", { name: "Add Ledger" });
+    const held = server.hold("createChannelMember");
+    await app.user.click(ledger);
+    await waitFor(() => expect(ledger.getAttribute("aria-busy")).toBe("true"));
+    expect(within(dialog).getByRole("button", { name: "Add Tally" }).getAttribute("aria-busy") === null).toBe(
+      true,
+    );
+    await act(async () => held.release());
+  });
+
+  test("with everyone in already, it says there's nobody left to add", async () => {
+    const app = await open("/channel/ch_general", "usr_ana");
+    await app.user.click(await screen.findByRole("button", { name: /in the channel/ }));
+    const dialog = await screen.findByRole("dialog", { name: "People in #general" });
+    expect(
+      await within(dialog).findByText("Everyone who could join is in the channel already."),
+    ).toBeDefined();
+  });
+});
+
+describe("pins where they apply", () => {
+  test("a direct message reads no pins", async () => {
+    const server = newServer();
+    const app = await open("/channel/ch_general", "usr_ana", server);
+    const sidebar = await screen.findByRole("complementary");
+    await app.user.click(await within(sidebar).findByRole("button", { name: "Message someone" }));
+    const dialog = await screen.findByRole("dialog", { name: "Message someone" });
+    await app.user.type(within(dialog).getByRole("searchbox", { name: "Name or handle" }), "iris");
+    await app.user.click(await within(dialog).findByRole("button", { name: /Íris Valença/ }));
+    expect(await screen.findByRole("heading", { name: "Íris Valença" })).toBeDefined();
+    await screen.findByRole("textbox", { name: /Write/ });
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+    const pinReads = server.calls.filter(
+      (call) => call.method === "listChannelPinnedMessages" && call.params.channelId !== "ch_general",
+    );
+    expect(pinReads.length).toBe(0);
+  });
+
+  test("unpinning what someone else already unpinned ends unpinned, without an error", async () => {
+    const server = newServer();
+    server.state.messages.push(message("msg_pin", "Kiln B runs hot"));
+    const app = await open("/channel/ch_general", "usr_ana", server);
+    const item = await screen.findByRole("article", { name: /Jonas Lind/ });
+    const toggle = within(item).getByRole("button", { name: "Pin to the channel" });
+    await app.user.click(toggle);
+    await waitFor(() => expect(toggle.getAttribute("aria-pressed")).toBe("true"));
+    // Someone else unpins it; this page still shows it pinned.
+    server.chat.pins = [];
+    await app.user.click(toggle);
+    await waitFor(() => expect(toggle.getAttribute("aria-pressed")).toBe("false"));
+    expect(screen.queryByText("That no longer exists.") === null).toBe(true);
+  });
+});
+
+describe("starting a direct message, who is around", () => {
+  test("shows each person's presence in plain sight", async () => {
+    const app = await open("/channel/ch_general");
+    const sidebar = await screen.findByRole("complementary");
+    await app.user.click(await within(sidebar).findByRole("button", { name: "Message someone" }));
+    const dialog = await screen.findByRole("dialog", { name: "Message someone" });
+    await app.user.type(within(dialog).getByRole("searchbox", { name: "Name or handle" }), "iris");
+    const row = await within(dialog).findByRole("button", { name: /Íris Valença/ });
+    const presence = within(row).getByText(/^(online|away)$/);
+    expect(presence.closest(".vr-visually-hidden") === null).toBe(true);
+  });
+});

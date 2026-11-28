@@ -55,7 +55,10 @@ const NUMBERS = [
 type NumberKey = (typeof NUMBERS)[number]["key"];
 
 /** A limit as typed: a number inside its bounds (a whole one unless it is money), or undefined. */
-export function readLimit(text: string, limit: (typeof NUMBERS)[number]): number | undefined {
+export function readLimit(
+  text: string,
+  limit: { min: number; max: number; step: number | "any" },
+): number | undefined {
   // Digits with one decimal mark, either "." or ",": not "0x10", "1e3" or a thousands separator.
   const typed = text.trim();
   if (!/^\d+([.,]\d+)?$/.test(typed)) return undefined;

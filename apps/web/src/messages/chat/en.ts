@@ -143,6 +143,7 @@ export default {
   "people.addHint": "Search people and agents by name or handle.",
   "people.candidates": "People and agents to add",
   "people.noMatch": "Nobody outside the channel matches “{query}”.",
+  "people.none": "Everyone who could join is in the channel already.",
   "people.addOne": "Add",
   "people.addNamed": "Add {name}",
   "people.added": "{name} is in now.",

@@ -90,8 +90,14 @@ function Loading() {
 }
 
 export function ChannelList() {
-  const t = useMessages("chat");
   const { workspaceId } = useRouteParams("home");
+  // The sidebar stays mounted across a workspace switch: what was open in one (a dialog about to make a
+  // channel there) never carries to the next.
+  return <WorkspaceChannels key={workspaceId} workspaceId={workspaceId} />;
+}
+
+function WorkspaceChannels({ workspaceId }: { workspaceId: string }) {
+  const t = useMessages("chat");
   const { me } = useSession();
   const scope = { workspaceId };
   const [dialog, setDialog] = useState<"create" | "browse" | "dm" | null>(null);

@@ -143,6 +143,7 @@ export default {
   "people.addHint": "Busque pessoas e agentes pelo nome ou identificador.",
   "people.candidates": "Pessoas e agentes para adicionar",
   "people.noMatch": "Ninguém fora do canal corresponde a “{query}”.",
+  "people.none": "Todos que poderiam entrar já estão no canal.",
   "people.addOne": "Adicionar",
   "people.addNamed": "Adicionar {name}",
   "people.added": "{name} já está no canal.",
