@@ -117,9 +117,21 @@ function LiveRunView({
             />
           )}
         </header>
+        {run.consulting !== null && !ended && (
+          <p className="chat-note" role="status">
+            {t("run.consulting", { agent: directory.agentName(run.consulting) })}
+          </p>
+        )}
+        {run.unavailable !== null && (
+          <p className="chat-note chat-note--danger" role="alert">
+            {run.unavailable === ""
+              ? t("run.unavailable", { agent: name })
+              : t("run.unavailableWhy", { agent: name, reason: run.unavailable })}
+          </p>
+        )}
         <StepList steps={run.steps} label={t("run.steps", { agent: name })} />
         {run.text !== "" ? (
-          <p className="chat-live__text">
+          <p className="chat-live__text" data-testid="run-text">
             {run.text}
             {!ended && <span className="chat-live__caret" aria-hidden="true" />}
           </p>

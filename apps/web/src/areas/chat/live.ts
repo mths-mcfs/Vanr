@@ -1,6 +1,6 @@
-// An agent's runs in one conversation while they happen, built from the run events. Nothing here is
-// stored: the answer the run posts (`message.posted`) takes the place of the streamed text, and the list
-// of active runs (`listChannelActiveRuns`) is the truth whenever it is read again.
+// An agent's runs in one conversation while they happen, built from the run events. Nothing here goes
+// to the server: the answer the run posts (`message.posted`) takes the place of the streamed text, and
+// the list of active runs (`listChannelActiveRuns`) is the truth whenever it is read again.
 import type { ActiveRun } from "@vanr/contract";
 
 /** A step of a live run: a note the agent made between tools, or a tool it called. */
@@ -35,6 +35,10 @@ export type LiveRun = {
   /** Set once the run ended with an answer: the line stays until that answer is on screen. */
   answerId: string | null;
   endedAt: number | null;
+  /** The agent this run is asking right now, while a delegation is open. */
+  consulting: string | null;
+  /** Why the agent can't work right now, when the server said so. */
+  unavailable: string | null;
 };
 
 /** The run events this file reads, by name, with the fields it reads. */
@@ -46,7 +50,11 @@ export type RunEvent =
   | { type: "run.tool_result"; toolUseId?: string; text?: string; isError?: boolean; tool?: string }
   | { type: "run.completed"; messageId?: string | null }
   | { type: "run.stopped" }
-  | { type: "run.idle" };
+  | { type: "run.idle" }
+  | { type: "run.thinking" }
+  | { type: "run.agent_unavailable"; reason?: string }
+  | { type: "delegation.started"; delegateAgentId?: string }
+  | { type: "delegation.completed" };
 
 export type RunEventBase = { runId?: string; agentId: string; threadId?: string | null };
 
@@ -69,6 +77,8 @@ function fresh(base: RunEventBase & { runId: string }, now: number): LiveRun {
     lastEventAt: now,
     answerId: null,
     endedAt: null,
+    consulting: null,
+    unavailable: null,
   };
 }
 
@@ -104,6 +114,14 @@ export function applyRunEvent(
       if (known === undefined) return runs;
       if (event.messageId == null) return runs.filter((run) => run.runId !== runId);
       return withRun(runs, at, now, (run) => ({ ...run, answerId: event.messageId ?? null, endedAt: now }));
+    case "run.thinking":
+      return withRun(runs, at, now, (run) => run);
+    case "run.agent_unavailable":
+      return withRun(runs, at, now, (run) => ({ ...run, unavailable: event.reason ?? "" }));
+    case "delegation.started":
+      return withRun(runs, at, now, (run) => ({ ...run, consulting: event.delegateAgentId ?? null }));
+    case "delegation.completed":
+      return withRun(runs, at, now, (run) => ({ ...run, consulting: null }));
     case "run.status_changed":
       return withRun(runs, at, now, (run) => ({
         ...run,
@@ -216,3 +234,9 @@ export function showing(runs: readonly LiveRun[], answers: ReadonlySet<string>, 
 
 export const isQuiet = (run: LiveRun, now: number) =>
   run.endedAt === null && now - run.lastEventAt >= QUIET_AFTER_MS;
+
+/** The runs without the ended ones whose time to land has passed. */
+export function prune(runs: readonly LiveRun[], now: number): readonly LiveRun[] {
+  const kept = runs.filter((run) => run.endedAt === null || now - run.endedAt < LANDING_MS);
+  return kept.length === runs.length ? runs : kept;
+}

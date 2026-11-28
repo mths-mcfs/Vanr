@@ -57,7 +57,8 @@ test.describe("chat", () => {
     // While it works: the agent lit, its first words streaming, then the tool it called.
     const run = page.getByRole("region", { name: t("chat", "run.label", { agent: "Kiln" }) });
     await expect(run).toBeVisible({ timeout: 30_000 });
-    await expect(run.getByText(/save to memory/)).toBeVisible();
+    // The words themselves, as they stream: not the note they turn into once the tool is called.
+    await expect(run.getByTestId("run-text")).toContainText(/save to memory/i);
     const steps = run.getByRole("list", { name: t("chat", "run.steps", { agent: "Kiln" }) });
     await expect(steps.getByRole("button", { name: /remember/ })).toBeVisible({ timeout: 30_000 });
 

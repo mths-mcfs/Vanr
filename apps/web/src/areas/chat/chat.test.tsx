@@ -117,11 +117,8 @@ describe("a channel", () => {
     const server = newServer();
     server.state.messages.push(message({ id: "msg_hi", body: "Proofs **ready** at noon" }));
     const app = await open("/channel/ch_general", "usr_ana", server);
-    const strong = await screen.findByText("ready");
-    console.log("FOUND", strong.tagName, document.querySelector("[role=log]")?.getAttribute("aria-label"));
-    const log = screen.getByRole("log", { name: "Messages" });
-    console.log("LOG");
-    expect(strong.tagName).toBe("STRONG");
+    const log = await screen.findByRole("log", { name: "Messages" });
+    expect(within(log).getByText("ready").tagName).toBe("STRONG");
     expect(screen.getByRole("heading", { name: /general/ })).toBeDefined();
     const field = screen.getByRole("textbox", { name: "Write in #general" });
     await app.user.type(field, "First line{Shift>}{Enter}{/Shift}second line");
@@ -147,9 +144,13 @@ describe("a channel", () => {
     const app = await open("/channel/ch_general", "usr_ana", server);
     const field = await screen.findByRole("textbox", { name: "Write in #general" });
     await app.user.type(field, "Kiln is warm{Enter}");
-    expect(await screen.findByText("Not sent.")).toBeDefined();
+    expect(await screen.findByText("Not sent. It stays here only until you leave this page.")).toBeDefined();
     await app.user.click(screen.getByRole("button", { name: "Send again" }));
-    await waitFor(() => expect(screen.queryByText("Not sent.") === null).toBe(true));
+    await waitFor(() =>
+      expect(screen.queryByText("Not sent. It stays here only until you leave this page.") === null).toBe(
+        true,
+      ),
+    );
     const posts = server.calls.filter((call) => call.method === "createChannelMessage");
     expect(posts).toHaveLength(2);
     expect(posts[0]?.params.clientId).toBe(posts[1]?.params.clientId);

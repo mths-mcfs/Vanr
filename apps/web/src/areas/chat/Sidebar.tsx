@@ -103,6 +103,9 @@ export function ChannelList() {
     (members.data ?? []).filter((member) => member.online).map((member) => member.userId),
   );
   const teammates = (agents.data ?? []).filter((agent) => agent.archivedAt === null);
+  // Lit only for a run this person may see: the server's list follows who can read each run.
+  const runs = useApiQuery("listActiveRuns", scope);
+  const atWork = new Set((runs.data ?? []).map((run) => run.agentId));
 
   return (
     <div className="chat-side">
@@ -171,7 +174,7 @@ export function ChannelList() {
                       name=""
                       size="sm"
                       aria-hidden="true"
-                      working={agent.busy}
+                      working={atWork.has(agent.id)}
                     />
                     <span className="chat-side__name">{agent.name}</span>
                     <Unread count={unread} label={t("side.unread", { count: unread })} />

@@ -852,6 +852,14 @@ export class FakeServer {
     if (this.sockets.delete(socket)) socket.drop(code);
   }
 
+  /** The server stops a person's subscription to a channel, as when they are taken out of it. */
+  dropFromChannel(userId: string, channelId: string): void {
+    for (const socket of this.sockets) {
+      if (socket.userId !== userId || !socket.channels.delete(channelId)) continue;
+      socket.push({ type: "unsubscribed", channelId });
+    }
+  }
+
   /** Sends an event to everyone in a workspace, or to the followers of one channel. */
   emit(workspaceId: string, event: { type: string } & Record<string, unknown>, channelId?: string): void {
     for (const socket of this.sockets) {

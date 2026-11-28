@@ -27,6 +27,7 @@ import { useRuntime } from "../app/context.tsx";
 /** Opens the workspace's connection while mounted and stops it on the way out. */
 export function WorkspaceRealtime({ workspaceId, children }: { workspaceId: string; children: ReactNode }) {
   const client = useVanrClient();
+  const queryClient = useQueryClient();
   const { openSocket, clock, gate, session } = useRuntime();
   const realtime = useMemo(
     () =>
@@ -34,6 +35,16 @@ export function WorkspaceRealtime({ workspaceId, children }: { workspaceId: stri
         workspaceId,
         baseUrl: openSocket.baseUrl,
         clock,
+        // The server stopped this browser's subscription to a channel: the person may have lost it.
+        // Its list and its history are read again; a channel they can no longer read answers 404 there.
+        onUnsubscribed: (channelId) => {
+          for (const prefix of [
+            { method: "listChannels", args: { workspaceId } },
+            { method: "getDms", args: { workspaceId } },
+            { method: "listChannelMessages", args: { workspaceId, channelId } },
+          ] as const)
+            void queryClient.invalidateQueries({ queryKey: prefixKey(client, prefix) });
+        },
         ...(openSocket.createSocket !== undefined && { createSocket: openSocket.createSocket }),
         ...(openSocket.random !== undefined && { random: openSocket.random }),
         onEnded: (why) => {
@@ -43,7 +54,7 @@ export function WorkspaceRealtime({ workspaceId, children }: { workspaceId: stri
           else void session.load(true);
         },
       }),
-    [workspaceId, openSocket, clock, gate, session],
+    [workspaceId, openSocket, clock, gate, session, queryClient, client],
   );
   return (
     <VanrProvider client={client} realtime={realtime}>
@@ -82,24 +93,35 @@ export function useReconnectNow(): () => void {
 // How many mounted components follow each channel of each connection.
 const followers = new WeakMap<RealtimeClient, Map<string, number>>();
 
+/**
+ * Follows a channel's events until the returned function is called. Every follower of a channel
+ * shares one subscription, so one leaving never ends another's.
+ */
+export function followChannel(realtime: RealtimeClient, channelId: string): () => void {
+  const counts = followers.get(realtime) ?? new Map<string, number>();
+  followers.set(realtime, counts);
+  const before = counts.get(channelId) ?? 0;
+  counts.set(channelId, before + 1);
+  if (before === 0) realtime.subscribe(channelId);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const left = (counts.get(channelId) ?? 1) - 1;
+    if (left > 0) counts.set(channelId, left);
+    else {
+      counts.delete(channelId);
+      realtime.unsubscribe(channelId);
+    }
+  };
+}
+
 /** Follows a channel's events while mounted. Two components on the same channel share one subscription. */
 export function useChannelSubscription(channelId: string | undefined): void {
   const realtime = useRealtime();
   useEffect(() => {
     if (realtime === null || channelId === undefined) return;
-    const counts = followers.get(realtime) ?? new Map<string, number>();
-    followers.set(realtime, counts);
-    const before = counts.get(channelId) ?? 0;
-    counts.set(channelId, before + 1);
-    if (before === 0) realtime.subscribe(channelId);
-    return () => {
-      const left = (counts.get(channelId) ?? 1) - 1;
-      if (left > 0) counts.set(channelId, left);
-      else {
-        counts.delete(channelId);
-        realtime.unsubscribe(channelId);
-      }
-    };
+    return followChannel(realtime, channelId);
   }, [realtime, channelId]);
 }
 

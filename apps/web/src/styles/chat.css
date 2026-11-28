@@ -131,6 +131,20 @@
     color: var(--vr-fg-muted);
   }
 
+  .chat__facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--vr-space-1) var(--vr-space-4);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    color: var(--vr-fg-muted);
+  }
+
+  .chat__working {
+    padding-inline: var(--vr-space-6);
+  }
+
   .chat__body {
     display: flex;
     flex: 1;
@@ -762,7 +776,8 @@
     }
 
     .chat-typing,
-    .chat__offline {
+    .chat__offline,
+    .chat__working {
       padding-inline: var(--vr-space-4);
     }
 

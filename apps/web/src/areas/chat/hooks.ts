@@ -1,10 +1,9 @@
-// What a conversation keeps while it is open: its history (the first page, older pages asked for,
-// and posts on their way), its live runs, who is typing, and marking it read.
+// What a conversation keeps while it is open: its history (every message seen, and posts on their
+// way), its live runs, who is typing, marking it read, and forgetting a channel the person lost.
 import { useQueryClient } from "@tanstack/react-query";
-import type { RealtimeEvent } from "@vanr/client";
+import { isApiError } from "@vanr/client";
 import {
   prefixKey,
-  queryKey,
   useApiMutation,
   useApiQuery,
   useRealtime,
@@ -12,9 +11,10 @@ import {
   useVanrClient,
 } from "@vanr/client/react";
 import type { Message } from "@vanr/contract";
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useClock } from "../../platform/clock.tsx";
-import { applyRunEvent, type LiveRun, type RunEvent, type RunEventBase, reconcile } from "./live.ts";
+import type { LiveRun } from "./live.ts";
+import { channelRuns, forgetChannelRuns } from "./runs-store.ts";
 
 /** One page of history, as the server sends it at most. */
 export const PAGE = 100;
@@ -43,53 +43,83 @@ const newClientId = () =>
 
 export type Outgoing = { body: string; replyTo?: string; replyExcerpt?: Message["meta"]["replyTo"] };
 
+const byTime = (a: Message, b: Message) =>
+  a.createdAt === b.createdAt ? (a.id < b.id ? -1 : a.id > b.id ? 1 : 0) : a.createdAt < b.createdAt ? -1 : 1;
+
+/** The answer a channel gives someone who can no longer read it: the same as one that does not exist. */
+const isLost = (error: unknown) => isApiError(error) && (error.status === 404 || error.status === 403);
+
 /**
- * The conversation's messages, oldest first: older pages asked for, then the latest page, then the
- * posts of this tab still on their way or failed. A post is sent with an id the browser chose, so a
- * retry is stored once and its echo replaces the local copy.
+ * The conversation's messages, oldest first. Every message seen is kept in one place, in its newest
+ * version: the latest page each time it is read, the older pages asked for, and what the events say
+ * about any of them. The posts of this tab still on their way, or failed, come last. A post is sent
+ * with an id the browser chose, so a retry is stored once and its echo replaces the local copy.
+ *
+ * When the channel answers 404 or 403 the person lost it: what was shown is dropped and `lost` says
+ * so; `useForgetChannel` then clears the cache once the conversation is off screen.
  */
 export function useHistory(workspaceId: string, channelId: string, authorId: string) {
   const client = useVanrClient();
   const queryClient = useQueryClient();
   const args = { workspaceId, channelId, query: { limit: PAGE } };
   const latest = useApiQuery("listChannelMessages", args);
-  const [older, setOlder] = useState<{ messages: Message[]; more: boolean }>({ messages: [], more: true });
+  const [known, setKnown] = useState<ReadonlyMap<string, Message>>(() => new Map());
+  const [more, setMore] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [olderError, setOlderError] = useState<unknown>(null);
   const [local, setLocal] = useState<Message[]>([]);
+  const [lost, setLost] = useState(false);
 
-  const server = useMemo(() => latest.data ?? [], [latest.data]);
-  // Once older pages are loaded, a message that slides out of the latest page moves to them, so the
-  // history the person scrolled through keeps no gap.
-  const previous = useRef<Message[]>([]);
-  useEffect(() => {
-    const before = previous.current;
-    previous.current = server;
-    const now = new Set(server.map((message) => message.id));
-    const slid = before.filter((message) => !now.has(message.id));
-    if (slid.length === 0) return;
-    setOlder((current) => {
-      if (current.messages.length === 0) return current;
-      const kept = new Set(current.messages.map((message) => message.id));
-      return { ...current, messages: [...current.messages, ...slid.filter((m) => !kept.has(m.id))] };
+  const upsert = useCallback((list: readonly Message[]) => {
+    if (list.length === 0) return;
+    setKnown((current) => {
+      const next = new Map(current);
+      for (const message of list) next.set(message.id, message);
+      return next;
     });
-  }, [server]);
+  }, []);
+  const patch = useCallback((messageId: string, change: (message: Message) => Message) => {
+    setKnown((current) => {
+      const message = current.get(messageId);
+      return message === undefined ? current : new Map(current).set(messageId, change(message));
+    });
+  }, []);
+
+  useEffect(() => {
+    if (latest.data !== undefined) upsert(latest.data);
+  }, [latest.data, upsert]);
+  // The events refetch only the latest page: these keep the older ones current too.
+  useRealtimeEvent("message.posted", (event) => {
+    const { message } = event.payload;
+    if (message.channelId === channelId && message.threadId === null) upsert([message]);
+  });
+  useRealtimeEvent("message.reactions_updated", (event) =>
+    patch(event.payload.messageId, (message) => ({ ...message, reactions: event.payload.reactions })),
+  );
+  useRealtimeEvent("message.actions_updated", (event) =>
+    patch(event.payload.messageId, (message) => ({ ...message, actions: event.payload.actions })),
+  );
+  useRealtimeEvent("message.memories_updated", (event) =>
+    patch(event.payload.messageId, (message) => ({ ...message, memories: event.payload.memories })),
+  );
+
+  const forget = useCallback(() => {
+    setLost(true);
+    setKnown(new Map());
+    setLocal([]);
+  }, []);
+
+  useEffect(() => {
+    if (latest.isError && isLost(latest.error)) forget();
+  }, [latest.isError, latest.error, forget]);
+
   const messages = useMemo(() => {
-    // The latest page holds the newest version of a message, so it wins over an older copy.
-    const fresh = new Map(server.map((message) => [message.id, message]));
-    const out: Message[] = [];
-    const seen = new Set<string>();
-    for (const message of [...older.messages, ...server]) {
-      if (seen.has(message.id)) continue;
-      seen.add(message.id);
-      out.push(fresh.get(message.id) ?? message);
-    }
+    const out = [...known.values()].sort(byTime);
     const echoed = new Set(out.flatMap((message) => (message.clientId === null ? [] : [message.clientId])));
     return [...out, ...local.filter((message) => message.clientId === null || !echoed.has(message.clientId))];
-  }, [older.messages, server, local]);
+  }, [known, local]);
 
-  const firstFull = server.length >= PAGE;
-  const canLoadOlder = firstFull && older.more;
+  const canLoadOlder = (latest.data?.length ?? 0) >= PAGE && more;
 
   const loadOlder = async () => {
     const first = messages.find((message) => message.local === undefined);
@@ -102,9 +132,11 @@ export function useHistory(workspaceId: string, channelId: string, authorId: str
         channelId,
         query: { before: first.id, limit: PAGE },
       });
-      setOlder((current) => ({ messages: [...page, ...current.messages], more: page.length >= PAGE }));
+      upsert(page);
+      setMore(page.length >= PAGE);
     } catch (error) {
-      setOlderError(error);
+      if (isLost(error)) forget();
+      else setOlderError(error);
     } finally {
       setLoadingOlder(false);
     }
@@ -123,17 +155,17 @@ export function useHistory(workspaceId: string, channelId: string, authorId: str
           ...(message.meta.replyTo !== undefined && { replyTo: message.meta.replyTo.messageId }),
         },
       });
-      // The echo goes in the latest page at once, so the local copy and the server's never show together.
-      queryClient.setQueryData<Message[]>(queryKey(client, "listChannelMessages", args), (current) =>
-        current === undefined || current.some((m) => m.id === posted.id) ? current : [...current, posted],
-      );
+      // The echo goes in at once, so the local copy and the server's never show together.
+      upsert([posted]);
       setLocal((current) => current.filter((m) => m.clientId !== clientId));
       // Posting in a public channel joins it, and every post changes what is unread.
       void queryClient.invalidateQueries({
         queryKey: prefixKey(client, { method: "listChannels", args: { workspaceId } }),
       });
-    } catch {
-      setLocal((current) => current.map((m) => (m.clientId === clientId ? { ...m, local: "failed" } : m)));
+    } catch (error) {
+      if (isLost(error)) forget();
+      else
+        setLocal((current) => current.map((m) => (m.clientId === clientId ? { ...m, local: "failed" } : m)));
     }
   };
 
@@ -165,84 +197,23 @@ export function useHistory(workspaceId: string, channelId: string, authorId: str
 
   const retry = (message: Message) => void deliver(message);
 
-  return {
-    latest,
-    messages,
-    send,
-    retry,
-    canLoadOlder,
-    loadOlder,
-    loadingOlder,
-    olderError,
-  };
-}
-
-type RunEventName =
-  | "run.status_changed"
-  | "run.text_delta"
-  | "run.commentary"
-  | "run.tool_call"
-  | "run.tool_result"
-  | "run.completed"
-  | "run.stopped"
-  | "run.idle";
-
-type RunAction =
-  | { kind: "event"; base: RunEventBase; event: RunEvent; now: number }
-  | { kind: "list"; active: Parameters<typeof reconcile>[1]; readAt: number };
-
-/** The runs, and the ones known to have ended: a list read before the end never brings one back. */
-type RunsState = { runs: readonly LiveRun[]; ended: ReadonlySet<string> };
-
-const ENDING: ReadonlySet<RunEvent["type"]> = new Set(["run.completed", "run.stopped", "run.idle"]);
-
-function runsReducer(state: RunsState, action: RunAction): RunsState {
-  if (action.kind === "list")
-    return { ...state, runs: reconcile(state.runs, action.active, action.readAt, state.ended) };
-  const runs = applyRunEvent(state.runs, action.base, action.event, action.now);
-  const { runId } = action.base;
-  const ended =
-    runId !== undefined && ENDING.has(action.event.type) ? new Set(state.ended).add(runId) : state.ended;
-  return { runs, ended };
-}
-
-const NO_RUNS: RunsState = { runs: [], ended: new Set() };
-
-/** Listens to one run event in this channel and hands it to the reducer. */
-function useRunEvent(name: RunEventName, channelId: string, dispatch: (action: RunAction) => void) {
-  const clock = useClock();
-  useRealtimeEvent(name, (event: RealtimeEvent<RunEventName>) => {
-    const payload = event.payload;
-    const inChannel =
-      payload.channelId === channelId ||
-      (event.scope.kind === "channel" && event.scope.channelId === channelId);
-    if (!inChannel) return;
-    dispatch({
-      kind: "event",
-      base: {
-        agentId: payload.agentId,
-        ...(payload.runId !== undefined && { runId: payload.runId }),
-        ...(payload.threadId !== undefined && { threadId: payload.threadId }),
-      },
-      event: { ...payload, type: name } as RunEvent,
-      now: clock.now(),
-    });
-  });
+  return { latest, messages, send, retry, canLoadOlder, loadOlder, loadingOlder, olderError, lost };
 }
 
 /** The live runs of a conversation: the server's list, kept current by the run events. */
 export function useLiveRuns(workspaceId: string, channelId: string) {
-  const active = useApiQuery("listChannelActiveRuns", { workspaceId, channelId });
-  const [{ runs }, dispatch] = useReducer(runsReducer, NO_RUNS);
-  useRunEvent("run.status_changed", channelId, dispatch);
-  useRunEvent("run.text_delta", channelId, dispatch);
-  useRunEvent("run.commentary", channelId, dispatch);
-  useRunEvent("run.tool_call", channelId, dispatch);
-  useRunEvent("run.tool_result", channelId, dispatch);
-  useRunEvent("run.completed", channelId, dispatch);
-  useRunEvent("run.stopped", channelId, dispatch);
-  useRunEvent("run.idle", channelId, dispatch);
+  const realtime = useRealtime();
   const clock = useClock();
+  const store = useMemo(
+    () => (realtime === null ? null : channelRuns(realtime, channelId, clock)),
+    [realtime, channelId, clock],
+  );
+  const runs = useSyncExternalStore(
+    store?.subscribe ?? noSubscription,
+    store?.snapshot ?? noRuns,
+    store?.snapshot ?? noRuns,
+  );
+  const active = useApiQuery("listChannelActiveRuns", { workspaceId, channelId });
   const { data, fetchStatus } = active;
   // When the list was asked for: a run heard from after that may be missing from it and still be live.
   const askedAt = useRef(clock.now());
@@ -250,10 +221,14 @@ export function useLiveRuns(workspaceId: string, channelId: string) {
     if (fetchStatus === "fetching") askedAt.current = clock.now();
   }, [fetchStatus, clock]);
   useEffect(() => {
-    if (data != null) dispatch({ kind: "list", active: data, readAt: askedAt.current });
-  }, [data]);
+    if (data != null) store?.list(data, askedAt.current);
+  }, [data, store]);
   return { runs, active };
 }
+
+const NO_RUNS: readonly LiveRun[] = [];
+const noRuns = () => NO_RUNS;
+const noSubscription = () => () => {};
 
 /**
  * Marks the conversation read up to its last message, while the tab is in front. A tab in the
@@ -339,4 +314,30 @@ export function useTypingSignal(channelId: string): () => void {
     last.current = now;
     realtime.typing(channelId);
   }, [realtime, clock, channelId]);
+}
+
+/**
+ * Drops everything cached about a channel the person lost: its history, directory, runs, members and
+ * pins, and reads the lists of conversations again. Called once nothing that reads them is on screen,
+ * so nothing reads them back in.
+ */
+export function useForgetChannel(workspaceId: string, channelId: string) {
+  const client = useVanrClient();
+  const queryClient = useQueryClient();
+  const realtime = useRealtime();
+  useEffect(() => {
+    for (const method of [
+      "listChannelMessages",
+      "getChannelDirectory",
+      "listChannelActiveRuns",
+      "listChannelMembers",
+      "listChannelPinnedMessages",
+    ] as const)
+      queryClient.removeQueries({
+        queryKey: prefixKey(client, { method, args: { workspaceId, channelId } }),
+      });
+    for (const method of ["listChannels", "getDms"] as const)
+      void queryClient.invalidateQueries({ queryKey: prefixKey(client, { method, args: { workspaceId } }) });
+    if (realtime !== null) forgetChannelRuns(realtime, channelId);
+  }, [queryClient, client, workspaceId, channelId, realtime]);
 }

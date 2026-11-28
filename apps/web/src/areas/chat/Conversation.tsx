@@ -9,12 +9,14 @@ import { Hash, Lock, MessagesSquare, WifiOff } from "lucide-react";
 import { Fragment, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useRouteParams } from "../../app/navigation.tsx";
 import { ScreenError, ScreenLoading, useDocumentTitle, useErrorMessage } from "../../app/screens.tsx";
-import { useLocale, useMessages } from "../../i18n/react.tsx";
+import { useLocale, useLookup, useMessages } from "../../i18n/react.tsx";
+import { useClock } from "../../platform/clock.tsx";
 import { useChannelSubscription, useRealtimeStatus } from "../../realtime/react.tsx";
 import { useDirectory } from "../control/cards.ts";
 import { Composer } from "./Composer.tsx";
 import { ConversationProvider, useConversation } from "./context.tsx";
 import {
+  useForgetChannel,
   useHistory,
   useLiveRuns,
   useMarkRead,
@@ -23,7 +25,7 @@ import {
   useTypingSignal,
 } from "./hooks.ts";
 import { LiveRuns } from "./LiveRuns.tsx";
-import { showing } from "./live.ts";
+import { LANDING_MS, type LiveRun, showing } from "./live.ts";
 import { MessageItem } from "./Message.tsx";
 
 /** Two messages of one author closer than this read as one. */
@@ -131,22 +133,48 @@ function Header({ target }: { target: Kind }) {
       </header>
     );
   }
-  const name = directory.agentName(target.agentId);
-  const owner = directory.agentOwner(target.agentId);
+  return <AgentHeader agentId={target.agentId} />;
+}
+
+/** A direct message with an agent: who it is, what it does, who looks after it and what it runs on. */
+function AgentHeader({ agentId }: { agentId: string }) {
+  const t = useMessages("chat");
+  const agents = useLookup("agents");
+  const { workspaceId, directory } = useConversation();
+  const listed = useApiQuery("listAgents", { workspaceId });
+  const agent = listed.data?.find((candidate) => candidate.id === agentId);
+  const owner = directory.agentOwner(agentId);
+  const role = agent === undefined ? undefined : agents(`role.${agent.role}`);
+  const harness = agent === undefined ? undefined : agents(`harness.kind.${agent.harness.kind}`);
   return (
     <header className="chat__head">
       <h1 className="chat__title">
-        <AgentSigil agentId={target.agentId} name="" size="sm" aria-hidden="true" />
-        <span>{name}</span>
+        <AgentSigil agentId={agentId} name="" size="sm" aria-hidden="true" />
+        <span>{directory.agentName(agentId)}</span>
       </h1>
-      {owner !== undefined && (
-        <p className="chat__topic">{t("dm.agentOwner", { name: directory.personName(owner) })}</p>
-      )}
+      <ul className="chat__facts" aria-label={t("dm.agentFacts")}>
+        {role !== undefined && <li>{role}</li>}
+        {owner !== undefined && <li>{t("dm.agentOwner", { name: directory.personName(owner) })}</li>}
+        {harness !== undefined && agent !== undefined && (
+          <li>{t("dm.agentHarness", { harness, model: agent.harness.model })}</li>
+        )}
+      </ul>
     </header>
   );
 }
 
-function History({ target, member, children }: { target: Kind; member: boolean; children?: ReactNode }) {
+function History({
+  target,
+  member,
+  onLost,
+  children,
+}: {
+  target: Kind;
+  member: boolean;
+  /** The person can no longer read the channel. */
+  onLost: () => void;
+  children?: ReactNode;
+}) {
   const t = useMessages("chat");
   const common = useMessages("common");
   const describe = useErrorMessage("chat");
@@ -166,8 +194,18 @@ function History({ target, member, children }: { target: Kind; member: boolean; 
   const lastServer = [...messages].reverse().find((message) => message.local === undefined);
   useMarkRead(workspaceId, channelId, member, lastServer?.id);
   const answers = new Set(messages.map((message) => message.id));
-  const now = useTicker(runs.length > 0, 1000);
+  const { lost } = history;
+  useEffect(() => {
+    if (lost) onLost();
+  }, [lost, onLost]);
+  // The clock ticks only while a run is live or has just ended: an idle conversation stays still.
+  const clockNow = useClock().now();
+  const moving = runs.some((run) => run.endedAt === null || clockNow - run.endedAt < LANDING_MS);
+  const now = useTicker(moving, 1000);
   const live = showing(runs, answers, now);
+  const jumpTo = useCallback(() => {
+    root.current?.querySelector(".chat-live")?.scrollIntoView({ block: "nearest" });
+  }, []);
   const streamed = live.reduce((sum, run) => sum + run.text.length + run.steps.length, 0);
 
   // Follow the newest message while the person is at the bottom; keep the place when older ones load.
@@ -260,6 +298,7 @@ function History({ target, member, children }: { target: Kind; member: boolean; 
         <LiveRuns runs={live} now={now} onCheck={() => void active.refetch()} scope={root} />
       </div>
       <TypingLine userIds={typing} />
+      <WorkingNotice runs={live} onJump={jumpTo} />
       {status === "reconnecting" && (
         <p className="chat-note chat__offline" role="status">
           <Icon icon={WifiOff} size="sm" />
@@ -298,13 +337,40 @@ function ConversationView({
 }) {
   const { workspaceId } = useRouteParams("home");
   useChannelSubscription(channelId);
+  // Once the person lost the channel nothing of it stays on screen, its name included.
+  const [lost, setLost] = useState(false);
+  const onLost = useCallback(() => setLost(true), []);
+  if (lost) return <Forgotten workspaceId={workspaceId} channelId={channelId} />;
   return (
     <ConversationProvider workspaceId={workspaceId} channelId={channelId} member={member}>
       <div className="chat">
         <Header target={target} />
-        <History target={target} member={member} />
+        <History target={target} member={member} onLost={onLost} />
       </div>
     </ConversationProvider>
+  );
+}
+
+/** A channel the person lost: the not-found screen, with everything of the channel cleared. */
+function Forgotten({ workspaceId, channelId }: { workspaceId: string; channelId: string }) {
+  useForgetChannel(workspaceId, channelId);
+  return <NotFound />;
+}
+
+/** Above the composer: which agents are at work here, with a way to the run. */
+function WorkingNotice({ runs, onJump }: { runs: readonly LiveRun[]; onJump: () => void }) {
+  const t = useMessages("chat");
+  const { directory } = useConversation();
+  const working = runs.filter((run) => run.endedAt === null && run.threadId === null);
+  if (working.length === 0) return null;
+  const agents = [...new Set(working.map((run) => directory.agentName(run.agentId)))].join(", ");
+  return (
+    <p className="chat-note chat__working">
+      <span>{t("run.notice", { count: working.length, agents })}</span>
+      <button type="button" className="app-link-button" onClick={onJump}>
+        {t("run.jump")}
+      </button>
+    </p>
   );
 }
 
@@ -365,7 +431,8 @@ export function ChannelScreen() {
         : { kind: "person", userId: dm.with.id };
     return <ConversationView key={channelId} channelId={channelId} target={target} member />;
   }
-  if (channel === undefined) return <NotFound />;
+  // Not listed: it never existed, or the person lost it; either way nothing of it stays cached.
+  if (channel === undefined) return <Forgotten workspaceId={workspaceId} channelId={channelId} />;
   return (
     <ConversationView
       key={channelId}
