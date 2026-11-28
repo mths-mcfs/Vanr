@@ -2,6 +2,7 @@
 import { useLookup, useMessages } from "../../i18n/react.tsx";
 import { useConversation } from "./context.tsx";
 import { useAgentNotices } from "./hooks.ts";
+import { isHeldReason } from "./Message.tsx";
 
 /** Agents the person called that can't take their message, each with why. The code never shows. */
 export function AgentNotices({ thread = null }: { thread?: string | null }) {
@@ -16,7 +17,7 @@ export function AgentNotices({ thread = null }: { thread?: string | null }) {
       {here.map((notice) => {
         const agent = directory.agentName(notice.agentId);
         const text =
-          lookup(`blocked.${notice.reason}`, { agent }) ??
+          (isHeldReason(notice.reason) ? lookup(`blocked.${notice.reason}`, { agent }) : undefined) ??
           (notice.text !== "" ? notice.text : t("blocked.other", { agent }));
         return (
           <p key={notice.key} className="chat-note chat-note--warning" role="status">

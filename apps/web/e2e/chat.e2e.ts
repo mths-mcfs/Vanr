@@ -208,7 +208,7 @@ test.describe("chat", () => {
     });
     await field.fill(`@${agent.handle} can you check this?`);
     await field.press("Enter");
-    // Told twice, both in the person's words: in the notice above the composer, and on the message.
+    // Told twice, both in words: in the notice above the composer, and on the message itself.
     const absent = t("chat", "blocked.not_in_channel", { agent: "Quill" });
     await expect(page.getByRole("status").filter({ hasText: absent })).toBeVisible({ timeout: 30_000 });
     await expect(
