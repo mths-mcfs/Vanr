@@ -5,6 +5,7 @@ import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { eq } from "drizzle-orm";
 import { createMemory } from "../src/agent-memory";
+import { createAssignment, startAssignmentJob } from "../src/assignments/engine";
 import { DECISION_TTL_MS, trailEntry } from "../src/control";
 import { postMessage } from "../src/messages";
 import { environmentToolsFor } from "../src/runners/agent-tools";
@@ -18,6 +19,7 @@ import { channelRow, racing, seedAgent, toolRun } from "./tool-run";
 
 const {
   agents,
+  assignments,
   agentEnvironments,
   approvals,
   approvalRules,
@@ -112,6 +114,7 @@ function waitingRuntime(liveAgentId: string) {
     resolveApproval: rt.resolveApproval,
     activeRuns: rt.activeRuns,
     cancel: rt.cancel,
+    reviseApproval: rt.reviseApproval,
   };
   const resolved: string[] = [];
   const canceled: string[] = [];
@@ -240,6 +243,21 @@ describe("archiving", () => {
           expect([res.status, res.body?.error?.code]).toEqual([409, "agent.archived"]);
           expect(await statusOf(approvals, row.id)).toBe("pending");
         }
+        // Edit and approve too: the run validates the edit, then the decision is refused under the agent's lock.
+        const edited = await pendingApproval(t);
+        server.deps.runtime.reviseApproval = async () => ({
+          input: { body: "Edited" },
+          payloadHash: "hash-2",
+          preview: { title: "Send the report", body: "Edited" },
+          effect: "K2",
+          rule: null,
+        });
+        const res = await call(t.beto, "POST", `${t.w}/approvals/${edited.id}/edit`, {
+          input: { body: "Edited" },
+          payloadHash: "hash-1",
+        });
+        expect([res.status, res.body?.error?.code]).toEqual([409, "agent.archived"]);
+        expect(await statusOf(approvals, edited.id)).toBe("pending");
         expect(rt.resolved).toEqual([]);
       } finally {
         rt.restore();
@@ -284,6 +302,61 @@ describe("archiving", () => {
       expect(written).toEqual([]);
       const [still] = await server.deps.db.select().from(proposals).where(eq(proposals.id, p.id));
       expect(still?.status).toBe("pending");
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("what reaches an archived agent another way", () => {
+  test(
+    "undoing what it wrote is refused, and its memory stays as it was",
+    async () => {
+      const t = await team();
+      const run = await toolRun(server, { workspaceId: t.workspaceId, agent: t.lia, channelId: t.general });
+      expect((await run.call("remember", { text: "The report goes out on Fridays." })).isError).toBe(false);
+      const action = await run.action("memory_recorded");
+      await t.archive();
+      const res = await call(t.ana, "POST", `${t.w}/actions/${action}/undo`);
+      expect([res.status, res.body?.error?.code]).toEqual([409, "agent.archived"]);
+      const [kept] = await server.deps.db.select().from(memories).where(eq(memories.agentId, t.lia.id));
+      expect(kept?.archived).toBe(false);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "an archived agent's assignment starts no job, and nobody gives it a new one",
+    async () => {
+      const t = await team();
+      const fake = await pairFake(server, t.ana, t.workspaceId, { open });
+      const row = await createAssignment(server.deps, {
+        workspaceId: t.workspaceId,
+        agentId: t.lia.id,
+        agentHandle: t.lia.handle,
+        channelId: t.general,
+        ownerId: t.ana.user.id,
+        title: "Fix the flaky test",
+        goal: "The suite passes ten times in a row",
+        executor: "claude_code",
+        runnerId: fake.runnerId,
+        commandPolicy: "never",
+      });
+      const [active] = await server.deps.db
+        .update(assignments)
+        .set({ status: "active", startedAt: server.deps.now() })
+        .where(eq(assignments.id, row.id))
+        .returning();
+      if (!active) throw new Error("assignment not activated");
+      await t.archive();
+      await expect(startAssignmentJob(server.deps, active, {})).rejects.toMatchObject({
+        code: "agent.archived",
+      });
+      const res = await call(t.ana, "POST", `${t.w}/assignments`, {
+        agentId: t.lia.id,
+        goal: "Another one",
+        channelId: t.general,
+      });
+      expect(res.status).toBe(404);
     },
     SERVER_TEST_MS,
   );

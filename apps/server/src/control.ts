@@ -722,7 +722,9 @@ async function flipMemory(
     );
     return (after) => publishMemory(after, mem);
   } catch (err) {
-    if (err instanceof HttpError) throw actionError(409, "action.changed_since", "The memory changed since");
+    // An archived agent's store refuses the undo as it refuses every write (`lockActiveAgent`).
+    if (err instanceof HttpError && err.code !== "agent.archived")
+      throw actionError(409, "action.changed_since", "The memory changed since");
     throw err;
   }
 }

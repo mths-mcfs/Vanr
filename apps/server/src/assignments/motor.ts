@@ -882,6 +882,13 @@ async function dispatch(
     } catch (err) {
       if (!(err instanceof HttpError)) throw err;
       await end("failed");
+      if (err.code === "agent.archived") {
+        const agent = await agentOf(db, row);
+        await pauseFor(deps, row, { waitReason: "paused" }, `I stopped: ${agent.name} was archived.`, {
+          why: "archived",
+        });
+        return null;
+      }
       // Rejected before anything reached the runner (offline, no runner): the item keeps its turn.
       if (BEFORE_SEND.has(err.code)) await refundTurn(deps, row.id, item.id, claim.epoch);
       // Another job already runs (a person asked for something): wait for it. Runner offline: try again later.

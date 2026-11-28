@@ -335,6 +335,8 @@ async function startAssignmentJobNow(
   if ((await runningJobsOf(deps.db, row.id)).length > 0)
     throw new HttpError(409, "assignment.job_running", "A job is already running for this assignment");
   const agent = await agentOf(deps.db, row);
+  // Every job of an assignment starts here: an archived agent's runs nothing on the runner.
+  if (agent.archivedAt) throw new HttpError(409, "agent.archived", "This agent was archived");
   const [last] = await deps.db
     .select()
     .from(runnerJobs)

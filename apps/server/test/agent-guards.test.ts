@@ -1,7 +1,7 @@
 // The three rules every agent route follows, checked from the routes themselves: an archived agent takes no writes,
 // a runner acts for a person only if they may use it, and a memory's origin names its channel only to whoever
-// reads it. The first test reads the router: a new route that names an agent (or an agent's memory, review,
-// proposal, request or intervention) fails it until it is classified here.
+// reads it. The first test reads the router: a new family, a new write of a family that reaches agents, or a new
+// route that names an agent, fails it until it is classified here.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
@@ -122,13 +122,77 @@ const interventionStatus = async (id: string) =>
 
 // ---- the router's classification ----
 
-/** The routes that name an agent or something an agent owns (its memory, reviews, proposals, requests, browser). */
-const FAMILY = /agent|memor|proposal|network-request|secret-request|browser-intervention|\/runs\/|feedback/;
+/**
+ * Every workspace write sits in a family, its first path segment. The writes of an agent family can reach an agent's
+ * state (its memory, skills, environment, identity, approvals, questions, runs or jobs), so each one is classified in
+ * `BY_REFERENCE`. Every other family says here why it can't, and a write there that still names an agent
+ * (`NAMES_AGENT`) is classified too. A new family fails the first test until it is placed.
+ */
+const AGENT_FAMILIES = new Set([
+  "agents",
+  "agent-drafts",
+  "agent-imports",
+  "approvals",
+  "questions",
+  "actions",
+  "assignments",
+  "memories",
+  "memory-reviews",
+  "proposals",
+  "network-requests",
+  "secret-requests",
+  "browser-interventions",
+  "runs",
+  "messages",
+]);
+const OTHER_FAMILIES: Record<string, string> = {
+  "": "the workspace's own settings",
+  "approval-rules": "revokes a rule, which only takes away",
+  bases: "people's bases",
+  calendar: "people's calendars",
+  channels: "channels and posts; a post reaches only active agents (routing skips an archived one)",
+  connectors: "the workspace's connections; an agent's accounts are under /agents/:agentId",
+  credentials: "the workspace's model credentials",
+  databases: "outside databases the workspace connects",
+  "debate-suggestions": "suggests a debate; a debate picks only active agents",
+  debates: "debates; a debate picks only active agents",
+  dms: "opens a DM, refused with an archived agent",
+  files: "the Drive",
+  "github-app": "the GitHub installation",
+  "invite-links": "invitations",
+  invitations: "invitations",
+  "issue-columns": "the issue board",
+  issues: "issues",
+  logo: "the workspace's logo",
+  mail: "people's mail accounts; an agent's are under /agents/:agentId",
+  me: "the person's own profile",
+  members: "people",
+  notifications: "the person's inbox",
+  reminders: "a reminder for an archived agent answers 404",
+  routines: "routines; a routine's run refuses an archived agent (agent_gone)",
+  "runner-pairings": "pairs a runner",
+  runners: "runners; moving agents onto one is classified",
+  "sandbox-settings": "the workspace's sandbox",
+  search: "asks the search",
+  settings: "the workspace's settings",
+  skills: "the workspace's skill library; an agent's own list is under /agents/:agentId",
+  storage: "the workspace's storage",
+  threads: "threads",
+  wiki: "the wiki",
+};
+
+/** A write outside the agent families that still names an agent or something an agent owns. */
+const NAMES_AGENT =
+  /agent|memor|proposal|network-request|secret-request|browser-intervention|\/runs\/|feedback/;
+
+/** Reaches the agent only through its runs and jobs, which an archived agent doesn't start. */
+const RUNS = { checked: "agent-archive: stops a real live run, and the agent starts no run after it" };
+const NO_JOB = { checked: "agent-archive: an archived agent's assignment starts no job" };
 
 /**
- * Every write of the family outside `/agents/:agentId` (those are all refused by the guard, except `OPEN`). Each
- * says how an archived agent is kept from it: `checked` names the test that proves the refusal, `ends` only ends,
- * refuses or takes away (open on purpose), `none` writes no agent (it creates one, or writes a person's store).
+ * Every classified write outside `/agents/:agentId` (those are all refused by the guard, except `OPEN`). Each says
+ * how an archived agent is kept from it: `checked` names the test that proves the refusal, `ends` only ends, refuses
+ * or takes away (open on purpose), `none` writes no agent (it creates one, or writes a person's own records).
  */
 const BY_REFERENCE: Record<string, { checked: string } | { ends: string } | { none: string }> = {
   "POST /browser-interventions/:interventionId/control": { checked: "A5" },
@@ -145,22 +209,65 @@ const BY_REFERENCE: Record<string, { checked: string } | { ends: string } | { no
   "POST /runs/:runId/skill-draft": { checked: "agent-access: doesn't draft a skill from its run" },
   "POST /issues/:issueId/ask-agent": { checked: "issues: an archived agent answers as missing" },
   "POST /runners/:runnerId/move-agents": { checked: "moves only active agents (the race is #121)" },
+  "POST /approvals/:approvalId/approve": { checked: "agent-archive: approving ... refuses with 409" },
+  "POST /approvals/:approvalId/edit": { checked: "agent-archive: approving ... refuses with 409" },
+  "POST /proposals/:proposalId/reject": { checked: "agent-archive: rejecting a proposal ... refuses" },
+  "POST /questions/:questionId/answer": { checked: "agent-archive: archiving closes its open questions" },
+  "POST /actions/:actionId/undo": { checked: "agent-archive: undoing what it wrote is refused" },
+  "POST /actions/:actionId/redo": { checked: "agent-archive: undoing what it wrote is refused" },
+  "POST /messages/:messageId/actions/undo": { checked: "agent-archive: undoing what it wrote is refused" },
+  "POST /assignments": { checked: "assignments: an archived agent can't take one" },
+  "POST /assignments/:assignmentId/:action{start|pause|resume|stop}": RUNS,
+  "POST /assignments/:assignmentId/messages": RUNS,
+  "POST /assignments/:assignmentId/decisions/:decisionId/choose": RUNS,
+  "POST /assignments/:assignmentId/decisions/approve-provisional": RUNS,
+  "POST /assignments/:assignmentId/reviews/:reviewId/:action{approve|changes}": RUNS,
+  "POST /assignments/:assignmentId/submissions/:submissionId/accept": RUNS,
+  "POST /assignments/:assignmentId/submissions/:submissionId/request-changes": RUNS,
+  "POST /assignments/:assignmentId/suggestions/:suggestionId/:action{accept|decline}": RUNS,
+  "POST /assignments/:assignmentId/items/:itemId/retry": NO_JOB,
+  "POST /assignments/:assignmentId/commands/:commandId/decide": NO_JOB,
+  "POST /assignments/:assignmentId/commands/retry": NO_JOB,
   "POST /browser-interventions/:interventionId/complete": { ends: "ends the intervention" },
   "POST /browser-interventions/:interventionId/fail": { ends: "ends the intervention" },
   "POST /browser-interventions/:interventionId/cancel": { ends: "ends the intervention" },
   "POST /memory-reviews/:memoryReviewId/reject": { ends: "drops a pending write" },
-  "POST /proposals/:proposalId/reject": { ends: "drops a pending change" },
+  "POST /approvals/:approvalId/reject": { ends: "ends the wait, runs nothing" },
   "POST /network-requests/:networkRequestId/deny": { ends: "closes the network" },
   "DELETE /network-requests/:networkRequestId": { ends: "closes the network" },
   "POST /secret-requests/:secretRequestId/decline": { ends: "gives the agent nothing" },
   "POST /runs/:runId/cancel": { ends: "stops a run" },
   "DELETE /channels/:channelId/members/agents/:agentId": { ends: "takes the agent out of a channel" },
+  "POST /assignments/:assignmentId/close": { ends: "closes the assignment" },
+  "DELETE /assignments/:assignmentId/command-rules/:commandRuleId": { ends: "drops a command rule" },
+  "DELETE /assignments/:assignmentId/participants/:participantId": { ends: "takes a person out" },
   "POST /agents": { none: "creates an agent" },
   "POST /agent-drafts": { none: "drafts a new agent" },
   "POST /agent-imports/github": { none: "reads instructions to create an agent" },
   "POST /memories": { none: "writes the person's or the workspace's store" },
   "POST /calendar/proposals/:proposalId/confirm": { none: "the person writes their calendar" },
   "POST /calendar/proposals/:proposalId/dismiss": { none: "the person drops a suggestion" },
+  "POST /messages/:messageId/reactions": { none: "a person's reaction" },
+  "DELETE /messages/:messageId/reactions": { none: "a person's reaction" },
+  "PATCH /assignments/:assignmentId": { none: "the assignment's own fields" },
+  "PUT /assignments/:assignmentId/plan": { none: "the assignment's plan" },
+  "PUT /assignments/:assignmentId/runner": { none: "picks the runner; a job still starts through NO_JOB" },
+  "PUT /assignments/:assignmentId/executor": {
+    none: "picks the executor; a job still starts through NO_JOB",
+  },
+  "PUT /assignments/:assignmentId/runtime": { none: "the assignment's limits" },
+  "PUT /assignments/:assignmentId/command-approval": { none: "the assignment's command policy" },
+  "POST /assignments/:assignmentId/decisions/:decisionId/opinion": { none: "a person's opinion" },
+  "PUT /assignments/:assignmentId/submissions/:submissionId/checklist/:itemId": {
+    none: "a reviewer's checklist",
+  },
+  "POST /assignments/:assignmentId/join-requests": { none: "a person asks to join" },
+  "POST /assignments/:assignmentId/join-requests/:joinRequestId/:action{accept|decline}": {
+    none: "a person joins or not",
+  },
+  "PATCH /assignments/:assignmentId/participants/:participantId": { none: "a person's role" },
+  "POST /assignments/:assignmentId/seen": { none: "the person's read mark" },
+  "POST /assignments/:assignmentId/transfer": { none: "who owns the assignment" },
 };
 
 /** The writes under `/agents/:agentId` an archived agent still takes: each only ends or takes something away. */
@@ -175,20 +282,25 @@ const OPEN: Record<string, string> = {
 };
 
 const PREFIX = "/api/v1/workspaces/:workspaceId";
-const familyWrites = () => [
+const allWrites = () => [
   ...new Set(
     server.routes
       .filter((r) => ["POST", "PUT", "PATCH", "DELETE"].includes(r.method) && r.path.startsWith(PREFIX))
-      .map((r) => `${r.method} ${r.path.slice(PREFIX.length)}`)
-      .filter((key) => FAMILY.test(key)),
+      .map((r) => `${r.method} ${r.path.slice(PREFIX.length)}`),
   ),
 ];
+const familyOf = (key: string) => key.slice(key.indexOf(" ") + 1).split("/")[1] ?? "";
+const familyWrites = () =>
+  allWrites().filter((key) => AGENT_FAMILIES.has(familyOf(key)) || NAMES_AGENT.test(key));
 const underAgent = (key: string) => / \/agents\/:agentId(\/|$)/.test(key);
 
 describe("the router's agent writes", () => {
   test(
     "each one is classified, and every write under /agents/:agentId refuses an archived agent but the open ones",
     async () => {
+      const families = new Set(allWrites().map(familyOf));
+      expect([...families].filter((f) => !AGENT_FAMILIES.has(f) && !(f in OTHER_FAMILIES))).toEqual([]);
+      expect(Object.keys(OTHER_FAMILIES).filter((f) => !families.has(f))).toEqual([]);
       const writes = familyWrites();
       const unclassified = writes.filter((k) => !underAgent(k) && !(k in BY_REFERENCE));
       expect(unclassified).toEqual([]);
