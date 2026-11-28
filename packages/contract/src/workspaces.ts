@@ -43,7 +43,8 @@ export interface WorkspaceSettings {
 
 export interface WorkspaceOverview {
   agents: number;
-  budgetSpentPct: number;
+  /** The month's spend against the budget, in percent: null for whoever can't `view_usage`. */
+  budgetSpentPct: number | null;
   myApprovalQueue: number;
   people: number;
 }

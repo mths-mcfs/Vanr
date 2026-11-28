@@ -77,14 +77,15 @@ export interface AgentChannel {
 
 export interface AgentDetail extends Agent {
   budgetInherited: boolean;
-  budgetPerMonthUsd: number;
-  budgetSpentPct: number;
+  /** Spend and budget: null for whoever can't `view_usage`. */
+  budgetPerMonthUsd: number | null;
+  budgetSpentPct: number | null;
   channels: AgentChannel[];
-  costThisMonthUsd: number;
+  costThisMonthUsd: number | null;
   credentialId: string | null;
-  inheritedBudgetUsd: number;
-  monthRuns: number;
-  monthTokens: number;
+  inheritedBudgetUsd: number | null;
+  monthRuns: number | null;
+  monthTokens: number | null;
   queuedApprovals: number;
 }
 

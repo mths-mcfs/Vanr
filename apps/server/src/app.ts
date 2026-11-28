@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import { Hono } from "hono";
+import { registerArchivedAgentGuard } from "./agents";
 import type { AppDeps, AppEnv } from "./context";
 import { errorBody, HttpError } from "./http";
 import { log } from "./logger";
@@ -132,6 +133,7 @@ export function createApp(
   });
 
   registerWorkspaceScope(app);
+  registerArchivedAgentGuard(app);
   registerWaitlist(app);
   registerAccount(app);
   registerWorkspaces(app);

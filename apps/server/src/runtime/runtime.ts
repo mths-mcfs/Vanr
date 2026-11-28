@@ -13,6 +13,7 @@
 // the real cost in the ledger after; without room for the reservation, the call doesn't go out.
 
 import type { ActiveRun, HandledStatus, Message, MessageMeta, RunStatus } from "@vanr/contract";
+import { can } from "@vanr/contract";
 import { actionCredential, type CredentialRef } from "@vanr/engine/action-credential";
 import { schema } from "@vanr/engine/db";
 import { breakerOpen, type GateDecision, RiskTracker } from "@vanr/engine/effects";
@@ -75,7 +76,7 @@ import {
   withPlanOwners,
 } from "../runners/plans";
 import { expireRunnerRequests } from "../runners/requests";
-import { canUseRunner, type RunnerRow } from "../runners/runners";
+import { personMayUseRunner, type RunnerRow } from "../runners/runners";
 import { matchRule } from "../standing-rules";
 import { purgeReservations } from "../usage-ledger";
 import { BackgroundWork } from "./background";
@@ -1166,12 +1167,8 @@ export class AgentRuntime implements RuntimePort {
     return barred;
   }
 
-  private async mayUseRunner(workspaceId: string, userId: string, runner: RunnerRow): Promise<boolean> {
-    const [member] = await this.deps.db
-      .select({ role: members.role })
-      .from(members)
-      .where(and(eq(members.workspaceId, workspaceId), eq(members.userId, userId)));
-    return !!member && canUseRunner({ userId, role: member.role }, runner);
+  private mayUseRunner(workspaceId: string, userId: string, runner: RunnerRow): Promise<boolean> {
+    return personMayUseRunner(this.deps.db, { workspaceId, userId }, runner);
   }
 
   /**
@@ -2625,6 +2622,8 @@ export class AgentRuntime implements RuntimePort {
   private async notifyBudget(agent: AgentRow, kind: "warning" | "exhausted", spent: number, budget: number) {
     const { db, hub } = this.deps;
     const month = monthKey(this.deps.now());
+    // Read before the notice is claimed: a failure here leaves the month's notice to send.
+    const sees = await this.seesUsage(agent.workspaceId, agent.ownerUserId);
     const [row] = await db
       .select({ notice: agents.budgetNotice })
       .from(agents)
@@ -2635,11 +2634,12 @@ export class AgentRuntime implements RuntimePort {
       .update(agents)
       .set({ budgetNotice: `${kind}:${month}` })
       .where(eq(agents.id, agent.id));
+    // The amounts follow view_usage, as GET /usage: an owner without it hears only that the budget was reached.
     hub.toUser(agent.workspaceId, agent.ownerUserId, {
       type: kind === "exhausted" ? "budget.cap_reached" : "budget.threshold_reached",
       agentId: agent.id,
-      spentUsd: spent,
-      budgetUsd: budget,
+      spentUsd: sees ? spent : null,
+      budgetUsd: sees ? budget : null,
     });
   }
 
@@ -2671,6 +2671,19 @@ export class AgentRuntime implements RuntimePort {
     if (!row) return;
     const [lastLevel, lastMonth] = (row.notice ?? "").split(":");
     if (lastMonth === month && rank(lastLevel ?? "") >= rank(level)) return;
+    // Who hears it and with what, read before the notice is claimed: a failure here leaves it to the next check.
+    // The spend follows view_usage: whoever asks without it hears only that the channel ran out, with no amounts
+    // (a warning's level would tell how much of the cap went).
+    const admins = await db
+      .select({ userId: members.userId })
+      .from(members)
+      .where(and(eq(members.workspaceId, row.workspaceId), inArray(members.role, ["owner", "admin"])));
+    const to = new Set([...admins.map((a) => a.userId), ...(requesterId ? [requesterId] : [])]);
+    const recipients: { userId: string; sees: boolean }[] = [];
+    for (const userId of to) {
+      const sees = await this.seesUsage(row.workspaceId, userId);
+      if (sees || level === "exhausted") recipients.push({ userId, sees });
+    }
     // Whoever writes the notice first tells: two checks at the same time don't send two.
     const claimed = await db
       .update(channels)
@@ -2683,20 +2696,23 @@ export class AgentRuntime implements RuntimePort {
       )
       .returning({ id: channels.id });
     if (claimed.length === 0) return;
-    const admins = await db
-      .select({ userId: members.userId })
-      .from(members)
-      .where(and(eq(members.workspaceId, row.workspaceId), inArray(members.role, ["owner", "admin"])));
-    const to = new Set([...admins.map((a) => a.userId), ...(requesterId ? [requesterId] : [])]);
-    for (const userId of to)
+    for (const { userId, sees } of recipients)
       hub.toUser(row.workspaceId, userId, {
         type: "channel.budget",
         channelId,
         channelName: row.name,
         level,
-        spentUsd: spent,
-        budgetUsd: scope.limitUsd,
+        spentUsd: sees ? spent : null,
+        budgetUsd: sees ? scope.limitUsd : null,
       });
+  }
+
+  private async seesUsage(workspaceId: string, userId: string): Promise<boolean> {
+    const [member] = await this.deps.db
+      .select({ role: members.role })
+      .from(members)
+      .where(and(eq(members.workspaceId, workspaceId), eq(members.userId, userId)));
+    return !!member && can(member.role, "view_usage");
   }
 
   // ---- sweep ----

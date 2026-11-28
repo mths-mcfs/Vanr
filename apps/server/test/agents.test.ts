@@ -174,7 +174,16 @@ describe("agent registry", () => {
 
       const list = await ok<{ agents: Agent[] }>(call(beto, "GET", `${ws(workspaceId)}/agents`));
       expect(list.agents.map((a) => a.handle)).toEqual(["lia"]);
-      const detail = await ok<AgentDetail>(call(beto, "GET", agentPath(workspaceId, lia.id)));
+      // Spend and budget follow GET /usage: a member without view_usage gets nulls.
+      expect(await ok<AgentDetail>(call(beto, "GET", agentPath(workspaceId, lia.id)))).toMatchObject({
+        budgetPerMonthUsd: null,
+        inheritedBudgetUsd: null,
+        budgetInherited: true,
+        channels: [{ id: general, autoAnswer: false }],
+        monthRuns: null,
+        costThisMonthUsd: null,
+      });
+      const detail = await ok<AgentDetail>(call(ana, "GET", agentPath(workspaceId, lia.id)));
       expect(detail).toMatchObject({
         budgetPerMonthUsd: 20,
         inheritedBudgetUsd: 20,

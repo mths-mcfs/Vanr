@@ -222,6 +222,63 @@ describe("memory tools", () => {
     expect(t.actions.map((a) => a.kind)).toEqual(["memory_recorded", "memory_recorded"]);
   });
 
+  test("a memory replaced from another channel is announced here without that channel's name", async () => {
+    const t = await setup("replaces-origin");
+    const secret = await seedChannel(server, t.workspaceId, {
+      name: "secret-ops",
+      visibility: "private",
+      members: [t.ana],
+    });
+    const runIn = async (channelId: string) => {
+      const id = newId("run");
+      await server.deps.db.insert(schema.runs).values({
+        id,
+        workspaceId: t.workspaceId,
+        agentId: t.agent.id,
+        channelId,
+        status: "running",
+        model: "claude-haiku-5-5",
+      });
+      return id;
+    };
+    const there = await run(
+      t.ctx({ channel: await channelRow(secret), runId: await runIn(secret) }),
+      "remember",
+      {
+        text: "The merger closes Friday",
+      },
+    );
+    expect(there.isError).toBe(false);
+    const [old] = await server.deps.db.select().from(memories).where(eq(memories.agentId, t.agent.id));
+    expect(old?.origin?.channel).toBe("#secret-ops");
+    const announced: {
+      channelId: string;
+      memory: { id: string; origin: { channel: string | null } | null };
+    }[] = [];
+    const { hub } = server.deps;
+    const toChannel = hub.toChannel.bind(hub);
+    hub.toChannel = (channelId, event) => {
+      if (event.type === "memory.recorded")
+        announced.push({
+          channelId,
+          memory: (event as unknown as { memory: (typeof announced)[number]["memory"] }).memory,
+        });
+      return toChannel(channelId, event);
+    };
+    try {
+      await run(t.ctx({ runId: await runIn(t.general) }), "remember", {
+        text: "It moved to Monday",
+        replaces: old?.id,
+      });
+    } finally {
+      hub.toChannel = toChannel;
+    }
+    expect(announced.map((a) => [a.channelId, a.memory.id === old?.id, a.memory.origin?.channel])).toEqual([
+      [t.general, true, null],
+      [t.general, false, "#general"],
+    ]);
+  });
+
   test("after reading outside content (flag A) a memory write waits for review and nothing is saved", async () => {
     const t = await setup("review");
     const ctx = t.ctx();
