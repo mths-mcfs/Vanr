@@ -200,6 +200,33 @@ describe("starting a debate", () => {
     expect(made?.userIds).toEqual(["usr_iris"]);
   });
 
+  test("an agent that leaves the list while the form is open no longer counts", async () => {
+    const app = await renderApp({ path: LIST, signedInAs: "usr_ana" });
+    await app.user.click(await screen.findByRole("button", { name: "Start a debate" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "Start a debate" }));
+    await app.user.type(dialog.getByRole("textbox", { name: /^Question/ }), "Which printer first?");
+    await app.user.click(await dialog.findByRole("checkbox", { name: "Scout" }));
+    await app.user.click(dialog.getByRole("checkbox", { name: "Tally" }));
+    expect(await dialog.findByText("At most 5 model calls, up to $0.2125")).toBeDefined();
+    const tally = app.server.agents.find((agent) => agent.id === "agt_tally");
+    if (tally === undefined) throw new Error("the seed has no Tally");
+    tally.archivedAt = "2026-11-14T12:00:00.000Z";
+    await act(async () =>
+      app.server.emit(WORKSPACE, {
+        type: "budget.cap_reached",
+        agentId: "agt_tally",
+        spentUsd: null,
+        budgetUsd: null,
+      }),
+    );
+    await waitFor(() => expect(dialog.queryByRole("checkbox", { name: /Tally/ }) === null).toBe(true));
+    // Only Scout is left at the table: the ceiling and what is sent drop Tally.
+    expect(await dialog.findByText("At most 3 model calls, up to $0.1275")).toBeDefined();
+    await app.user.click(dialog.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(app.address().startsWith(`/workspace/${WORKSPACE}/debates/deb`)).toBe(true));
+    expect(app.server.debates.debates.at(-1)?.agentIds).toEqual(["agt_scout"]);
+  });
+
   test("a member sees how many calls it can take, never the money", async () => {
     const app = await renderApp({ path: LIST, signedInAs: "usr_iris" });
     await app.user.click(await screen.findByRole("button", { name: "Start a debate" }));
@@ -344,6 +371,30 @@ describe("the fake follows the server", () => {
   test("a speaker who isn't an agent or member of the workspace is refused", () => {
     expect(open({ speakers: [{ type: "agent", id: "agt_fjell" }] }).status).toBe(404);
     expect(open({ speakers: [{ type: "person", id: "usr_noor" }] }).status).toBe(404);
+  });
+
+  test("whoever holds a speaker slot takes part, and so sees the debate", () => {
+    server.state.channels.push({
+      id: "ch_board",
+      workspaceId: WORKSPACE,
+      name: "board",
+      topic: "",
+      isGeneral: false,
+      visibility: "private",
+      budgetPerMonthUsd: null,
+      createdAt: "2026-11-01T00:00:00.000Z",
+      memberIds: ["usr_ana"],
+    });
+    const made = open({ channelId: "ch_board", speakers: [{ type: "person", id: "usr_iris" }] });
+    expect(made.status).toBe(201);
+    const id = (made.body as { id: string }).id;
+    expect(call("getDebate", { debateId: id }, "usr_iris").status).toBe(200);
+    expect(call("getDebate", { debateId: id }, "usr_tomas").status).toBe(404);
+  });
+
+  test("more than 20 speaker slots are refused", () => {
+    const slots = Array.from({ length: 21 }, () => ({ type: "agent", id: "agt_scout" }));
+    expect(open({ speakers: slots }).status).toBe(400);
   });
 
   test("a debate from an issue of a private channel stays in that channel", () => {

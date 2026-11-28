@@ -92,8 +92,12 @@ export function NewDebateDialog({
   const [deadline, setDeadline] = useState("");
   const [optionText, setOptionText] = useState("");
   const [cap, setCap] = useState("");
-  const [agentIds, setAgentIds] = useState<string[]>([]);
-  const [userIds, setUserIds] = useState<string[]>([]);
+  const [pickedAgents, setAgentIds] = useState<string[]>([]);
+  const [pickedPeople, setUserIds] = useState<string[]>([]);
+  // A pick whose agent or person left the lists while the form was open (archived, removed) no longer
+  // counts: not in the seats, the estimate or what is sent.
+  const agentIds = pickedAgents.filter((id) => directory.seatable.some((agent) => agent.id === id));
+  const userIds = pickedPeople.filter((id) => directory.people.some((person) => person.id === id));
 
   const options = optionsOf(optionText);
   const optionsBad = !optionsFit(options);

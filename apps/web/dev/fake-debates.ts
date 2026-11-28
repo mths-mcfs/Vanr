@@ -328,7 +328,8 @@ export class FakeDebates {
         const people = [...userIds, ...speakers.filter((s) => s.type === "person").map((s) => s.id)];
         if (people.some((id) => !this.host.isMember(scope.workspaceId, id)))
           return fail(404, "not_found", "Member not found");
-        if (agentIds.length + userIds.length > 20) return invalid("At most 20 seats");
+        // The server takes at most 20 ids of people and 20 speaker slots, and seats every one of them.
+        if (userIds.length > 20 || speakers.length > 20) return invalid("At most 20 seats");
         const options = strings(params.options);
         if (options !== null && (options.length < 2 || options.length > 8))
           return invalid("Give 2 to 8 options");
@@ -357,7 +358,8 @@ export class FakeDebates {
           goal,
           format,
           agentIds,
-          userIds,
+          // Whoever holds a speaker slot takes part, and so sees the debate wherever it lives.
+          userIds: [...new Set(people)],
           speakers,
           roundLimit: rounds,
           deadline,
