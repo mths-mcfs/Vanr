@@ -330,4 +330,6 @@ export default {
   "summary.routines.run.private_context": "Failed: it now answers where the event's channel can't be read.",
   "summary.routines.run.debate": "Opened the debate “{title}”.",
   "summary.routines.run.file": "Wrote the document “{title}”.",
+  "recur.form.limitRange": "A number from {min} to {max}.",
+  "week.field.everyone": "With no one invited, everyone in the workspace sees it.",
 } as const satisfies Catalog;

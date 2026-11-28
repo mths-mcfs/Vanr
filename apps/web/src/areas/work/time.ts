@@ -14,9 +14,12 @@ export function startOfDay(at: Date): Date {
   return new Date(at.getFullYear(), at.getMonth(), at.getDate());
 }
 
-/** The same local time `days` later (or earlier), across a change of clocks. */
+/**
+ * The start of the local day `days` later (or earlier). Counted on the date, not from the hour: a day whose
+ * midnight is skipped by a change of clocks starts at 01:00, and the days after it start at 00:00 again.
+ */
 export function addDays(at: Date, days: number): Date {
-  return new Date(at.getFullYear(), at.getMonth(), at.getDate() + days, at.getHours(), at.getMinutes());
+  return new Date(at.getFullYear(), at.getMonth(), at.getDate() + days);
 }
 
 /** Local midnight of the Monday the day falls in: weeks here run Monday to Sunday. */
@@ -92,15 +95,21 @@ export function describeRule(rule: RecurrenceRule, words: RuleWords, locale: str
   const list = new Intl.ListFormat(locale, { type: "conjunction" });
   const days = rule.weekdays ?? [];
   let text: string;
+  // A daily or weekly rule limited to some days reads by its days: Monday to Friday is "every weekday".
+  const someDays = days.length > 0 && days.length < 7;
+  const workweek = days.length === 5 && WORKWEEK.every((day) => days.includes(day as Weekday));
+  const named = () =>
+    list.format(WEEKDAYS.filter((day) => days.includes(day)).map((day) => weekdayName(day, locale)));
   switch (rule.freq) {
     case "daily":
-      text = words.daily(count);
+      text = !someDays
+        ? words.daily(count)
+        : count === 1 && workweek
+          ? words.weekdays()
+          : words.weekly(1, named());
       break;
     case "weekly":
-      text =
-        count === 1 && days.length === 5 && WORKWEEK.every((day) => days.includes(day as Weekday))
-          ? words.weekdays()
-          : words.weekly(count, list.format(days.map((day) => weekdayName(day, locale))));
+      text = count === 1 && workweek ? words.weekdays() : words.weekly(count, named());
       break;
     case "hourly":
       text = words.hourly(count);

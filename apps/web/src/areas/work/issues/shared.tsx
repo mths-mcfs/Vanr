@@ -101,6 +101,13 @@ export function useMyId(): string {
   return useSession().me?.user.id ?? "";
 }
 
+/** Whether the signed-in person may see the workspace's usage and costs (admins and owners). */
+export function useSeesUsage(workspaceId: string): boolean {
+  const { me } = useSession();
+  const role = me?.workspaces.find((workspace) => workspace.id === workspaceId)?.role ?? "member";
+  return can(role, "view_usage");
+}
+
 /** Whether the signed-in person sets the workspace up (admins and owners): the server decides, this hides. */
 export function useConfigures(workspaceId: string): boolean {
   const { me } = useSession();

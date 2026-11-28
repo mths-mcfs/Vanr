@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { screen, waitFor, within } from "@testing-library/react";
+
+// The fixtures are in UTC: the screens read them in the same zone wherever the tests run.
+process.env.TZ = "UTC";
+
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { newServer, renderApp } from "../../../../test/app.tsx";
 
 const ROUTINES = "/workspace/workspace_birchwood/routines";
@@ -62,13 +66,85 @@ describe("the routines", () => {
     expect(card("Morning digest").getByRole("button", { name: "Duplicate" })).toBeDefined();
   });
 
-  test("a member who didn't create a routine can't run, pause or delete it", async () => {
-    await renderApp({ path: ROUTINES, signedInAs: "usr_iris" });
-    await screen.findByRole("article", { name: "Morning digest" });
-    const digest = card("Morning digest");
-    expect(digest.queryByRole("switch") === null).toBe(true);
-    expect(digest.queryByRole("button", { name: "Run now" }) === null).toBe(true);
-    expect(digest.queryByRole("button", { name: "Delete" }) === null).toBe(true);
+  test("a member sees a routine of a channel they read, but can't run, pause or delete it, nor see its cost", async () => {
+    const app = await renderApp({ path: ROUTINES, signedInAs: "usr_iris" });
+    await screen.findByRole("article", { name: "Invoice watcher" });
+    // Ana's routine answers in her own conversation with the agent: Íris doesn't see it.
+    expect(screen.queryByRole("article", { name: "Morning digest" }) === null).toBe(true);
+    const watcher = card("Invoice watcher");
+    expect(watcher.queryByRole("switch") === null).toBe(true);
+    expect(watcher.queryByRole("button", { name: "Run now" }) === null).toBe(true);
+    expect(watcher.queryByRole("button", { name: "Delete" }) === null).toBe(true);
+    await app.user.click(watcher.getByRole("button", { name: "Details of Invoice watcher" }));
+    expect(await watcher.findByRole("region", { name: "Recent runs" })).toBeDefined();
+    expect(watcher.queryByRole("region", { name: "What it costs" }) === null).toBe(true);
+  });
+
+  test("an admin who isn't in a private channel can't duplicate the routine that answers there", async () => {
+    const server = newServer();
+    server.state.channels.push({
+      id: "ch_board",
+      workspaceId: "workspace_birchwood",
+      name: "board",
+      topic: "",
+      isGeneral: false,
+      visibility: "private",
+      budgetPerMonthUsd: null,
+      createdAt: "2026-11-02T09:00:00.000Z",
+      memberIds: ["usr_ana"],
+    });
+    const watcher = server.work.routines.find((routine) => routine.id === "rtn_invoices");
+    if (watcher !== undefined) watcher.target = { kind: "channel", channelId: "ch_board" };
+    await renderApp({ path: ROUTINES, signedInAs: "usr_jonas", server });
+    await screen.findByRole("article", { name: "Invoice watcher" });
+    expect(card("Invoice watcher").queryByRole("button", { name: "Duplicate" }) === null).toBe(true);
+  });
+
+  test("a double click on run now runs it once", async () => {
+    const app = await renderApp({ path: ROUTINES, signedInAs: "usr_ana" });
+    const runNow = (await screen.findAllByRole("button", { name: "Run now" }))[0] as HTMLElement;
+    const before = app.server.work.runs.length;
+    fireEvent.click(runNow);
+    fireEvent.click(runNow);
+    expect(await screen.findByText("Morning digest started")).toBeDefined();
+    await waitFor(() =>
+      expect(app.server.calls.filter((call) => call.method === "runRoutine").length).toBeGreaterThan(0),
+    );
+    const keys = new Set(
+      app.server.calls.filter((call) => call.method === "runRoutine").map((call) => call.params.key),
+    );
+    expect(keys.size).toBe(1);
+    expect(app.server.work.runs.length).toBe(before + 1);
+  });
+
+  test("the limits keep what is typed until the routine is sent", async () => {
+    const app = await renderApp({ path: ROUTINES, signedInAs: "usr_ana" });
+    await app.user.click(await screen.findByRole("button", { name: "New routine" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "New routine" }));
+    await app.user.type(dialog.getByRole("textbox", { name: "Name" }), "Limits");
+    await app.user.type(dialog.getByRole("textbox", { name: "Instruction" }), "Do it.");
+    await app.user.click(dialog.getByRole("combobox", { name: "Runs" }));
+    await app.user.click(await screen.findByRole("option", { name: "When a web address is called" }));
+    await app.user.click(dialog.getByText("Limits"));
+    const field = (name: string) => dialog.getByRole("textbox", { name });
+    for (const [name, value] of [
+      ["Most it may spend per run (USD)", "1.5"],
+      ["Most minutes per run", "45"],
+    ] as const) {
+      await app.user.clear(field(name));
+      await app.user.type(field(name), value);
+      expect((field(name) as HTMLInputElement).value).toBe(value);
+    }
+    await app.user.clear(field("Most steps per run"));
+    await app.user.type(field("Most steps per run"), "0.25");
+    expect(dialog.getByText("A number from 1 to 50.")).toBeDefined();
+    expect(dialog.getByRole("button", { name: "Create routine" }).hasAttribute("disabled")).toBe(true);
+    await app.user.clear(field("Most steps per run"));
+    await app.user.type(field("Most steps per run"), "20");
+    await app.user.click(dialog.getByRole("button", { name: "Create routine" }));
+    expect(await screen.findByText("Limits created")).toBeDefined();
+    const made = app.server.work.routines.find((routine) => routine.name === "Limits");
+    expect([made?.policy.maxCostUsd, made?.policy.maxMinutes, made?.policy.maxSteps]).toEqual([1.5, 45, 20]);
   });
 
   test("a webhook's secret is made and shown once", async () => {

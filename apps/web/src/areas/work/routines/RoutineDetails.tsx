@@ -7,7 +7,7 @@ import { Button, Chip, Dialog, DialogContent } from "@vanr/ui";
 import { type ReactNode, useState } from "react";
 import { AppLink } from "../../../app/navigation.tsx";
 import { useLocale, useLookup, useMessages } from "../../../i18n/react.tsx";
-import { useOutcome } from "../issues/shared.tsx";
+import { useOutcome, useSeesUsage } from "../issues/shared.tsx";
 import { PartError, PartLoading } from "../parts.tsx";
 
 const RUNS_SHOWN = 10;
@@ -25,13 +25,15 @@ export function RoutineDetails({
   mayEdit: boolean;
 }) {
   const t = useMessages("work");
+  // What a routine costs is usage: shown only to whoever may see the workspace's usage.
+  const seesUsage = useSeesUsage(workspaceId);
   return (
     <div className="work-routine__details">
       <section className="work-section" aria-label={t("recur.instruction")}>
         <h3 className="work-subhead">{t("recur.instruction")}</h3>
         <p className="work-routine__full">{routine.prompt}</p>
       </section>
-      <Cost workspaceId={workspaceId} routineId={routine.id} />
+      {seesUsage && <Cost workspaceId={workspaceId} routineId={routine.id} />}
       <Runs workspaceId={workspaceId} routine={routine} />
       {routine.trigger.kind === "webhook" && (
         <Webhook workspaceId={workspaceId} routine={routine} mayEdit={mayEdit} />

@@ -330,4 +330,6 @@ export default {
   "summary.routines.run.private_context": "Falhou: agora responde onde o canal do evento não pode ser lido.",
   "summary.routines.run.debate": "Abriu o debate “{title}”.",
   "summary.routines.run.file": "Escreveu o documento “{title}”.",
+  "recur.form.limitRange": "Um número de {min} a {max}.",
+  "week.field.everyone": "Sem convidados, todos do espaço de trabalho veem o evento.",
 } satisfies TranslationOf<typeof en>;
