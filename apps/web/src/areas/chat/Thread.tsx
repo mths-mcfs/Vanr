@@ -291,6 +291,16 @@ function ThreadPage({ workspaceId, threadId }: { workspaceId: string; threadId: 
     channels.data !== undefined &&
     !channels.data.some((c) => c.id === unlistedIn.current);
   const missing = goneFor.current === threadId || stillUnlisted;
+  // The channel whose cache the gone page clears, fixed once: the forgotten thread read again must not
+  // remount the clearing, which would forget it again, and loop.
+  const forgotten = useRef<string | undefined>(undefined);
+  if (missing) forgotten.current ??= unlistedIn.current ?? info.data?.channelId;
+  // A list that has the channel back reads the thread again if its last read failed while gone.
+  const listedAgain = unlistedIn.current !== null && !stillUnlisted;
+  const readAgain = info.refetch;
+  useEffect(() => {
+    if (listedAgain && info.isError) void readAgain();
+  }, [listedAgain, info.isError, readAgain]);
   const channelId = missing ? undefined : info.data?.channelId;
   useChannelSubscription(channelId);
   useDocumentTitle(
@@ -312,7 +322,7 @@ function ThreadPage({ workspaceId, threadId }: { workspaceId: string; threadId: 
     return (
       <div className="page">
         {back}
-        <ForgetThread workspaceId={workspaceId} threadId={threadId} channelId={info.data?.channelId} />
+        <ForgetThread workspaceId={workspaceId} threadId={threadId} channelId={forgotten.current} />
         <h1 className="page__title">{t("thread.gone")}</h1>
         <p className="page__lead">{t("thread.goneText")}</p>
       </div>
