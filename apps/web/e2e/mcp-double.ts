@@ -1,5 +1,6 @@
-// An MCP server on a local port for the journeys: it answers `initialize` and `tools/list` over the
-// streamable HTTP transport with plain JSON, and lists the tools it was started with. Nothing leaves the
+// An MCP server on a local port for the journeys: it answers `initialize`, `tools/list` and `tools/call`
+// over the streamable HTTP transport with plain JSON, lists the tools it was started with and notes each
+// call. Nothing leaves the
 // machine. The real Vanr server reaches it because a self-hosted server allows the local network.
 import { createServer, type IncomingMessage } from "node:http";
 
@@ -10,6 +11,8 @@ export interface McpDouble {
   readonly url: string;
   /** The `Authorization` header of every request it got. */
   readonly authorizations: (string | undefined)[];
+  /** The name of every tool an agent called, in order. */
+  readonly calls: string[];
   stop(): Promise<void>;
 }
 
@@ -21,15 +24,17 @@ async function readBody(request: IncomingMessage): Promise<string> {
 
 export async function startMcpDouble(tools: readonly McpDoubleTool[]): Promise<McpDouble> {
   const authorizations: (string | undefined)[] = [];
+  const calls: string[] = [];
   const server = createServer(async (request, response) => {
     authorizations.push(request.headers.authorization);
     if (request.method !== "POST" || request.url !== "/mcp") {
       response.writeHead(404).end();
       return;
     }
-    let message: { id?: number; method?: string };
+    type Message = { id?: number; method?: string; params?: { name?: unknown } };
+    let message: Message;
     try {
-      message = JSON.parse(await readBody(request)) as { id?: number; method?: string };
+      message = JSON.parse(await readBody(request)) as Message;
     } catch {
       response.writeHead(400).end();
       return;
@@ -54,7 +59,12 @@ export async function startMcpDouble(tools: readonly McpDoubleTool[]): Promise<M
                 annotations: { readOnlyHint: tool.readOnly === true },
               })),
             }
-          : null;
+          : message.method === "tools/call" && tools.some((tool) => tool.name === message.params?.name)
+            ? (() => {
+                calls.push(String(message.params?.name));
+                return { content: [{ type: "text", text: "done" }] };
+              })()
+            : null;
     const body =
       result === null
         ? { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Method not found" } }
@@ -68,6 +78,7 @@ export async function startMcpDouble(tools: readonly McpDoubleTool[]): Promise<M
   return {
     url: `http://127.0.0.1:${address.port}/mcp`,
     authorizations,
+    calls,
     stop: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }

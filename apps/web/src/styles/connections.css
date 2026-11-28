@@ -215,6 +215,56 @@
     color: var(--vr-info-fg);
   }
 
+  /* The access matrix: agents down, connections across; the agent column stays put while it scrolls. */
+  .grid-wrap {
+    max-width: 100%;
+    overflow-x: auto;
+    border: var(--vr-border) solid var(--vr-line);
+    border-radius: var(--vr-radius-2);
+  }
+
+  .grid {
+    min-width: 100%;
+    border-collapse: collapse;
+    font-size: var(--vr-text-sm);
+    line-height: var(--vr-text-sm-lh);
+  }
+
+  .grid th,
+  .grid td {
+    padding: var(--vr-space-2) var(--vr-space-3);
+    border-bottom: var(--vr-border) solid var(--vr-line);
+    text-align: start;
+    white-space: nowrap;
+  }
+
+  .grid thead th {
+    font-weight: var(--vr-weight-medium);
+    color: var(--vr-fg-muted);
+    background: var(--vr-bg-sunken);
+  }
+
+  .grid th[scope="row"],
+  .grid thead th:first-child {
+    position: sticky;
+    inset-inline-start: 0;
+    background: var(--vr-bg-raised);
+  }
+
+  .grid tbody tr:last-child th,
+  .grid tbody tr:last-child td {
+    border-bottom: 0;
+  }
+
+  /* An agent with everything: its cells are moot, and read as such. */
+  .grid tr[data-everything="true"] td + td {
+    opacity: 0.55;
+  }
+
+  .grid td[data-level="none"] .vr-select {
+    color: var(--vr-fg-subtle);
+  }
+
   @media (max-width: 40rem) {
     .wire-row {
       grid-template-columns: minmax(0, 1fr);

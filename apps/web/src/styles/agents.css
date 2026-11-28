@@ -593,4 +593,51 @@
       border-top: var(--vr-border) solid var(--vr-line);
     }
   }
+
+  /* An agent's own reach, on its Access tab. */
+  .reach {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-4);
+  }
+
+  .reach__group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-2);
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+
+  .reach__group:disabled {
+    opacity: 0.6;
+  }
+
+  .reach__list {
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+    padding: 0;
+    border-top: var(--vr-border) solid var(--vr-line);
+    list-style: none;
+  }
+
+  .reach__row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--vr-space-4);
+    min-height: var(--vr-control-lg);
+    border-bottom: var(--vr-border) solid var(--vr-line);
+  }
+
+  .reach__name {
+    flex: 1 1 12rem;
+    font-weight: var(--vr-weight-medium);
+  }
+
+  .reach__level {
+    color: var(--vr-fg-muted);
+  }
 }
