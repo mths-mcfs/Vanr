@@ -48,7 +48,7 @@ describe("adding an agent", () => {
     expect(review.textContent).toContain("@mare-alta");
     expect(review.textContent).toContain("Support");
     expect(review.textContent).toContain("#general, #design");
-    expect(review.textContent).toContain("Everyone in the workspace");
+    expect(review.textContent).toContain("All workspace members");
     await app.user.click(screen.getByRole("button", { name: "Create the agent" }));
 
     await screen.findByRole("heading", { name: "Maré Alta is ready" });
@@ -73,7 +73,7 @@ describe("adding an agent", () => {
     expect(screen.getByRole("button", { name: "Next" }).hasAttribute("disabled")).toBe(true);
     await app.user.clear(screen.getByLabelText("Handle"));
     await app.user.type(screen.getByLabelText("Handle"), "A");
-    expect(screen.getByText(/Use 2 to 32 lowercase letters/)).toBeDefined();
+    expect(screen.getByText(/2 to 32 characters from a–z/)).toBeDefined();
   });
 
   test("a handle the server refuses at the end sends the person back to the name", async () => {
@@ -145,7 +145,7 @@ describe("adding an agent", () => {
       await form(step);
     }
     await app.user.click(screen.getByRole("radio", { name: "Only the people I pick" }));
-    expect(screen.getByRole("alert").textContent).toBe("Pick at least one person.");
+    expect(screen.getByRole("alert").textContent).toBe("Choose one person or more.");
     expect(screen.getByRole("button", { name: "Next" }).hasAttribute("disabled")).toBe(true);
     await app.user.click(screen.getByRole("checkbox", { name: "Íris Valença" }));
     expect(screen.getByRole("button", { name: "Next" }).hasAttribute("disabled")).toBe(false);

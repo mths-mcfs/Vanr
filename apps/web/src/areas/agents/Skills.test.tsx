@@ -40,11 +40,11 @@ describe("the workspace's skills", () => {
     expect(names()).toHaveLength(6);
     await app.user.click(screen.getByRole("button", { name: "Show all 8" }));
     expect(names()).toHaveLength(8);
-    await app.user.type(screen.getByLabelText("Search skills"), "brochures");
+    await app.user.type(screen.getByLabelText("Find a skill"), "brochures");
     expect(names()).toEqual(["Extra 4"]);
-    await app.user.clear(screen.getByLabelText("Search skills"));
-    await app.user.type(screen.getByLabelText("Search skills"), "zebra");
-    expect(screen.getByText("No skill matches “zebra”.")).toBeDefined();
+    await app.user.clear(screen.getByLabelText("Find a skill"));
+    await app.user.type(screen.getByLabelText("Find a skill"), "zebra");
+    expect(screen.getByText("Nothing in the catalog matches “zebra”.")).toBeDefined();
   });
 
   test("an admin writes a skill that every new agent gets", async () => {

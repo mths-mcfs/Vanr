@@ -73,7 +73,7 @@ describe("the team", () => {
     const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
     const list = await screen.findByRole("list", { name: "Delegations today" });
     expect(within(list).getAllByRole("listitem")).toHaveLength(1);
-    expect(list.textContent).toContain("Scout asked Ledger");
+    expect(list.textContent).toContain("Scout delegated to Ledger");
     expect(within(list).queryByText("New") === null).toBe(true);
     await act(async () => {
       app.server.agentWork.delegations.unshift({
@@ -91,7 +91,7 @@ describe("the team", () => {
       ).toHaveLength(2),
     );
     const fresh = within(screen.getByRole("list", { name: "Delegations today" })).getAllByRole("listitem")[0];
-    expect(fresh?.textContent).toContain("Tally asked Scout");
+    expect(fresh?.textContent).toContain("Tally delegated to Scout");
     expect(fresh?.textContent).toContain("New");
   });
 
