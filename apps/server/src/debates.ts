@@ -43,10 +43,10 @@ import type { BudgetScope } from "@vanr/engine/usage";
 import { PRODUCT } from "@vanr/product";
 import { and, asc, eq, inArray, isNull, lte, or, type SQL, sql } from "drizzle-orm";
 import { z } from "zod";
-import { type AgentRow, agentBudgetScope } from "./agents";
+import { type AgentRow, agentBudgetScope, seesSpend } from "./agents";
 import { canReadChannel, channelInWorkspace, isChannelMember, readableChannelsSql } from "./channels";
 import { type ClaimOutput, claim, forget, release, settle } from "./claims";
-import type { AppDeps, CompleteResult } from "./context";
+import type { AppDeps, CompleteResult, WorkspaceMember } from "./context";
 import { notFound } from "./http";
 import { type IssueViewer, visibleIssuesSql } from "./issues";
 import { log } from "./logger";
@@ -374,7 +374,11 @@ const roundMajority = (
 };
 
 /** The debate as the person reads it: its linked issues only as far as they see them (`visibleIssuesSql`). */
-export async function toDetail(deps: AppDeps, row: DebateRow, viewer: IssueViewer): Promise<DebateDetail> {
+export async function toDetail(
+  deps: AppDeps,
+  row: DebateRow,
+  viewer: IssueViewer & Pick<WorkspaceMember, "role">,
+): Promise<DebateDetail> {
   const { db } = deps;
   const posts = await postsOf(db, row.id);
   const rounds = new Map<number, string[]>();
@@ -411,7 +415,7 @@ export async function toDetail(deps: AppDeps, row: DebateRow, viewer: IssueViewe
     synthesis: synthesisOf(row),
     issues: linked.sort((a, b) => a.number - b.number),
     sealedCount: hidden?.n ?? 0,
-    spentUsd: Math.round((await debateSpent(deps, row)) * 10_000) / 10_000,
+    spentUsd: seesSpend(viewer) ? Math.round((await debateSpent(deps, row)) * 10_000) / 10_000 : null,
   };
 }
 
@@ -564,6 +568,16 @@ export async function answerRound(
   const done = await deps.db.transaction(async (tx) => {
     const locked = await lockDebate(tx, row.id);
     if (!locked || !inQueue(locked, row.round, who)) return null;
+    // An agent's post goes in its name only while it is active, read under its row lock (`archiveAgent` takes it
+    // FOR UPDATE): an archive that landed after the turn's own check still keeps the post out.
+    if (who.type === "agent") {
+      const [author] = await tx
+        .select({ archivedAt: agents.archivedAt })
+        .from(agents)
+        .where(eq(agents.id, who.id))
+        .for("share");
+      if (!author || author.archivedAt) return "archived" as const;
+    }
     const change = { ...set, pendingSpeakers: locked.pendingSpeakers.filter((s) => !same(s, who)) };
     const [debate] = await tx
       .update(debates)
@@ -586,6 +600,10 @@ export async function answerRound(
     if (!post) throw new Error("debate post insert failed");
     return { debate, post, change };
   });
+  if (done === "archived") {
+    await leaveRound(deps, row, who);
+    return null;
+  }
   if (!done) return null;
   await afterSave(deps, done.debate, done.change);
   return { debate: done.debate, post: done.post };
@@ -1024,6 +1042,12 @@ async function agentTurn(deps: AppDeps, row: DebateRow, agentId: string): Promis
   if (got === "held") return false;
   const result =
     "done" in got ? recordedTurn(got.done) : await callTurn(deps, row, agent, posts, key, got.token);
+  // An archive that landed while the agent thought: its turn isn't posted in its name, and it leaves the round.
+  if (!(await liveAgents(db, [agentId])).length) {
+    await forget(db, key);
+    await leaveRound(deps, row, who);
+    return true;
+  }
   if (!result.ok && result.code !== "budget") {
     // The round changed while the agent thought (canceled, removed, concluded): the failure no longer counts.
     const reason = result.error.slice(0, 300);
@@ -1146,15 +1170,25 @@ function buildSynthesis(
   };
 }
 
+/** A candidate signer turned out archived: its savepoint rolls back, and with it the row lock it took. */
+class NotSigner extends Error {}
+
 async function synthesize(deps: AppDeps, row: DebateRow) {
   const { db } = deps;
   const leadId = leadOf(row);
   const [lead] = leadId ? await liveAgents(db, [leadId]) : [];
   await publishRevealed(deps, row, await revealHidden(db, deps, row.id));
   const posts = await postsOf(db, row.id);
+  /** The last round's majority as the synthesis, without a model: no lead to write it, or no balance for it. */
+  const onVotes = (on: DebateRow): DivergenceSynthesis => {
+    const final = buildSynthesis(on, posts, { summary: "" }, null).final;
+    return final ? voteSynthesis(final) : { summary: "" };
+  };
   let structured: DivergenceSynthesis;
   let fallback: "budget" | null = null;
   let runId: string | null = null;
+  // Whether the text is the lead's own (it then signs it while it is still active).
+  let leadWrote = false;
   if (lead) {
     const names = await promptNames(deps, row, posts);
     const result = await deps.runtime.complete({
@@ -1170,43 +1204,97 @@ async function synthesize(deps: AppDeps, row: DebateRow) {
     if (result.ok) {
       structured = parseDivergenceSynthesis(result.text);
       runId = result.runId;
+      leadWrote = true;
     } else if (result.code === "budget") {
-      // No balance for the synthesis: it closes with the last round's majority, without a model.
-      const final = buildSynthesis(row, posts, { summary: "" }, null).final;
-      structured = final ? voteSynthesis(final) : { summary: "" };
+      structured = onVotes(row);
       fallback = "budget";
+    } else if (!(await liveAgents(db, [lead.id])).length) {
+      // The call failed because the lead was archived (`complete` refuses one): the debate closes on the votes.
+      structured = onVotes(row);
     } else {
       const reason = result.error.slice(0, 300);
+      const agentId = lead.id;
       await changeDebate(deps, row.id, (fresh) =>
         fresh.status === "open" && fresh.phase === "concluding" && fresh.round === row.round
-          ? { status: "stalled", phase: null, stallInfo: { agentId: lead.id, round: row.round, reason } }
+          ? { status: "stalled", phase: null, stallInfo: { agentId, round: row.round, reason } }
           : null,
       );
       return;
     }
   } else {
-    structured = { summary: "" };
+    // A lead archived before the synthesis started closes on the votes as one archived during it; people only, empty.
+    structured = leadId ? onVotes(row) : { summary: "" };
   }
-  // It closes only if nobody canceled or reopened it while the lead wrote.
-  const done = await changeDebate(deps, row.id, (fresh) =>
-    fresh.status === "open" && fresh.phase === "concluding" && fresh.round === row.round
-      ? {
-          status: "done",
-          phase: null,
-          pendingSpeakers: [],
-          synthesis: { ...buildSynthesis(fresh, posts, structured, fallback) },
-        }
-      : null,
-  );
-  if (!done) return;
-  await insertPost(deps, done, {
-    author: { type: "agent", id: lead?.id ?? row.agentIds[0] ?? "" },
-    kind: "synthesis",
-    round: row.round,
-    body: structured.summary,
-    runId,
-    meta: { synthesis: done.synthesis },
+  // It closes only if nobody canceled or reopened it while the lead wrote. Who signs is read in the same transaction
+  // that writes the synthesis: the lead, if it wrote the text and is still active; else the first active agent in
+  // `agentIds` order, over the votes. Each candidate is locked FOR SHARE alone, in a savepoint that rolls back (and
+  // lets its lock go) when it turns out archived: no more than one agent row is ever held, so the batch updates of
+  // agents (a credential, a runner) can't deadlock with it. With none of its agents active, the synthesis stays on
+  // the debate and no post is written: it is never signed by an archived agent.
+  let signer: string | null = null;
+  let post: DebatePostRow | null = null;
+  const done = await changeDebate(deps, row.id, async (fresh, tx) => {
+    if (!(fresh.status === "open" && fresh.phase === "concluding" && fresh.round === row.round)) return null;
+    const holds = async (id: string) => {
+      try {
+        await tx.transaction(async (sp) => {
+          const [a] = await sp
+            .select({ archivedAt: agents.archivedAt })
+            .from(agents)
+            .where(eq(agents.id, id))
+            .for("share");
+          if (!a || a.archivedAt) throw new NotSigner();
+        });
+        return true;
+      } catch (err) {
+        if (err instanceof NotSigner) return false;
+        throw err;
+      }
+    };
+    if (lead && leadWrote) {
+      if (await holds(lead.id)) signer = lead.id;
+      else {
+        // Archived while it wrote: its text goes, and the debate closes on the votes.
+        structured = onVotes(fresh);
+        fallback = null;
+        runId = null;
+      }
+    }
+    if (!signer)
+      for (const id of fresh.agentIds)
+        if (id !== lead?.id || !leadWrote)
+          if (await holds(id)) {
+            signer = id;
+            break;
+          }
+    const synthesis = { ...buildSynthesis(fresh, posts, structured, fallback) };
+    // A debate of people only has no agent to sign: its post goes out as it always did. One whose agents were all
+    // archived gets none.
+    const peopleOnly = fresh.agentIds.length === 0;
+    if (signer || peopleOnly) {
+      const [inserted] = await tx
+        .insert(debatePosts)
+        .values({
+          id: newId("dpost"),
+          debateId: row.id,
+          createdAt: deps.now(),
+          author: { type: "agent", id: signer ?? "" },
+          kind: "synthesis",
+          round: row.round,
+          body: structured.summary,
+          runId,
+          meta: { synthesis },
+        })
+        .returning();
+      post = inserted ?? null;
+    }
+    return { status: "done", phase: null, pendingSpeakers: [], synthesis };
   });
+  if (!done) return;
+  if (post) {
+    await publishPost(deps, done, post);
+    await reindex(deps, { kind: "debate", id: done.id });
+  }
   await closeNotifications(deps, row.workspaceId, turnKey(row.id));
   for (const userId of stakeholders(row)) {
     await notify(deps, {
@@ -1214,7 +1302,7 @@ async function synthesize(deps: AppDeps, row: DebateRow) {
       userId,
       kind: "debate_synthesis",
       groupKey: `debate_synthesis:${row.id}`,
-      ...(lead ? { actor: { type: "agent" as const, id: lead.id } } : {}),
+      ...(signer ? { actor: { type: "agent" as const, id: signer } } : {}),
       source: { debateId: row.id, label: row.title },
       latest: { title: row.title, text: (structured.decision ?? structured.summary).slice(0, 160) },
     });

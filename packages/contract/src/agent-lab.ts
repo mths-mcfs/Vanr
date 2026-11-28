@@ -41,7 +41,8 @@ export interface AgentEvalSummary {
 export interface AgentEval {
   id: string;
   agentId: string;
-  costUsd: number;
+  /** What the test run spent; null without view_usage. */
+  costUsd: number | null;
   createdAt: string;
   done: number;
   error: string | null;

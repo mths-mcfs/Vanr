@@ -9,13 +9,14 @@ import type {
   AssignmentReview,
   AssignmentRole,
   AssignmentSubmission,
+  AssignmentUsage,
 } from "@vanr/contract";
 import { can } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { assignmentWorkState } from "@vanr/engine/work-state";
 import { and, count, eq, gt, inArray } from "drizzle-orm";
-import type { AgentRow } from "../agents";
+import { type AgentRow, seesSpend } from "../agents";
 import { canReadChannel, channelInWorkspace } from "../channels";
 import type { AppDeps, WorkspaceMember } from "../context";
 import { HttpError } from "../http";
@@ -100,6 +101,16 @@ export async function viewAssignment(deps: AppDeps, me: WorkspaceMember, id: str
   const role = await roleOf(deps.db, me, row);
   if (!role) throw notFoundAssignment();
   return { row, role };
+}
+
+/** The assignment's usage as the person reads it: its dollars only with view_usage (`seesSpend`). */
+async function usageFor(
+  deps: AppDeps,
+  row: AssignmentRow,
+  me: Pick<WorkspaceMember, "role">,
+): Promise<AssignmentUsage> {
+  const usage = await assignmentUsage(deps, row);
+  return seesSpend(me) ? usage : { ...usage, dollars: null, jobTokens: null };
 }
 
 /** Who may act (the owner or who decides); everyone else gets 403. */
@@ -230,7 +241,7 @@ export async function runningJobsOf(db: Db, assignmentId: string) {
 export async function toAssignment(
   deps: AppDeps,
   row: AssignmentRow,
-  me: { workspaceId: string; userId: string },
+  me: Pick<WorkspaceMember, "workspaceId" | "userId" | "role">,
 ): Promise<Assignment> {
   const { db } = deps;
   const role = await roleOf(db, me, row);
@@ -314,7 +325,7 @@ export async function toAssignment(
     wakeAt: row.wakeAt?.toISOString() ?? null,
     waitReason: (row.waitReason as Assignment["waitReason"]) ?? null,
     limits: row.limits,
-    usage: await assignmentUsage(deps, row),
+    usage: await usageFor(deps, row, me),
     ceiling: row.ceiling,
     unseen: unseen?.n ?? 0,
     runningJobs: (await runningJobsOf(db, row.id)).length,

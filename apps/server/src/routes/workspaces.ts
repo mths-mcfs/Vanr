@@ -7,7 +7,14 @@ import { HANDLE_RE } from "@vanr/engine/text";
 import { and, count, eq, isNull } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
-import { budgetOf, monthStart, requireCredential, usageSince, workspaceBudgetDefaults } from "../agents";
+import {
+  budgetOf,
+  monthStart,
+  requireCredential,
+  seesSpend,
+  usageSince,
+  workspaceBudgetDefaults,
+} from "../agents";
 import { type AppEnv, type Ctx, requireUser } from "../context";
 import { approvalsWaitingFor } from "../control";
 import { isUniqueViolation } from "../db-errors";
@@ -138,11 +145,7 @@ export function registerWorkspaces(app: Hono<AppEnv>) {
     const overview: WorkspaceOverview = {
       myApprovalQueue: (await approvalsWaitingFor(db, me)).length,
       // Spend follows view_usage, as GET /usage: whoever doesn't have it gets null.
-      budgetSpentPct: can(me.role, "view_usage")
-        ? budget > 0
-          ? Math.round((spent / budget) * 1000) / 10
-          : 0
-        : null,
+      budgetSpentPct: seesSpend(me) ? (budget > 0 ? Math.round((spent / budget) * 1000) / 10 : 0) : null,
       agents: active.length,
       people: people?.n ?? 0,
     };

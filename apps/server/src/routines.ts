@@ -20,7 +20,7 @@ import { PRODUCT } from "@vanr/product";
 import { and, asc, desc, eq, inArray, isNull, lt, lte, or, type SQL, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { AgentRow } from "./agents";
-import { canReadChannel, channelInWorkspace, openDm, readableChannelsSql } from "./channels";
+import { canReadChannel, channelInWorkspace, existingDm, openDm, readableChannelsSql } from "./channels";
 import type { AppDeps, WorkspaceMember } from "./context";
 import { openDebate } from "./debates";
 import { createFile } from "./drive";
@@ -246,6 +246,26 @@ async function recentFires(
   return out;
 }
 
+/** The routines with a run in progress the person sees: a run in a channel they can't read doesn't show as running. */
+async function visiblyRunning(
+  db: Db,
+  viewer: { workspaceId: string; userId: string },
+  ids: string[],
+): Promise<Set<string>> {
+  if (ids.length === 0) return new Set();
+  const rows = await db
+    .selectDistinct({ routineId: routineExecutions.routineId })
+    .from(routineExecutions)
+    .where(
+      and(
+        inArray(routineExecutions.routineId, ids),
+        eq(routineExecutions.status, "running"),
+        visibleRunsSql(viewer),
+      ),
+    );
+  return new Set(rows.map((r) => r.routineId));
+}
+
 /** The trigger as the screen sees it: the email one says whether the mailbox is still connected. */
 async function withMailStatus(db: Db, rows: RoutineRow[]): Promise<Map<string, RoutineTrigger>> {
   const ids = rows.flatMap((r) => {
@@ -286,6 +306,11 @@ export async function toRoutines(
     rows.map((r) => r.id),
   );
   const triggers = await withMailStatus(deps.db, rows);
+  const running = await visiblyRunning(
+    deps.db,
+    viewer,
+    rows.filter((r) => r.runningSince).map((r) => r.id),
+  );
   return rows.map((row) => {
     const recent = (byRoutine.get(row.id) ?? []).map((r) => ({ at: r.at.toISOString(), status: r.status }));
     return {
@@ -298,7 +323,7 @@ export async function toRoutines(
       policy: policyOf(row),
       active: row.active,
       pausedReason: row.pausedReason === "failures" ? "failures" : null,
-      running: !!row.runningSince,
+      running: running.has(row.id),
       nextFireAt: row.active ? (row.nextFireAt?.toISOString() ?? null) : null,
       lastRun: recent[0] ?? null,
       recentFires: recent,
@@ -474,12 +499,19 @@ export async function registerFire(
 async function fireChannel(db: Db, row: RoutineRow): Promise<string | null> {
   const target = targetOf(row);
   if (target.kind === "channel") return target.channelId;
-  if (target.kind === "dm" || target.kind === "conversation")
-    return openDm(db, {
+  if (target.kind === "dm" || target.kind === "conversation") {
+    const dm = {
       workspaceId: row.workspaceId,
       userId: row.createdBy,
-      other: { type: "agent", id: row.agentId },
-    });
+      other: { type: "agent" as const, id: row.agentId },
+    };
+    // An archived agent's fire fails (`agent_gone`): it keeps a DM that exists and doesn't open a new one.
+    const [agent] = await db
+      .select({ archivedAt: agents.archivedAt })
+      .from(agents)
+      .where(eq(agents.id, row.agentId));
+    return !agent || agent.archivedAt ? existingDm(db, dm) : openDm(db, dm);
+  }
   return null;
 }
 
@@ -1019,6 +1051,16 @@ async function execute(
             : fail("routines.run.model", result.error, "model");
     if (!result.text)
       return { status: "silent", summary: null, summaryKey: "routines.run.silent", runId: result.runId };
+    // An archive that landed while the model wrote: the file doesn't go in the archived agent's name.
+    const [still] = await db
+      .select({ archivedAt: agents.archivedAt })
+      .from(agents)
+      .where(eq(agents.id, agent.id));
+    if (!still || still.archivedAt)
+      return {
+        ...fail("routines.run.agent_gone", "The agent was archived", "agent_gone"),
+        runId: result.runId,
+      };
     const { row: file } = await createFile(deps, {
       workspaceId: row.workspaceId,
       title: `${row.name} · ${stamp}`,
@@ -1072,6 +1114,9 @@ async function execute(
   const channel = await channelInWorkspace(db, row.workspaceId, channelId);
   if (!channel || channel.archivedAt)
     return fail("routines.run.channel_gone", "The channel no longer exists", "channel_gone");
+  // The run is where it posts, from now on: its target may have moved since the fire, and whoever sees the run in
+  // progress (`running`, the history) is whoever reads this channel.
+  await db.update(routineExecutions).set({ channelId: channel.id }).where(eq(routineExecutions.id, run.id));
   const [inChannel] = await db
     .select({ id: schema.channelMemberships.memberId })
     .from(schema.channelMemberships)
@@ -1116,6 +1161,8 @@ async function execute(
     replyMeta: { fromRoutine: routineRef },
     limits,
   });
+  if (!started.ok && started.code === "archived")
+    return { ...fail("routines.run.agent_gone", "The agent was archived", "agent_gone"), ...session };
   if (!started.ok && started.code === "personal_plan")
     return {
       ...fail("routines.run.personal_plan", `${agent.name} ${PERSONAL_PLAN_TEXT}`, "personal_plan"),

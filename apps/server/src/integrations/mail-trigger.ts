@@ -11,7 +11,7 @@
 // Who calls `pollEmailRoutines` is the runtime's tick; the boot doesn't start a periodic reader here.
 // The email is outside data, never instructions: it goes into the request as the fire's untrusted context.
 import { schema } from "@vanr/engine/db";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import type { AppDeps } from "../context";
 import { log } from "../logger";
 import { fireRoutine, type RoutineContext, type RoutineRow, triggerOf } from "../routines";
@@ -20,7 +20,7 @@ import { mailboxesOf, withImap } from "./mail";
 import { allowedBy } from "./mail-rules";
 import { parseMail } from "./mime";
 
-const { routines, mailConnections } = schema;
+const { agents, routines, mailConnections } = schema;
 export const POLL_MS = 60_000;
 export const MAX_PER_POLL = 5;
 /** The most of an email's text that goes into the request. */
@@ -36,12 +36,24 @@ const busy = new Set<string>();
  */
 const oneLine = (s: string | null | undefined) => (s ?? "").replace(/[\r\n\u2028\u2029]+/g, " ").trim();
 
-/** Checks the folders of the active email routines; returns how many emails it queued to fire. */
+/**
+ * Checks the folders of the active email routines; returns how many emails it queued to fire. An archived agent's
+ * routines aren't read: its mailbox stays shut, and no fire is recorded only to fail as `agent_gone`.
+ */
 export async function pollEmailRoutines(deps: AppDeps): Promise<number> {
-  const rows = await deps.db
-    .select()
-    .from(routines)
-    .where(and(eq(routines.active, true), sql`${routines.trigger}->>'kind' = 'email'`));
+  const rows = (
+    await deps.db
+      .select({ routine: routines })
+      .from(routines)
+      .innerJoin(agents, eq(agents.id, routines.agentId))
+      .where(
+        and(
+          eq(routines.active, true),
+          sql`${routines.trigger}->>'kind' = 'email'`,
+          isNull(agents.archivedAt),
+        ),
+      )
+  ).map((r) => r.routine);
   const now = deps.now().getTime();
   let fired = 0;
   for (const row of rows) {
@@ -77,6 +89,12 @@ async function pollOne(deps: AppDeps, row: RoutineRow): Promise<number> {
   if (!box || box.level === "none") return 0;
   const { policy } = box;
   if (policy.folders.length > 0 && !policy.folders.includes(trigger.folder)) return 0;
+  // Read again right before the mailbox opens: an agent archived while earlier routines of this check were polled.
+  const [agent] = await deps.db
+    .select({ archivedAt: agents.archivedAt })
+    .from(agents)
+    .where(eq(agents.id, row.agentId));
+  if (!agent || agent.archivedAt) return 0;
 
   const found = await withImap(deps, account, async (imap) => {
     const { uidValidity } = await imap.open(trigger.folder, true);

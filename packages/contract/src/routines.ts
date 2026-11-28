@@ -150,7 +150,7 @@ export interface ScheduleParse {
 /**
  * Cost of running the routine. `upToUsd`: the cap when there is one (document: one call; debate: the
  * debate's cap); a conversation in a channel has no fixed cap. `recent`: what the latest runs actually
- * cost, from the ledger.
+ * cost, from the ledger, counting only the runs the person sees; null without view_usage.
  */
 export interface RoutineEstimate {
   calls: number | null;

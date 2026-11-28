@@ -29,6 +29,7 @@ import {
 } from "@vanr/engine/runner-protocol";
 import { and, eq, gt, inArray, isNotNull } from "drizzle-orm";
 import { z } from "zod";
+import { lockActiveAgent } from "../agent-memory";
 import type { AgentRow } from "../agents";
 import { assignmentGate } from "../assignments/engine";
 import { contentOf, createFile, fileBytes, versionOf } from "../drive";
@@ -601,13 +602,22 @@ const setEnvironment = (status: "running" | "stopped") =>
       input: z.object({}),
       readiness: { allowStopped: true },
       async run(ctx) {
-        await ctx.deps.db
-          .insert(agentEnvironments)
-          .values({ agentId: ctx.agent.id, workspaceId: ctx.workspaceId, status, lastUsedAt: ctx.deps.now() })
-          .onConflictDoUpdate({
-            target: agentEnvironments.agentId,
-            set: { status, updatedAt: ctx.deps.now() },
-          });
+        await ctx.deps.db.transaction(async (tx) => {
+          // Starting is a write an archived agent refuses, as `POST /environment/start` does; stopping stays open.
+          if (status === "running") await lockActiveAgent(tx, ctx.agent.id);
+          await tx
+            .insert(agentEnvironments)
+            .values({
+              agentId: ctx.agent.id,
+              workspaceId: ctx.workspaceId,
+              status,
+              lastUsedAt: ctx.deps.now(),
+            })
+            .onConflictDoUpdate({
+              target: agentEnvironments.agentId,
+              set: { status, updatedAt: ctx.deps.now() },
+            });
+        });
         await emitEnvironment(ctx.deps, ctx.workspaceId, ctx.agent.id);
         return status === "running" ? "Your runner is ready." : "Your runner is stopped.";
       },

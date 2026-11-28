@@ -20,7 +20,7 @@ import { newId } from "@vanr/engine/ids";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
-import { agentInWorkspace, requireAgentEditor } from "../agents";
+import { agentInWorkspace, requireAgentEditor, seesSpend } from "../agents";
 import {
   addOpinion,
   allowJobCommands,
@@ -1229,7 +1229,7 @@ export function registerAssignments(app: Hono<AppEnv>) {
     });
     const last = await lastEvent(deps, row.id);
     return c.json({
-      events: events.map(toEvent),
+      events: events.map((e) => toEvent(e, seesSpend(me))),
       seenSeq: await seenBy(deps, row.id, me.userId),
       lastSeq: last?.seq ?? 0,
     });

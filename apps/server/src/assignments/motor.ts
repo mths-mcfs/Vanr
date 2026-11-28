@@ -14,17 +14,18 @@
 // and the job on the runner carries an id derived from the key, which the runner rejects when repeated.
 
 import { DBOS } from "@dbos-inc/dbos-sdk";
-import type { AssignmentLimitKind, AssignmentUsage, AssignmentWaitReason } from "@vanr/contract";
+import type { AssignmentLimitKind, AssignmentWaitReason } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { and, eq, gt, inArray, isNotNull, isNull, lt, max, ne, sql } from "drizzle-orm";
+import { seesSpend } from "../agents";
 import { channelInWorkspace } from "../channels";
 import type { AppDeps } from "../context";
 import { launchDurable } from "../durable";
 import { HttpError } from "../http";
 import { log } from "../logger";
 import { postMessage } from "../messages";
-import { assignmentUsage, ceilingState, type LimitKind } from "./budget";
+import { assignmentUsage, ceilingState, type LimitKind, type MeasuredUsage } from "./budget";
 import { type AssignmentRow, agentOf, agentSays, isClosed, moveAssignment, publishAssignment } from "./core";
 import {
   announceCommand,
@@ -54,6 +55,7 @@ const {
   assignmentPlanItems,
   runnerJobs,
   messages,
+  members,
   effectKeys,
 } = schema;
 
@@ -117,7 +119,7 @@ export interface Snapshot {
   executor: AssignmentRow["executor"];
   ceiling: AssignmentRow["ceiling"];
   limits: AssignmentLimits;
-  usage: Pick<AssignmentUsage, LimitKind>;
+  usage: Pick<MeasuredUsage, LimitKind>;
   dueAt: Date | null;
   wakeAt: Date | null;
   items: SnapItem[];
@@ -437,6 +439,14 @@ async function setWait(deps: AppDeps, row: AssignmentRow, reason: AssignmentWait
 }
 
 /** Stops the assignment (a cap, the agent's budget, a personal plan): pauses, stops what runs and tells. */
+async function ownerSeesSpend(deps: AppDeps, row: AssignmentRow): Promise<boolean> {
+  const [owner] = await deps.db
+    .select({ role: members.role })
+    .from(members)
+    .where(and(eq(members.workspaceId, row.workspaceId), eq(members.userId, row.ownerId)));
+  return !!owner && seesSpend(owner);
+}
+
 async function pauseFor(
   deps: AppDeps,
   row: AssignmentRow,
@@ -494,7 +504,9 @@ export async function act(deps: AppDeps, assignmentId: string, a: EngineAction):
         key: key(warnKey(a.which, limit)),
         data: { which: a.which, limit, usage: await assignmentUsage(deps, row) },
       });
-      if (ev) await notifyOwner(deps, row, "assignment_stopped", `80% of the ${a.which} limit used`, null);
+      // How much of a dollars cap went is spend: an owner without view_usage isn't told, as for the agent's 80%.
+      if (ev && (a.which !== "dollars" || (await ownerSeesSpend(deps, row))))
+        await notifyOwner(deps, row, "assignment_stopped", `80% of the ${a.which} limit used`, null);
       return null;
     }
 
@@ -882,6 +894,13 @@ async function dispatch(
     } catch (err) {
       if (!(err instanceof HttpError)) throw err;
       await end("failed");
+      if (err.code === "agent.archived") {
+        const agent = await agentOf(db, row);
+        await pauseFor(deps, row, { waitReason: "paused" }, `I stopped: ${agent.name} was archived.`, {
+          why: "archived",
+        });
+        return null;
+      }
       // Rejected before anything reached the runner (offline, no runner): the item keeps its turn.
       if (BEFORE_SEND.has(err.code)) await refundTurn(deps, row.id, item.id, claim.epoch);
       // Another job already runs (a person asked for something): wait for it. Runner offline: try again later.
@@ -940,7 +959,9 @@ async function dispatch(
       { waitReason: "paused" },
       res.code === "budget"
         ? `I stopped: ${agent.name} is out of budget this month.`
-        : `I stopped: ${agent.name} thinks with the personal plan of who paired its runner and only works for that person.`,
+        : res.code === "archived"
+          ? `I stopped: ${agent.name} was archived.`
+          : `I stopped: ${agent.name} thinks with the personal plan of who paired its runner and only works for that person.`,
       { why: res.code },
     );
     return null;

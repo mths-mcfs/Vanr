@@ -18,7 +18,15 @@ import {
 import { type Db, schema } from "@vanr/engine/db";
 import { contentSha256 } from "@vanr/engine/memory";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
-import { changeMemory, createMemory, itemAtPath, storeWhere, writeInstructions } from "./agent-memory";
+import {
+  changeMemory,
+  createMemory,
+  itemAtPath,
+  lockActiveAgent,
+  storeWhere,
+  writeInstructions,
+} from "./agent-memory";
+import { cancelJobs } from "./assignments/engine";
 import { BASE_UNDOERS } from "./bases/undo";
 import { canReadChannel } from "./channels";
 import { CONTENT_UNDOERS } from "./content-undo";
@@ -33,6 +41,7 @@ import { cancelQueued } from "./outbox";
 import { publishMemory } from "./routes/memories";
 import { canSeeRoutine } from "./routines";
 import { reindex, unindex } from "./search-index";
+import { publishThread } from "./threads";
 import { canReadPage } from "./wiki-access";
 
 const {
@@ -438,6 +447,65 @@ export function toQuestion(row: QuestionRow): AgentQuestion {
   };
 }
 
+/**
+ * Archives the agent, the one way to do it. One transaction, with the agent's row locked FOR UPDATE, sets
+ * `archivedAt` and closes what its runs wait on: pending approvals become `canceled` and open questions `expired`.
+ * A decision that locked the row first (`lockActiveAgent`) lands before the archive; one that comes after finds the
+ * approval closed. Then the agent's live runs stop, and their tools refuse anyway (`runTool`). Archiving again
+ * closes whatever is still open.
+ */
+export async function archiveAgent(deps: AppDeps, workspaceId: string, agentId: string, actorUserId: string) {
+  const at = deps.now();
+  const closed = await deps.db.transaction(async (tx) => {
+    const [row] = await tx
+      .select({ archivedAt: agents.archivedAt })
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.workspaceId, workspaceId)))
+      .for("update");
+    if (!row) throw notFound("Agent not found");
+    if (!row.archivedAt) await tx.update(agents).set({ archivedAt: at }).where(eq(agents.id, agentId));
+    const entry = trailEntry(at, "canceled", "The agent was archived");
+    const canceled = await tx
+      .update(approvals)
+      .set({
+        status: "canceled",
+        decidedAt: at,
+        trail: sql`${approvals.trail} || ${JSON.stringify([entry])}::jsonb`,
+      })
+      .where(and(eq(approvals.agentId, agentId), eq(approvals.status, "pending")))
+      .returning();
+    const expired = await tx
+      .update(questions)
+      .set({ status: "expired" })
+      .where(and(eq(questions.agentId, agentId), eq(questions.status, "open")))
+      .returning();
+    // Its reminders don't go out as it any more (the sweep skips one scheduled while this commits).
+    await tx
+      .update(reminders)
+      .set({ status: "canceled" })
+      .where(and(eq(reminders.agentId, agentId), eq(reminders.status, "scheduled")));
+    return { canceled, expired };
+  });
+  for (const run of deps.runtime.activeRuns({ workspaceId }))
+    if (run.agentId === agentId) deps.runtime.cancel(run.runId, actorUserId);
+  // Its assignments' jobs on the runner stop too. The cancel waits for a job start in progress on the same
+  // assignment (`withAssignmentJobs`), and a start after it reads the archive: no job runs past the archive.
+  const owned = await deps.db
+    .select()
+    .from(schema.assignments)
+    .where(and(eq(schema.assignments.agentId, agentId), eq(schema.assignments.workspaceId, workspaceId)));
+  // One assignment's failure doesn't hold the others or the notices; archiving again retries what's left.
+  for (const row of owned)
+    await cancelJobs(deps, row).catch((err) =>
+      log.error("agent.archive_cancel_jobs_failed", { agentId, assignmentId: row.id, err }),
+    );
+  // The closures are committed: each notice goes out on its own, and one that fails doesn't hold the rest.
+  const publish = (what: Promise<unknown>) =>
+    what.catch((err) => log.error("agent.archive_publish_failed", { agentId, err }));
+  for (const row of closed.canceled) await publish(publishApproval(deps, row, "approval.resolved"));
+  for (const row of closed.expired) await publish(publishQuestion(deps, row, "question.closed"));
+}
+
 /** Rewrites the card's `meta.question` and tells the channel (the question changed state). */
 export async function publishQuestion(
   deps: AppDeps,
@@ -506,7 +574,8 @@ export type Undoer = {
 
 /**
  * The message again, as it is now, and the messages of its channel that quote it: a retracted post's excerpt goes
- * from their quote too, and a redone one comes back.
+ * from their quote too, and a redone one comes back. A thread root also tells its thread changed: a top-level root
+ * goes out with no `threadId`, and the thread lists that show its opening text read it again on that event.
  */
 async function republishMessage(deps: AppDeps, messageId: string) {
   const [row] = await deps.db.select().from(messages).where(eq(messages.id, messageId));
@@ -522,6 +591,7 @@ async function republishMessage(deps: AppDeps, messageId: string) {
     );
   for (const message of await hydrate(deps.db, [row, ...quoting]))
     deps.hub.toChannel(row.channelId, { type: "message.posted", message });
+  await publishThread(deps, row.id);
 }
 
 /**
@@ -682,7 +752,9 @@ async function flipMemory(
     );
     return (after) => publishMemory(after, mem);
   } catch (err) {
-    if (err instanceof HttpError) throw actionError(409, "action.changed_since", "The memory changed since");
+    // An archived agent's store refuses the undo as it refuses every write (`lockActiveAgent`).
+    if (err instanceof HttpError && err.code !== "agent.archived")
+      throw actionError(409, "action.changed_since", "The memory changed since");
     throw err;
   }
 }
@@ -990,6 +1062,8 @@ export async function applyUndo(
       after = await undoer.undo(scoped, locked, me.userId);
     } else {
       if (!locked.revertedAt) throw conflict("action.not_undone", "Not undone");
+      // Redoing is the agent's action again, in its name: an archived agent's is refused under its row lock.
+      await lockActiveAgent(tx, locked.agentId);
       after = await undoer.redo(scoped, locked, me.userId);
     }
     const [next] = await tx

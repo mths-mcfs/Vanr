@@ -1,12 +1,17 @@
 // The three rules every agent route follows, checked from the routes themselves: an archived agent takes no writes,
 // a runner acts for a person only if they may use it, and a memory's origin names its channel only to whoever
-// reads it. The first test reads the router: a new route that names an agent (or an agent's memory, review,
-// proposal, request or intervention) fails it until it is classified here.
+// reads it. The first test reads the router: a new family, a new write of a family that reaches agents, or a new
+// route that names an agent, fails it until it is classified here.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { eq } from "drizzle-orm";
+import { createAssignment } from "../src/assignments/engine";
+import { assignmentEvent, SYSTEM } from "../src/assignments/events";
+import { act } from "../src/assignments/motor";
 import { queueMemoryReview } from "../src/memory-reviews";
+import { postMessage } from "../src/messages";
+import { recheckLiveViews } from "../src/runners/browser-live";
 import { revalidateInterventions } from "../src/runners/requests";
 import type { RunningServer } from "../src/server";
 import { SERVER_TEST_MS, signedIn, startTestServer, TestSocket } from "./harness";
@@ -122,13 +127,77 @@ const interventionStatus = async (id: string) =>
 
 // ---- the router's classification ----
 
-/** The routes that name an agent or something an agent owns (its memory, reviews, proposals, requests, browser). */
-const FAMILY = /agent|memor|proposal|network-request|secret-request|browser-intervention|\/runs\/|feedback/;
+/**
+ * Every workspace write sits in a family, its first path segment. The writes of an agent family can reach an agent's
+ * state (its memory, skills, environment, identity, approvals, questions, runs or jobs), so each one is classified in
+ * `BY_REFERENCE`. Every other family says here why it can't, and a write there that still names an agent
+ * (`NAMES_AGENT`) is classified too. A new family fails the first test until it is placed.
+ */
+const AGENT_FAMILIES = new Set([
+  "agents",
+  "agent-drafts",
+  "agent-imports",
+  "approvals",
+  "questions",
+  "actions",
+  "assignments",
+  "memories",
+  "memory-reviews",
+  "proposals",
+  "network-requests",
+  "secret-requests",
+  "browser-interventions",
+  "runs",
+  "messages",
+]);
+const OTHER_FAMILIES: Record<string, string> = {
+  "": "the workspace's own settings",
+  "approval-rules": "revokes a rule, which only takes away",
+  bases: "people's bases",
+  calendar: "people's calendars",
+  channels: "channels and posts; a post reaches only active agents (routing skips an archived one)",
+  connectors: "the workspace's connections; an agent's accounts are under /agents/:agentId",
+  credentials: "the workspace's model credentials",
+  databases: "outside databases the workspace connects",
+  "debate-suggestions": "suggests a debate; a debate picks only active agents",
+  debates: "debates; a debate picks only active agents",
+  dms: "opens a DM, refused with an archived agent",
+  files: "the Drive",
+  "github-app": "the GitHub installation",
+  "invite-links": "invitations",
+  invitations: "invitations",
+  "issue-columns": "the issue board",
+  issues: "issues",
+  logo: "the workspace's logo",
+  mail: "people's mail accounts; an agent's are under /agents/:agentId",
+  me: "the person's own profile",
+  members: "people",
+  notifications: "the person's inbox",
+  reminders: "a reminder for an archived agent answers 404",
+  routines: "routines; a routine's run refuses an archived agent (agent_gone)",
+  "runner-pairings": "pairs a runner",
+  runners: "runners; moving agents onto one is classified",
+  "sandbox-settings": "the workspace's sandbox",
+  search: "asks the search",
+  settings: "the workspace's settings",
+  skills: "the workspace's skill library; an agent's own list is under /agents/:agentId",
+  storage: "the workspace's storage",
+  threads: "threads",
+  wiki: "the wiki",
+};
+
+/** A write outside the agent families that still names an agent or something an agent owns. */
+const NAMES_AGENT =
+  /agent|memor|proposal|network-request|secret-request|browser-intervention|\/runs\/|feedback/;
+
+/** Reaches the agent only through its runs and jobs, which an archived agent doesn't start. */
+const RUNS = { checked: "agent-archive: stops a real live run, and the agent starts no run after it" };
+const NO_JOB = { checked: "agent-archive: an archived agent's assignment starts no job" };
 
 /**
- * Every write of the family outside `/agents/:agentId` (those are all refused by the guard, except `OPEN`). Each
- * says how an archived agent is kept from it: `checked` names the test that proves the refusal, `ends` only ends,
- * refuses or takes away (open on purpose), `none` writes no agent (it creates one, or writes a person's store).
+ * Every classified write outside `/agents/:agentId` (those are all refused by the guard, except `OPEN`). Each says
+ * how an archived agent is kept from it: `checked` names the test that proves the refusal, `ends` only ends, refuses
+ * or takes away (open on purpose), `none` writes no agent (it creates one, or writes a person's own records).
  */
 const BY_REFERENCE: Record<string, { checked: string } | { ends: string } | { none: string }> = {
   "POST /browser-interventions/:interventionId/control": { checked: "A5" },
@@ -145,22 +214,65 @@ const BY_REFERENCE: Record<string, { checked: string } | { ends: string } | { no
   "POST /runs/:runId/skill-draft": { checked: "agent-access: doesn't draft a skill from its run" },
   "POST /issues/:issueId/ask-agent": { checked: "issues: an archived agent answers as missing" },
   "POST /runners/:runnerId/move-agents": { checked: "moves only active agents (the race is #121)" },
+  "POST /approvals/:approvalId/approve": { checked: "agent-archive: approving ... refuses with 409" },
+  "POST /approvals/:approvalId/edit": { checked: "agent-archive: approving ... refuses with 409" },
+  "POST /proposals/:proposalId/reject": { checked: "agent-archive: rejecting a proposal ... refuses" },
+  "POST /questions/:questionId/answer": { checked: "agent-archive: archiving closes its open questions" },
+  "POST /actions/:actionId/undo": { checked: "agent-archive: undoing what it wrote is refused" },
+  "POST /actions/:actionId/redo": { checked: "agent-archive: undoing what it wrote is refused" },
+  "POST /messages/:messageId/actions/undo": { checked: "agent-archive: undoing what it wrote is refused" },
+  "POST /assignments": { checked: "assignments: an archived agent can't take one" },
+  "POST /assignments/:assignmentId/:action{start|pause|resume|stop}": RUNS,
+  "POST /assignments/:assignmentId/messages": RUNS,
+  "POST /assignments/:assignmentId/decisions/:decisionId/choose": RUNS,
+  "POST /assignments/:assignmentId/decisions/approve-provisional": RUNS,
+  "POST /assignments/:assignmentId/reviews/:reviewId/:action{approve|changes}": RUNS,
+  "POST /assignments/:assignmentId/submissions/:submissionId/accept": RUNS,
+  "POST /assignments/:assignmentId/submissions/:submissionId/request-changes": RUNS,
+  "POST /assignments/:assignmentId/suggestions/:suggestionId/:action{accept|decline}": RUNS,
+  "POST /assignments/:assignmentId/items/:itemId/retry": NO_JOB,
+  "POST /assignments/:assignmentId/commands/:commandId/decide": NO_JOB,
+  "POST /assignments/:assignmentId/commands/retry": NO_JOB,
   "POST /browser-interventions/:interventionId/complete": { ends: "ends the intervention" },
   "POST /browser-interventions/:interventionId/fail": { ends: "ends the intervention" },
   "POST /browser-interventions/:interventionId/cancel": { ends: "ends the intervention" },
   "POST /memory-reviews/:memoryReviewId/reject": { ends: "drops a pending write" },
-  "POST /proposals/:proposalId/reject": { ends: "drops a pending change" },
+  "POST /approvals/:approvalId/reject": { ends: "ends the wait, runs nothing" },
   "POST /network-requests/:networkRequestId/deny": { ends: "closes the network" },
   "DELETE /network-requests/:networkRequestId": { ends: "closes the network" },
   "POST /secret-requests/:secretRequestId/decline": { ends: "gives the agent nothing" },
   "POST /runs/:runId/cancel": { ends: "stops a run" },
   "DELETE /channels/:channelId/members/agents/:agentId": { ends: "takes the agent out of a channel" },
+  "POST /assignments/:assignmentId/close": { ends: "closes the assignment" },
+  "DELETE /assignments/:assignmentId/command-rules/:commandRuleId": { ends: "drops a command rule" },
+  "DELETE /assignments/:assignmentId/participants/:participantId": { ends: "takes a person out" },
   "POST /agents": { none: "creates an agent" },
   "POST /agent-drafts": { none: "drafts a new agent" },
   "POST /agent-imports/github": { none: "reads instructions to create an agent" },
   "POST /memories": { none: "writes the person's or the workspace's store" },
   "POST /calendar/proposals/:proposalId/confirm": { none: "the person writes their calendar" },
   "POST /calendar/proposals/:proposalId/dismiss": { none: "the person drops a suggestion" },
+  "POST /messages/:messageId/reactions": { none: "a person's reaction" },
+  "DELETE /messages/:messageId/reactions": { none: "a person's reaction" },
+  "PATCH /assignments/:assignmentId": { none: "the assignment's own fields" },
+  "PUT /assignments/:assignmentId/plan": { none: "the assignment's plan" },
+  "PUT /assignments/:assignmentId/runner": { none: "picks the runner; a job still starts through NO_JOB" },
+  "PUT /assignments/:assignmentId/executor": {
+    none: "picks the executor; a job still starts through NO_JOB",
+  },
+  "PUT /assignments/:assignmentId/runtime": { none: "the assignment's limits" },
+  "PUT /assignments/:assignmentId/command-approval": { none: "the assignment's command policy" },
+  "POST /assignments/:assignmentId/decisions/:decisionId/opinion": { none: "a person's opinion" },
+  "PUT /assignments/:assignmentId/submissions/:submissionId/checklist/:itemId": {
+    none: "a reviewer's checklist",
+  },
+  "POST /assignments/:assignmentId/join-requests": { none: "a person asks to join" },
+  "POST /assignments/:assignmentId/join-requests/:joinRequestId/:action{accept|decline}": {
+    none: "a person joins or not",
+  },
+  "PATCH /assignments/:assignmentId/participants/:participantId": { none: "a person's role" },
+  "POST /assignments/:assignmentId/seen": { none: "the person's read mark" },
+  "POST /assignments/:assignmentId/transfer": { none: "who owns the assignment" },
 };
 
 /** The writes under `/agents/:agentId` an archived agent still takes: each only ends or takes something away. */
@@ -175,20 +287,25 @@ const OPEN: Record<string, string> = {
 };
 
 const PREFIX = "/api/v1/workspaces/:workspaceId";
-const familyWrites = () => [
+const allWrites = () => [
   ...new Set(
     server.routes
       .filter((r) => ["POST", "PUT", "PATCH", "DELETE"].includes(r.method) && r.path.startsWith(PREFIX))
-      .map((r) => `${r.method} ${r.path.slice(PREFIX.length)}`)
-      .filter((key) => FAMILY.test(key)),
+      .map((r) => `${r.method} ${r.path.slice(PREFIX.length)}`),
   ),
 ];
+const familyOf = (key: string) => key.slice(key.indexOf(" ") + 1).split("/")[1] ?? "";
+const familyWrites = () =>
+  allWrites().filter((key) => AGENT_FAMILIES.has(familyOf(key)) || NAMES_AGENT.test(key));
 const underAgent = (key: string) => / \/agents\/:agentId(\/|$)/.test(key);
 
 describe("the router's agent writes", () => {
   test(
     "each one is classified, and every write under /agents/:agentId refuses an archived agent but the open ones",
     async () => {
+      const families = new Set(allWrites().map(familyOf));
+      expect([...families].filter((f) => !AGENT_FAMILIES.has(f) && !(f in OTHER_FAMILIES))).toEqual([]);
+      expect(Object.keys(OTHER_FAMILIES).filter((f) => !families.has(f))).toEqual([]);
       const writes = familyWrites();
       const unclassified = writes.filter((k) => !underAgent(k) && !(k in BY_REFERENCE));
       expect(unclassified).toEqual([]);
@@ -608,6 +725,50 @@ describe("a runner someone else paired", () => {
     },
     SERVER_TEST_MS,
   );
+
+  test(
+    "B5: an admin demoted to member loses the live view they watch on the next recheck",
+    async () => {
+      const t = await team();
+      const runner = await lentRunner(t, t.ana);
+      const sock = await TestSocket.open(t.carla.browser, t.workspaceId);
+      try {
+        sock.send({ type: "live_view.subscribe", agentId: t.lia.id });
+        await sock.event("live_view.status");
+        await server.deps.db
+          .update(schema.members)
+          .set({ role: "member" })
+          .where(eq(schema.members.userId, t.carla.user.id));
+        await recheckLiveViews(server.deps);
+        expect((await sock.event("live_view.unavailable")).event).toMatchObject({ reason: "forbidden" });
+      } finally {
+        sock.close();
+        online.delete(runner);
+      }
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+// ---- the agent's integrations ----
+
+describe("the agent's integrations", () => {
+  test(
+    "its mail list reads like its other integrations: open to any member, missing for another workspace",
+    async () => {
+      const t = await team();
+      const other = await team();
+      const reads = ["mail", "databases", "scopes", "access", "identity"];
+      const status = async (agentId: string) => {
+        const out: Record<string, number> = {};
+        for (const r of reads) out[r] = (await call(t.davi, "GET", `${t.w}/agents/${agentId}/${r}`)).status;
+        return out;
+      };
+      expect(await status(t.lia.id)).toEqual(Object.fromEntries(reads.map((r) => [r, 200])));
+      expect(await status(other.lia.id)).toEqual(Object.fromEntries(reads.map((r) => [r, 404])));
+    },
+    SERVER_TEST_MS,
+  );
 });
 
 // ---- C: a memory review's origin ----
@@ -711,7 +872,293 @@ describe("spend outside the usage page", () => {
   );
 
   test(
-    "D2: the agent's budget notice reaches an owner without view_usage with no amounts",
+    "D4: a run's cost and tokens are null without view_usage, in the list and the detail",
+    async () => {
+      const t = await team();
+      const id = newId("run");
+      await server.deps.db.insert(schema.runs).values({
+        id,
+        workspaceId: t.workspaceId,
+        agentId: t.lia.id,
+        channelId: t.general,
+        status: "done",
+        model: "claude-haiku-5-5",
+        costUsd: 2,
+        inputTokens: 10,
+        cachedTokens: 3,
+        outputTokens: 5,
+      });
+      const spend = (run: Record<string, unknown>) => [
+        run.costUsd,
+        run.inputTokens,
+        run.cachedTokens,
+        run.outputTokens,
+      ];
+      const listed = async (who: Person) =>
+        (await call(who, "GET", `${t.w}/runs?agentId=${t.lia.id}`)).body.runs.find(
+          (r: { id: string }) => r.id === id,
+        );
+      expect(spend(await listed(t.beto))).toEqual([null, null, null, null]);
+      expect(spend((await call(t.beto, "GET", `${t.w}/runs/${id}`)).body.run)).toEqual([
+        null,
+        null,
+        null,
+        null,
+      ]);
+      expect(spend(await listed(t.carla))).toEqual([2, 10, 3, 5]);
+      expect(spend((await call(t.carla, "GET", `${t.w}/runs/${id}`)).body.run)).toEqual([2, 10, 3, 5]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "D5: a debate's spend is null without view_usage",
+    async () => {
+      const t = await team();
+      const debateId = newId("dbt");
+      await server.deps.db.insert(schema.debates).values({
+        id: debateId,
+        workspaceId: t.workspaceId,
+        title: "Price",
+        goal: "Pick the price",
+        channelId: t.general,
+        createdBy: { type: "person", id: t.ana.user.id },
+      });
+      const beto = await call(t.beto, "GET", `${t.w}/debates/${debateId}`);
+      expect([beto.status, beto.body.spentUsd]).toEqual([200, null]);
+      expect(typeof (await call(t.carla, "GET", `${t.w}/debates/${debateId}`)).body.spentUsd).toBe("number");
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "D6: an assignment's dollars and job tokens are null without view_usage; its minutes and steps stay",
+    async () => {
+      const t = await team();
+      const row = await createAssignment(server.deps, {
+        workspaceId: t.workspaceId,
+        agentId: t.lia.id,
+        agentHandle: t.lia.handle,
+        channelId: t.general,
+        ownerId: t.beto.user.id,
+        title: "Fix the flaky test",
+        goal: "The suite passes ten times in a row",
+        executor: "agent",
+        runnerId: null,
+        commandPolicy: "never",
+      });
+      const usage = async (who: Person) =>
+        (await call(who, "GET", `${t.w}/assignments/${row.id}`)).body.usage;
+      expect(await usage(t.beto)).toMatchObject({ dollars: null, jobTokens: null, minutes: 0, steps: 0 });
+      expect(await usage(t.carla)).toMatchObject({ dollars: 0, minutes: 0, steps: 0 });
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "D7: a routine's recent cost is null without view_usage, and counts only the runs the person sees",
+    async () => {
+      const t = await team();
+      const secret = await seedChannel(server, t.workspaceId, {
+        name: `secret-${seq}`,
+        visibility: "private",
+        members: [t.beto],
+      });
+      const routineId = newId("rtn");
+      await server.deps.db.insert(schema.routines).values({
+        id: routineId,
+        workspaceId: t.workspaceId,
+        name: "Digest",
+        prompt: "Sum up the day",
+        agentId: t.lia.id,
+        target: { kind: "channel", channelId: t.general },
+        trigger: { kind: "webhook" },
+        createdBy: t.carla.user.id,
+      });
+      // One run in #general, and one from when the routine pointed at a private channel Carla isn't in.
+      for (const [channelId, cost] of [
+        [t.general, 1],
+        [secret, 5],
+      ] as const) {
+        const runId = newId("run");
+        await server.deps.db.insert(schema.runs).values({
+          id: runId,
+          workspaceId: t.workspaceId,
+          agentId: t.lia.id,
+          channelId,
+          status: "done",
+          model: "claude-haiku-5-5",
+          costUsd: cost,
+        });
+        await server.deps.db.insert(schema.routineExecutions).values({
+          id: newId("rrun"),
+          routineId,
+          at: new Date(),
+          status: "ok",
+          trigger: "webhook",
+          runId,
+          channelId,
+        });
+      }
+      const estimate = (who: Person) => call(who, "GET", `${t.w}/routines/${routineId}/estimate`);
+      expect((await estimate(t.carla)).body.recent).toEqual({ runs: 1, avgUsd: 1, maxUsd: 1 });
+      const beto = await estimate(t.beto);
+      expect([beto.status, beto.body.recent]).toEqual([200, null]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "D8: an assignment's cap warning keeps its dollars from whoever lacks view_usage, and out of the channel event",
+    async () => {
+      const t = await team();
+      const row = await createAssignment(server.deps, {
+        workspaceId: t.workspaceId,
+        agentId: t.lia.id,
+        agentHandle: t.lia.handle,
+        channelId: t.general,
+        ownerId: t.beto.user.id,
+        title: "Fix the flaky test",
+        goal: "The suite passes ten times in a row",
+        executor: "agent",
+        runnerId: null,
+        commandPolicy: "never",
+      });
+      const usage = { dollars: 8.5, minutes: 3, steps: 2, jobTokens: 0, unmeasuredJobs: 0 };
+      const socket = await TestSocket.open(t.carla.browser, t.workspaceId);
+      try {
+        expect((await socket.subscribe(t.general)).type).toBe("subscribed");
+        await assignmentEvent(server.deps, row, {
+          kind: "ceiling_warning",
+          actor: SYSTEM,
+          data: { which: "dollars", limit: 10, usage },
+        });
+        const live = (await socket.event("assignment.trail_event")).event as unknown as {
+          event: { data: unknown };
+        };
+        expect(live.event.data).toEqual({
+          which: "dollars",
+          limit: 10,
+          usage: { ...usage, dollars: null, jobTokens: null },
+        });
+      } finally {
+        socket.close();
+      }
+      const warning = async (who: Person) =>
+        (await call(who, "GET", `${t.w}/assignments/${row.id}/events`)).body.events.find(
+          (e: { kind: string }) => e.kind === "ceiling_warning",
+        )?.data.usage;
+      expect(await warning(t.beto)).toEqual({ ...usage, dollars: null, jobTokens: null });
+      expect(await warning(t.carla)).toEqual(usage);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "D11: the 80% notice of a dollars cap reaches the assignment's owner only with view_usage",
+    async () => {
+      const t = await team();
+      const notices = async (owner: Person) => {
+        const row = await createAssignment(server.deps, {
+          workspaceId: t.workspaceId,
+          agentId: t.lia.id,
+          agentHandle: t.lia.handle,
+          channelId: t.general,
+          ownerId: owner.user.id,
+          title: "Fix the flaky test",
+          goal: "The suite passes ten times in a row",
+          executor: "agent",
+          runnerId: null,
+          commandPolicy: "never",
+        });
+        await server.deps.db
+          .update(schema.assignments)
+          .set({ status: "active", limits: { dollars: 10, minutes: 10, steps: null } })
+          .where(eq(schema.assignments.id, row.id));
+        for (const which of ["dollars", "minutes"] as const)
+          await act(server.deps, row.id, { type: "warn", which });
+        // Both warnings fold into the assignment's one notice: its count says how many reached the owner.
+        const [notice] = await server.deps.db
+          .select({ count: schema.notifications.count, latest: schema.notifications.latest })
+          .from(schema.notifications)
+          .where(eq(schema.notifications.groupKey, `assignment:${row.id}:assignment_stopped`));
+        return [notice?.count ?? 0, notice?.latest.text];
+      };
+      // Beto lacks view_usage: he hears of the minutes cap, not of the dollars one.
+      expect(await notices(t.beto)).toEqual([1, "80% of the minutes limit used"]);
+      expect(await notices(t.carla)).toEqual([2, "80% of the minutes limit used"]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "D9: a test run's cost is null without view_usage",
+    async () => {
+      const t = await team();
+      const id = newId("eval");
+      await server.deps.db.insert(schema.agentEvals).values({
+        id,
+        workspaceId: t.workspaceId,
+        agentId: t.lia.id,
+        beforeText: "Helps.",
+        textAfter: "Helps more.",
+        status: "done",
+        costUsd: 0.25,
+      });
+      const cost = async (who: Person) => {
+        const one = await call(who, "GET", `${t.w}/agents/${t.lia.id}/evals/${id}`);
+        const list = await call(who, "GET", `${t.w}/agents/${t.lia.id}/evals`);
+        return [one.body.costUsd, list.body.evals[0]?.costUsd];
+      };
+      // Beto owns Lia, so he reads her test runs, but not what they spent.
+      expect(await cost(t.beto)).toEqual([null, null]);
+      expect(await cost(t.carla)).toEqual([0.25, 0.25]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "D10: a message's tokens are null without view_usage, and in the channel event",
+    async () => {
+      const t = await team();
+      const [channel] = await server.deps.db
+        .select()
+        .from(schema.channels)
+        .where(eq(schema.channels.id, t.general));
+      if (!channel) throw new Error("no channel");
+      const usage = { model: "claude-haiku-5-5", inputTokens: 120, outputTokens: 40 };
+      const socket = await TestSocket.open(t.carla.browser, t.workspaceId);
+      let id = "";
+      try {
+        expect((await socket.subscribe(t.general)).type).toBe("subscribed");
+        const { message } = await postMessage(server.deps, {
+          workspaceId: t.workspaceId,
+          channel,
+          author: { type: "agent", id: t.lia.id },
+          body: "The report is ready.",
+          clientId: null,
+          usage,
+        });
+        id = message.id;
+        const live = (await socket.event("message.posted")).event as unknown as {
+          message: { usage: unknown };
+        };
+        expect(live.message.usage).toBe(null);
+      } finally {
+        socket.close();
+      }
+      const read = async (who: Person) =>
+        (await call(who, "GET", `${t.w}/channels/${t.general}/messages`)).body.messages.find(
+          (m: { id: string }) => m.id === id,
+        )?.usage;
+      expect(await read(t.beto)).toBe(null);
+      expect(await read(t.carla)).toEqual(usage);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "D2: the agent's budget notice reaches an owner without view_usage only when it runs out, with no amounts",
     async () => {
       const sent: { userId: string; event: Record<string, unknown> }[] = [];
       const { hub } = server.deps;
@@ -722,14 +1169,17 @@ describe("spend outside the usage page", () => {
       };
       try {
         const t = await team();
-        const notify = (agentId: string) => {
-          const [agent] = [agentId];
-          return server.deps.db
+        const notify = (agentId: string, kind: "warning" | "exhausted" = "exhausted") =>
+          server.deps.db
             .select()
             .from(schema.agents)
-            .where(eq(schema.agents.id, agent as string))
-            .then(([row]) => server.runtime["notifyBudget"](row as never, "exhausted", 12, 10));
-        };
+            .where(eq(schema.agents.id, agentId))
+            .then(([row]) =>
+              server.runtime["notifyBudget"](row as never, kind, kind === "warning" ? 8.5 : 12, 10),
+            );
+        // The 80% notice alone tells how much went: it doesn't reach Beto.
+        await notify(t.lia.id, "warning");
+        expect(sent.filter((s) => s.userId === t.beto.user.id)).toEqual([]);
         await notify(t.lia.id);
         expect(sent.find((s) => s.userId === t.beto.user.id)?.event).toMatchObject({
           type: "budget.cap_reached",
@@ -738,8 +1188,14 @@ describe("spend outside the usage page", () => {
           budgetUsd: null,
         });
         const owned = await seedAgent(server, t.workspaceId, t.carla, "max");
-        await notify(owned.id);
+        await notify(owned.id, "warning");
         expect(sent.find((s) => s.userId === t.carla.user.id)?.event).toMatchObject({
+          type: "budget.threshold_reached",
+          spentUsd: 8.5,
+          budgetUsd: 10,
+        });
+        await notify(owned.id);
+        expect(sent.findLast((s) => s.userId === t.carla.user.id)?.event).toMatchObject({
           type: "budget.cap_reached",
           spentUsd: 12,
           budgetUsd: 10,

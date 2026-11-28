@@ -14,7 +14,7 @@ import { channelName } from "@vanr/engine/text";
 import { and, asc, count, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
-import { agentInWorkspace, agentNames } from "../agents";
+import { agentInWorkspace, agentNames, seesSpend } from "../agents";
 import { assignmentPostMeta } from "../assignments/tools";
 import {
   type ChannelRow,
@@ -216,7 +216,8 @@ async function readableMessage(c: Ctx, messageId: string, missing = "Message not
 
 /**
  * A message the person may react to: they read it and are in its channel, as the screen asks (a public channel
- * they haven't joined shows its messages without reactions). Adding and taking a reaction ask the same.
+ * they haven't joined shows its messages without reactions). Taking back one's own reaction only needs to read
+ * the message: whoever left a public channel can still remove what they added.
  */
 async function reactableMessage(c: Ctx, messageId: string) {
   const me = requireMember(c);
@@ -497,7 +498,9 @@ export function registerChat(app: Hono<AppEnv>) {
       if (root && root.channelId === channel.id && root.threadId === null) rows.unshift(root);
     }
     // Private history: no cache keeps it for another session of the same browser.
-    return c.json({ messages: await hydrate(db, rows) }, 200, { "cache-control": "private, no-store" });
+    return c.json({ messages: await hydrate(db, rows, seesSpend(me)) }, 200, {
+      "cache-control": "private, no-store",
+    });
   });
 
   app.post(`${WORKSPACE}/channels/:channelId/messages`, async (c) => {
@@ -601,10 +604,10 @@ export function registerChat(app: Hono<AppEnv>) {
 
   app.delete(`${WORKSPACE}/messages/:messageId/reactions`, async (c) => {
     const me = requireMember(c);
-    const row = await reactableMessage(c, param(c, "messageId"));
+    const row = await readableMessage(c, param(c, "messageId"));
     const q = readQuery(c, z.object({ reaction }));
     const { db } = c.get("deps");
-    await db
+    const removed = await db
       .delete(emojiReactions)
       .where(
         and(
@@ -613,8 +616,11 @@ export function registerChat(app: Hono<AppEnv>) {
           eq(emojiReactions.actorType, "person"),
           eq(emojiReactions.actorId, me.userId),
         ),
-      );
+      )
+      .returning({ messageId: emojiReactions.messageId });
     const reactions = await reactionsOf(db, row.id);
+    // Nothing of theirs was there: nothing changed, so nobody hears of it (a reader outside the channel adds nothing).
+    if (removed.length === 0) return c.json({ reactions });
     publishReactions(c, row, reactions);
     const actor = { type: "person" as const, id: me.userId };
     await notifyReaction(c.get("deps"), { message: row, actor, reaction: q.reaction, added: false });

@@ -32,6 +32,22 @@ const authorCols = (a: Author) => ({
   authorId: a.type === "system" ? null : a.id,
 });
 
+/**
+ * Locks the agent's row against an archive until the transaction ends (FOR SHARE) and refuses an archived agent
+ * with 409 agent.archived. The archive (`archiveAgent`) takes the same row FOR UPDATE, so a write that passed this
+ * lands before the archive, and one that comes after it is refused. Every write to an agent's own state that the
+ * HTTP guard can't see goes through here: its memory store, a decision on its approval, its environment tool.
+ */
+export async function lockActiveAgent(tx: Db | Tx, agentId: string): Promise<void> {
+  const [row] = await tx
+    .select({ archivedAt: agents.archivedAt })
+    .from(agents)
+    .where(eq(agents.id, agentId))
+    .for("share");
+  if (!row) throw notFound("Agent not found");
+  if (row.archivedAt) throw conflict("agent.archived", "This agent was archived");
+}
+
 // ---- instructions ----
 
 type InstructionSource = InstructionVersionRow["source"];
@@ -253,6 +269,8 @@ export async function createMemory(
   });
   try {
     return await db.transaction(async (tx) => {
+      // An archived agent's store is read-only: a lesson, a remembered fact or an undo don't land in it.
+      if (store.scope === "agent") await lockActiveAgent(tx, store.agentId);
       await ensureRoom(tx, store);
       const [row] = await tx
         .insert(memories)
@@ -312,6 +330,7 @@ export async function changeMemory(
         .where(and(eq(memories.id, id), meta.store ? storeWhere(meta.store) : undefined))
         .for("update");
       if (!row) throw notFound("Memory not found");
+      if (row.scope === "agent" && row.agentId) await lockActiveAgent(tx, row.agentId);
       if (meta.expectedSha256 !== undefined && contentSha256(row.text) !== meta.expectedSha256)
         throw memoryChanged();
       if (meta.expectArchived !== undefined && row.archived !== meta.expectArchived) throw memoryChanged();

@@ -141,7 +141,7 @@ export interface RuntimePort {
     admit?: () => Promise<boolean>;
   }): Promise<
     | { ok: true; runId: string; done: Promise<void> }
-    | { ok: false; code: "budget" | "personal_plan" | "busy" | "fenced" }
+    | { ok: false; code: "budget" | "personal_plan" | "busy" | "fenced" | "archived" }
   >;
   /** The agent's active run in that conversation. Callers: assignments/engine and the assignment engine. */
   activeRun(agentId: string, channelId: string, threadId: string | null): string | null;
