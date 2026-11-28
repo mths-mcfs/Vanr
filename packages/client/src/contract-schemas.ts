@@ -360,7 +360,7 @@ export const WorkspaceSummary: Schema<C.WorkspaceSummary> = s.object({ id: s.str
 export const Me: Schema<C.Me> = s.object({ user: s.lazy(() => User), workspaces: s.array(s.lazy(() => WorkspaceSummary)) });
 export const Workspace: Schema<C.Workspace> = s.object({ id: s.string, context: s.string, logo: s.nullable(s.string), name: s.string });
 export const WorkspaceSettings: Schema<C.WorkspaceSettings> = s.object({ agentBudgetDefaultUsd: s.number, approvalReviewer: s.boolean, context: s.string, name: s.string, primaryCredentialId: s.nullable(s.string), timezone: s.string });
-export const WorkspaceOverview: Schema<C.WorkspaceOverview> = s.object({ agents: s.number, budgetSpentPct: s.number, myApprovalQueue: s.number, people: s.number });
+export const WorkspaceOverview: Schema<C.WorkspaceOverview> = s.object({ agents: s.number, budgetSpentPct: s.nullable(s.number), myApprovalQueue: s.number, people: s.number });
 export const Member: Schema<C.Member> = s.object({ avatarUrl: s.nullable(s.string), email: s.string, handle: s.string, image: s.nullable(s.string), name: s.string, role: s.lazy(() => Role), timezone: s.nullable(s.string), userId: s.string });
 export const Person: Schema<C.Person> = s.object({ avatarUrl: s.nullable(s.string), email: s.string, handle: s.string, image: s.nullable(s.string), lastOnlineAt: s.nullable(s.string), memberSince: s.string, name: s.string, online: s.boolean, role: s.lazy(() => Role), timezone: s.nullable(s.string), userId: s.string });
 export const Invitation: Schema<C.Invitation> = s.object({ id: s.string, createdAt: s.string, email: s.nullable(s.string), expiresAt: s.string, invitedBy: s.nullable(s.string), role: s.lazy(() => Role) });

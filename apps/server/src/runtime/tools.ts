@@ -41,12 +41,12 @@ import { and, eq, inArray, isNull } from "drizzle-orm";
 import { z } from "zod";
 import { type Author, changeMemory, createMemory, type MemoryRow, type Store } from "../agent-memory";
 import type { AgentRow } from "../agents";
-import { toMemory } from "../agents";
 import { agentCanPost, type ChannelRow } from "../channels";
 import type { AppDeps } from "../context";
 import { proposalTrail, publishProposal } from "../control";
 import { allowance, grantsOf } from "../integrations/access";
 import { queueMemoryReview } from "../memory-reviews";
+import { viewMemory } from "../memory-view";
 import { channelNameOf, postMessage, reactionsFor } from "../messages";
 import { notifyReaction } from "../notify-sources";
 import { queueSend } from "../outbox";
@@ -373,11 +373,12 @@ async function queueForReview(
   return `Not saved yet: this run read content from outside (${from}), so this memory change waits for a person to review it. It is not in your memory until approved; don't rely on it.`;
 }
 
-function announceMemory(ctx: ToolContext, row: MemoryRow) {
+/** memory.recorded in the run's channel: a memory from another channel (the one replaced) goes without its name. */
+async function announceMemory(ctx: ToolContext, row: MemoryRow) {
   ctx.deps.hub.toChannel(ctx.channel.id, {
     type: "memory.recorded",
     agentId: ctx.agent.id,
-    memory: toMemory(row),
+    memory: await viewMemory(ctx.deps.db, { channelId: ctx.channel.id }, row),
   });
 }
 
@@ -434,13 +435,13 @@ const remember = define({
           store: agentStore(ctx),
         },
       );
-      announceMemory(ctx, archived);
+      await announceMemory(ctx, archived);
     }
     await ctx.recordAction({
       kind: "memory_recorded",
       target: { type: "memory", id: row.id, title: row.text },
     });
-    announceMemory(ctx, row);
+    await announceMemory(ctx, row);
     if (ctx.trigger) {
       const ids = (
         await db
@@ -491,7 +492,7 @@ const updateMemory = define({
       { text: input.text, textBefore: current.text },
       { op: "update", author: agentAuthor(ctx), reason: "edit_memory", store: agentStore(ctx) },
     );
-    announceMemory(ctx, row);
+    await announceMemory(ctx, row);
     return `Updated memory ${input.id}.`;
   },
 });
@@ -512,7 +513,7 @@ const forget = define({
       { archived: true },
       { op: "archive", author: agentAuthor(ctx), reason: "forget", store: agentStore(ctx) },
     );
-    announceMemory(ctx, row);
+    await announceMemory(ctx, row);
     return `Archived memory ${input.id}.`;
   },
 });

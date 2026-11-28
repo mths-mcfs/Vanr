@@ -31,6 +31,7 @@ import {
   emitEnvironment,
   environmentOf,
   pushAgents,
+  requireRunnerUse,
   runnerInWorkspace,
   targetOf,
   toRunner,
@@ -60,7 +61,9 @@ const MAX_TIMEOUT_S = 3600;
  */
 async function setAgentRunner(deps: AppDeps, agentId: string, runnerId: string | null) {
   const { previous, closed } = await deps.db.transaction(async (tx) => {
-    const [agent] = await tx.select().from(agents).where(eq(agents.id, agentId)).for("update");
+    // "No key update": it still waits on an archive and on a start's share lock, but not on the key-share lock an
+    // agent_environments insert takes on the agent (its foreign key), so a first lend racing a stop can't deadlock.
+    const [agent] = await tx.select().from(agents).where(eq(agents.id, agentId)).for("no key update");
     if (runnerId && agent) requireActiveAgent(agent);
     const previous = agent?.environmentId ?? null;
     await tx
@@ -437,6 +440,8 @@ export function registerRunners(app: Hono<AppEnv>) {
     requireActiveAgent(agent);
     if (!agent.environmentId)
       throw conflict("sandbox.not_set_up", "This installation has no cloud sandbox; pair a runner");
+    // Starting the agent's environment is using its runner.
+    requireRunnerUse(me, await runnerInWorkspace(deps.db, me.workspaceId, agent.environmentId));
     if (!deps.runners.isOnline(agent.environmentId)) throw offline();
     return c.json(await setStatus(deps, me.workspaceId, agent.id, "running"));
   });
@@ -447,6 +452,9 @@ export function registerRunners(app: Hono<AppEnv>) {
     const agent = await agentInWorkspace(deps.db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, agent);
     if (agent.environmentId) {
+      // Stopping cancels the runner's jobs: only whoever may use it (a removed runner has nothing left to stop).
+      const [runner] = await deps.db.select().from(runners).where(eq(runners.id, agent.environmentId));
+      if (runner && !runner.removedAt) requireRunnerUse(me, runner);
       // Stops what the agent had running there.
       const running = await deps.db
         .select({ id: runnerJobs.id })
@@ -488,7 +496,7 @@ export function registerRunners(app: Hono<AppEnv>) {
     if (runnerId) requireActiveAgent(agent);
     if (runnerId) {
       const runner = await runnerInWorkspace(deps.db, me.workspaceId, runnerId);
-      if (!canUseRunner(me, runner)) throw forbidden("Only who paired this runner can lend it to agents");
+      requireRunnerUse(me, runner);
     }
     const previous = await setAgentRunner(deps, agent.id, runnerId);
     const target = await targetOf(deps, runnerId);
@@ -532,7 +540,10 @@ export function registerRunners(app: Hono<AppEnv>) {
         ),
       );
     if (!row) throw notFound("Request not found");
-    requireAgentEditor(me, await agentInWorkspace(deps.db, me.workspaceId, row.agentId));
+    const agent = await agentInWorkspace(deps.db, me.workspaceId, row.agentId);
+    requireAgentEditor(me, agent);
+    // Allowing opens the network to the agent; denying and removing only take it away, as on any archived agent.
+    if (decision === "allowed") requireActiveAgent(agent);
     const updated = await decideNetwork(deps, row, decision, me.userId);
     if (!updated) throw conflict("network.decided", "Someone already decided this request");
     return c.json(toNetworkRequest(updated));

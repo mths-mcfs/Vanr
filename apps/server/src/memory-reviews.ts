@@ -1,13 +1,12 @@
 // The memory review queue: a run's write with flag A doesn't count until a person approves it. Approving applies
 // the operation through the single writer, with the base text as a precondition (if the item changed in the
 // meantime, the review fails with `changed_since` and nothing changes). Rejecting only closes it.
-import type { MemoryReview } from "@vanr/contract";
 import { can } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { and, desc, eq } from "drizzle-orm";
 import { type Author, changeMemory, createMemory, type MemoryRow } from "./agent-memory";
-import { agentInWorkspace } from "./agents";
+import { agentInWorkspace, requireActiveAgent } from "./agents";
 import type { AppDeps, WorkspaceMember } from "./context";
 import { conflict, forbidden, HttpError, notFound } from "./http";
 
@@ -25,31 +24,6 @@ export async function queueMemoryReview(deps: AppDeps, values: NewMemoryReview):
     .returning();
   if (!row) throw new Error("memory review insert returned nothing");
   return row;
-}
-
-export function toMemoryReview(row: MemoryReviewRow): MemoryReview {
-  return {
-    id: row.id,
-    agentId: row.agentId,
-    runId: row.runId,
-    scope: row.scope,
-    op: row.op,
-    memoryId: row.memoryId,
-    path: row.path,
-    newPath: row.newPath,
-    text: row.text,
-    kind: row.kind,
-    about: row.about,
-    reasons: row.reasons.map((r) => r.source),
-    origin: row.origin,
-    tool: row.tool,
-    status: row.status,
-    note: row.note,
-    deciderUserId: row.deciderUserId,
-    decidedAt: row.decidedAt?.toISOString() ?? null,
-    resultMemoryId: row.resultMemoryId,
-    createdAt: row.createdAt.toISOString(),
-  };
 }
 
 /**
@@ -226,6 +200,15 @@ export async function approveReview(
       .where(and(eq(memoryReviews.id, id), eq(memoryReviews.status, "pending")))
       .for("update");
     if (!row) throw conflict("memory_review.decided", "Already decided");
+    // Approving writes into the agent's store, which is read-only once it is archived (rejecting stays open).
+    if (row.scope === "agent") {
+      const [agent] = await tx
+        .select({ archivedAt: schema.agents.archivedAt })
+        .from(schema.agents)
+        .where(eq(schema.agents.id, row.agentId))
+        .for("share");
+      if (agent) requireActiveAgent(agent);
+    }
     try {
       // Each write of the writer is a nested transaction (a savepoint): if it fails, only it rolls back.
       const mem = await apply({ ...deps, db: tx }, row, me);

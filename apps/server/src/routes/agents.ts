@@ -37,6 +37,7 @@ import {
   agentInWorkspace,
   channelViewer,
   monthStart,
+  outsideAnonymousDebate,
   requireActiveAgent,
   requireAgentEditor,
   requireCredential,
@@ -839,7 +840,13 @@ export function registerAgents(app: Hono<AppEnv>) {
     const rows = await db
       .select({ agentId: runs.agentId, cost: sql<number>`coalesce(sum(${runs.costUsd}), 0)` })
       .from(runs)
-      .where(and(eq(runs.workspaceId, me.workspaceId), gte(runs.createdAt, monthStart(now()))))
+      .where(
+        and(
+          eq(runs.workspaceId, me.workspaceId),
+          gte(runs.createdAt, monthStart(now())),
+          outsideAnonymousDebate(),
+        ),
+      )
       .groupBy(runs.agentId);
     return c.json({ usage: rows.map((r) => ({ agentId: r.agentId, costUsd: Number(r.cost) })) });
   });

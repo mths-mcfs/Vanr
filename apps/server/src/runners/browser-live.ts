@@ -13,6 +13,7 @@ import { canTalkTo } from "../runtime/route";
 import { openIntervention, policyFor } from "./browser-guard";
 import { withPlanOwner } from "./plans";
 import { interventionSession } from "./requests";
+import { personMayUseRunner } from "./runners";
 
 const { agents, runners } = schema;
 const WATCH_FPS = 1;
@@ -106,6 +107,9 @@ export async function liveViewSubscribe(deps: AppDeps, ws: BrowserSocket, agentI
   const [runner] = await deps.db.select().from(runners).where(eq(runners.id, agent.environmentId));
   if (!runner || runner.removedAt)
     return send(ws, { type: "live_view.unavailable", agentId, reason: "no_environment" });
+  // Watching the browser is using the runner: its screen is the paired person's.
+  if (!(await personMayUseRunner(deps.db, ws.data, runner)))
+    return send(ws, { type: "live_view.unavailable", agentId, reason: "forbidden" });
   if (!deps.runners.isOnline(runner.id))
     return send(ws, { type: "live_view.unavailable", agentId, reason: "offline" });
   if (!runner.browser || !runner.access.tools.browser)
@@ -360,7 +364,12 @@ export async function recheckLiveViews(deps: AppDeps, only?: BrowserSocket) {
     const talker = await withPlanOwner(deps.db, agent);
     for (const w of [...s.watchers]) {
       if (only && w !== only) continue;
-      if (w.data.workspaceId === agent.workspaceId && canTalkTo(talker, w.data.userId)) continue;
+      if (
+        w.data.workspaceId === agent.workspaceId &&
+        canTalkTo(talker, w.data.userId) &&
+        (await personMayUseRunner(deps.db, w.data, runner))
+      )
+        continue;
       liveViewUnsubscribe(deps, w, agentId);
       send(w, { type: "live_view.unavailable", agentId, reason: "forbidden" });
     }

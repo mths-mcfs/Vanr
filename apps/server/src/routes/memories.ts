@@ -1,6 +1,6 @@
 // Memory: the three stores (agent, person, workspace), editing with the hash precondition, immutable versions
 // and restore, the review queue; feedback on an answer and reminders.
-import { can, type Memory, type MemoryVersion, type Message, type Reminder } from "@vanr/contract";
+import { can, type MemoryVersion, type Message, type Reminder } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import {
@@ -10,7 +10,7 @@ import {
   MemoryPathError,
   parseMemoryPath,
 } from "@vanr/engine/memory";
-import { and, asc, desc, eq, inArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, or } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
 import {
@@ -23,13 +23,13 @@ import {
   restoreMemory,
   storeWhere,
 } from "../agent-memory";
-import { agentInWorkspace, requireActiveAgent, toMemory } from "../agents";
-import { canReadChannel, readableChannel, readableChannelsSql, writableChannel } from "../channels";
+import { agentInWorkspace, requireActiveAgent } from "../agents";
+import { canReadChannel, readableChannel, writableChannel } from "../channels";
 import type { AppDeps, AppEnv, WorkspaceMember } from "../context";
 import { badRequest, conflict, forbidden, notFound, param, readJson, readQuery } from "../http";
-import { approveReview, rejectReview, reviewsFor, toMemoryReview } from "../memory-reviews";
+import { approveReview, rejectReview, reviewsFor } from "../memory-reviews";
+import { viewMemories, viewMemory, viewMemoryReview, viewMemoryReviews } from "../memory-view";
 import { channelNameOf, hydrateOne, memoriesFor, messageInWorkspace, postMessage } from "../messages";
-import { readableRuns } from "../run-access";
 import { requireMember, WORKSPACE } from "../workspace-scope";
 
 const { memories, reminders } = schema;
@@ -74,44 +74,6 @@ async function editableMemory(deps: AppDeps, me: WorkspaceMember, id: string) {
   return found.row;
 }
 
-/**
- * The memories as the person sees them: the origin's channel name only to whoever reads that channel, found
- * through the message the memory came from or the run that wrote it (under the runs' rule). One whose channel
- * can't be found keeps no name. Whether the memory itself shows waits on its own decision (#47).
- */
-async function shownMemories(db: Db, me: WorkspaceMember, rows: MemoryRow[]): Promise<Memory[]> {
-  const named = rows.filter((r) => r.origin?.channel);
-  const messageIds = named.flatMap((r) => (r.originMessageId ? [r.originMessageId] : []));
-  const runIds = named.flatMap((r) => (!r.originMessageId && r.origin?.runId ? [r.origin.runId] : []));
-  const readMessages = messageIds.length
-    ? await db
-        .select({ id: schema.messages.id })
-        .from(schema.messages)
-        .where(
-          and(
-            inArray(schema.messages.id, messageIds),
-            sql`${schema.messages.channelId} in ${readableChannelsSql(me)}`,
-          ),
-        )
-    : [];
-  const readRuns = runIds.length
-    ? await db
-        .select({ id: schema.runs.id })
-        .from(schema.runs)
-        .where(and(inArray(schema.runs.id, runIds), readableRuns(db, me)))
-    : [];
-  const shown = new Set([...readMessages, ...readRuns].map((r) => r.id));
-  return rows.map((r) => {
-    const memory = toMemory(r);
-    const source = r.originMessageId ?? r.origin?.runId;
-    if (!memory.origin?.channel || (source && shown.has(source))) return memory;
-    return { ...memory, origin: { ...memory.origin, channel: null } };
-  });
-}
-
-const shownMemory = async (db: Db, me: WorkspaceMember, row: MemoryRow) =>
-  (await shownMemories(db, me, [row]))[0];
-
 const person = (me: WorkspaceMember): Author => ({ type: "person", id: me.userId });
 
 /** memory.recorded goes to the channel the memory came from, if any (only the agent's store). */
@@ -125,7 +87,7 @@ export async function publishMemory(deps: AppDeps, row: MemoryRow) {
   deps.hub.toChannel(origin.channelId, {
     type: "memory.recorded",
     agentId: row.agentId,
-    memory: toMemory(row),
+    memory: await viewMemory(deps.db, { channelId: origin.channelId }, row),
   });
   const list = (await memoriesFor(deps.db, [row.originMessageId])).get(row.originMessageId) ?? [];
   deps.hub.toChannel(origin.channelId, {
@@ -202,7 +164,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       )
       .orderBy(desc(memories.pinned), desc(memories.updatedAt));
     // The origins depend on who asks: no shared cache keeps one person's answer for another.
-    return c.json({ memories: await shownMemories(db, me, rows) }, 200, { "cache-control": "no-store" });
+    return c.json({ memories: await viewMemories(db, me, rows) }, 200, { "cache-control": "no-store" });
   });
 
   // The person's store: what the agents kept about them. Only they see it.
@@ -216,7 +178,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       .orderBy(desc(memories.updatedAt))
       .limit(STORE_LIST_LIMIT);
     // One person's store: no browser or proxy keeps a copy for whoever signs in next.
-    return c.json({ memories: await shownMemories(db, me, rows) }, 200, { "cache-control": "no-store" });
+    return c.json({ memories: await viewMemories(db, me, rows) }, 200, { "cache-control": "no-store" });
   });
 
   // The workspace's store: every member reads it (the agents too); only who manages agents writes.
@@ -229,7 +191,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       .where(storeWhere({ scope: "workspace", workspaceId: me.workspaceId }))
       .orderBy(memories.path)
       .limit(STORE_LIST_LIMIT);
-    return c.json({ memories: await shownMemories(db, me, rows) }, 200, { "cache-control": "no-store" });
+    return c.json({ memories: await viewMemories(db, me, rows) }, 200, { "cache-control": "no-store" });
   });
 
   app.post(`${WORKSPACE}/memories`, async (c) => {
@@ -270,7 +232,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       },
       { author: person(me), reason: input.reason ?? "" },
     );
-    return c.json(toMemory(row), 201);
+    return c.json(await viewMemory(deps.db, me, row), 201);
   });
 
   // One PATCH changes the text (with the hash precondition), the path, the pin or the archive.
@@ -326,7 +288,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       { op, author: person(me), reason: input.reason ?? "", expectedSha256: input.expectedSha256 },
     );
     await publishMemory(deps, updated);
-    return c.json(await shownMemory(deps.db, me, updated));
+    return c.json(await viewMemory(deps.db, me, updated));
   });
 
   // Brings back the text before the last edit by a person (it is a new version).
@@ -344,7 +306,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       { op: "update", author: person(me), reason: "revert", expectedSha256: contentSha256(row.text) },
     );
     await publishMemory(deps, updated);
-    return c.json(await shownMemory(deps.db, me, updated));
+    return c.json(await viewMemory(deps.db, me, updated));
   });
 
   app.get(`${WORKSPACE}/memories/:memoryId/versions`, async (c) => {
@@ -370,7 +332,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       input.reason ?? "",
     );
     await publishMemory(deps, updated);
-    return c.json(await shownMemory(deps.db, me, updated));
+    return c.json(await viewMemory(deps.db, me, updated));
   });
 
   // ---- review queue (a run's write under flag A) ----
@@ -379,14 +341,17 @@ export function registerMemories(app: Hono<AppEnv>) {
     const me = requireMember(c);
     const { db } = c.get("deps");
     const agentId = readQuery(c, z.object({ agentId: z.string().max(64).optional() })).agentId || undefined;
-    return c.json({ reviews: (await reviewsFor(db, me, agentId)).map(toMemoryReview) });
+    // The origins depend on who asks: no shared cache keeps one person's answer for another.
+    return c.json({ reviews: await viewMemoryReviews(db, me, await reviewsFor(db, me, agentId)) }, 200, {
+      "cache-control": "no-store",
+    });
   });
 
   app.post(`${WORKSPACE}/memory-reviews/:memoryReviewId/approve`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
     const row = await approveReview(deps, me, param(c, "memoryReviewId"));
-    return c.json(toMemoryReview(row));
+    return c.json(await viewMemoryReview(deps.db, me, row), 200, { "cache-control": "no-store" });
   });
 
   app.post(`${WORKSPACE}/memory-reviews/:memoryReviewId/reject`, async (c) => {
@@ -397,7 +362,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       z.object({ note: z.string().trim().max(MEMORY_REASON_MAX).optional() }).strict(),
     );
     const row = await rejectReview(deps, me, param(c, "memoryReviewId"), input.note ?? null);
-    return c.json(toMemoryReview(row));
+    return c.json(await viewMemoryReview(deps.db, me, row), 200, { "cache-control": "no-store" });
   });
 
   // Feedback on an agent's answer: it goes into the answer's thread and becomes a lesson for the agent. Everything
