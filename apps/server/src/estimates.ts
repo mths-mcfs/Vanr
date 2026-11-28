@@ -9,7 +9,7 @@
 //   (`ROUTINE_CONTEXT_CHARS`) when the trigger brings some (webhook, email, event).
 // A routine that talks in a channel has no fixed ceiling (the agent decides how many tools it uses): it shows what
 // the latest executions really cost, measured in the ledger.
-import type { DebateEstimate, RoutineEstimate } from "@vanr/contract";
+import type { RoutineEstimate } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import { DEFAULT_MODEL } from "@vanr/engine/models/catalog";
 import { PRICES } from "@vanr/engine/models/prices";
@@ -45,7 +45,7 @@ export function debateEstimate(
   speakers: readonly AgentRow[],
   input: { roundLimit: number; format?: "decision" | "plan"; titleChars?: number; goalChars?: number },
   at: Date,
-): DebateEstimate {
+): { calls: number; upToUsd: number } {
   // `roundLimit` counts the challenge rounds after the blind round 0: each agent speaks roundLimit + 1 times.
   const roundLimit = Math.min(Math.max(0, input.roundLimit), MAX_ROUNDS);
   const turns = roundLimit + 1;

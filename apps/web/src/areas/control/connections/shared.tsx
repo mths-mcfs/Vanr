@@ -159,7 +159,10 @@ export function useForgetReadOnLoss(workspaceId: string, methods: readonly Metho
  * (its row was removed) or can't take it (it is disabled), the heading of its block does, so the
  * focus never falls back to the page itself.
  */
-export function useReturnFocus() {
+export function useReturnFocus(
+  /** The block's title, whose heading takes the focus when nothing opened the dialog (it opened by itself). */
+  block?: string,
+) {
   const opener = useRef<HTMLElement | null>(null);
   const heading = useRef<HTMLElement | null>(null);
   const remember = useCallback(() => {
@@ -170,8 +173,12 @@ export function useReturnFocus() {
   const back = useCallback(() => {
     const target = opener.current;
     if (target?.isConnected === true && !target.hasAttribute("disabled")) target.focus();
-    else heading.current?.focus();
-  }, []);
+    else if (heading.current?.isConnected === true) heading.current.focus();
+    else if (block !== undefined)
+      document
+        .querySelector<HTMLElement>(`section.wire-block[aria-label="${CSS.escape(block)}"] h3`)
+        ?.focus();
+  }, [block]);
   /** For a dialog's `onCloseAutoFocus`. */
   const onCloseAutoFocus = useCallback(
     (event: Event) => {

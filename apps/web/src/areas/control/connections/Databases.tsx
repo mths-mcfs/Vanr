@@ -3,6 +3,7 @@
 // the server's certificate (`verify-full`) is a choice per connection, and no encryption at all only works
 // where this server allows it. Vanr checks the connection when it is saved, says whether the login could
 // change data (agents still only read) and suggests columns to hide. The password is never shown back.
+import { isApiError } from "@vanr/client";
 import { useApiMutation, useApiQuery } from "@vanr/client/react";
 import type { DatabaseConnectInput, DatabaseConnection, DatabaseProvider } from "@vanr/contract";
 import {
@@ -219,6 +220,17 @@ export function Databases({ workspaceId }: { workspaceId: string }) {
   );
 }
 
+/**
+ * The text of a refusal from the database side: the network rule's "TLS only" is about an encrypted
+ * Postgres connection here, not about an https:// address as for connectors.
+ */
+function useDescribeDatabase() {
+  const t = useMessages("control");
+  const describe = useErrorMessage("control");
+  return (error: unknown) =>
+    isApiError(error) && error.rawCode === "tls_required" ? t("db.tlsRefused") : describe(error);
+}
+
 /** The sslmode a connection string asks for, when it names one of the three. */
 export function sslmodeIn(text: string): Tls | undefined {
   const query = text.trim().split("?")[1];
@@ -242,7 +254,7 @@ function AddDatabase({
 }) {
   const t = useMessages("control");
   const common = useMessages("common");
-  const describe = useErrorMessage("control");
+  const describe = useDescribeDatabase();
   const outcome = useOutcome();
   const latch = useLatch();
   const forget = useForgetOnLoss(workspaceId, READS);
@@ -373,7 +385,7 @@ function AddDatabase({
                   type="password"
                   value={url}
                   maxLength={LIMIT.url}
-                  autoComplete="off"
+                  autoComplete="new-password"
                   spellCheck={false}
                   placeholder="postgres://"
                   disabled={connect.isPending}
@@ -494,27 +506,34 @@ function EditDatabase({
 }) {
   const t = useMessages("control");
   const common = useMessages("common");
-  const describe = useErrorMessage("control");
+  const describe = useDescribeDatabase();
   const outcome = useOutcome();
   const latch = useLatch();
   const forget = useForgetOnLoss(workspaceId, READS);
+  // The name as the dialog opened with it: someone else's rename meanwhile is not this person's edit.
+  const [openedLabel] = useState(connection.label);
   const [name, setName] = useState(connection.label);
   const [password, setPassword] = useState("");
-  const [off, setOff] = useState<ReadonlySet<string>>(() => new Set(connection.disabledActions));
+  // Only the actions this person toggled. Every other one shows, and is saved, as the server has it now.
+  const [picked, setPicked] = useState<Partial<Record<DbAction, boolean>>>({});
   const save = useApiMutation("updateDatabase", {
     ...SECRET,
     invalidates: () => [{ method: "listDatabases" as const, args: { workspaceId } }],
   });
   const renewing = connection.status === "reauth_required";
   const ready = name.trim() !== "" && (!renewing || password !== "");
+  const isOff = (action: DbAction) => picked[action] ?? connection.disabledActions.includes(action);
+  const nextOff = DB_ACTIONS.filter(isOff);
   const actionsChanged = DB_ACTIONS.some(
-    (action) => off.has(action) !== connection.disabledActions.includes(action),
+    (action) => isOff(action) !== connection.disabledActions.includes(action),
   );
+  // Picking what the server has for an action right now is no pick at all, so an action toggled and
+  // toggled back never undoes a change someone else makes to it later.
   const toggle = (action: DbAction, allowed: boolean) => {
-    const next = new Set(off);
-    if (allowed) next.delete(action);
-    else next.add(action);
-    setOff(next);
+    const next = { ...picked };
+    if (!allowed === connection.disabledActions.includes(action)) delete next[action];
+    else next[action] = !allowed;
+    setPicked(next);
   };
   return (
     <Dialog
@@ -542,11 +561,9 @@ function EditDatabase({
                   workspaceId,
                   databaseId: connection.id,
                   body: {
-                    ...(name.trim() !== connection.label && { label: name.trim() }),
+                    ...(name.trim() !== openedLabel && { label: name.trim() }),
                     // Only what changed goes: an untouched list never undoes someone else's change.
-                    ...(actionsChanged && {
-                      disabledActions: DB_ACTIONS.filter((action) => off.has(action)),
-                    }),
+                    ...(actionsChanged && { disabledActions: nextOff }),
                     ...(password !== "" && { password }),
                   },
                 })
@@ -600,7 +617,7 @@ function EditDatabase({
             {DB_ACTIONS.map((action) => (
               <Checkbox
                 key={action}
-                checked={!off.has(action)}
+                checked={!isOff(action)}
                 disabled={save.isPending}
                 onCheckedChange={(checked) => toggle(action, checked === true)}
                 label={t(`db.action.${action}`)}

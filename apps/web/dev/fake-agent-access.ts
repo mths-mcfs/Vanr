@@ -67,8 +67,8 @@ export class FakeAgentAccess {
   versions: T.MemoryVersion[] = [];
   /** The agents' own accounts, by agent id. */
   accounts = new Map<string, T.Connection[]>();
-  /** The workspace's shared connections. */
-  shared: (T.Connection & { workspaceId: string })[] = [];
+  /** The workspace's shared connections; `pending`: an OAuth that hasn't come back, which access doesn't count. */
+  shared: (T.Connection & { workspaceId: string; pending?: boolean })[] = [];
   rules: Rule[] = [];
 
   constructor(private readonly host: Host) {}

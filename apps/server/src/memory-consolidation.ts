@@ -131,10 +131,12 @@ function testConsolidation(read: readonly MemoryRow[]): ProposedItem[] {
   );
 }
 
+// A lesson confined to a channel stays out of the consolidation: merged into a shared item, it would leave it.
 const agentStore = (agent: AgentRow) => ({
   scope: "agent" as const,
   workspaceId: agent.workspaceId,
   agentId: agent.id,
+  seenFrom: null,
 });
 
 /**

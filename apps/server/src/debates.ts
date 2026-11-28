@@ -136,6 +136,21 @@ const pendingPeople = (row: DebateRow) =>
     ? row.pendingSpeakers.filter((s) => s.type === "person").map((s) => s.id)
     : [];
 
+/**
+ * The stall as it goes out. While anonymous, a stalled turn in a round names neither the agent nor its pseudonym:
+ * the id beside the posts that did come in, or the letter beside the agents still thinking (`engagedAgentIds`), would
+ * tell whose letter it is. Only the synthesis keeps the lead's id (public on the table), without a letter. At the
+ * reveal both show.
+ */
+function stallOf(row: DebateRow): Debate["stallInfo"] {
+  const stall = row.stallInfo;
+  if (!stall) return null;
+  const { agentId, round, reason } = stall;
+  if (!isAnonymous(row)) return { agentId, pseudonym: row.pseudonyms[agentId] ?? null, round, reason };
+  if (stall.synthesis) return { agentId, pseudonym: null, round, reason };
+  return { agentId: null, pseudonym: null, round, reason };
+}
+
 export function toDebate(row: DebateRow): Debate {
   const origin = originOf(row);
   const waiting = pendingPeople(row);
@@ -163,7 +178,7 @@ export function toDebate(row: DebateRow): Debate {
         : row.status === "open" && row.phase === "concluding"
           ? [leadOf(row)].filter((x): x is string => !!x)
           : [],
-    stallInfo: row.stallInfo ?? null,
+    stallInfo: stallOf(row),
     awaitedUserId: waiting[0] ?? null,
     waitingUserIds: waiting,
     channelId: row.channelId,
@@ -229,18 +244,8 @@ export async function debateById(db: Db, workspaceId: string, id: string): Promi
 
 // ---- who sees the debate ----
 // A debate without a channel or in a public channel belongs to the workspace. A debate in a private channel (or
-// a DM) shows only to whoever reads the channel and to whoever takes part (asked, leads, opened it or was called
-// to the table): for everyone else it is as if it didn't exist (404, out of the list, the search and the events).
-
-const participants = (row: DebateRow) =>
-  new Set(
-    [
-      row.requesterUserId,
-      row.leadUserId,
-      row.createdBy.type === "person" ? row.createdBy.id : null,
-      ...row.userIds,
-    ].filter((x): x is string => !!x),
-  );
+// a DM) shows only to whoever reads the channel, taking part or not: whoever left the channel loses it like the
+// channel's other content (404, out of the list, the search, the events and the notices).
 
 /** SQL filter of the list and the search: the debates the person sees (the same rule as `canSeeDebate`). */
 export function visibleDebates(viewer: { workspaceId: string; userId: string }): SQL {
@@ -248,14 +253,7 @@ export function visibleDebates(viewer: { workspaceId: string; userId: string }):
   return (
     and(
       eq(debates.workspaceId, viewer.workspaceId),
-      or(
-        isNull(debates.channelId),
-        sql`${debates.channelId} in ${readable}`,
-        eq(debates.requesterUserId, viewer.userId),
-        eq(debates.leadUserId, viewer.userId),
-        sql`${debates.userIds} @> ${JSON.stringify([viewer.userId])}::jsonb`,
-        sql`(${debates.createdBy}->>'type' = 'person' and ${debates.createdBy}->>'id' = ${viewer.userId})`,
-      ),
+      or(isNull(debates.channelId), sql`${debates.channelId} in ${readable}`),
     ) ?? sql`false`
   );
 }
@@ -269,7 +267,7 @@ export function revealedDebateIds(db: Db, viewer: { workspaceId: string; userId:
 }
 
 export async function canSeeDebate(db: Db, row: DebateRow, userId: string): Promise<boolean> {
-  if (!row.channelId || participants(row).has(userId)) return true;
+  if (!row.channelId) return true;
   return canReadChannel(db, { workspaceId: row.workspaceId, userId, channelId: row.channelId });
 }
 
@@ -296,7 +294,7 @@ export async function visibleDebateById(
   return row;
 }
 
-/** Who the debate's events go to: the whole workspace, or (private channel) whoever reads the channel and takes part. */
+/** Who the debate's events go to: the whole workspace, or (private channel) whoever reads the channel. */
 async function audience(db: Db, row: DebateRow): Promise<"workspace" | string[]> {
   if (!row.channelId) return "workspace";
   const channel = await channelInWorkspace(db, row.workspaceId, row.channelId);
@@ -307,7 +305,7 @@ async function audience(db: Db, row: DebateRow): Promise<"workspace" | string[]>
         .from(channelMemberships)
         .where(and(eq(channelMemberships.channelId, channel.id), eq(channelMemberships.memberType, "person")))
     : [];
-  return [...new Set([...members.map((m) => m.id), ...participants(row)])];
+  return members.map((m) => m.id);
 }
 
 async function publish(deps: AppDeps, row: DebateRow, event: Parameters<AppDeps["hub"]["toWorkspace"]>[1]) {
@@ -684,9 +682,11 @@ function stakeholders(row: DebateRow): string[] {
   return [...new Set([row.requesterUserId, row.leadUserId].filter((x): x is string => !!x))];
 }
 
-/** A round began: every person at the table gets the turn (all at once). */
+/** A round began: every person at the table gets the turn (all at once), if they still read the debate. */
 async function callPeople(deps: AppDeps, row: DebateRow) {
   for (const id of pendingPeople(row)) {
+    // Checked for each one right before their notice: a leave while the others are notified counts too.
+    if (!(await readers(deps.db, row, [id])).has(id)) continue;
     await notify(deps, {
       workspaceId: row.workspaceId,
       userId: id,
@@ -936,11 +936,69 @@ async function liveAgents(db: Db, ids: readonly string[]): Promise<AgentRow[]> {
     .where(and(inArray(agents.id, [...ids]), isNull(agents.archivedAt)));
 }
 
+/** Who among `people` still reads the debate: a member of the workspace who reads its channel (if it has one). */
+async function readers(db: Db, row: DebateRow, people: readonly string[]): Promise<Set<string>> {
+  if (!people.length) return new Set();
+  const inWorkspace = await db
+    .select({ id: schema.members.userId })
+    .from(schema.members)
+    .where(and(eq(schema.members.workspaceId, row.workspaceId), inArray(schema.members.userId, [...people])));
+  const out = new Set<string>();
+  for (const { id } of inWorkspace) if (await canSeeDebate(db, row, id)) out.add(id);
+  return out;
+}
+
+/** The people the round waits on who no longer read the debate: out of its private channel, or of the workspace. */
+async function pendingOutside(db: Db, row: DebateRow): Promise<string[]> {
+  const people = row.pendingSpeakers.filter((s) => s.type === "person").map((s) => s.id);
+  const reading = await readers(db, row, people);
+  return people.filter((id) => !reading.has(id));
+}
+
+/**
+ * Someone who no longer reads the debate leaves the round's queue, so the round goes on without them. Their seat
+ * stays: back in the channel, they speak again from the next round on.
+ */
+async function dropOutside(deps: AppDeps, row: DebateRow): Promise<boolean> {
+  const gone = new Set(await pendingOutside(deps.db, row));
+  if (!gone.size) return false;
+  const changed = await changeDebate(deps, row.id, (locked) =>
+    locked.status === "open" && locked.round === row.round
+      ? { pendingSpeakers: locked.pendingSpeakers.filter((s) => !(s.type === "person" && gone.has(s.id))) }
+      : null,
+  );
+  return changed !== null;
+}
+
+/**
+ * After someone left a channel (or the workspace), the open debates whose round waited on them and that they no
+ * longer read go on without them.
+ */
+export async function releaseSeats(
+  deps: AppDeps,
+  input: { workspaceId: string; userId: string; channelIds?: readonly string[] },
+): Promise<void> {
+  const rows = await deps.db
+    .select()
+    .from(debates)
+    .where(
+      and(
+        eq(debates.workspaceId, input.workspaceId),
+        eq(debates.status, "open"),
+        input.channelIds ? inArray(debates.channelId, [...input.channelIds]) : undefined,
+        sql`${debates.pendingSpeakers} @> ${JSON.stringify([{ type: "person", id: input.userId }])}::jsonb`,
+      ),
+    );
+  for (const row of rows) if (await dropOutside(deps, row)) scheduleAdvance(deps, row.id);
+}
+
 /** One step. Returns false when the debate stopped (a person's turn, stalled, closed). */
 async function step(deps: AppDeps, debateId: string): Promise<boolean> {
   const { db } = deps;
   const [row] = await db.select().from(debates).where(eq(debates.id, debateId));
   if (row?.status !== "open") return false;
+  // A round never waits on someone who can't read the debate anymore (a new round seats everyone again).
+  if (row.phase !== "concluding" && (await dropOutside(deps, row))) return true;
   const expect = { pendingSpeakers: row.pendingSpeakers, round: row.round };
 
   if (row.phase === "concluding") {
@@ -1050,7 +1108,10 @@ async function agentTurn(deps: AppDeps, row: DebateRow, agentId: string): Promis
   }
   if (!result.ok && result.code !== "budget") {
     // The round changed while the agent thought (canceled, removed, concluded): the failure no longer counts.
-    const reason = result.error.slice(0, 300);
+    // The error may name the agent ("Lia thinks with the personal plan..."): the stall names nobody.
+    const named = agent.name.trim() ? agent.name : null;
+    const label = "A participant";
+    const reason = (named ? result.error.replaceAll(named, label) : result.error).slice(0, 300);
     await changeDebate(deps, row.id, (fresh) =>
       inQueue(fresh, row.round, who)
         ? { status: "stalled", phase: null, stallInfo: { agentId: agent.id, round: row.round, reason } }
@@ -1216,7 +1277,11 @@ async function synthesize(deps: AppDeps, row: DebateRow) {
       const agentId = lead.id;
       await changeDebate(deps, row.id, (fresh) =>
         fresh.status === "open" && fresh.phase === "concluding" && fresh.round === row.round
-          ? { status: "stalled", phase: null, stallInfo: { agentId, round: row.round, reason } }
+          ? {
+              status: "stalled",
+              phase: null,
+              stallInfo: { agentId, round: row.round, reason, synthesis: true },
+            }
           : null,
       );
       return;
@@ -1297,6 +1362,8 @@ async function synthesize(deps: AppDeps, row: DebateRow) {
   }
   await closeNotifications(deps, row.workspaceId, turnKey(row.id));
   for (const userId of stakeholders(row)) {
+    // Checked for each one right before their notice: a leave while the others are notified counts too.
+    if (!(await readers(db, done, [userId])).has(userId)) continue;
     await notify(deps, {
       workspaceId: row.workspaceId,
       userId,

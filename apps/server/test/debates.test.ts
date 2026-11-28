@@ -446,10 +446,13 @@ describe("the debates' debts (F2-3.2-P0-01)", () => {
       expect(debateIds).not.toContain(hidden.id);
       betoSocket.close();
 
-      // Whoever was called to the table sees it, even outside the channel.
-      await call(ana, "PUT", `${base}/${hidden.id}/participants`, { peopleToAdd: [caio.user.id] });
-      expect((await call(caio, "GET", `${base}/${hidden.id}`)).body.title).toBe("Confidential layoffs");
-      expect(await ids(caio)).toContain(hidden.id);
+      // Nobody outside the channel is called to its table: the debate stays the channel's.
+      const called = await call(ana, "PUT", `${base}/${hidden.id}/participants`, {
+        peopleToAdd: [caio.user.id],
+      });
+      expect(called.status).toBe(400);
+      expect((await call(caio, "GET", `${base}/${hidden.id}`)).status).toBe(404);
+      expect(await ids(caio)).not.toContain(hidden.id);
       // Whoever joins the channel starts seeing it.
       await addToChannel(server, secret, { type: "person", id: beto.user.id });
       expect((await call(beto, "GET", `${base}/${hidden.id}`)).body.id).toBe(hidden.id);

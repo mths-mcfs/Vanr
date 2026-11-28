@@ -35,8 +35,8 @@ import { ANSWER_MAX, answerKey } from "@vanr/engine/debate-protocol";
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
-import { seesSpend } from "../agents";
-import { isPublicChannel, readableChannel } from "../channels";
+import { requirePlacesAgent, seesSpend } from "../agents";
+import { canReadChannel, isPublicChannel, readableChannel } from "../channels";
 import type { AppDeps, AppEnv, Ctx, WorkspaceMember } from "../context";
 import {
   answerRound,
@@ -61,7 +61,7 @@ import {
   visibleDebates,
 } from "../debates";
 import { debateEstimate, speakerAgents } from "../estimates";
-import { conflict, forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
+import { badRequest, conflict, forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
 import { createIssue, issueById, issueSeenBy } from "../issues";
 import { type MessageRow, messageInWorkspace } from "../messages";
 import { closeNotifications } from "../notifications";
@@ -72,10 +72,13 @@ const { debates, debatePosts, agents, members, messages, runs } = schema;
 const person = (me: WorkspaceMember): ActorRef => ({ type: "person", id: me.userId });
 const ids = z.array(z.string().min(1).max(64)).max(20);
 
-/** The debate's agents. A personal-plan agent only joins the debate asked by whoever paired its runner. */
+/**
+ * The debate's agents. Whoever seats one edits it or talks to it (`requirePlacesAgent`), and a personal-plan agent
+ * only joins the debate asked by whoever paired its runner.
+ */
 async function checkAgents(
   deps: AppDeps,
-  workspaceId: string,
+  me: WorkspaceMember,
   agentIds: string[],
   initiatedBy: string | null,
 ) {
@@ -83,18 +86,26 @@ async function checkAgents(
   const rows = await deps.db
     .select()
     .from(agents)
-    .where(and(eq(agents.workspaceId, workspaceId), inArray(agents.id, agentIds), isNull(agents.archivedAt)));
+    .where(
+      and(eq(agents.workspaceId, me.workspaceId), inArray(agents.id, agentIds), isNull(agents.archivedAt)),
+    );
   if (rows.length !== new Set(agentIds).size) throw notFound("Agent not found");
+  for (const row of rows) await requirePlacesAgent(deps.db, me, row);
   await requirePlanOwners(deps.db, rows, initiatedBy);
 }
 
-async function checkPeople(deps: AppDeps, workspaceId: string, userIds: string[]) {
+/** The people called to the table: the workspace's, and able to read the debate's channel when it has one. */
+async function checkPeople(deps: AppDeps, workspaceId: string, userIds: string[], channelId: string | null) {
   if (userIds.length === 0) return;
   const rows = await deps.db
     .select({ id: members.userId })
     .from(members)
     .where(and(eq(members.workspaceId, workspaceId), inArray(members.userId, userIds)));
   if (rows.length !== new Set(userIds).size) throw notFound("Member not found");
+  if (!channelId) return;
+  for (const userId of new Set(userIds))
+    if (!(await canReadChannel(deps.db, { workspaceId, userId, channelId })))
+      throw badRequest("That person can't read this debate's channel", { field: "userIds" });
 }
 
 /** Who runs the debate: whoever opened or asked for it, whoever leads it, or an admin. */
@@ -356,9 +367,12 @@ export function registerDebates(app: Hono<AppEnv>) {
     );
     const agentIds = q.agentIds.split(",").filter(Boolean).slice(0, 20);
     const speakers = await speakerAgents(deps.db, me.workspaceId, agentIds);
-    return c.json<DebateEstimate>(
-      debateEstimate(speakers, { roundLimit: q.rounds, format: q.format }, deps.now()),
-    );
+    const estimate = debateEstimate(speakers, { roundLimit: q.rounds, format: q.format }, deps.now());
+    // The cap is an amount: it follows view_usage, as every other spend.
+    return c.json<DebateEstimate>({
+      calls: estimate.calls,
+      upToUsd: seesSpend(me) ? estimate.upToUsd : null,
+    });
   });
 
   // What the debate promises (a decision), over the debates the person sees.
@@ -387,14 +401,10 @@ export function registerDebates(app: Hono<AppEnv>) {
     const speakers = input.speakers ?? [];
     await checkAgents(
       deps,
-      me.workspaceId,
+      me,
       [...input.agentIds, ...speakers.filter((s) => s.type === "agent").map((s) => s.id)],
       me.userId,
     );
-    await checkPeople(deps, me.workspaceId, [
-      ...(input.userIds ?? []),
-      ...speakers.filter((s) => s.type === "person").map((s) => s.id),
-    ]);
     if (input.channelId)
       await readableChannel(deps.db, {
         workspaceId: me.workspaceId,
@@ -411,6 +421,13 @@ export function registerDebates(app: Hono<AppEnv>) {
         : null;
     if (issueChannel && input.channelId && input.channelId !== issueChannel)
       throw new HttpError(400, "debate.issue_channel", "Debate this issue in the channel it belongs to");
+    const channelId = issueChannel ?? input.channelId ?? null;
+    await checkPeople(
+      deps,
+      me.workspaceId,
+      [...(input.userIds ?? []), ...speakers.filter((s) => s.type === "person").map((s) => s.id)],
+      channelId,
+    );
     const row = await openDebate(deps, {
       workspaceId: me.workspaceId,
       title: input.title,
@@ -425,7 +442,7 @@ export function registerDebates(app: Hono<AppEnv>) {
       spendCapPercent: input.spendCapPercent,
       createdBy: person(me),
       requesterUserId: me.userId,
-      channelId: issueChannel ?? input.channelId ?? null,
+      channelId,
       origin: sourceIssue
         ? { kind: "issue", issueId: sourceIssue.id, issueSeq: sourceIssue.number }
         : { kind: "manual" },
@@ -571,8 +588,8 @@ export function registerDebates(app: Hono<AppEnv>) {
     const input = await readJson(c, participantsBody);
     const agentsToAdd = input.agentsToAdd ?? [];
     const speakersToAdd = input.addSpeakerUserIds ?? [];
-    await checkAgents(deps, me.workspaceId, agentsToAdd, row.requesterUserId);
-    await checkPeople(deps, me.workspaceId, [...(input.peopleToAdd ?? []), ...speakersToAdd]);
+    await checkAgents(deps, me, agentsToAdd, row.requesterUserId);
+    await checkPeople(deps, me.workspaceId, [...(input.peopleToAdd ?? []), ...speakersToAdd], row.channelId);
     const removeAgents = new Set(input.agentsToRemove ?? []);
     const removeUsers = new Set(input.peopleToRemove ?? []);
     const unseat = new Set([...(input.removeSpeakerUserIds ?? []), ...removeUsers]);
@@ -751,7 +768,7 @@ export function registerDebates(app: Hono<AppEnv>) {
     const { row, suggestion } = await suggestionMessage(c, me);
     const overrides = await readJson(c, overridesBody);
     const agentIds = overrides.agentIds ?? suggestion.agentIds;
-    await checkAgents(deps, me.workspaceId, agentIds, me.userId);
+    await checkAgents(deps, me, agentIds, me.userId);
     await claimSuggestion(deps, row.id, "accepted");
     let debate: DebateRow;
     try {

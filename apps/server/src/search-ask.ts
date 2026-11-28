@@ -1,13 +1,15 @@
 // "Ask" mode: the best chunks the person reads go to the model as `search_result` blocks (the API's native
 // citation) and the answer comes back in pieces, each with the numbers of its sources. The model gets no
 // tool at all: retrieved text is data and has no way out of here (EchoLeak). The cost goes into the ledger
-// as `search`, paid by the workspace's key or the platform's.
+// as `search`, paid by the workspace's key or the platform's, on the workspace's month budget.
 import type { AskAnswer, AskSource } from "@vanr/contract";
 import type { ModelContent, ModelProvider, Usage } from "@vanr/engine/models/types";
 import { emptyUsage } from "@vanr/engine/models/types";
+import { utf8Bytes } from "@vanr/engine/usage";
 import type { AppDeps, WorkspaceMember } from "./context";
 import { HttpError } from "./http";
 import { searchAs, toApiHit } from "./routes/search";
+import { onWorkspaceBudget } from "./workspace-spend";
 
 export const ASK_MODEL = "claude-haiku-5-5";
 const ASK_SOURCES = 8;
@@ -76,36 +78,38 @@ export async function askSources(deps: AppDeps, me: WorkspaceMember, q: string):
     })),
     { type: "text", text: q },
   ];
-  let usage: Usage = emptyUsage();
-  let answer: ModelContent[] = [];
-  const signal = AbortSignal.timeout(60_000);
-  for await (const ev of provider.stream({
-    model: ASK_MODEL,
-    system: SYSTEM,
-    messages: [{ role: "user", content }],
-    tools: [],
-    maxTokens: ASK_MAX_TOKENS,
-    signal,
-  })) {
-    if (ev.type === "turn") {
-      answer = ev.content;
-      usage = ev.usage;
-    }
-  }
-  if (!test)
-    await deps.ledger.record(
-      {
-        workspaceId: me.workspaceId,
-        agentId: null,
-        userId: me.userId,
-        runId: null,
-        source: "search",
+  // On the workspace's month budget: out of it, the question stops with 402 workspace.budget before the call.
+  const answer = await onWorkspaceBudget(
+    deps,
+    {
+      workspaceId: me.workspaceId,
+      userId: me.userId,
+      source: "search",
+      model: ASK_MODEL,
+      promptBytes: utf8Bytes(SYSTEM) + utf8Bytes(JSON.stringify(content)),
+      maxTokens: ASK_MAX_TOKENS,
+      test,
+    },
+    async () => {
+      let usage: Usage = emptyUsage();
+      let value: ModelContent[] = [];
+      const signal = AbortSignal.timeout(60_000);
+      for await (const ev of provider.stream({
         model: ASK_MODEL,
-        usage,
-        at: deps.now(),
-      },
-      [],
-    );
+        system: SYSTEM,
+        messages: [{ role: "user", content }],
+        tools: [],
+        maxTokens: ASK_MAX_TOKENS,
+        signal,
+      })) {
+        if (ev.type === "turn") {
+          value = ev.content;
+          usage = ev.usage;
+        }
+      }
+      return { value, usage };
+    },
+  );
 
   const blocks: AskAnswer["blocks"] = [];
   for (const block of answer) {

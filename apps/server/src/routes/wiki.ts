@@ -75,6 +75,7 @@ import { CHECK_NOW_GAP_MS, checkWorkspace, readChecks } from "../wiki-checks";
 import { linkingPages, panelOf, planRenames, viewerEdges } from "../wiki-links";
 import { attachmentsOf, exportVault, importVault, unzipVault } from "../wiki-vault";
 import { requireMember, WORKSPACE } from "../workspace-scope";
+import { workspaceOutOfBudget } from "../workspace-spend";
 
 const { knowledgePages, pageRevisions, wikiPageViews } = schema;
 const me$ = (me: WorkspaceMember): ActorRef => ({ type: "person", id: me.userId });
@@ -987,7 +988,10 @@ export function registerWiki(app: Hono<AppEnv>) {
       gapMs: CHECK_NOW_GAP_MS,
       model: () => deps.runtime.providerForWorkspace(me.workspaceId),
     });
-    if (!ran) throw new HttpError(429, "wiki.checks.too_soon", "The wiki was checked less than a minute ago");
+    if (ran === "busy")
+      throw new HttpError(429, "wiki.checks.too_soon", "The wiki was checked less than a minute ago");
+    // What it could check is stored; the pairs left wait for a check with budget.
+    if (ran === "out_of_budget") throw workspaceOutOfBudget();
     return c.json(await snapshot(deps.db, (tx) => readChecks(tx, viewerOf(me))));
   });
 }

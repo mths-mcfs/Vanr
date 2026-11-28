@@ -142,7 +142,7 @@ describe("who sees an assignment and what waits on them", () => {
     expect(await screen.findByRole("article", { name: "Vault job" })).toBeDefined();
   });
 
-  test("an admin who only reads the channel isn't waited on for requests, and isn't shown a list they can't open", async () => {
+  test("an admin who only reads the assignment is waited on for requests, and lists and answers them", async () => {
     const server = newServer();
     const paper = paperOf(server);
     paper.people = [];
@@ -165,14 +165,19 @@ describe("who sees an assignment and what waits on them", () => {
     ];
     const app = await renderApp({ path: LIST, signedInAs: "usr_jonas", server });
     const row = within(await screen.findByRole("article", { name: "Restock the paper room" }));
-    expect(row.getByText("1 open item")).toBeDefined();
-    expect(row.queryByText(/waits on you/) === null).toBe(true);
-    await app.user.click(row.getByRole("link", { name: "Restock the paper room" }));
+    // They let people in (configure), as the server's waitingFor: the request waits on them, and the assignment is
+    // under their "Waiting on you" tab.
+    expect(row.getByText("1 thing waits on you")).toBeDefined();
+    await app.user.click(screen.getByRole("tab", { name: "Waiting on you (1)" }));
+    const waiting = within(await screen.findByRole("article", { name: "Restock the paper room" }));
+    await app.user.click(waiting.getByRole("link", { name: "Restock the paper room" }));
     const panel = within(await screen.findByRole("region", { name: "Assignment" }));
     await app.user.click(panel.getByRole("tab", { name: "People" }));
     await panel.findByText(/Ana Beatriz Souza owns it/);
+    // They manage it (configure), as the server's managesAssignment: the request is theirs to answer.
+    expect(await panel.findByText("Íris Valença")).toBeDefined();
     expect(panel.queryByText("The requests to take part could not be loaded") === null).toBe(true);
-    expect(app.server.calls.some((each) => each.method === "listAssignmentJoinRequests")).toBe(false);
+    expect(app.server.calls.some((each) => each.method === "listAssignmentJoinRequests")).toBe(true);
   });
 
   test("a provisional decision is open, but waits on no one", async () => {
@@ -191,7 +196,7 @@ describe("who sees an assignment and what waits on them", () => {
     expect(row.queryByText(/wait on you|waits on you/) === null).toBe(true);
   });
 
-  test("the waiting list follows the server: not a provisional decision, requests and a cost pause for the owner, a stuck step for whoever decides", async () => {
+  test("the waiting list follows the server: not a provisional decision, requests for who decides and manages, a cost pause for the owner, a stuck step for whoever decides", async () => {
     const server = newServer();
     const paper = paperOf(server);
     const blocked = async (userId: string) => {
@@ -208,8 +213,9 @@ describe("who sees an assignment and what waits on them", () => {
     };
     paper.plan = { ...paper.plan, items: paper.plan.items.map((item) => ({ ...item, stallReason: null })) };
     expect([await blocked("usr_ana"), await blocked("usr_jonas")]).toEqual([0, 0]);
+    // Jonas decides and is an admin: he may let people in, so a request waits on him too.
     paper.pending = { ...paper.pending, provisional: 0, joinRequests: 1 };
-    expect([await blocked("usr_ana"), await blocked("usr_jonas")]).toEqual([1, 0]);
+    expect([await blocked("usr_ana"), await blocked("usr_jonas")]).toEqual([1, 1]);
     paper.pending = { ...paper.pending, joinRequests: 0 };
     paper.status = "paused";
     paper.ceiling = "usd";

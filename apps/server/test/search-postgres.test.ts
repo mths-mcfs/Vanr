@@ -57,7 +57,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("vector search on Postgres"), () 
         .select()
         .from(schema.usageLines)
         .where(eq(schema.usageLines.workspaceId, workspaceId));
-      expect(lines.map((l) => l.source)).toContain("search");
+      expect(lines.map((l) => l.source)).toContain("embedding");
       const hits = await body(await ana.browser.fetch(`${W(workspaceId)}/search?q=harbor`));
       expect(hits.hits[0]).toMatchObject({ kind: "file", sourceId: open.id });
     } finally {

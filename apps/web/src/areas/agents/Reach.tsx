@@ -58,7 +58,7 @@ function ReachForm({
   const enabled = new Map(access.builtins.map((each) => [each.scope, each.enabled]));
   const areas = AREAS.filter((area) => enabled.has(`${area}:read`));
   return (
-    <div className="reach">
+    <div className="reach" aria-busy={change.pending} onFocusCapture={change.onFocusCapture}>
       <Switch
         checked={access.all}
         disabled={locked}
@@ -71,12 +71,14 @@ function ReachForm({
         <ul className="reach__list" aria-label={t("reach.areas")}>
           {areas.map((area) => {
             const write = `${area}:write`;
+            // Changing an area includes reading it: with Change on, Read shows as given by it.
+            const changes = enabled.get(write) === true;
             return (
               <li key={area} className="reach__row">
                 <span className="reach__name">{t(`reach.area.${area}`)}</span>
                 <Checkbox
-                  checked={enabled.get(`${area}:read`) === true}
-                  disabled={locked || access.all}
+                  checked={changes || enabled.get(`${area}:read`) === true}
+                  disabled={locked || access.all || changes}
                   label={t("reach.read")}
                   aria-label={t("reach.readArea", { area: t(`reach.area.${area}`) })}
                   onCheckedChange={(on) => change.setBuiltin(`${area}:read`, on === true)}
