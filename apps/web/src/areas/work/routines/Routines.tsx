@@ -125,7 +125,10 @@ function RoutineCard({
   const [open, setOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const mayEdit = routine.createdBy === me || configures;
-  const mayDuplicate = actors.reachable.some((agent) => agent.id === routine.agentId);
+  // A copy runs as the person who makes it: with an agent they may set to work, answering where they can write.
+  const mayDuplicate =
+    actors.reachable.some((agent) => agent.id === routine.agentId) &&
+    (routine.target.kind !== "channel" || channelName(routine.target.channelId) !== undefined);
   const refresh = () => [
     { method: "listRoutines" as const, args: { workspaceId } },
     { method: "listRoutineRuns" as const, args: { workspaceId, routineId: routine.id } },

@@ -51,6 +51,17 @@ describe("the routines", () => {
     );
   });
 
+  test("a routine answering in a channel the person can't open can't be duplicated", async () => {
+    const server = newServer();
+    const watcher = server.work.routines.find((routine) => routine.id === "rtn_invoices");
+    if (watcher !== undefined) watcher.target = { kind: "channel", channelId: "ch_hidden" };
+    await renderApp({ path: ROUTINES, signedInAs: "usr_ana", server });
+    await screen.findByRole("article", { name: "Invoice watcher" });
+    expect(card("Invoice watcher").getByText("In a channel you can't open")).toBeDefined();
+    expect(card("Invoice watcher").queryByRole("button", { name: "Duplicate" }) === null).toBe(true);
+    expect(card("Morning digest").getByRole("button", { name: "Duplicate" })).toBeDefined();
+  });
+
   test("a member who didn't create a routine can't run, pause or delete it", async () => {
     await renderApp({ path: ROUTINES, signedInAs: "usr_iris" });
     await screen.findByRole("article", { name: "Morning digest" });
