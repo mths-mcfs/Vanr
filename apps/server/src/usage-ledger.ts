@@ -99,16 +99,18 @@ export async function workspaceSpent(tx: Tx | Db, scope: BudgetScope, at: Date):
     scope.period === "month" ? new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth() + 1, 1)) : null;
   // One statement, so one snapshot: a run whose rows a settle commits meanwhile counts by its rows or by its cost,
   // never by neither. The names are written out: inside the subqueries a bare column would bind to the wrong table.
-  const end = to ?? new Date("9999-12-31T00:00:00Z");
+  // Bound as text: the postgres driver takes no Date in a raw template.
+  const start = from.toISOString();
+  const end = (to ?? new Date("9999-12-31T00:00:00Z")).toISOString();
   const [row] = await tx
     .select({
       lines: sql<number | string | null>`(
         select sum(l.cost_micros) from usage_lines l
-        where l.workspace_id = ${scope.id} and l.at >= ${from} and l.at < ${end}
+        where l.workspace_id = ${scope.id} and l.at >= ${start}::timestamptz and l.at < ${end}::timestamptz
           and not (l.source = 'embedding' or (l.source = 'search' and l.user_id is null)))`,
       runs: sql<number | string | null>`(
         select sum(r.cost_usd) from runs r
-        where r.workspace_id = ${scope.id} and r.created_at >= ${from} and r.created_at < ${end}
+        where r.workspace_id = ${scope.id} and r.created_at >= ${start}::timestamptz and r.created_at < ${end}::timestamptz
           and not exists (select 1 from usage_lines l where l.run_id = r.id))`,
     })
     .from(sql`(select 1) as one`);
