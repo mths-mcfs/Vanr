@@ -58,14 +58,31 @@ export function useHistory(workspaceId: string, channelId: string, authorId: str
   const [olderError, setOlderError] = useState<unknown>(null);
   const [local, setLocal] = useState<Message[]>([]);
 
-  const server = latest.data ?? [];
+  const server = useMemo(() => latest.data ?? [], [latest.data]);
+  // Once older pages are loaded, a message that slides out of the latest page moves to them, so the
+  // history the person scrolled through keeps no gap.
+  const previous = useRef<Message[]>([]);
+  useEffect(() => {
+    const before = previous.current;
+    previous.current = server;
+    const now = new Set(server.map((message) => message.id));
+    const slid = before.filter((message) => !now.has(message.id));
+    if (slid.length === 0) return;
+    setOlder((current) => {
+      if (current.messages.length === 0) return current;
+      const kept = new Set(current.messages.map((message) => message.id));
+      return { ...current, messages: [...current.messages, ...slid.filter((m) => !kept.has(m.id))] };
+    });
+  }, [server]);
   const messages = useMemo(() => {
-    const seen = new Set<string>();
+    // The latest page holds the newest version of a message, so it wins over an older copy.
+    const fresh = new Map(server.map((message) => [message.id, message]));
     const out: Message[] = [];
+    const seen = new Set<string>();
     for (const message of [...older.messages, ...server]) {
       if (seen.has(message.id)) continue;
       seen.add(message.id);
-      out.push(message);
+      out.push(fresh.get(message.id) ?? message);
     }
     const echoed = new Set(out.flatMap((message) => (message.clientId === null ? [] : [message.clientId])));
     return [...out, ...local.filter((message) => message.clientId === null || !echoed.has(message.clientId))];
@@ -170,16 +187,26 @@ type RunEventName =
   | "run.stopped"
   | "run.idle";
 
-const LIST_SLACK_MS = 5000;
 type RunAction =
   | { kind: "event"; base: RunEventBase; event: RunEvent; now: number }
   | { kind: "list"; active: Parameters<typeof reconcile>[1]; readAt: number };
 
-function runsReducer(runs: readonly LiveRun[], action: RunAction): readonly LiveRun[] {
-  return action.kind === "event"
-    ? applyRunEvent(runs, action.base, action.event, action.now)
-    : reconcile(runs, action.active, action.readAt);
+/** The runs, and the ones known to have ended: a list read before the end never brings one back. */
+type RunsState = { runs: readonly LiveRun[]; ended: ReadonlySet<string> };
+
+const ENDING: ReadonlySet<RunEvent["type"]> = new Set(["run.completed", "run.stopped", "run.idle"]);
+
+function runsReducer(state: RunsState, action: RunAction): RunsState {
+  if (action.kind === "list")
+    return { ...state, runs: reconcile(state.runs, action.active, action.readAt, state.ended) };
+  const runs = applyRunEvent(state.runs, action.base, action.event, action.now);
+  const { runId } = action.base;
+  const ended =
+    runId !== undefined && ENDING.has(action.event.type) ? new Set(state.ended).add(runId) : state.ended;
+  return { runs, ended };
 }
+
+const NO_RUNS: RunsState = { runs: [], ended: new Set() };
 
 /** Listens to one run event in this channel and hands it to the reducer. */
 function useRunEvent(name: RunEventName, channelId: string, dispatch: (action: RunAction) => void) {
@@ -206,7 +233,7 @@ function useRunEvent(name: RunEventName, channelId: string, dispatch: (action: R
 /** The live runs of a conversation: the server's list, kept current by the run events. */
 export function useLiveRuns(workspaceId: string, channelId: string) {
   const active = useApiQuery("listChannelActiveRuns", { workspaceId, channelId });
-  const [runs, dispatch] = useReducer(runsReducer, []);
+  const [{ runs }, dispatch] = useReducer(runsReducer, NO_RUNS);
   useRunEvent("run.status_changed", channelId, dispatch);
   useRunEvent("run.text_delta", channelId, dispatch);
   useRunEvent("run.commentary", channelId, dispatch);
@@ -216,11 +243,15 @@ export function useLiveRuns(workspaceId: string, channelId: string) {
   useRunEvent("run.stopped", channelId, dispatch);
   useRunEvent("run.idle", channelId, dispatch);
   const clock = useClock();
-  const { data } = active;
+  const { data, fetchStatus } = active;
+  // When the list was asked for: a run heard from after that may be missing from it and still be live.
+  const askedAt = useRef(clock.now());
   useEffect(() => {
-    // The list was read a moment ago: a run heard from in the last seconds may have started after it.
-    if (data != null) dispatch({ kind: "list", active: data, readAt: clock.now() - LIST_SLACK_MS });
-  }, [data, clock]);
+    if (fetchStatus === "fetching") askedAt.current = clock.now();
+  }, [fetchStatus, clock]);
+  useEffect(() => {
+    if (data != null) dispatch({ kind: "list", active: data, readAt: askedAt.current });
+  }, [data]);
   return { runs, active };
 }
 
@@ -240,13 +271,21 @@ export function useMarkRead(
       { method: "getDms", args: { workspaceId } },
     ],
   });
+  // The last message marked, or on its way to be; a failure clears it, so coming back tries again.
   const marked = useRef<string | undefined>(undefined);
   const { mutate } = mark;
   const markNow = useCallback(() => {
     if (!member || lastId === undefined || marked.current === lastId) return;
     if (document.visibilityState !== "visible") return;
     marked.current = lastId;
-    mutate({ workspaceId, channelId });
+    mutate(
+      { workspaceId, channelId },
+      {
+        onError: () => {
+          if (marked.current === lastId) marked.current = undefined;
+        },
+      },
+    );
   }, [member, lastId, workspaceId, channelId, mutate]);
   useEffect(() => {
     markNow();

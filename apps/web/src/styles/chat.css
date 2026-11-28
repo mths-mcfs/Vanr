@@ -237,7 +237,7 @@
     position: absolute;
     top: calc(-1 * var(--vr-space-3));
     right: var(--vr-space-2);
-    display: none;
+    display: flex;
     gap: var(--vr-space-1);
     padding: var(--vr-space-1);
     border: var(--vr-border) solid var(--vr-line);
@@ -245,9 +245,10 @@
     background-color: var(--vr-bg-raised);
   }
 
-  .chat-message:hover .chat-message__actions,
-  .chat-message:focus-within .chat-message__actions {
-    display: flex;
+  /* Hidden until wanted, but never out of the tab order: tabbing onto them shows them. */
+  .chat-message:not(:hover, :focus-within) .chat-message__actions {
+    opacity: 0;
+    pointer-events: none;
   }
 
   .chat-icon-button {

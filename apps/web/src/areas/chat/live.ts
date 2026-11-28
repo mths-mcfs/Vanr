@@ -11,6 +11,8 @@ export type LiveStep =
       key: string;
       tool: string;
       detail: string | null;
+      /** What the tool was asked, when the saved steps carry it. */
+      input: string | null;
       output: string | null;
       isError: boolean;
       running: boolean;
@@ -146,6 +148,7 @@ export function applyRunEvent(
                   key: id,
                   tool,
                   detail: event.detail ?? null,
+                  input: null,
                   output: null,
                   isError: false,
                   running: true,
@@ -175,15 +178,18 @@ export function reconcile(
   runs: readonly LiveRun[],
   active: readonly ActiveRun[],
   readAt: number,
+  ended: ReadonlySet<string> = new Set(),
 ): readonly LiveRun[] {
-  const listed = new Map(active.map((run) => [run.runId, run]));
+  // A run known to have ended stays ended, even when a list read before the end still names it.
+  const listed = new Map(active.filter((run) => !ended.has(run.runId)).map((run) => [run.runId, run]));
   const kept = runs.flatMap((run): LiveRun[] => {
     const row = listed.get(run.runId);
-    if (row !== undefined) return [{ ...run, status: row.status, initiatedBy: row.initiatedBy }];
+    if (row !== undefined)
+      return [{ ...run, status: row.status, initiatedBy: row.initiatedBy, threadId: row.threadId }];
     return run.endedAt !== null || run.lastEventAt > readAt ? [run] : [];
   });
   const known = new Set(runs.map((run) => run.runId));
-  const added = active
+  const added = [...listed.values()]
     .filter((row) => !known.has(row.runId))
     .map(
       (row): LiveRun => ({

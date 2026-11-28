@@ -1,11 +1,12 @@
 // A channel or a direct message: its header, its history with the agents at work below it, who is
 // typing, and the composer (or, for someone reading a public channel they have not joined, a way to
 // join). A channel this person cannot read looks exactly like one that does not exist.
-import { useApiMutation, useApiQuery } from "@vanr/client/react";
+import { useQueryClient } from "@tanstack/react-query";
+import { prefixKey, useApiMutation, useApiQuery, useVanrClient } from "@vanr/client/react";
 import type { Channel, Message } from "@vanr/contract";
 import { AgentSigil, Avatar, Button, EmptyState, ErrorState, Icon, Spinner } from "@vanr/ui";
 import { Hash, Lock, MessagesSquare, WifiOff } from "lucide-react";
-import { Fragment, type ReactNode, useCallback, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useRouteParams } from "../../app/navigation.tsx";
 import { ScreenError, ScreenLoading, useDocumentTitle, useErrorMessage } from "../../app/screens.tsx";
 import { useLocale, useMessages } from "../../i18n/react.tsx";
@@ -382,6 +383,16 @@ function DirectScreen({ target }: { target: Extract<Kind, { kind: "person" | "ag
   const directory = useDirectory(workspaceId);
   const body = target.kind === "agent" ? { agentId: target.agentId } : { userId: target.userId };
   const opened = useApiQuery("createDm", { workspaceId, body }, { staleTime: Number.POSITIVE_INFINITY });
+  // A direct message opened for the first time has no message yet: nothing else would list it.
+  const queryClient = useQueryClient();
+  const client = useVanrClient();
+  const openedId = opened.data?.channelId;
+  useEffect(() => {
+    if (openedId === undefined) return;
+    void queryClient.invalidateQueries({
+      queryKey: prefixKey(client, { method: "getDms", args: { workspaceId } }),
+    });
+  }, [openedId, queryClient, client, workspaceId]);
   useDocumentTitle(
     opened.isError
       ? t("dm.failed")

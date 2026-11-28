@@ -21,6 +21,7 @@ import { AppLink } from "../../app/navigation.tsx";
 import { useErrorMessage } from "../../app/screens.tsx";
 import { useLocale, useLookup, useMessages } from "../../i18n/react.tsx";
 import { ActionReceipt, ApprovalCard, ConnectorScopeCard, QuestionCard } from "../control/cards.ts";
+import { useOutcome } from "../control/shared.tsx";
 import { MessageBody } from "./body.tsx";
 import { useConversation } from "./context.tsx";
 import { SavedSteps } from "./Steps.tsx";
@@ -239,6 +240,8 @@ function Files({ message }: { message: Message }) {
 
 function Actions({ message, onQuote }: { message: Message; onQuote: (message: Message) => void }) {
   const t = useMessages("chat");
+  const describe = useErrorMessage("chat");
+  const outcome = useOutcome();
   const { workspaceId, member } = useConversation();
   const react = useApiMutation("createMessageReaction", {
     invalidates: () => [
@@ -259,7 +262,12 @@ function Actions({ message, onQuote }: { message: Message; onQuote: (message: Me
             <MenuItem
               key={reaction}
               aria-label={t("tools.reactWith", { reaction })}
-              onSelect={() => react.mutate({ workspaceId, messageId: message.id, body: { reaction } })}
+              onSelect={() =>
+                react.mutate(
+                  { workspaceId, messageId: message.id, body: { reaction } },
+                  { onError: (error) => outcome.warn(t("reaction.failed", { error: describe(error) })) },
+                )
+              }
             >
               {reaction}
             </MenuItem>

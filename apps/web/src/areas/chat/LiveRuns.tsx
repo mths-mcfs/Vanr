@@ -154,7 +154,8 @@ function useDoubleEscape(
     const element = scope.current;
     if (element === null) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented) return;
+      // A held key repeats: only two separate presses stop a run.
+      if (event.key !== "Escape" || event.defaultPrevented || event.repeat) return;
       const now = clock.now();
       if (now - last.current < 600) {
         last.current = Number.NEGATIVE_INFINITY;

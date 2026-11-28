@@ -57,6 +57,7 @@ describe("a live run", () => {
         key: "tu_1",
         tool: "search",
         detail: "kiln",
+        input: null,
         output: "boom",
         isError: true,
         running: false,
@@ -103,5 +104,15 @@ describe("the server's list of active runs", () => {
     });
     // A run already streaming keeps its text when the list names it.
     expect(reconcile(heard, [row()], 6000)[0]?.text).toBe("hi");
+  });
+
+  test("a run that ended is never brought back by a list read before the end", () => {
+    const stopped = play([{ type: "run.status_changed", status: "running" }, { type: "run.stopped" }]);
+    expect(reconcile(stopped, [row()], 0, new Set(["run_1"]))).toEqual([]);
+  });
+
+  test("the list says where a run is: a run first heard without its thread moves to it", () => {
+    const heard = play([{ type: "run.text_delta", seq: 0, text: "hi" }]);
+    expect(reconcile(heard, [row({ threadId: "msg_root" })], 0)[0]?.threadId).toBe("msg_root");
   });
 });

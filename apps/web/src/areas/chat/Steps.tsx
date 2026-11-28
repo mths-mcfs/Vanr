@@ -38,6 +38,11 @@ function ToolStep({ step }: { step: Extract<LiveStep, { kind: "tool" }> }) {
       </button>
       {open && (
         <div className="chat-step__out" id={panel}>
+          {step.input !== null && (
+            <section aria-label={t("step.input")}>
+              <pre>{preview(step.input)}</pre>
+            </section>
+          )}
           {step.output === null ? (
             <p className="chat-note">{step.running ? t("step.waiting") : t("step.noOutput")}</p>
           ) : (
@@ -81,6 +86,7 @@ export function stepsOf(saved: readonly RunStep[]): LiveStep[] {
         key: data.toolUseId ?? `tool-${step.seq}`,
         tool: data.name ?? "",
         detail: null,
+        input: data.input === undefined ? null : JSON.stringify(data.input, null, 2),
         output: null,
         isError: false,
         running: false,

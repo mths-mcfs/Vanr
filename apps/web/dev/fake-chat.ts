@@ -169,10 +169,19 @@ export class FakeChat {
         const agentId = typeof params.agentId === "string" ? params.agentId : undefined;
         const userId = typeof params.userId === "string" ? params.userId : undefined;
         const otherId = agentId ?? userId;
+        // A direct message is the caller's with the other side: someone else's with the same person is not it.
+        const isMine = (channelId: string) =>
+          this.host
+            .channels()
+            .find((each) => each.id === channelId)
+            ?.memberIds.includes(scope.user.id) ?? false;
         const existing = this.host
           .dms(scope.workspaceId)
           .find(
-            (dm) => dm.with.id === otherId && dm.with.type === (agentId === undefined ? "person" : "agent"),
+            (dm) =>
+              dm.with.id === otherId &&
+              dm.with.type === (agentId === undefined ? "person" : "agent") &&
+              isMine(dm.channelId),
           );
         if (existing !== undefined) return reply(200, { channelId: existing.channelId });
         const name =

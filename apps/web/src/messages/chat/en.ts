@@ -113,6 +113,7 @@ export default {
   "step.failed": "failed",
   "step.waiting": "No result yet.",
   "step.noOutput": "The tool returned nothing.",
+  "step.input": "What the tool was asked",
   "step.output": "What the tool returned",
   "step.error": "What went wrong",
   "steps.show": {

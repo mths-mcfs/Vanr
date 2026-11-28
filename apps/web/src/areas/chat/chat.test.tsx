@@ -387,6 +387,9 @@ describe("an agent at work", () => {
     await app.user.click(await screen.findByRole("button", { name: "Show the step behind this answer" }));
     const steps = await screen.findByRole("list", { name: "Steps behind this answer" });
     await app.user.click(within(steps).getByRole("button", { name: /search/ }));
+    expect(within(steps).getByRole("region", { name: "What the tool was asked" }).textContent).toContain(
+      '"query": "kiln"',
+    );
     expect(within(steps).getByRole("region", { name: "What went wrong" }).textContent).toBe("3 pages");
   });
 });
@@ -410,5 +413,66 @@ describe("direct messages", () => {
     await open("/dm/agent/agt_tally", "usr_tomas", server);
     expect(await screen.findByText("The conversation couldn't be opened")).toBeDefined();
     expect(screen.getByRole("button", { name: "Retry" })).toBeDefined();
+  });
+});
+
+describe("what CodeRabbit found on the first head", () => {
+  test("a message that slides out of the latest page stays once earlier ones were loaded", async () => {
+    const server = newServer();
+    for (let i = 1; i <= 150; i += 1)
+      server.state.messages.push(message({ id: `msg_${i}`, body: `line ${i}`, createdAt: at(-200 + i) }));
+    const app = await open("/channel/ch_general", "usr_ana", server);
+    await screen.findByText("line 150");
+    await app.user.click(screen.getByRole("button", { name: "Show earlier messages" }));
+    expect(await screen.findByText("line 1")).toBeDefined();
+    server.state.messages.push(message({ id: "msg_151", body: "line 151", createdAt: at(-40) }));
+    await act(async () => {
+      server.emit(WS, { type: "message.posted", message: server.state.messages.at(-1) }, "ch_general");
+    });
+    expect(await screen.findByText("line 151")).toBeDefined();
+    expect(screen.getByText("line 51")).toBeDefined();
+  });
+
+  test("marking read is tried again when the tab comes back after a failure", async () => {
+    const server = newServer();
+    server.state.messages.push(message({ id: "msg_hi", body: "Proofs at noon" }));
+    server.force("markChannelRead", { kind: "error", status: 503, code: "unavailable" }, 1);
+    await open("/channel/ch_general", "usr_ana", server);
+    const marks = () => server.calls.filter((call) => call.method === "markChannelRead").length;
+    await waitFor(() => expect(marks()).toBe(1));
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await waitFor(() => expect(marks()).toBe(2));
+  });
+
+  test("a direct message opened for the first time shows in the sidebar at once", async () => {
+    await open("/dm/person/usr_jonas");
+    const sidebar = await screen.findByRole("complementary");
+    expect(await within(sidebar).findByRole("link", { name: /Jonas Lind/ })).toBeDefined();
+  });
+
+  test("Escape held down does not stop a run; two presses do", async () => {
+    const server = newServer();
+    server.chat.startRun({
+      workspaceId: WS,
+      runId: "run_esc",
+      agentId: "agt_scout",
+      channelId: "ch_general",
+      initiatedBy: "usr_ana",
+    });
+    await open("/channel/ch_general", "usr_ana", server);
+    await screen.findByRole("region", { name: "Scout at work" });
+    const field = screen.getByRole("textbox", { name: "Write in #general" });
+    const press = (repeat: boolean) =>
+      act(async () => {
+        field.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, repeat }));
+      });
+    const cancels = () => server.calls.filter((call) => call.method === "cancelRun").length;
+    await press(false);
+    await press(true);
+    expect(cancels()).toBe(0);
+    await press(false);
+    await waitFor(() => expect(cancels()).toBe(1));
   });
 });

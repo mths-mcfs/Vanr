@@ -1296,7 +1296,12 @@ export class FakeServer {
     getDms: (params, session) => {
       const scope = this.scope(params, session);
       if ("status" in scope) return scope;
-      return reply(200, { dms: this.dms.get(scope.workspaceId) ?? [] });
+      // Only the caller's: a direct message whose channel is known lists for its members alone.
+      const mine = (this.dms.get(scope.workspaceId) ?? []).filter((dm) => {
+        const channel = this.state.channels.find((candidate) => candidate.id === dm.channelId);
+        return channel === undefined || channel.memberIds.includes(scope.user.id);
+      });
+      return reply(200, { dms: mine });
     },
     getInvitation: (params, session) => {
       const body = Bodies.invitation.safeParse(params);
