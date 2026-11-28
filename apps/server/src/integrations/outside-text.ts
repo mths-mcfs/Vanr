@@ -8,12 +8,13 @@ export const OUTSIDE_TEXT_MAX = 300;
 const REDACTED = "[redacted]";
 
 /**
- * The forms a secret travels in: as is, base64, base64url, percent-encoded (both hex cases) and form-encoded
- * (a space as `+`, as a query string re-serialized by `URLSearchParams` carries it).
+ * The forms a secret travels in: as is, base64, base64url, percent-encoded (both hex cases) and form-encoded, both
+ * as `encodeURIComponent` with `+` for a space and as `URLSearchParams` re-serializes it (which also escapes `!'()~`).
  */
 function forms(secret: string): string[] {
   const encoded = encodeURIComponent(secret);
   const form = encoded.replace(/%20/g, "+");
+  const serialized = new URLSearchParams([["k", secret]]).toString().slice("k=".length);
   const lower = (text: string) => text.replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase());
   return [
     secret,
@@ -24,6 +25,8 @@ function forms(secret: string): string[] {
     lower(encoded),
     form,
     lower(form),
+    serialized,
+    lower(serialized),
   ];
 }
 

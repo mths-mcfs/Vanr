@@ -77,6 +77,13 @@ describe("outside text", () => {
     expect(outsideText(`bad key ${form} and ${form.toLowerCase()}`, [secret])).toBe(
       "bad key [redacted] and [redacted]",
     );
+    // URLSearchParams also escapes what encodeURIComponent leaves as is.
+    const marks = "key!(it's)~123";
+    const escaped = new URLSearchParams({ key: marks }).toString().slice("key=".length);
+    expect(escaped).toBe("key%21%28it%27s%29%7E123");
+    expect(outsideText(`bad key ${escaped} and ${escaped.toLowerCase()}`, [marks])).toBe(
+      "bad key [redacted] and [redacted]",
+    );
   });
 
   test("the text keeps OUTSIDE_TEXT_MAX characters at most", () => {
