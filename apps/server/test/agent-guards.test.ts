@@ -48,6 +48,20 @@ type Team = Awaited<ReturnType<typeof team>>;
 
 const archive = (t: Team) =>
   server.deps.db.update(schema.agents).set({ archivedAt: new Date() }).where(eq(schema.agents.id, t.lia.id));
+/** Archives Lia right as the next transaction opens: after the route's first read, before its locked write. */
+function archiveAtNextTransaction(t: Team) {
+  const { db } = server.deps;
+  const transaction = db.transaction.bind(db);
+  db.transaction = (async (fn: Parameters<typeof transaction>[0]) => {
+    db.transaction = transaction;
+    await archive(t);
+    return transaction(fn);
+  }) as typeof db.transaction;
+  return () => {
+    db.transaction = transaction;
+  };
+}
+
 const code = (res: { status: number; body: { error?: { code?: string } } | null }) => [
   res.status,
   res.body?.error?.code,
@@ -201,6 +215,54 @@ describe("the router's agent writes", () => {
       expect(
         code(await call(t.ana, "PUT", `${t.w}/agents/${t.lia.id}/environment/target`, { runnerId: "x" })),
       ).toEqual([409, "agent.archived"]);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("the writes an archived agent still takes", () => {
+  test(
+    "each one works and does what it says",
+    async () => {
+      const t = await team();
+      const runner = await lentRunner(t, t.ana);
+      const base = `${t.w}/agents/${t.lia.id}`;
+      const pending = await intervention(t, runner, { targetUserId: t.ana.user.id });
+      await server.deps.db.insert(schema.runnerSecrets).values({
+        workspaceId: t.workspaceId,
+        agentId: t.lia.id,
+        runnerId: runner,
+        name: "API_TOKEN",
+        target: "env",
+      });
+      await server.deps.db.insert(schema.connections).values({
+        id: newId("conn"),
+        workspaceId: t.workspaceId,
+        connector: "linear",
+        label: "Lia's Linear",
+        authKind: "none",
+        agentId: t.lia.id,
+      });
+      await archive(t);
+      expect((await call(t.ana, "DELETE", base)).status).toBe(204);
+      expect((await call(t.ana, "POST", `${base}/identity/revoke`)).body).toEqual({ revoked: 1 });
+      expect((await call(t.ana, "POST", `${base}/browser/stop`, {})).status).toBe(204);
+      expect(await interventionStatus(pending)).toBe("canceled");
+      expect((await call(t.ana, "DELETE", `${base}/secrets/API_TOKEN?runnerId=${runner}`)).status).toBe(204);
+      const secrets = await server.deps.db
+        .select()
+        .from(schema.runnerSecrets)
+        .where(eq(schema.runnerSecrets.agentId, t.lia.id));
+      expect(secrets).toEqual([]);
+      expect((await call(t.ana, "POST", `${base}/environment/stop`)).body.status).toBe("stopped");
+      expect(
+        (await call(t.ana, "PUT", `${base}/environment/target`, { runnerId: runner })).body.error.code,
+      ).toBe("agent.archived");
+      expect((await call(t.ana, "PUT", `${base}/environment/target`, { runnerId: null })).status).toBe(200);
+      expect((await call(t.ana, "DELETE", `${base}/environment`)).status).toBe(204);
+      const [agent] = await server.deps.db.select().from(schema.agents).where(eq(schema.agents.id, t.lia.id));
+      expect([agent?.environmentId, agent?.archivedAt !== null]).toEqual([null, true]);
+      online.delete(runner);
     },
     SERVER_TEST_MS,
   );
@@ -377,6 +439,68 @@ describe("an archived agent, reached by reference", () => {
   );
 });
 
+describe("an archive that lands after the first read", () => {
+  test(
+    "a secret delivery checks it again under the lock: nothing goes out",
+    async () => {
+      const t = await team();
+      const runner = await lentRunner(t, t.ana);
+      const id = newId("sr");
+      await server.deps.db.insert(schema.secretPrompts).values({
+        id,
+        workspaceId: t.workspaceId,
+        agentId: t.lia.id,
+        runnerId: runner,
+        name: "API_TOKEN",
+        target: "env",
+        targetUserId: t.beto.user.id,
+        publicKey: "pk",
+        expiresAt: new Date(Date.now() + 30 * 60_000),
+      });
+      const restore = archiveAtNextTransaction(t);
+      try {
+        const box = { v: 1, epk: "e", iv: "i", ct: "c" };
+        expect(code(await call(t.beto, "POST", `${t.w}/secret-requests/${id}/deliver`, { box }))).toEqual([
+          409,
+          "agent.archived",
+        ]);
+      } finally {
+        restore();
+        online.delete(runner);
+      }
+      const [row] = await server.deps.db
+        .select()
+        .from(schema.secretPrompts)
+        .where(eq(schema.secretPrompts.id, id));
+      expect(row?.status).toBe("pending");
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a takeover checks it again under the lock: no intervention opens",
+    async () => {
+      const t = await team();
+      const runner = await lentRunner(t, t.ana);
+      const restore = archiveAtNextTransaction(t);
+      try {
+        expect(
+          code(await call(t.ana, "POST", `${t.w}/agents/${t.lia.id}/browser/interventions/start`, {})),
+        ).toEqual([409, "agent.archived"]);
+      } finally {
+        restore();
+        online.delete(runner);
+      }
+      const open = await server.deps.db
+        .select()
+        .from(schema.browserInterventions)
+        .where(eq(schema.browserInterventions.agentId, t.lia.id));
+      expect(open).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
 // ---- B: a runner acts for a person only if they may use it ----
 
 describe("a runner someone else paired", () => {
@@ -419,6 +543,32 @@ describe("a runner someone else paired", () => {
         davi.close();
         ana.close();
         online.delete(runner);
+      }
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "B2: a live view already streaming from the agent's previous runner isn't handed to who may use the new one",
+    async () => {
+      const t = await team();
+      const anaBox = await lentRunner(t, t.ana);
+      const ana = await TestSocket.open(t.ana.browser, t.workspaceId);
+      const carla = await TestSocket.open(t.carla.browser, t.workspaceId);
+      try {
+        ana.send({ type: "live_view.subscribe", agentId: t.lia.id });
+        await ana.event("live_view.status");
+        // Lia moves to Carla's runner while Ana's stream of the old one is still up.
+        const carlaBox = await lentRunner(t, t.carla);
+        carla.send({ type: "live_view.subscribe", agentId: t.lia.id });
+        expect((await carla.event("live_view.unavailable")).event).toMatchObject({
+          reason: "no_environment",
+        });
+        online.delete(carlaBox);
+      } finally {
+        ana.close();
+        carla.close();
+        online.delete(anaBox);
       }
     },
     SERVER_TEST_MS,
@@ -501,10 +651,10 @@ describe("a memory review's origin", () => {
         baseSha256: null,
       });
       const listed = async (who: Person) => {
-        const res = await t.beto.browser.fetch(`${t.w}/memory-reviews?agentId=${t.lia.id}`);
+        const res = await who.browser.fetch(`${t.w}/memory-reviews?agentId=${t.lia.id}`);
         expect(res.headers.get("cache-control")).toBe("no-store");
-        const own = await call(who, "GET", `${t.w}/memory-reviews?agentId=${t.lia.id}`);
-        return own.body.reviews.map((r: { origin: { channel: string | null } }) => r.origin.channel);
+        const body = (await res.json()) as { reviews: { origin: { channel: string | null } }[] };
+        return body.reviews.map((r) => r.origin.channel);
       };
       expect(await listed(t.ana)).toEqual([`#payroll${seq}`]);
       expect(await listed(t.beto)).toEqual([null]);
@@ -641,6 +791,55 @@ describe("spend outside the usage page", () => {
       } finally {
         hub.toUser = toUser;
         ledger.spent = spent;
+      }
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("a budget notice whose recipients can't be read", () => {
+  test(
+    "isn't claimed: the next check still sends it, for the agent and for the channel",
+    async () => {
+      const t = await team();
+      const runtime = server.runtime;
+      const seesUsage = runtime["seesUsage"].bind(runtime);
+      const sent: string[] = [];
+      const { hub } = server.deps;
+      const toUser = hub.toUser.bind(hub);
+      hub.toUser = (workspaceId, userId, event) => {
+        sent.push((event as { type: string }).type);
+        return toUser(workspaceId, userId, event);
+      };
+      const failOnce = () => {
+        runtime["seesUsage"] = async () => {
+          runtime["seesUsage"] = seesUsage;
+          throw new Error("members read failed");
+        };
+      };
+      try {
+        const [agent] = await server.deps.db
+          .select()
+          .from(schema.agents)
+          .where(eq(schema.agents.id, t.lia.id));
+        failOnce();
+        await expect(runtime["notifyBudget"](agent as never, "exhausted", 12, 10)).rejects.toThrow(
+          "members read failed",
+        );
+        await runtime["notifyBudget"](agent as never, "exhausted", 12, 10);
+        expect(sent).toEqual(["budget.cap_reached"]);
+        const channel = await seedChannel(server, t.workspaceId, { name: `fin${seq}`, members: [t.ana] });
+        await server.deps.db
+          .update(schema.channels)
+          .set({ budgetPerMonthUsd: 10 })
+          .where(eq(schema.channels.id, channel));
+        failOnce();
+        await expect(runtime["channelBudgetCheck"](channel, null, true) as Promise<void>).rejects.toThrow();
+        await runtime["channelBudgetCheck"](channel, null, true);
+        expect(sent.filter((s) => s === "channel.budget").length).toBeGreaterThan(0);
+      } finally {
+        runtime["seesUsage"] = seesUsage;
+        hub.toUser = toUser;
       }
     },
     SERVER_TEST_MS,

@@ -115,6 +115,9 @@ export async function liveViewSubscribe(deps: AppDeps, ws: BrowserSocket, agentI
   if (!runner.browser || !runner.access.tools.browser)
     return send(ws, { type: "live_view.unavailable", agentId, reason: "unavailable" });
   let s = streams.get(agentId);
+  // The checks above awaited: a stream opened meanwhile on another runner (the agent moved) isn't the one allowed.
+  if (s && s.runnerId !== runner.id)
+    return send(ws, { type: "live_view.unavailable", agentId, reason: "no_environment" });
   if (!s) {
     s = {
       runnerId: runner.id,

@@ -174,6 +174,8 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
     const won = await deps.db.transaction(async (tx) => {
       const [runner] = await tx.select().from(runners).where(eq(runners.id, row.runnerId)).for("share");
       const [current] = await tx.select().from(agents).where(eq(agents.id, agent.id)).for("share");
+      // An archive that landed after the first read wins: the secret doesn't go out.
+      if (current) requireActiveAgent(current);
       if (
         !runner ||
         runner.removedAt ||
@@ -679,6 +681,8 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
       if (!session) throw closed();
       const [currentRunner] = await tx.select().from(runners).where(eq(runners.id, runner.id)).for("share");
       const [current] = await tx.select().from(agents).where(eq(agents.id, agent.id)).for("share");
+      // An archive that landed after the first read wins: no takeover opens.
+      if (current) requireActiveAgent(current);
       if (
         !currentRunner ||
         currentRunner.revokedAt ||
