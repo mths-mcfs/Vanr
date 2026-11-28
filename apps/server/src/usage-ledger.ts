@@ -97,29 +97,22 @@ export async function workspaceSpent(tx: Tx | Db, scope: BudgetScope, at: Date):
   const from = periodStart(scope, at) ?? new Date(0);
   const to =
     scope.period === "month" ? new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth() + 1, 1)) : null;
+  // One statement, so one snapshot: a run whose rows a settle commits meanwhile counts by its rows or by its cost,
+  // never by neither. The names are written out: inside the subqueries a bare column would bind to the wrong table.
+  const end = to ?? new Date("9999-12-31T00:00:00Z");
   const [row] = await tx
-    .select({ cost: sql<number | string | null>`sum(${lines.costMicros})` })
-    .from(lines)
-    .where(
-      and(
-        eq(lines.workspaceId, scope.id),
-        gte(lines.at, from),
-        to ? lt(lines.at, to) : undefined,
-        sql`not (${lines.source} = 'embedding' or (${lines.source} = 'search' and ${lines.userId} is null))`,
-      ),
-    );
-  const [legacy] = await tx
-    .select({ cost: sql<number | string | null>`sum(${runs.costUsd})` })
-    .from(runs)
-    .where(
-      and(
-        eq(runs.workspaceId, scope.id),
-        gte(runs.createdAt, from),
-        to ? lt(runs.createdAt, to) : undefined,
-        sql`not exists (select 1 from ${lines} where ${lines.runId} = ${runs.id})`,
-      ),
-    );
-  return Number(row?.cost ?? 0) + toMicros(Number(legacy?.cost ?? 0));
+    .select({
+      lines: sql<number | string | null>`(
+        select sum(l.cost_micros) from usage_lines l
+        where l.workspace_id = ${scope.id} and l.at >= ${from} and l.at < ${end}
+          and not (l.source = 'embedding' or (l.source = 'search' and l.user_id is null)))`,
+      runs: sql<number | string | null>`(
+        select sum(r.cost_usd) from runs r
+        where r.workspace_id = ${scope.id} and r.created_at >= ${from} and r.created_at < ${end}
+          and not exists (select 1 from usage_lines l where l.run_id = r.id))`,
+    })
+    .from(sql`(select 1) as one`);
+  return Number(row?.lines ?? 0) + toMicros(Number(row?.runs ?? 0));
 }
 
 /** Counter of the scope in the period, locked until the end of the transaction; born with the legacy spending. */
