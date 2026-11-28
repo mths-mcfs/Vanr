@@ -81,6 +81,7 @@ export const SERVER_ERROR_CODES = [
   "cell_too_long",
   "channel.general",
   "channel.name_taken",
+  "channel.not_archived",
   "connector.auth",
   "connector.invalid_key",
   "connector.key_unsupported",
@@ -321,4 +322,5 @@ export const SERVER_ERROR_CODES = [
   "wiki.stale_draft",
   "wiki.title_chars",
   "wiki.too_large",
+  "workspace.budget",
 ] as const;

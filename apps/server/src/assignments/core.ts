@@ -92,7 +92,11 @@ export async function roleOf(
 }
 
 export const canActRole = (role: AssignmentRole | null) => role === "owner" || role === "decide";
-export const managesAssignment = (me: WorkspaceMember, row: AssignmentRow) =>
+/**
+ * Who manages the assignment: its owner, or whoever has the workspace's `configure`. Only they let people in, so the
+ * join requests are theirs to list, answer and count as waiting.
+ */
+export const managesAssignment = (me: Pick<WorkspaceMember, "userId" | "role">, row: AssignmentRow) =>
   row.ownerId === me.userId || can(me.role, "configure");
 
 /** The assignment as the person may see it; 404 for whoever neither reads the channel nor takes part. */
@@ -168,7 +172,8 @@ const executorsOf = (m: {
   access: { tools: { claude: boolean; codex: boolean } };
 }) => m.executors.filter((e) => (e === "claude_code" ? m.access.tools.claude : m.access.tools.codex));
 
-async function pendingCounts(db: Db, assignmentId: string) {
+/** What waits in the assignment. The join requests count only for whoever may let people in (`admits`). */
+async function pendingCounts(db: Db, assignmentId: string, admits: boolean) {
   const n = async (q: Promise<{ n: number }[]>) => (await q)[0]?.n ?? 0;
   return {
     decisions: await n(
@@ -217,17 +222,19 @@ async function pendingCounts(db: Db, assignmentId: string) {
           ),
         ),
     ),
-    joinRequests: await n(
-      db
-        .select({ n: count() })
-        .from(assignmentJoinRequests)
-        .where(
-          and(
-            eq(assignmentJoinRequests.assignmentId, assignmentId),
-            eq(assignmentJoinRequests.status, "pending"),
-          ),
+    joinRequests: !admits
+      ? 0
+      : await n(
+          db
+            .select({ n: count() })
+            .from(assignmentJoinRequests)
+            .where(
+              and(
+                eq(assignmentJoinRequests.assignmentId, assignmentId),
+                eq(assignmentJoinRequests.status, "pending"),
+              ),
+            ),
         ),
-    ),
   };
 }
 
@@ -248,7 +255,8 @@ export async function toAssignment(
   const runner = await runnerOfAssignment(db, row);
   const items = await planOf(deps, row.id);
   const live = items.filter((i) => i.status !== "dropped");
-  const pending = await pendingCounts(db, row.id);
+  const manages = managesAssignment(me, row);
+  const pending = await pendingCounts(db, row.id, manages);
   const now = deps.now();
   const lastActivity = await lastActivityOf(deps, row);
   const person = {
@@ -305,7 +313,7 @@ export async function toAssignment(
     ownerId: row.ownerId,
     role,
     actionable: canActRole(role),
-    manageable: row.ownerId === me.userId,
+    manageable: manages,
     needsEnvironment: row.executor !== "agent" && !runner,
     commandPolicy: row.commandPolicy,
     resumeJobs: row.resumeJobs,
@@ -340,16 +348,6 @@ export async function toAssignment(
     pausedAt: row.pausedAt?.toISOString() ?? null,
     closedAt: row.closedAt?.toISOString() ?? null,
   };
-}
-
-/** With the workspace's manager permission (configure), `manageable` also holds for whoever isn't the owner. */
-export async function assignmentFor(
-  deps: AppDeps,
-  row: AssignmentRow,
-  me: WorkspaceMember,
-): Promise<Assignment> {
-  const m = await toAssignment(deps, row, me);
-  return { ...m, manageable: managesAssignment(me, row) };
 }
 
 export type AssignmentChange =
@@ -597,17 +595,17 @@ export async function agentSays(
 }
 
 /** Open assignments in which the person decides and something waits on them. */
-export async function waitingFor(db: Db, me: { workspaceId: string; userId: string }, row: AssignmentRow) {
+export async function waitingFor(
+  db: Db,
+  me: Pick<WorkspaceMember, "workspaceId" | "userId" | "role">,
+  row: AssignmentRow,
+) {
   if (isClosed(row)) return false;
   if (!canActRole(await roleOf(db, me, row))) return false;
   // Stopped at the cap: only the owner raises the cap.
   if (row.status === "paused" && row.ceiling && row.ownerId === me.userId) return true;
-  const p = await pendingCounts(db, row.id);
-  if (
-    p.decisions + p.reviews + p.commands + p.submissions + (row.ownerId === me.userId ? p.joinRequests : 0) >
-    0
-  )
-    return true;
+  const p = await pendingCounts(db, row.id, managesAssignment(me, row));
+  if (p.decisions + p.reviews + p.commands + p.submissions + p.joinRequests > 0) return true;
   // A stuck item (or one waiting on someone) waits on whoever can have it tried again.
   const items = await planOf({ db }, row.id);
   return items.some((i) => i.status === "blocked_on_you" || itemStuck(i) !== null);

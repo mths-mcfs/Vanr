@@ -176,6 +176,45 @@ describe("workspaces", () => {
     expect((await call(browser, "GET", `${ws(id)}/members`)).body.members[0]?.avatarUrl).toBeNull();
   });
 
+  test("avatar and logo: no-cache with an ETag, a 304 while unchanged, and nothing for whoever lost access", async () => {
+    const { browser } = await signedIn(server, "Ines", "ines@space.test");
+    const { workspace } = await create(browser, { name: "Cached" });
+    const id = workspace.id;
+    const { logo } = (
+      await call(browser, "PUT", `${ws(id)}/logo`, { imageBase64: PNG, contentType: "image/png" })
+    ).body;
+    const { avatarUrl } = (
+      await call(browser, "PUT", `${ws(id)}/me/avatar`, { imageBase64: PNG, contentType: "image/png" })
+    ).body;
+    for (const url of [logo, avatarUrl]) {
+      const first = await browser.fetch(url);
+      expect(first.status).toBe(200);
+      expect(first.headers.get("cache-control")).toBe("private, no-cache");
+      const etag = first.headers.get("etag") ?? "";
+      expect(etag).toMatch(/^"[\w-]+"$/);
+      const again = await browser.fetch(url, { headers: { "if-none-match": etag } });
+      expect(again.status).toBe(304);
+      expect(again.headers.get("etag")).toBe(etag);
+      expect(again.headers.get("cache-control")).toBe("private, no-cache");
+      expect(await again.text()).toBe("");
+      // A list of validators, and a weak one, match too; another ETag gets the image.
+      expect((await browser.fetch(url, { headers: { "if-none-match": `"x", W/${etag}` } })).status).toBe(304);
+      expect((await browser.fetch(url, { headers: { "if-none-match": '"other"' } })).status).toBe(200);
+      // Revalidating isn't a way in: whoever isn't a member gets a 404, ETag or not.
+      const outsider = await signedIn(server, "Peek", `peek${url.length}@space.test`);
+      expect((await outsider.browser.fetch(url, { headers: { "if-none-match": etag } })).status).toBe(404);
+    }
+    // A new image: the old ETag no longer matches, so the browser gets the new one at once.
+    const before = (await browser.fetch(avatarUrl)).headers.get("etag") ?? "";
+    const other = Buffer.concat([Buffer.from(PNG, "base64"), Buffer.from([0])]).toString("base64");
+    const next = (
+      await call(browser, "PUT", `${ws(id)}/me/avatar`, { imageBase64: other, contentType: "image/png" })
+    ).body.avatarUrl;
+    const changed = await browser.fetch(next, { headers: { "if-none-match": before } });
+    expect(changed.status).toBe(200);
+    expect(changed.headers.get("etag") === before).toBe(false);
+  });
+
   test("updateMe changes name, handle and time zone; a repeated handle gives handle.taken", async () => {
     const { browser, user } = await signedIn(server, "Gabi", "gabi@space.test");
     const { workspace } = await create(browser, { name: "Profiles" });

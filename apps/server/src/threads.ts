@@ -57,9 +57,9 @@ export const actionNeededSql = (viewer: Viewer) => sql`(
       and (mi.owner_id = ${viewer.userId} or exists (
         select 1 from ${assignmentParticipants} mp
         where mp.assignment_id = mi.id and mp.user_id = ${viewer.userId} and mp.role = 'decide'))
-      and ((mi.owner_id = ${viewer.userId} and (
-          (mi.status = 'paused' and mi.ceiling is not null)
-          or exists (select 1 from ${assignmentJoinRequests} j where j.assignment_id = mi.id and j.status = 'pending')))
+      and ((mi.owner_id = ${viewer.userId} and mi.status = 'paused' and mi.ceiling is not null)
+        or ((mi.owner_id = ${viewer.userId} or ${sql.raw(can(viewer.role, "configure") ? "true" : "false")})
+          and exists (select 1 from ${assignmentJoinRequests} j where j.assignment_id = mi.id and j.status = 'pending'))
         or exists (select 1 from ${assignmentDecisions} d where d.assignment_id = mi.id and d.status = 'pending')
         or exists (select 1 from ${assignmentReviews} v where v.assignment_id = mi.id and v.status = 'pending')
         or exists (select 1 from ${assignmentCommands} c where c.assignment_id = mi.id and c.state = 'pending')

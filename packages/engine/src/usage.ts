@@ -66,9 +66,13 @@ export interface UsageLine extends Omit<ModelCall, "usage"> {
   priceVersion: string | null;
 }
 
-/** A cap scope. `month`: spend counts in the calendar month (UTC) of `at`. */
+/**
+ * A cap scope. `month`: spend counts in the calendar month (UTC) of `at`. The `workspace` scope (its id is the
+ * workspace's) counts everything the workspace spent, whatever scopes each call went through: it caps the calls
+ * that no agent pays (search answers, wiki checks, agent drafts) by the whole month's spend.
+ */
 export interface BudgetScope {
-  kind: "agent" | "channel" | "assignment" | "routine_run" | "debate";
+  kind: "agent" | "channel" | "assignment" | "routine_run" | "debate" | "workspace";
   id: string;
   limitUsd: number;
   period: "month" | "total";
@@ -303,13 +307,13 @@ export function memoryLedger(book: PriceBook): UsageLedger & { lines: UsageLine[
   const settled = new Set<string>();
   let seq = 0;
 
+  const counts = (scope: BudgetScope, l: (typeof lines)[number]) =>
+    scope.kind === "workspace"
+      ? l.workspaceId === scope.id
+      : l.scopes.some((s) => scopeKey(s) === scopeKey(scope));
   const spentIn = (scope: BudgetScope, at: Date) => {
     return lines
-      .filter(
-        (l) =>
-          l.scopes.some((s) => scopeKey(s) === scopeKey(scope)) &&
-          periodKey(scope, l.at) === periodKey(scope, at),
-      )
+      .filter((l) => counts(scope, l) && periodKey(scope, l.at) === periodKey(scope, at))
       .reduce((sum, l) => sum + l.costUsd, 0);
   };
   const reservedIn = (scope: BudgetScope, at: Date) => {

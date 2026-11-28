@@ -588,8 +588,9 @@ describe("a memory's origin", () => {
           }[]
         ).map((m) => m.origin?.channel);
       expect(await channels(t.ana)).toEqual([`#payroll${seq}`, `#payroll${seq}`]);
-      expect(await channels(t.beto)).toEqual([null, null]);
-      expect(await channels(t.carla)).toEqual([null, null]);
+      // The feedback's lesson stays in #payroll (it doesn't show at all outside it); the run's memory shows unnamed.
+      expect(await channels(t.beto)).toEqual([null]);
+      expect(await channels(t.carla)).toEqual([null]);
       // The answer depends on who asks: no shared cache keeps it.
       for (const path of [`${t.w}/agents/${t.lia.id}/memories`, `${t.w}/memories/workspace`])
         expect((await t.beto.browser.fetch(path)).headers.get("cache-control")).toBe("no-store");

@@ -87,6 +87,22 @@ async function legacySpent(tx: Tx, scope: BudgetScope, at: Date): Promise<number
   return Number(row?.cost ?? 0);
 }
 
+/**
+ * What the workspace scope counts: every ledger row of the workspace in the month, whatever scopes its call went
+ * through (an agent's run reserves only its own). Its counter row is only the lock that makes the reservations of
+ * the scope go one at a time.
+ */
+async function workspaceSpent(tx: Tx | Db, scope: BudgetScope, at: Date): Promise<number> {
+  const from = periodStart(scope, at) ?? new Date(0);
+  const to =
+    scope.period === "month" ? new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth() + 1, 1)) : null;
+  const [row] = await tx
+    .select({ cost: sql<number | string | null>`sum(${lines.costMicros})` })
+    .from(lines)
+    .where(and(eq(lines.workspaceId, scope.id), gte(lines.at, from), to ? lt(lines.at, to) : undefined));
+  return Number(row?.cost ?? 0);
+}
+
 /** Counter of the scope in the period, locked until the end of the transaction; born with the legacy spending. */
 async function lockCounter(tx: Tx, workspaceId: string, scope: BudgetScope, at: Date): Promise<number> {
   const key = { scope: scopeKey(scope), period: periodKey(scope, at) };
@@ -186,7 +202,8 @@ export function postgresLedger(db: Db, book: PriceBook): UsageLedger {
       const estimate = Math.ceil(estimateUsd * 1_000_000);
       return db.transaction(async (tx) => {
         for (const scope of byKey(scopes)) {
-          const spent = await lockCounter(tx, workspaceId, scope, at);
+          const counted = await lockCounter(tx, workspaceId, scope, at);
+          const spent = scope.kind === "workspace" ? await workspaceSpent(tx, scope, at) : counted;
           const [open] = await tx
             .select({ sum: sql<number | string | null>`sum(${usageReservations.estimateMicros})` })
             .from(usageReservationScopes)
@@ -276,6 +293,7 @@ export function postgresLedger(db: Db, book: PriceBook): UsageLedger {
     },
 
     async spent(scope, at) {
+      if (scope.kind === "workspace") return (await workspaceSpent(db, scope, at)) / 1_000_000;
       const [row] = await db
         .select({ spent: budgetCounters.spentMicros })
         .from(budgetCounters)

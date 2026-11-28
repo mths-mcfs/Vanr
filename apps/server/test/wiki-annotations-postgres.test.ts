@@ -227,7 +227,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("wiki annotations on Postgres"), 
           checkWorkspace(pg.deps, workspaceId, { gapMs: CHECK_NOW_GAP_MS, model: async () => provider }),
         ),
       );
-      expect(runs.filter(Boolean)).toHaveLength(1);
+      expect(runs.filter((r) => r !== "busy")).toHaveLength(1);
     } finally {
       await pg.stop();
     }

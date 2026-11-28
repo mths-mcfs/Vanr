@@ -14,6 +14,8 @@ import {
   seesSpend,
   usageSince,
   workspaceBudgetDefaults,
+  workspaceCallsSince,
+  workspaceMonthBudget,
 } from "../agents";
 import { type AppEnv, type Ctx, requireUser } from "../context";
 import { approvalsWaitingFor } from "../control";
@@ -138,10 +140,13 @@ export function registerWorkspaces(app: Hono<AppEnv>) {
       .select()
       .from(agents)
       .where(and(eq(agents.workspaceId, workspaceId), isNull(agents.archivedAt)));
-    const { defaultBudget } = await workspaceBudgetDefaults(db, workspaceId);
-    const usage = await usageSince(db, workspaceId, monthStart(now()));
-    const budget = active.reduce((total, a) => total + budgetOf(a, defaultBudget), 0);
-    const spent = [...usage.values()].reduce((total, u) => total + u.costUsd, 0);
+    const since = monthStart(now());
+    const usage = await usageSince(db, workspaceId, since);
+    // The same budget the calls with no agent reserve against (`workspaceBudgetScope`), and their spend with it.
+    const budget = await workspaceMonthBudget(db, workspaceId);
+    const spent =
+      [...usage.values()].reduce((total, u) => total + u.costUsd, 0) +
+      (await workspaceCallsSince(db, workspaceId, since)).reduce((total, k) => total + k.costUsd, 0);
     const overview: WorkspaceOverview = {
       myApprovalQueue: (await approvalsWaitingFor(db, me)).length,
       // Spend follows view_usage, as GET /usage: whoever doesn't have it gets null.
@@ -180,7 +185,8 @@ export function registerWorkspaces(app: Hono<AppEnv>) {
     const me = requireMember(c);
     const target = param(c, "memberId");
     if (target !== me.userId && !can(me.role, "manage_members")) throw forbidden();
-    await removeMember(c.get("deps").db, { workspaceId: me.workspaceId, actorId: me.userId, target });
+    const { db, now } = c.get("deps");
+    await removeMember(db, { workspaceId: me.workspaceId, actorId: me.userId, target, at: now() });
     // Whoever left the workspace loses their open connections to it.
     c.get("deps").hub.dropUser(me.workspaceId, target);
     return c.body(null, 204);
@@ -273,7 +279,7 @@ export function registerWorkspaces(app: Hono<AppEnv>) {
       .where(and(eq(members.workspaceId, me.workspaceId), eq(members.userId, param(c, "personId"))));
     const blob = row?.key ? await blobs.get(row.key) : null;
     if (!blob) throw notFound("No avatar");
-    return imageResponse(blob);
+    return imageResponse(blob, c.req.header("if-none-match"));
   });
 
   app.put(`${WORKSPACE}/logo`, async (c) => {
@@ -301,7 +307,7 @@ export function registerWorkspaces(app: Hono<AppEnv>) {
     const workspace = await loadWorkspace(c);
     const blob = workspace.logoKey ? await c.get("deps").blobs.get(workspace.logoKey) : null;
     if (!blob) throw notFound("No logo");
-    return imageResponse(blob);
+    return imageResponse(blob, c.req.header("if-none-match"));
   });
 
   app.get(`${WORKSPACE}/usage/report`, async (c) => {
@@ -321,13 +327,14 @@ export function registerWorkspaces(app: Hono<AppEnv>) {
       .from(agents)
       .where(and(eq(agents.workspaceId, workspaceId), isNull(agents.archivedAt)))
       .orderBy(agents.name);
-    const total = [...usage.values()].reduce((sum, u) => sum + u.costUsd, 0);
+    const runsUsd = [...usage.values()].reduce((sum, u) => sum + u.costUsd, 0);
     const calls = [...usage.values()].reduce((sum, u) => sum + u.calls, 0);
+    // The agents' runs, then what the workspace paid with no agent (search, wiki checks, agent drafts) by source.
+    const unowned = await workspaceCallsSince(db, workspaceId, from);
     const report: UsageReport = {
-      spendUsd: total,
+      spendUsd: runsUsd + unowned.reduce((sum, k) => sum + k.costUsd, 0),
       since: from.toISOString(),
-      // For now there is only one kind of spend: the runs' model calls.
-      perKind: calls > 0 ? [{ kind: "model", calls, costUsd: total }] : [],
+      perKind: [...(calls > 0 ? [{ kind: "model", calls, costUsd: runsUsd }] : []), ...unowned],
       agents: rows.map((a) => {
         const costUsd = usage.get(a.id)?.costUsd ?? 0;
         const budgetPerMonthUsd = budgetOf(a, defaultBudget);

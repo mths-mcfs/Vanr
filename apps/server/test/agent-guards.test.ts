@@ -153,6 +153,7 @@ const AGENT_FAMILIES = new Set([
 const OTHER_FAMILIES: Record<string, string> = {
   "": "the workspace's own settings",
   "approval-rules": "revokes a rule, which only takes away",
+  "archived-channels": "the owner brings back a channel; its agents' posts are checked as in any channel",
   bases: "people's bases",
   calendar: "people's calendars",
   channels: "channels and posts; a post reaches only active agents (routing skips an archived one)",

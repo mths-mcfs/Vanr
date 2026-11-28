@@ -136,6 +136,19 @@ const pendingPeople = (row: DebateRow) =>
     ? row.pendingSpeakers.filter((s) => s.type === "person").map((s) => s.id)
     : [];
 
+/**
+ * The stall as it goes out. While anonymous, an agent's turn names only its pseudonym: its id beside the posts
+ * that did come in would tell whose pseudonym it is. The lead (public on the table) keeps its id, without one.
+ */
+function stallOf(row: DebateRow): Debate["stallInfo"] {
+  const stall = row.stallInfo;
+  if (!stall) return null;
+  const { agentId, round, reason } = stall;
+  if (!isAnonymous(row)) return { agentId, pseudonym: row.pseudonyms[agentId] ?? null, round, reason };
+  if (agentId === leadOf(row)) return { agentId, pseudonym: null, round, reason };
+  return { agentId: null, pseudonym: row.pseudonyms[agentId] ?? null, round, reason };
+}
+
 export function toDebate(row: DebateRow): Debate {
   const origin = originOf(row);
   const waiting = pendingPeople(row);
@@ -163,7 +176,7 @@ export function toDebate(row: DebateRow): Debate {
         : row.status === "open" && row.phase === "concluding"
           ? [leadOf(row)].filter((x): x is string => !!x)
           : [],
-    stallInfo: row.stallInfo ?? null,
+    stallInfo: stallOf(row),
     awaitedUserId: waiting[0] ?? null,
     waitingUserIds: waiting,
     channelId: row.channelId,
@@ -1050,7 +1063,10 @@ async function agentTurn(deps: AppDeps, row: DebateRow, agentId: string): Promis
   }
   if (!result.ok && result.code !== "budget") {
     // The round changed while the agent thought (canceled, removed, concluded): the failure no longer counts.
-    const reason = result.error.slice(0, 300);
+    // The error may name the agent ("Lia thinks with the personal plan..."): the stall shows it by its pseudonym.
+    const named = agent.name.trim() ? agent.name : null;
+    const label = `Participant ${row.pseudonyms[agent.id] ?? "?"}`;
+    const reason = (named ? result.error.replaceAll(named, label) : result.error).slice(0, 300);
     await changeDebate(deps, row.id, (fresh) =>
       inQueue(fresh, row.round, who)
         ? { status: "stalled", phase: null, stallInfo: { agentId: agent.id, round: row.round, reason } }

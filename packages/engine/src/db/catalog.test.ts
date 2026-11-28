@@ -8,6 +8,7 @@ import postgres from "postgres";
 import { type Catalog, type CatalogQuery, readCatalog } from "./catalog";
 import expected from "./fixtures/catalog.json";
 import basesRelations from "./fixtures/catalog-bases-relations.json";
+import confinedLessons from "./fixtures/catalog-confined-lessons-and-free-channel-names.json";
 import identityFirstAttempt from "./fixtures/catalog-identity-first-attempt.json";
 import messageEffects from "./fixtures/catalog-message-effects.json";
 import wikiAnnotations from "./fixtures/catalog-wiki-annotations.json";
@@ -15,11 +16,17 @@ import { MIGRATIONS_DIR, openDb } from "./index";
 
 // The fixture is the catalog of the database the product ran on before the port, with every name
 // translated to the Vanr vocabulary. The initial migration alone has to rebuild it exactly; each later
-// migration adds what its own fixture lists (and changes nothing else), so the whole chain builds the
-// historical catalog plus those additions.
+// migration adds what its own fixture lists, or redefines an object of the same table and name (an index whose
+// condition changed), and changes nothing else, so the whole chain builds the historical catalog plus those.
 const fixture: Catalog = expected;
 /** What each migration after the initial one adds, in the order of the journal. */
-const additions: Partial<Catalog>[] = [basesRelations, wikiAnnotations, identityFirstAttempt, messageEffects];
+const additions: Partial<Catalog>[] = [
+  basesRelations,
+  wikiAnnotations,
+  identityFirstAttempt,
+  messageEffects,
+  confinedLessons,
+];
 
 const sections = [
   "extensions",
@@ -33,6 +40,9 @@ const sections = [
 ] as const;
 
 const key = (x: unknown) => JSON.stringify(x);
+const named = (x: unknown) => x as { table?: string; name?: string };
+const sameObject = (a: unknown, b: unknown) =>
+  named(a).name !== undefined && named(a).table === named(b).table && named(a).name === named(b).name;
 const sorted = <T>(xs: readonly T[]) =>
   [...xs].sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
 
@@ -43,7 +53,10 @@ const sorted = <T>(xs: readonly T[]) =>
 async function expectFixture(query: CatalogQuery, added: readonly Partial<Catalog>[] = []) {
   const actual = await readCatalog(query);
   for (const section of sections) {
-    const want: unknown[] = [...fixture[section], ...added.flatMap((a): unknown[] => a[section] ?? [])];
+    let want: unknown[] = [...fixture[section]];
+    // A later entry with the same table and name replaces the earlier one (the migration redefined it).
+    for (const item of added.flatMap((a): unknown[] => a[section] ?? []))
+      want = [...want.filter((w) => !sameObject(w, item)), item];
     const got: unknown[] = actual[section];
     expect({ [section]: added.length ? sorted(got) : got }).toEqual({
       [section]: added.length ? sorted(want) : want,
