@@ -79,6 +79,23 @@ describe("where a new assignment can live", () => {
     expect(sent.status).toBe(404);
   });
 
+  test("the agent is checked first, as on the server: another workspace's in a direct message is no agent", async () => {
+    const server = newServer();
+    server.state.channels.push(room("ch_dm_iris", "dm", "private", ["usr_jonas", "usr_iris"]));
+    server.dms.set(WS, [
+      { channelId: "ch_dm_iris", unread: 0, with: { id: "usr_iris", name: "Íris Valença", type: "person" } },
+    ]);
+    const other = server.agents.find((agent) => agent.workspaceId !== WS);
+    if (other === undefined) throw new Error("the seed has no agent in another workspace");
+    const sent = await call(server, "usr_jonas", "POST", "/assignments", {
+      goal: "Borrow an agent",
+      agentId: other.id,
+      channelId: "ch_dm_iris",
+    });
+    expect(sent.status).toBe(404);
+    expect(((await sent.json()) as { error: { message: string } }).error.message).toBe("Agent not found");
+  });
+
   test("the agent has to be in the channel", async () => {
     const server = newServer();
     server.state.channels.push(room("ch_ops", "ops", "public", ["usr_ana"]));
@@ -288,6 +305,40 @@ describe("the trail of an assignment", () => {
     await waitFor(() => expect(timeline()?.children.length).toBe(51));
     await app.user.click(panel.getByRole("button", { name: "Show older" }));
     await waitFor(() => expect(timeline()?.children.length).toBe(56));
+  });
+
+  test("sixty events arriving between two reads leave no gap: the older ones load in order", async () => {
+    const server = newServer();
+    paperOf(server).events = Array.from({ length: 55 }, (_, at) => event(1 + at));
+    const app = await renderApp({ path: PAGE("asg_paper"), signedInAs: "usr_ana", server });
+    const panel = within(await screen.findByRole("region", { name: "Assignment" }));
+    await app.user.click(panel.getByRole("tab", { name: /^Trail/ }));
+    const timeline = () =>
+      panel.getAllByRole("list").find((list) => list.classList.contains("work-timeline"));
+    await waitFor(() => expect(timeline()?.children.length).toBe(50));
+    // As after a reconnect: everything is read again, and 60 came in the meantime.
+    paperOf(server).events.push(...Array.from({ length: 60 }, (_, at) => event(56 + at)));
+    await act(async () => app.runtime.queryClient.invalidateQueries());
+    for (const shown of [50, 100, 115]) {
+      await waitFor(() => expect(timeline()?.children.length).toBe(shown));
+      if (shown < 115) await app.user.click(await panel.findByRole("button", { name: "Show older" }));
+    }
+    await waitFor(() => expect(panel.queryByRole("button", { name: "Show older" }) === null).toBe(true));
+  });
+
+  test("a short trail that grows past a page while open offers nothing older", async () => {
+    const server = newServer();
+    paperOf(server).events = Array.from({ length: 30 }, (_, at) => event(1 + at));
+    const app = await renderApp({ path: PAGE("asg_paper"), signedInAs: "usr_ana", server });
+    const panel = within(await screen.findByRole("region", { name: "Assignment" }));
+    await app.user.click(panel.getByRole("tab", { name: /^Trail/ }));
+    const timeline = () =>
+      panel.getAllByRole("list").find((list) => list.classList.contains("work-timeline"));
+    await waitFor(() => expect(timeline()?.children.length).toBe(30));
+    paperOf(server).events.push(...Array.from({ length: 25 }, (_, at) => event(31 + at)));
+    await act(async () => app.runtime.queryClient.invalidateQueries());
+    await waitFor(() => expect(timeline()?.children.length).toBe(55));
+    expect(panel.queryByRole("button", { name: "Show older" }) === null).toBe(true);
   });
 
   test("a long trail loads its older events on request, then offers no more", async () => {

@@ -3,13 +3,7 @@
 // that stalled or didn't pass the check, the trail (read up to its end once seen, older events on request),
 // what waits on the person as cards, the people on it and their requests, and the files the agent wrote.
 import { useApiMutation, useApiQuery } from "@vanr/client/react";
-import type {
-  Assignment,
-  AssignmentEvent,
-  AssignmentEventKind,
-  CommandPolicy,
-  ParticipantRole,
-} from "@vanr/contract";
+import type { Assignment, AssignmentEventKind, CommandPolicy, ParticipantRole } from "@vanr/contract";
 import { Button, Chip, Field, Input, Select, SelectItem, Switch } from "@vanr/ui";
 import { useEffect, useState } from "react";
 import { useLocale, useMessages } from "../../../i18n/react.tsx";
@@ -26,6 +20,7 @@ import { type Actors, useMyId, useOutcome, useSeesUsage } from "../issues/shared
 import { type Limit, readLimit } from "../limits.ts";
 import { PartError, PartLoading } from "../parts.tsx";
 import { assignmentKeys, useActorName } from "./shared.tsx";
+import { askOlder, EMPTY_TRAIL, type TrailState, withLatest, withOlder } from "./trail.ts";
 
 type Part = { workspaceId: string; assignment: Assignment };
 const TRAIL_PAGE = 50;
@@ -167,9 +162,8 @@ export function Trail({ workspaceId, assignment, actors }: Part & { actors: Acto
   const t = useMessages("work");
   const ago = useRelativeTime();
   const who = useActorName(actors);
-  const [before, setBefore] = useState<number | undefined>(undefined);
-  // Every event shown so far: a newer latest page that no longer reaches one keeps it on screen.
-  const [kept, setKept] = useState<AssignmentEvent[]>([]);
+  const [trail, setTrail] = useState<TrailState>(EMPTY_TRAIL);
+  const before = trail.before;
   const latest = useApiQuery("listAssignmentEvents", {
     workspaceId,
     assignmentId: assignment.id,
@@ -195,13 +189,15 @@ export function Trail({ workspaceId, assignment, actors }: Part & { actors: Acto
     if (lastSeq === undefined || seenSeq === undefined || lastSeq <= seenSeq) return;
     markSeen({ workspaceId, assignmentId: assignment.id, body: { seq: lastSeq } });
   }, [lastSeq, seenSeq, workspaceId, assignment.id, markSeen]);
+  const newest = latest.data?.events;
   useEffect(() => {
-    const got = [...(latest.data?.events ?? []), ...(before === undefined ? [] : (page.data?.events ?? []))];
-    setKept((current) => {
-      const fresh = got.filter((event) => !current.some((each) => each.seq === event.seq));
-      return fresh.length === 0 ? current : [...current, ...fresh];
-    });
-  }, [latest.data, page.data, before]);
+    if (newest !== undefined) setTrail((current) => withLatest(current, newest, TRAIL_PAGE));
+  }, [newest]);
+  const older = page.data?.events;
+  useEffect(() => {
+    if (older !== undefined && before !== undefined)
+      setTrail((current) => withOlder(current, older, before, TRAIL_PAGE));
+  }, [older, before]);
 
   if (latest.isPending) return <PartLoading />;
   if (latest.isError && latest.data === undefined) {
@@ -209,16 +205,11 @@ export function Trail({ workspaceId, assignment, actors }: Part & { actors: Acto
       <PartError title={t("asg.trail.failed")} error={latest.error} onRetry={() => void latest.refetch()} />
     );
   }
-  const events = [
-    ...kept,
-    ...latest.data.events.filter((event) => !kept.some((each) => each.seq === event.seq)),
-  ].sort((a, b) => b.seq - a.seq);
+  // Before the first page is taken in, it shows as it came.
+  const taken = trail.events.length > 0;
+  const events = taken ? trail.events : latest.data.events;
   if (events.length === 0) return <p className="page__muted">{t("asg.trail.empty")}</p>;
-  const first = events[events.length - 1]?.seq ?? 0;
-  // The seq counts every assignment's events, so it says nothing of what is left: older ones may be
-  // there only while the last page asked for came back full.
-  const lastPage = before === undefined ? latest.data : page.data;
-  const more = lastPage === undefined || lastPage.events.length >= TRAIL_PAGE;
+  const more = taken ? !trail.complete : latest.data.events.length >= TRAIL_PAGE;
   const what = (kind: AssignmentEventKind) => {
     const known = KNOWN_EVENTS.find((each) => each === kind);
     return known === undefined ? t("asg.ev.other") : t(`asg.ev.${known}`);
@@ -242,7 +233,7 @@ export function Trail({ workspaceId, assignment, actors }: Part & { actors: Acto
         <PartError title={t("asg.trail.failed")} error={page.error} onRetry={() => void page.refetch()} />
       ) : (
         more && (
-          <Button size="sm" variant="ghost" loading={page.isFetching} onClick={() => setBefore(first)}>
+          <Button size="sm" variant="ghost" loading={page.isFetching} onClick={() => setTrail(askOlder)}>
             {t("asg.trail.older")}
           </Button>
         )

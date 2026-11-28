@@ -352,17 +352,17 @@ export class FakeAssignments {
       createAssignment: within((scope, params) => {
         const goal = text(params.goal)?.trim() ?? "";
         if (goal === "") return fail(400, "invalid_request", "A goal is needed");
-        // As the server: a channel the person can write in (writing in a public one joins it), never a
-        // direct message, and one the agent is in.
+        // In the server's order: an agent of this workspace (another one's id is no agent here), then a
+        // channel the person can write in (writing in a public one joins it), never a direct message,
+        // and one the agent is in.
         const channelId = text(params.channelId) ?? "";
         const agentId = text(params.agentId) ?? "";
+        const ours = this.host.agents(scope.workspaceId).some((agent) => agent.id === agentId);
+        if (!ours) return fail(404, "not_found", "Agent not found");
         if (!this.host.readsChannel(scope.user.id, channelId, scope.workspaceId))
           return fail(404, "not_found", "Channel not found");
         if (this.host.isDm(channelId, scope.workspaceId))
           return fail(400, "invalid_request", "Assignments live in channels");
-        // The agent is this workspace's (another one's id is no agent here) and in the channel.
-        const ours = this.host.agents(scope.workspaceId).some((agent) => agent.id === agentId);
-        if (!ours) return fail(404, "not_found", "Agent not found");
         if (!this.host.agentIn(agentId, channelId))
           return fail(409, "assignment.agent_not_in_channel", "Add the agent to this channel first");
         this.host.join(scope.user.id, channelId);
