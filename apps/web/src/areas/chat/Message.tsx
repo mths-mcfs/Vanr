@@ -247,10 +247,10 @@ function Actions({ message, onQuote }: { message: Message; onQuote: (message: Me
   });
   if (!member) return null;
   return (
-    <div className="chat-message__actions" role="toolbar" aria-label={t("actions.label")}>
+    <div className="chat-message__actions" role="toolbar" aria-label={t("tools.label")}>
       <Menu>
         <MenuTrigger asChild>
-          <button type="button" className="chat-icon-button" aria-label={t("actions.react")}>
+          <button type="button" className="chat-icon-button" aria-label={t("tools.react")}>
             <Icon icon={SmilePlus} size="sm" />
           </button>
         </MenuTrigger>
@@ -258,7 +258,7 @@ function Actions({ message, onQuote }: { message: Message; onQuote: (message: Me
           {QUICK_REACTIONS.map((reaction) => (
             <MenuItem
               key={reaction}
-              aria-label={t("actions.reactWith", { reaction })}
+              aria-label={t("tools.reactWith", { reaction })}
               onSelect={() => react.mutate({ workspaceId, messageId: message.id, body: { reaction } })}
             >
               {reaction}
@@ -269,7 +269,7 @@ function Actions({ message, onQuote }: { message: Message; onQuote: (message: Me
       <button
         type="button"
         className="chat-icon-button"
-        aria-label={t("actions.quote")}
+        aria-label={t("tools.quote")}
         onClick={() => onQuote(message)}
       >
         <Icon icon={Quote} size="sm" />
@@ -308,7 +308,7 @@ function MessageItemView({ message, continued, onQuote, onRetry }: MessageItemPr
       data-author={message.author.type}
       data-local={message.local}
       data-retracted={retracted !== undefined || undefined}
-      aria-label={t("message.label", { name, time: when })}
+      aria-label={t("post.label", { name, time: when })}
     >
       <div className="chat-message__mark">
         {!continued && <AuthorMark author={message.author} name={name} />}
@@ -324,12 +324,12 @@ function MessageItemView({ message, continued, onQuote, onRetry }: MessageItemPr
             >
               {when}
             </time>
-            {message.editedAt !== null && <span className="chat-message__flag">{t("message.edited")}</span>}
+            {message.editedAt !== null && <span className="chat-message__flag">{t("post.edited")}</span>}
           </header>
         )}
         {retracted !== undefined ? (
           <p className="chat-retracted">
-            {t("message.retracted", { name: directory.personName(retracted.actorUserId) })}
+            {t("post.withdrawn", { name: directory.personName(retracted.actorUserId) })}
           </p>
         ) : (
           <>
@@ -343,13 +343,13 @@ function MessageItemView({ message, continued, onQuote, onRetry }: MessageItemPr
               <MessageBody text={templated ?? message.body} mention={mention} />
             )}
             <Files message={message} />
-            {meta.canceled === true && <p className="chat-note">{t("message.canceled")}</p>}
-            {meta.interrupted === true && <p className="chat-note">{t("message.interrupted")}</p>}
+            {meta.canceled === true && <p className="chat-note">{t("post.stopped")}</p>}
+            {meta.interrupted === true && <p className="chat-note">{t("post.interrupted")}</p>}
             {message.memories.length > 0 && (
-              <ul className="chat-memories" aria-label={t("memory.label")}>
+              <ul className="chat-memories" aria-label={t("recall.label")}>
                 {message.memories.map((memory) => (
                   <li key={memory.id}>
-                    {t("memory.saved", { agent: directory.agentName(memory.agentId), text: memory.text })}
+                    {t("recall.saved", { agent: directory.agentName(memory.agentId), text: memory.text })}
                   </li>
                 ))}
               </ul>
@@ -364,15 +364,15 @@ function MessageItemView({ message, continued, onQuote, onRetry }: MessageItemPr
         )}
         {sending && (
           <p className="chat-note" role="status">
-            {t("message.sending")}
+            {t("post.sending")}
           </p>
         )}
         {failed && (
           <p className="chat-note chat-note--danger" role="alert">
             <Icon icon={TriangleAlert} size="sm" />
-            {t("message.failed")}{" "}
+            {t("post.failed")}{" "}
             <Button size="sm" variant="ghost" onClick={() => onRetry(message)}>
-              {t("message.retry")}
+              {t("post.retry")}
             </Button>
           </p>
         )}

@@ -123,7 +123,7 @@ export function answering(
 type Tool = {
   key: string;
   icon: LucideIcon;
-  label: "bold" | "italic" | "strike" | "code" | "codeBlock" | "link" | "list" | "numbered" | "quote";
+  label: "bold" | "italic" | "strike" | "code" | "fence" | "link" | "list" | "numbered" | "quote";
   apply: (edit: Edit) => Edit;
 };
 
@@ -132,7 +132,7 @@ const TOOLS: Tool[] = [
   { key: "italic", icon: Italic, label: "italic", apply: (edit) => wrap(edit, "_") },
   { key: "strike", icon: Strikethrough, label: "strike", apply: (edit) => wrap(edit, "~~") },
   { key: "code", icon: Code, label: "code", apply: (edit) => wrap(edit, "`") },
-  { key: "codeBlock", icon: SquareCode, label: "codeBlock", apply: (edit) => wrap(edit, "```\n", "\n```") },
+  { key: "fence", icon: SquareCode, label: "fence", apply: (edit) => wrap(edit, "```\n", "\n```") },
   { key: "link", icon: Link, label: "link", apply: (edit) => wrap(edit, "[", "](https://)") },
   { key: "list", icon: List, label: "list", apply: (edit) => prefixLines(edit, () => "- ") },
   {
@@ -347,13 +347,13 @@ export function Composer({
           onKeyDown={onKeyDown}
         />
         <div className="chat-composer__bar">
-          <div className="chat-composer__tools" role="toolbar" aria-label={t("composer.format")}>
+          <div className="chat-composer__tools" role="toolbar" aria-label={t("composer.marks")}>
             {TOOLS.map((tool) => (
               <button
                 key={tool.key}
                 type="button"
                 className="chat-icon-button"
-                aria-label={t(`format.${tool.label}`)}
+                aria-label={t(`mark.${tool.label}`)}
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => applyEdit(tool.apply(current()))}
               >
@@ -362,7 +362,7 @@ export function Composer({
             ))}
             <Menu>
               <MenuTrigger asChild>
-                <button type="button" className="chat-icon-button" aria-label={t("format.emoji")}>
+                <button type="button" className="chat-icon-button" aria-label={t("mark.emoji")}>
                   <Icon icon={Smile} size="sm" />
                 </button>
               </MenuTrigger>
@@ -386,7 +386,7 @@ export function Composer({
           <button
             type="button"
             className="chat-composer__send"
-            aria-label={t("composer.send")}
+            aria-label={t("composer.go")}
             disabled={text.trim() === ""}
             onClick={send}
           >

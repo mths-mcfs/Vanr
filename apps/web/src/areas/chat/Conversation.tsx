@@ -3,7 +3,7 @@
 // join). A channel this person cannot read looks exactly like one that does not exist.
 import { useApiMutation, useApiQuery } from "@vanr/client/react";
 import type { Channel, Message } from "@vanr/contract";
-import { AgentSigil, Avatar, Button, EmptyState, Icon, Spinner } from "@vanr/ui";
+import { AgentSigil, Avatar, Button, EmptyState, ErrorState, Icon, Spinner } from "@vanr/ui";
 import { Hash, Lock, MessagesSquare, WifiOff } from "lucide-react";
 import { Fragment, type ReactNode, useCallback, useLayoutEffect, useRef, useState } from "react";
 import { useRouteParams } from "../../app/navigation.tsx";
@@ -113,7 +113,7 @@ function Header({ target }: { target: Kind }) {
         <h1 className="chat__title">
           <Icon icon={priv ? Lock : Hash} size="sm" />
           <span>{channel.name}</span>
-          <span className="vr-visually-hidden">{priv ? t("channel.private") : t("channel.public")}</span>
+          <span className="vr-visually-hidden">{priv ? t("room.private") : t("room.public")}</span>
         </h1>
         {channel.topic !== "" && <p className="chat__topic">{channel.topic}</p>}
       </header>
@@ -191,8 +191,8 @@ function History({ target, member, children }: { target: Kind; member: boolean; 
 
   const placeholder =
     target.kind === "channel"
-      ? t("composer.placeholderChannel", { channel: target.channel.name })
-      : t("composer.placeholderDm");
+      ? t("composer.hintChannel", { channel: target.channel.name })
+      : t("composer.hintDm");
 
   if (history.latest.isPending) return <ScreenLoading />;
   if (history.latest.isError)
@@ -309,13 +309,24 @@ function ConversationView({
 
 function NotFound() {
   const t = useMessages("chat");
-  useDocumentTitle(t("missing.title"));
   return (
     <div className="page">
-      <EmptyState
-        icon={<Icon icon={MessagesSquare} size="lg" />}
-        title={t("missing.title")}
-        description={t("missing.text")}
+      <h1 className="page__title">{t("missing.title")}</h1>
+      <p className="page__lead">{t("missing.text")}</p>
+    </div>
+  );
+}
+
+/** A conversation that could not be opened: what failed, why, and a retry. */
+function Failed({ title, error, onRetry }: { title: string; error: unknown; onRetry: () => void }) {
+  const common = useMessages("common");
+  const describe = useErrorMessage("chat");
+  return (
+    <div className="page">
+      <h1 className="page__title">{title}</h1>
+      <ErrorState
+        title={describe(error)}
+        action={<Button onClick={onRetry}>{common("action.retry")}</Button>}
       />
     </div>
   );
@@ -328,18 +339,23 @@ export function ChannelScreen() {
   const dms = useApiQuery("getDms", { workspaceId });
   const channel = channels.data?.find((candidate) => candidate.id === channelId);
   const dm = dms.data?.find((candidate) => candidate.channelId === channelId);
-  useDocumentTitle(dm !== undefined ? dm.with.name : channel !== undefined ? `#${channel.name}` : undefined);
+  const failedToLoad = channels.isError || dms.isError;
+  const loaded = channels.data !== undefined && dms.data !== undefined;
+  useDocumentTitle(
+    dm !== undefined
+      ? dm.with.name
+      : channel !== undefined
+        ? `#${channel.name}`
+        : failedToLoad
+          ? t("room.failed")
+          : loaded
+            ? t("missing.title")
+            : undefined,
+  );
   if (channels.isPending || dms.isPending) return <ScreenLoading />;
   if (channels.isError || dms.isError) {
     const failed = channels.isError ? channels : dms;
-    return (
-      <ScreenError
-        title={t("channel.failed")}
-        error={failed.error}
-        onRetry={() => void failed.refetch()}
-        namespace="chat"
-      />
-    );
+    return <Failed title={t("room.failed")} error={failed.error} onRetry={() => void failed.refetch()} />;
   }
   if (dm !== undefined) {
     const target: Kind =
@@ -367,7 +383,11 @@ function DirectScreen({ target }: { target: Extract<Kind, { kind: "person" | "ag
   const body = target.kind === "agent" ? { agentId: target.agentId } : { userId: target.userId };
   const opened = useApiQuery("createDm", { workspaceId, body }, { staleTime: Number.POSITIVE_INFINITY });
   useDocumentTitle(
-    target.kind === "agent" ? directory.agentName(target.agentId) : directory.personName(target.userId),
+    opened.isError
+      ? t("dm.failed")
+      : target.kind === "agent"
+        ? directory.agentName(target.agentId)
+        : directory.personName(target.userId),
   );
   if (opened.isPending)
     return (
@@ -376,14 +396,7 @@ function DirectScreen({ target }: { target: Extract<Kind, { kind: "person" | "ag
       </div>
     );
   if (opened.isError)
-    return (
-      <ScreenError
-        title={t("dm.failed")}
-        error={opened.error}
-        onRetry={() => void opened.refetch()}
-        namespace="chat"
-      />
-    );
+    return <Failed title={t("dm.failed")} error={opened.error} onRetry={() => void opened.refetch()} />;
   return (
     <ConversationView key={opened.data.channelId} channelId={opened.data.channelId} target={target} member />
   );

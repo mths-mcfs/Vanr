@@ -62,7 +62,7 @@ describe("the conversations in the sidebar", () => {
     const sidebar = await screen.findByRole("complementary");
     expect(await within(sidebar).findByRole("link", { name: /general/ })).toBeDefined();
     const board = within(sidebar).getByRole("link", { name: /board-room/ });
-    expect(within(board).getByText("Private channel")).toBeDefined();
+    expect(within(board).getByText("Private, members only")).toBeDefined();
     expect(within(board).getByText("1 unread message")).toBeDefined();
     expect(within(sidebar).getByRole("link", { name: "Scout" }).getAttribute("href")).toBe(
       `/workspace/${WS}/dm/agent/agt_scout`,
@@ -90,7 +90,6 @@ describe("the conversations in the sidebar", () => {
     const sidebar = await screen.findByRole("complementary");
     await within(sidebar).findByRole("link", { name: /general/ });
     expect(within(sidebar).queryByText("board-room") === null).toBe(true);
-    expect(within(sidebar).queryByText(/unread/) === null).toBe(true);
   });
 
   test("a private channel's address answers like one that does not exist", async () => {

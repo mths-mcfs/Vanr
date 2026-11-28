@@ -126,7 +126,7 @@ export function ChannelList() {
                   >
                     <Icon icon={priv ? Lock : Hash} size="sm" />
                     <span className="chat-side__name">{channel.name}</span>
-                    {priv && <span className="vr-visually-hidden">{t("channel.private")}</span>}
+                    {priv && <span className="vr-visually-hidden">{t("room.private")}</span>}
                     <Unread
                       count={channel.unreadCount}
                       label={t("side.unread", { count: channel.unreadCount })}
