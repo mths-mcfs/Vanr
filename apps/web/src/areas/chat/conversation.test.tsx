@@ -471,3 +471,65 @@ describe("what the second round of review found", () => {
     await waitFor(() => expect(follows()).toBe(false));
   });
 });
+
+describe("a receipt for an agent that was held back", () => {
+  const held = (author: string, blocked: { agentId: string; reason: string }[]) =>
+    message({
+      id: "msg_held",
+      body: "@scout check this",
+      author: { type: "person", id: author },
+      receipts: { claimedBy: [], handled: [], viewedBy: [], blocked },
+    });
+
+  test("reads in the person's words, never the reason's code", async () => {
+    const server = newServer();
+    server.state.messages.push(
+      held("usr_ana", [
+        { agentId: "agt_scout", reason: "not_in_channel" },
+        { agentId: "agt_ledger", reason: "something_new" },
+        // A code that happens to match another key of the catalog is still only "held back".
+        { agentId: "agt_tally", reason: "dismiss" },
+      ]),
+    );
+    await open("/channel/ch_general", "usr_ana", server);
+    expect(
+      await screen.findByText("Scout isn't in this conversation. Add it to the channel to bring it in."),
+    ).toBeDefined();
+    expect(screen.getByText("Ledger was held back")).toBeDefined();
+    expect(screen.getByText("Tally was held back")).toBeDefined();
+    expect(screen.queryByText(/not_in_channel|something_new/) === null).toBe(true);
+  });
+
+  test("names the author for anyone else, instead of saying you", async () => {
+    const server = newServer();
+    server.state.messages.push(held("usr_jonas", [{ agentId: "agt_scout", reason: "audience" }]));
+    await open("/channel/ch_general", "usr_tomas", server);
+    expect(await screen.findByText("Scout doesn't take requests from Jonas Lind here.")).toBeDefined();
+    expect(screen.queryByText("Scout doesn't take requests from you here.") === null).toBe(true);
+  });
+
+  test("tells the author themselves with you", async () => {
+    const server = newServer();
+    server.state.messages.push(held("usr_ana", [{ agentId: "agt_scout", reason: "audience" }]));
+    await open("/channel/ch_general", "usr_ana", server);
+    expect(await screen.findByText("Scout doesn't take requests from you here.")).toBeDefined();
+  });
+});
+
+test("an author notice with a code that matches another catalog key shows the server's sentence", async () => {
+  const server = newServer();
+  await open("/channel/ch_general", "usr_ana", server);
+  await screen.findByRole("textbox", { name: "Write in #general" });
+  await act(async () =>
+    server.emit(WS, {
+      type: "run.agent_unavailable",
+      agentId: "agt_scout",
+      channelId: "ch_general",
+      threadId: null,
+      messageId: "msg_9",
+      reason: "dismiss",
+      text: "Scout can't take this one.",
+    }),
+  );
+  expect(await screen.findByText("Scout can't take this one.")).toBeDefined();
+});
