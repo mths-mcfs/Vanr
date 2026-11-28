@@ -63,14 +63,7 @@ export function UsageSection() {
   if (report.isPending) body = <PartLoading />;
   else if (report.isError)
     body = <PartError title={t("use.failed")} error={report.error} onRetry={() => void report.refetch()} />;
-  else
-    body = (
-      <Report
-        workspaceId={workspaceId}
-        report={report.data}
-        defaultBudget={settings.data?.agentBudgetDefaultUsd ?? null}
-      />
-    );
+  else body = <Report workspaceId={workspaceId} report={report.data} />;
   return (
     <>
       <Block title={t("use.title")} lead={t("use.lead")}>
@@ -98,17 +91,18 @@ export function UsageSection() {
   );
 }
 
-/** The share spent, in whole percent; a budget not quite spent never reads as 100%. */
-const shareOf = (spent: number, budget: number) => {
+/** The share spent, in whole percent; a budget not yet spent never reads as 100%. */
+const shareOf = (spent: number, budget: number, spentAll: boolean) => {
   const percent = Math.round((spent / budget) * 100);
-  return spent < budget ? Math.min(percent, 99) : percent;
+  return spentAll ? percent : Math.min(percent, 99);
 };
 
-/** A share of a budget, as a bar that reads by its tone too: calm, near the end, or past it. */
-function Meter({ spent, budget, label }: { spent: number; budget: number; label: string }) {
-  // The tone compares the amounts themselves: 19.92 of 20 is near the end, not past it.
-  const tone = spent >= budget && spent > 0 ? "over" : spent >= budget * 0.8 && spent > 0 ? "near" : "calm";
-  const percent = budget > 0 ? shareOf(spent, budget) : spent > 0 ? 100 : 0;
+/** A share of a budget, as a bar that reads by its tone too; spent is the server's word when it gives one. */
+function Meter(props: { spent: number; budget: number; label: string; exhausted?: boolean }) {
+  const { spent, budget, label } = props;
+  const exhausted = props.exhausted ?? (spent > 0 && spent >= budget);
+  const tone = exhausted ? "over" : spent > 0 && spent >= budget * 0.8 ? "near" : "calm";
+  const percent = budget > 0 ? shareOf(spent, budget, exhausted) : spent > 0 ? 100 : 0;
   return (
     <meter
       className="spend-meter"
@@ -121,33 +115,20 @@ function Meter({ spent, budget, label }: { spent: number; budget: number; label:
   );
 }
 
-function Report({
-  workspaceId,
-  report,
-  defaultBudget,
-}: {
-  workspaceId: string;
-  report: UsageReport;
-  /** One agent's default budget: the workspace's own while it has no agents; null until it is known. */
-  defaultBudget: number | null;
-}) {
+function Report({ workspaceId, report }: { workspaceId: string; report: UsageReport }) {
   const t = useMessages("control");
   const { locale } = useLocale();
   const dollars = useDollars();
   const since = new Intl.DateTimeFormat(locale, { dateStyle: "long", timeZone: "UTC" }).format(
     new Date(report.since),
   );
-  // The very numbers the server's cap uses: the sum of the active agents' monthly budgets (one agent's
-  // default while there are none), and every spend but the embeddings this server pays.
-  const budget =
-    report.agents.length === 0
-      ? defaultBudget
-      : report.agents.reduce((sum, agent) => sum + agent.budgetPerMonthUsd, 0);
+  // The cap's own numbers: only the server knows what it counts (an anonymous debate's turns in, every
+  // embedding it pays out) and when the next call is refused.
+  const { capUsd: budget, countedUsd: counted, exhausted } = report.budget;
   const unbudgeted = report.perKind
     .filter((each) => each.kind === UNBUDGETED)
     .reduce((sum, each) => sum + each.costUsd, 0);
-  const counted = report.spendUsd - unbudgeted;
-  const percent = budget !== null && budget > 0 ? shareOf(counted, budget) : null;
+  const percent = budget > 0 ? shareOf(counted, budget, exhausted) : null;
   const kinds = report.perKind.map((each) => ({
     ...each,
     label: t(`use.kind.${KINDS.find((kind) => kind === each.kind) ?? "other"}`),
@@ -160,11 +141,11 @@ function Report({
           <span className="spend__amount">{dollars(counted)}</span>{" "}
           <span className="spend__of">{t("use.ofBudget", { budget: dollars(budget) })}</span>
         </p>
-        <Meter spent={counted} budget={budget ?? 0} label={t("use.workspaceMeter")} />
+        <Meter spent={counted} budget={budget} exhausted={exhausted} label={t("use.workspaceMeter")} />
         <p className="page__muted">
           {percent === null
             ? t("use.noBudget")
-            : budget !== null && counted >= budget
+            : exhausted
               ? t("use.spentAll")
               : t("use.percent", { percent })}
         </p>

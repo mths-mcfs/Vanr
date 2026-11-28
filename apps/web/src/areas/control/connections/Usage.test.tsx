@@ -102,6 +102,61 @@ describe("usage", () => {
     ).toBe("near");
   });
 
+  describe("the budget reads as the server's cap counts it", () => {
+    const capped = (budget: number) => {
+      const server = newServer();
+      for (const id of ["agt_scout", "agt_ledger", "agt_tally"]) server.agentBudgets.set(id, budget);
+      return server;
+    };
+    const workspaceMeter = (part: HTMLElement) =>
+      within(part)
+        .getByRole("meter", { name: "Share of the workspace's budget spent" })
+        .getAttribute("data-tone");
+
+    test("an anonymous debate's turns spend it, though no row names them", async () => {
+      const server = capped(1);
+      server.usage.push({
+        workspaceId: WS,
+        agentId: "agt_scout",
+        kind: "debate",
+        calls: 1,
+        costUsd: 3,
+        anonymous: true,
+      });
+      await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+      const part = await month();
+      expect(await within(part).findByText(/The budget is spent\./)).toBeDefined();
+      expect(within(part).getByText("Nothing spent yet this month.")).toBeDefined();
+      expect(workspaceMeter(part)).toBe("over");
+    });
+
+    test("an old index row that comes as search doesn't spend it", async () => {
+      const server = capped(1);
+      server.usage.push({
+        workspaceId: WS,
+        agentId: null,
+        kind: "search",
+        calls: 1,
+        costUsd: 3,
+        platform: true,
+      });
+      await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+      const part = await month();
+      expect(await within(part).findByText("0% of the budget is spent.")).toBeDefined();
+      expect(within(part).queryByText(/The budget is spent/) === null).toBe(true);
+      expect(workspaceMeter(part)).toBe("calm");
+    });
+
+    test("three 10-cent budgets are spent by 30 cents, to the micro", async () => {
+      const server = capped(0.1);
+      server.usage.push({ workspaceId: WS, agentId: null, kind: "search", calls: 1, costUsd: 0.3 });
+      await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+      const part = await month();
+      expect(await within(part).findByText(/The budget is spent\./)).toBeDefined();
+      expect(workspaceMeter(part)).toBe("over");
+    });
+  });
+
   test("an amount under a cent is not shown as nothing", async () => {
     const server = newServer();
     server.usage.push({ workspaceId: WS, agentId: null, kind: "wiki", calls: 1, costUsd: 0.004 });

@@ -303,7 +303,17 @@ export class FakeServer {
    * The month's model spend the usage report sums: an agent's runs (`agentId`), or a call made for no
    * agent (`agentId: null`) of a kind such as "search", "wiki" or "embedding".
    */
-  usage: { workspaceId: string; agentId: string | null; kind: string; calls: number; costUsd: number }[] = [];
+  usage: {
+    workspaceId: string;
+    agentId: string | null;
+    kind: string;
+    calls: number;
+    costUsd: number;
+    /** A turn of a debate still anonymous: the cap counts it, the report's rows leave it out. */
+    anonymous?: boolean;
+    /** Paid by the server (an embedding, or an old one written as search): out of the cap. */
+    platform?: boolean;
+  }[] = [];
   /** An agent's own monthly budget; one left out takes the workspace's default. */
   agentBudgets = new Map<string, number>();
   readonly runnerWork: FakeRunners;
@@ -1606,7 +1616,8 @@ export class FakeServer {
       const scope = this.allowed(params, session, "view_usage");
       if ("status" in scope) return scope;
       const defaultBudget = this.settingsOf(scope.workspaceId)?.agentBudgetDefaultUsd ?? 20;
-      const lines = this.usage.filter((line) => line.workspaceId === scope.workspaceId);
+      const all = this.usage.filter((line) => line.workspaceId === scope.workspaceId);
+      const lines = all.filter((line) => !line.anonymous);
       const runs = lines.filter((line) => line.agentId !== null);
       const unowned = new Map<string, { kind: string; calls: number; costUsd: number }>();
       for (const line of lines.filter((each) => each.agentId === null)) {
@@ -1619,15 +1630,26 @@ export class FakeServer {
       }
       const runsUsd = runs.reduce((sum, line) => sum + line.costUsd, 0);
       const runCalls = runs.reduce((sum, line) => sum + line.calls, 0);
+      const active = this.agents.filter(
+        (agent) => agent.workspaceId === scope.workspaceId && agent.archivedAt === null,
+      );
+      const capUsd =
+        active.length === 0
+          ? defaultBudget
+          : active.reduce((sum, agent) => sum + (this.agentBudgets.get(agent.id) ?? defaultBudget), 0);
+      const countedUsd = all
+        .filter((line) => !(line.platform ?? line.kind === "embedding"))
+        .reduce((sum, line) => sum + line.costUsd, 0);
+      const micros = (usd: number) => Math.round(usd * 1_000_000);
       const report: T.UsageReport = {
+        budget: { capUsd, countedUsd, exhausted: micros(countedUsd) >= micros(capUsd) },
         since: new Date(Date.UTC(this.now().getUTCFullYear(), this.now().getUTCMonth(), 1)).toISOString(),
         spendUsd: runsUsd + [...unowned.values()].reduce((sum, kind) => sum + kind.costUsd, 0),
         perKind: [
           ...(runCalls > 0 ? [{ kind: "model", calls: runCalls, costUsd: runsUsd }] : []),
           ...[...unowned.values()].sort((a, b) => a.kind.localeCompare(b.kind)),
         ],
-        agents: this.agents
-          .filter((agent) => agent.workspaceId === scope.workspaceId && agent.archivedAt === null)
+        agents: active
           .sort((a, b) => a.name.localeCompare(b.name))
           .map((agent) => {
             const costUsd = runs
