@@ -9,15 +9,29 @@ import { z } from "zod";
 import { AppLink, useGo, useRouteParams, useSearch } from "../../app/navigation.tsx";
 import { ScreenLoading, useDocumentTitle } from "../../app/screens.tsx";
 import { useLocale, useMessages } from "../../i18n/react.tsx";
+import { Access } from "./Access.tsx";
 import { Activity } from "./Activity.tsx";
 import { AgentSkills } from "./AgentSkills.tsx";
+import { Environment } from "./Environment.tsx";
 import { Harness } from "./Harness.tsx";
 import { Instructions } from "./Instructions.tsx";
 import { Lab } from "./Lab.tsx";
+import { MemoryPanel } from "./Memory.tsx";
 import { Settings } from "./Settings.tsx";
 import { PartError, PartLoading, Section, useAgentRights } from "./shared.tsx";
 
-export const TABS = ["overview", "instructions", "lab", "harness", "skills", "activity", "settings"] as const;
+export const TABS = [
+  "overview",
+  "instructions",
+  "lab",
+  "memory",
+  "access",
+  "environment",
+  "harness",
+  "skills",
+  "activity",
+  "settings",
+] as const;
 export type Tab = (typeof TABS)[number];
 const TabSearch = z.object({ tab: z.enum(TABS).optional() });
 const NO_TAB: z.infer<typeof TabSearch> = {};
@@ -94,6 +108,18 @@ function Profile({ workspaceId, agentId }: { workspaceId: string; agentId: strin
         </TabsContent>
         <TabsContent value="lab">
           <Lab agent={a} workspaceId={workspaceId} rights={rights} />
+        </TabsContent>
+        <TabsContent value="memory">
+          <MemoryPanel agent={a} workspaceId={workspaceId} rights={rights} />
+          <AppLink className="app-link" route="agentMemory" params={{ workspaceId, agentId }}>
+            {t("memory.open")}
+          </AppLink>
+        </TabsContent>
+        <TabsContent value="access">
+          <Access agent={a} workspaceId={workspaceId} rights={rights} />
+        </TabsContent>
+        <TabsContent value="environment">
+          <Environment agent={a} workspaceId={workspaceId} rights={rights} />
         </TabsContent>
         <TabsContent value="harness">
           <Harness agent={a} workspaceId={workspaceId} rights={rights} />

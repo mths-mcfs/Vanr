@@ -16,7 +16,7 @@ describe("a wiki em português", () => {
 
   test("o índice mostra as páginas por pasta, as fixadas e as mais lidas", async () => {
     await renderApp({ path: W, ...pt });
-    expect(await screen.findByText("3 páginas")).toBeDefined();
+    expect(await screen.findByText("4 páginas")).toBeDefined();
     expect(await screen.findByRole("navigation", { name: "Páginas por pasta" })).toBeDefined();
     expect(screen.getByRole("region", { name: "Fixadas" })).toBeDefined();
     expect(

@@ -38,6 +38,8 @@ export const wiki = {
     props?: Record<string, unknown>;
     altTitles?: string[];
     tags?: string[];
+    /** How agents change the page: directly, or only through proposals a person reviews. */
+    agentEdits?: "direct" | "propose";
   }>(),
   renameWikiPage: e("POST", "/api/v1/workspaces/:workspaceId/wiki/pages/:pageId/rename", C.WikiPage).body<{
     title: string;
@@ -106,6 +108,43 @@ export const wiki = {
     C.WikiVaultImportResult,
   ).form<{ file: { blob: Blob; fileName: string }; folder?: string }>(),
   exportWiki: e("GET", "/api/v1/workspaces/:workspaceId/wiki/export", DOWNLOAD),
+  /** Who reads the page: null gives it back to the whole workspace. Who created it or an admin. */
+  setWikiPageAccess: e("PUT", "/api/v1/workspaces/:workspaceId/wiki/pages/:pageId/access", C.WikiPage).body<{
+    access: T.WikiAccessInput;
+  }>(),
+  /** The page's comments and proposals. */
+  getWikiPageAnnotations: e(
+    "GET",
+    "/api/v1/workspaces/:workspaceId/wiki/pages/:pageId/annotations",
+    C.WikiAnnotations,
+  ),
+  createWikiPageComment: e(
+    "POST",
+    "/api/v1/workspaces/:workspaceId/wiki/pages/:pageId/comments",
+    C.WikiComment,
+  ).body<T.WikiCommentInput>(),
+  /** Resolves a comment thread; `reopenWikiAnnotation` opens it again. */
+  resolveWikiAnnotation: e(
+    "PUT",
+    "/api/v1/workspaces/:workspaceId/wiki/annotations/:annotationId/resolution",
+    C.WikiComment,
+  ),
+  reopenWikiAnnotation: e(
+    "DELETE",
+    "/api/v1/workspaces/:workspaceId/wiki/annotations/:annotationId/resolution",
+    C.WikiComment,
+  ),
+  deleteWikiAnnotation: e(
+    "DELETE",
+    "/api/v1/workspaces/:workspaceId/wiki/annotations/:annotationId",
+    NOTHING,
+  ),
+  /** Accepts or rejects each pending change of a proposal. */
+  decideWikiAnnotation: e(
+    "POST",
+    "/api/v1/workspaces/:workspaceId/wiki/annotations/:annotationId/decide",
+    C.WikiDecision,
+  ).body<T.WikiDecisionInput>(),
   listWikiAttachments: e(
     "GET",
     "/api/v1/workspaces/:workspaceId/wiki/attachments",

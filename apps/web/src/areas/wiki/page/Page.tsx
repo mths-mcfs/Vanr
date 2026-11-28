@@ -2,9 +2,10 @@
 // shared draft, kept in sync with everyone on the page and saved by the server on its own; "Publish"
 // makes it a version. The header says who changed it last, the version, the lock, who is here and
 // where the draft stands. Beside it, the outline, the links and who reads it.
+import { useQueryClient } from "@tanstack/react-query";
 import { isApiError } from "@vanr/client";
-import { useApiQuery, useVanrClient } from "@vanr/client/react";
-import { can, type WikiPropDef } from "@vanr/contract";
+import { type KeyPrefix, prefixKey, useApiQuery, useVanrClient } from "@vanr/client/react";
+import { can, type WikiAnchor, type WikiPropDef } from "@vanr/contract";
 import {
   Avatar,
   Button,
@@ -20,14 +21,18 @@ import {
 import {
   Bot,
   Check,
+  EyeOff,
   History,
   Lock,
   LockOpen,
+  MessageSquarePlus,
   MoreHorizontal,
   Pin,
   PinOff,
   Trash2,
   Undo2,
+  UserRoundCheck,
+  Users,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { z } from "zod";
@@ -36,9 +41,11 @@ import { ScreenError, ScreenLoading, useDocumentTitle, useErrorMessage } from ".
 import { useMessages } from "../../../i18n/react.tsx";
 import { useRelativeTime } from "../../../i18n/relative-time.tsx";
 import { href } from "../../../routes.ts";
-import { Editor, type EditorHandle, type EditorSource } from "../editor/Editor.tsx";
+import { Editor, type EditorHandle, type EditorSource, type Picked } from "../editor/Editor.tsx";
 import type { ResolvedLink } from "../editor/plugins.ts";
 import { linkResolver, REFRESH_MS, TITLE_MAX, useActorName, useRole, useWikiRefresh } from "../shared.tsx";
+import { AccessDialog, accessSummary } from "./Access.tsx";
+import { Annotations, anchorFor, inPublished } from "./Annotations.tsx";
 import { type LiveEvent, settle, useLive } from "./collab.ts";
 import { HistoryDialog } from "./History.tsx";
 import { type MetaWrite, PropsBar } from "./Props.tsx";
@@ -85,6 +92,16 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
   const [title, setTitle] = useState<string | null>(null);
   const [history, setHistory] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [sharing, setSharing] = useState(false);
+  // Who reads the page is being saved: restricting moves it to a new address and closes this live document.
+  const [restricting, setRestricting] = useState(false);
+  const restrictingNow = useRef(false);
+  restrictingNow.current = restricting;
+  // Restricted by this person, the page is on its way to its new address: the old one answering
+  // "not found" meanwhile is expected, not a loss.
+  const [moving, setMoving] = useState(false);
+  const [picked, setPicked] = useState<Picked | null>(null);
+  const [anchor, setAnchor] = useState<WikiAnchor | null>(null);
   const editor = useRef<EditorHandle>(null);
   const pending = useRef(new Set<Exclude<Busy, null>>());
   const queue = useRef<Promise<void>>(Promise.resolve());
@@ -92,7 +109,46 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
   const { at } = useSearch(PageAddress, NO_ANCHOR);
   /** The `?at=` heading the live editor reached: a new one in the address is sought again. */
   const reachedAnchor = useRef<string | null>(null);
-  const p = page.data;
+  // Not found or not readable any more (a restriction, a trash): what was read of it before leaves the
+  // screen and the cache, so no title, text, comment or button of it stays for who lost it.
+  // Once lost, it stays lost until the server gives the page again: a later failed read (a dropped
+  // connection, a 500) is no reason to show what was read before.
+  const lostSince = useRef<number | null>(null);
+  if (
+    !restricting &&
+    !moving &&
+    page.isError &&
+    isApiError(page.error) &&
+    (page.error.status === 404 || page.error.status === 403)
+  )
+    lostSince.current ??= page.errorUpdatedAt;
+  if (lostSince.current !== null && page.dataUpdatedAt > lostSince.current) lostSince.current = null;
+  const gone = lostSince.current !== null && !restricting && !moving;
+  const p = gone ? undefined : page.data;
+  const queries = useQueryClient();
+  const client = useVanrClient();
+  useEffect(() => {
+    if (!gone) return;
+    for (const method of ["getWikiPageAnnotations", "getWikiPagePanel"] as const)
+      queries.removeQueries({
+        queryKey: prefixKey(client, { method, args: { workspaceId, pageId: slug } } as KeyPrefix),
+      });
+  }, [client, gone, queries, slug, workspaceId]);
+  // The page's own read goes when this view does, so coming back never shows it again first.
+  const goneNow = useRef(gone);
+  goneNow.current = gone;
+  useEffect(
+    () => () => {
+      if (goneNow.current)
+        queries.removeQueries({
+          queryKey: prefixKey(client, {
+            method: "getWikiPage",
+            args: { workspaceId, pageId: slug },
+          } as KeyPrefix),
+        });
+    },
+    [client, queries, slug, workspaceId],
+  );
   useDocumentTitle(p?.title ?? t("index.title"));
 
   const onEvent = useCallback(
@@ -102,6 +158,9 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
       if (event.type === "rights") {
         setConflict(null);
         setDeleting(false);
+        // Who reads the page is the creator's or an admin's: a lock or a lost read takes it away. The
+        // close this person's own restriction causes leaves their save to finish.
+        if (!restrictingNow.current) setSharing(false);
       }
       if (event.type === "publish_failed" || event.type === "draft_save_failed")
         setFailure(
@@ -212,7 +271,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
   }, [kind, seekAnchor]);
 
   if (p === undefined) {
-    if (page.isError && isApiError(page.error) && page.error.status === 404)
+    if (gone || (page.isError && isApiError(page.error) && page.error.status === 404))
       return (
         <div className="page wiki">
           <h1 className="page__title">{t("page.missing.title")}</h1>
@@ -244,10 +303,12 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
   const mayDelete = !denied && (admin || (!p.locked && createdIt && !live.readOnly));
   // Offline, the live document still takes edits: they wait in it and sync on reconnect.
   // One rule for every write control: the page says this person may edit it, and the live document has
-  // not said otherwise since (a lock seen live, a revoked read).
-  const canWrite = p.editable && live.status !== "denied" && !live.readOnly;
+  // not said otherwise since (a lock seen live, a revoked read). While who reads it is being saved the
+  // controls rest too, but the writes already waiting their turn still go: they are finished first.
+  const mayEdit = p.editable && live.status !== "denied" && !live.readOnly;
+  const canWrite = mayEdit && !restricting;
   const editable = canWrite && source?.kind === "live";
-  mayWrite.current = canWrite;
+  mayWrite.current = mayEdit;
   const dirty = live.touched || p.draft?.dirty === true;
   const agentName = (id: string) => agents.data?.find((agent) => agent.id === id)?.name;
 
@@ -407,6 +468,11 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
                 <Icon icon={Lock} /> {t("page.locked")}
               </span>
             )}
+            {p.restricted && (
+              <span className="wiki-page__restricted">
+                <Icon icon={EyeOff} /> {accessSummary(p, t)}
+              </span>
+            )}
           </p>
         </div>
         <ul className="wiki-page__presence" aria-label={t("live.presence")}>
@@ -475,6 +541,21 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
                 }
               >
                 {p.locked ? t("page.unlock") : t("page.lock")}
+              </MenuItem>
+            )}
+            {p.accessEditable && !denied && (
+              <MenuItem icon={<Icon icon={Users} />} onSelect={() => setSharing(true)}>
+                {t("access.open")}
+              </MenuItem>
+            )}
+            {canWrite && (
+              <MenuItem
+                icon={<Icon icon={UserRoundCheck} />}
+                onSelect={() =>
+                  void writeMeta({ agentEdits: p.agentEdits === "propose" ? "direct" : "propose" })
+                }
+              >
+                {p.agentEdits === "propose" ? t("page.agentsEdit") : t("page.agentsPropose")}
               </MenuItem>
             )}
             {mayDelete && (
@@ -573,6 +654,34 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
               {t("draft.readOnlyBody")}
             </p>
           )}
+          <div className="wiki-doc__tools">
+            <Button
+              size="sm"
+              variant="ghost"
+              icon={<Icon icon={MessageSquarePlus} />}
+              disabled={picked === null}
+              onClick={() => {
+                if (picked === null) return;
+                // A comment holds to the published text. A passage written since isn't there yet (nor
+                // should it hold to the same words elsewhere), and one across Markdown marks (bold, a
+                // link) has no exact place in it: the person is told instead of making an orphan.
+                // Unpublished changes make the editor's text differ from the published one: the passage
+                // is sought in the published text read the editor's way, so formatting nearby is no
+                // difference.
+                const published = dirty ? editor.current?.textOf(p.body) : undefined;
+                const found = anchorFor(p.body, picked);
+                if (dirty && (published == null || !inPublished(published, picked)))
+                  setFailure(new Error(t("comments.publishFirst")));
+                else if (found.position === undefined) setFailure(new Error(t("comments.cantAnchor")));
+                else {
+                  setFailure(null);
+                  setAnchor(found);
+                }
+              }}
+            >
+              {t("comments.onSelection")}
+            </Button>
+          </div>
           {source !== null && source.kind === "static" && p.body.trim() === "" ? (
             <p className="wiki-doc__empty">{t("page.empty")}</p>
           ) : (
@@ -586,6 +695,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
                 label={t("page.editor", { title: p.title })}
                 pages={pages}
                 hooks={hooks}
+                onPick={setPicked}
                 onReady={seekAnchor}
               />
             )
@@ -597,8 +707,48 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
           agentName={agentName}
           onHeading={(text, nth) => editor.current?.scrollToHeading(text, nth)}
           onCreate={create}
-        />
+        >
+          <Annotations
+            workspaceId={workspaceId}
+            page={{ ...p, editable: canWrite }}
+            draft={anchor}
+            onDraftDone={() => setAnchor(null)}
+            onDecided={({ page: saved, applied, rejected, stale }) => {
+              // Only a change that landed made a version; a stale one is said not to have.
+              if (applied > 0)
+                toast.push({ tone: "success", title: t("proposals.decided", { version: saved.version }) });
+              if (stale > 0)
+                toast.push({ tone: "warning", title: t("proposals.staleCount", { count: stale }) });
+              if (applied === 0 && stale === 0 && rejected > 0)
+                toast.push({ tone: "info", title: t("proposals.rejected", { count: rejected }) });
+              void refresh();
+            }}
+          />
+        </SidePanel>
       </div>
+      {sharing && (
+        <AccessDialog
+          workspaceId={workspaceId}
+          page={p}
+          userId={userId}
+          beforeSave={async () => {
+            // The field writes already accepted go to the page's current address first.
+            await queue.current;
+            return settle(live.live);
+          }}
+          onBusy={setRestricting}
+          onClose={() => setSharing(false)}
+          onSaved={(saved) => {
+            void refresh();
+            // Restricting gives the page a new address, so the old one no longer tells it exists. This
+            // view stays as it is until the new address opens its own.
+            if (saved.slug !== slug) {
+              setMoving(true);
+              void go("wikiPage", { workspaceId, pageId: saved.slug }, { replace: true });
+            } else setSharing(false);
+          }}
+        />
+      )}
       {history && (
         <HistoryDialog
           workspaceId={workspaceId}

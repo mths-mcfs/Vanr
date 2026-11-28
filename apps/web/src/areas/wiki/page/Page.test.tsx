@@ -336,7 +336,8 @@ describe("a wiki page", () => {
   test("the outline's second heading of the same name scrolls to the second one", async () => {
     const server = newServer();
     const last = server.wiki.pages[0]?.versions.at(-1);
-    if (last !== undefined) last.body = "## Notes\n\nFirst.\n\n## Notes\n\nSecond.";
+    // "notes" in another case is the same heading to the editor: the count matches it the same way.
+    if (last !== undefined) last.body = "## Notes\n\nFirst.\n\n## notes\n\nSecond.";
     const hit: number[] = [];
     const original = HTMLElement.prototype.scrollIntoView;
     HTMLElement.prototype.scrollIntoView = function (this: HTMLElement) {
@@ -346,8 +347,10 @@ describe("a wiki page", () => {
       const app = await renderApp({ path: PAGE, server, signedInAs: "usr_ana" });
       await screen.findByRole("textbox", { name: "Text of Press checklist" });
       const outline = await screen.findByRole("navigation", { name: "On this page" });
-      await waitFor(() => expect(within(outline).getAllByRole("button", { name: "Notes" })).toHaveLength(2));
-      await app.user.click(within(outline).getAllByRole("button", { name: "Notes" })[1] as HTMLElement);
+      await waitFor(() =>
+        expect(within(outline).getAllByRole("button", { name: /^notes$/i })).toHaveLength(2),
+      );
+      await app.user.click(within(outline).getAllByRole("button", { name: /^notes$/i })[1] as HTMLElement);
       expect(hit).toEqual([1]);
     } finally {
       HTMLElement.prototype.scrollIntoView = original;

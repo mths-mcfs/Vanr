@@ -8,6 +8,7 @@ import {
   editorViewCtx,
   editorViewOptionsCtx,
   Editor as Milkdown,
+  parserCtx,
   rootCtx,
 } from "@milkdown/kit/core";
 import { BlockProvider, block } from "@milkdown/kit/plugin/block";
@@ -38,6 +39,11 @@ export type EditorHandle = {
    */
   scrollToHeading: (text: string, nth?: number) => boolean;
   focus: () => void;
+  /**
+   * Markdown as the editor's text, read with the editor's own parser and its blocks apart by a blank
+   * line, as a picked passage is reported; null while there is no editor.
+   */
+  textOf: (markdown: string) => string | null;
 };
 
 export type EditorSource = { kind: "live"; live: Live } | { kind: "static"; body: string };
@@ -49,9 +55,55 @@ type Props = {
   label: string;
   pages: readonly LinkCandidate[];
   hooks: Omit<EditorHooks, "trigger" | "menuKey" | "links">;
+  /** The passage selected now, with a little of the text around it (null: nothing selected). */
+  onPick?: (picked: Picked | null) => void;
   /** The editor is made and holds its document: the live one, or the published text read only. */
   onReady?: (kind: EditorSource["kind"]) => void;
 };
+
+export type Picked = { quote: string; before: string; after: string };
+
+/**
+ * A selection without the spaces at its ends, which go to the text around it so that the quote and its
+ * context still meet; null when only spaces were selected.
+ */
+export function trimPicked(raw: string, before: string, after: string): Picked | null {
+  const quote = raw.trim();
+  if (quote === "") return null;
+  const lead = raw.slice(0, raw.length - raw.trimStart().length);
+  const trail = raw.slice(raw.trimEnd().length);
+  return { quote, before: before + lead, after: trail + after };
+}
+
+const AROUND = 64;
+const BLOCKS = "\n\n";
+
+/** Tells the screen which passage is selected, for a comment on it. */
+const pickPlugin = (onPick: () => ((picked: Picked | null) => void) | undefined) =>
+  $prose(
+    () =>
+      new Plugin({
+        view: () => ({
+          update(view, previous) {
+            if (previous.selection.eq(view.state.selection) && previous.doc.eq(view.state.doc)) return;
+            const report = onPick();
+            if (report === undefined) return;
+            const { from, to, empty } = view.state.selection;
+            // Blocks are apart by a blank line, as in the Markdown, so a passage over two paragraphs is
+            // found in the published text.
+            const raw = empty ? "" : view.state.doc.textBetween(from, to, BLOCKS);
+            const size = view.state.doc.content.size;
+            report(
+              trimPicked(
+                raw,
+                view.state.doc.textBetween(Math.max(0, from - AROUND), from, BLOCKS),
+                view.state.doc.textBetween(to, Math.min(size, to + AROUND), BLOCKS),
+              ),
+            );
+          },
+        }),
+      }),
+  );
 
 type MenuItem =
   | { kind: "slash"; item: SlashItem; label: string; icon: LucideIcon }
@@ -195,7 +247,8 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(props, ref
       .use(block)
       .use(triggerPlugin(hooks))
       .use(wikiLinkInputRule)
-      .use(wikiLinkView(hooks));
+      .use(wikiLinkView(hooks))
+      .use(pickPlugin(() => latest.current.onPick));
     if (live !== null) editor.use(collab).use(agentBlocks(() => live.provider.awareness));
     void editor.create().then(() => {
       if (disposed) {
@@ -265,6 +318,14 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(props, ref
     },
     focus() {
       editorRef.current?.action((ctx) => ctx.get(editorViewCtx).focus());
+    },
+    textOf(markdown) {
+      let text: string | null = null;
+      editorRef.current?.action((ctx) => {
+        const doc = ctx.get(parserCtx)(markdown);
+        text = doc.textBetween(0, doc.content.size, BLOCKS);
+      });
+      return text;
     },
   }));
 
