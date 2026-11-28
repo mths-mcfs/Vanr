@@ -27,6 +27,8 @@ import { type Catalog, formatMessage, type ParamNames } from "../src/i18n/format
 import type { Locale } from "../src/i18n/locales.ts";
 import accountEn from "../src/messages/account/en.ts";
 import accountPt from "../src/messages/account/pt-BR.ts";
+import agentsEn from "../src/messages/agents/en.ts";
+import agentsPt from "../src/messages/agents/pt-BR.ts";
 import commonEn from "../src/messages/common/en.ts";
 import commonPt from "../src/messages/common/pt-BR.ts";
 import controlEn from "../src/messages/control/en.ts";
@@ -49,6 +51,7 @@ export { expect };
 const CATALOGS = {
   en: {
     account: accountEn,
+    agents: agentsEn,
     common: commonEn,
     control: controlEn,
     files: filesEn,
@@ -59,6 +62,7 @@ const CATALOGS = {
   },
   "pt-BR": {
     account: accountPt,
+    agents: agentsPt,
     common: commonPt,
     control: controlPt,
     files: filesPt,

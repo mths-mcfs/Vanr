@@ -5,7 +5,7 @@
 // settings, members' roles and storage, the inbox and its preferences, agents and their runs,
 // sessions by cookie, the server's side of the real-time
 // socket, and a way to force any state (an error, a held answer, a busy server, an ended session,
-// a dropped connection). The Drive and the search live in `fake-files.ts`, bases in `fake-bases.ts`, the wiki in `fake-wiki.ts`. It is never part of the
+// a dropped connection). The Drive and the search live in `fake-files.ts`, bases in `fake-bases.ts`, the wiki in `fake-wiki.ts`, the agents' team, profile, lab and skills in `fake-agents.ts`. It is never part of the
 // production build.
 import { endpoints, type FetchLike, type MethodName, type SocketLike } from "@vanr/client";
 import { type FakeServer as ClientFake, createFakeServer, FakeSocket } from "@vanr/client/testing";
@@ -13,6 +13,7 @@ import type * as T from "@vanr/contract";
 import { can } from "@vanr/contract";
 import { z } from "zod";
 import { AUTH_ROUTES, type AuthMethod } from "../src/api/auth.ts";
+import { FakeAgents } from "./fake-agents.ts";
 import { FakeBases } from "./fake-bases.ts";
 import { FakeControl } from "./fake-control.ts";
 import { FakeFiles } from "./fake-files.ts";
@@ -284,6 +285,7 @@ export class FakeServer {
   readonly bases: FakeBases;
   readonly wiki: FakeWiki;
   readonly control: FakeControl;
+  readonly agentWork: FakeAgents;
   private readonly fileOperations: ReturnType<FakeFiles["operations"]>;
   private readonly accounts = new Map<string, Account>();
   private readonly now: () => Date;
@@ -329,12 +331,37 @@ export class FakeServer {
       messages: () => this.state.messages,
       emitTo: (workspaceId, event, channelId) => this.emit(workspaceId, event, channelId),
     });
+    // The lab's cases and test runs are one store with the control center's (a proposal's evaluation
+    // runs the same cases): the agents' fake reads and writes the control fake's lists.
+    this.agentWork = new FakeAgents({
+      ...host,
+      agents: () => this.agents,
+      people: (workspaceId) => this.state.members.filter((member) => member.workspaceId === workspaceId),
+      busy: (agentId) => this.runs.some((run) => run.agentId === agentId),
+      cases: (agentId) => {
+        let cases = this.control.testCases.get(agentId);
+        if (cases === undefined) {
+          cases = [];
+          this.control.testCases.set(agentId, cases);
+        }
+        return cases;
+      },
+      evals: () => this.control.evals,
+    });
     this.fileOperations = {
       ...this.files.operations(),
       ...this.bases.operations(),
       ...this.wiki.operations(),
       ...this.control.operations(),
+      ...this.agentWork.operations(),
     };
+    // A proposal's evaluation stays the control fake's; the lab's own run (a candidate text) is the agents'.
+    const proposalEval = this.control.operations().createAgentEval;
+    const labEval = this.fileOperations.createAgentEval;
+    if (proposalEval !== undefined && labEval !== undefined) {
+      this.fileOperations.createAgentEval = (params, session, raw) =>
+        params.proposalId !== undefined ? proposalEval(params, session) : labEval(params, session, raw);
+    }
     this.seed(options.seed ?? "team");
   }
 
@@ -360,6 +387,7 @@ export class FakeServer {
     this.control.questions = [];
     this.control.testCases = new Map();
     this.control.evals = [];
+    this.agentWork.clear();
     if (name === "empty") return;
     const inDays = (days: number) => new Date(this.now().getTime() + days * DAY_MS);
     const people: [string, string, string][] = [
@@ -427,6 +455,7 @@ export class FakeServer {
     this.files.seed();
     this.bases.seed();
     this.wiki.seed();
+    this.agentWork.seed();
     this.agents = [
       agent("agt_scout", "workspace_birchwood", "Scout", "usr_ana"),
       agent("agt_ledger", "workspace_birchwood", "Ledger", "usr_ana"),
@@ -1625,8 +1654,9 @@ export class FakeServer {
     listAgents: (params, session) => {
       const scope = this.scope(params, session);
       if ("status" in scope) return scope;
+      // As on the server: an archived agent leaves the list (its row and its handle stay).
       const agents: T.Agent[] = this.agents
-        .filter((candidate) => candidate.workspaceId === scope.workspaceId)
+        .filter((candidate) => candidate.workspaceId === scope.workspaceId && candidate.archivedAt === null)
         .map(({ workspaceId: _workspace, ...rest }) => ({
           ...rest,
           busy: this.runs.some((candidate) => candidate.agentId === rest.id),

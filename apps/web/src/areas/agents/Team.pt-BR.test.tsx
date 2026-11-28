@@ -3,19 +3,27 @@ import { expect, test } from "bun:test";
 import { screen, within } from "@testing-library/react";
 import { renderApp } from "../../../test/app.tsx";
 
-test("the agents of a workspace, in Portuguese", async () => {
-  await renderApp({
+test("the team, in Portuguese", async () => {
+  const app = await renderApp({
     path: "/workspace/workspace_birchwood/agents",
     signedInAs: "usr_ana",
     languages: ["pt-BR"],
   });
   await screen.findByRole("heading", { level: 1, name: "Agentes" });
-  expect(await screen.findByText("3 agentes neste espaço de trabalho.")).toBeDefined();
-  const rows = within(screen.getByRole("list", { name: "Agentes" })).getAllByRole("listitem");
+  expect(screen.getByText("3 agentes neste espaço de trabalho.")).toBeDefined();
+  const rows = within(screen.getByRole("list", { name: "Agentes de Ana Beatriz Souza" })).getAllByRole(
+    "listitem",
+  );
   expect(rows.map((row) => row.textContent)).toEqual([
     "Scout@scoutEm atividade",
     "Ledger@ledgerEm atividade",
-    "Tally@tallyParado",
   ]);
+  expect(screen.getByRole("list", { name: "Delegações de hoje" }).textContent).toContain(
+    "Scout delegou a Ledger",
+  );
+  await app.user.click(screen.getByRole("button", { name: "Tally" }));
+  const card = screen.getByRole("region", { name: "Tally" });
+  expect(within(card).getByRole("link", { name: "Abrir perfil" })).toBeDefined();
+  expect(within(card).getByRole("link", { name: "Conversar com Tally" })).toBeDefined();
   expect(document.title).toBe("Agentes | Birchwood Labs | Vanr");
 });
