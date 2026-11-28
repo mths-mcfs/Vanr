@@ -235,9 +235,9 @@ export interface ApprovalRequest {
   reviewed: boolean;
   /**
    * The person edited the input: validates it with the tool's schema and plans again. Returns the new effect
-   * (preview and hash) or the error, which the route returns as 400.
+   * (preview and hash) or the error, which the route returns as 400 (with `code` when it is not a plain input error).
    */
-  revise(edits: Record<string, unknown>): Promise<RevisedApproval | { error: string }>;
+  revise(edits: Record<string, unknown>): Promise<RevisedApproval | { error: string; code?: string }>;
 }
 
 export interface RevisedApproval {
@@ -1284,7 +1284,7 @@ async function revise(
   editable: string[],
   edits: Record<string, unknown>,
   granted: Map<string, Granted>,
-): Promise<RevisedApproval | { error: string }> {
+): Promise<RevisedApproval | { error: string; code?: string }> {
   const keys = Object.keys(edits);
   if (keys.length === 0) return { error: "Nothing to change" };
   const bad = keys.find((k) => !editable.includes(k));
@@ -1296,6 +1296,13 @@ async function revise(
     const plan = await planOf(ctx, tool, parsed.data);
     // The edit can change what the rule would cover: the gate decides again whether it can be remembered.
     const again = gate(ctx.risk, gateCallOf(tool.name, plan, parsed.data));
+    // An edit the gate would block outright (say, an address outside the allowlist after the run read outside
+    // content) is refused: approving it would carry out what the gate denies. The request stays as it was.
+    if (again.kind === "deny")
+      return {
+        error: `The edited request is blocked (${again.reason}); it stays as it was`,
+        code: "approval.edit_blocked",
+      };
     const hash = hashOf(tool.name, plan, parsed.data);
     granted.set(hash, grantOf(plan));
     return {

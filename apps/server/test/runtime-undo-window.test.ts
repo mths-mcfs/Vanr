@@ -1,5 +1,5 @@
 // The receipts a live run writes inside a transaction of its own (the engine's fake model calling the tool):
-// an approved post with the undo window on (the send queue's transaction), a reminder and an issue comment
+// an approved post with the undo window on (the send queue's transaction), a reminder, an issue comment and base rows
 // (each with its receipt). The runtime's `recordAction` must write in the transaction it is given: on the
 // single connection of PGlite a write beside it waits on it forever. The rest of the tests run with the
 // window off (harness.ts), so this file is the one that takes the runtime through `queueSend`.
@@ -113,6 +113,18 @@ test(
     expect(issue.status).toBe(201);
     await ask(`[[tool:comment_issue {"number":${issue.body.number},"text":"Cleared the tray."}]]`);
     expect(await receipts()).toEqual(["issue_commented"]);
+  },
+  SERVER_TEST_MS,
+);
+
+test(
+  "base rows and their receipt are written together",
+  async () => {
+    const { ana, w, ask, receipts } = await withLia("rows");
+    const base = await call(ana, "POST", `${w}/bases`, { title: "Orders", titleName: "Name" });
+    expect(base.status).toBe(201);
+    await ask('[[tool:upsert_base_rows {"base":"Orders","rows":[{"values":{"Name":"Paper"}}]}]]');
+    expect(await receipts()).toEqual(["base_rows_upserted"]);
   },
   SERVER_TEST_MS,
 );

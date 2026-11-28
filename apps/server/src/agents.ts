@@ -14,6 +14,7 @@ import { type Db, schema } from "@vanr/engine/db";
 import { contentSha256 } from "@vanr/engine/memory";
 import type { BudgetScope } from "@vanr/engine/usage";
 import { and, count, eq, gte, inArray, isNull, notInArray, or, sql, sum } from "drizzle-orm";
+import { readableChannelsSql } from "./channels";
 import type { WorkspaceMember } from "./context";
 import { badRequest, forbidden, notFound } from "./http";
 import { type Talker, withPlanOwner } from "./runners/plans";
@@ -262,11 +263,21 @@ export async function toAgentDetail(
     budgetInherited: row.budgetPerMonthUsd === null,
     credentialId: row.credentialId,
     channels: await agentChannels(db, row.id, input.viewer),
+    // Pending requests the viewer may see, as the approvals list shows them: the agent's owner sees all of them,
+    // anyone else only those of conversations they read (and the ones asked outside any conversation).
     queuedApprovals: (
       await db
         .select({ id: schema.approvals.id })
         .from(schema.approvals)
-        .where(and(eq(schema.approvals.agentId, row.id), eq(schema.approvals.status, "pending")))
+        .where(
+          and(
+            eq(schema.approvals.agentId, row.id),
+            eq(schema.approvals.status, "pending"),
+            row.ownerUserId === input.viewer.userId
+              ? undefined
+              : sql`(${schema.approvals.channelId} is null or ${schema.approvals.channelId} in ${readableChannelsSql({ workspaceId: row.workspaceId, userId: input.viewer.userId })})`,
+          ),
+        )
     ).length,
     monthRuns: usage.runs,
     monthTokens: usage.tokens,
