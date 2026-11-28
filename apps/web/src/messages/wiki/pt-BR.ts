@@ -145,6 +145,7 @@ export default {
   "proposals.accept": "Aceitar",
   "proposals.reject": "Recusar",
   "proposals.acceptAll": "Aceitar todas",
+  "proposals.noneLeft": "Nenhuma proposta para revisar",
   "proposals.decided": "Salva como versão {version}.",
   "proposals.rejected": { one: "Mudança recusada.", other: "{count} mudanças recusadas." },
   "proposals.staleCount": {

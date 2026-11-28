@@ -236,7 +236,7 @@ export function Annotations({ workspaceId, page, draft, onDraftDone, onDecided }
       {shown.length > 0 && (
         <section className="wiki-side__section" aria-labelledby="wiki-proposals">
           <h2 id="wiki-proposals" className="wiki-side__heading">
-            {t("proposals.title", { count: pending.length })}
+            {pending.length > 0 ? t("proposals.title", { count: pending.length }) : t("proposals.noneLeft")}
           </h2>
           <ul className="wiki-notes">{shown.map(proposalView)}</ul>
         </section>
@@ -386,18 +386,20 @@ export function Annotations({ workspaceId, page, draft, onDraftDone, onDecided }
  * whose surroundings match the editor's best, with up to 32 characters before and after it.
  */
 /**
- * Whether a picked passage stands in the published Markdown as it does in the editor: some occurrence
- * of it has the same text on both sides, as far as the editor gave it. Text not published yet doesn't.
+ * Whether a picked passage stands in the published text as it does in the editor: some occurrence of
+ * it has all of the editor's text on both sides. `text` is the published page as the editor's text
+ * (`EditorHandle.textOf`), not its Markdown, so formatting nearby is no difference. Where the published
+ * text has less on a side than the editor gave, that occurrence is another passage: text not published
+ * yet never matches the same words elsewhere.
  */
-export function inPublished(body: string, picked: { quote: string; before: string; after: string }): boolean {
+export function inPublished(text: string, picked: { quote: string; before: string; after: string }): boolean {
   const { quote, before, after } = picked;
-  for (let at = body.indexOf(quote); at !== -1; at = body.indexOf(quote, at + 1)) {
+  for (let at = text.indexOf(quote); at !== -1; at = text.indexOf(quote, at + 1)) {
     const end = at + quote.length;
-    const left = Math.min(before.length, at);
-    const right = Math.min(after.length, body.length - end);
+    // Less text on a side than the editor gave makes a shorter slice, never equal to it.
     if (
-      body.slice(at - left, at) === before.slice(before.length - left) &&
-      body.slice(end, end + right) === after.slice(0, right)
+      text.slice(Math.max(0, at - before.length), at) === before &&
+      text.slice(end, end + after.length) === after
     )
       return true;
   }

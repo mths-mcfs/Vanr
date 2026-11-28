@@ -8,6 +8,7 @@ import {
   editorViewCtx,
   editorViewOptionsCtx,
   Editor as Milkdown,
+  parserCtx,
   rootCtx,
 } from "@milkdown/kit/core";
 import { BlockProvider, block } from "@milkdown/kit/plugin/block";
@@ -38,6 +39,11 @@ export type EditorHandle = {
    */
   scrollToHeading: (text: string, nth?: number) => boolean;
   focus: () => void;
+  /**
+   * Markdown as the editor's text, read with the editor's own parser and its blocks apart by a blank
+   * line, as a picked passage is reported; null while there is no editor.
+   */
+  textOf: (markdown: string) => string | null;
 };
 
 export type EditorSource = { kind: "live"; live: Live } | { kind: "static"; body: string };
@@ -312,6 +318,14 @@ export const Editor = forwardRef<EditorHandle, Props>(function Editor(props, ref
     },
     focus() {
       editorRef.current?.action((ctx) => ctx.get(editorViewCtx).focus());
+    },
+    textOf(markdown) {
+      let text: string | null = null;
+      editorRef.current?.action((ctx) => {
+        const doc = ctx.get(parserCtx)(markdown);
+        text = doc.textBetween(0, doc.content.size, BLOCKS);
+      });
+      return text;
     },
   }));
 

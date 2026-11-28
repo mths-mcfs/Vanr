@@ -349,8 +349,59 @@ test("comment on a passage across formatting: the person is told instead of leav
     window.getSelection()?.setBaseAndExtent(start, from, end, to);
   });
   await page.getByRole("button", { name: t("wiki", "comments.onSelection") }).click();
-  await expect(page.getByRole("alert").filter({ hasText: t("wiki", "comments.cantAnchor") })).toBeVisible();
+  const refused = page.getByRole("alert").filter({ hasText: t("wiki", "comments.cantAnchor") });
+  await expect(refused).toBeVisible();
   await expect(page.getByRole("textbox", { name: t("wiki", "comments.new") })).toHaveCount(0);
+
+  // A plain passage then opens the comment, and the refusal goes.
+  await pick(editor, "Bring the", "Bring the");
+  await page.getByRole("button", { name: t("wiki", "comments.onSelection") }).click();
+  await expect(page.getByRole("textbox", { name: t("wiki", "comments.new") })).toBeVisible();
+  expect(await refused.count()).toBe(0);
+});
+
+test("comment on published text near formatting while the page has unpublished changes: it holds", async ({
+  page,
+  t,
+  seedUser,
+  signIn,
+  apiAs,
+}) => {
+  const owner = await seedUser({ workspace: "Harbour Café" });
+  const title = "Kitchen";
+  const slug = await createPage(await apiAs(owner), owner, {
+    title,
+    body: "# Kitchen\n\nThe **oven** is hot. See [[Ink suppliers]] for more.\n\n## Closing\n\n- Wipe the bench before you leave.\n\nThe deliveries come on Mondays and Thursdays, before the doors open at nine.",
+  });
+  await signIn(owner);
+  await page.goto(`/workspace/${owner.workspace.id}/wiki/${slug}`);
+  await expect(
+    page.getByRole("status").filter({ hasText: t("wiki", "draft.published", { version: 1 }) }),
+  ).toBeVisible();
+  const editor = page.getByRole("textbox", { name: t("wiki", "page.editor", { title }) });
+  // The new line goes at the very end, far from the passage picked below.
+  await expect(editor).toHaveAttribute("contenteditable", "true");
+  await editor.click();
+  await editor.evaluate((element) => {
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    let last: Text | null = null;
+    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) last = node as Text;
+    if (last !== null) window.getSelection()?.setBaseAndExtent(last, last.length, last, last.length);
+  });
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("Lock the door.");
+  await expect(page.getByRole("status").filter({ hasText: t("wiki", "draft.unpublished") })).toBeVisible();
+  await expect(editor.getByRole("paragraph").last()).toHaveText("Lock the door.");
+
+  await pick(editor, "is hot.", "is hot.");
+  await page.getByRole("button", { name: t("wiki", "comments.onSelection") }).click();
+  await expect(page.getByRole("textbox", { name: t("wiki", "comments.new") })).toBeVisible();
+  expect(
+    await page
+      .getByRole("alert")
+      .filter({ hasText: t("wiki", "comments.publishFirst") })
+      .count(),
+  ).toBe(0);
 });
 
 test("comment on a passage while another comment is still sending: the new one stays open", async ({

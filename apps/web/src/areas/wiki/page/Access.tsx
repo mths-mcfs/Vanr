@@ -55,7 +55,8 @@ export function AccessDialog({
   // no channel is offered until they are known.
   const dms = useApiQuery("getDms", { workspaceId });
   const direct = new Set((dms.data ?? []).map((dm) => dm.channelId));
-  const dmsKnown = dms.data !== undefined;
+  // Known only from an answer that is current: after a failed read the old list may miss a new one.
+  const dmsKnown = dms.data !== undefined && !dms.isError;
   const current = page.access;
   const [kind, setKind] = useState<Kind>(current === null ? "workspace" : current.kind);
   const [people, setPeople] = useState<string[]>(

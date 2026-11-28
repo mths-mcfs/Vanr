@@ -215,6 +215,8 @@ describe("access, comments and proposals", () => {
       await screen.findByText("A change no longer applies to the page, so it was not saved."),
     ).toBeDefined();
     expect(await within(panel).findByText("No longer applies")).toBeDefined();
+    // Nothing is left to review: the heading says so, not "0 proposals".
+    expect(within(panel).getByRole("region", { name: "No proposals left to review" })).toBeDefined();
     expect(screen.queryByText(/^Saved as version/) === null).toBe(true);
     expect(checklist?.versions.length).toBe(2);
   });
@@ -397,6 +399,15 @@ describe("access, comments and proposals", () => {
       false,
     );
     expect(inPublished(body, { quote: "oven", before: "The ", after: " is hot." })).toBe(true);
+  });
+
+  test("nor for the same words at the very end or start of the published text", () => {
+    // Published "Clean the oven"; the draft adds "Clean the oven again on Friday." and "oven" is picked there.
+    const end = { quote: "oven", before: "Clean the oven\n\nClean the ", after: " again on Friday." };
+    expect(inPublished("Clean the oven", end)).toBe(false);
+    // Published "Oven." then "More."; the draft adds "Check Oven." and "Oven" is picked there.
+    const start = { quote: "Oven", before: "Oven.\n\nMore.\n\nCheck ", after: "." };
+    expect(inPublished("Oven.\n\nMore.", start)).toBe(false);
   });
 
   test("a picked passage anchors where its surroundings match in the published text", () => {

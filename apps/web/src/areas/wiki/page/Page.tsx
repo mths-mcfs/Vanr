@@ -111,12 +111,19 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
   const reachedAnchor = useRef<string | null>(null);
   // Not found or not readable any more (a restriction, a trash): what was read of it before leaves the
   // screen and the cache, so no title, text, comment or button of it stays for who lost it.
-  const gone =
+  // Once lost, it stays lost until the server gives the page again: a later failed read (a dropped
+  // connection, a 500) is no reason to show what was read before.
+  const lostSince = useRef<number | null>(null);
+  if (
     !restricting &&
     !moving &&
     page.isError &&
     isApiError(page.error) &&
-    (page.error.status === 404 || page.error.status === 403);
+    (page.error.status === 404 || page.error.status === 403)
+  )
+    lostSince.current ??= page.errorUpdatedAt;
+  if (lostSince.current !== null && page.dataUpdatedAt > lostSince.current) lostSince.current = null;
+  const gone = lostSince.current !== null && !restricting && !moving;
   const p = gone ? undefined : page.data;
   const queries = useQueryClient();
   const client = useVanrClient();
@@ -264,7 +271,7 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
   }, [kind, seekAnchor]);
 
   if (p === undefined) {
-    if (page.isError && isApiError(page.error) && page.error.status === 404)
+    if (gone || (page.isError && isApiError(page.error) && page.error.status === 404))
       return (
         <div className="page wiki">
           <h1 className="page__title">{t("page.missing.title")}</h1>
@@ -658,10 +665,18 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
                 // A comment holds to the published text. A passage written since isn't there yet (nor
                 // should it hold to the same words elsewhere), and one across Markdown marks (bold, a
                 // link) has no exact place in it: the person is told instead of making an orphan.
+                // Unpublished changes make the editor's text differ from the published one: the passage
+                // is sought in the published text read the editor's way, so formatting nearby is no
+                // difference.
+                const published = dirty ? editor.current?.textOf(p.body) : undefined;
                 const found = anchorFor(p.body, picked);
-                if (dirty && !inPublished(p.body, picked)) setFailure(new Error(t("comments.publishFirst")));
+                if (dirty && (published == null || !inPublished(published, picked)))
+                  setFailure(new Error(t("comments.publishFirst")));
                 else if (found.position === undefined) setFailure(new Error(t("comments.cantAnchor")));
-                else setAnchor(found);
+                else {
+                  setFailure(null);
+                  setAnchor(found);
+                }
               }}
             >
               {t("comments.onSelection")}

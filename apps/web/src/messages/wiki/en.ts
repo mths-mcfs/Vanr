@@ -140,6 +140,7 @@ export default {
   "proposals.accept": "Accept",
   "proposals.reject": "Reject",
   "proposals.acceptAll": "Accept all",
+  "proposals.noneLeft": "No proposals left to review",
   "proposals.decided": "Saved as version {version}.",
   "proposals.rejected": { one: "Change rejected.", other: "{count} changes rejected." },
   "proposals.staleCount": {

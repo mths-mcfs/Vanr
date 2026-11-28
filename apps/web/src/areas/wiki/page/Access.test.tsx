@@ -273,4 +273,66 @@ describe("losing a page", () => {
     expect(decided).toBe(403);
     expect(checklist.versions.length).toBe(versions);
   });
+
+  test("a page found missing stays missing through a later failed read, until the server gives it again", async () => {
+    resetLive();
+    const server = newServer();
+    const checklist = server.wiki.pages[0];
+    if (checklist === undefined) throw new Error("no checklist");
+    const app = await renderApp({
+      path: `${WIKI}/press-checklist`,
+      signedInAs: "usr_iris",
+      server,
+      wikiSocket: live,
+    });
+    await waitFor(() => expect(status()).toBe("Version 2 published"));
+    checklist.access = { kind: "private", userIds: ["usr_ana"], agentIds: [] };
+    checklist.slug = "press-checklist-restricted";
+    await act(async () => FakeCollabSocket.instances[0]?.serverClose(4403, "access-revoked"));
+    expect(await screen.findByText("No page here")).toBeDefined();
+    const sockets = FakeCollabSocket.instances.length;
+
+    // A reconnect reads everything again, and the server fails this time.
+    server.force("getWikiPage", { kind: "error", status: 500, code: "internal" }, 50);
+    await act(async () => {
+      await app.runtime.queryClient.invalidateQueries();
+    });
+    await waitFor(() => expect(app.runtime.queryClient.isFetching()).toBe(0));
+    expect({
+      missing: screen.queryByText("No page here") !== null,
+      title: screen.queryByRole("textbox", { name: "Page title" }) !== null,
+      text: document.body.textContent?.includes("Clean the rollers") === true,
+      sockets: FakeCollabSocket.instances.length,
+    }).toEqual({ missing: true, title: false, text: false, sockets });
+
+    // Given back (the restriction lifted at the same address), it shows again.
+    server.unforce("getWikiPage");
+    checklist.access = null;
+    checklist.slug = "press-checklist";
+    await act(async () => {
+      await app.runtime.queryClient.invalidateQueries();
+    });
+    expect(await screen.findByRole("textbox", { name: "Page title" })).toBeDefined();
+  });
+
+  test("no channel is offered while the direct messages can't be read again", async () => {
+    const server = newServer();
+    const app = await renderApp({ path: `${WIKI}/ink-suppliers`, signedInAs: "usr_ana", server });
+    await screen.findByRole("textbox", { name: "Page title" });
+    await app.user.click(screen.getByRole("button", { name: "Page actions" }));
+    await app.user.click(await screen.findByRole("menuitem", { name: "Who reads it…" }));
+    const dialog = await screen.findByRole("dialog", { name: "Who reads Ink suppliers" });
+    await app.user.click(within(dialog).getByRole("radio", { name: "Whoever reads a channel" }));
+    const picker = within(dialog).getByRole("combobox", { name: "Pick a channel" });
+    await waitFor(() => expect(picker.hasAttribute("disabled")).toBe(false));
+    // A read of them again fails: the list kept from before may miss a new one.
+    server.force("getDms", { kind: "error", status: 500, code: "internal" }, 50);
+    await act(async () => {
+      await app.runtime.queryClient.invalidateQueries();
+    });
+    expect(
+      await within(dialog).findByText("The channels could not be checked, so none can be picked yet."),
+    ).toBeDefined();
+    expect(picker.hasAttribute("disabled")).toBe(true);
+  });
 });
