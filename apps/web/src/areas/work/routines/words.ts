@@ -17,24 +17,24 @@ export function useTriggerText(): (trigger: RoutineTrigger) => string {
       case "schedule":
         return describeRule(trigger.rule, words, locale);
       case "once":
-        return t("routines.when.once", { when: when.format(new Date(trigger.at)) });
+        return t("recur.when.once", { when: when.format(new Date(trigger.at)) });
       case "event": {
         const known = ROUTINE_EVENTS.find((event) => event === trigger.event);
-        return t("routines.when.event", {
-          event: known === undefined ? trigger.event : t(`routines.event.${known}`),
+        return t("recur.when.event", {
+          event: known === undefined ? trigger.event : t(`recur.event.${known}`),
         });
       }
       case "email":
         return t(
           trigger.status === undefined || trigger.status === "active"
-            ? "routines.when.email"
-            : "routines.when.emailDown",
+            ? "recur.when.email"
+            : "recur.when.emailDown",
           {
             folder: trigger.folder,
           },
         );
       default:
-        return t("routines.when.webhook");
+        return t("recur.when.webhook");
     }
   };
 }
@@ -48,9 +48,9 @@ export function useTargetText(): (
     if (target.kind === "channel") {
       const name = channelName(target.channelId);
       return name === undefined
-        ? t("routines.where.channelHidden")
-        : t("routines.where.channel", { channel: name });
+        ? t("recur.where.channelHidden")
+        : t("recur.where.channel", { channel: name });
     }
-    return t(`routines.where.${target.kind}`);
+    return t(`recur.where.${target.kind}`);
   };
 }

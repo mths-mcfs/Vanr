@@ -53,11 +53,11 @@ const NUMBERS = [
   { key: "pauseAfterFailures", min: 0, max: 20, step: 1 },
 ] as const;
 const NUMBER_LABEL = {
-  maxCostUsd: "routines.form.maxCost",
-  maxSteps: "routines.form.maxSteps",
-  maxMinutes: "routines.form.maxMinutes",
-  retries: "routines.form.retries",
-  pauseAfterFailures: "routines.form.pauseAfter",
+  maxCostUsd: "recur.form.maxCost",
+  maxSteps: "recur.form.maxSteps",
+  maxMinutes: "recur.form.maxMinutes",
+  retries: "recur.form.retries",
+  pauseAfterFailures: "recur.form.pauseAfter",
 } as const;
 
 function useSettled(value: string, ms: number): string {
@@ -167,7 +167,7 @@ export function NewRoutineDialog({
       },
       {
         onSuccess: (routine) => {
-          outcome.done(t("routines.form.created", { name: routine.name }));
+          outcome.done(t("recur.form.created", { name: routine.name }));
           onClose();
         },
       },
@@ -176,9 +176,9 @@ export function NewRoutineDialog({
 
   const scheduleHint =
     kind !== "schedule" || settled === "" || parsed.isPending || parsed.data === undefined
-      ? t("routines.form.scheduleHint")
+      ? t("recur.form.scheduleHint")
       : parsed.data.ok && parsed.data.trigger !== null
-        ? t("routines.form.scheduleNext", {
+        ? t("recur.form.scheduleNext", {
             text: triggerText(parsed.data.trigger),
             when:
               parsed.data.upcomingFireTimes[0] === undefined
@@ -194,7 +194,7 @@ export function NewRoutineDialog({
     <Dialog open onOpenChange={(next) => !next && onClose()}>
       <DialogContent
         size="lg"
-        title={t("routines.new")}
+        title={t("recur.new")}
         closeLabel={common("action.close")}
         footer={
           <>
@@ -208,7 +208,7 @@ export function NewRoutineDialog({
               disabled={!ready}
               loading={create.isPending}
             >
-              {t("routines.form.create")}
+              {t("recur.form.create")}
             </Button>
           </>
         }
@@ -222,7 +222,7 @@ export function NewRoutineDialog({
           }}
         >
           <div className="work-form__row">
-            <Field label={t("routines.form.name")} required>
+            <Field label={t("recur.form.name")} required>
               <Input
                 value={name}
                 maxLength={ROUTINE_NAME_MAX}
@@ -230,7 +230,7 @@ export function NewRoutineDialog({
                 onChange={(change) => setName(change.target.value)}
               />
             </Field>
-            <Field label={t("routines.form.agent")}>
+            <Field label={t("recur.form.agent")}>
               <Select
                 value={agentId}
                 onValueChange={(value) => {
@@ -246,7 +246,7 @@ export function NewRoutineDialog({
               </Select>
             </Field>
           </div>
-          <Field label={t("routines.form.instruction")} hint={t("routines.form.instructionHint")} required>
+          <Field label={t("recur.form.instruction")} hint={t("recur.form.instructionHint")} required>
             <Textarea
               rows={4}
               value={prompt}
@@ -254,23 +254,23 @@ export function NewRoutineDialog({
               onChange={(change) => setPrompt(change.target.value)}
             />
           </Field>
-          <Field label={t("routines.form.trigger")}>
+          <Field label={t("recur.form.trigger")}>
             <Select
               value={kind}
               onValueChange={(value) => setKind(KINDS.find((each) => each === value) ?? "schedule")}
             >
               {KINDS.map((each) => (
                 <SelectItem key={each} value={each}>
-                  {t(`routines.form.trigger.${each}`)}
+                  {t(`recur.form.trigger.${each}`)}
                 </SelectItem>
               ))}
             </Select>
           </Field>
           {kind === "schedule" && (
             <Field
-              label={t("routines.form.schedule")}
+              label={t("recur.form.schedule")}
               {...(scheduleHint !== undefined && { hint: scheduleHint })}
-              {...(scheduleWrong && { error: t("routines.form.scheduleWrong") })}
+              {...(scheduleWrong && { error: t("recur.form.scheduleWrong") })}
             >
               <Input
                 value={phrase}
@@ -281,18 +281,18 @@ export function NewRoutineDialog({
           )}
           {scheduleFailed && (
             <Callout tone="danger" role="alert">
-              {t("routines.form.scheduleFailed")}{" "}
+              {t("recur.form.scheduleFailed")}{" "}
               <Button size="sm" variant="ghost" onClick={() => void parsed.refetch()}>
                 {common("action.retry")}
               </Button>
             </Callout>
           )}
           {kind === "event" && (
-            <Field label={t("routines.form.event")}>
+            <Field label={t("recur.form.event")}>
               <Select value={event} onValueChange={setEvent}>
                 {ROUTINE_EVENTS.map((each) => (
                   <SelectItem key={each} value={each}>
-                    {t(`routines.event.${each}`)}
+                    {t(`recur.event.${each}`)}
                   </SelectItem>
                 ))}
               </Select>
@@ -300,11 +300,11 @@ export function NewRoutineDialog({
           )}
           {kind === "email" &&
             (readable.length === 0 ? (
-              <p className="work-note">{t("routines.form.noMailbox")}</p>
+              <p className="work-note">{t("recur.form.noMailbox")}</p>
             ) : (
               <>
                 <div className="work-form__row">
-                  <Field label={t("routines.form.mailbox")}>
+                  <Field label={t("recur.form.mailbox")}>
                     <Select value={accountId} onValueChange={setAccountId}>
                       {readable.map((box) => (
                         <SelectItem key={box.accountId} value={box.accountId}>
@@ -313,30 +313,30 @@ export function NewRoutineDialog({
                       ))}
                     </Select>
                   </Field>
-                  <Field label={t("routines.form.folder")}>
+                  <Field label={t("recur.form.folder")}>
                     <Input value={folder} onChange={(change) => setFolder(change.target.value)} />
                   </Field>
                 </div>
-                <Field label={t("routines.form.from")} hint={t("routines.form.fromHint")}>
+                <Field label={t("recur.form.from")} hint={t("recur.form.fromHint")}>
                   <Input value={from} onChange={(change) => setFrom(change.target.value)} />
                 </Field>
               </>
             ))}
           <div className="work-form__row">
-            <Field label={t("routines.form.target")}>
+            <Field label={t("recur.form.target")}>
               <Select
                 value={targetKind}
                 onValueChange={(value) => setTargetKind(TARGETS.find((each) => each === value) ?? "dm")}
               >
                 {TARGETS.map((each) => (
                   <SelectItem key={each} value={each}>
-                    {each === "channel" ? t("routines.form.channel") : t(`routines.where.${each}`)}
+                    {each === "channel" ? t("recur.form.channel") : t(`recur.where.${each}`)}
                   </SelectItem>
                 ))}
               </Select>
             </Field>
             {targetKind === "channel" && (
-              <Field label={t("routines.form.channel")}>
+              <Field label={t("recur.form.channel")}>
                 <Select value={channelId} onValueChange={setChannelId}>
                   {channels.map((channel) => (
                     <SelectItem key={channel.id} value={channel.id}>
@@ -348,7 +348,7 @@ export function NewRoutineDialog({
             )}
           </div>
           <details className="work-limits">
-            <summary>{t("routines.form.limits")}</summary>
+            <summary>{t("recur.form.limits")}</summary>
             <div className="work-form__row">
               {NUMBERS.map((each) => (
                 <Field key={each.key} label={t(NUMBER_LABEL[each.key])}>
@@ -367,33 +367,33 @@ export function NewRoutineDialog({
                   />
                 </Field>
               ))}
-              <Field label={t("routines.form.missed")}>
+              <Field label={t("recur.form.missed")}>
                 <Select
                   value={policy.missed}
                   onValueChange={(value) =>
                     setPolicy({ ...policy, missed: value === "skip" ? "skip" : "once" })
                   }
                 >
-                  <SelectItem value="once">{t("routines.form.missed.once")}</SelectItem>
-                  <SelectItem value="skip">{t("routines.form.missed.skip")}</SelectItem>
+                  <SelectItem value="once">{t("recur.form.missed.once")}</SelectItem>
+                  <SelectItem value="skip">{t("recur.form.missed.skip")}</SelectItem>
                 </Select>
               </Field>
-              <Field label={t("routines.form.overlap")}>
+              <Field label={t("recur.form.overlap")}>
                 <Select
                   value={policy.overlap}
                   onValueChange={(value) =>
                     setPolicy({ ...policy, overlap: value === "queue" ? "queue" : "skip" })
                   }
                 >
-                  <SelectItem value="skip">{t("routines.form.overlap.skip")}</SelectItem>
-                  <SelectItem value="queue">{t("routines.form.overlap.queue")}</SelectItem>
+                  <SelectItem value="skip">{t("recur.form.overlap.skip")}</SelectItem>
+                  <SelectItem value="queue">{t("recur.form.overlap.queue")}</SelectItem>
                 </Select>
               </Field>
             </div>
           </details>
           <Checkbox
-            label={t("routines.form.startActive")}
-            hint={t("routines.form.startActiveHint")}
+            label={t("recur.form.startActive")}
+            hint={t("recur.form.startActiveHint")}
             checked={active}
             onCheckedChange={(checked) => setActive(checked === true)}
           />
