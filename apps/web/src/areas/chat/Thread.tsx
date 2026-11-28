@@ -130,6 +130,9 @@ export function ThreadPanel({
         ? root.body.slice(0, EXCERPT)
         : t("thread.untitled");
   const state = data?.state ?? "open";
+  // The record counts every reply; the panel draws only the latest page of them.
+  const replyCount = Math.max(data?.replyCount ?? 0, replies.length);
+  const counted = replyCount === 0 ? t("thread.noReplies") : t("thread.replies", { count: replyCount });
 
   return (
     <section
@@ -148,9 +151,7 @@ export function ThreadPanel({
               </AppLink>
             )}
             {state !== "open" && <Chip>{t(`thread.state.${state}`)}</Chip>}
-            {data !== undefined && data.replyCount > 0 && (
-              <span>{t("thread.replies", { count: data.replyCount })}</span>
-            )}
+            {replyCount > 0 && <span>{counted}</span>}
           </p>
         </div>
         <Controls rootId={rootId} info={data} />
@@ -207,9 +208,7 @@ export function ThreadPanel({
         ) : (
           <div className="chat__log" role="log" aria-label={t("thread.log")}>
             <MessageItem message={root} continued={false} onQuote={setQuoting} onRetry={history.retry} />
-            <p className="chat-thread__count">
-              {replies.length === 0 ? t("thread.noReplies") : t("thread.replies", { count: replies.length })}
-            </p>
+            <p className="chat-thread__count">{counted}</p>
             {replies.map((message, index) => {
               const previous = replies[index - 1];
               // Grouped as in the channel: same author, same day, within a few minutes.
@@ -273,12 +272,19 @@ function ThreadPage({ workspaceId, threadId }: { workspaceId: string; threadId: 
     info.data !== undefined &&
     channels.data !== undefined &&
     !channels.data.some((c) => c.id === info.data.channelId);
-  // Once gone it stays gone for this thread: forgetting the cache must not bring a loading state back.
+  // Refused or lost stays gone for this thread: forgetting the cache must not bring a loading state back.
   const goneFor = useRef<string | null>(null);
   if (refused || lostHere) goneFor.current = threadId;
-  // Refused or lost stays gone; a channel missing from the list may only be a list read before the
-  // person was added back, so it is looked at again each time the list comes in.
-  const missing = goneFor.current === threadId || unlisted;
+  // A channel left out of the list stays gone while each new list still leaves it out, even once the
+  // forgotten copy of the thread can't be read again. A list that has it back (the person was added
+  // again) lets the thread load.
+  const unlistedIn = useRef<string | null>(null);
+  if (unlisted) unlistedIn.current = info.data.channelId;
+  const stillUnlisted =
+    unlistedIn.current !== null &&
+    channels.data !== undefined &&
+    !channels.data.some((c) => c.id === unlistedIn.current);
+  const missing = goneFor.current === threadId || stillUnlisted;
   const channelId = missing ? undefined : info.data?.channelId;
   useChannelSubscription(channelId);
   useDocumentTitle(
