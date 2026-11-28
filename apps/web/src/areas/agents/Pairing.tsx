@@ -185,7 +185,7 @@ function Request({ code, onCode }: { code: string; onCode: (code: string) => voi
         <Button
           variant="ghost"
           // Declining needs the same standing as pairing: a workspace where the person may post.
-          disabled={(fixed === null && eligible.length === 0) || (busy && !deny.isPending)}
+          disabled={eligible.length === 0 || (busy && !deny.isPending)}
           loading={deny.isPending}
           onClick={() =>
             deny.mutate({ pairingCode: code }, { onSuccess: () => setOutcome({ kind: "declined" }) })

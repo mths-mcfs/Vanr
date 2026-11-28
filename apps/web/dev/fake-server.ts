@@ -361,6 +361,7 @@ export class FakeServer {
           channel !== undefined && (channel.visibility === "public" || channel.memberIds.includes(userId))
         );
       },
+      channelExists: (channelId) => this.state.channels.some((candidate) => candidate.id === channelId),
     });
     this.runnerWork = new FakeRunners({
       ...host,

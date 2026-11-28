@@ -191,6 +191,23 @@ describe("the rules per channel", () => {
     expect(within(form).queryByRole("alert") === null).toBe(true);
   });
 
+  test("an admin outside a private channel keeps its rule when saving the others", async () => {
+    const server = withPayroll();
+    const payroll = server.state.channels.find((channel) => channel.id === "ch_secret");
+    // Jonas manages agents but is not in #payroll: the server still shows him its rule.
+    if (payroll !== undefined) payroll.memberIds = ["usr_ana"];
+    const app = await renderApp({ path: tab("agt_scout"), signedInAs: "usr_jonas", server });
+    await screen.findByRole("list", { name: "Rules per channel" });
+    expect(rules()).toEqual(["#generalAll connectionsRead only", "A private channelLinear · Team LinearOff"]);
+    await app.user.click(
+      screen.getByRole("button", { name: "Remove the rule for All connections in #general" }),
+    );
+    await screen.findByText("Rule removed");
+    expect(server.agentAccess.rules.filter((rule) => rule.agentId === "agt_scout")).toEqual([
+      { agentId: "agt_scout", channelId: "ch_secret", connectionId: "con_github", level: "off" },
+    ]);
+  });
+
   test("rules that fail to load can be tried again", async () => {
     const server = newServer();
     server.force("getAgentIdentity", { kind: "error", status: 503, code: "unavailable" }, 4);

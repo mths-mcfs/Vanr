@@ -8,7 +8,7 @@ import { useApiMutation, useApiQuery } from "@vanr/client/react";
 import type { AgentDetail, ChannelAccessLevel, ChannelAccessRule, Connection } from "@vanr/contract";
 import { Button, Callout, Chip, ConfirmDialog, EmptyState, Field, Input, Select, SelectItem } from "@vanr/ui";
 import { Trash2 } from "lucide-react";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { useErrorMessage } from "../../app/screens.tsx";
 import { useMessages } from "../../i18n/react.tsx";
 import { type AgentRights, PartError, PartLoading, Section, useOutcome } from "./shared.tsx";
@@ -248,7 +248,7 @@ function Rules({
 }: Props & {
   rules: ChannelAccessRule[];
   own: Connection[];
-  /** A rule names a channel the person no longer sees: ask the server again. */
+  /** The person's channels changed: ask the server for the rules again. */
   onStale: () => unknown;
 }) {
   const t = useMessages("agents");
@@ -276,13 +276,18 @@ function Rules({
   };
   // Only channels the agent is in and the person may read can take a new rule.
   const choosable = agent.channels.filter((channel) => names.has(channel.id));
-  // Once the channels are known, a rule on one the person cannot see any more (they left it) is neither
-  // shown nor sent again, and the server is asked for the rules again.
-  const shown = channels.isSuccess ? rules.filter((rule) => names.has(rule.channelId)) : rules;
-  const stale = shown.length !== rules.length;
+  // The rules are exactly what the server answered: someone who manages agents sees rules on private
+  // channels missing from their own channel list, and a save replaces every rule they see, so nothing
+  // here is dropped by name. When the channels change (the person left one), the rules are asked again
+  // and the server's answer decides what stays.
+  const shown = rules;
+  const channelKey = (channels.data ?? []).map((channel) => channel.id).join(",");
+  const firstKey = useRef(channelKey);
   useEffect(() => {
-    if (stale) onStale();
-  }, [stale, onStale]);
+    if (channelKey === firstKey.current) return;
+    firstKey.current = channelKey;
+    onStale();
+  }, [channelKey, onStale]);
   const picked = choosable.some((channel) => channel.id === channelId) ? channelId : "";
   const send = (next: ChannelAccessRule[], done: string) =>
     save.mutate(

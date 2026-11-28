@@ -12,6 +12,8 @@ type Host = FilesHost & {
   agents: () => FakeAgentRow[];
   /** Whether a person may read a channel (a member of a private one, anyone for a public one). */
   readsChannel: (userId: string, channelId: string) => boolean;
+  /** Whether the channel exists (any visibility). */
+  channelExists: (channelId: string) => boolean;
 };
 type Rule = T.ChannelAccessRule & { agentId: string };
 
@@ -158,9 +160,17 @@ export class FakeAgentAccess {
     ];
   }
 
+  /** As the server: whoever manages agents sees every rule; anyone else, the rules on channels they read. */
+  private sees(scope: Scope, channelId: string): boolean {
+    return (
+      (can(scope.role, "manage_agents") && this.host.channelExists(channelId)) ||
+      this.host.readsChannel(scope.user.id, channelId)
+    );
+  }
+
   private visible(scope: Scope, agentId: string): T.ChannelAccessRule[] {
     return this.rules
-      .filter((rule) => rule.agentId === agentId && this.host.readsChannel(scope.user.id, rule.channelId))
+      .filter((rule) => rule.agentId === agentId && this.sees(scope, rule.channelId))
       .map(({ agentId: _agent, ...rest }) => rest);
   }
 
@@ -249,9 +259,14 @@ export class FakeAgentAccess {
         this.version(memory, "restore", scope.user.id);
         return reply(200, memory);
       }),
-      listMemoryVersions: within((_scope, params) =>
-        reply(200, { versions: this.versions.filter((each) => each.memoryId === text(params.memoryId)) }),
-      ),
+      listMemoryVersions: within((scope, params) => {
+        // A note of another workspace's agent does not exist here, history included.
+        const memory = this.memories.find((each) => each.id === text(params.memoryId));
+        if (memory === undefined || agentOf(scope, memory.agentId) === undefined) {
+          return fail(404, "not_found", "Memory not found");
+        }
+        return reply(200, { versions: this.versions.filter((each) => each.memoryId === memory.id) });
+      }),
 
       getConnectorCatalog: () => reply(200, FAKE_CATALOG),
       listConnectors: within((scope) =>
@@ -297,13 +312,11 @@ export class FakeAgentAccess {
       }, true),
       setAgentIdentityChannels: withAgent((scope, agent, params) => {
         const asked = Array.isArray(params.channels) ? (params.channels as T.ChannelAccessRule[]) : [];
-        const hidden = asked.find((rule) => !this.host.readsChannel(scope.user.id, rule.channelId));
+        const hidden = asked.find((rule) => !this.sees(scope, rule.channelId));
         if (hidden !== undefined) return fail(400, "identity.unknown_channel", "Unknown channel");
         // Rules on channels hidden from this person stay as they are.
         this.rules = [
-          ...this.rules.filter(
-            (rule) => rule.agentId !== agent.id || !this.host.readsChannel(scope.user.id, rule.channelId),
-          ),
+          ...this.rules.filter((rule) => rule.agentId !== agent.id || !this.sees(scope, rule.channelId)),
           ...asked.map((rule) => ({ ...rule, agentId: agent.id })),
         ];
         return reply(200, { channels: this.visible(scope, agent.id) });

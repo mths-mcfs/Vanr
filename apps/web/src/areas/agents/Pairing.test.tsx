@@ -51,6 +51,16 @@ describe("pairing a runner by code", () => {
     expect(screen.getByRole("button", { name: "Decline" }).hasAttribute("disabled")).toBe(true);
   });
 
+  test("a reconnection cannot be declined without a workspace where the person may post", async () => {
+    const server = newServer();
+    const request = server.runnerWork.pairings[0];
+    if (request !== undefined)
+      request.reconnect = { runnerId: "rnr_studio", workspaceId: "workspace_birchwood" };
+    await renderApp({ path: "/connect?code=BIRCH7", signedInAs: "usr_noor", server });
+    await screen.findByRole("heading", { name: "Pair Garage laptop again?" });
+    expect(screen.getByRole("button", { name: "Decline" }).hasAttribute("disabled")).toBe(true);
+  });
+
   test("a code with a character no code has asks for it again", async () => {
     await renderApp({ path: "/connect?code=BIRCH-7", signedInAs: "usr_ana" });
     await screen.findByRole("heading", { name: "This code is not valid" });
