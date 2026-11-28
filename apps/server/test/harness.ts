@@ -81,10 +81,15 @@ export async function startTestServer(opts: TestServerOptions = {}): Promise<Run
 }
 
 /**
- * Holds the next write to the search index until `release`: `begun` resolves once it started. It is the
- * window of a slow save, to race it against another write (the trash, a person typing).
+ * Holds the next write to the search index while `body` runs: `begun` resolves once that write started, and
+ * `release` lets it go on. It is the window of a slow save, to race it against another write (the trash, a
+ * person typing). However `body` ends, the write is released and the index restored: a body that throws
+ * before `release` would leave the request parked, holding its page's queue and the server's stop.
  */
-export function holdNextIndexWrite(server: RunningServer): { begun: Promise<void>; release: () => void } {
+export async function holdNextIndexWrite<T>(
+  server: RunningServer,
+  body: (hold: { begun: Promise<void>; release: () => void }) => Promise<T>,
+): Promise<T> {
   const index = server.deps.search;
   const withDb = index.withDb.bind(index);
   let started!: () => void;
@@ -95,7 +100,7 @@ export function holdNextIndexWrite(server: RunningServer): { begun: Promise<void
   const until = new Promise<void>((r) => {
     release = r;
   });
-  index.withDb = (db) => {
+  const held: typeof index.withDb = (db) => {
     const inner = withDb(db);
     const upsert = inner.upsert.bind(inner);
     inner.upsert = async (source, chunks) => {
@@ -106,7 +111,13 @@ export function holdNextIndexWrite(server: RunningServer): { begun: Promise<void
     };
     return inner;
   };
-  return { begun, release };
+  index.withDb = held;
+  try {
+    return await body({ begun, release });
+  } finally {
+    if (index.withDb === held) index.withDb = withDb;
+    release();
+  }
 }
 
 /** Tests don't go out to the network: whoever needs GitHub passes a fake fetch. */

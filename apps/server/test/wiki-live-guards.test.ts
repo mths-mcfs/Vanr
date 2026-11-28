@@ -188,19 +188,19 @@ describe("a connection doesn't outlive the right that opened it", () => {
       const b = connect(server, beto.browser, workspaceId, docName(workspaceId, page.slug));
       await Promise.all([a.synced, b.synced]);
       await until(() => !a.provider.hasUnsyncedChanges && !b.provider.hasUnsyncedChanges);
-      const hold = holdNextIndexWrite(server);
       try {
-        if (!locking) locking = ana.api.wiki.lockWikiPage(workspaceId, page.slug, true);
-        release();
-        await hold.begun;
-        const acks = b.syncStatus.length;
-        await b.edit((md) => `${md}\nUNAUTHORIZED AFTER LOCK.\n`);
-        await until(() => b.closeCodes.length > 0 || b.syncStatus.length > acks);
-        expect(b.syncStatus.slice(acks)).not.toContain(true);
-        expect(await a.md()).not.toContain("UNAUTHORIZED AFTER LOCK.");
+        await holdNextIndexWrite(server, async (hold) => {
+          if (!locking) locking = ana.api.wiki.lockWikiPage(workspaceId, page.slug, true);
+          release();
+          await hold.begun;
+          const acks = b.syncStatus.length;
+          await b.edit((md) => `${md}\nUNAUTHORIZED AFTER LOCK.\n`);
+          await until(() => b.closeCodes.length > 0 || b.syncStatus.length > acks);
+          expect(b.syncStatus.slice(acks)).not.toContain(true);
+          expect(await a.md()).not.toContain("UNAUTHORIZED AFTER LOCK.");
+        });
       } finally {
         release();
-        hold.release();
         db.transaction = transaction;
         await locking;
         a.close();
@@ -918,12 +918,13 @@ describe("stopping the server", () => {
         const a = connect(first, ana.browser, workspaceId, docName(workspaceId, page.slug));
         await a.synced;
         // The quiet publish's index write is held: the stop starts while the publish is in progress.
-        const hold = holdNextIndexWrite(first);
-        await a.edit((md) => md.replace("One.", "One, published while stopping."));
-        await hold.begun;
-        const stopping = first.stop();
-        hold.release();
-        await stopping;
+        await holdNextIndexWrite(first, async (hold) => {
+          await a.edit((md) => md.replace("One.", "One, published while stopping."));
+          await hold.begun;
+          const stopping = first.stop();
+          hold.release();
+          await stopping;
+        });
         a.close();
         const second = await startTestServer({ env: { DATA_DIR: dir } });
         try {

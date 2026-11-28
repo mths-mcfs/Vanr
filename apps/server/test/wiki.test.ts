@@ -547,15 +547,19 @@ describe("diff, authorship, restore and trash (P0-09)", () => {
   test("search: a slow save that ends after the trash doesn't bring the page back to the search", async () => {
     const { workspaceId, ana } = await team();
     const p = await ana.api.wiki.createWikiPage(workspaceId, { title: "Old draft", body: "plugh" });
-    const hold = holdNextIndexWrite(server);
-    const save = ana.api.wiki.replaceWikiPage(workspaceId, p.slug, { body: "plugh again", parentVersion: 1 });
-    await hold.begun;
-    // The held index write keeps its transaction open: on PGlite (one transaction at a time) the trash waits
-    // for it at the database, so it is released at once; whichever order the two land in, the end state is
-    // the same. On Postgres the order is the page row's share lock in reindex.
-    const trash = ana.api.wiki.deleteWikiPage(workspaceId, p.slug);
-    hold.release();
-    await Promise.all([save, trash]);
+    await holdNextIndexWrite(server, async (hold) => {
+      const save = ana.api.wiki.replaceWikiPage(workspaceId, p.slug, {
+        body: "plugh again",
+        parentVersion: 1,
+      });
+      await hold.begun;
+      // The held index write keeps its transaction open: on PGlite (one transaction at a time) the trash
+      // waits for it at the database, so it is released at once; whichever order the two land in, the end
+      // state is the same. On Postgres the order is the page row's share lock in reindex.
+      const trash = ana.api.wiki.deleteWikiPage(workspaceId, p.slug);
+      hold.release();
+      await Promise.all([save, trash]);
+    });
     expect(await search.search({ workspaceId, userId: ana.user.id }, "plugh")).toEqual([]);
   });
 

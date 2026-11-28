@@ -282,15 +282,16 @@ describe("publishing while someone types (P0-03)", () => {
           async () => (await ana.api.wiki.getWikiPage(workspaceId, page.slug)).draft?.dirty === true,
         );
 
-        const hold = holdNextIndexWrite(slow);
-        const published = ana.api.wiki.publishWikiPageDraft(workspaceId, page.slug);
-        await hold.begun;
-        await a.edit((md) => `${md.trimEnd()}\n\nThree, typed during the publish.\n`);
-        // The update waits in the page's queue, which the publish holds through its save: it is applied
-        // (and acknowledged) right after the version, on top of it, never inside it.
-        expect(a.provider.hasUnsyncedChanges).toBe(true);
-        hold.release();
-        const v2 = await published;
+        const v2 = await holdNextIndexWrite(slow, async (hold) => {
+          const published = ana.api.wiki.publishWikiPageDraft(workspaceId, page.slug);
+          await hold.begun;
+          await a.edit((md) => `${md.trimEnd()}\n\nThree, typed during the publish.\n`);
+          // The update waits in the page's queue, which the publish holds through its save: it is applied
+          // (and acknowledged) right after the version, on top of it, never inside it.
+          expect(a.provider.hasUnsyncedChanges).toBe(true);
+          hold.release();
+          return published;
+        });
         expect(v2.body).toBe("One edited.\n\nTwo.\n");
         await until(() => !a.provider.hasUnsyncedChanges);
         await until(
