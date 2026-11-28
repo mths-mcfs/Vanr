@@ -19,7 +19,7 @@ test("the team, in Portuguese", async () => {
     "Ledger@ledgerEm atividade",
   ]);
   expect(screen.getByRole("list", { name: "Delegações de hoje" }).textContent).toContain(
-    "Scout pediu a Ledger",
+    "Scout delegou a Ledger",
   );
   await app.user.click(screen.getByRole("button", { name: "Tally" }));
   const card = screen.getByRole("region", { name: "Tally" });

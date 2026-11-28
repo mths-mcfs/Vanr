@@ -81,8 +81,8 @@ export function AudienceFields({
         }
       >
         <Radio value="everyone" label={t("audience.everyone")} />
-        <Radio value="people" label={t("audience.people")} />
         <Radio value="owner" label={t("audience.owner")} />
+        <Radio value="people" label={t("audience.people")} />
       </RadioGroup>
       {value.mode === "people" && (
         <ul className="agent-picks" aria-label={t("audience.people")}>

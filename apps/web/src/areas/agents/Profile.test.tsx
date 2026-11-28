@@ -27,7 +27,7 @@ describe("an agent's profile", () => {
 
   test("the overview: where it works, its owner and what it did lately", async () => {
     await renderApp({ path: path("agt_scout"), signedInAs: "usr_iris" });
-    const where = await screen.findByRole("list", { name: "Where it works" });
+    const where = await screen.findByRole("list", { name: "Channels it is in" });
     expect(within(where).getByRole("link", { name: "#general" })).toBeDefined();
     await waitFor(() => expect(screen.getByText("Owner: Ana Beatriz Souza")).toBeDefined());
     const lately = await screen.findByRole("list", { name: "Lately" });
@@ -84,7 +84,7 @@ describe("the instructions and their history", () => {
 
     await app.user.click(within(history).getByRole("button", { name: "Compare with the one before" }));
     const diff = screen.getByRole("region", { name: "Changes" });
-    expect(diff.textContent).toContain("1 lines added, 0 removed");
+    expect(diff.textContent).toContain("+1 / −0 lines");
     expect(diff.textContent).toContain("+ Be brief.");
 
     await app.user.click(within(history).getByRole("button", { name: "Go back to this version" }));
@@ -204,9 +204,7 @@ describe("activity and saving a run as a skill", () => {
     await within(dialog).findByText(/private channel or a direct message/);
     const save = within(dialog).getByRole("button", { name: "Save the skill" });
     expect(save.hasAttribute("disabled")).toBe(true);
-    await app.user.click(
-      within(dialog).getByRole("checkbox", { name: /Everyone in the workspace may read/ }),
-    );
+    await app.user.click(within(dialog).getByRole("checkbox", { name: /All workspace members may read/ }));
     expect(save.hasAttribute("disabled")).toBe(false);
   });
 
