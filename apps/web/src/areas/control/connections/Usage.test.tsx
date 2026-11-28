@@ -38,7 +38,7 @@ describe("usage", () => {
     expect(
       within(part)
         .getByRole("meter", { name: "Share of the workspace's budget spent" })
-        .getAttribute("aria-valuenow"),
+        .getAttribute("value"),
     ).toBe("23");
     const kinds = within(part).getByRole("list", { name: "By kind" });
     const rows = within(kinds)
@@ -58,7 +58,7 @@ describe("usage", () => {
     expect(
       within(scout as HTMLElement)
         .getByRole("meter", { name: "Share of Scout's budget spent" })
-        .getAttribute("aria-valuenow"),
+        .getAttribute("value"),
     ).toBe("63");
     expect(
       within(scout as HTMLElement)

@@ -311,23 +311,46 @@
   }
 
   .spend-meter {
+    display: block;
+    inline-size: 100%;
     block-size: 6px;
-    overflow: hidden;
-    background: var(--vr-bg-sunken);
+    appearance: none;
+    border: 0;
     border-radius: var(--vr-radius-1);
+    background: var(--vr-bg-sunken);
   }
 
-  .spend-meter__fill {
-    display: block;
-    block-size: 100%;
+  .spend-meter::-webkit-meter-bar {
+    border: 0;
+    border-radius: var(--vr-radius-1);
+    background: var(--vr-bg-sunken);
+  }
+
+  .spend-meter::-webkit-meter-optimum-value,
+  .spend-meter::-webkit-meter-suboptimum-value,
+  .spend-meter::-webkit-meter-even-less-good-value {
+    border-radius: var(--vr-radius-1);
     background: var(--vr-success-fg);
   }
 
-  .spend-meter[data-tone="near"] .spend-meter__fill {
+  .spend-meter::-moz-meter-bar {
+    border-radius: var(--vr-radius-1);
+    background: var(--vr-success-fg);
+  }
+
+  .spend-meter[data-tone="near"]::-webkit-meter-optimum-value {
     background: var(--vr-warning-fg);
   }
 
-  .spend-meter[data-tone="over"] .spend-meter__fill {
+  .spend-meter[data-tone="near"]::-moz-meter-bar {
+    background: var(--vr-warning-fg);
+  }
+
+  .spend-meter[data-tone="over"]::-webkit-meter-optimum-value {
+    background: var(--vr-danger-fg);
+  }
+
+  .spend-meter[data-tone="over"]::-moz-meter-bar {
     background: var(--vr-danger-fg);
   }
 

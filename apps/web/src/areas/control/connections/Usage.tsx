@@ -103,17 +103,14 @@ function Meter({ spent, budget, label }: { spent: number; budget: number; label:
   const percent = budget > 0 ? Math.round((spent / budget) * 100) : spent > 0 ? 100 : 0;
   const tone = percent >= 100 ? "over" : percent >= 80 ? "near" : "calm";
   return (
-    <div
+    <meter
       className="spend-meter"
-      role="meter"
       aria-label={label}
-      aria-valuemin={0}
-      aria-valuemax={100}
-      aria-valuenow={Math.min(percent, 100)}
+      min={0}
+      max={100}
+      value={Math.min(percent, 100)}
       data-tone={tone}
-    >
-      <span className="spend-meter__fill" style={{ inlineSize: `${Math.min(percent, 100)}%` }} />
-    </div>
+    />
   );
 }
 
