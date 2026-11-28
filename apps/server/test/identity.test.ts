@@ -22,10 +22,17 @@ const mcp = startFakeMcp();
 const LINEAR = "https://mcp.linear.app";
 const toLinear = (s: string) => s.replaceAll(mcp.origin, LINEAR);
 const toFake = (s: string) => s.replaceAll(LINEAR, mcp.origin);
+/** Runs once while the token endpoint answers: what lands between the callback's checks and its activation. */
+let duringToken: (() => Promise<void>) | null = null;
 const external: typeof fetch = Object.assign(
   async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     if (url.origin !== LINEAR) return fetch(url, init);
+    if (url.pathname === "/token" && duringToken) {
+      const run = duringToken;
+      duringToken = null;
+      await run();
+    }
     const res = await fetch(toFake(url.toString()), init);
     const headers = new Headers(res.headers);
     const challenge = headers.get("www-authenticate");
@@ -230,6 +237,40 @@ describe("the agent's own account", () => {
       expect((await t.ask(t.rui.handle, t.general, "linear__list_items", {}))?.result).toContain(
         "Unknown tool",
       );
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "an OAuth started before the agent is archived doesn't turn the account on when it comes back",
+    async () => {
+      const t = await team();
+      const started = await ok(connectOwn(t, t.ana, t.lia.id, { connector: "linear", nextPath: "/" }));
+      if (started.status !== "oauth") throw new Error("expected oauth");
+      expect(await status(call(t.ana, "DELETE", `${t.w}/agents/${t.lia.id}`))).toBe(204);
+      const res = await comeBack(t.ana, started.consentUrl);
+      expect(res.headers.get("location")).toContain("connector_error=gone");
+      const own = await server.deps.db.select().from(connections).where(eq(connections.agentId, t.lia.id));
+      expect(own).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "an archive that lands while the code is exchanged doesn't let the account come alive",
+    async () => {
+      const t = await team();
+      const started = await ok(connectOwn(t, t.ana, t.lia.id, { connector: "linear", nextPath: "/" }));
+      if (started.status !== "oauth") throw new Error("expected oauth");
+      duringToken = async () => {
+        expect(await status(call(t.ana, "DELETE", `${t.w}/agents/${t.lia.id}`))).toBe(204);
+      };
+      const res = await comeBack(t.ana, started.consentUrl);
+      expect(duringToken === null).toBe(true);
+      // "gone" is the archive's answer; an error inside the hook would answer "token" instead.
+      expect(res.headers.get("location")).toContain("connector_error=gone");
+      const own = await server.deps.db.select().from(connections).where(eq(connections.agentId, t.lia.id));
+      expect(own.filter((c) => c.status === "active")).toEqual([]);
     },
     SERVER_TEST_MS,
   );

@@ -15,7 +15,7 @@ import { newId } from "@vanr/engine/ids";
 import { and, eq, gt, inArray, lte, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
-import { type AgentRow, agentInWorkspace, requireAgentEditor } from "../agents";
+import { type AgentRow, agentInWorkspace, requireActiveAgent, requireAgentEditor } from "../agents";
 import type { AppDeps, AppEnv, WorkspaceMember } from "../context";
 import { conflict, forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
 import {
@@ -40,7 +40,7 @@ import {
   toIntervention,
   toSecretRequest,
 } from "../runners/requests";
-import { canManageRunner } from "../runners/runners";
+import { canManageRunner, canUseRunner, requireRunnerUse } from "../runners/runners";
 import { canTalkTo } from "../runtime/route";
 import { requireMember, WORKSPACE } from "../workspace-scope";
 import { runnerError } from "./runners";
@@ -60,9 +60,13 @@ const {
  * The agent's browser policy is read and written under the agent's lock: two changes at once (the sites, the
  * level and private ranges) apply one after the other, each on the row as the other left it.
  */
+/** A browser policy write: one at a time per agent, and none once the agent is archived (read under its row lock). */
 const underAgentPolicyLock = <T>(deps: AppDeps, agentId: string, fn: (tx: Db) => Promise<T>) =>
   deps.db.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`browser-policy:${agentId}`}, 0))`);
+    const [agent] = await tx.select().from(agents).where(eq(agents.id, agentId)).for("share");
+    if (!agent) throw notFound("Agent not found");
+    requireActiveAgent(agent);
     return fn(tx);
   });
 
@@ -75,10 +79,16 @@ const isEditor = (me: WorkspaceMember, agent: AgentRow) => {
   }
 };
 
+/**
+ * The intervention, if the person may see it. With `act`, they also act on it through its runner: driving it
+ * (`drive`: the runner must be there and the agent not archived) or ending it (`end`: cancel, complete, fail),
+ * both only for whoever may use that runner.
+ */
 async function interventionIn(
   deps: AppDeps,
   me: WorkspaceMember,
   id: string,
+  act?: "drive" | "end",
 ): Promise<{ row: InterventionRow; agent: AgentRow }> {
   let [row] = await deps.db
     .select()
@@ -91,6 +101,14 @@ async function interventionIn(
     await expireRunnerRequests(deps, agent.id);
     [row] = await deps.db.select().from(browserInterventions).where(eq(browserInterventions.id, id));
     if (!row) throw notFound("Browser request not found");
+  }
+  if (act) {
+    const [runner] = await deps.db.select().from(runners).where(eq(runners.id, row.runnerId));
+    if (act === "drive") {
+      requireActiveAgent(agent);
+      if (!runner || runner.removedAt) throw conflict("browser.no_environment", "This agent has no runner");
+    }
+    if (runner) requireRunnerUse(me, runner);
   }
   return { row, agent };
 }
@@ -131,6 +149,8 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
       throw notFound("Secret request not found");
     if (row.targetUserId && row.targetUserId !== me.userId)
       throw forbidden("This request is for someone else");
+    // A secret given to an archived agent would outlive it on the runner: it takes none (declining stays open).
+    requireActiveAgent(agent);
     if (row.status !== "pending") throw secretClosed(row.status);
     if (row.expiresAt <= deps.now()) {
       const [expired] = await deps.db
@@ -154,6 +174,8 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
     const won = await deps.db.transaction(async (tx) => {
       const [runner] = await tx.select().from(runners).where(eq(runners.id, row.runnerId)).for("share");
       const [current] = await tx.select().from(agents).where(eq(agents.id, agent.id)).for("share");
+      // An archive that landed after the first read wins: the secret doesn't go out.
+      if (current) requireActiveAgent(current);
       if (
         !runner ||
         runner.removedAt ||
@@ -351,6 +373,7 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const agent = await agentInWorkspace(deps.db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, agent);
+    requireActiveAgent(agent);
     const { permittedDomains } = await readJson(
       c,
       z.object({
@@ -394,6 +417,7 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const agent = await agentInWorkspace(deps.db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, agent);
+    requireActiveAgent(agent);
     const body = await readJson(
       c,
       z.object({
@@ -538,7 +562,7 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
   app.post(`${WORKSPACE}/browser-interventions/:interventionId/control`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
-    const { row } = await interventionIn(deps, me, param(c, "interventionId"));
+    const { row } = await interventionIn(deps, me, param(c, "interventionId"), "drive");
     if (row.targetUserId && row.targetUserId !== me.userId)
       throw forbidden("This request is for someone else");
     if (
@@ -576,7 +600,7 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
     app.post(`${WORKSPACE}/browser-interventions/:interventionId/${path}`, async (c) => {
       const me = requireMember(c);
       const deps = c.get("deps");
-      const { row } = await interventionIn(deps, me, param(c, "interventionId"));
+      const { row } = await interventionIn(deps, me, param(c, "interventionId"), "end");
       const note =
         status === "failed"
           ? (await readJson(c, z.object({ note: z.string().trim().max(500).optional() }))).note
@@ -606,7 +630,7 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
   app.post(`${WORKSPACE}/browser-interventions/:interventionId/cancel`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
-    const { row, agent } = await interventionIn(deps, me, param(c, "interventionId"));
+    const { row, agent } = await interventionIn(deps, me, param(c, "interventionId"), "end");
     const allowed =
       row.controllingUserId === me.userId ||
       row.targetUserId === me.userId ||
@@ -630,6 +654,8 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
     if (!agent.environmentId) throw conflict("browser.no_environment", "This agent has no runner");
     const [runner] = await deps.db.select().from(runners).where(eq(runners.id, agent.environmentId));
     if (!runner || runner.removedAt) throw conflict("browser.no_environment", "This agent has no runner");
+    // Driving the browser is using the runner: only whoever may use it (who paired it or manages agents).
+    requireRunnerUse(me, runner);
     if (!deps.runners.isOnline(runner.id)) throw conflict("runner.offline", "The runner is offline");
     if (!runner.browser || !runner.access.tools.browser)
       throw conflict("browser.disabled", "The browser is turned off on this runner");
@@ -655,6 +681,8 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
       if (!session) throw closed();
       const [currentRunner] = await tx.select().from(runners).where(eq(runners.id, runner.id)).for("share");
       const [current] = await tx.select().from(agents).where(eq(agents.id, agent.id)).for("share");
+      // An archive that landed after the first read wins: no takeover opens.
+      if (current) requireActiveAgent(current);
       if (
         !currentRunner ||
         currentRunner.revokedAt ||
@@ -745,28 +773,35 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const agent = await agentInWorkspace(deps.db, me.workspaceId, param(c, "agentId"));
     if (!canTalkTo(await withPlanOwner(deps.db, agent), me.userId) && !isEditor(me, agent)) throw forbidden();
-    const open = await deps.db
-      .select({ id: browserInterventions.id })
-      .from(browserInterventions)
-      .where(
-        and(
-          eq(browserInterventions.agentId, agent.id),
-          inArray(browserInterventions.status, ["pending", "active"]),
-        ),
-      );
+    // Closing the browser acts on the runner: as starting a takeover, only whoever may use it. The runner checked
+    // is the one the close goes to, so a move in between doesn't reach one they can't use.
+    const [runner] = agent.environmentId
+      ? await deps.db.select().from(runners).where(eq(runners.id, agent.environmentId))
+      : [];
+    if (runner) requireRunnerUse(me, runner);
+    // Only the interventions on a runner the person may use: one opened on another runner (after a move, or with
+    // no runner when this read) isn't theirs to end.
+    const open = (
+      await deps.db
+        .select({ id: browserInterventions.id, runner: runners })
+        .from(browserInterventions)
+        .innerJoin(runners, eq(runners.id, browserInterventions.runnerId))
+        .where(
+          and(
+            eq(browserInterventions.agentId, agent.id),
+            inArray(browserInterventions.status, ["pending", "active"]),
+          ),
+        )
+    ).filter((h) => canUseRunner(me, h.runner));
     for (const h of open)
       await moveIntervention(deps, h.id, ["pending", "active"], {
         status: "canceled",
         handledAt: deps.now(),
       });
-    const [a] = await deps.db
-      .select({ environmentId: agents.environmentId })
-      .from(agents)
-      .where(eq(agents.id, agent.id));
-    if (a?.environmentId && deps.runners.isOnline(a.environmentId))
+    if (runner && deps.runners.isOnline(runner.id))
       await deps.runners
         .call(
-          a.environmentId,
+          runner.id,
           "browser.close",
           {},
           { agent: { id: agent.id, handle: agent.handle }, timeoutMs: 15_000 },

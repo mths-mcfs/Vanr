@@ -34,6 +34,20 @@ describe("an agent's profile", () => {
     expect(lately.textContent).toContain("Summarized the print queue");
   });
 
+  test("the month's spend shows only to whoever may view usage", async () => {
+    await renderApp({ path: path("agt_scout"), signedInAs: "usr_iris" });
+    await screen.findByRole("list", { name: "Channels it is in" });
+    expect(screen.queryByRole("heading", { name: "This month" }) === null).toBe(true);
+    expect(screen.queryByText("Spent") === null).toBe(true);
+  });
+
+  test("an admin sees the month's runs, spend and budget", async () => {
+    await renderApp({ path: path("agt_scout"), signedInAs: "usr_jonas" });
+    expect(await screen.findByRole("heading", { name: "This month" })).toBeDefined();
+    expect(screen.getByText("Spent")).toBeDefined();
+    expect(screen.getByText("Budget")).toBeDefined();
+  });
+
   test("the tabs live in the address", async () => {
     const app = await renderApp({ path: path("agt_scout"), signedInAs: "usr_iris" });
     await app.user.click(await screen.findByRole("tab", { name: "Activity" }));

@@ -229,18 +229,20 @@ export class FakeAgents {
     return { ...rest, busy: this.host.busy(agent.id), reachable: agent.reachable && audience };
   }
 
-  private detail(agent: FakeAgentRow, viewerId: string): T.AgentDetail {
+  /** As the server: spend and budget only for whoever may view usage, nulls for the others. */
+  private detail(agent: FakeAgentRow, scope: Scope): T.AgentDetail {
+    const sees = can(scope.role, "view_usage");
     return {
-      ...this.plain(agent, viewerId),
+      ...this.plain(agent, scope.user.id),
       budgetInherited: true,
-      budgetPerMonthUsd: 50,
-      budgetSpentPct: 10,
+      budgetPerMonthUsd: sees ? 50 : null,
+      budgetSpentPct: sees ? 10 : null,
       channels: this.extra(agent).channels,
-      costThisMonthUsd: 5,
+      costThisMonthUsd: sees ? 5 : null,
       credentialId: null,
-      inheritedBudgetUsd: 50,
-      monthRuns: this.runs.filter((run) => run.agentId === agent.id).length,
-      monthTokens: 1000,
+      inheritedBudgetUsd: sees ? 50 : null,
+      monthRuns: sees ? this.runs.filter((run) => run.agentId === agent.id).length : null,
+      monthTokens: sees ? 1000 : null,
       queuedApprovals: 0,
     };
   }
@@ -433,7 +435,7 @@ export class FakeAgents {
         return reply(201, this.plain(agent, scope.user.id));
       }),
 
-      getAgent: withAgent((scope, agent) => reply(200, this.detail(agent, scope.user.id))),
+      getAgent: withAgent((scope, agent) => reply(200, this.detail(agent, scope))),
 
       updateAgent: asEditor((scope, agent, params) => {
         if (agent.archivedAt !== null) return fail(409, "agent.archived", "This agent was archived");

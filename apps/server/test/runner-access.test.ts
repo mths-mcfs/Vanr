@@ -755,7 +755,8 @@ describe("requests to a person", () => {
     async () => {
       const t = await team();
       const shared = await agent(t, t.ana.user.id, "ivy");
-      const paired = await pairOverHttp(t, t.ana);
+      // Beto pairs the runner: taking over its browser needs to be allowed to use it.
+      const paired = await pairOverHttp(t, t.beto);
       const runner = await online(paired, { browser: true });
       await lend(shared.id, paired.runnerId);
       const id = newId("bi");
@@ -849,7 +850,8 @@ describe("intervention regressions", () => {
     async () => {
       const t = await team();
       const shared = await agent(t, t.ana.user.id, "race");
-      const runner = await online(await pairOverHttp(t, t.ana), { browser: true });
+      // Beto pairs the runner: taking over its browser needs to be allowed to use it.
+      const runner = await online(await pairOverHttp(t, t.beto), { browser: true });
       await lend(shared.id, runner.runnerId);
       const hold = stepHolder(server);
       try {
@@ -941,7 +943,8 @@ describe("intervention regressions", () => {
     "ending the granting session, membership or audience releases control, while another session's logout preserves it",
     async () => {
       const t = await team();
-      const runner = await online(await pairOverHttp(t, t.ana), { browser: true });
+      // Beto pairs the runner: taking over its browser needs to be allowed to use it.
+      const runner = await online(await pairOverHttp(t, t.beto), { browser: true });
       for (const reason of ["signout", "expiry", "audience", "member"]) {
         const shared = await agent(t, t.ana.user.id, reason);
         await lend(shared.id, runner.runnerId);
@@ -1656,7 +1659,8 @@ describe("a connection doesn't outlive the right that opened it", () => {
 
       // Beto watches and controls an agent everyone talks to; then it becomes Ana's only.
       const ivy = await agent(t, t.ana.user.id, "ivy2");
-      const paired = await pairOverHttp(t, t.ana);
+      // Beto pairs the runner: taking over its browser needs to be allowed to use it.
+      const paired = await pairOverHttp(t, t.beto);
       const runner = await online(paired, { browser: true });
       await lend(ivy.id, paired.runnerId);
       beto.send({ type: "live_view.subscribe", agentId: ivy.id });

@@ -26,6 +26,13 @@ import { MessageBody } from "./body.tsx";
 import { useConversation } from "./context.tsx";
 import { SavedSteps } from "./Steps.tsx";
 
+/** The reason codes the server holds an agent back with, each worded in the catalog. */
+export const HELD_REASONS = ["not_in_channel", "audience", "personal_plan", "budget"] as const;
+
+/** A known reason code; any other is worded only as "held back", never looked up. */
+export const isHeldReason = (reason: string): reason is (typeof HELD_REASONS)[number] =>
+  (HELD_REASONS as readonly string[]).includes(reason);
+
 /** The quick reactions, in the order they are offered. */
 export const QUICK_REACTIONS = ["👍", "❤️", "😄", "🎉", "👀", "✅"] as const;
 
@@ -120,7 +127,7 @@ const HANDLED: Record<HandledStatus, string> = {
 function Receipts({ message }: { message: Message }) {
   const lookup = useLookup("chat");
   const t = useMessages("chat");
-  const { directory } = useConversation();
+  const { directory, me } = useConversation();
   const { receipts } = message;
   const handled = new Set(receipts.handled.map((entry) => entry.agentId));
   const blocked = receipts.blocked ?? [];
@@ -138,7 +145,21 @@ function Receipts({ message }: { message: Message }) {
     })),
     ...blocked.map((entry) => ({
       key: `blocked-${entry.agentId}`,
-      text: t("receipt.blockedBecause", { agent: directory.agentName(entry.agentId), reason: entry.reason }),
+      // The reason is a code: it reads in words, for who reads it. The author is told "you"; anyone else
+      // reads the author's name. A code the web doesn't know yet says only that the agent was held back.
+      text:
+        (message.author.id === me.userId
+          ? undefined
+          : !isHeldReason(entry.reason)
+            ? undefined
+            : lookup(`receipt.held.${entry.reason}`, {
+                agent: directory.agentName(entry.agentId),
+                name: directory.personName(message.author.id),
+              })) ??
+        (isHeldReason(entry.reason)
+          ? lookup(`blocked.${entry.reason}`, { agent: directory.agentName(entry.agentId) })
+          : undefined) ??
+        t("receipt.blocked", { agent: directory.agentName(entry.agentId) }),
       tone: "danger" as const,
     })),
   ];

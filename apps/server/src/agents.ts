@@ -8,15 +8,14 @@ import {
   type AgentDetail,
   type AgentRole,
   can,
-  type Memory,
 } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
-import { contentSha256 } from "@vanr/engine/memory";
 import type { BudgetScope } from "@vanr/engine/usage";
 import { and, count, eq, gte, inArray, isNull, notInArray, or, sql, sum } from "drizzle-orm";
+import type { Hono } from "hono";
 import { readableChannelsSql } from "./channels";
-import type { WorkspaceMember } from "./context";
-import { badRequest, forbidden, notFound } from "./http";
+import type { AppEnv, WorkspaceMember } from "./context";
+import { badRequest, conflict, forbidden, notFound } from "./http";
 import { type Talker, withPlanOwner } from "./runners/plans";
 import { canTalkTo } from "./runtime/route";
 
@@ -27,7 +26,7 @@ const { agents, runs, workspaces, channelMemberships, channels, credentials, deb
  * anonymous stay out until it ends: the size of each turn, crossed with each agent's token growth, would tell
  * who each participant is. The cap stays in the ledger, which counts everything.
  */
-const outsideAnonymousDebate = () =>
+export const outsideAnonymousDebate = () =>
   or(
     isNull(runs.debateId),
     notInArray(
@@ -109,6 +108,52 @@ export async function agentInWorkspace(db: Db, workspaceId: string, agentId: str
     .where(and(eq(agents.workspaceId, workspaceId), eq(agents.id, agentId)));
   if (!row) throw notFound("Agent not found");
   return row;
+}
+
+/** An archived agent is read-only: every write to it answers 409 agent.archived. */
+export function requireActiveAgent(agent: { archivedAt: Date | null }) {
+  if (agent.archivedAt) throw conflict("agent.archived", "This agent was archived");
+}
+
+/**
+ * The writes under `/agents/:agentId` that stay open on an archived agent: each one only takes something away or
+ * ends what is running (the archive itself, revoking its accounts, detaching or stopping its environment, closing
+ * its browser, deleting a secret). Clearing the runner (`runnerId: null`) also stays open; that route decides by
+ * its body, so it checks the archive itself.
+ */
+export const ARCHIVED_AGENT_WRITES_OPEN: readonly { method: string; path: RegExp }[] = [
+  { method: "DELETE", path: /^$/ },
+  { method: "POST", path: /^\/identity\/revoke$/ },
+  { method: "DELETE", path: /^\/environment$/ },
+  { method: "POST", path: /^\/environment\/stop$/ },
+  { method: "PUT", path: /^\/environment\/target$/ },
+  { method: "POST", path: /^\/browser\/stop$/ },
+  { method: "DELETE", path: /^\/secrets\/[^/]+$/ },
+];
+
+const WRITES = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+/**
+ * An archived agent is read-only: every write under `/agents/:agentId` answers 409 agent.archived here, before the
+ * route runs, except the ones listed above. A write that reaches an agent another way (a review, a proposal, a
+ * request) checks it where it writes. The routes that recheck under a lock keep doing so.
+ */
+export function registerArchivedAgentGuard(app: Hono<AppEnv>) {
+  app.use("/api/v1/workspaces/:workspaceId/agents/:agentId/*", async (c, next) => {
+    if (!WRITES.has(c.req.method)) return next();
+    const agentId = c.req.param("agentId");
+    const rest = c.req.path.slice(c.req.path.indexOf(`/agents/${agentId}`) + `/agents/${agentId}`.length);
+    if (ARCHIVED_AGENT_WRITES_OPEN.some((w) => w.method === c.req.method && w.path.test(rest))) return next();
+    const member = c.get("member");
+    if (!member || !agentId) return next();
+    const [row] = await c
+      .get("deps")
+      .db.select({ archivedAt: agents.archivedAt })
+      .from(agents)
+      .where(and(eq(agents.workspaceId, member.workspaceId), eq(agents.id, agentId)));
+    if (row) requireActiveAgent(row);
+    return next();
+  });
 }
 
 /** Who edits an agent: who manages agents or the agent's owner. */
@@ -250,16 +295,11 @@ export async function agentChannels(db: Db, agentId: string, viewer?: ChannelVie
 export async function toAgentDetail(
   db: Db,
   row: AgentRow,
-  input: { viewer: ChannelViewer; busy: boolean; testModel: boolean; now: Date },
+  input: { viewer: ChannelViewer; seesUsage: boolean; busy: boolean; testModel: boolean; now: Date },
 ): Promise<AgentDetail> {
-  const workspace = await workspaceBudgetDefaults(db, row.workspaceId);
-  const usage = (await monthUsage(db, [row.id], input.now)).get(row.id) ?? { runs: 0, tokens: 0, costUsd: 0 };
-  const budget = budgetOf(row, workspace.defaultBudget);
   return {
     ...toAgent(await withPlanOwner(db, row), input.viewer.userId, input.busy, input.testModel),
-    budgetSpentPct: budget > 0 ? Math.min(999, Math.round((usage.costUsd / budget) * 100)) : 100,
-    budgetPerMonthUsd: budget,
-    inheritedBudgetUsd: workspace.defaultBudget,
+    ...(input.seesUsage ? await spendOf(db, row, input.now) : NO_SPEND),
     budgetInherited: row.budgetPerMonthUsd === null,
     credentialId: row.credentialId,
     channels: await agentChannels(db, row.id, input.viewer),
@@ -280,6 +320,37 @@ export async function toAgentDetail(
           ),
         )
     ).length,
+  };
+}
+
+type Spend = Pick<
+  AgentDetail,
+  | "budgetSpentPct"
+  | "budgetPerMonthUsd"
+  | "inheritedBudgetUsd"
+  | "monthRuns"
+  | "monthTokens"
+  | "costThisMonthUsd"
+>;
+
+/** Spend and budget are shown under `view_usage`, as GET /usage: whoever doesn't have it gets nulls. */
+const NO_SPEND: Spend = {
+  budgetSpentPct: null,
+  budgetPerMonthUsd: null,
+  inheritedBudgetUsd: null,
+  monthRuns: null,
+  monthTokens: null,
+  costThisMonthUsd: null,
+};
+
+async function spendOf(db: Db, row: AgentRow, now: Date): Promise<Spend> {
+  const workspace = await workspaceBudgetDefaults(db, row.workspaceId);
+  const usage = (await monthUsage(db, [row.id], now)).get(row.id) ?? { runs: 0, tokens: 0, costUsd: 0 };
+  const budget = budgetOf(row, workspace.defaultBudget);
+  return {
+    budgetSpentPct: budget > 0 ? Math.min(999, Math.round((usage.costUsd / budget) * 100)) : 100,
+    budgetPerMonthUsd: budget,
+    inheritedBudgetUsd: workspace.defaultBudget,
     monthRuns: usage.runs,
     monthTokens: usage.tokens,
     costThisMonthUsd: usage.costUsd,
@@ -295,31 +366,6 @@ async function decidesFor(db: Db, row: AgentRow, viewer: ChannelViewer): Promise
     .from(schema.members)
     .where(and(eq(schema.members.workspaceId, row.workspaceId), eq(schema.members.userId, row.ownerUserId)));
   return owner === undefined;
-}
-
-export function toMemory(row: MemoryRow): Memory {
-  return {
-    id: row.id,
-    agentId: row.agentId,
-    scope: row.scope,
-    path: row.path,
-    sha256: contentSha256(row.text),
-    text: row.text,
-    kind: row.kind,
-    about: row.about,
-    pinned: row.pinned,
-    archived: row.archived,
-    verified: row.verified,
-    untrustedSource: row.untrustedSource,
-    uses: row.uses,
-    lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
-    source: row.source,
-    origin: row.origin ?? null,
-    replaces: row.replaces,
-    editorUserId: row.editorUserId,
-    updatedAt: row.updatedAt.toISOString(),
-    createdAt: row.createdAt.toISOString(),
-  };
 }
 
 /** The agents' names and handles, for message authorship and the directory. */

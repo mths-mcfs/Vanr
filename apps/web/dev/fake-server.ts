@@ -1392,7 +1392,12 @@ export class FakeServer {
         agents: here(this.agents).length,
         myApprovalQueue: (this.approvals.get(scope.workspaceId) ?? []).filter((id) => id === scope.user.id)
           .length,
-        budgetSpentPct: scope.workspaceId === "workspace_birchwood" ? 38 : 0,
+        // As the server: the share of the budget only for whoever may view usage.
+        budgetSpentPct: !can(this.memberOf(scope.workspaceId, scope.user.id)?.role ?? "member", "view_usage")
+          ? null
+          : scope.workspaceId === "workspace_birchwood"
+            ? 38
+            : 0,
       };
       return reply(200, overview);
     },
