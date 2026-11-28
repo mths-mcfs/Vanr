@@ -2,14 +2,8 @@
 // criteria, drags its card from "To do" to "In progress" with the mouse, carries it on to "In review"
 // from the keyboard, and opens it to meet a criterion and comment. Each move is still there after a
 // reload, and a second member opening the board sees the card where the owner left it.
-import type { Locator, Page } from "@playwright/test";
-import { expect, type Text, test } from "./fixtures.ts";
-
-const lane = (page: Page, t: Text, stage: "todo" | "in_progress" | "reviewing") =>
-  page.getByRole("region", { name: new RegExp(`^${t("work", `stage.${stage}`)},`) });
-
-const card = (column: Locator, title: string) =>
-  column.getByRole("listitem").filter({ has: column.page().getByRole("link", { name: title }) });
+import { expect, test } from "./fixtures.ts";
+import { card, lane } from "./helpers.ts";
 
 test.describe("the issues board", () => {
   test("write an issue, drag it, move it from the keyboard and open it", async ({

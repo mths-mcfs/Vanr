@@ -1,8 +1,8 @@
 // The wiki journeys. Each one checks what the people see, in the project's language.
-import type { APIRequestContext, Browser } from "@playwright/test";
+import type { APIRequestContext } from "@playwright/test";
 import type { SeededMember } from "./fixtures.ts";
 import { expect, test } from "./fixtures.ts";
-import type { RunningServer } from "./server.ts";
+import { browserOf } from "./helpers.ts";
 
 /** A page made through the API, as the owner would through the form. */
 async function createPage(
@@ -13,17 +13,6 @@ async function createPage(
   const created = await api.post(`/api/v1/workspaces/${owner.workspace.id}/wiki/pages`, { data: input });
   if (!created.ok()) throw new Error(`create page: HTTP ${created.status()} ${await created.text()}`);
   return ((await created.json()) as { slug: string }).slug;
-}
-
-/** A second browser, signed in as the person (through their API client), in the same language as the first. */
-async function browserOf(
-  browser: Browser,
-  server: RunningServer,
-  api: APIRequestContext,
-  locale: string | undefined,
-) {
-  const storageState = await api.storageState();
-  return browser.newContext({ baseURL: server.url, storageState, ...(locale !== undefined && { locale }) });
 }
 
 test("edit a page together: each sees the other's change before it is published", async ({

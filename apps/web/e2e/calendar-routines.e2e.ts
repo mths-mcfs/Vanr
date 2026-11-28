@@ -2,16 +2,9 @@
 // A weekly series is made from the header, shows on the same weekday a week later, and is cut from that
 // occurrence on. A routine written in the page runs by hand, and its history shows the finished run with
 // a way into the conversation the agent answered in.
-import type { APIRequestContext, Page } from "@playwright/test";
+import type { APIRequestContext } from "@playwright/test";
 import { expect, type Text, test } from "./fixtures.ts";
-
-/** A day of the open week, by the label the page gives it in the browser's language. */
-function dayRegion(page: Page, locale: string | undefined, at: Date) {
-  const label = new Intl.DateTimeFormat(locale, { weekday: "long", day: "numeric", month: "long" }).format(
-    at,
-  );
-  return page.getByRole("region", { name: label, exact: true });
-}
+import { dayRegion } from "./helpers.ts";
 
 async function occurrences(api: APIRequestContext, workspaceId: string, title: string, from: Date, to: Date) {
   const answer = await api.get(
