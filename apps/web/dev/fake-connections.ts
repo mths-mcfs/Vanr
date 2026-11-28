@@ -87,6 +87,8 @@ export class FakeConnections {
   githubInstallable = true;
   /** Like an installation that allows plain-text connections (off in production). */
   plaintextAllowed = true;
+  /** Mail hosts that only speak plain text (no TLS on any port). */
+  plainHosts = new Set<string>();
   /** Hosts on a private network, which the installation refuses. */
   blockedHosts = new Set<string>();
   /** The hosted mail provider fails to start a sign-in. */
@@ -106,6 +108,7 @@ export class FakeConnections {
     this.keyServers = new Set();
     this.plaintextAllowed = true;
     this.blockedHosts = new Set();
+    this.plainHosts = new Set();
     this.hostedMailDown = false;
     this.oauthServers = new Set();
   }
@@ -166,8 +169,9 @@ export class FakeConnections {
         ) {
           return fail(400, "mail.blocked_host", "That address is on a private network");
         }
-        // 143 is IMAP without TLS: refused where the installation only connects over TLS.
-        if (!this.plaintextAllowed && params.imapPort === 143) {
+        // The server tries TLS on any port; a host that only speaks plain text is refused where the
+        // installation only connects over TLS.
+        if (!this.plaintextAllowed && this.plainHosts.has(text(params.imapHost) ?? "")) {
           return fail(400, "mail.tls_required", "This installation only connects to servers over TLS");
         }
         if (text(params.password) === "wrong-password") {

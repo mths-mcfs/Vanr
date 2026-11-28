@@ -527,7 +527,14 @@ function EditDatabase({
   const actionsChanged = DB_ACTIONS.some(
     (action) => isOff(action) !== connection.disabledActions.includes(action),
   );
-  const toggle = (action: DbAction, allowed: boolean) => setPicked({ ...picked, [action]: !allowed });
+  // Picking what the server has for an action right now is no pick at all, so an action toggled and
+  // toggled back never undoes a change someone else makes to it later.
+  const toggle = (action: DbAction, allowed: boolean) => {
+    const next = { ...picked };
+    if (!allowed === connection.disabledActions.includes(action)) delete next[action];
+    else next[action] = !allowed;
+    setPicked(next);
+  };
   return (
     <Dialog
       open

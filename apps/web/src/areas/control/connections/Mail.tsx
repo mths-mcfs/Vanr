@@ -515,6 +515,14 @@ function EditMailbox({
   // Only the rules this person picked. Every other one shows, and is saved, as the server has it now,
   // so a rule someone else changed while the dialog is open is both what is seen and what is kept.
   const [picked, setPicked] = useState<Partial<Record<MailAction, Rule>>>({});
+  // Picking what the server has for a rule right now is no pick at all, so a rule set and set back
+  // never undoes a change someone else makes to it later.
+  const pick = (action: MailAction, rule: Rule) => {
+    const next = { ...picked };
+    if (rule === ruleOf(account, action)) delete next[action];
+    else next[action] = rule;
+    setPicked(next);
+  };
   const save = useApiMutation("updateMailAccount", {
     ...SECRET,
     invalidates: () => [{ method: "listMailAccounts" as const, args: { workspaceId } }],
@@ -619,7 +627,7 @@ function EditMailbox({
                     aria-label={t("box.ruleFor", { action: t(`box.action.${action}`) })}
                     onValueChange={(next) => {
                       const rule = RULES.find((each) => each === next);
-                      if (rule !== undefined) setPicked({ ...picked, [action]: rule });
+                      if (rule !== undefined) pick(action, rule);
                     }}
                   >
                     {RULES.map((rule) => (

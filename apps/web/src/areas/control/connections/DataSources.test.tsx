@@ -382,9 +382,65 @@ describe("mailboxes", () => {
     expect(server.connections.mail[0]?.confirmActions).toEqual([]);
   });
 
+  test("a rename another admin made while the dialog was open is kept when the person saves something else", async () => {
+    const server = newServer();
+    server.connections.mail.push(mailbox());
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const list = await within(await boxes()).findByRole("list", { name: "Mailboxes" });
+    await app.user.click(
+      within(row(list, "Orders")).getByRole("button", { name: "Edit orders@birchwood.example" }),
+    );
+    const form = await screen.findByRole("form", { name: "Edit orders@birchwood.example" });
+    const account = server.connections.mail[0];
+    if (account === undefined) throw new Error("no mailbox");
+    account.label = "Orders desk";
+    await act(async () => {
+      await app.runtime.queryClient.refetchQueries();
+    });
+    await waitFor(() => expect(within(list).getByText("Orders desk")).toBeDefined());
+    await app.user.type(within(form).getByLabelText(/^New password/), "fresh-pass");
+    await app.user.click(within(form).getByRole("button", { name: "Save mailbox" }));
+    expect(await screen.findByText("orders@birchwood.example is saved.")).toBeDefined();
+    expect(server.connections.mail[0]?.label).toBe("Orders desk");
+  });
+
+  test("a rule set and set back is no change, even after another admin changed it", async () => {
+    const server = newServer();
+    server.connections.mail.push(mailbox());
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const list = await within(await boxes()).findByRole("list", { name: "Mailboxes" });
+    await app.user.click(
+      within(row(list, "Orders")).getByRole("button", { name: "Edit orders@birchwood.example" }),
+    );
+    const form = await screen.findByRole("form", { name: "Edit orders@birchwood.example" });
+    await chooseOption(app, within(form).getByRole("combobox", { name: "Rule for: Delete" }), "Never");
+    await chooseOption(app, within(form).getByRole("combobox", { name: "Rule for: Delete" }), "Allowed");
+    const account = server.connections.mail[0];
+    if (account === undefined) throw new Error("no mailbox");
+    account.disabledActions = ["delete"];
+    await act(async () => {
+      await app.runtime.queryClient.refetchQueries();
+    });
+    await waitFor(() =>
+      expect(within(form).getByRole("combobox", { name: "Rule for: Delete" }).textContent).toBe("Never"),
+    );
+    await chooseOption(
+      app,
+      within(form).getByRole("combobox", { name: "Rule for: Send a new message" }),
+      "A person approves first",
+    );
+    await app.user.click(within(form).getByRole("button", { name: "Save mailbox" }));
+    expect(await screen.findByText("orders@birchwood.example is saved.")).toBeDefined();
+    expect([server.connections.mail[0]?.disabledActions, server.connections.mail[0]?.confirmActions]).toEqual(
+      [["delete"], ["send"]],
+    );
+  });
+
   test("a refusal from the mail server's network rule says what it is about", async () => {
     const server = newServer();
     server.connections.plaintextAllowed = false;
+    // A mail host that only speaks plain text, as the server finds out when it tries TLS.
+    server.connections.plainHosts.add("imap.birchwood.example");
     server.connections.blockedHosts.add("imap.internal");
     const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
     await app.user.click(within(await boxes()).getByRole("button", { name: "Connect a mailbox" }));
@@ -394,9 +450,6 @@ describe("mailboxes", () => {
     await app.user.type(within(form).getByLabelText(/^App password/), "secret-1");
     await app.user.type(within(form).getByLabelText(/^Incoming server/), "imap.birchwood.example");
     await app.user.type(within(form).getByLabelText(/^Outgoing server/), "smtp.birchwood.example");
-    const imapPort = within(form).getByLabelText(/^IMAP port/);
-    await app.user.clear(imapPort);
-    await app.user.type(imapPort, "143");
     await app.user.click(within(form).getByRole("button", { name: "Connect" }));
     expect((await within(form).findByRole("alert")).textContent).toBe(
       "This server only connects to mail servers over an encrypted (TLS) connection. Use the encrypted ports, such as 993 and 465.",
@@ -626,6 +679,49 @@ describe("databases", () => {
     await app.user.click(within(form).getByRole("button", { name: "Save database" }));
     expect(await screen.findByText("Shop is saved.")).toBeDefined();
     expect(server.connections.databases[0]?.disabledActions).toEqual([]);
+  });
+
+  test("a database rename another admin made while the dialog was open is kept", async () => {
+    const server = newServer();
+    server.connections.databases.push(database());
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const list = await within(await block()).findByRole("list", { name: "Databases" });
+    await app.user.click(within(row(list, "Shop")).getByRole("button", { name: "Edit Shop" }));
+    const form = await screen.findByRole("form", { name: "Edit Shop" });
+    const shop = server.connections.databases[0];
+    if (shop === undefined) throw new Error("no database");
+    shop.label = "Shop replica";
+    await act(async () => {
+      await app.runtime.queryClient.refetchQueries();
+    });
+    await waitFor(() => expect(within(list).getByText("Shop replica")).toBeDefined());
+    await app.user.click(within(form).getByRole("checkbox", { name: "List the tables" }));
+    await app.user.click(within(form).getByRole("button", { name: "Save database" }));
+    expect(await screen.findByText("Shop replica is saved.")).toBeDefined();
+    expect(server.connections.databases[0]?.label).toBe("Shop replica");
+  });
+
+  test("a database action toggled and toggled back is no change, even after another admin changed it", async () => {
+    const server = newServer();
+    server.connections.databases.push(database());
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const list = await within(await block()).findByRole("list", { name: "Databases" });
+    await app.user.click(within(row(list, "Shop")).getByRole("button", { name: "Edit Shop" }));
+    const form = await screen.findByRole("form", { name: "Edit Shop" });
+    const query = () => within(form).getByRole("checkbox", { name: "Run read-only queries" });
+    await app.user.click(query());
+    await app.user.click(query());
+    const shop = server.connections.databases[0];
+    if (shop === undefined) throw new Error("no database");
+    shop.disabledActions = ["query"];
+    await act(async () => {
+      await app.runtime.queryClient.refetchQueries();
+    });
+    await waitFor(() => expect(query().getAttribute("aria-checked")).toBe("false"));
+    await app.user.click(within(form).getByRole("checkbox", { name: "List the tables" }));
+    await app.user.click(within(form).getByRole("button", { name: "Save database" }));
+    expect(await screen.findByText("Shop is saved.")).toBeDefined();
+    expect([...(server.connections.databases[0]?.disabledActions ?? [])].sort()).toEqual(["query", "tables"]);
   });
 
   test("an unencrypted connection the server refuses is explained for a database", async () => {
