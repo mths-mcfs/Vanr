@@ -411,7 +411,8 @@ describe("a lost thread, and the next one", () => {
     // The thread answers first; the fresh channel list comes only later.
     const later = server.delay("listChannels");
     await act(() => app.runtime.router.navigate({ to: `/workspace/${WS}/threads/msg_broot` }));
-    await waitFor(() => expect(server.calls.some((call) => call.method === "getThread")).toBe(true));
+    // The thread's answer against the old list: its channel isn't in it, so the page says gone.
+    expect(await screen.findByRole("heading", { name: "There's no thread here" })).toBeDefined();
     await act(async () => later.release());
     expect(await screen.findByText("Agreed, quietly")).toBeDefined();
   });
@@ -501,8 +502,75 @@ describe("what CodeRabbit found on the thread round", () => {
     // The thread answers first; the fresh channel list comes only later.
     const later = server.delay("listChannels");
     await act(() => app.runtime.router.navigate({ to: `/workspace/${WS}/threads/msg_broot` }));
-    await waitFor(() => expect(server.calls.some((call) => call.method === "getThread")).toBe(true));
+    // The thread's answer against the old list: its channel isn't in it, so the page says gone.
+    expect(await screen.findByRole("heading", { name: "There's no thread here" })).toBeDefined();
     await act(async () => later.release());
     expect(await screen.findByText("Agreed, quietly")).toBeDefined();
+  });
+
+  test("a channel left out of the list keeps the page gone when the thread can't be read again", async () => {
+    const server = newServer();
+    seedBoard(server);
+    const app = await open("/threads/msg_broot", "usr_iris", server);
+    expect(await screen.findByText("Agreed, quietly")).toBeDefined();
+    // Out of the channel with no word on the socket: only a fresh list tells, and then the thread
+    // itself can't be read again.
+    const board = server.state.channels.find((channel) => channel.id === "ch_board");
+    if (board !== undefined) board.memberIds = ["usr_ana"];
+    server.force("getThread", { kind: "offline" }, 20);
+    await act(async () => {
+      void app.runtime.queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[2] === "listChannels",
+      });
+    });
+    expect(await screen.findByRole("heading", { name: "There's no thread here" })).toBeDefined();
+    await waitFor(() =>
+      expect(server.calls.filter((call) => call.method === "getThread").length).toBeGreaterThan(1),
+    );
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(screen.getByRole("heading", { name: "There's no thread here" })).toBeDefined();
+    expect(screen.queryByText("This thread didn't load") === null).toBe(true);
+    expect(screen.queryAllByText(/Secret pricing|board-room|Agreed/).length).toBe(0);
+  });
+
+  test("the count is the thread's, though the panel draws only the latest page", async () => {
+    const server = newServer();
+    server.state.messages.push(message({ id: "msg_root", body: "Kiln log", replyCount: 102 }));
+    for (let i = 1; i <= 102; i += 1)
+      server.state.messages.push(
+        message({ id: `msg_r${i}`, body: `reply ${i}`, threadId: "msg_root", createdAt: at(-300 + i * 2) }),
+      );
+    server.chat.thread("msg_root", "usr_jonas", { title: "Kiln log", replyCount: 102 });
+    await open("/channel/ch_general?thread=msg_root", "usr_ana", server);
+    const panel = await screen.findByRole("region", { name: "Thread" });
+    await within(panel).findByText("reply 102");
+    expect(within(panel).queryByText("reply 1") === null).toBe(true);
+    const log = within(panel).getByRole("log", { name: "Messages in this thread" });
+    expect(within(log).getByText("102 replies")).toBeDefined();
+    expect(within(panel).getAllByText("102 replies").length).toBe(2);
+    expect(within(panel).queryByText("100 replies") === null).toBe(true);
+  });
+
+  test("replies close together from one author run on under one header", async () => {
+    const server = newServer();
+    server.state.messages.push(
+      message({ id: "msg_root", body: "Kiln log", replyCount: 3 }),
+      message({ id: "msg_a", body: "First look", threadId: "msg_root", createdAt: at(-5) }),
+      message({ id: "msg_b", body: "Second look", threadId: "msg_root", createdAt: at(-4) }),
+      message({
+        id: "msg_c",
+        body: "Scout's look",
+        author: { type: "agent", id: "agt_scout" },
+        threadId: "msg_root",
+        createdAt: at(-3),
+      }),
+    );
+    await open("/channel/ch_general?thread=msg_root", "usr_ana", server);
+    const panel = await screen.findByRole("region", { name: "Thread" });
+    const item = async (text: string) => (await within(panel).findByText(text)).closest("article");
+    expect((await item("First look"))?.getAttribute("data-continued") === null).toBe(true);
+    expect((await item("Second look"))?.getAttribute("data-continued") === null).toBe(false);
+    // Another author starts a header of its own.
+    expect((await item("Scout's look"))?.getAttribute("data-continued") === null).toBe(true);
   });
 });
