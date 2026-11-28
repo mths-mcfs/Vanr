@@ -3,8 +3,9 @@
 // got worse listed first.
 import { describe, expect, test } from "bun:test";
 import { screen, waitFor, within } from "@testing-library/react";
+import { isApiError } from "@vanr/client";
 import type { AgentEval, AgentTestCase } from "@vanr/contract";
-import { newServer, renderApp } from "../../../../test/app.tsx";
+import { newServer, newTestRuntime, renderApp } from "../../../../test/app.tsx";
 
 const PATH = "/workspace/workspace_birchwood/proposals";
 const TITLE = "Answer print questions with the shop's hours";
@@ -117,4 +118,23 @@ describe("the test cases of an instructions proposal", () => {
     expect(Boolean(worse.compareDocumentPosition(fine) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
     expect(within(tone).getByText("Missing “9 to 18”")).toBeDefined();
   });
+});
+
+test("an agent of another workspace answers 404 on the test-case routes", async () => {
+  const server = newServer();
+  server.control.testCases.set("agt_scout", [testCase("tc_1", "When do you open?")]);
+  // Ana belongs to Night Shift too, but Scout is Birchwood's.
+  const { runtime } = newTestRuntime({ path: "/", server, signedInAs: "usr_ana" });
+  const asked = await runtime.api.client
+    .call("listAgentTestCases", { workspaceId: "workspace_nightshift", agentId: "agt_scout" })
+    .then(
+      () => null,
+      (error: unknown) => error,
+    );
+  expect(isApiError(asked) && asked.status === 404).toBe(true);
+  const own = await runtime.api.client.call("listAgentTestCases", {
+    workspaceId: "workspace_birchwood",
+    agentId: "agt_scout",
+  });
+  expect(own.length).toBe(1);
 });

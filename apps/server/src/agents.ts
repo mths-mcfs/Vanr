@@ -263,8 +263,9 @@ export async function toAgentDetail(
     budgetInherited: row.budgetPerMonthUsd === null,
     credentialId: row.credentialId,
     channels: await agentChannels(db, row.id, input.viewer),
-    // Pending requests the viewer may see, as the approvals list shows them: the agent's owner sees all of them,
-    // anyone else only those of conversations they read (and the ones asked outside any conversation).
+    // Pending requests the viewer may see, as the approvals list shows them: whoever decides them (the agent's
+    // owner, or someone who manages agents once the owner left) sees all of them, anyone else only those of
+    // conversations they read (and the ones asked outside any conversation).
     queuedApprovals: (
       await db
         .select({ id: schema.approvals.id })
@@ -273,7 +274,7 @@ export async function toAgentDetail(
           and(
             eq(schema.approvals.agentId, row.id),
             eq(schema.approvals.status, "pending"),
-            row.ownerUserId === input.viewer.userId
+            (await decidesFor(db, row, input.viewer))
               ? undefined
               : sql`(${schema.approvals.channelId} is null or ${schema.approvals.channelId} in ${readableChannelsSql({ workspaceId: row.workspaceId, userId: input.viewer.userId })})`,
           ),
@@ -283,6 +284,17 @@ export async function toAgentDetail(
     monthTokens: usage.tokens,
     costThisMonthUsd: usage.costUsd,
   };
+}
+
+/** The viewer decides the agent's approvals: its owner, or someone who manages agents once the owner left. */
+async function decidesFor(db: Db, row: AgentRow, viewer: ChannelViewer): Promise<boolean> {
+  if (row.ownerUserId === viewer.userId) return true;
+  if (!viewer.seesAll) return false;
+  const [owner] = await db
+    .select({ userId: schema.members.userId })
+    .from(schema.members)
+    .where(and(eq(schema.members.workspaceId, row.workspaceId), eq(schema.members.userId, row.ownerUserId)));
+  return owner === undefined;
 }
 
 export function toMemory(row: MemoryRow): Memory {

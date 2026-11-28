@@ -321,6 +321,7 @@ export class FakeServer {
     this.control = new FakeControl({
       ...host,
       agentOwner: (agentId) => this.agents.find((candidate) => candidate.id === agentId)?.ownerUserId,
+      agentWorkspace: (agentId) => this.agents.find((candidate) => candidate.id === agentId)?.workspaceId,
       isMember: (workspaceId, userId) => this.memberOf(workspaceId, userId) !== undefined,
       channel: (channelId) => this.state.channels.find((candidate) => candidate.id === channelId),
       channelWorkspace: (channelId) =>

@@ -12,6 +12,7 @@ type Scope = { workspaceId: string; user: T.User; role: T.Role };
 /** What the control center needs from the fake server beyond the files' host. */
 export type ControlHost = FilesHost & {
   agentOwner: (agentId: string) => string | undefined;
+  agentWorkspace: (agentId: string) => string | undefined;
   isMember: (workspaceId: string, userId: string) => boolean;
   /** A channel's members and visibility, or undefined when it does not exist. */
   channel: (channelId: string) => { memberIds: string[]; visibility: string } | undefined;
@@ -431,6 +432,13 @@ export class FakeControl {
         const scope = this.host.scope(params, session);
         return "status" in scope ? scope : handler(scope, params);
       };
+    /** An agent's own routes: an agent of another workspace answers 404, as the real server does. */
+    const ownAgent = (handler: (scope: Scope, params: Record<string, unknown>) => FilesReply) =>
+      within((scope, params) =>
+        this.host.agentWorkspace(String(params.agentId)) === scope.workspaceId
+          ? handler(scope, params)
+          : fail(404, "not_found", "Agent not found"),
+      );
     const approvalOf = (scope: Scope, id: unknown) =>
       this.approvals.find((each) => each.workspaceId === scope.workspaceId && each.approval.id === id);
     const decide = (
@@ -620,10 +628,10 @@ export class FakeControl {
         return reply(200, stored.question);
       }),
 
-      listAgentTestCases: within((_scope, params) =>
+      listAgentTestCases: ownAgent((_scope, params) =>
         reply(200, { cases: this.testCases.get(String(params.agentId)) ?? [] }),
       ),
-      listAgentEvals: within((_scope, params) =>
+      listAgentEvals: ownAgent((_scope, params) =>
         reply(200, {
           evals: this.evals
             .filter((run) => run.agentId === params.agentId)
@@ -631,7 +639,7 @@ export class FakeControl {
             .reverse(),
         }),
       ),
-      createAgentEval: within((_scope, params) => {
+      createAgentEval: ownAgent((_scope, params) => {
         const cases = this.testCases.get(String(params.agentId)) ?? [];
         if (cases.length === 0) return fail(400, "agent_eval.no_cases", "The agent has no test cases");
         const run: T.AgentEval = {

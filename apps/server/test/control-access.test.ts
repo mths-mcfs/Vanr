@@ -4,7 +4,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { DECISION_TTL_MS, trailEntry } from "../src/control";
 import type { RunningServer } from "../src/server";
 import { type FakeMailServer, startFakeMail } from "./fake-mail";
@@ -23,7 +23,7 @@ afterAll(async () => {
   mail.stop();
 }, SERVER_TEST_MS);
 
-const { approvals, gateDecisions, outbox } = schema;
+const { approvals, gateDecisions, members, outbox } = schema;
 let n = 0;
 const email = (who: string) => `${who}${++n}@control-access.test`;
 
@@ -143,6 +143,12 @@ describe("counts that leave out conversations the viewer can't read", () => {
       expect(await queued(carla)).toBe(1);
       // Managing agents is not reading #secret.
       expect(await queued(ana)).toBe(1);
+      // Once Beto leaves, Ana decides Lia's requests: she counts all of them, as her approvals list shows them.
+      await server.deps.db
+        .delete(members)
+        .where(and(eq(members.workspaceId, workspaceId), eq(members.userId, beto.user.id)));
+      expect(await queued(ana)).toBe(2);
+      expect(await queued(carla)).toBe(1);
     },
     SERVER_TEST_MS,
   );
