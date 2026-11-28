@@ -122,13 +122,6 @@ function LiveRunView({
             {t("run.consulting", { agent: directory.agentName(run.consulting) })}
           </p>
         )}
-        {run.unavailable !== null && (
-          <p className="chat-note chat-note--danger" role="alert">
-            {run.unavailable === ""
-              ? t("run.unavailable", { agent: name })
-              : t("run.unavailableWhy", { agent: name, reason: run.unavailable })}
-          </p>
-        )}
         <StepList steps={run.steps} label={t("run.steps", { agent: name })} />
         {run.text !== "" ? (
           <p className="chat-live__text" data-testid="run-text">

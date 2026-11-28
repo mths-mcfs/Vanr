@@ -46,7 +46,8 @@ export const BROWSER_EVENTS = {
   "run.idle": run({}),
   "run.stopped": run({}),
   "run.completed": run({ status: opt(s.string), messageId: opt(s.nullable(id)) }),
-  "run.agent_unavailable": run({ reason: s.string }),
+  // Sent to the author alone when an agent they called can't take the message; `reason` is a code.
+  "run.agent_unavailable": run({ reason: s.string, messageId: opt(id), text: opt(s.string) }),
   "agent.typing": s.object({ agentId: id, ttlMs: opt(s.number) }),
   "delegation.started": s.object({ agentId: opt(id), delegateAgentId: opt(id), runId: opt(id) }),
   "delegation.completed": s.object({ agentId: opt(id), delegateAgentId: opt(id), runId: opt(id) }),

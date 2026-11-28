@@ -110,6 +110,50 @@ export function useHistory(workspaceId: string, channelId: string, authorId: str
   useRealtimeEvent("message.memories_updated", (event) =>
     patch(event.payload.messageId, (message) => ({ ...message, memories: event.payload.memories })),
   );
+  useRealtimeEvent("thread.info_changed", (event) => {
+    const { replyCount } = event.payload;
+    if (replyCount !== undefined) patch(event.payload.threadId, (message) => ({ ...message, replyCount }));
+  });
+  useRealtimeEvent("message.claimed", (event) =>
+    patch(event.payload.messageId, (message) =>
+      message.receipts.claimedBy.includes(event.payload.agentId)
+        ? message
+        : {
+            ...message,
+            receipts: {
+              ...message.receipts,
+              claimedBy: [...message.receipts.claimedBy, event.payload.agentId],
+            },
+          },
+    ),
+  );
+  useRealtimeEvent("message.handled", (event) => {
+    const { agentId, runId, status } = event.payload;
+    patch(event.payload.messageId, (message) => ({
+      ...message,
+      receipts: {
+        ...message.receipts,
+        handled: [
+          ...message.receipts.handled.filter(
+            (entry) => !(entry.agentId === agentId && entry.runId === runId),
+          ),
+          { agentId, runId, status },
+        ],
+      },
+    }));
+  });
+  useRealtimeEvent("message.routed", (event) => {
+    const { claimedBy, viewedBy, blocked } = event.payload;
+    patch(event.payload.messageId, (message) => ({
+      ...message,
+      receipts: {
+        ...message.receipts,
+        ...(claimedBy !== undefined && { claimedBy }),
+        ...(viewedBy !== undefined && { viewedBy }),
+        ...(blocked !== undefined && { blocked }),
+      },
+    }));
+  });
 
   const forget = useCallback(() => {
     setLost(true);
@@ -213,16 +257,31 @@ export function useHistory(workspaceId: string, channelId: string, authorId: str
 export function useLiveRuns(workspaceId: string, channelId: string) {
   const realtime = useRealtime();
   const clock = useClock();
+  const client = useVanrClient();
   const store = useMemo(
-    () => (realtime === null ? null : channelRuns(realtime, channelId, clock)),
-    [realtime, channelId, clock],
+    () =>
+      realtime === null
+        ? null
+        : channelRuns(
+            realtime,
+            channelId,
+            clock,
+            async (id) => (await client.api.listChannelActiveRuns({ workspaceId, channelId: id })) ?? [],
+          ),
+    [realtime, channelId, clock, client, workspaceId],
   );
   const runs = useSyncExternalStore(
     store?.subscribe ?? noSubscription,
     store?.snapshot ?? noRuns,
     store?.snapshot ?? noRuns,
   );
-  const active = useApiQuery("listChannelActiveRuns", { workspaceId, channelId });
+  // Every answer is a new value, even one equal to the last: an empty list read again after a
+  // reconnect still ends the runs heard of in between.
+  const active = useApiQuery(
+    "listChannelActiveRuns",
+    { workspaceId, channelId },
+    { structuralSharing: false },
+  );
   const { data, fetchStatus } = active;
   // When the list was asked for: a run heard from after that may be missing from it and still be live.
   const askedAt = useRef(clock.now());
@@ -349,4 +408,36 @@ export function useForgetChannel(workspaceId: string, channelId: string) {
       void queryClient.invalidateQueries({ queryKey: prefixKey(client, { method, args: { workspaceId } }) });
     if (realtime !== null) forgetChannelRuns(realtime, channelId);
   }, [queryClient, client, workspaceId, channelId, realtime]);
+}
+
+/** An agent the person called that can't take their message, as the server told them alone. */
+export type AgentNotice = {
+  key: string;
+  agentId: string;
+  reason: string;
+  text: string;
+  threadId: string | null;
+};
+
+/** The notices of this channel since it opened, until the person dismisses them. */
+export function useAgentNotices(channelId: string) {
+  const [notices, setNotices] = useState<readonly AgentNotice[]>([]);
+  useRealtimeEvent("run.agent_unavailable", (event) => {
+    const { payload } = event;
+    if (payload.channelId !== channelId) return;
+    const key = `${payload.messageId ?? ""}:${payload.agentId}`;
+    const notice: AgentNotice = {
+      key,
+      agentId: payload.agentId,
+      reason: payload.reason,
+      text: payload.text ?? "",
+      threadId: payload.threadId ?? null,
+    };
+    setNotices((current) => (current.some((each) => each.key === key) ? current : [...current, notice]));
+  });
+  const dismiss = useCallback(
+    (key: string) => setNotices((current) => current.filter((each) => each.key !== key)),
+    [],
+  );
+  return { notices, dismiss };
 }

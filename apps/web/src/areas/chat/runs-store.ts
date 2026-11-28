@@ -5,7 +5,7 @@
 import type { RealtimeClient } from "@vanr/client";
 import type { ActiveRun } from "@vanr/contract";
 import type { Clock } from "../../platform/clock.tsx";
-import { followChannel } from "../../realtime/react.tsx";
+import { followChannel, onChannelLost } from "../../realtime/react.tsx";
 import { applyRunEvent, type LiveRun, prune, type RunEvent, type RunEventBase, reconcile } from "./live.ts";
 
 const RUN_EVENTS = [
@@ -18,7 +18,6 @@ const RUN_EVENTS = [
   "run.completed",
   "run.stopped",
   "run.idle",
-  "run.agent_unavailable",
   "delegation.started",
   "delegation.completed",
 ] as const;
@@ -48,7 +47,14 @@ export class ChannelRuns {
 
   snapshot = () => this.runs;
 
+  /** The channel is followed only for a live run of it. */
+  get held(): boolean {
+    return this.release !== null;
+  }
+
   apply(base: RunEventBase, event: RunEvent): void {
+    // A late event of a run that ended never brings it back.
+    if (base.runId !== undefined && this.ended.has(base.runId)) return;
     if (base.runId !== undefined && ENDING.has(event.type)) this.ended.add(base.runId);
     this.set(applyRunEvent(this.runs, base, event, this.clock.now()));
   }
@@ -78,16 +84,38 @@ export class ChannelRuns {
   }
 }
 
-type Workspace = { channels: Map<string, ChannelRuns>; clock: Clock };
+/** Reads a channel's active runs from the server. */
+export type ReadRuns = (channelId: string) => Promise<readonly ActiveRun[]>;
+
+type Workspace = { channels: Map<string, ChannelRuns>; clock: Clock; read: ReadRuns };
 const workspaces = new WeakMap<RealtimeClient, Workspace>();
 
 /** The runs of a channel on this connection; the first call starts listening to the run events. */
-export function channelRuns(realtime: RealtimeClient, channelId: string, clock: Clock): ChannelRuns {
+export function channelRuns(
+  realtime: RealtimeClient,
+  channelId: string,
+  clock: Clock,
+  read: ReadRuns,
+): ChannelRuns {
   let workspace = workspaces.get(realtime);
   if (workspace === undefined) {
-    const created: Workspace = { channels: new Map(), clock };
+    const created: Workspace = { channels: new Map(), clock, read };
     workspace = created;
     workspaces.set(realtime, created);
+    // After a reconnect, a channel followed only for its run reads its runs again: an end missed
+    // while the connection was down lets the channel go.
+    realtime.onReconnect(() => {
+      for (const [id, each] of created.channels) {
+        if (!each.held) continue;
+        const at = created.clock.now();
+        created.read(id).then(
+          (active) => each.list(active, at),
+          () => each.forget(),
+        );
+      }
+    });
+    // A channel the person lost keeps nothing of its runs.
+    onChannelLost(realtime, (channelId) => created.channels.get(channelId)?.forget());
     for (const type of RUN_EVENTS) {
       realtime.on(type, (event) => {
         const payload: Record<string, unknown> = { ...event.payload };
@@ -107,7 +135,7 @@ export function channelRuns(realtime: RealtimeClient, channelId: string, clock: 
           )?.[0];
         if (home === undefined || agentId === undefined) return;
         const threadId = payload.threadId;
-        channelRuns(realtime, home, created.clock).apply(
+        channelRuns(realtime, home, created.clock, created.read).apply(
           {
             agentId,
             ...(runId !== undefined && { runId }),
