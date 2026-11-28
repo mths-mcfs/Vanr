@@ -1,10 +1,10 @@
-// What the agent reaches of the workspace (Reach.tsx), its own accounts on services and its per-channel
-// rules. A rule only narrows what the workspace granted (off, read only, or each use waits for
-// approval), for one connection or for all of them, in one channel the agent is in. The server answers
-// with the rules on channels this person may read and keeps the others as they are, so a member never
-// sees the rules of a private channel they are not in: this screen shows and replaces exactly what came
-// back. Whoever edits the agent changes them; everyone else reads them. The connector screens
-// themselves are the workspace settings'.
+// What the agent reaches of the workspace (Reach.tsx), its mailboxes, databases and repositories
+// (Sources.tsx), its own accounts on services and its per-channel rules. A rule only narrows what the
+// workspace granted (off, read only, or each use waits for approval), for one connection or for all of
+// them, in one channel the agent is in. The server answers with the rules on channels this person may
+// read and keeps the others as they are, so a member never sees the rules of a private channel they are
+// not in: this screen shows and replaces exactly what came back. Whoever edits the agent changes them;
+// everyone else reads them. The connector screens themselves are the workspace settings'.
 import { useApiMutation, useApiQuery } from "@vanr/client/react";
 import type { AgentDetail, ChannelAccessLevel, ChannelAccessRule, Connection } from "@vanr/contract";
 import { Button, Callout, Chip, ConfirmDialog, EmptyState, Field, Input, Select, SelectItem } from "@vanr/ui";
@@ -13,6 +13,7 @@ import { type ReactNode, useEffect, useRef, useState } from "react";
 import { useErrorMessage } from "../../app/screens.tsx";
 import { useMessages } from "../../i18n/react.tsx";
 import { Reach } from "./Reach.tsx";
+import { Sources } from "./Sources.tsx";
 import { type AgentRights, PartError, PartLoading, Section, useOutcome } from "./shared.tsx";
 
 /** The connection id of a rule that covers every connection. */
@@ -63,6 +64,7 @@ export function Access(props: Props) {
       <Section title={t("reach.title")} help={t("reach.help")}>
         <Reach {...props} />
       </Section>
+      <Sources {...props} />
       <Section title={t("access.accounts")} help={t("access.accountsHelp")}>
         {accounts}
       </Section>

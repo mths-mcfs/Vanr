@@ -1,7 +1,7 @@
 // The creation, the profile, the lab and the skills in Portuguese.
 import { expect, test } from "bun:test";
 import { screen, within } from "@testing-library/react";
-import { renderApp } from "../../../test/app.tsx";
+import { chooseOption, newServer, renderApp } from "../../../test/app.tsx";
 
 const BASE = "/workspace/workspace_birchwood";
 const languages = ["pt-BR"];
@@ -77,4 +77,45 @@ test("o dinheiro do mês no formato do português", async () => {
   const month = screen.getByRole("region", { name: "Este mês" });
   expect(month.textContent?.replace(/\s/g, " ")).toContain("US$ 5,00");
   expect(month.textContent?.replace(/\s/g, " ")).toContain("10% de US$ 50,00");
+});
+
+test("as caixas, os bancos e os repositórios de um agente, em português", async () => {
+  const server = newServer();
+  server.connections.mail.push({
+    id: "mail_orders",
+    workspaceId: "workspace_birchwood",
+    address: "pedidos@birchwood.example",
+    label: "pedidos@birchwood.example",
+    preset: "gmail",
+    provider: "gmail",
+    via: "imap",
+    status: "active",
+    agents: [],
+    confirmActions: [],
+    disabledActions: [],
+  });
+  const app = await renderApp({
+    path: "/workspace/workspace_birchwood/agents/agt_scout?tab=access",
+    signedInAs: "usr_jonas",
+    server,
+    languages,
+  });
+  const boxes = await screen.findByRole("region", { name: "Caixas de e-mail" });
+  const form = await within(boxes).findByRole("form", { name: "pedidos@birchwood.example" });
+  await chooseOption(
+    app,
+    within(form).getByRole("combobox", {
+      name: "O que este agente pode fazer com pedidos@birchwood.example",
+    }),
+    "Ler e escrever",
+  );
+  expect(
+    within(form).getByText("Liste antes pelo menos um endereço para o qual ele pode escrever."),
+  ).toBeDefined();
+  await app.user.type(within(form).getByLabelText(/^Dias para trás/), "9999");
+  expect(within(form).getByText("Um número inteiro de 1 a 3.650, ou vazio.")).toBeDefined();
+  const databases = screen.getByRole("region", { name: "Bancos de dados" });
+  expect(await within(databases).findByText("O workspace não tem bancos de dados")).toBeDefined();
+  const repos = screen.getByRole("region", { name: "Repositórios do GitHub" });
+  expect(await within(repos).findByText("O GitHub não está vinculado")).toBeDefined();
 });

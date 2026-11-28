@@ -100,6 +100,12 @@ export class FakeConnections {
   mail: FakeMailAccount[] = [];
   /** Each agent's raw scopes. */
   grants = new Map<string, T.ScopeGrant[]>();
+  /** Each agent's mailboxes, databases and GitHub repositories. */
+  mailboxes = new Map<string, T.AgentMailbox[]>();
+  agentDatabases = new Map<string, T.AgentDatabase[]>();
+  repositories = new Map<string, string[]>();
+  /** The tables a database lists, by connection id. */
+  tables = new Map<string, T.DatabaseTable[]>();
   databases: FakeDatabase[] = [];
   installations: FakeInstallation[] = [];
   /** Whether this server has a GitHub App set up. */
@@ -114,6 +120,10 @@ export class FakeConnections {
     this.servers = [];
     this.mail = [];
     this.grants = new Map();
+    this.mailboxes = new Map();
+    this.agentDatabases = new Map();
+    this.repositories = new Map();
+    this.tables = new Map();
     this.databases = [];
     this.installations = [];
     this.githubInstallable = true;
@@ -224,7 +234,112 @@ export class FakeConnections {
         return handler(scope, agent, params);
       });
 
+    const ADDRESS_OR_DOMAIN = /^(?:[^\s@,;<>"]+@|@)[^\s@,;<>"]+\.[^\s@,;<>"]+$/;
+    const addresses = (value: unknown) =>
+      value === undefined ||
+      (Array.isArray(value) &&
+        value.length <= 200 &&
+        value.every((each) => typeof each === "string" && ADDRESS_OR_DOMAIN.test(each)));
+
     return {
+      getAgentMail: withAgent((_scope, agent) =>
+        reply(200, { mailboxes: this.mailboxes.get(agent.id) ?? [] }),
+      ),
+      replaceAgentMail: withAgent((scope, agent, params) => {
+        const account = mailOf(scope, params.mailId);
+        if (account === undefined) return fail(404, "not_found", "Mail account not found");
+        const level = text(params.level) as T.MailLevel | undefined;
+        if (level !== "none" && level !== "read" && level !== "read_write")
+          return fail(400, "validation", "Invalid body");
+        const asked = (
+          typeof params.policy === "object" && params.policy !== null ? params.policy : {}
+        ) as Partial<T.MailPolicy>;
+        if (!addresses(asked.senderAllowlist) || !addresses(asked.recipientAllowlist)) {
+          return fail(400, "validation", "Invalid body");
+        }
+        const own = this.mailboxes.get(agent.id) ?? [];
+        const current = own.find((each) => each.accountId === account.id);
+        const merged: T.MailPolicy = {
+          folders: [],
+          senderAllowlist: [],
+          lookbackDays: null,
+          recipientAllowlist: [],
+          sendsPerDay: 25,
+          autoSend: false,
+          senderAddress: null,
+          ...current?.policy,
+          ...asked,
+        };
+        const box: T.AgentMailbox = {
+          accountId: account.id,
+          level,
+          deletable: level === "read_write" ? params.deletable === true : false,
+          policy: { ...merged, autoSend: merged.autoSend && merged.recipientAllowlist.length > 0 },
+        };
+        this.mailboxes.set(agent.id, [...own.filter((each) => each.accountId !== account.id), box]);
+        account.agents = [
+          ...account.agents.filter((each) => each.agentId !== agent.id),
+          { agentId: agent.id, level },
+        ];
+        return reply(200, box);
+      }, true),
+      listDatabaseTables: within((scope, params) => {
+        if (!can(scope.role, "manage_agents")) return fail(403, "forbidden", "Forbidden");
+        const connection = databaseOf(scope, params.databaseId);
+        if (connection === undefined) return fail(404, "not_found", "Database not found");
+        return reply(200, { tables: this.tables.get(connection.id) ?? [] });
+      }),
+      listAgentDatabases: withAgent((_scope, agent) =>
+        reply(200, { databases: this.agentDatabases.get(agent.id) ?? [] }),
+      ),
+      replaceAgentDatabase: withAgent((scope, agent, params) => {
+        const connection = databaseOf(scope, params.databaseId);
+        if (connection === undefined) return fail(404, "not_found", "Database not found");
+        const level = text(params.level);
+        if (level !== "none" && level !== "read") return fail(400, "validation", "Invalid body");
+        const own = this.agentDatabases.get(agent.id) ?? [];
+        const current = own.find((each) => each.connectionId === connection.id);
+        const asked = (
+          typeof params.policy === "object" && params.policy !== null ? params.policy : {}
+        ) as Partial<T.DatabasePolicy>;
+        const link: T.AgentDatabase = {
+          connectionId: connection.id,
+          level,
+          policy: {
+            tables: (this.tables.get(connection.id) ?? []).map((each) => `${each.schema}.${each.name}`),
+            maskedColumns: connection.hiddenSuggestion,
+            queriesPerDay: 200,
+            timeoutSeconds: 30,
+            ...current?.policy,
+            ...asked,
+          },
+        };
+        this.agentDatabases.set(agent.id, [
+          ...own.filter((each) => each.connectionId !== connection.id),
+          link,
+        ]);
+        connection.agents = [
+          ...connection.agents.filter((each) => each.agentId !== agent.id),
+          { agentId: agent.id, level },
+        ];
+        return reply(200, link);
+      }, true),
+      listAgentRepositories: withAgent((_scope, agent) =>
+        reply(200, { repositories: this.repositories.get(agent.id) ?? [] }),
+      ),
+      setAgentRepositories: withAgent((_scope, agent, params) => {
+        const asked = params.repositories;
+        if (
+          !Array.isArray(asked) ||
+          !asked.every((each) => typeof each === "string" && /^[\w.-]+\/(?:\*|[\w.-]+)$/.test(each))
+        ) {
+          return fail(400, "validation", "Use owner/repo or owner/*");
+        }
+        const repositories = [...new Set(asked as string[])];
+        this.repositories.set(agent.id, repositories);
+        return reply(200, { repositories });
+      }, true),
+
       getAgentAccess: withAgent((scope, agent) =>
         reply(200, accessView(scope.workspaceId, this.grants.get(agent.id) ?? [])),
       ),
