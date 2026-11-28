@@ -407,6 +407,45 @@ describe("a debate that can't be read", () => {
     expect(screen.queryByText("Do we sell the shop?") === null).toBe(true);
   });
 
+  test("once lost, a later failure of another kind never shows it again", async () => {
+    const app = await renderApp({ path: PAGE("deb_paper"), signedInAs: "usr_iris" });
+    await screen.findByRole("heading", { level: 1, name: "Which paper supplier do we keep?" });
+    app.server.state.channels.push({
+      id: "ch_board",
+      workspaceId: WORKSPACE,
+      name: "board",
+      topic: "",
+      isGeneral: false,
+      visibility: "private",
+      budgetPerMonthUsd: null,
+      createdAt: "2026-11-01T00:00:00.000Z",
+      memberIds: ["usr_ana"],
+    });
+    const paper = app.server.debates.debates.find((row) => row.id === "deb_paper");
+    if (paper === undefined) throw new Error("the seed has no paper debate");
+    paper.channelId = "ch_board";
+    await act(async () => app.server.emit(WORKSPACE, { type: "debate.updated", debateId: "deb_paper" }));
+    expect(await screen.findByText("This debate isn't here")).toBeDefined();
+    // The next read fails for another reason: the page still shows nothing of the debate.
+    app.server.force("getDebate", { kind: "error", status: 503, code: "unavailable" }, 50);
+    const before = app.server.calls.filter((call) => call.method === "getDebate").length;
+    await act(async () => app.server.emit(WORKSPACE, { type: "debate.updated", debateId: "deb_paper" }));
+    for (let n = 0; n < 5; n++) await app.advance(60_000);
+    await waitFor(() => {
+      const state = app.runtime.queryClient
+        .getQueryCache()
+        .findAll()
+        .find((query) => JSON.stringify(query.queryKey).includes("getDebate"))?.state;
+      expect(state?.fetchStatus).toBe("idle");
+      expect((state?.error as { status?: number } | null)?.status).toBe(503);
+    });
+    expect(app.server.calls.filter((call) => call.method === "getDebate").length > before).toBe(true);
+    expect(screen.getByText("This debate isn't here")).toBeDefined();
+    expect(
+      screen.queryByRole("heading", { level: 1, name: "Which paper supplier do we keep?" }) === null,
+    ).toBe(true);
+  });
+
   test("one that didn't load says so and loads on retry", async () => {
     const server = newServer();
     server.force("getDebate", { kind: "error", status: 503, code: "unavailable" }, 3);

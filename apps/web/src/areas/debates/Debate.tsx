@@ -47,7 +47,12 @@ function DebateView({ workspaceId, debateId }: { workspaceId: string; debateId: 
     { retry: (count, error) => !isGone(error) && count < 2 },
   );
   const directory = useDirectory(workspaceId);
-  const gone = debate.isError && isGone(debate.error);
+  // Lost once (403/404), the debate stays lost until a read succeeds after that: a later failure of
+  // another kind (a 503 on reconnect) must not bring back what was read before.
+  const lostSince = useRef<number | null>(null);
+  if (debate.isError && isGone(debate.error)) lostSince.current ??= debate.errorUpdatedAt;
+  if (lostSince.current !== null && debate.dataUpdatedAt > lostSince.current) lostSince.current = null;
+  const gone = lostSince.current !== null;
   useDocumentTitle(gone ? shell("route.debate") : (debate.data?.title ?? shell("route.debate")));
 
   // What was read before the debate left the person's sight never shows again, here or on the way back.

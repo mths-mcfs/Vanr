@@ -194,8 +194,11 @@ test.describe("the debates", () => {
         claimData: { answer: string; confidence: number | null } | null;
       }[];
     };
+    // The member's own post, found by who they are.
+    const memberApi = await apiAs(member);
+    const session = (await (await memberApi.get("/api/auth/get-session")).json()) as { user: { id: string } };
     const position = detail.posts.find(
-      (post) => post.claimData !== null && post.author?.id !== undefined && post.claimData.confidence === 0.8,
+      (post) => post.author?.id === session.user.id && post.claimData !== null,
     );
     expect(position?.claimData).toMatchObject({ answer: "Yes", confidence: 0.8 });
   });
