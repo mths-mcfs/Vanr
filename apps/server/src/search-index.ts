@@ -393,8 +393,8 @@ async function build(tx: Tx, ref: { kind: IndexedKind; id: string }): Promise<Ch
         {
           workspaceId: row.workspaceId,
           title: `#${row.number} ${row.title}`,
-          // Issues belong to the whole workspace today (the list and the screen don't look at the channel).
-          scope: { kind: "workspace" },
+          // An issue opened in a channel is read by whoever reads the channel; one of no channel, by everyone.
+          scope: row.channelId ? { kind: "channel", channelId: row.channelId } : { kind: "workspace" },
           url: `/workspace/${row.workspaceId}/issues/${row.number}`,
           authorId: actorKey(row.createdBy),
           updatedAt: row.updatedAt.toISOString(),

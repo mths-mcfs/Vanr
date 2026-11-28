@@ -373,6 +373,30 @@ describe("debates", () => {
 
 describe("the debates' debts (F2-3.2-P0-01)", () => {
   test(
+    "a debate opened from an issue of a private channel: only whoever reads the channel may open it",
+    async () => {
+      const { workspaceId, base, ana, beto, lia } = await team();
+      const secret = await seedChannel(server, workspaceId, {
+        name: "deal",
+        visibility: "private",
+        members: [ana],
+      });
+      const issue = await call(ana, "POST", `${ws(workspaceId)}/issues`, {
+        title: "Quiet merger",
+        channelId: secret,
+      });
+      expect(issue.status).toBe(201);
+      const input = { title: "Go or not", goal: "Decide", agentIds: [lia.id], rounds: 1 };
+      const missing = await call(beto, "POST", base, { ...input, sourceIssueId: "iss_missing" });
+      const refused = await call(beto, "POST", base, { ...input, sourceIssueId: issue.body.id });
+      expect([refused.status, refused.body]).toEqual([404, missing.body]);
+      expect((await call(ana, "POST", base, { ...input, sourceIssueId: issue.body.id })).status).toBe(201);
+      await settle();
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "a debate of a private channel: whoever isn't in the channel doesn't see it in the list, the read, the search or the socket",
     async () => {
       const { workspaceId, base, open, ana, beto, caio, lia } = await team();

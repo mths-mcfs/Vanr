@@ -1250,9 +1250,16 @@ export async function dueRoutines(deps: AppDeps): Promise<number> {
 /** A workspace event that fires routines (only what people do). The event's id is the dedupe key. */
 export async function fireRoutineEvent(
   deps: AppDeps,
-  input: { workspaceId: string; event: (typeof ROUTINE_EVENTS)[number]; eventId: string; context: string },
+  input: {
+    workspaceId: string;
+    event: (typeof ROUTINE_EVENTS)[number];
+    eventId: string;
+    context: string;
+    /** The channel the context comes from: a private one or a DM keeps it among the people who read it. */
+    channelId?: string | null;
+  },
 ) {
-  const rows = await deps.db
+  const candidates = await deps.db
     .select()
     .from(routines)
     .where(
@@ -1262,6 +1269,7 @@ export async function fireRoutineEvent(
         sql`${routines.trigger}->>'kind' = 'event' and ${routines.trigger}->>'event' = ${input.event}`,
       ),
     );
+  const rows = await keptInChannel(deps.db, candidates, input.workspaceId, input.channelId ?? null);
   for (const row of rows) {
     const reg = await registerFire(deps, row.id, {
       trigger: "event",
@@ -1270,6 +1278,30 @@ export async function fireRoutineEvent(
     });
     if (!reg.duplicate) deps.runtime.track(startRoutineRun(deps, reg.run), "routine.event");
   }
+}
+
+/**
+ * The routines an event's context may reach. A public channel's (or no channel's) reaches them all. A private
+ * channel's or a DM's reaches only a routine whose creator reads that channel and that answers back in it or in
+ * the creator's own DM with the agent, so its text never lands where someone outside the channel reads it.
+ */
+async function keptInChannel(
+  db: Db,
+  rows: RoutineRow[],
+  workspaceId: string,
+  channelId: string | null,
+): Promise<RoutineRow[]> {
+  if (channelId === null) return rows;
+  const channel = await channelInWorkspace(db, workspaceId, channelId);
+  if (channel?.kind === "channel" && channel.visibility === "public") return rows;
+  const kept: RoutineRow[] = [];
+  for (const row of rows) {
+    const target = targetOf(row);
+    const ownDm = target.kind === "dm" || target.kind === "conversation";
+    if (!ownDm && !(target.kind === "channel" && target.channelId === channelId)) continue;
+    if (await canReadChannel(db, { workspaceId, userId: row.createdBy, channelId })) kept.push(row);
+  }
+  return kept;
 }
 
 /** Who sees it: whoever created it; and everyone who reads the target channel or sees the workspace's Drive and debates. */

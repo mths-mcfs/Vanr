@@ -26,7 +26,8 @@ import {
   createIssue,
   deleteColumn,
   issueById,
-  issueByNumber,
+  issueNumberSeenBy,
+  issueSeenBy,
   publishColumns,
   STAGES,
   setCriterion,
@@ -36,6 +37,7 @@ import {
   toIssue,
   toIssues,
   updateIssue,
+  visibleIssuesSql,
 } from "../issues";
 import { log } from "../logger";
 import { postMessage } from "../messages";
@@ -117,8 +119,9 @@ async function checkAgentAssignee(deps: AppDeps, workspaceId: string, a: ActorRe
   await requireCanTalk(deps.db, agent, asker);
 }
 
+/** The issue in the path, if the person sees it: one of a channel they don't read is the same 404 as a missing one. */
 async function issueOf(c: Ctx, me: WorkspaceMember) {
-  return issueById(c.get("deps").db, me.workspaceId, param(c, "issueId"));
+  return issueSeenBy(c.get("deps").db, me, param(c, "issueId"));
 }
 
 function columnsReply(c: Ctx, workspaceId: string, cols: Awaited<ReturnType<typeof columnsOf>>) {
@@ -138,6 +141,7 @@ export function registerIssues(app: Hono<AppEnv>) {
       .where(
         and(
           eq(issues.workspaceId, me.workspaceId),
+          visibleIssuesSql(me),
           like
             ? or(
                 ilike(issues.title, like),
@@ -149,7 +153,7 @@ export function registerIssues(app: Hono<AppEnv>) {
       )
       .orderBy(asc(issues.boardPosition), desc(issues.number))
       .limit(ISSUE_LIST_LIMIT);
-    return c.json({ issues: await toIssues(db, me.workspaceId, rows) });
+    return c.json({ issues: await toIssues(db, me, rows) });
   });
 
   // A number of another workspace, one that doesn't exist and one that isn't a number answer the same 404.
@@ -158,7 +162,7 @@ export function registerIssues(app: Hono<AppEnv>) {
     const { db } = c.get("deps");
     const raw = param(c, "issueSeq");
     if (!issueSeq.test(raw) || Number(raw) > ISSUE_SEQ_MAX) throw notFound("Issue not found");
-    return c.json(await toIssue(db, await issueByNumber(db, me.workspaceId, Number(raw))));
+    return c.json(await toIssue(db, me, await issueNumberSeenBy(db, me, Number(raw))));
   });
 
   app.post(`${WORKSPACE}/issues`, async (c) => {
@@ -183,9 +187,9 @@ export function registerIssues(app: Hono<AppEnv>) {
     });
     if (row.assignee?.type === "agent") {
       const started = await askAgent(deps, me, row.id, row.assignee.id);
-      return c.json(await toIssue(deps.db, started), 201);
+      return c.json(await toIssue(deps.db, me, started), 201);
     }
-    return c.json(await toIssue(deps.db, row), 201);
+    return c.json(await toIssue(deps.db, me, row), 201);
   });
 
   app.patch(`${WORKSPACE}/issues/:issueId`, async (c) => {
@@ -194,7 +198,7 @@ export function registerIssues(app: Hono<AppEnv>) {
     const row = await issueOf(c, me);
     const input = await readJson(c, updateIssueBody);
     const updated = await updateIssue(deps, row, input, me$(me));
-    return c.json(await toIssue(deps.db, updated));
+    return c.json(await toIssue(deps.db, me, updated));
   });
 
   app.put(`${WORKSPACE}/issues/:issueId/criteria/:criterionId`, async (c) => {
@@ -203,7 +207,7 @@ export function registerIssues(app: Hono<AppEnv>) {
     const row = await issueOf(c, me);
     const { done } = await readJson(c, z.object({ done: z.boolean() }).strict());
     const updated = await setCriterion(deps, row, param(c, "criterionId"), done, me$(me));
-    return c.json(await toIssue(deps.db, updated));
+    return c.json(await toIssue(deps.db, me, updated));
   });
 
   app.get(`${WORKSPACE}/issues/:issueId/activity`, async (c) => {
@@ -236,7 +240,7 @@ export function registerIssues(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const row = await issueOf(c, me);
     const { agentId } = await readJson(c, z.object({ agentId: z.string().min(1).max(64) }).strict());
-    return c.json(await toIssue(deps.db, await askAgent(deps, me, row.id, agentId)));
+    return c.json(await toIssue(deps.db, me, await askAgent(deps, me, row.id, agentId)));
   });
 
   // ---- columns ----

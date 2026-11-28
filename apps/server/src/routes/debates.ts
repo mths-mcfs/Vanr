@@ -61,7 +61,7 @@ import {
 } from "../debates";
 import { debateEstimate, speakerAgents } from "../estimates";
 import { conflict, forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
-import { createIssue, issueById } from "../issues";
+import { createIssue, issueSeenBy } from "../issues";
 import { type MessageRow, messageInWorkspace } from "../messages";
 import { closeNotifications } from "../notifications";
 import { requirePlanOwners } from "../runners/plans";
@@ -402,9 +402,7 @@ export function registerDebates(app: Hono<AppEnv>) {
       });
     if (input.deadline && new Date(input.deadline) <= deps.now())
       throw new HttpError(400, "debate.deadline_past", "The deadline must be in the future");
-    const sourceIssue = input.sourceIssueId
-      ? await issueById(deps.db, me.workspaceId, input.sourceIssueId)
-      : null;
+    const sourceIssue = input.sourceIssueId ? await issueSeenBy(deps.db, me, input.sourceIssueId) : null;
     const row = await openDebate(deps, {
       workspaceId: me.workspaceId,
       title: input.title,
