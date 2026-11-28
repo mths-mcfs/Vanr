@@ -531,7 +531,7 @@ export default {
   "asg.settings.minutes": "Time limit (minutes)",
   "asg.settings.noLimit": "Empty for no limit",
   "asg.settings.dollarsHint":
-    "Dollars, up to two decimals (1.50 or 1,50), no thousands separator. Empty for no limit",
+    "Dollars, up to two decimals after a point (1.50), no thousands separator. Empty for no limit",
   "asg.settings.saveLimits": "Save limits",
   "asg.settings.resumeJobs": "Resume interrupted jobs on their own",
   "asg.settings.failed": "The command rules could not be loaded",
@@ -544,6 +544,7 @@ export default {
   "asg.form.channelsFailed": "The channels an assignment can live in could not be loaded",
   "asg.people.requestsFailed": "The requests to take part could not be loaded",
   "recur.form.limitRange": "A number from {min} to {max}.",
-  "recur.form.amountHint": "Dollars, with up to two decimals: 1.50 or 1,50. No thousands separator.",
+  "recur.form.amountHint": "Dollars, with up to two decimals after a point: 1.50. No thousands separator.",
+  "recur.form.amountRange": "An amount from {min} to {max}, written like 1.50, with no thousands separator.",
   "week.field.everyone": "With no one invited, everyone in the workspace sees it.",
 } as const satisfies Catalog;

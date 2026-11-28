@@ -173,11 +173,16 @@ describe("an assignment's page", () => {
     await app.user.type(panel.getByRole("textbox", { name: "Step limit" }), "40");
     // A thousands separator is no amount: the field says so and nothing is saved.
     const dollars = panel.getByRole("textbox", { name: "Spending limit (USD)" });
-    await app.user.type(dollars, "1,000");
-    expect(panel.getByText(/^A number from 0 to 1/)).toBeDefined();
+    await app.user.type(dollars, "10,000");
+    expect(
+      panel.getByText(/^An amount from 0 to .*, written like 1\.50, with no thousands separator\.$/),
+    ).toBeDefined();
     expect((panel.getByRole("button", { name: "Save limits" }) as HTMLButtonElement).disabled).toBe(true);
     await app.user.clear(dollars);
-    await app.user.type(dollars, "1,50");
+    await app.user.type(dollars, "1,5");
+    expect((panel.getByRole("button", { name: "Save limits" }) as HTMLButtonElement).disabled).toBe(true);
+    await app.user.clear(dollars);
+    await app.user.type(dollars, "1.5");
     await app.user.click(panel.getByRole("button", { name: "Save limits" }));
     await waitFor(() => expect(app.server.assignments.assignments[0]?.limits.steps).toBe(40));
     expect(app.server.assignments.assignments[0]?.limits.dollars).toBe(1.5);

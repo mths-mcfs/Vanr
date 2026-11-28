@@ -20,7 +20,7 @@ import { useEffect, useState } from "react";
 import { useErrorMessage } from "../../../app/screens.tsx";
 import { useLocale, useMessages } from "../../../i18n/react.tsx";
 import { type Actors, useOutcome } from "../issues/shared.tsx";
-import { readLimit } from "../limits.ts";
+import { decimalMark, formatLimit, readLimit } from "../limits.ts";
 import { browserTimezone } from "../time.ts";
 import { ROUTINE_EVENTS, useTriggerText } from "./words.ts";
 
@@ -86,6 +86,7 @@ export function NewRoutineDialog({
   const t = useMessages("work");
   const common = useMessages("common");
   const { locale } = useLocale();
+  const mark = decimalMark(locale);
   const describe = useErrorMessage("work");
   const outcome = useOutcome();
   const triggerText = useTriggerText();
@@ -103,14 +104,14 @@ export function NewRoutineDialog({
   const [policy, setPolicy] = useState<RoutinePolicy>(DEFAULT_POLICY);
   // The limits stay as typed until the routine is sent: a half-typed "1." is not 1 yet.
   const [limitText, setLimitText] = useState<Record<NumberKey, string>>(() => ({
-    maxCostUsd: String(DEFAULT_POLICY.maxCostUsd),
+    maxCostUsd: formatLimit(DEFAULT_POLICY.maxCostUsd, mark),
     maxSteps: String(DEFAULT_POLICY.maxSteps),
     maxMinutes: String(DEFAULT_POLICY.maxMinutes),
     retries: String(DEFAULT_POLICY.retries),
     pauseAfterFailures: String(DEFAULT_POLICY.pauseAfterFailures),
   }));
   const limits = Object.fromEntries(
-    NUMBERS.map((each) => [each.key, readLimit(limitText[each.key], each)]),
+    NUMBERS.map((each) => [each.key, readLimit(limitText[each.key], each, mark)]),
   ) as Record<NumberKey, number | undefined>;
   const limitsValid = NUMBERS.every((each) => limits[each.key] !== undefined);
   const [active, setActive] = useState(false);
@@ -380,7 +381,10 @@ export function NewRoutineDialog({
                   label={t(NUMBER_LABEL[each.key])}
                   {...(each.step !== 1 && { hint: t("recur.form.amountHint") })}
                   {...(limits[each.key] === undefined && {
-                    error: t("recur.form.limitRange", { min: each.min, max: each.max }),
+                    error: t(each.step === 1 ? "recur.form.limitRange" : "recur.form.amountRange", {
+                      min: each.min,
+                      max: each.max,
+                    }),
                   })}
                 >
                   <Input

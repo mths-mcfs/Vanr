@@ -17,7 +17,7 @@ import {
   SubmissionCard,
 } from "../cards/AssignmentCards.tsx";
 import { type Actors, useMyId, useOutcome, useSeesUsage } from "../issues/shared.tsx";
-import { type Limit, readLimit } from "../limits.ts";
+import { decimalMark, formatLimit, type Limit, readLimit } from "../limits.ts";
 import { PartError, PartLoading } from "../parts.tsx";
 import { assignmentKeys, useActorName } from "./shared.tsx";
 import { askOlder, EMPTY_TRAIL, type TrailState, withLatest, withOlder } from "./trail.ts";
@@ -463,6 +463,7 @@ const BOUNDS: Record<(typeof LIMITS)[number], Limit> = {
 /** How the assignment runs: command approval on the runner, its limits and due date, and resuming jobs. */
 export function Settings({ workspaceId, assignment }: Part) {
   const t = useMessages("work");
+  const mark = decimalMark(useLocale().locale);
   const outcome = useOutcome();
   const args = { workspaceId, assignmentId: assignment.id };
   const settings = useApiQuery("getAssignmentSettings", args, { enabled: assignment.manageable });
@@ -478,14 +479,14 @@ export function Settings({ workspaceId, assignment }: Part) {
   const update = useApiMutation("updateAssignment", refresh);
   const dropRule = useApiMutation("deleteAssignmentCommandRule", refresh);
   const [limits, setLimits] = useState(() => ({
-    dollars: assignment.limits.dollars === null ? "" : String(assignment.limits.dollars),
+    dollars: assignment.limits.dollars === null ? "" : formatLimit(assignment.limits.dollars, mark),
     steps: assignment.limits.steps === null ? "" : String(assignment.limits.steps),
     minutes: assignment.limits.minutes === null ? "" : String(assignment.limits.minutes),
   }));
   if (!assignment.manageable) return <p className="page__muted">{t("asg.settings.owner")}</p>;
   // Empty is no limit; anything else has to read as the limit it is.
   const parsed = (key: (typeof LIMITS)[number]) =>
-    limits[key].trim() === "" ? null : readLimit(limits[key], BOUNDS[key]);
+    limits[key].trim() === "" ? null : readLimit(limits[key], BOUNDS[key], mark);
   const valid = LIMITS.every((key) => parsed(key) !== undefined);
   return (
     <div className="work-section">
@@ -528,7 +529,10 @@ export function Settings({ workspaceId, assignment }: Part) {
               label={t(`asg.settings.${key}`)}
               hint={t(key === "dollars" ? "asg.settings.dollarsHint" : "asg.settings.noLimit")}
               {...(parsed(key) === undefined && {
-                error: t("recur.form.limitRange", { min: BOUNDS[key].min, max: BOUNDS[key].max }),
+                error: t(key === "dollars" ? "recur.form.amountRange" : "recur.form.limitRange", {
+                  min: BOUNDS[key].min,
+                  max: BOUNDS[key].max,
+                }),
               })}
             >
               <Input

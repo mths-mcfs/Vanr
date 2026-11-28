@@ -157,8 +157,37 @@ describe("a channel's settings", () => {
     await app.user.click(await screen.findByRole("button", { name: "Settings" }));
     const dialog = await screen.findByRole("dialog", { name: "Settings for #print-queue" });
     await app.user.type(within(dialog).getByRole("textbox", { name: /Monthly budget/ }), "lots");
-    expect(within(dialog).getByText("Use an amount from 0 to 100,000.")).toBeDefined();
+    expect(
+      within(dialog).getByText(
+        "Use an amount from 0 to 100,000, written like 1.50, with no thousands separator.",
+      ),
+    ).toBeDefined();
     expect(within(dialog).getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
+  });
+});
+
+describe("a channel's budget in English", () => {
+  test("a thousands separator is refused, a point is the decimal mark", async () => {
+    const server = newServer();
+    const app = await open("/channel/ch_print", "usr_jonas", server);
+    await app.user.click(await screen.findByRole("button", { name: "Settings" }));
+    const dialog = await screen.findByRole("dialog", { name: "Settings for #print-queue" });
+    const budget = within(dialog).getByRole("textbox", { name: /Monthly budget/ });
+    await app.user.type(budget, "10,000");
+    expect(within(dialog).getByText(/^Use an amount from 0 to 100,000/)).toBeDefined();
+    expect(within(dialog).getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
+    // Nor is the comma a decimal mark in English.
+    await app.user.clear(budget);
+    await app.user.type(budget, "1,5");
+    expect(within(dialog).getByText(/^Use an amount from 0 to 100,000/)).toBeDefined();
+    await app.user.clear(budget);
+    await app.user.type(budget, "1.5");
+    await app.user.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(server.calls.find((call) => call.method === "updateChannel")?.params.budgetPerMonthUsd).toBe(
+        1.5,
+      ),
+    );
   });
 });
 
@@ -459,6 +488,23 @@ describe("a channel's people, round one of the access check", () => {
     );
     await act(async () => held.release());
     await waitFor(() => expect(app.address()).toBe(`/workspace/${WS}`));
+  });
+
+  test("someone who moved on before the leave answers stays where they went", async () => {
+    const server = newServer();
+    board(server);
+    const app = await open("/channel/ch_board", "usr_iris", server);
+    expect(await screen.findByText("Raise it 4%")).toBeDefined();
+    await app.user.click(screen.getByRole("button", { name: /in the channel/ }));
+    const dialog = await screen.findByRole("dialog", { name: "People in #board-room" });
+    const held = server.delay("deleteChannelMemberPerson");
+    await app.user.click(await within(dialog).findByRole("button", { name: "Leave channel" }));
+    await act(() => app.runtime.router.navigate({ to: `/workspace/${WS}/channel/ch_general` }));
+    await waitFor(() => expect(app.address()).toBe(`/workspace/${WS}/channel/ch_general`));
+    await act(async () => held.release());
+    await waitFor(() => expect(screen.queryByText("Raise it 4%") === null).toBe(true));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 100)));
+    expect(app.address()).toBe(`/workspace/${WS}/channel/ch_general`);
   });
 
   test("a second click on Remove sends nothing more", async () => {

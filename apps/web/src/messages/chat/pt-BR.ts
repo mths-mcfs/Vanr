@@ -154,7 +154,7 @@ export default {
   "setup.topic": "Sobre o que é",
   "setup.budget": "Orçamento mensal dos agentes (USD)",
   "setup.budgetHint": "Deixe vazio para não ter limite próprio.",
-  "setup.budgetBad": "Use um valor de 0 a 100.000.",
+  "setup.budgetBad": "Use um valor de 0 a 100.000, escrito como 1,50, sem separador de milhar.",
   "setup.budgetRead": "Os agentes daqui podem gastar até {amount} USD por mês.",
   "setup.save": "Salvar",
   "setup.saved": "Canal salvo.",

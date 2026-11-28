@@ -19,11 +19,11 @@ import {
 } from "@vanr/ui";
 import { useRef, useState } from "react";
 import { useErrorMessage } from "../../app/screens.tsx";
-import { useMessages } from "../../i18n/react.tsx";
+import { useLocale, useMessages } from "../../i18n/react.tsx";
 import { forgetChannelQueries } from "../../realtime/react.tsx";
 import { ROUTES } from "../../routes.ts";
 import { useOutcome } from "../control/shared.tsx";
-import { readLimit } from "../work/limits.ts";
+import { decimalMark, formatLimit, readLimit } from "../work/limits.ts";
 import { NAME_MAX, TOPIC_MAX } from "./Channels.tsx";
 import { useConversation } from "./context.tsx";
 import { useAuthorName } from "./Message.tsx";
@@ -277,6 +277,7 @@ export function SettingsDialog({ channel, onClose }: { channel: Channel; onClose
   const outcome = useOutcome();
   const { workspaceId, me } = useConversation();
   const configures = can(me.role, "configure");
+  const mark = decimalMark(useLocale().locale);
   // What the channel said when the dialog opened: only the fields the person changed from it are sent,
   // so a change someone else made meanwhile isn't written back over.
   const [opened] = useState(() => ({
@@ -287,13 +288,14 @@ export function SettingsDialog({ channel, onClose }: { channel: Channel; onClose
   const [name, setName] = useState(opened.name);
   const [topic, setTopic] = useState(opened.topic);
   const [budget, setBudget] = useState(
-    opened.budgetPerMonthUsd === null ? "" : String(opened.budgetPerMonthUsd),
+    opened.budgetPerMonthUsd === null ? "" : formatLimit(opened.budgetPerMonthUsd, mark),
   );
   const save = useApiMutation("updateChannel", {
     invalidates: () => [{ method: "listChannels", args: { workspaceId } }],
   });
-  // An amount as typed in either language ("1.5" or "1,5"), or nothing for no limit of its own.
-  const budgetValue = budget.trim() === "" ? null : (readLimit(budget, BUDGET) ?? Number.NaN);
+  // An amount as the language writes it ("1.5" in English, "1,5" in Portuguese), or nothing for no
+  // limit of its own.
+  const budgetValue = budget.trim() === "" ? null : (readLimit(budget, BUDGET, mark) ?? Number.NaN);
   const budgetBad = budgetValue !== null && Number.isNaN(budgetValue);
   const nameBad = name.trim() === "" || name.length > NAME_MAX;
   const topicBad = topic.length > TOPIC_MAX;

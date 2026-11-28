@@ -154,7 +154,7 @@ export default {
   "setup.topic": "What it's about",
   "setup.budget": "Monthly budget for agents (USD)",
   "setup.budgetHint": "Leave it empty for no limit of its own.",
-  "setup.budgetBad": "Use an amount from 0 to 100,000.",
+  "setup.budgetBad": "Use an amount from 0 to 100,000, written like 1.50, with no thousands separator.",
   "setup.budgetRead": "Agents here may spend up to {amount} USD a month.",
   "setup.save": "Save",
   "setup.saved": "Channel saved.",

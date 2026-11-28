@@ -30,8 +30,17 @@ describe("canais em português", () => {
     });
     await app.user.click(await screen.findByRole("button", { name: "Ajustes" }));
     const dialog = await screen.findByRole("dialog", { name: "Configurações de #print-queue" });
-    await app.user.type(within(dialog).getByRole("textbox", { name: /Orçamento mensal/ }), "1,5");
-    expect(within(dialog).queryByText("Use um valor de 0 a 100.000.") === null).toBe(true);
+    const budget = within(dialog).getByRole("textbox", { name: /Orçamento mensal/ });
+    // O ponto é separador de milhar: "1.000" não é um dólar.
+    await app.user.type(budget, "1.000");
+    expect(within(dialog).getByText(/^Use um valor de 0 a 100\.000/)).toBeDefined();
+    // Nem o ponto é decimal em português.
+    await app.user.clear(budget);
+    await app.user.type(budget, "1.5");
+    expect(within(dialog).getByText(/^Use um valor de 0 a 100\.000/)).toBeDefined();
+    await app.user.clear(budget);
+    await app.user.type(budget, "1,5");
+    expect(within(dialog).queryByText(/^Use um valor de 0 a 100\.000/) === null).toBe(true);
     await app.user.click(within(dialog).getByRole("button", { name: "Salvar" }));
     await waitFor(() =>
       expect(server.calls.find((call) => call.method === "updateChannel")?.params.budgetPerMonthUsd).toBe(
