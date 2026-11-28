@@ -850,6 +850,12 @@
     color: var(--vr-fg-muted);
   }
 
+  .work-routine__full {
+    margin: 0;
+    white-space: pre-line;
+    overflow-wrap: anywhere;
+  }
+
   .work-routine__actions {
     display: flex;
     flex-wrap: wrap;

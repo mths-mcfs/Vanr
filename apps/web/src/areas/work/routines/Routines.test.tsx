@@ -133,4 +133,34 @@ describe("the routines", () => {
     await app.user.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByRole("article", { name: "Morning digest" })).toBeDefined();
   });
+  test("a run with nothing to say says so in the person's language, and the full instruction opens in the details", async () => {
+    const server = newServer();
+    server.work.runs.unshift({
+      ...(server.work.runs[0] as (typeof server.work.runs)[number]),
+      id: "rrun_quiet",
+      summary: null,
+      summaryKey: "routines.run.silent",
+      status: "silent",
+    });
+    const digest = server.work.routines.find((routine) => routine.id === "rtn_digest");
+    if (digest !== undefined) digest.prompt = "Line one\nLine two\nLine three\nLine four is the end";
+    const app = await renderApp({ path: ROUTINES, signedInAs: "usr_ana", server });
+    await screen.findByRole("article", { name: "Morning digest" });
+    await app.user.click(card("Morning digest").getByRole("button", { name: "Details of Morning digest" }));
+    expect(await card("Morning digest").findByText("The agent had nothing to report.")).toBeDefined();
+    const instruction = within(card("Morning digest").getByRole("region", { name: "Instruction" }));
+    expect(instruction.getByText(/Line four is the end/)).toBeDefined();
+  });
+
+  test("a schedule that couldn't be checked says so and checks again on retry", async () => {
+    const server = newServer();
+    server.force("parseRoutineSchedule", { kind: "error", status: 503, code: "unavailable" }, 4);
+    const app = await renderApp({ path: ROUTINES, signedInAs: "usr_ana", server });
+    await app.user.click(await screen.findByRole("button", { name: "New routine" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "New routine" }));
+    await app.user.type(dialog.getByRole("textbox", { name: "Schedule" }), "every day at 9am");
+    expect(await dialog.findByText("The schedule couldn't be checked.")).toBeDefined();
+    await app.user.click(dialog.getByRole("button", { name: "Retry" }));
+    expect(await dialog.findByText(/^Every day at 09:00\. Next run /)).toBeDefined();
+  });
 });

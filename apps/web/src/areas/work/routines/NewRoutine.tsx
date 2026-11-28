@@ -130,7 +130,8 @@ export function NewRoutineDialog({
           .split(",")
           .map((each) => each.trim())
           .filter((each) => each !== "");
-        return accountId === "" || folder.trim() === ""
+        // A box picked for another agent doesn't count for this one.
+        return !readable.some((box) => box.accountId === accountId) || folder.trim() === ""
           ? undefined
           : {
               kind: "email",
@@ -187,6 +188,7 @@ export function NewRoutineDialog({
         : undefined;
   const scheduleWrong =
     kind === "schedule" && parsed.data !== undefined && !parsed.data.ok && settled === phrase.trim();
+  const scheduleFailed = kind === "schedule" && settled !== "" && parsed.isError && parsed.data === undefined;
 
   return (
     <Dialog open onOpenChange={(next) => !next && onClose()}>
@@ -229,7 +231,13 @@ export function NewRoutineDialog({
               />
             </Field>
             <Field label={t("routines.form.agent")}>
-              <Select value={agentId} onValueChange={setAgentId}>
+              <Select
+                value={agentId}
+                onValueChange={(value) => {
+                  setAgentId(value);
+                  setAccountId("");
+                }}
+              >
                 {actors.reachable.map((agent) => (
                   <SelectItem key={agent.id} value={agent.id}>
                     {agent.name}
@@ -270,6 +278,14 @@ export function NewRoutineDialog({
                 onChange={(change) => setPhrase(change.target.value)}
               />
             </Field>
+          )}
+          {scheduleFailed && (
+            <Callout tone="danger" role="alert">
+              {t("routines.form.scheduleFailed")}{" "}
+              <Button size="sm" variant="ghost" onClick={() => void parsed.refetch()}>
+                {common("action.retry")}
+              </Button>
+            </Callout>
           )}
           {kind === "event" && (
             <Field label={t("routines.form.event")}>

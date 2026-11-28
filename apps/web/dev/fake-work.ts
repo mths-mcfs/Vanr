@@ -454,6 +454,11 @@ export class FakeWork {
           start: new Date(String(params.start)).toISOString(),
           end: new Date(String(params.end)).toISOString(),
           allDay: params.allDay === true,
+          // Whole days carry their first and last day (the last one inclusive), as the server answers them.
+          ...(params.allDay === true && {
+            startDate: String(params.start).slice(0, 10),
+            endDate: new Date(Date.parse(String(params.end)) - 1).toISOString().slice(0, 10),
+          }),
           rule,
           recurrence: rule?.freq ?? null,
           timezone: text(params.timezone) ?? "UTC",
@@ -462,7 +467,12 @@ export class FakeWork {
           createdBy: { type: "person", id: scope.user.id },
         });
         this.events.push(event);
-        const [first] = this.occurrences(event, new Date(event.start), new Date(Date.parse(event.end) + 1));
+        // The first occurrence the rule allows, which may be days after the start (a weekday series from a Saturday).
+        const [first] = this.occurrences(
+          event,
+          new Date(event.start),
+          new Date(Date.parse(event.start) + 15 * 86_400_000),
+        );
         return reply(201, first);
       }),
       deleteCalendarEvent: within((scope, params) => {
@@ -615,7 +625,18 @@ export class FakeWork {
             upcomingFireTimes: [],
           });
         }
-        const hour = (Number(match[1]) % 12) + (match[3] === "pm" ? 12 : 0);
+        // A 12-hour time only with am or pm; otherwise the hour is taken as written (0 to 23).
+        const raw = Number(match[1]);
+        if (match[3] === undefined ? raw > 23 : raw < 1 || raw > 12) {
+          return reply(200, {
+            ok: false,
+            trigger: null,
+            description: null,
+            error: "rule.unknown",
+            upcomingFireTimes: [],
+          });
+        }
+        const hour = match[3] === undefined ? raw : (raw % 12) + (match[3] === "pm" ? 12 : 0);
         const time = `${String(hour).padStart(2, "0")}:${match[2] ?? "00"}`;
         const timezone = text(params.timezone) ?? "UTC";
         return reply(200, {

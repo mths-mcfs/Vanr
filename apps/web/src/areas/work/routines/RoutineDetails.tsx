@@ -6,7 +6,7 @@ import type { Routine, RoutineRun } from "@vanr/contract";
 import { Button, Chip, Dialog, DialogContent } from "@vanr/ui";
 import { type ReactNode, useState } from "react";
 import { AppLink } from "../../../app/navigation.tsx";
-import { useLocale, useMessages } from "../../../i18n/react.tsx";
+import { useLocale, useLookup, useMessages } from "../../../i18n/react.tsx";
 import { useOutcome } from "../issues/shared.tsx";
 import { PartError, PartLoading } from "../parts.tsx";
 
@@ -24,8 +24,13 @@ export function RoutineDetails({
   routine: Routine;
   mayEdit: boolean;
 }) {
+  const t = useMessages("work");
   return (
     <div className="work-routine__details">
+      <section className="work-section" aria-label={t("routines.instruction")}>
+        <h3 className="work-subhead">{t("routines.instruction")}</h3>
+        <p className="work-routine__full">{routine.prompt}</p>
+      </section>
       <Cost workspaceId={workspaceId} routineId={routine.id} />
       <Runs workspaceId={workspaceId} routine={routine} />
       {routine.trigger.kind === "webhook" && (
@@ -86,6 +91,14 @@ function Runs({ workspaceId, routine }: { workspaceId: string; routine: Routine 
     },
   );
   const when = new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" });
+  const lookup = useLookup("work");
+  // The server's key read in the person's language; its own words when the key isn't one known here.
+  const summaryOf = (run: RoutineRun) =>
+    (run.summaryKey === null
+      ? undefined
+      : lookup(`summary.${run.summaryKey}`, run.summaryVars ?? undefined)) ??
+    run.summary ??
+    "";
   let body: ReactNode;
   if (runs.isPending) body = <PartLoading />;
   else if (runs.isError && runs.data === undefined)
@@ -117,9 +130,7 @@ function Runs({ workspaceId, routine }: { workspaceId: string; routine: Routine 
                   {t("routines.run.queued", { when: when.format(new Date(run.notBefore)) })}
                 </span>
               )}
-              {run.summary !== null && run.summary !== "" && (
-                <p className="work-run__summary">{run.summary}</p>
-              )}
+              {summaryOf(run) !== "" && <p className="work-run__summary">{summaryOf(run)}</p>}
               {run.channelId !== null &&
                 (run.threadId !== null ? (
                   <AppLink

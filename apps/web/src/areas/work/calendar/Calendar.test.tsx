@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { screen, waitFor, within } from "@testing-library/react";
+import type { CalendarEvent, CalendarRange } from "@vanr/contract";
 import { chooseOption, newServer, renderApp } from "../../../../test/app.tsx";
+import { dayKey, weekDays } from "../time.ts";
+import { entriesByDay } from "./Calendar.tsx";
 
 const CALENDAR = "/workspace/workspace_birchwood/calendar";
 const day = (name: RegExp) => screen.getByRole("region", { name });
@@ -100,5 +103,57 @@ describe("the week", () => {
     expect(await screen.findByText("The calendar could not be loaded")).toBeDefined();
     await app.user.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByRole("region", { name: /^Thursday/ })).toBeDefined();
+  });
+});
+
+describe("what a day holds", () => {
+  const range = (events: Partial<CalendarEvent>[]): CalendarRange => ({
+    dueItems: [],
+    routines: [],
+    proposals: [],
+    events: events.map((event, at) => ({
+      id: `evt_${at}`,
+      allDay: false,
+      createdBy: { type: "person", id: "usr_ana" },
+      description: null,
+      end: "",
+      endDate: null,
+      instanceStart: null,
+      location: null,
+      participants: [],
+      recurrence: null,
+      rule: null,
+      seriesId: null,
+      start: "",
+      startDate: null,
+      timezone: "UTC",
+      title: "",
+      ...event,
+    })),
+  });
+  const week = weekDays(new Date(2026, 10, 9));
+  const titles = (map: Map<string, unknown[]>, day: Date) =>
+    (map.get(dayKey(day)) ?? []).map((entry) => (entry as { event?: CalendarEvent }).event?.title);
+
+  test("a year-long all-day event shows on every day of the week", () => {
+    const map = entriesByDay(
+      range([{ title: "Fiscal year", allDay: true, startDate: "2026-01-01", endDate: "2026-12-31" }]),
+      week,
+    );
+    for (const day of week) expect(titles(map, day)).toEqual(["Fiscal year"]);
+  });
+
+  test("an event across midnight shows on both days, and not on the day its end touches", () => {
+    const sunday = new Date(2026, 10, 8, 23);
+    const monday = new Date(2026, 10, 10, 0);
+    const map = entriesByDay(
+      range([
+        { title: "Night run", start: sunday.toISOString(), end: new Date(2026, 10, 9, 1).toISOString() },
+        { title: "Late shift", start: new Date(2026, 10, 9, 22).toISOString(), end: monday.toISOString() },
+      ]),
+      week,
+    );
+    expect(titles(map, week[0] ?? new Date())).toEqual(["Night run", "Late shift"]);
+    expect(titles(map, week[1] ?? new Date())).toEqual([]);
   });
 });
