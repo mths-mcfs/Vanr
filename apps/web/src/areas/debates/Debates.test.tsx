@@ -227,6 +227,43 @@ describe("starting a debate", () => {
     expect(app.server.debates.debates.at(-1)?.agentIds).toEqual(["agt_scout"]);
   });
 
+  test("a pick that comes back over the limit holds the form", async () => {
+    const server = newServer();
+    const base = server.agents.find((agent) => agent.id === "agt_scout");
+    if (base === undefined) throw new Error("the seed has no Scout");
+    const names = ["Ash", "Birch", "Cedar", "Dogwood", "Elm", "Fir", "Gum"];
+    for (const name of names)
+      server.agents.push({ ...base, id: `agt_${name.toLowerCase()}`, name, handle: name.toLowerCase() });
+    const app = await renderApp({ path: LIST, signedInAs: "usr_ana", server });
+    await app.user.click(await screen.findByRole("button", { name: "Start a debate" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "Start a debate" }));
+    await app.user.type(dialog.getByRole("textbox", { name: /^Question/ }), "Which tree?");
+    for (const name of ["Scout", ...names])
+      await app.user.click(await dialog.findByRole("checkbox", { name }));
+    const refresh = () =>
+      act(async () =>
+        app.server.emit(WORKSPACE, {
+          type: "budget.cap_reached",
+          agentId: "agt_scout",
+          spentUsd: null,
+          budgetUsd: null,
+        }),
+      );
+    // Scout leaves while the form is open, and an eighth agent takes its place.
+    base.archivedAt = "2026-11-14T12:00:00.000Z";
+    await refresh();
+    await waitFor(() => expect(dialog.queryByRole("checkbox", { name: /Scout/ }) === null).toBe(true));
+    await app.user.click(dialog.getByRole("checkbox", { name: "Ledger" }));
+    expect(dialog.getByRole("button", { name: "Start" }).hasAttribute("disabled")).toBe(false);
+    // Scout comes back still picked: nine agents, over the limit of eight.
+    base.archivedAt = null;
+    await refresh();
+    await dialog.findByRole("checkbox", { name: /Scout/ });
+    await waitFor(() =>
+      expect(dialog.getByRole("button", { name: "Start" }).hasAttribute("disabled")).toBe(true),
+    );
+  });
+
   test("a member sees how many calls it can take, never the money", async () => {
     const app = await renderApp({ path: LIST, signedInAs: "usr_iris" });
     await app.user.click(await screen.findByRole("button", { name: "Start a debate" }));
