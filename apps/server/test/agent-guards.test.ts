@@ -7,7 +7,9 @@ import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { eq } from "drizzle-orm";
 import { createAssignment } from "../src/assignments/engine";
+import { assignmentEvent, SYSTEM } from "../src/assignments/events";
 import { queueMemoryReview } from "../src/memory-reviews";
+import { postMessage } from "../src/messages";
 import { recheckLiveViews } from "../src/runners/browser-live";
 import { revalidateInterventions } from "../src/runners/requests";
 import type { RunningServer } from "../src/server";
@@ -1001,6 +1003,114 @@ describe("spend outside the usage page", () => {
       expect((await estimate(t.carla)).body.recent).toEqual({ runs: 1, avgUsd: 1, maxUsd: 1 });
       const beto = await estimate(t.beto);
       expect([beto.status, beto.body.recent]).toEqual([200, null]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "D8: an assignment's cap warning keeps its dollars from whoever lacks view_usage, and out of the channel event",
+    async () => {
+      const t = await team();
+      const row = await createAssignment(server.deps, {
+        workspaceId: t.workspaceId,
+        agentId: t.lia.id,
+        agentHandle: t.lia.handle,
+        channelId: t.general,
+        ownerId: t.beto.user.id,
+        title: "Fix the flaky test",
+        goal: "The suite passes ten times in a row",
+        executor: "agent",
+        runnerId: null,
+        commandPolicy: "never",
+      });
+      const usage = { dollars: 8.5, minutes: 3, steps: 2, jobTokens: 0, unmeasuredJobs: 0 };
+      const socket = await TestSocket.open(t.carla.browser, t.workspaceId);
+      try {
+        expect((await socket.subscribe(t.general)).type).toBe("subscribed");
+        await assignmentEvent(server.deps, row, {
+          kind: "ceiling_warning",
+          actor: SYSTEM,
+          data: { which: "dollars", limit: 10, usage },
+        });
+        const live = (await socket.event("assignment.trail_event")).event as unknown as {
+          event: { data: unknown };
+        };
+        expect(live.event.data).toEqual({ which: "dollars", limit: 10, usage: { ...usage, dollars: null } });
+      } finally {
+        socket.close();
+      }
+      const warning = async (who: Person) =>
+        (await call(who, "GET", `${t.w}/assignments/${row.id}/events`)).body.events.find(
+          (e: { kind: string }) => e.kind === "ceiling_warning",
+        )?.data.usage;
+      expect(await warning(t.beto)).toEqual({ ...usage, dollars: null });
+      expect(await warning(t.carla)).toEqual(usage);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "D9: a test run's cost is null without view_usage",
+    async () => {
+      const t = await team();
+      const id = newId("eval");
+      await server.deps.db.insert(schema.agentEvals).values({
+        id,
+        workspaceId: t.workspaceId,
+        agentId: t.lia.id,
+        beforeText: "Helps.",
+        textAfter: "Helps more.",
+        status: "done",
+        costUsd: 0.25,
+      });
+      const cost = async (who: Person) => {
+        const one = await call(who, "GET", `${t.w}/agents/${t.lia.id}/evals/${id}`);
+        const list = await call(who, "GET", `${t.w}/agents/${t.lia.id}/evals`);
+        return [one.body.costUsd, list.body.evals[0]?.costUsd];
+      };
+      // Beto owns Lia, so he reads her test runs, but not what they spent.
+      expect(await cost(t.beto)).toEqual([null, null]);
+      expect(await cost(t.carla)).toEqual([0.25, 0.25]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "D10: a message's tokens are null without view_usage, and in the channel event",
+    async () => {
+      const t = await team();
+      const [channel] = await server.deps.db
+        .select()
+        .from(schema.channels)
+        .where(eq(schema.channels.id, t.general));
+      if (!channel) throw new Error("no channel");
+      const usage = { model: "claude-haiku-5-5", inputTokens: 120, outputTokens: 40 };
+      const socket = await TestSocket.open(t.carla.browser, t.workspaceId);
+      let id = "";
+      try {
+        expect((await socket.subscribe(t.general)).type).toBe("subscribed");
+        const { message } = await postMessage(server.deps, {
+          workspaceId: t.workspaceId,
+          channel,
+          author: { type: "agent", id: t.lia.id },
+          body: "The report is ready.",
+          clientId: null,
+          usage,
+        });
+        id = message.id;
+        const live = (await socket.event("message.posted")).event as unknown as {
+          message: { usage: unknown };
+        };
+        expect(live.message.usage).toBe(null);
+      } finally {
+        socket.close();
+      }
+      const read = async (who: Person) =>
+        (await call(who, "GET", `${t.w}/channels/${t.general}/messages`)).body.messages.find(
+          (m: { id: string }) => m.id === id,
+        )?.usage;
+      expect(await read(t.beto)).toBe(null);
+      expect(await read(t.carla)).toEqual(usage);
     },
     SERVER_TEST_MS,
   );

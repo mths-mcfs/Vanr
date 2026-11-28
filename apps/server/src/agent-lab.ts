@@ -39,7 +39,8 @@ export function toTestCase(row: TestCaseRow): AgentTestCase {
   };
 }
 
-export function toEval(row: EvalRow): AgentEval {
+/** A test run as the person reads it: what it spent only with view_usage (`seesSpend`). */
+export function toEval(row: EvalRow, seesSpend: boolean): AgentEval {
   return {
     id: row.id,
     agentId: row.agentId,
@@ -50,7 +51,7 @@ export function toEval(row: EvalRow): AgentEval {
     results: row.results,
     summary: row.summary,
     error: row.error,
-    costUsd: row.costUsd,
+    costUsd: seesSpend ? row.costUsd : null,
     createdAt: row.createdAt.toISOString(),
     finishedAt: row.finishedAt?.toISOString() ?? null,
   };

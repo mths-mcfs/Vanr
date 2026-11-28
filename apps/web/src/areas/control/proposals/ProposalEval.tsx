@@ -51,11 +51,15 @@ function EvalResult({ run }: { run: AgentEval }) {
   const worse = (side: AgentEval["results"][number]) => side.before.pass && !side.after.pass;
   // The cases that got worse come first: they are what weighs on the decision.
   const rows = [...run.results].sort((a, b) => Number(worse(b)) - Number(worse(a)));
-  const cost = new Intl.NumberFormat(locale, {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 4,
-  }).format(run.costUsd);
+  // The cost is null without view_usage: the line then says only that the run is advisory.
+  const cost =
+    run.costUsd === null
+      ? null
+      : new Intl.NumberFormat(locale, {
+          style: "currency",
+          currency: "USD",
+          maximumFractionDigits: 4,
+        }).format(run.costUsd);
   return (
     <div className="eval">
       {run.status === "failed" && (
@@ -85,7 +89,8 @@ function EvalResult({ run }: { run: AgentEval }) {
         ))}
       </ol>
       <p className="control-note">
-        {t("eval.advisory")} {t("eval.cost", { value: cost })}
+        {t("eval.advisory")}
+        {cost !== null && <> {t("eval.cost", { value: cost })}</>}
       </p>
     </div>
   );

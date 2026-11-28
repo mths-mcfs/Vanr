@@ -14,7 +14,7 @@ import { channelName } from "@vanr/engine/text";
 import { and, asc, count, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
-import { agentInWorkspace, agentNames } from "../agents";
+import { agentInWorkspace, agentNames, seesSpend } from "../agents";
 import { assignmentPostMeta } from "../assignments/tools";
 import {
   type ChannelRow,
@@ -498,7 +498,9 @@ export function registerChat(app: Hono<AppEnv>) {
       if (root && root.channelId === channel.id && root.threadId === null) rows.unshift(root);
     }
     // Private history: no cache keeps it for another session of the same browser.
-    return c.json({ messages: await hydrate(db, rows) }, 200, { "cache-control": "private, no-store" });
+    return c.json({ messages: await hydrate(db, rows, seesSpend(me)) }, 200, {
+      "cache-control": "private, no-store",
+    });
   });
 
   app.post(`${WORKSPACE}/channels/:channelId/messages`, async (c) => {

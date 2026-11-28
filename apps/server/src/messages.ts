@@ -71,6 +71,11 @@ export interface MessageExtras {
   memories?: MessageMemory[];
   receipts?: MessageReceipts;
   actions?: AgentAction[];
+  /**
+   * The reader has view_usage (`seesSpend`): the message carries the tokens its run spent. Without it, and in every
+   * channel event (it reaches everyone in the channel), `usage` is null.
+   */
+  seesSpend?: boolean;
 }
 
 const noReceipts = (): MessageReceipts => ({ viewedBy: [], claimedBy: [], handled: [] });
@@ -118,7 +123,7 @@ export function toMessage(row: MessageRow, extras: MessageExtras = {}): Message 
     agentMentionIds: row.agentMentionIds,
     receipts: extras.receipts ?? noReceipts(),
     clientId: row.clientId,
-    usage: row.usage ?? null,
+    usage: extras.seesSpend ? (row.usage ?? null) : null,
     replyCount: row.replyCount,
     actions: extras.actions ?? [],
   };
@@ -271,8 +276,8 @@ async function retractedQuotes(db: Db, rows: MessageRow[]): Promise<Set<string>>
   return new Set(found.map((r) => r.id));
 }
 
-/** Messages in the API format, with reactions, memories and receipts. */
-export async function hydrate(db: Db, rows: MessageRow[]): Promise<Message[]> {
+/** Messages in the API format, with reactions, memories and receipts; their tokens only for `seesSpend`. */
+export async function hydrate(db: Db, rows: MessageRow[], seesSpend = false): Promise<Message[]> {
   const ids = rows.map((r) => r.id);
   const [reactions, mems, receipts, actions, gone, unquoted] = await Promise.all([
     reactionsFor(db, ids),
@@ -288,6 +293,7 @@ export async function hydrate(db: Db, rows: MessageRow[]): Promise<Message[]> {
       memories: mems.get(r.id),
       receipts: receipts.get(r.id),
       actions: actions.get(r.id),
+      seesSpend,
     });
     const quote = message.meta.replyTo;
     if (quote && unquoted.has(quote.messageId))
