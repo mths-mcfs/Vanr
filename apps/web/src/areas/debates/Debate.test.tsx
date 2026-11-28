@@ -15,6 +15,12 @@ describe("an open debate", () => {
     expect(grid().getByRole("rowheader", { name: "Participant A" })).toBeDefined();
     expect(grid().getByRole("rowheader", { name: "Participant B" })).toBeDefined();
     expect(grid().getByRole("rowheader", { name: "Ana Beatriz Souza" })).toBeDefined();
+    // The agents come first, in letter order, then the people.
+    expect(
+      grid()
+        .getAllByRole("rowheader")
+        .map((cell) => cell.textContent),
+    ).toEqual(["Participant A", "Participant B", "Ana Beatriz Souza", "Majority"]);
     // No agent's name is put on a position while the debate runs.
     expect(grid().queryByText("Scout") === null).toBe(true);
     expect(grid().queryByText("Ledger") === null).toBe(true);
@@ -73,13 +79,20 @@ describe("an open debate", () => {
     await app.user.click(box.getByRole("button", { name: "Comment" }));
     expect(await screen.findByText("Comment posted")).toBeDefined();
     expect(await screen.findByText("Ask the print room too.")).toBeDefined();
+    // Commenting makes her take part, so she keeps reading it wherever it lives.
+    expect(app.server.debates.debates.find((row) => row.id === "deb_paper")?.userIds).toContain("usr_iris");
   });
 
-  test("who opened it concludes it", async () => {
+  test("who opened it concludes it, and the synthesis follows", async () => {
     const app = await renderApp({ path: PAGE("deb_paper"), signedInAs: "usr_jonas" });
     await app.user.click(await screen.findByRole("button", { name: "Conclude now" }));
-    expect(await screen.findByText("The lead agent is writing the synthesis.")).toBeDefined();
-    expect(screen.getByRole("button", { name: "Conclude now" }).hasAttribute("disabled")).toBe(true);
+    const synthesis = within(await screen.findByRole("region", { name: "Synthesis" }));
+    expect(synthesis.getByText("The table did not settle.")).toBeDefined();
+    expect(screen.getByText("It was concluded by hand.")).toBeDefined();
+    // Closed, so revealed: the letters give way to names.
+    expect(await screen.findByRole("rowheader", { name: /^Scout/ })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Conclude now" }) === null).toBe(true);
+    expect(app.server.debates.debates.find((row) => row.id === "deb_paper")?.status).toBe("done");
   });
 
   test("cancelling asks first, then closes the debate", async () => {
@@ -94,6 +107,9 @@ describe("an open debate", () => {
     expect(await screen.findByText("The debate was canceled")).toBeDefined();
     expect(await screen.findByText("This debate is closed. Nothing more can be posted.")).toBeDefined();
     expect(screen.queryByRole("button", { name: "Conclude now" }) === null).toBe(true);
+    // A canceled debate is no longer blind: who said what shows.
+    expect(await screen.findByRole("rowheader", { name: /^Scout/ })).toBeDefined();
+    expect(screen.queryByRole("rowheader", { name: "Participant A" }) === null).toBe(true);
   });
 
   test("a new post from elsewhere shows without a reload", async () => {
@@ -154,6 +170,25 @@ describe("an action starts once, however fast the clicks", () => {
     expect(callsOf(asOwner, "setDebateVerdict")).toBe(1);
   });
 
+  test("steps into issues: a click while the debate reloads makes nothing twice", async () => {
+    const app = await renderApp({ path: PAGE("deb_logo"), signedInAs: "usr_ana" });
+    const synthesis = within(await screen.findByRole("region", { name: "Synthesis" }));
+    const button = synthesis.getByRole("button", { name: "Turn 2 steps into issues" });
+    // The reload after the issues are made answers late, as on a slow network.
+    const late = app.server.delay("getDebate");
+    await app.user.click(button);
+    expect(await screen.findByText("2 issues created")).toBeDefined();
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    late.release();
+    await waitFor(() =>
+      expect(synthesis.queryByRole("button", { name: /into issues?/ }) === null).toBe(true),
+    );
+    expect(callsOf(app, "createDebateIssue")).toBe(1);
+    expect(app.server.debates.debates.find((row) => row.id === "deb_logo")?.issues.length).toBe(2);
+  });
+
   test("steps into issues: each one is made once", async () => {
     const app = await renderApp({ path: PAGE("deb_logo"), signedInAs: "usr_ana" });
     const synthesis = within(await screen.findByRole("region", { name: "Synthesis" }));
@@ -172,6 +207,8 @@ describe("a stuck debate", () => {
     expect(screen.queryByText(/Stuck on/) === null).toBe(true);
     await asOpener.user.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByText("The debate picked up again")).toBeDefined();
+    // Nobody was left to answer in the round: it goes on to the synthesis.
+    expect(await screen.findByRole("region", { name: "Synthesis" })).toBeDefined();
     asOpener.unmount();
 
     const server = newServer();
@@ -212,7 +249,10 @@ describe("a concluded debate", () => {
     await app.user.click(synthesis.getByRole("checkbox", { name: "Tell the landlord" }));
     await app.user.click(synthesis.getByRole("button", { name: "Turn 1 step into an issue" }));
     expect(await screen.findByText("1 issue created")).toBeDefined();
-    expect(await synthesis.findByRole("link", { name: "#100 Order the sign" })).toBeDefined();
+    expect(await synthesis.findByRole("link", { name: /^#\d+ Order the sign$/ })).toBeDefined();
+    // The issue was really made, where the debate lives.
+    const made = app.server.work.issues.find((issue) => issue.title === "Order the sign");
+    expect(made?.channelId ?? null).toBe(null);
     expect(synthesis.queryByRole("checkbox", { name: "Order the sign (for Scout)" }) === null).toBe(true);
     expect(synthesis.getByRole("checkbox", { name: "Tell the landlord" })).toBeDefined();
   });
@@ -221,6 +261,9 @@ describe("a concluded debate", () => {
     const app = await renderApp({ path: PAGE("deb_logo"), signedInAs: "usr_ana" });
     await app.user.click(await screen.findByRole("button", { name: "Revert the verdict" }));
     expect(await screen.findByText(/^Reverted by Ana Beatriz Souza/)).toBeDefined();
+    // A reverted verdict can be accepted again, as the server allows.
+    await app.user.click(await screen.findByRole("button", { name: "Accept the verdict" }));
+    expect(await screen.findByText(/^Accepted by Ana Beatriz Souza/)).toBeDefined();
   });
 
   test("the blind read draws a pair once opened and keeps the pick", async () => {
@@ -233,7 +276,44 @@ describe("a concluded debate", () => {
     ).toBeDefined();
     await app.user.click(screen.getByRole("button", { name: "The first is better" }));
     expect(await screen.findByText("You chose: First")).toBeDefined();
-    expect(app.server.debates.picks.get("deb_logo/usr_iris")).toBe("a");
+    expect(app.server.debates.picks.get("deb_logo/usr_iris")?.pick).toBe("debate");
+  });
+
+  test("the pair is drawn per person: someone else may read it the other way round", async () => {
+    const app = await renderApp({ path: PAGE("deb_logo"), signedInAs: "usr_jonas" });
+    await app.user.click(await screen.findByText("Read it blind"));
+    const first = within(await screen.findByRole("article", { name: "First" }));
+    expect(first.getByText(/The round mark reads at any size/)).toBeDefined();
+    await app.user.click(screen.getByRole("button", { name: "The first is better" }));
+    expect(await screen.findByText("You chose: First")).toBeDefined();
+    expect(app.server.debates.picks.get("deb_logo/usr_jonas")?.pick).toBe("single");
+  });
+
+  test("a debate lost from sight drops the blind pair it held", async () => {
+    const app = await renderApp({ path: PAGE("deb_logo"), signedInAs: "usr_iris" });
+    await app.user.click(await screen.findByText("Read it blind"));
+    await screen.findByRole("article", { name: "First" });
+    app.server.state.channels.push({
+      id: "ch_board",
+      workspaceId: WORKSPACE,
+      name: "board",
+      topic: "",
+      isGeneral: false,
+      visibility: "private",
+      budgetPerMonthUsd: null,
+      createdAt: "2026-11-01T00:00:00.000Z",
+      memberIds: ["usr_ana"],
+    });
+    const logo = app.server.debates.debates.find((row) => row.id === "deb_logo");
+    if (logo === undefined) throw new Error("the seed has no logo debate");
+    logo.channelId = "ch_board";
+    await act(async () => app.server.emit(WORKSPACE, { type: "debate.updated", debateId: "deb_logo" }));
+    expect(await screen.findByText("This debate isn't here")).toBeDefined();
+    const cached = app.runtime.queryClient
+      .getQueryCache()
+      .findAll()
+      .filter((query) => JSON.stringify(query.queryKey).includes("reviewDebate"));
+    expect(cached.length).toBe(0);
   });
 
   test("spend shows only to who may see it", async () => {

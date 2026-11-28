@@ -57,16 +57,19 @@ function DebateView({ workspaceId, debateId }: { workspaceId: string; debateId: 
   goneNow.current = gone;
   useEffect(() => {
     if (!gone) return;
+    // The blind pair it held goes at once: it is text from a debate the person no longer sees.
+    queries.removeQueries({
+      queryKey: prefixKey(client, { method: "reviewDebate", args: { workspaceId, debateId } }),
+    });
     void queries.invalidateQueries({
       queryKey: prefixKey(client, { method: "listDebates", args: { workspaceId } }),
     });
-  }, [client, gone, queries, workspaceId]);
+  }, [client, debateId, gone, queries, workspaceId]);
   useEffect(
     () => () => {
       if (goneNow.current)
-        queries.removeQueries({
-          queryKey: prefixKey(client, { method: "getDebate", args: { workspaceId, debateId } }),
-        });
+        for (const method of ["getDebate", "reviewDebate"] as const)
+          queries.removeQueries({ queryKey: prefixKey(client, { method, args: { workspaceId, debateId } }) });
     },
     [client, debateId, queries, workspaceId],
   );

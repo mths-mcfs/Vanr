@@ -51,7 +51,13 @@ export function Positions({ debate, directory }: { debate: DebateDetail; directo
     }
   // Agents in letter order, then the people by name.
   const sorted = [...lanes.values()].sort((a, b) =>
-    (a.letter ?? `~${a.label}`).localeCompare(b.letter ?? `~${b.label}`),
+    a.letter !== null && b.letter !== null
+      ? a.letter.localeCompare(b.letter)
+      : a.letter !== null
+        ? -1
+        : b.letter !== null
+          ? 1
+          : a.label.localeCompare(b.label),
   );
   const roundName = (round: number) => (round === 0 ? t("pos.opening") : t("pos.round", { round }));
   return (

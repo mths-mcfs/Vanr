@@ -208,9 +208,10 @@ function Steps({
         } catch (error) {
           outcome.failed(error);
         } finally {
+          // Whatever was made before a failure shows as made, and is not offered again: the button comes
+          // back only once the debate has reloaded with its new issues, so a second click can't repeat them.
+          await outcome.refresh().catch(() => undefined);
           setSending(false);
-          // Whatever was made before a failure shows as made, and is not offered again.
-          outcome.refresh();
           done();
         }
       })();
@@ -256,11 +257,12 @@ function Verdict({ workspaceId, debate, directory, steers }: Props) {
       : verdict?.state === "reverted" && verdict.revertedBy !== undefined && verdict.revertedAt !== undefined
         ? t("verdict.revertedBy", { name: person(verdict.revertedBy), when: when(verdict.revertedAt) })
         : t("verdict.pending");
-  const action = verdict?.state === "accepted" ? "revert" : verdict === null ? "accept" : null;
+  // A reverted verdict can be accepted again, as the server allows.
+  const action = verdict?.state === "accepted" ? "revert" : "accept";
   return (
     <div className="debate-verdict" data-state={verdict?.state ?? "pending"}>
       <p role="status">{status}</p>
-      {steers && action !== null && (
+      {steers && (
         <Button
           variant={action === "accept" ? "primary" : "ghost"}
           loading={act.isPending}

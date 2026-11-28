@@ -135,6 +135,10 @@ test.describe("the debates", () => {
     await expect(page.getByRole("button", { name: t("debates", "steer.conclude") })).toHaveCount(0);
     await turn.getByRole("combobox", { name: t("debates", "turn.answer") }).click();
     await page.getByRole("option", { name: "Yes", exact: true }).click();
+    await turn.getByRole("combobox", { name: t("debates", "turn.confidence") }).click();
+    await page
+      .getByRole("option", { name: t("debates", "turn.confidence.value", { value: 80 }), exact: true })
+      .click();
     await turn.getByRole("textbox", { name: t("debates", "turn.text") }).fill("Demand is there.");
     await turn.getByRole("button", { name: t("debates", "turn.send") }).click();
     await expect(page.getByText(t("debates", "turn.sent"), { exact: true })).toBeVisible();
@@ -149,7 +153,12 @@ test.describe("the debates", () => {
     // Closed: the agents' names are revealed beside their letters, and the majority is theirs.
     await expect(grid.getByRole("rowheader", { name: /Quill/ })).toBeVisible();
     await expect(grid.getByRole("rowheader", { name: /Rivet/ })).toBeVisible();
-    await expect(grid.getByRole("rowheader", { name: member.name })).toBeVisible();
+    // The member's own position, as they gave it: the answer and how sure they were.
+    const memberRow = grid
+      .getByRole("row")
+      .filter({ has: page.getByRole("rowheader", { name: member.name }) });
+    await expect(memberRow.getByRole("link", { name: "Yes", exact: true })).toBeVisible();
+    await expect(memberRow.getByText(t("debates", "pos.confidence", { value: 80 }))).toBeVisible();
     // The server's majority of the round: every answer was Yes.
     const lead = t("debates", "pos.lead", { answer: "Yes", count: 7, total: 8 })
       .replace("7", "COUNT")
@@ -179,5 +188,15 @@ test.describe("the debates", () => {
     const made = debates.find((debate) => debate.title === "Do we open a second shop?");
     expect(made?.status).toBe("done");
     expect(made?.verdictState?.state).toBe("accepted");
+    const detail = (await (await api.get(`${base}/debates/${address.split("/").pop()}`)).json()) as {
+      posts: {
+        author: { id: string } | null;
+        claimData: { answer: string; confidence: number | null } | null;
+      }[];
+    };
+    const position = detail.posts.find(
+      (post) => post.claimData !== null && post.author?.id !== undefined && post.claimData.confidence === 0.8,
+    );
+    expect(position?.claimData).toMatchObject({ answer: "Yes", confidence: 0.8 });
   });
 });

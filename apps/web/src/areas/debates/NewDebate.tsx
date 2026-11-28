@@ -19,7 +19,7 @@ import {
   Textarea,
   useToast,
 } from "@vanr/ui";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { useGo } from "../../app/navigation.tsx";
 import { useErrorMessage } from "../../app/screens.tsx";
 import { useMessages } from "../../i18n/react.tsx";
@@ -94,10 +94,23 @@ export function NewDebateDialog({
   const [cap, setCap] = useState("");
   const [pickedAgents, setAgentIds] = useState<string[]>([]);
   const [pickedPeople, setUserIds] = useState<string[]>([]);
-  // A pick whose agent or person left the lists while the form was open (archived, removed) no longer
-  // counts: not in the seats, the estimate or what is sent.
+  // A pick whose agent or person left the lists while the form was open (archived, removed) leaves the
+  // table: it counts nowhere, it is forgotten (it doesn't come back picked), and the form says so.
   const agentIds = pickedAgents.filter((id) => directory.seatable.some((agent) => agent.id === id));
   const userIds = pickedPeople.filter((id) => directory.people.some((person) => person.id === id));
+  const [dropped, setDropped] = useState<string[]>([]);
+  const names = useRef(new Map<string, string>());
+  for (const each of [...directory.seatable, ...directory.people]) names.current.set(each.id, each.name);
+  const agentsReady = directory.agentsState.status === "ready";
+  const peopleReady = directory.peopleState.status === "ready";
+  useEffect(() => {
+    const goneAgents = agentsReady ? pickedAgents.filter((id) => !agentIds.includes(id)) : [];
+    const gonePeople = peopleReady ? pickedPeople.filter((id) => !userIds.includes(id)) : [];
+    if (goneAgents.length === 0 && gonePeople.length === 0) return;
+    if (goneAgents.length > 0) setAgentIds(agentIds);
+    if (gonePeople.length > 0) setUserIds(userIds);
+    setDropped([...goneAgents, ...gonePeople].map((id) => names.current.get(id) ?? t("someone")));
+  }, [agentIds, agentsReady, peopleReady, pickedAgents, pickedPeople, t, userIds]);
 
   const options = optionsOf(optionText);
   const optionsBad = !optionsFit(options);
@@ -312,7 +325,7 @@ export function NewDebateDialog({
                   label={seatName(agent.name, order(agentIds, agent.id, 0))}
                   checked={picked}
                   disabled={!picked && (agentIds.length >= AGENTS_MAX || seats >= SEATS_MAX)}
-                  onCheckedChange={(on) => setAgentIds((list) => toggle(list, agent.id, on === true))}
+                  onCheckedChange={(on) => setAgentIds(toggle(agentIds, agent.id, on === true))}
                 />
               );
             })}
@@ -334,11 +347,16 @@ export function NewDebateDialog({
                   label={seatName(name, order(userIds, person.id, agentIds.length))}
                   checked={picked}
                   disabled={!picked && seats >= SEATS_MAX}
-                  onCheckedChange={(on) => setUserIds((list) => toggle(list, person.id, on === true))}
+                  onCheckedChange={(on) => setUserIds(toggle(userIds, person.id, on === true))}
                 />
               );
             })}
           </SeatPicker>
+          {dropped.length > 0 && (
+            <Callout tone="warning" role="status">
+              {t("start.dropped", { count: dropped.length, names: dropped.join(", ") })}
+            </Callout>
+          )}
           {create.isError && (
             <Callout tone="danger" role="alert">
               {describe(create.error)}

@@ -14,6 +14,12 @@ type Host = FilesHost & {
   /** Whether the person reads the channel, which must be one of this workspace. */
   readsChannel: (userId: string, channelId: string, workspaceId: string) => boolean;
   isMember: (workspaceId: string, userId: string) => boolean;
+  /** Makes an issue as the person, in the channel given; its id and number, or the error answer. */
+  createIssue: (
+    workspaceId: string,
+    userId: string,
+    issue: { title: string; description: string; channelId: string | null },
+  ) => { id: string; number: number; title: string } | FilesReply;
   /** An issue the person sees, with the channel it lives in and whether that channel is public. */
   issue: (
     workspaceId: string,
@@ -21,7 +27,15 @@ type Host = FilesHost & {
     issueId: string,
   ) => { number: number; channelId: string | null; publicChannel: boolean } | undefined;
 };
-export type StoredDebate = T.DebateDetail & { workspaceId: string; spent: number };
+/** As kept: the real author of every post, and each agent's letter, which show only once revealed. */
+export type StoredDebate = T.DebateDetail & {
+  workspaceId: string;
+  spent: number;
+  letters: Record<string, string>;
+};
+const LETTERS = "ABCDEFGH";
+/** While the debate hasn't closed, an agent shows only by its letter (the server's `isAnonymous`). */
+const isBlind = (row: Pick<T.Debate, "status">) => row.status === "open" || row.status === "stalled";
 
 const reply = (status: number, body: unknown): FilesReply => ({ status, body });
 const fail = (status: number, code: string, message: string) => reply(status, { error: { code, message } });
@@ -35,8 +49,11 @@ export class FakeDebates {
   debates: StoredDebate[] = [];
   /** Who paired each personal-plan agent's runner, by agent id: only they can seat it. */
   planOwners = new Map<string, string>();
-  /** Each person's blind pick, by `${debateId}/${userId}`; null once opened and not picked. */
-  picks = new Map<string, "a" | "b" | "tie" | null>();
+  /**
+   * Each person's blind read, by `${debateId}/${userId}`: whether the synthesis came first (drawn once,
+   * as the server does) and what they picked, as "debate", "single" or "tie" (null until they pick).
+   */
+  picks = new Map<string, { debateFirst: boolean; pick: "debate" | "single" | "tie" | null }>();
 
   constructor(private readonly host: Host) {}
 
@@ -46,15 +63,50 @@ export class FakeDebates {
     this.picks = new Map();
   }
 
-  /** The blind pair: the synthesis first, then the lead agent's opening answer. */
-  pair(row: StoredDebate, pick: "a" | "b" | "tie" | null): T.DebateBlindReview {
+  /** Closes the debate with a synthesis from the last round's majority, revealing who spoke. */
+  synthesize(workspaceId: string, row: StoredDebate): void {
+    if (row.status !== "open" || row.phase !== "concluding") return;
+    const rounds = row.track.roundLimit;
+    const final = rounds.at(-1)?.majority ?? null;
+    const winner = final?.winner ?? null;
+    Object.assign(row, {
+      status: "done",
+      phase: null,
+      engagedAgentIds: [],
+      synthesis: {
+        format: row.format,
+        revision: (row.synthesis?.revision ?? 0) + 1,
+        endReason: row.endReason,
+        baseline: rounds[0]?.majority ?? null,
+        final,
+        structured: {
+          summary: winner === null ? "The table did not settle." : `The table settled on ${winner}.`,
+          ...(winner !== null && { decision: winner }),
+        },
+      },
+      updatedAt: this.host.now().toISOString(),
+    });
+    this.host.emit(workspaceId, { type: "debate.concluded", debateId: row.id, title: row.title });
+  }
+
+  /** The blind pair in the order drawn for this person, and their pick as "a", "b" or "tie". */
+  pair(
+    row: StoredDebate,
+    read: { debateFirst: boolean; pick: "debate" | "single" | "tie" | null },
+  ): T.DebateBlindReview {
     const s = row.synthesis?.structured;
     const opening = row.posts.find((post) => post.round === 0 && post.kind === "turn");
-    return {
-      a: [s?.decision, s?.summary].filter(Boolean).join("\n\n"),
-      b: [opening?.claimData?.answer, opening?.body].filter(Boolean).join("\n\n"),
-      pick,
-    };
+    const debate = [s?.decision, s?.summary].filter(Boolean).join("\n\n");
+    const single = [opening?.claimData?.answer, opening?.body].filter(Boolean).join("\n\n");
+    const pick =
+      read.pick === null
+        ? null
+        : read.pick === "tie"
+          ? "tie"
+          : (read.pick === "debate") === read.debateFirst
+            ? "a"
+            : "b";
+    return read.debateFirst ? { a: debate, b: single, pick } : { a: single, b: debate, pick };
   }
 
   seed(): void {
@@ -133,8 +185,22 @@ export class FakeDebates {
     if (paper !== undefined) {
       // The opening round closed: the agents speak under their letters, as an open debate shows them.
       paper.posts = [
-        this.post("pst_p1", 0, null, "A", "Northpaper delivers in two days.", this.claim("Northpaper", 0.8)),
-        this.post("pst_p2", 0, null, "B", "Mill & Co is cheaper by a tenth.", this.claim("Mill & Co", 0.6)),
+        this.post(
+          "pst_p1",
+          0,
+          { type: "agent", id: "agt_scout" },
+          "A",
+          "Northpaper delivers in two days.",
+          this.claim("Northpaper", 0.8),
+        ),
+        this.post(
+          "pst_p2",
+          0,
+          { type: "agent", id: "agt_ledger" },
+          "B",
+          "Mill & Co is cheaper by a tenth.",
+          this.claim("Mill & Co", 0.6),
+        ),
         this.post(
           "pst_p3",
           0,
@@ -230,6 +296,7 @@ export class FakeDebates {
     const debate: StoredDebate = {
       workspaceId,
       spent: 0,
+      letters: Object.fromEntries(agentIds.map((id, index) => [id, LETTERS[index] ?? "?"])),
       goal: fields.title,
       agentIds,
       anonymous: true,
@@ -348,6 +415,7 @@ export class FakeDebates {
     const {
       workspaceId: _workspace,
       spent: _spent,
+      letters,
       issues: _issues,
       posts: _posts,
       sealedCount: _sealed,
@@ -356,13 +424,30 @@ export class FakeDebates {
       track: _track,
       ...debate
     } = row;
-    return debate;
+    const blind = isBlind(row);
+    return { ...debate, anonymous: blind, pseudonyms: blind ? null : letters };
   }
 
-  /** The detail as the person reads it: spend only to who may see usage, null for everyone else. */
+  /**
+   * The detail as the person reads it: while blind an agent's post loses its author and run (its letter
+   * stays), and spend goes only to who may see usage, null for everyone else.
+   */
   detail(scope: Scope, row: StoredDebate): T.DebateDetail {
-    const { workspaceId: _workspace, spent, ...debate } = row;
-    return { ...debate, spentUsd: can(scope.role, "view_usage") ? spent : null };
+    const blind = isBlind(row);
+    const posts = row.posts.map((post) =>
+      blind && post.author?.type === "agent" && post.kind !== "synthesis"
+        ? { ...post, author: null, runId: null }
+        : post,
+    );
+    return {
+      ...this.summary(row),
+      posts,
+      issues: row.issues,
+      sealedCount: row.sealedCount,
+      synthesis: row.synthesis,
+      track: row.track,
+      spentUsd: can(scope.role, "view_usage") ? row.spent : null,
+    };
   }
 
   operations(): Record<string, (params: Record<string, unknown>, session: string | undefined) => FilesReply> {
@@ -417,13 +502,19 @@ export class FakeDebates {
           row.waitingUserIds = row.waitingUserIds.filter((id) => id !== scope.user.id);
           row.awaitedUserId = row.waitingUserIds[0] ?? null;
           if (row.waitingUserIds.length === 0 && row.phase === "human_turn") row.phase = "debating";
-        } else row.posts.push(post);
+        } else {
+          row.posts.push(post);
+          // Whoever comments takes part from then on, and keeps reading the debate (the server's `commentOn`).
+          if (!row.userIds.includes(scope.user.id)) row.userIds = [...row.userIds, scope.user.id];
+        }
         this.host.emit(scope.workspaceId, { type: "debate.post_created", debateId: row.id, postId: post.id });
         row.updatedAt = this.host.now().toISOString();
         return reply(201, post);
       }),
       skipDebate: withOne((scope, row) => {
-        if (!(row.status === "open" && row.waitingUserIds.includes(scope.user.id)))
+        if (
+          !(row.status === "open" && row.phase !== "concluding" && row.waitingUserIds.includes(scope.user.id))
+        )
           return fail(409, "debate.out_of_turn", "It isn't your round to answer");
         row.waitingUserIds = row.waitingUserIds.filter((id) => id !== scope.user.id);
         row.awaitedUserId = row.waitingUserIds[0] ?? null;
@@ -432,21 +523,35 @@ export class FakeDebates {
       }),
       concludeDebate: withOne((scope, row) => {
         if (closed(row)) return fail(409, "debate.closed", "This debate is closed");
-        row.status = "open";
-        row.phase = "concluding";
-        row.waitingUserIds = [];
-        row.awaitedUserId = null;
+        Object.assign(row, {
+          status: "open",
+          phase: "concluding",
+          stallInfo: null,
+          waitingUserIds: [],
+          awaitedUserId: null,
+          engagedAgentIds: row.agentIds.slice(0, 1),
+          endReason: "concluded",
+        });
+        // The lead agent writes the synthesis after the answer, as the server's step does.
+        queueMicrotask(() => this.synthesize(scope.workspaceId, row));
         return changed(scope, row);
       }, "host"),
       cancelDebate: withOne((scope, row) => {
         if (closed(row)) return fail(409, "debate.closed", "This debate is closed");
+        // A canceled debate is no longer blind: its authors show, as on the server.
         Object.assign(row, { status: "canceled", phase: null, waitingUserIds: [], awaitedUserId: null });
-        Object.assign(row, { anonymous: false, pseudonyms: {} });
         return changed(scope, row);
       }, "host"),
       resumeDebate: withOne((scope, row) => {
         if (row.status !== "stalled") return fail(409, "debate.not_stalled", "This debate is not stalled");
-        Object.assign(row, { status: "open", phase: "debating", stallInfo: null });
+        // With nobody left to answer in the round, it goes on to the synthesis.
+        const nobodyLeft = row.waitingUserIds.length === 0 && row.engagedAgentIds.length === 0;
+        Object.assign(row, {
+          status: "open",
+          phase: nobodyLeft ? "concluding" : "debating",
+          stallInfo: null,
+        });
+        if (nobodyLeft) queueMicrotask(() => this.synthesize(scope.workspaceId, row));
         return changed(scope, row);
       }, "host"),
       setDebateVerdict: withOne((scope, row, params) => {
@@ -467,31 +572,57 @@ export class FakeDebates {
         }
         return changed(scope, row);
       }, "host"),
-      createDebateIssue: withOne((_scope, row, params) => {
-        const items = Array.isArray(params.items) ? (params.items as { title: string }[]) : [];
+      createDebateIssue: withOne((scope, row, params) => {
+        const items = Array.isArray(params.items)
+          ? (params.items as { title?: unknown; owner?: unknown; step?: unknown; description?: unknown }[])
+          : [];
         if (items.length < 1 || items.length > 30) return invalid("Send 1 to 30 items");
-        const issues = items.map((item, index) => ({
-          id: this.host.id("iss"),
-          number: 100 + row.issues.length + index,
-          title: item.title,
-        }));
+        const text = (value: unknown) => (typeof value === "string" ? value : undefined);
+        for (const item of items) {
+          const title = text(item.title)?.trim() ?? "";
+          if (title === "" || [...title].length > 300) return invalid("A title of 1 to 300 characters");
+          if ([...(text(item.owner) ?? "")].length > 100) return invalid("An owner of up to 100 characters");
+          if ([...(text(item.step) ?? "")].length > 500) return invalid("A step of up to 500 characters");
+        }
+        // The issues live where the debate lives.
+        const issues: { id: string; number: number; title: string }[] = [];
+        for (const item of items) {
+          const made = this.host.createIssue(scope.workspaceId, scope.user.id, {
+            title: (text(item.title) ?? "").trim(),
+            description: [text(item.description), text(item.step)].filter(Boolean).join("\n\n"),
+            channelId: row.channelId,
+          });
+          if ("status" in made) return made;
+          issues.push(made);
+        }
         row.issues.push(...issues);
         return reply(201, { numbers: issues.map((issue) => issue.number), issues });
       }, "host"),
       reviewDebate: withOne((scope, row) => {
         if (row.status !== "done") return fail(409, "debate.not_done", "The debate has no verdict yet");
-        const pick = this.picks.get(`${row.id}/${scope.user.id}`) ?? null;
-        this.picks.set(`${row.id}/${scope.user.id}`, pick);
-        return reply(200, this.pair(row, pick));
+        const key = `${row.id}/${scope.user.id}`;
+        // The order is drawn once per person; the fake draws it from the person's id, so tests can tell.
+        const read = this.picks.get(key) ?? { debateFirst: [...scope.user.id].length % 2 === 0, pick: null };
+        this.picks.set(key, read);
+        return reply(200, this.pair(row, read));
       }),
       reviewDebatePickReview: withOne((scope, row, params) => {
         const key = `${row.id}/${scope.user.id}`;
-        if (!this.picks.has(key))
-          return fail(409, "debate.review_not_started", "Open the blind review first");
+        const read = this.picks.get(key);
+        if (read === undefined) return fail(409, "debate.review_not_started", "Open the blind review first");
         const pick = params.pick === "a" || params.pick === "b" || params.pick === "tie" ? params.pick : null;
         if (pick === null) return invalid("Pick a, b or tie");
-        this.picks.set(key, pick);
-        return reply(200, this.pair(row, pick));
+        const next = {
+          ...read,
+          pick:
+            pick === "tie"
+              ? ("tie" as const)
+              : (pick === "a") === read.debateFirst
+                ? ("debate" as const)
+                : ("single" as const),
+        };
+        this.picks.set(key, next);
+        return reply(200, this.pair(row, next));
       }),
       listDebates: within((scope) =>
         reply(200, {
@@ -532,11 +663,9 @@ export class FakeDebates {
         for (const row of done)
           if (row.endReason !== null) endReasons[row.endReason] = (endReasons[row.endReason] ?? 0) + 1;
         const blindReviews = { debate: 0, single: 0, tie: 0 };
-        for (const [key, pick] of this.picks) {
+        for (const [key, read] of this.picks) {
           const row = done.find((each) => key.startsWith(`${each.id}/`));
-          // The fake shows the synthesis first, so "a" is the debate's own answer.
-          if (row !== undefined && pick !== null)
-            blindReviews[pick === "a" ? "debate" : pick === "b" ? "single" : "tie"]++;
+          if (row !== undefined && read.pick !== null) blindReviews[read.pick]++;
         }
         const cost = done.reduce((sum, row) => sum + row.spent, 0);
         const metrics: T.DebateMetrics = {

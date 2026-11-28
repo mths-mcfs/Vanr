@@ -99,6 +99,10 @@ export default {
   },
   "start.estimate.loading": "Calculando o custo…",
   "start.estimate.failed": "Não deu para calcular o custo. Você ainda pode começar.",
+  "start.dropped": {
+    one: "{names} não está mais disponível e saiu da mesa.",
+    other: "{names} não estão mais disponíveis e saíram da mesa.",
+  },
   "start.submit": "Começar",
   "start.started": "O debate começou",
 

@@ -203,16 +203,19 @@ export function useDebateOutcome(workspaceId: string, debateId: string) {
   const describe = useErrorMessage("debates");
   const queries = useQueryClient();
   const client = useVanrClient();
-  const refresh = () => {
-    for (const prefix of debateKeys(workspaceId, debateId))
-      void queries.invalidateQueries({ queryKey: prefixKey(client, prefix) });
-  };
+  /** Reloads the debate's reads; settles once they are back, so a latch can wait for the fresh state. */
+  const refresh = () =>
+    Promise.all(
+      debateKeys(workspaceId, debateId).map((prefix) =>
+        queries.invalidateQueries({ queryKey: prefixKey(client, prefix) }),
+      ),
+    ).then(() => undefined);
   return {
     done: (title: string) => toast.push({ tone: "success", title }),
     failed: (error: unknown) => {
       toast.push({ tone: "danger", title: describe(error) });
       // A 409 means someone else moved the debate first: show it as it is now.
-      refresh();
+      void refresh();
     },
     refresh,
   };

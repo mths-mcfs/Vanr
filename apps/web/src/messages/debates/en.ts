@@ -95,6 +95,10 @@ export default {
   },
   "start.estimate.loading": "Working out the cost…",
   "start.estimate.failed": "The cost could not be worked out. You can still start.",
+  "start.dropped": {
+    one: "{names} is no longer available and was taken off the table.",
+    other: "{names} are no longer available and were taken off the table.",
+  },
   "start.submit": "Start",
   "start.started": "The debate started",
 

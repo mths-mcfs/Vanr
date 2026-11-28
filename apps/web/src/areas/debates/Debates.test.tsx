@@ -220,14 +220,28 @@ describe("starting a debate", () => {
       }),
     );
     await waitFor(() => expect(dialog.queryByRole("checkbox", { name: /Tally/ }) === null).toBe(true));
+    expect(dialog.getByText("Tally is no longer available and was taken off the table.")).toBeDefined();
     // Only Scout is left at the table: the ceiling and what is sent drop Tally.
     expect(await dialog.findByText("At most 3 model calls, up to $0.1275")).toBeDefined();
+    // Tally coming back doesn't bring the pick back: it stays off the table until picked again.
+    tally.archivedAt = null;
+    await act(async () =>
+      app.server.emit(WORKSPACE, {
+        type: "budget.cap_reached",
+        agentId: "agt_tally",
+        spentUsd: null,
+        budgetUsd: null,
+      }),
+    );
+    const back = await dialog.findByRole("checkbox", { name: "Tally" });
+    expect(back.getAttribute("aria-checked")).toBe("false");
+    expect(dialog.getByRole("checkbox", { name: "1. Scout" })).toBeDefined();
     await app.user.click(dialog.getByRole("button", { name: "Start" }));
     await waitFor(() => expect(app.address().startsWith(`/workspace/${WORKSPACE}/debates/deb`)).toBe(true));
     expect(app.server.debates.debates.at(-1)?.agentIds).toEqual(["agt_scout"]);
   });
 
-  test("a pick that comes back over the limit holds the form", async () => {
+  test("a pick that left the lists comes back unpicked, so the table never goes over", async () => {
     const server = newServer();
     const base = server.agents.find((agent) => agent.id === "agt_scout");
     if (base === undefined) throw new Error("the seed has no Scout");
@@ -255,13 +269,43 @@ describe("starting a debate", () => {
     await waitFor(() => expect(dialog.queryByRole("checkbox", { name: /Scout/ }) === null).toBe(true));
     await app.user.click(dialog.getByRole("checkbox", { name: "Ledger" }));
     expect(dialog.getByRole("button", { name: "Start" }).hasAttribute("disabled")).toBe(false);
-    // Scout comes back still picked: nine agents, over the limit of eight.
+    // Scout comes back, but not picked: it left the table and stays off it, so the table stays at eight.
     base.archivedAt = null;
     await refresh();
-    await dialog.findByRole("checkbox", { name: /Scout/ });
-    await waitFor(() =>
-      expect(dialog.getByRole("button", { name: "Start" }).hasAttribute("disabled")).toBe(true),
+    const back = await dialog.findByRole("checkbox", { name: "Scout" });
+    expect(back.getAttribute("aria-checked")).toBe("false");
+    expect(dialog.getByRole("button", { name: "Start" }).hasAttribute("disabled")).toBe(false);
+  });
+
+  test("a person removed from the workspace leaves the table, and the order closes up", async () => {
+    const app = await renderApp({ path: LIST, signedInAs: "usr_ana" });
+    await app.user.click(await screen.findByRole("button", { name: "Start a debate" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "Start a debate" }));
+    await app.user.type(dialog.getByRole("textbox", { name: /^Question/ }), "Which printer first?");
+    await app.user.click(await dialog.findByRole("checkbox", { name: "Scout" }));
+    await app.user.click(await dialog.findByRole("checkbox", { name: /Íris/ }));
+    await app.user.click(await dialog.findByRole("checkbox", { name: /Tomás/ }));
+    expect(dialog.getByRole("checkbox", { name: "3. Tomás Eriksen" })).toBeDefined();
+    const at = app.server.state.members.findIndex(
+      (m) => m.workspaceId === WORKSPACE && m.userId === "usr_iris",
     );
+    app.server.state.members.splice(at, 1);
+    await act(async () => {
+      await app.runtime.queryClient.invalidateQueries();
+    });
+    await waitFor(() => expect(dialog.queryByRole("checkbox", { name: /Íris/ }) === null).toBe(true));
+    expect(dialog.getByRole("checkbox", { name: "2. Tomás Eriksen" })).toBeDefined();
+    expect(
+      dialog.getByText("Íris Valença is no longer available and was taken off the table."),
+    ).toBeDefined();
+    await app.user.click(dialog.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(app.address().startsWith(`/workspace/${WORKSPACE}/debates/deb`)).toBe(true));
+    const made = app.server.debates.debates.at(-1);
+    expect(made?.userIds).toEqual(["usr_tomas"]);
+    expect(made?.speakers).toEqual([
+      { type: "agent", id: "agt_scout" },
+      { type: "person", id: "usr_tomas" },
+    ]);
   });
 
   test("a member sees how many calls it can take, never the money", async () => {
@@ -474,5 +518,18 @@ describe("the fake follows the server", () => {
       (call("listDebateMetrics", { days: "90" }, userId).body as { meanCostUsd: number | null }).meanCostUsd;
     expect(mean("usr_iris")).toBe(null);
     expect(typeof mean("usr_ana")).toBe("number");
+  });
+
+  test("a turn can't be skipped while the synthesis is being written", () => {
+    const paper = server.debates.debates.find((row) => row.id === "deb_paper");
+    if (paper === undefined) throw new Error("the seed has no paper debate");
+    paper.phase = "concluding";
+    expect(call("skipDebate", { debateId: "deb_paper" }).status).toBe(409);
+  });
+
+  test("a step longer than the server takes is refused", () => {
+    const long = "a".repeat(301);
+    expect(call("createDebateIssue", { debateId: "deb_logo", items: [{ title: long }] }).status).toBe(400);
+    expect(call("createDebateIssue", { debateId: "deb_logo", items: [] }).status).toBe(400);
   });
 });
