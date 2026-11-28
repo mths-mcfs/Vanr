@@ -238,7 +238,7 @@ export async function lockPrivateChannels(tx: Tx, ids: readonly string[]): Promi
 /**
  * A private channel nobody is left in is archived, and so lets go of its name: no one could read it anymore, and a
  * new channel may take the name. Its agents stay members and its history stays; the workspace's owner can bring it
- * back (`restoreChannel`). Call it under `lockPrivateChannels`, after the leave.
+ * back (`POST /archived-channels/:id/restore`). Call it under `lockPrivateChannels`, after the leave.
  */
 export async function archiveOrphans(tx: Tx, ids: readonly string[], at: Date): Promise<string[]> {
   if (ids.length === 0) return [];
