@@ -493,6 +493,83 @@
     gap: var(--vr-space-1);
   }
 
+  /* ---------- Memory, access, environment and runners ---------- */
+
+  .agent-back {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--vr-space-1);
+    align-self: flex-start;
+  }
+
+  .access-rule,
+  .access-account {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--vr-space-2) var(--vr-space-3);
+    min-height: var(--vr-control-lg);
+    padding-block: var(--vr-space-1);
+    border-bottom: var(--vr-border) solid var(--vr-line);
+  }
+
+  .access-add {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+    gap: var(--vr-space-3);
+    align-items: end;
+    max-width: 52rem;
+  }
+
+  .access-connect {
+    max-width: 32rem;
+  }
+
+  .memory-list {
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .memory-note {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-2);
+    padding-block: var(--vr-space-3);
+    border-bottom: var(--vr-border) solid var(--vr-line);
+  }
+
+  .memory-note__text {
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+  }
+
+  .memory-note__meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--vr-space-1) var(--vr-space-3);
+    font-size: var(--vr-text-sm);
+  }
+
+  .memory-note__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--vr-space-1);
+  }
+
+  .runner-command {
+    margin: 0;
+    padding: var(--vr-space-3);
+    overflow-x: auto;
+    border-radius: var(--vr-radius-2);
+    background: var(--vr-bg-sunken);
+    font-family: var(--vr-font-mono);
+    font-size: var(--vr-text-sm);
+  }
+
   /* ---------- Narrow screens ---------- */
 
   @media (max-width: 48rem) {
