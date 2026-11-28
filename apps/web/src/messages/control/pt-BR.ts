@@ -111,6 +111,7 @@ export default {
   "field.cc": "Cc",
   "field.subject": "Assunto",
   "edit.submit": "Salvar e aprovar",
+  "edit.once": "Um pedido editado é aprovado só desta vez: o “permitir sempre” não fica salvo para ele.",
 
   "rules.title": "Sempre permitido",
   "rules.lead": "O que os agentes podem fazer sem pedir, por 30 dias desde que alguém permitiu.",
@@ -263,6 +264,8 @@ export default {
   "error.approval.changed": "O pedido mudou desde que você abriu. Olhe de novo antes de decidir.",
   "error.approval.already_resolved": "Alguém já decidiu este pedido.",
   "error.approval.gone": "O trabalho que pediu parou, então não há o que decidir.",
+  "error.approval.edit_blocked":
+    "Essa edição mandaria o pedido para onde o agente não pode chegar depois do que leu. Mude ou recuse o pedido.",
   "error.approval.not_rememberable": "Este pedido não pode ser sempre permitido.",
   "error.proposal.decided": "Alguém já decidiu esta proposta.",
   "error.proposal.stale": "O texto mudou desde esta proposta, então ela só pode ser recusada.",

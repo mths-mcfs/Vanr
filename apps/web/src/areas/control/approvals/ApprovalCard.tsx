@@ -5,6 +5,7 @@
 // of the version on screen, so a request that changed meanwhile is never approved blind. Once the
 // approved action ran, the card shows the receipt of what it changed, with undo.
 import { useQueryClient } from "@tanstack/react-query";
+import { isApiError } from "@vanr/client";
 import { prefixKey, useApiMutation, useApiQuery, useVanrClient } from "@vanr/client/react";
 import type { Approval, EffectClass } from "@vanr/contract";
 import { AgentSigil, Button, Callout, Checkbox, StatusBadge } from "@vanr/ui";
@@ -28,6 +29,12 @@ import { Block, type Directory, type Me, useOutcome } from "../shared.tsx";
 import { EditDialog, RejectDialog } from "./Decide.tsx";
 
 const EFFECTS: readonly EffectClass[] = ["K0", "K1", "K2", "K3"];
+/** Refusals that mean the version on screen is no longer the one to decide. */
+const STALE: ReadonlySet<string> = new Set([
+  "approval.changed",
+  "approval.already_resolved",
+  "approval.gone",
+]);
 
 /** Four steps, from only reading (K0) to what cannot be undone (K3). */
 function EffectScale({ effect }: { effect: EffectClass }) {
@@ -200,21 +207,21 @@ export function ApprovalCard({
         onSuccess: () => outcome.done(t(remembering ? "toast.remembered" : "toast.approved")),
       },
     );
+  // An edited request is approved once and never remembered: the rule the box showed was the unedited
+  // request's, and the edit can change what it would cover (another recipient, another address).
   const onEdit = (from: Approval, input: Record<string, unknown>) =>
     edit.mutate(
-      {
-        workspaceId,
-        approvalId: approval.id,
-        body: { input, payloadHash: from.payloadHash ?? "", remember: remembering },
-      },
+      { workspaceId, approvalId: approval.id, body: { input, payloadHash: from.payloadHash ?? "" } },
       {
         onError: (error) => {
-          setEditing(null);
+          // A request that changed or was decided meanwhile takes the dialog with it; any other refusal (an
+          // edit the gate blocks) keeps the person's edit open to change.
+          if (isApiError(error) && STALE.has(error.rawCode)) setEditing(null);
           failed(error);
         },
         onSuccess: () => {
           setEditing(null);
-          outcome.done(t(remembering ? "toast.remembered" : "toast.approved"));
+          outcome.done(t("toast.approved"));
         },
       },
     );
@@ -349,6 +356,7 @@ export function ApprovalCard({
       {deciding && editing !== null && (
         <EditDialog
           approval={editing}
+          remembering={remembering}
           busy={edit.isPending}
           onSave={(input) => onEdit(editing, input)}
           onClose={() => setEditing(null)}

@@ -37,6 +37,9 @@ export class FakeControl {
   rules: StoredRule[] = [];
   proposals: StoredProposal[] = [];
   stats: T.ApprovalStatsRow[] = [];
+  /** Each agent's test cases, and the evaluations run with them (newest last). */
+  testCases = new Map<string, T.AgentTestCase[]>();
+  evals: T.AgentEval[] = [];
   /** The agents' open and closed questions (the conversation's cards). */
   questions: { workspaceId: string; question: T.AgentQuestion }[] = [];
 
@@ -615,6 +618,38 @@ export class FakeControl {
         const answer = text(params.choice) ?? text(params.text) ?? "";
         stored.question = { ...question, status: "answered", answer, responderUserId: scope.user.id };
         return reply(200, stored.question);
+      }),
+
+      listAgentTestCases: within((_scope, params) =>
+        reply(200, { cases: this.testCases.get(String(params.agentId)) ?? [] }),
+      ),
+      listAgentEvals: within((_scope, params) =>
+        reply(200, {
+          evals: this.evals
+            .filter((run) => run.agentId === params.agentId)
+            .filter((run) => params.proposalId === undefined || run.proposalId === params.proposalId)
+            .reverse(),
+        }),
+      ),
+      createAgentEval: within((_scope, params) => {
+        const cases = this.testCases.get(String(params.agentId)) ?? [];
+        if (cases.length === 0) return fail(400, "agent_eval.no_cases", "The agent has no test cases");
+        const run: T.AgentEval = {
+          id: this.host.id("eval"),
+          agentId: String(params.agentId),
+          costUsd: 0,
+          createdAt: this.at(0),
+          done: 0,
+          error: null,
+          finishedAt: null,
+          proposalId: text(params.proposalId) ?? null,
+          results: [],
+          status: "running",
+          summary: null,
+          total: cases.length,
+        };
+        this.evals.push(run);
+        return reply(200, run);
       }),
 
       undoAction: within((scope, params) => toggle(scope, params, "undo")),

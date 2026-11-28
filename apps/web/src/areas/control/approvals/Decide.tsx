@@ -100,11 +100,14 @@ export function editedInput(
 
 export function EditDialog({
   approval,
+  remembering,
   busy,
   onSave,
   onClose,
 }: {
   approval: Approval;
+  /** "Always allow" is ticked on the card: say it does not carry over to the edit. */
+  remembering: boolean;
   busy: boolean;
   onSave: (input: Record<string, unknown>) => void;
   onClose: () => void;
@@ -141,6 +144,7 @@ export function EditDialog({
             onSave(editedInput(original, approval.editable, values));
           }}
         >
+          {remembering && <p className="control-note">{t("edit.once")}</p>}
           {approval.editable.map((key, index) => (
             <Field
               key={key}

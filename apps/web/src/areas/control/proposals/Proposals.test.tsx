@@ -57,6 +57,20 @@ describe("the proposals page", () => {
     expect(app.server.control.proposals[0]?.proposal.undone).toBe(false);
   });
 
+  test("a proposal that went stale meanwhile: the failed accept reads the list again", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
+    const tone = await card("Answer print questions with the shop's hours");
+    const stored = app.server.control.proposals[0]?.proposal;
+    if (stored === undefined) throw new Error("no proposal");
+    stored.stale = true;
+    await app.user.click(within(tone).getByRole("button", { name: "Accept" }));
+    expect(
+      await screen.findByText("The text changed since this was proposed, so it can only be rejected."),
+    ).toBeDefined();
+    expect(await within(tone).findByText(/can only be rejected\. Ask the agent/)).toBeDefined();
+    expect(absent(within(tone).queryByRole("button", { name: "Accept" }))).toBe(true);
+  });
+
   test("rejecting becomes a lesson", async () => {
     const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
     const stale = await card("Mention the new address");

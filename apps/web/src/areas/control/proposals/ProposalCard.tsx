@@ -3,7 +3,8 @@
 // the final text, if they want) or reject, which becomes a lesson. A proposal whose text changed
 // since can only be rejected. Once accepted, whoever accepted, the agent's lead or an admin can undo
 // it while the window is open (the server says so in `canUndo`), and redo it after.
-import { useApiMutation } from "@vanr/client/react";
+import { useQueryClient } from "@tanstack/react-query";
+import { prefixKey, useApiMutation, useVanrClient } from "@vanr/client/react";
 import type { Proposal } from "@vanr/contract";
 import { AgentSigil, Button, Callout, Field, StatusBadge, Textarea, type WorkStatus } from "@vanr/ui";
 import { useMemo, useState } from "react";
@@ -42,6 +43,8 @@ export function ProposalCard({
   const lookup = useLookup("control");
   const { locale } = useLocale();
   const outcome = useOutcome();
+  const client = useVanrClient();
+  const queryClient = useQueryClient();
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(proposal.after);
   const target = useTarget(proposal, directory);
@@ -62,6 +65,13 @@ export function ProposalCard({
   const busy = accept.isPending || reject.isPending || undo.isPending || redo.isPending;
   const pending = proposal.status === "pending";
 
+  /** A refused decision (stale or decided meanwhile) shows the list as it is now, without waiting a minute. */
+  const refused = (error: unknown) => {
+    outcome.failed(error);
+    void queryClient.invalidateQueries({
+      queryKey: prefixKey(client, { method: "listProposals", args: { workspaceId } }),
+    });
+  };
   const onAccept = () =>
     accept.mutate(
       { workspaceId, proposalId: proposal.id, body: editing ? { text } : {} },
@@ -70,13 +80,13 @@ export function ProposalCard({
           setEditing(false);
           outcome.done(t("toast.accepted"));
         },
-        onError: outcome.failed,
+        onError: refused,
       },
     );
   const onReject = () =>
     reject.mutate(
       { workspaceId, proposalId: proposal.id },
-      { onSuccess: () => outcome.done(t("toast.proposalRejected")), onError: outcome.failed },
+      { onSuccess: () => outcome.done(t("toast.proposalRejected")), onError: refused },
     );
   const onToggle = () => {
     if (proposal.actionId === null) return;

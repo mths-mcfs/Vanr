@@ -96,6 +96,43 @@ describe("the approvals page", () => {
     expect(app.server.control.approvals[0]?.approval.input).toMatchObject({ text: "Proofs ready at 3pm." });
   });
 
+  test("edit and approve never saves an always-allow rule, even with the box ticked", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
+    const post = await card("Post in #print-queue");
+    await app.user.click(within(post).getByRole("checkbox", { name: /Always allow for 30 days/ }));
+    await app.user.click(within(post).getByRole("button", { name: "Edit and approve" }));
+    const dialog = await screen.findByRole("dialog", { name: "Edit before approving" });
+    expect(within(dialog).getByText(/An edited request is approved this once/)).toBeDefined();
+    const text = within(dialog).getByRole("textbox", { name: "Text" });
+    await app.user.clear(text);
+    await app.user.type(text, "Proofs ready at 3pm.");
+    await app.user.click(within(dialog).getByRole("button", { name: "Save and approve" }));
+    expect(await within(post).findByText("Edited before it was approved.")).toBeDefined();
+    const sent = app.server.calls.find((call) => call.method === "editApproval");
+    expect(sent?.params.remember === undefined).toBe(true);
+    expect(app.server.control.rules.map((rule) => rule.rule.label)).toEqual(["#design"]);
+  });
+
+  test("an edit the server blocks keeps the dialog and the edit open", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
+    const post = await card("Post in #print-queue");
+    app.server.force("editApproval", { kind: "error", status: 400, code: "approval.edit_blocked" });
+    await app.user.click(within(post).getByRole("button", { name: "Edit and approve" }));
+    const dialog = await screen.findByRole("dialog", { name: "Edit before approving" });
+    const text = within(dialog).getByRole("textbox", { name: "Text" });
+    await app.user.clear(text);
+    await app.user.type(text, "Somewhere else");
+    await app.user.click(within(dialog).getByRole("button", { name: "Save and approve" }));
+    expect(
+      await screen.findByText(/That edit would send it somewhere the agent may not reach/),
+    ).toBeDefined();
+    expect(screen.getByRole("dialog", { name: "Edit before approving" })).toBeDefined();
+    expect((within(dialog).getByRole("textbox", { name: "Text" }) as HTMLTextAreaElement).value).toBe(
+      "Somewhere else",
+    );
+    expect(app.server.control.approvals[0]?.approval.status).toBe("pending");
+  });
+
   test("a request that changed since it was opened is not approved blind, and shows its new version", async () => {
     const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
     const post = await card("Post in #print-queue");

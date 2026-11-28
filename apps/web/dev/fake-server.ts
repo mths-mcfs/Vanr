@@ -357,6 +357,8 @@ export class FakeServer {
     this.control.proposals = [];
     this.control.stats = [];
     this.control.questions = [];
+    this.control.testCases = new Map();
+    this.control.evals = [];
     if (name === "empty") return;
     const inDays = (days: number) => new Date(this.now().getTime() + days * DAY_MS);
     const people: [string, string, string][] = [

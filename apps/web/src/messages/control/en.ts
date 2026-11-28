@@ -110,6 +110,7 @@ export default {
   "field.cc": "Cc",
   "field.subject": "Subject",
   "edit.submit": "Save and approve",
+  "edit.once": "An edited request is approved this once: “always allow” is not saved for it.",
 
   "rules.title": "Always allowed",
   "rules.lead": "What agents may do without asking, for 30 days from when someone allowed it.",
@@ -261,6 +262,8 @@ export default {
   "error.approval.changed": "The request changed since you opened it. Look at it again before you decide.",
   "error.approval.already_resolved": "Someone already decided this request.",
   "error.approval.gone": "The work that asked stopped, so there is nothing to decide.",
+  "error.approval.edit_blocked":
+    "That edit would send it somewhere the agent may not reach after what it read. Change it or reject the request.",
   "error.approval.not_rememberable": "This request can't be always allowed.",
   "error.proposal.decided": "Someone already decided this proposal.",
   "error.proposal.stale": "The text changed since this was proposed, so it can only be rejected.",
