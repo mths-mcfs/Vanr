@@ -27,6 +27,7 @@ const WIKI_READS = [
   "getWikiPage",
   "getWikiPageHistory",
   "getWikiPagePanel",
+  "getWikiPageAnnotations",
   "getWikiPageDiff",
   "getWikiReads",
   "getWikiTrash",

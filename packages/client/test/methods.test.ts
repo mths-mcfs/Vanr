@@ -24,6 +24,14 @@ const APPROVED_DIVERGENCES: Record<string, string> = {
 const EXTRAS: Record<string, string> = {
   deleteChannelMemberPerson:
     "removes a person from a channel (the table only has the agent half of this route pair)",
+  setWikiPageAccess: "who reads a wiki page (per-page access, P4); the route came after the table",
+  getWikiPageAnnotations: "a wiki page's comments and proposals (P4); the route came after the table",
+  createWikiPageComment: "a comment on a passage of a wiki page (P4); the route came after the table",
+  resolveWikiAnnotation: "resolves a wiki comment thread (P4); the route came after the table",
+  reopenWikiAnnotation: "opens a resolved wiki comment thread again (P4); the route came after the table",
+  deleteWikiAnnotation: "deletes a wiki comment and its replies (P4); the route came after the table",
+  decideWikiAnnotation:
+    "accepts or rejects the changes of a wiki proposal (P4); the route came after the table",
 };
 
 const rows: Row[] = table.methods;

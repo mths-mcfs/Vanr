@@ -16,8 +16,10 @@ describe("the wiki index", () => {
   test("shows the pages by folder, with the pinned, the recent and the most read beside them", async () => {
     await renderApp({ path: PATH, signedInAs: "usr_ana" });
     await screen.findByRole("heading", { level: 1, name: "Wiki" });
-    expect(await screen.findByText("3 pages")).toBeDefined();
-    expect(await treePages()).toEqual(["Holidays", "Press checklist", "Ink suppliers"]);
+    expect(await screen.findByText("4 pages")).toBeDefined();
+    expect(await treePages()).toEqual(["Holidays", "Salaries", "Press checklist", "Ink suppliers"]);
+    const salaries = within(await tree()).getByRole("link", { name: /Salaries/ });
+    expect(within(salaries).getByRole("img", { name: "Restricted" })).toBeDefined();
     const holidays = within(await tree()).getByRole("link", { name: /Holidays/ });
     expect(within(holidays).getByRole("img", { name: "Locked" })).toBeDefined();
     const pinned = screen.getByRole("region", { name: "Pinned" });
@@ -176,6 +178,18 @@ describe("the wiki index", () => {
       await within(dialog).findByRole("button", { name: "Delete Old price list for good" }),
     );
     expect(await within(dialog).findByText("The trash is empty")).toBeDefined();
+  });
+
+  test("a restricted page is not there for someone who does not read it: not in the tree, the search or its address", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_iris" });
+    expect(await screen.findByText("3 pages")).toBeDefined();
+    expect(await treePages()).not.toContain("Salaries");
+    await app.user.type(screen.getByRole("searchbox", { name: "Search pages" }), "founders");
+    expect(await screen.findByText("No page matches.")).toBeDefined();
+    app.unmount();
+    await renderApp({ path: `${PATH}/salaries`, signedInAs: "usr_iris" });
+    expect(await screen.findByText("No page here")).toBeDefined();
+    expect(screen.queryByText("Only for the founders.") === null).toBe(true);
   });
 
   test("a link path as long as the server allows (200-character folder and title) opens the form", async () => {

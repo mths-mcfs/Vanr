@@ -259,6 +259,8 @@ export class FakeServer {
   /** The client's fake: users, workspaces, members, channels and messages live in its state. */
   inner: ClientFake;
   signupOpen = true;
+  /** Each workspace's direct messages, by workspace id; their channels may be in its channel list too. */
+  dms = new Map<string, T.DirectMessage[]>();
   agents: FakeAgent[] = [];
   runs: FakeRun[] = [];
   invitations: FakeInvitation[] = [];
@@ -319,7 +321,10 @@ export class FakeServer {
     };
     this.files = new FakeFiles(host);
     this.bases = new FakeBases(host);
-    this.wiki = new FakeWiki(host);
+    this.wiki = new FakeWiki({
+      ...host,
+      nameOf: (id) => this.state.users.find((user) => user.id === id)?.name,
+    });
     this.control = new FakeControl({
       ...host,
       agentOwner: (agentId) => this.agents.find((candidate) => candidate.id === agentId)?.ownerUserId,
@@ -679,6 +684,7 @@ export class FakeServer {
     this.settings.clear();
     this.storage.clear();
     this.notifications = [];
+    this.dms.clear();
     this.notificationSettings.clear();
     this.approvals.clear();
     this.accounts.clear();
@@ -1241,6 +1247,11 @@ export class FakeServer {
       return reply(200, { ok: true });
     },
 
+    getDms: (params, session) => {
+      const scope = this.scope(params, session);
+      if ("status" in scope) return scope;
+      return reply(200, { dms: this.dms.get(scope.workspaceId) ?? [] });
+    },
     getInvitation: (params, session) => {
       const body = Bodies.invitation.safeParse(params);
       if (!body.success) return invalid();

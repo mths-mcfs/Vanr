@@ -202,8 +202,9 @@ describe("a live wiki page", () => {
     await app.user.click(screen.getByRole("button", { name: "Page actions" }));
     await app.user.click(await screen.findByRole("menuitem", { name: "Move to trash" }));
     expect(await screen.findByRole("alertdialog")).toBeDefined();
-    // The page can't be read again: the refetch fails and the cached page still says unlocked.
-    server.force("getWikiPage", { kind: "error", status: 404, code: "not_found" }, 50);
+    // The page can't be read again from here: the refetch fails (not a "not found", which would take
+    // the page off the screen) and the cached page still says unlocked.
+    server.force("getWikiPage", { kind: "error", status: 500, code: "internal" }, 50);
     await act(async () => socket().serverClose(4403, "access-revoked"));
     await waitFor(() => expect(status()).toBe("Read only"));
     await waitFor(() => expect(screen.queryByRole("alertdialog") === null).toBe(true));

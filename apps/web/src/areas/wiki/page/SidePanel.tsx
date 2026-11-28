@@ -4,9 +4,13 @@
 import { useApiQuery } from "@vanr/client/react";
 import type { WikiPage } from "@vanr/contract";
 import { Button, Callout, Skeleton } from "@vanr/ui";
+import type { ReactNode } from "react";
 import { AppLink } from "../../../app/navigation.tsx";
 import { useMessages } from "../../../i18n/react.tsx";
 import { plainSnippet } from "../shared.tsx";
+
+/** Two heading texts the editor treats as the same one (it matches ignoring case and outer spaces). */
+const sameHeading = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
 
 export function SidePanel({
   workspaceId,
@@ -14,6 +18,7 @@ export function SidePanel({
   agentName,
   onHeading,
   onCreate,
+  children,
 }: {
   workspaceId: string;
   page: WikiPage;
@@ -21,6 +26,8 @@ export function SidePanel({
   /** Scrolls the editor to the heading with this text. */
   onHeading: (text: string, nth: number) => void;
   onCreate: (target: string) => void;
+  /** What goes first: the page's proposals and comments. */
+  children?: ReactNode;
 }) {
   const t = useMessages("wiki");
   const common = useMessages("common");
@@ -36,6 +43,7 @@ export function SidePanel({
 
   return (
     <aside className="wiki-side" aria-label={t("side.label")}>
+      {children}
       {panel.data === undefined && panel.isError ? (
         <Callout
           tone="danger"
@@ -72,7 +80,7 @@ export function SidePanel({
                         // Which of the headings with this text: the second "Notes" goes to the second one.
                         onHeading(
                           heading.text,
-                          all.slice(0, index).filter((each) => each.text === heading.text).length,
+                          all.slice(0, index).filter((each) => sameHeading(each.text, heading.text)).length,
                         )
                       }
                     >
