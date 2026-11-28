@@ -1,6 +1,6 @@
 // Memory: the three stores (agent, person, workspace), editing with the hash precondition, immutable versions
 // and restore, the review queue; feedback on an answer and reminders.
-import { can, type Memory, type MemoryVersion, type Message, type Reminder } from "@vanr/contract";
+import { can, type MemoryVersion, type Message, type Reminder } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import {
@@ -23,11 +23,12 @@ import {
   restoreMemory,
   storeWhere,
 } from "../agent-memory";
-import { agentInWorkspace, toMemory } from "../agents";
+import { agentInWorkspace, requireActiveAgent } from "../agents";
 import { canReadChannel, readableChannel, writableChannel } from "../channels";
 import type { AppDeps, AppEnv, WorkspaceMember } from "../context";
 import { badRequest, conflict, forbidden, notFound, param, readJson, readQuery } from "../http";
-import { approveReview, rejectReview, reviewsFor, toMemoryReview } from "../memory-reviews";
+import { approveReview, rejectReview, reviewsFor } from "../memory-reviews";
+import { viewMemories, viewMemory, viewMemoryReview, viewMemoryReviews } from "../memory-view";
 import { channelNameOf, hydrateOne, memoriesFor, messageInWorkspace, postMessage } from "../messages";
 import { requireMember, WORKSPACE } from "../workspace-scope";
 
@@ -58,16 +59,18 @@ async function memoryFor(deps: AppDeps, me: WorkspaceMember, id: string) {
   if (!row) throw notFound("Memory not found");
   if (row.scope === "person") {
     if (row.ownerUserId !== me.userId) throw notFound("Memory not found");
-    return { row, editable: true };
+    return { row, agent: null, editable: true };
   }
-  if (row.scope === "workspace") return { row, editable: can(me.role, "manage_agents") };
+  if (row.scope === "workspace") return { row, agent: null, editable: can(me.role, "manage_agents") };
   const agent = await agentInWorkspace(deps.db, me.workspaceId, row.agentId ?? "");
-  return { row, editable: can(me.role, "manage_agents") || agent.ownerUserId === me.userId };
+  return { row, agent, editable: can(me.role, "manage_agents") || agent.ownerUserId === me.userId };
 }
 
+/** A memory the person may change; an archived agent's store is read-only. */
 async function editableMemory(deps: AppDeps, me: WorkspaceMember, id: string) {
   const found = await memoryFor(deps, me, id);
   if (!found.editable) throw forbidden();
+  if (found.agent) requireActiveAgent(found.agent);
   return found.row;
 }
 
@@ -84,7 +87,7 @@ export async function publishMemory(deps: AppDeps, row: MemoryRow) {
   deps.hub.toChannel(origin.channelId, {
     type: "memory.recorded",
     agentId: row.agentId,
-    memory: toMemory(row),
+    memory: await viewMemory(deps.db, { channelId: origin.channelId }, row),
   });
   const list = (await memoriesFor(deps.db, [row.originMessageId])).get(row.originMessageId) ?? [];
   deps.hub.toChannel(origin.channelId, {
@@ -142,8 +145,6 @@ function toReminder(row: typeof reminders.$inferSelect): Reminder {
   };
 }
 
-const memoryList = (rows: MemoryRow[]): { memories: Memory[] } => ({ memories: rows.map(toMemory) });
-
 export function registerMemories(app: Hono<AppEnv>) {
   // The agent's store (the person's and the workspace's have their own routes).
   app.get(`${WORKSPACE}/agents/:agentId/memories`, async (c) => {
@@ -162,7 +163,8 @@ export function registerMemories(app: Hono<AppEnv>) {
         ),
       )
       .orderBy(desc(memories.pinned), desc(memories.updatedAt));
-    return c.json(memoryList(rows));
+    // The origins depend on who asks: no shared cache keeps one person's answer for another.
+    return c.json({ memories: await viewMemories(db, me, rows) }, 200, { "cache-control": "no-store" });
   });
 
   // The person's store: what the agents kept about them. Only they see it.
@@ -176,7 +178,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       .orderBy(desc(memories.updatedAt))
       .limit(STORE_LIST_LIMIT);
     // One person's store: no browser or proxy keeps a copy for whoever signs in next.
-    return c.json(memoryList(rows), 200, { "cache-control": "no-store" });
+    return c.json({ memories: await viewMemories(db, me, rows) }, 200, { "cache-control": "no-store" });
   });
 
   // The workspace's store: every member reads it (the agents too); only who manages agents writes.
@@ -189,7 +191,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       .where(storeWhere({ scope: "workspace", workspaceId: me.workspaceId }))
       .orderBy(memories.path)
       .limit(STORE_LIST_LIMIT);
-    return c.json(memoryList(rows));
+    return c.json({ memories: await viewMemories(db, me, rows) }, 200, { "cache-control": "no-store" });
   });
 
   app.post(`${WORKSPACE}/memories`, async (c) => {
@@ -230,7 +232,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       },
       { author: person(me), reason: input.reason ?? "" },
     );
-    return c.json(toMemory(row), 201);
+    return c.json(await viewMemory(deps.db, me, row), 201);
   });
 
   // One PATCH changes the text (with the hash precondition), the path, the pin or the archive.
@@ -286,7 +288,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       { op, author: person(me), reason: input.reason ?? "", expectedSha256: input.expectedSha256 },
     );
     await publishMemory(deps, updated);
-    return c.json(toMemory(updated));
+    return c.json(await viewMemory(deps.db, me, updated));
   });
 
   // Brings back the text before the last edit by a person (it is a new version).
@@ -304,7 +306,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       { op: "update", author: person(me), reason: "revert", expectedSha256: contentSha256(row.text) },
     );
     await publishMemory(deps, updated);
-    return c.json(toMemory(updated));
+    return c.json(await viewMemory(deps.db, me, updated));
   });
 
   app.get(`${WORKSPACE}/memories/:memoryId/versions`, async (c) => {
@@ -330,7 +332,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       input.reason ?? "",
     );
     await publishMemory(deps, updated);
-    return c.json(toMemory(updated));
+    return c.json(await viewMemory(deps.db, me, updated));
   });
 
   // ---- review queue (a run's write under flag A) ----
@@ -339,14 +341,17 @@ export function registerMemories(app: Hono<AppEnv>) {
     const me = requireMember(c);
     const { db } = c.get("deps");
     const agentId = readQuery(c, z.object({ agentId: z.string().max(64).optional() })).agentId || undefined;
-    return c.json({ reviews: (await reviewsFor(db, me, agentId)).map(toMemoryReview) });
+    // The origins depend on who asks: no shared cache keeps one person's answer for another.
+    return c.json({ reviews: await viewMemoryReviews(db, me, await reviewsFor(db, me, agentId)) }, 200, {
+      "cache-control": "no-store",
+    });
   });
 
   app.post(`${WORKSPACE}/memory-reviews/:memoryReviewId/approve`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
     const row = await approveReview(deps, me, param(c, "memoryReviewId"));
-    return c.json(toMemoryReview(row));
+    return c.json(await viewMemoryReview(deps.db, me, row), 200, { "cache-control": "no-store" });
   });
 
   app.post(`${WORKSPACE}/memory-reviews/:memoryReviewId/reject`, async (c) => {
@@ -357,7 +362,7 @@ export function registerMemories(app: Hono<AppEnv>) {
       z.object({ note: z.string().trim().max(MEMORY_REASON_MAX).optional() }).strict(),
     );
     const row = await rejectReview(deps, me, param(c, "memoryReviewId"), input.note ?? null);
-    return c.json(toMemoryReview(row));
+    return c.json(await viewMemoryReview(deps.db, me, row), 200, { "cache-control": "no-store" });
   });
 
   // Feedback on an agent's answer: it goes into the answer's thread and becomes a lesson for the agent. Everything
@@ -375,6 +380,8 @@ export function registerMemories(app: Hono<AppEnv>) {
     const target = await messageInWorkspace(db, me.workspaceId, param(c, "messageId"));
     if (!target) throw notFound("Message not found");
     if (target.authorKind !== "agent") throw badRequest("Only agent replies take feedback");
+    // The lesson goes into the agent's store, which is read-only once the agent is archived.
+    requireActiveAgent(await agentInWorkspace(db, me.workspaceId, target.authorId));
     const viewer = { workspaceId: me.workspaceId, userId: me.userId, channelId: target.channelId };
     // The right to write, without joining the channel yet (joining is an effect).
     const { channel } = await readableChannel(db, viewer);

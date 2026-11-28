@@ -137,7 +137,12 @@ export function registerWorkspaces(app: Hono<AppEnv>) {
     const spent = [...usage.values()].reduce((total, u) => total + u.costUsd, 0);
     const overview: WorkspaceOverview = {
       myApprovalQueue: (await approvalsWaitingFor(db, me)).length,
-      budgetSpentPct: budget > 0 ? Math.round((spent / budget) * 1000) / 10 : 0,
+      // Spend follows view_usage, as GET /usage: whoever doesn't have it gets null.
+      budgetSpentPct: can(me.role, "view_usage")
+        ? budget > 0
+          ? Math.round((spent / budget) * 1000) / 10
+          : 0
+        : null,
       agents: active.length,
       people: people?.n ?? 0,
     };

@@ -24,9 +24,32 @@ export interface Viewer {
 export const canManageRunner = (viewer: Viewer, row: RunnerRow) =>
   row.pairedByUserId === viewer.userId || can(viewer.role, "configure");
 
-/** Using the runner as an agent's environment: whoever administers agents, or whoever paired it. */
+/**
+ * Using the runner: lending it to an agent, or making it act for a person (a run on their behalf, driving or
+ * watching its browser, starting or stopping the agent's environment, ending an intervention on it). Whoever
+ * administers agents, or whoever paired it. Every such entry asks here: a route through `requireRunnerUse`, a
+ * socket, a sweep or a run through `personMayUseRunner`.
+ */
 export const canUseRunner = (viewer: Viewer, row: RunnerRow) =>
   row.pairedByUserId === viewer.userId || can(viewer.role, "manage_agents");
+
+export function requireRunnerUse(viewer: Viewer, row: RunnerRow) {
+  if (!canUseRunner(viewer, row))
+    throw new HttpError(403, "forbidden", "Only who paired this runner can use it");
+}
+
+/** The same rule for a person known only by id (a socket, a sweep, a run): their role is read now. */
+export async function personMayUseRunner(
+  db: Db,
+  person: { workspaceId: string; userId: string },
+  row: RunnerRow,
+): Promise<boolean> {
+  const [member] = await db
+    .select({ role: schema.members.role })
+    .from(schema.members)
+    .where(and(eq(schema.members.workspaceId, person.workspaceId), eq(schema.members.userId, person.userId)));
+  return !!member && canUseRunner({ userId: person.userId, role: member.role }, row);
+}
 
 export async function runnerInWorkspace(db: Db, workspaceId: string, id: string): Promise<RunnerRow> {
   const [row] = await db

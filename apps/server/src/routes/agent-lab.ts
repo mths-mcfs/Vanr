@@ -8,7 +8,7 @@ import type { Context, Hono } from "hono";
 import { z } from "zod";
 import { DESCRIPTION_MAX, draftNewAgent, proposeFromDescription } from "../agent-builder";
 import { startEval, TEST_CASES_MAX, toEval, toTestCase } from "../agent-lab";
-import { agentInWorkspace, requireAgentEditor } from "../agents";
+import { agentInWorkspace, requireActiveAgent, requireAgentEditor } from "../agents";
 import type { AppEnv } from "../context";
 import { conflict, forbidden, notFound, param, readJson, readQuery } from "../http";
 import {
@@ -39,7 +39,7 @@ export function registerAgentLab(app: Hono<AppEnv>) {
     const me = requireMember(c);
     const agent = await agentInWorkspace(c.get("deps").db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, agent);
-    if (agent.archivedAt) throw conflict("agent.archived", "This agent was archived");
+    requireActiveAgent(agent);
     return { me, agent };
   };
 
@@ -200,7 +200,7 @@ export function registerAgentLab(app: Hono<AppEnv>) {
     // Only whoever changes instructions: the owner without the role would accept their own proposal.
     const me = requirePermission(c, "manage_agents");
     const agent = await agentInWorkspace(c.get("deps").db, me.workspaceId, param(c, "agentId"));
-    if (agent.archivedAt) throw conflict("agent.archived", "This agent was archived");
+    requireActiveAgent(agent);
     const input = await readJson(c, description);
     return c.json(await proposeFromDescription(c.get("deps"), me, agent, input.description));
   });

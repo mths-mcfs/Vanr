@@ -7,7 +7,7 @@ import { PRODUCT } from "@vanr/product";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
-import { agentInWorkspace, requireAgentEditor } from "../agents";
+import { agentInWorkspace, requireActiveAgent, requireAgentEditor } from "../agents";
 import { type AppDeps, type AppEnv, requireUser } from "../context";
 import { conflict, forbidden, HttpError, notFound, param, readJson } from "../http";
 import { endLiveView, endLiveViewsOf, updateRunnerAccess } from "../runners/browser-live";
@@ -31,6 +31,7 @@ import {
   emitEnvironment,
   environmentOf,
   pushAgents,
+  requireRunnerUse,
   runnerInWorkspace,
   targetOf,
   toRunner,
@@ -53,10 +54,17 @@ export function runnerError(err: unknown): never {
 
 const MAX_TIMEOUT_S = 3600;
 
-/** Changing the binding and closing its requests commit together, before any new send can claim them. */
+/**
+ * Changing the binding and closing its requests commit together, before any new send can claim them. Lending a
+ * runner checks the archive under the agent's lock (an archive that lands mid-request wins) and turns the agent's
+ * environment on in the same step; clearing it does neither.
+ */
 async function setAgentRunner(deps: AppDeps, agentId: string, runnerId: string | null) {
   const { previous, closed } = await deps.db.transaction(async (tx) => {
-    const [agent] = await tx.select().from(agents).where(eq(agents.id, agentId)).for("update");
+    // "No key update": it still waits on an archive and on a start's share lock, but not on the key-share lock an
+    // agent_environments insert takes on the agent (its foreign key), so a first lend racing a stop can't deadlock.
+    const [agent] = await tx.select().from(agents).where(eq(agents.id, agentId)).for("no key update");
+    if (runnerId && agent) requireActiveAgent(agent);
     const previous = agent?.environmentId ?? null;
     await tx
       .update(agents)
@@ -68,6 +76,14 @@ async function setAgentRunner(deps: AppDeps, agentId: string, runnerId: string |
       previous ?? "",
       previous && previous !== runnerId ? [agentId] : [],
     );
+    if (runnerId && agent)
+      await tx
+        .insert(agentEnvironments)
+        .values({ agentId, workspaceId: agent.workspaceId, status: "running", lastUsedAt: deps.now() })
+        .onConflictDoUpdate({
+          target: agentEnvironments.agentId,
+          set: { status: "running", updatedAt: deps.now() },
+        });
     return { previous, closed };
   });
   if (previous && previous !== runnerId) {
@@ -397,13 +413,21 @@ export function registerRunners(app: Hono<AppEnv>) {
     agentId: string,
     status: "running" | "stopped" | "none",
   ) => {
-    await deps.db
-      .insert(agentEnvironments)
-      .values({ agentId, workspaceId, status, lastUsedAt: deps.now() })
-      .onConflictDoUpdate({
-        target: agentEnvironments.agentId,
-        set: { status, updatedAt: deps.now(), ...(status === "running" ? { lastUsedAt: deps.now() } : {}) },
-      });
+    await deps.db.transaction(async (tx) => {
+      // Starting is a write an archived agent refuses, read under its row lock; stopping and clearing stay open.
+      if (status === "running") {
+        const [agent] = await tx.select().from(agents).where(eq(agents.id, agentId)).for("share");
+        if (!agent) throw notFound("Agent not found");
+        requireActiveAgent(agent);
+      }
+      await tx
+        .insert(agentEnvironments)
+        .values({ agentId, workspaceId, status, lastUsedAt: deps.now() })
+        .onConflictDoUpdate({
+          target: agentEnvironments.agentId,
+          set: { status, updatedAt: deps.now(), ...(status === "running" ? { lastUsedAt: deps.now() } : {}) },
+        });
+    });
     await emitEnvironment(deps, workspaceId, agentId);
     return environmentOf(deps, agentId);
   };
@@ -413,8 +437,11 @@ export function registerRunners(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const agent = await agentInWorkspace(deps.db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, agent);
+    requireActiveAgent(agent);
     if (!agent.environmentId)
       throw conflict("sandbox.not_set_up", "This installation has no cloud sandbox; pair a runner");
+    // Starting the agent's environment is using its runner.
+    requireRunnerUse(me, await runnerInWorkspace(deps.db, me.workspaceId, agent.environmentId));
     if (!deps.runners.isOnline(agent.environmentId)) throw offline();
     return c.json(await setStatus(deps, me.workspaceId, agent.id, "running"));
   });
@@ -425,6 +452,9 @@ export function registerRunners(app: Hono<AppEnv>) {
     const agent = await agentInWorkspace(deps.db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, agent);
     if (agent.environmentId) {
+      // Stopping cancels the runner's jobs: only whoever may use it (a removed runner has nothing left to stop).
+      const [runner] = await deps.db.select().from(runners).where(eq(runners.id, agent.environmentId));
+      if (runner && !runner.removedAt) requireRunnerUse(me, runner);
       // Stops what the agent had running there.
       const running = await deps.db
         .select({ id: runnerJobs.id })
@@ -462,19 +492,13 @@ export function registerRunners(app: Hono<AppEnv>) {
     const agent = await agentInWorkspace(deps.db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, agent);
     const { runnerId } = await readJson(c, z.object({ runnerId: z.string().max(64).nullable() }));
+    // Lending a runner is a write an archived agent refuses; clearing it stays open, as DELETE /environment.
+    if (runnerId) requireActiveAgent(agent);
     if (runnerId) {
       const runner = await runnerInWorkspace(deps.db, me.workspaceId, runnerId);
-      if (!canUseRunner(me, runner)) throw forbidden("Only who paired this runner can lend it to agents");
+      requireRunnerUse(me, runner);
     }
     const previous = await setAgentRunner(deps, agent.id, runnerId);
-    if (runnerId)
-      await deps.db
-        .insert(agentEnvironments)
-        .values({ agentId: agent.id, workspaceId: me.workspaceId, status: "running", lastUsedAt: deps.now() })
-        .onConflictDoUpdate({
-          target: agentEnvironments.agentId,
-          set: { status: "running", updatedAt: deps.now() },
-        });
     const target = await targetOf(deps, runnerId);
     // The same shape as every `environment.updated`: the agent's page updates the card without fetching.
     await emitEnvironment(deps, me.workspaceId, agent.id);
@@ -516,7 +540,10 @@ export function registerRunners(app: Hono<AppEnv>) {
         ),
       );
     if (!row) throw notFound("Request not found");
-    requireAgentEditor(me, await agentInWorkspace(deps.db, me.workspaceId, row.agentId));
+    const agent = await agentInWorkspace(deps.db, me.workspaceId, row.agentId);
+    requireAgentEditor(me, agent);
+    // Allowing opens the network to the agent; denying and removing only take it away, as on any archived agent.
+    if (decision === "allowed") requireActiveAgent(agent);
     const updated = await decideNetwork(deps, row, decision, me.userId);
     if (!updated) throw conflict("network.decided", "Someone already decided this request");
     return c.json(toNetworkRequest(updated));

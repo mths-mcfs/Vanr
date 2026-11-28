@@ -10,6 +10,7 @@ import { canTalkTo } from "../runtime/route";
 import { pushPolicy } from "./browser-guard";
 import { refreshStream } from "./browser-live";
 import { withPlanOwner } from "./plans";
+import { personMayUseRunner } from "./runners";
 
 const { secretPrompts, browserInterventions, messages } = schema;
 
@@ -143,11 +144,19 @@ export async function revalidateInterventions(deps: AppDeps, endedSessionId?: st
             )
         : [];
     const [agent] = await deps.db.select().from(agents).where(eq(agents.id, row.agentId));
+    const [runner] = await deps.db.select().from(schema.runners).where(eq(schema.runners.id, row.runnerId));
+    // Control stays only while the controller may still use the runner (a demoted role loses it).
     if (
       right &&
       agent &&
+      runner &&
       agent.environmentId === row.runnerId &&
-      canTalkTo(await withPlanOwner(deps.db, agent), row.controllingUserId ?? "")
+      canTalkTo(await withPlanOwner(deps.db, agent), row.controllingUserId ?? "") &&
+      (await personMayUseRunner(
+        deps.db,
+        { workspaceId: row.workspaceId, userId: row.controllingUserId ?? "" },
+        runner,
+      ))
     )
       continue;
     await moveIntervention(

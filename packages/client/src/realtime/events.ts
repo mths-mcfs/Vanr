@@ -51,8 +51,17 @@ export const BROWSER_EVENTS = {
   "agent.typing": s.object({ agentId: id, ttlMs: opt(s.number) }),
   "delegation.started": s.object({ agentId: opt(id), delegateAgentId: opt(id), runId: opt(id) }),
   "delegation.completed": s.object({ agentId: opt(id), delegateAgentId: opt(id), runId: opt(id) }),
-  "budget.threshold_reached": s.object({ agentId: id, spentUsd: s.number, budgetUsd: s.number }),
-  "budget.cap_reached": s.object({ agentId: id, spentUsd: s.number, budgetUsd: s.number }),
+  // Without view_usage the amounts come null: the notice says only that the agent reached its budget.
+  "budget.threshold_reached": s.object({
+    agentId: id,
+    spentUsd: s.nullable(s.number),
+    budgetUsd: s.nullable(s.number),
+  }),
+  "budget.cap_reached": s.object({
+    agentId: id,
+    spentUsd: s.nullable(s.number),
+    budgetUsd: s.nullable(s.number),
+  }),
   "memory.recorded": s.object({ agentId: id, memoryId: opt(id) }),
 
   // Channels and messages.
@@ -74,8 +83,8 @@ export const BROWSER_EVENTS = {
     channelId: id,
     channelName: s.string,
     level: s.string,
-    spentUsd: s.number,
-    budgetUsd: s.number,
+    spentUsd: s.nullable(s.number),
+    budgetUsd: s.nullable(s.number),
   }),
   "person.typing": s.object({ userId: id, ttlMs: s.number }),
 
