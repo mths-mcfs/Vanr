@@ -43,7 +43,10 @@ test.describe("threads", () => {
     await field.fill(`@${handle} what do you suggest?`);
     await field.press("Enter");
     // The agent answers inside the thread, not in the channel.
-    await expect(panel.getByText(/Got the request/)).toBeVisible({ timeout: 30_000 });
+    // The posted answer, not the live text it streams as first.
+    await expect(panel.getByRole("article").filter({ hasText: /Got the request/ })).toBeVisible({
+      timeout: 30_000,
+    });
     await expect(
       page.getByRole("log", { name: t("chat", "history.label"), exact: true }).getByText(/Got the request/),
     ).toHaveCount(0);
@@ -65,7 +68,7 @@ test.describe("threads", () => {
     await list.getByRole("link", { name: /Which thread count for the linen run/ }).click();
     await expect(page).toHaveURL(new RegExp(`/threads/${root.id}$`));
     const whole = page.getByRole("region", { name: t("chat", "thread.label") });
-    await expect(whole.getByText(/Got the request/)).toBeVisible();
+    await expect(whole.getByRole("article").filter({ hasText: /Got the request/ })).toBeVisible();
     await whole.getByRole("button", { name: t("chat", "thread.shut") }).click();
     await expect(whole.getByText(t("chat", "thread.state.closed"))).toBeVisible();
     await page.goto(`/workspace/${owner.workspace.id}/threads`);

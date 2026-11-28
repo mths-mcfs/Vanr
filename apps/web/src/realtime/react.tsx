@@ -120,6 +120,11 @@ export function forgetChannelQueries(
 ): void {
   for (const method of CHANNEL_QUERIES)
     queryClient.removeQueries({ queryKey: prefixKey(client, { method, args: { workspaceId, channelId } }) });
+  // A list of threads keeps its other rows; the lost channel's leave it at once, before any refetch.
+  queryClient.setQueriesData<unknown>(
+    { queryKey: prefixKey(client, { method: "listThreads", args: { workspaceId } }) },
+    (data: unknown) => withoutChannel(data, channelId),
+  );
   queryClient.removeQueries({
     queryKey: [KEY_ROOT],
     predicate: (query) => {
@@ -127,6 +132,29 @@ export function forgetChannelQueries(
       return typeof data === "object" && data !== null && "channelId" in data && data.channelId === channelId;
     },
   });
+}
+
+/** A page of threads, or pages of them, without the threads of one channel. */
+function withoutChannel(data: unknown, channelId: string): unknown {
+  const keep = (page: unknown): unknown => {
+    if (typeof page !== "object" || page === null || !("threads" in page) || !Array.isArray(page.threads))
+      return page;
+    return {
+      ...page,
+      threads: page.threads.filter(
+        (thread: unknown) =>
+          !(
+            typeof thread === "object" &&
+            thread !== null &&
+            "channelId" in thread &&
+            thread.channelId === channelId
+          ),
+      ),
+    };
+  };
+  if (typeof data === "object" && data !== null && "pages" in data && Array.isArray(data.pages))
+    return { ...data, pages: data.pages.map(keep) };
+  return keep(data);
 }
 
 /** Calls `listener` with each channel whose subscription the server ends on this connection. */

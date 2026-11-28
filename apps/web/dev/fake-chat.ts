@@ -27,6 +27,8 @@ export class FakeChat {
   runs: StoredRun[] = [];
   /** Threads with a record: one was answered or followed. Ids are their first message's. */
   threads: T.ThreadInfo[] = [];
+  /** Who follows each thread, by thread id: following is each person's own. */
+  followers = new Map<string, Set<string>>();
   /** Corrections sent to agents' answers, newest last. */
   feedback: { messageId: string; body: string }[] = [];
   /** The agents of each channel, by channel id. */
@@ -162,6 +164,7 @@ export class FakeChat {
     // Whoever started a thread, or whoever configures the workspace, manages it.
     const shown = (scope: Scope, info: T.ThreadInfo): T.ThreadInfo => ({
       ...info,
+      following: this.followers.get(info.id)?.has(scope.user.id) ?? false,
       manageable:
         (info.createdBy.type === "person" && info.createdBy.id === scope.user.id) || manages(scope.role),
     });
@@ -222,13 +225,14 @@ export class FakeChat {
         const root = this.host.messages().find((m) => m.id === params.threadId && m.threadId === null);
         if (root === undefined || this.room(scope, root.channelId) === undefined)
           return fail(404, "not_found", "Thread not found");
-        this.thread(root.id, scope.user.id).following = true;
+        this.thread(root.id, scope.user.id);
+        this.followers.set(root.id, new Set(this.followers.get(root.id)).add(scope.user.id));
         return reply(200, { threadId: root.id, following: true });
       }),
       unfollowThread: within((scope, params) => {
         const info = readableThread(scope, params.threadId);
         if (info === undefined) return fail(404, "not_found", "Thread not found");
-        info.following = false;
+        this.followers.get(info.id)?.delete(scope.user.id);
         return reply(200, { threadId: info.id, following: false });
       }),
       runActionOnThread: within((scope, params) => {

@@ -751,6 +751,7 @@ export class FakeServer {
     this.chat.feedback = [];
     this.chat.agentMembers.clear();
     this.chat.pins = [];
+    this.chat.followers.clear();
     this.notificationSettings.clear();
     this.approvals.clear();
     this.accounts.clear();

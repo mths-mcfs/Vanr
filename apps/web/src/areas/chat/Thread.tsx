@@ -16,7 +16,7 @@ import { useChannelSubscription } from "../../realtime/react.tsx";
 import { useOutcome } from "../control/shared.tsx";
 import { Composer } from "./Composer.tsx";
 import { ConversationProvider, useConversation } from "./context.tsx";
-import { useForgetChannel, useHistory, useLiveRuns, useTicker, useTypingSignal } from "./hooks.ts";
+import { PAGE, useForgetChannel, useHistory, useLiveRuns, useTicker, useTypingSignal } from "./hooks.ts";
 import { LiveRuns } from "./LiveRuns.tsx";
 import { showing } from "./live.ts";
 import { MessageItem } from "./Message.tsx";
@@ -35,6 +35,8 @@ const ACTION_TEXT = {
 } as const;
 
 const EXCERPT = 80;
+/** Two replies of one author closer than this read as one, as in the channel. */
+const RUN_OF_MESSAGES_MS = 5 * 60_000;
 
 function Controls({ rootId, info }: { rootId: string; info: ThreadInfo | undefined }) {
   const t = useMessages("chat");
@@ -116,7 +118,8 @@ export function ThreadPanel({
     if (lost) onLost?.();
   }, [lost, onLost]);
   const root = messages.find((message) => message.id === rootId);
-  const replies = messages.filter((message) => message.id !== rootId);
+  // The panel holds the latest page of replies; live ones push the oldest out (no paging up yet).
+  const replies = messages.filter((message) => message.id !== rootId).slice(-PAGE);
   const live = showing(
     runs.filter((run) => run.threadId === rootId),
     new Set(messages.map((message) => message.id)),
@@ -215,10 +218,14 @@ export function ThreadPanel({
             </p>
             {replies.map((message, index) => {
               const previous = replies[index - 1];
+              // Grouped as in the channel: same author, same day, within a few minutes.
               const continued =
                 previous !== undefined &&
                 previous.author.id === message.author.id &&
-                previous.author.type === message.author.type;
+                previous.author.type === message.author.type &&
+                previous.meta.retracted === undefined &&
+                new Date(previous.createdAt).toDateString() === new Date(message.createdAt).toDateString() &&
+                Date.parse(message.createdAt) - Date.parse(previous.createdAt) < RUN_OF_MESSAGES_MS;
               return (
                 <Fragment key={message.id}>
                   <MessageItem
@@ -252,10 +259,15 @@ export function ThreadPanel({
 
 /** A thread on a page of its own, with the way back to the list and into its channel. */
 export function ThreadScreen() {
+  const { workspaceId, threadId } = useRouteParams("thread");
+  // Each thread is its own page: what one learned (it is gone) never carries to the next.
+  return <ThreadPage key={`${workspaceId}/${threadId}`} workspaceId={workspaceId} threadId={threadId} />;
+}
+
+function ThreadPage({ workspaceId, threadId }: { workspaceId: string; threadId: string }) {
   const t = useMessages("chat");
   const common = useMessages("common");
   const describe = useErrorMessage("chat");
-  const { workspaceId, threadId } = useRouteParams("thread");
   const info = useApiQuery("getThread", { workspaceId, threadId });
   const channels = useApiQuery("listChannels", { workspaceId });
   const [lostHere, setLostHere] = useState(false);
@@ -269,8 +281,10 @@ export function ThreadScreen() {
     !channels.data.some((c) => c.id === info.data.channelId);
   // Once gone it stays gone for this thread: forgetting the cache must not bring a loading state back.
   const goneFor = useRef<string | null>(null);
-  if (refused || lostHere || unlisted) goneFor.current = threadId;
-  const missing = goneFor.current === threadId;
+  if (refused || lostHere) goneFor.current = threadId;
+  // Refused or lost stays gone; a channel missing from the list may only be a list read before the
+  // person was added back, so it is looked at again each time the list comes in.
+  const missing = goneFor.current === threadId || unlisted;
   const channelId = missing ? undefined : info.data?.channelId;
   useChannelSubscription(channelId);
   useDocumentTitle(
