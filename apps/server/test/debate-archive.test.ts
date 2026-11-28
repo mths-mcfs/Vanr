@@ -27,9 +27,17 @@ let server: RunningServer;
 let duringLia: (() => Promise<void>) | null = null;
 /** Runs inside Lia's synthesis call (she leads: the first agent). */
 let duringLiaSynth: (() => Promise<void>) | null = null;
+/** How many of Lia's next synthesis calls fail at the provider. */
+let failLiaSynth = 0;
+/** What every agent answers in its turn (by default, its own name). */
+let everyoneSays: string | null = null;
 beforeAll(async () => {
   const scripted = textProvider(async (req) => {
     const agent = (/^You are (\S+)/.exec(req.system)?.[1] ?? "?").replace(/[,.]$/, "");
+    if (agent === "Lia" && failLiaSynth > 0 && /^Write the synthesis/.test(lastText(req))) {
+      failLiaSynth--;
+      throw new Error("provider timed out");
+    }
     if (agent === "Lia" && duringLiaSynth && /^Write the synthesis/.test(lastText(req))) {
       const run = duringLiaSynth;
       duringLiaSynth = null;
@@ -40,7 +48,7 @@ beforeAll(async () => {
       duringLia = null;
       await run();
     }
-    return position(agent.toLowerCase());
+    return position(everyoneSays ?? agent.toLowerCase());
   });
   const fake = fakeProvider();
   const debateCall = (req: ModelRequest) => /^(Round \d+ of|Write the synthesis)/.test(lastText(req));
@@ -208,6 +216,10 @@ describe("an archived agent in a debate", () => {
   );
 });
 
+/** The decision the synthesis settled on (the model's, or the votes' winner). */
+const decisionOf = (synthesis: unknown) =>
+  (synthesis as { structured?: { decision?: string } } | null)?.structured?.decision;
+
 describe("who signs a debate's synthesis", () => {
   /**
    * A debate of `names` (created in that order) with `agentIds` in `order`; `during` runs at the moment it says. Waits
@@ -248,7 +260,21 @@ describe("who signs a debate's synthesis", () => {
     const signers = posts
       .filter((p) => p.kind === "synthesis")
       .map((p) => name((p.author as { id?: string } | null)?.id));
-    return { ids, row, signers };
+    const read = async () => {
+      const [now] = await server.deps.db
+        .select()
+        .from(schema.debates)
+        .where(eq(schema.debates.id, res.body.id));
+      const rows = await server.deps.db
+        .select({ author: schema.debatePosts.author, kind: schema.debatePosts.kind })
+        .from(schema.debatePosts)
+        .where(eq(schema.debatePosts.debateId, res.body.id));
+      const signed = rows
+        .filter((p) => p.kind === "synthesis")
+        .map((p) => name((p.author as { id?: string } | null)?.id));
+      return { row: now, signers: signed };
+    };
+    return { ids, row, signers, ana, workspaceId, debateId: res.body.id as string, read };
   }
 
   test(
@@ -272,6 +298,8 @@ describe("who signs a debate's synthesis", () => {
   test(
     "a lead archived just before its synthesis call closes the debate on the votes, not stalled on it",
     async () => {
+      // Both vote "rui": the votes settle on a decision of their own.
+      everyoneSays = "rui";
       const rt = server.deps.runtime;
       const complete = rt.complete;
       let lia = "";
@@ -291,8 +319,9 @@ describe("who signs a debate's synthesis", () => {
         expect(out.row?.status).toBe("done");
         expect(out.row?.stallInfo ?? null).toBe(null);
         expect(out.signers).toEqual(["rui"]);
-        expect(JSON.stringify(out.row?.synthesis)).toContain('"decision"');
+        expect(decisionOf(out.row?.synthesis)).toBe("rui");
       } finally {
+        everyoneSays = null;
         rt.complete = complete;
       }
     },
@@ -312,7 +341,35 @@ describe("who signs a debate's synthesis", () => {
       );
       expect(out.row?.status).toBe("done");
       expect(out.signers).toEqual(["rui"]);
-      expect(JSON.stringify(out.row?.synthesis)).toContain('"decision":"rui"');
+      expect(decisionOf(out.row?.synthesis)).toBe("rui");
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "an active lead whose synthesis call fails stalls the debate on it, and Resume closes it signed by the lead",
+    async () => {
+      failLiaSynth = 1;
+      const out = await debate(
+        "fails",
+        ["lia", "rui"],
+        (i) => [i.lia ?? "", i.rui ?? ""],
+        () => {},
+      );
+      failLiaSynth = 0;
+      expect(out.row?.status).toBe("stalled");
+      expect((out.row?.stallInfo as { agentId?: string } | null)?.agentId).toBe(out.ids.lia);
+      expect(out.signers).toEqual([]);
+      const resumed = await call(out.ana, "POST", `${ws(out.workspaceId)}/debates/${out.debateId}/resume`);
+      expect(resumed.status).toBeLessThan(300);
+      let after = await out.read();
+      for (let i = 0; i < 60 && after.row?.status !== "done"; i++) {
+        await server.deps.runtime.settle();
+        await Bun.sleep(50);
+        after = await out.read();
+      }
+      expect(after.row?.status).toBe("done");
+      expect(after.signers).toEqual(["lia"]);
     },
     SERVER_TEST_MS,
   );
