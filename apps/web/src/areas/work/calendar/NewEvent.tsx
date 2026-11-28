@@ -55,10 +55,13 @@ export function NewEventDialog({
   workspaceId,
   day,
   onClose,
+  returnFocus,
 }: {
   workspaceId: string;
   day: Date;
   onClose: () => void;
+  /** Puts the focus back where the form was opened from. */
+  returnFocus?: () => void;
 }) {
   const t = useMessages("work");
   const common = useMessages("common");
@@ -125,6 +128,11 @@ export function NewEventDialog({
   return (
     <Dialog open onOpenChange={(next) => !next && onClose()}>
       <DialogContent
+        onCloseAutoFocus={(event) => {
+          if (returnFocus === undefined) return;
+          event.preventDefault();
+          returnFocus();
+        }}
         size="lg"
         title={t("cal.new.title")}
         closeLabel={common("action.close")}
@@ -153,7 +161,7 @@ export function NewEventDialog({
             submit();
           }}
         >
-          <Field label={t("cal.field.title")} required>
+          <Field label={t("cal.field.title")} hint={t("week.field.everyone")} required>
             <Input
               value={title}
               maxLength={EVENT_TITLE_MAX}

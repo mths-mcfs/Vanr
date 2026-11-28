@@ -6,7 +6,7 @@ import { useApiMutation, useApiQuery } from "@vanr/client/react";
 import type { CalendarEvent, CalendarRange } from "@vanr/contract";
 import { Button } from "@vanr/ui";
 import { ChevronLeft, ChevronRight, Plus, Repeat } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useRef, useState } from "react";
 import { AppLink, useRouteParams } from "../../../app/navigation.tsx";
 import { useDocumentTitle } from "../../../app/screens.tsx";
 import { useLocale, useMessages } from "../../../i18n/react.tsx";
@@ -85,6 +85,12 @@ function CalendarView({ workspaceId }: { workspaceId: string }) {
   const actors = useActors(workspaceId);
   const [monday, setMonday] = useState(() => startOfWeek(new Date(clock.now())));
   const [creatingOn, setCreatingOn] = useState<Date | null>(null);
+  // The button that opened the new-event form gets the focus back when it closes.
+  const opener = useRef<HTMLElement | null>(null);
+  const create = (day: Date) => {
+    opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setCreatingOn(day);
+  };
   const [open, setOpen] = useState<CalendarEvent | null>(null);
   useDocumentTitle(shell("route.calendar"));
   const days = weekDays(monday);
@@ -124,11 +130,7 @@ function CalendarView({ workspaceId }: { workspaceId: string }) {
           aria-label={t("week.next")}
           onClick={() => setMonday(addDays(monday, 7))}
         />
-        <Button
-          variant="primary"
-          icon={<Plus size={16} />}
-          onClick={() => setCreatingOn(new Date(clock.now()))}
-        >
+        <Button variant="primary" icon={<Plus size={16} />} onClick={() => create(new Date(clock.now()))}>
           {t("week.new")}
         </Button>
       </div>
@@ -171,7 +173,7 @@ function CalendarView({ workspaceId }: { workspaceId: string }) {
                     size="sm"
                     icon={<Plus size={14} />}
                     aria-label={t("week.addOn", { day: label })}
-                    onClick={() => setCreatingOn(day)}
+                    onClick={() => create(day)}
                   />
                 </header>
                 {entries.length > 0 && (
@@ -196,7 +198,12 @@ function CalendarView({ workspaceId }: { workspaceId: string }) {
       {header}
       {body}
       {creatingOn !== null && (
-        <NewEventDialog workspaceId={workspaceId} day={creatingOn} onClose={() => setCreatingOn(null)} />
+        <NewEventDialog
+          workspaceId={workspaceId}
+          day={creatingOn}
+          onClose={() => setCreatingOn(null)}
+          returnFocus={() => opener.current?.focus()}
+        />
       )}
       {open !== null && (
         <EventDialog workspaceId={workspaceId} event={open} actors={actors} onClose={() => setOpen(null)} />

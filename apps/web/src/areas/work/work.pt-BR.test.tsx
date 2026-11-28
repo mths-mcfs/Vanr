@@ -1,5 +1,9 @@
 // The issues in Portuguese. Assertions on Portuguese text live in a `*.pt-BR.test.tsx` file.
 import { expect, test } from "bun:test";
+
+// The fixtures are in UTC: the screens read them in the same zone wherever the tests run.
+process.env.TZ = "UTC";
+
 import { fireEvent, screen, within } from "@testing-library/react";
 import { renderApp } from "../../../test/app.tsx";
 

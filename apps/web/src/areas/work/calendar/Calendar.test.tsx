@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+
+// The fixtures are in UTC: the screens read them in the same zone wherever the tests run.
+process.env.TZ = "UTC";
+
 import { screen, waitFor, within } from "@testing-library/react";
 import type { CalendarEvent, CalendarRange } from "@vanr/contract";
 import { chooseOption, newServer, renderApp } from "../../../../test/app.tsx";
@@ -128,6 +132,37 @@ describe("the week", () => {
     await app.user.click(screen.getByRole("button", { name: "Next week" }));
     expect(await screen.findByText("Nov 16 – Nov 22, 2026")).toBeDefined();
     expect(await within(day(/^Tuesday/)).findByRole("button", { name: /Trade fair/ })).toBeDefined();
+  });
+  test("a weekly series reads its weekday where the rule lives, not in UTC", async () => {
+    const server = newServer();
+    // Monday 23:30 in São Paulo is Tuesday 02:30 in UTC, where the page reads it.
+    server.work.events.push(
+      server.work.event("workspace_birchwood", {
+        id: "evt_late",
+        title: "Late press check",
+        start: "2026-11-10T02:30:00.000Z",
+        end: "2026-11-10T03:00:00.000Z",
+        rule: { freq: "weekly", weekdays: ["MO"], timezone: "America/Sao_Paulo" },
+        createdBy: { type: "person", id: "usr_ana" },
+      }),
+    );
+    await renderApp({ path: CALENDAR, signedInAs: "usr_ana", server });
+    expect(
+      await within(await screen.findByRole("region", { name: /^Tuesday/ })).findByRole("button", {
+        name: /Late press check/,
+      }),
+    ).toBeDefined();
+  });
+  test("the new-event form says who sees an event, and Escape gives the focus back to its button", async () => {
+    const app = await renderApp({ path: CALENDAR, signedInAs: "usr_ana" });
+    const button = await screen.findByRole("button", { name: "New event" });
+    await app.user.click(button);
+    const dialog = within(await screen.findByRole("dialog", { name: "New event" }));
+    expect(dialog.getByText("With no one invited, everyone in the workspace sees it.")).toBeDefined();
+    await app.user.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(document.activeElement === screen.getByRole("button", { name: "New event" })).toBe(true),
+    );
   });
 });
 

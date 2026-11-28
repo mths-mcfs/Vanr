@@ -44,6 +44,8 @@ export class FakeWork {
   proposals: FakeProposal[] = [];
   routines: FakeRoutine[] = [];
   runs: FakeRoutineRun[] = [];
+  /** The run-now keys already used. */
+  runKeys = new Set<string>();
 
   constructor(private readonly host: Host) {}
 
@@ -55,6 +57,7 @@ export class FakeWork {
     this.proposals = [];
     this.routines = [];
     this.runs = [];
+    this.runKeys = new Set();
   }
 
   /** The board every workspace starts with: one column per stage, named after it. */
@@ -270,7 +273,15 @@ export class FakeWork {
       at = new Date(at.getTime() + 86_400_000)
     ) {
       if (event.until !== null && at.toISOString() >= event.until) break;
-      const day = codes[at.getUTCDay()] as T.Weekday;
+      // The weekday where the rule lives, as the server reads it.
+      const local = new Intl.DateTimeFormat("en-US", {
+        weekday: "short",
+        timeZone: event.rule.timezone || event.timezone,
+      })
+        .format(at)
+        .slice(0, 2)
+        .toUpperCase();
+      const day = (codes.includes(local) ? local : codes[at.getUTCDay()]) as T.Weekday;
       const fits = event.rule.freq === "daily" || (event.rule.weekdays ?? []).includes(day);
       if (fits && !event.exdates.includes(at.toISOString()) && at.getTime() + length > from.getTime())
         out.push(one(at));
@@ -392,6 +403,17 @@ export class FakeWork {
         .find((agent) => agent.id === agentId && agent.reachable);
 
     const configures = (scope: Scope) => scope.role === "admin" || scope.role === "owner";
+    /** The server's `canSeeRoutine`: its creator, an admin, whoever reads its channel; Drive and debates for all. */
+    const seesRoutine = (scope: Scope, routine: FakeRoutine) =>
+      routine.createdBy === scope.user.id ||
+      configures(scope) ||
+      (routine.target.kind === "channel"
+        ? this.host.readsChannel(scope.user.id, routine.target.channelId)
+        : routine.target.kind === "file" || routine.target.kind === "debate");
+    /** Whoever a proposal is for, or an admin; anyone else gets a missing one. */
+    const answers = (scope: Scope, proposal: FakeProposal) =>
+      configures(scope) ||
+      proposal.participants.some((each) => each.type === "person" && each.id === scope.user.id);
     const withRoutine = (
       handler: (scope: Scope, routine: FakeRoutine, params: Record<string, unknown>) => FilesReply,
       edit = false,
@@ -400,7 +422,8 @@ export class FakeWork {
         const routine = this.routines.find(
           (each) => each.id === params.routineId && each.workspaceId === scope.workspaceId,
         );
-        if (routine === undefined) return fail(404, "not_found", "Routine not found");
+        if (routine === undefined || !seesRoutine(scope, routine))
+          return fail(404, "not_found", "Routine not found");
         if (edit && routine.createdBy !== scope.user.id && !configures(scope)) {
           return fail(403, "forbidden", "Only who created the routine or an admin can change it");
         }
@@ -432,7 +455,10 @@ export class FakeWork {
         const routines = this.routines
           .filter(
             (routine) =>
-              routine.workspaceId === scope.workspaceId && routine.active && routine.nextFireAt !== null,
+              routine.workspaceId === scope.workspaceId &&
+              routine.active &&
+              routine.nextFireAt !== null &&
+              seesRoutine(scope, routine),
           )
           .filter(
             (routine) =>
@@ -509,7 +535,8 @@ export class FakeWork {
         const proposal = this.proposals.find(
           (each) => each.id === params.proposalId && each.workspaceId === scope.workspaceId,
         );
-        if (proposal === undefined) return fail(404, "not_found", "Proposal not found");
+        if (proposal === undefined || !answers(scope, proposal))
+          return fail(404, "not_found", "Proposal not found");
         if (proposal.status !== "pending")
           return fail(409, "calendar.proposal_closed", "This proposal was already answered");
         proposal.status = "confirmed";
@@ -529,7 +556,8 @@ export class FakeWork {
         const proposal = this.proposals.find(
           (each) => each.id === params.proposalId && each.workspaceId === scope.workspaceId,
         );
-        if (proposal === undefined) return fail(404, "not_found", "Proposal not found");
+        if (proposal === undefined || !answers(scope, proposal))
+          return fail(404, "not_found", "Proposal not found");
         if (proposal.status !== "pending")
           return fail(409, "calendar.proposal_closed", "This proposal was already answered");
         proposal.status = "dismissed";
@@ -541,7 +569,7 @@ export class FakeWork {
       listRoutines: within((scope) =>
         reply(200, {
           routines: this.routines
-            .filter((each) => each.workspaceId === scope.workspaceId)
+            .filter((each) => each.workspaceId === scope.workspaceId && seesRoutine(scope, each))
             .map((each) => this.viewRoutine(each)),
         }),
       ),
@@ -579,6 +607,15 @@ export class FakeWork {
         return reply(204, null);
       }, true),
       duplicateRoutine: withRoutine((scope, routine) => {
+        // A copy runs as whoever makes it: an agent they may talk to, a channel they can write in.
+        if (talks(scope, routine.agentId) === undefined)
+          return fail(403, "forbidden", "You can't talk to this agent");
+        if (
+          routine.target.kind === "channel" &&
+          !this.host.readsChannel(scope.user.id, routine.target.channelId)
+        ) {
+          return fail(404, "not_found", "Channel not found");
+        }
         const copy = {
           ...routine,
           id: this.host.id("rtn"),
@@ -589,7 +626,13 @@ export class FakeWork {
         this.routines.push(copy);
         return reply(201, this.viewRoutine(copy));
       }),
-      runRoutine: withRoutine((_scope, routine) => {
+      runRoutine: withRoutine((_scope, routine, params) => {
+        // The same key twice (a double click, a resend) runs once.
+        const key = text(params.key);
+        if (key !== undefined) {
+          if (this.runKeys.has(key)) return reply(200, { ...this.viewRoutine(routine), running: true });
+          this.runKeys.add(key);
+        }
         const at = this.host.now().toISOString();
         this.runs.unshift({
           id: this.host.id("rrun"),

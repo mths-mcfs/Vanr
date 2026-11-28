@@ -52,6 +52,16 @@ const NUMBERS = [
   { key: "retries", min: 0, max: 5, step: 1 },
   { key: "pauseAfterFailures", min: 0, max: 20, step: 1 },
 ] as const;
+type NumberKey = (typeof NUMBERS)[number]["key"];
+
+/** A limit as typed: a number inside its bounds (a whole one unless it is money), or undefined. */
+export function readLimit(text: string, limit: (typeof NUMBERS)[number]): number | undefined {
+  const value = Number(text.trim().replace(",", "."));
+  if (text.trim() === "" || !Number.isFinite(value) || value < limit.min || value > limit.max)
+    return undefined;
+  if (limit.step === 1 && !Number.isInteger(value)) return undefined;
+  return value;
+}
 const NUMBER_LABEL = {
   maxCostUsd: "recur.form.maxCost",
   maxSteps: "recur.form.maxSteps",
@@ -98,6 +108,18 @@ export function NewRoutineDialog({
   const [targetKind, setTargetKind] = useState<TargetKind>("dm");
   const [channelId, setChannelId] = useState(channels.find((channel) => channel.isMember)?.id ?? "");
   const [policy, setPolicy] = useState<RoutinePolicy>(DEFAULT_POLICY);
+  // The limits stay as typed until the routine is sent: a half-typed "1." is not 1 yet.
+  const [limitText, setLimitText] = useState<Record<NumberKey, string>>(() => ({
+    maxCostUsd: String(DEFAULT_POLICY.maxCostUsd),
+    maxSteps: String(DEFAULT_POLICY.maxSteps),
+    maxMinutes: String(DEFAULT_POLICY.maxMinutes),
+    retries: String(DEFAULT_POLICY.retries),
+    pauseAfterFailures: String(DEFAULT_POLICY.pauseAfterFailures),
+  }));
+  const limits = Object.fromEntries(
+    NUMBERS.map((each) => [each.key, readLimit(limitText[each.key], each)]),
+  ) as Record<NumberKey, number | undefined>;
+  const limitsValid = NUMBERS.every((each) => limits[each.key] !== undefined);
   const [active, setActive] = useState(false);
   const timezone = browserTimezone();
   const settled = useSettled(phrase.trim(), PHRASE_PAUSE_MS);
@@ -156,6 +178,7 @@ export function NewRoutineDialog({
     prompt.trim() !== "" &&
     trigger !== undefined &&
     target !== undefined &&
+    limitsValid &&
     !create.isPending;
 
   const submit = () => {
@@ -163,7 +186,15 @@ export function NewRoutineDialog({
     create.mutate(
       {
         workspaceId,
-        body: { name: name.trim(), agentId, prompt: prompt.trim(), trigger, target, policy, active },
+        body: {
+          name: name.trim(),
+          agentId,
+          prompt: prompt.trim(),
+          trigger,
+          target,
+          policy: { ...policy, ...(limits as Record<NumberKey, number>) },
+          active,
+        },
       },
       {
         onSuccess: (routine) => {
@@ -351,19 +382,17 @@ export function NewRoutineDialog({
             <summary>{t("recur.form.limits")}</summary>
             <div className="work-form__row">
               {NUMBERS.map((each) => (
-                <Field key={each.key} label={t(NUMBER_LABEL[each.key])}>
+                <Field
+                  key={each.key}
+                  label={t(NUMBER_LABEL[each.key])}
+                  {...(limits[each.key] === undefined && {
+                    error: t("recur.form.limitRange", { min: each.min, max: each.max }),
+                  })}
+                >
                   <Input
-                    type="number"
-                    min={each.min}
-                    max={each.max}
-                    step={each.step}
-                    value={policy[each.key]}
-                    onChange={(change) => {
-                      const value = Number(change.target.value);
-                      if (Number.isFinite(value)) {
-                        setPolicy({ ...policy, [each.key]: Math.min(each.max, Math.max(each.min, value)) });
-                      }
-                    }}
+                    inputMode={each.step === 1 ? "numeric" : "decimal"}
+                    value={limitText[each.key]}
+                    onChange={(change) => setLimitText({ ...limitText, [each.key]: change.target.value })}
                   />
                 </Field>
               ))}

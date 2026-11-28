@@ -6,7 +6,7 @@ import { useApiMutation, useApiQuery } from "@vanr/client/react";
 import type { Routine } from "@vanr/contract";
 import { Button, Chip, ConfirmDialog, EmptyState, Switch } from "@vanr/ui";
 import { ChevronDown, Plus } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRouteParams } from "../../../app/navigation.tsx";
 import { ScreenError, ScreenLoading, useDocumentTitle } from "../../../app/screens.tsx";
 import { useLocale, useMessages } from "../../../i18n/react.tsx";
@@ -58,6 +58,11 @@ function RoutinesView({ workspaceId }: { workspaceId: string }) {
     </Button>
   );
   const channelName = (id: string) => channels.data?.find((channel) => channel.id === id)?.name;
+  // Writing in a channel: any public one (writing joins it), a private one only as a member.
+  const writable = (id: string) => {
+    const channel = channels.data?.find((each) => each.id === id);
+    return channel !== undefined && (channel.visibility === "public" || channel.isMember);
+  };
 
   return (
     <div className="page page--wide work">
@@ -85,6 +90,7 @@ function RoutinesView({ workspaceId }: { workspaceId: string }) {
                 routine={routine}
                 actors={actors}
                 channelName={channelName}
+                writable={writable}
               />
             </li>
           ))}
@@ -107,11 +113,13 @@ function RoutineCard({
   routine,
   actors,
   channelName,
+  writable,
 }: {
   workspaceId: string;
   routine: Routine;
   actors: Actors;
   channelName: (id: string) => string | undefined;
+  writable: (id: string) => boolean;
 }) {
   const t = useMessages("work");
   const common = useMessages("common");
@@ -128,7 +136,7 @@ function RoutineCard({
   // A copy runs as the person who makes it: with an agent they may set to work, answering where they can write.
   const mayDuplicate =
     actors.reachable.some((agent) => agent.id === routine.agentId) &&
-    (routine.target.kind !== "channel" || channelName(routine.target.channelId) !== undefined);
+    (routine.target.kind !== "channel" || writable(routine.target.channelId));
   const refresh = () => [
     { method: "listRoutines" as const, args: { workspaceId } },
     { method: "listRoutineRuns" as const, args: { workspaceId, routineId: routine.id } },
@@ -136,6 +144,7 @@ function RoutineCard({
   const failed = (error: unknown) => outcome.failed(error);
   const toggle = useApiMutation("setRoutineEnabled", { invalidates: refresh, onError: failed });
   const run = useApiMutation("runRoutine", { invalidates: refresh, onError: failed });
+  const intent = useRef<string | null>(null);
   const duplicate = useApiMutation("duplicateRoutine", { invalidates: refresh, onError: failed });
   const remove = useApiMutation("deleteRoutine", { invalidates: refresh, onError: failed });
   const when = new Intl.DateTimeFormat(locale, {
@@ -202,17 +211,22 @@ function RoutineCard({
           <Button
             size="sm"
             loading={run.isPending}
-            onClick={() =>
+            onClick={() => {
+              // One key per intent: a second click before the answer sends the same key, which runs once.
+              intent.current ??= crypto.randomUUID();
               run.mutate(
-                { workspaceId, routineId: routine.id, body: { key: crypto.randomUUID() } },
+                { workspaceId, routineId: routine.id, body: { key: intent.current } },
                 {
                   onSuccess: () => {
                     setOpen(true);
                     outcome.done(t("recur.started", { name: routine.name }));
                   },
+                  onSettled: () => {
+                    intent.current = null;
+                  },
                 },
-              )
-            }
+              );
+            }}
           >
             {t("recur.runNow")}
           </Button>

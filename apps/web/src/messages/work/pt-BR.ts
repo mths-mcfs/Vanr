@@ -535,4 +535,6 @@ export default {
   "asg.open": { one: "{count} item em aberto", other: "{count} itens em aberto" },
   "asg.form.agentsFailed": "Não deu para carregar os agentes que podem receber uma atribuição",
   "asg.people.requestsFailed": "Não deu para carregar os pedidos para participar",
+  "recur.form.limitRange": "Um número de {min} a {max}.",
+  "week.field.everyone": "Sem convidados, todos do espaço de trabalho veem o evento.",
 } satisfies TranslationOf<typeof en>;
