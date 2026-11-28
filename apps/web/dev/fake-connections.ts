@@ -345,8 +345,10 @@ export class FakeConnections {
         ) as Partial<T.DatabasePolicy>;
         // As the server's databasePolicyInput: up to 500 tables named `table` or `schema.table`, and a
         // hidden column is `table.column` or `schema.table.column`, up to 1000 of them.
-        const column = /^[^.\s]+(?:\.[^.\s]+){1,2}$/;
-        const relation = /^[^.\s]+(?:\.[^.\s]+)?$/;
+        // A name part as the server's nameParts reads it: bare, or quoted with "" for a quote.
+        const part = String.raw`(?:[A-Za-z_\u0080-\uffff][A-Za-z0-9_$\u0080-\uffff]*|"(?:[^"]|"")+")`;
+        const column = new RegExp(`^${part}(?:\\.${part}){1,2}$`, "u");
+        const relation = new RegExp(`^${part}(?:\\.${part})?$`, "u");
         if (
           (asked.tables !== undefined &&
             (!Array.isArray(asked.tables) ||

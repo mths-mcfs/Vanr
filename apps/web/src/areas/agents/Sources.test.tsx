@@ -822,6 +822,16 @@ describe("GitHub repositories", () => {
     expect(server.connections.repositories.get("agt_scout")).toEqual([]);
   });
 
+  test("saving no limit unchanged writes nothing", async () => {
+    const server = seeded();
+    birchwoodGitHub(server);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "GitHub repositories" });
+    await app.user.click(within(form).getByRole("button", { name: "Save repositories" }));
+    expect(await screen.findByText("The repositories are saved.")).toBeDefined();
+    expect(count(server, "setAgentRepositories")).toBe(0);
+  });
+
   test("a kept repository GitHub no longer lists stays visible", async () => {
     const server = seeded();
     birchwoodGitHub(server);
@@ -1003,6 +1013,17 @@ describe("the fake server's source rules, as the server's", () => {
     expect(await statusOf(database(client, { level: "read", policy: { tables: ["not a table"] } }))).toBe(
       "400 validation",
     );
+    expect(await statusOf(database(client, { level: "read", policy: { tables: ["foo;bar"] } }))).toBe(
+      "400 validation",
+    );
+    expect(
+      await statusOf(database(client, { level: "read", policy: { tables: ['public."order items"'] } })),
+    ).toBe("ok");
+    expect(
+      await statusOf(
+        database(client, { level: "read", policy: { maskedColumns: ['public."order items".note'] } }),
+      ),
+    ).toBe("ok");
     const many = Array.from({ length: 501 }, (_, i) => `public.t${i}`);
     expect(await statusOf(database(client, { level: "read", policy: { tables: many } }))).toBe(
       "400 validation",

@@ -859,6 +859,12 @@ function RepositoryForm({
           await failure.reload();
           return;
         }
+        if (!limited && form.picks.scope === undefined) {
+          // Nothing changed and no limit is what is saved: nothing is written, so a limit someone saves
+          // between this read and a write can't be undone by it.
+          outcome.done(t("repo.saved"));
+          return;
+        }
         if (limited) {
           // Someone set "no limit" meanwhile: the person's ticks stay on screen as their own choice, and
           // nothing is sent until they save again or pick "no limit" too.
