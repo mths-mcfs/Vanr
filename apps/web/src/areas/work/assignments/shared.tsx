@@ -15,6 +15,18 @@ export const isClosedAssignment = (assignment: Pick<Assignment, "status">) =>
   assignment.status === "done" || assignment.status === "canceled";
 
 /** Everything a change on one assignment can make stale: its own reads and the lists it shows in. */
+/**
+ * How much of an assignment is open, and how much of it waits on this person: requests to take
+ * part only on who may let people in, the rest only on someone who may act.
+ */
+export function pendingOf(assignment: Pick<Assignment, "pending" | "actionable" | "manageable">) {
+  const open = Object.values(assignment.pending).reduce((sum, count) => sum + count, 0);
+  const mine =
+    (assignment.actionable ? open - assignment.pending.joinRequests : 0) +
+    (assignment.manageable ? assignment.pending.joinRequests : 0);
+  return { open, waiting: mine };
+}
+
 export function assignmentKeys(workspaceId: string, assignmentId: string): KeyPrefix[] {
   const own = { workspaceId, assignmentId };
   return [

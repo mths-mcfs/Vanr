@@ -235,6 +235,26 @@ describe("an assignment's states, as each person sees them", () => {
     expect(row.queryByText(/wait on you/) === null).toBe(true);
   });
 
+  test("on the assignment's page, too, only what this person may answer waits on them", async () => {
+    const server = newServer();
+    const paper = server.assignments.assignments.find((row) => row.id === "asg_paper");
+    if (paper !== undefined) {
+      paper.people.push({ userId: "usr_iris", role: "decide" });
+      paper.pending = { ...paper.pending, decisions: 0, submissions: 0, commands: 0, joinRequests: 2 };
+    }
+    await renderApp({ path: PAGE("asg_paper"), signedInAs: "usr_iris", server });
+    const panel = within(await screen.findByRole("region", { name: "Assignment" }));
+    expect(panel.getByText("2 open items")).toBeDefined();
+    expect(panel.queryByText(/wait on you/) === null).toBe(true);
+  });
+
+  test("someone who only follows an assignment sees its open items on its page, not things waiting on them", async () => {
+    await renderApp({ path: PAGE("asg_paper"), signedInAs: "usr_iris" });
+    const panel = within(await screen.findByRole("region", { name: "Assignment" }));
+    expect(panel.getByText("3 open items")).toBeDefined();
+    expect(panel.queryByText(/wait on you/) === null).toBe(true);
+  });
+
   test("a public channel the person isn't in can hold a new assignment, and the form says it adds them", async () => {
     const server = newServer();
     server.state.channels.push({

@@ -27,7 +27,7 @@ import { useChannelSubscription } from "../../../realtime/react.tsx";
 import { type Actors, useActors, useOutcome } from "../issues/shared.tsx";
 import { PartError, PartLoading } from "../parts.tsx";
 import { Files, People, Plan, Settings, Summary, Trail, Waiting } from "./PanelParts.tsx";
-import { assignmentKeys, CLOSE_NOTE_MAX, isClosedAssignment } from "./shared.tsx";
+import { assignmentKeys, CLOSE_NOTE_MAX, isClosedAssignment, pendingOf } from "./shared.tsx";
 
 export function AssignmentPanel({
   workspaceId,
@@ -84,7 +84,7 @@ function PanelBody({
       },
     );
   const closed = isClosedAssignment(assignment);
-  const waiting = Object.values(assignment.pending).reduce((sum, count) => sum + count, 0);
+  const { open, waiting } = pendingOf(assignment);
   const rights = {
     act: assignment.actionable,
     comment: assignment.role !== null && assignment.role !== "view",
@@ -109,7 +109,11 @@ function PanelBody({
             <span>{t("asg.progress", { done: assignment.plan.done, count: assignment.plan.total })}</span>
           )}
           {assignment.runningJobs > 0 && <span>{t("asg.jobs", { count: assignment.runningJobs })}</span>}
-          {waiting > 0 && <strong>{t("asg.waiting", { count: waiting })}</strong>}
+          {waiting > 0 ? (
+            <strong>{t("asg.waiting", { count: waiting })}</strong>
+          ) : (
+            open > 0 && <span>{t("asg.open", { count: open })}</span>
+          )}
           {assignment.dueAt !== null && (
             <span>{t("asg.due", { when: due.format(new Date(assignment.dueAt)) })}</span>
           )}

@@ -11,6 +11,7 @@ import { ScreenError, ScreenLoading, useDocumentTitle } from "../../../app/scree
 import { useMessages } from "../../../i18n/react.tsx";
 import { type Actors, useActors } from "../issues/shared.tsx";
 import { NewAssignmentDialog } from "./NewAssignment.tsx";
+import { pendingOf } from "./shared.tsx";
 
 const SEARCH_PAUSE_MS = 250;
 const TABS = ["open", "blocked_on_you", "closed"] as const;
@@ -144,9 +145,7 @@ function AssignmentRow({
 }) {
   const t = useMessages("work");
   const channel = channelName(assignment.channelId);
-  const open = Object.values(assignment.pending).reduce((sum, count) => sum + count, 0);
-  // Requests to take part wait only on who may let people in; the rest waits on whoever may act.
-  const waiting = open - (assignment.manageable ? 0 : assignment.pending.joinRequests);
+  const { open, waiting } = pendingOf(assignment);
   return (
     <article
       className={`work-assignment work-assignment--${assignment.status}`}
@@ -170,7 +169,7 @@ function AssignmentRow({
         )}
         {assignment.runningJobs > 0 && <span>{t("asg.jobs", { count: assignment.runningJobs })}</span>}
         {/* Only someone who may act is waited on; anyone else just sees how much is open. */}
-        {assignment.actionable && waiting > 0 ? (
+        {waiting > 0 ? (
           <strong className="work-assignment__waiting">{t("asg.waiting", { count: waiting })}</strong>
         ) : (
           open > 0 && <span>{t("asg.open", { count: open })}</span>
