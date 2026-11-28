@@ -203,6 +203,47 @@ describe("an archived agent", () => {
   );
 
   test(
+    "PUT /channels refuses when the archive lands after the first read: the check runs again under the lock",
+    async () => {
+      const t = await team();
+      const ops = await seedChannel(server, t.workspaceId, { name: "ops", members: [t.ana] });
+      // The body arrives late, so the route reads the agent (still active) and waits on it; the archive lands then.
+      let send!: (chunk: string) => void;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          send = (chunk) => {
+            controller.enqueue(new TextEncoder().encode(chunk));
+            controller.close();
+          };
+        },
+      });
+      const pending = t.ana.browser.fetch(`${t.w}/agents/${t.lia.id}/channels`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body,
+        duplex: "half",
+      });
+      await Bun.sleep(300);
+      await server.deps.db
+        .update(schema.agents)
+        .set({ archivedAt: new Date() })
+        .where(eq(schema.agents.id, t.lia.id));
+      send(JSON.stringify({ channels: [{ channelId: ops, autoAnswer: true }] }));
+      const res = await pending;
+      expect([res.status, ((await res.json()) as { error?: { code?: string } }).error?.code]).toEqual([
+        409,
+        "agent.archived",
+      ]);
+      const links = await server.deps.db
+        .select({ channelId: schema.channelMemberships.channelId })
+        .from(schema.channelMemberships)
+        .where(eq(schema.channelMemberships.memberId, t.lia.id));
+      expect(links.map((l) => l.channelId)).toEqual([t.general]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "doesn't draft a skill from its run: the model isn't called and nothing is spent",
     async () => {
       const t = await team();

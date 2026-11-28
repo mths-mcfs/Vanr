@@ -506,7 +506,10 @@ export function registerAgents(app: Hono<AppEnv>) {
     await db.transaction(async (tx) => {
       // The links are read under the agent's lock, in the same transaction as the writes: what counts as added is
       // decided on the list the writes act on. A private channel the person doesn't read stays as it is.
-      await tx.select({ id: agents.id }).from(agents).where(eq(agents.id, row.id)).for("update");
+      const [locked] = await tx.select().from(agents).where(eq(agents.id, row.id)).for("update");
+      if (!locked) throw notFound("Agent not found");
+      // An archive that landed after the first read wins: nothing is written.
+      requireActiveAgent(locked);
       const visible = new Set((await agentChannels(tx, row.id, viewer)).map((ch) => ch.id));
       const added = [...wanted.keys()].filter((id) => !visible.has(id));
       // Stricter than the source: an owner without manage_agents only adds a private channel they belong to, so
