@@ -246,6 +246,26 @@ async function recentFires(
   return out;
 }
 
+/** The routines with a run in progress the person sees: a run in a channel they can't read doesn't show as running. */
+async function visiblyRunning(
+  db: Db,
+  viewer: { workspaceId: string; userId: string },
+  ids: string[],
+): Promise<Set<string>> {
+  if (ids.length === 0) return new Set();
+  const rows = await db
+    .selectDistinct({ routineId: routineExecutions.routineId })
+    .from(routineExecutions)
+    .where(
+      and(
+        inArray(routineExecutions.routineId, ids),
+        eq(routineExecutions.status, "running"),
+        visibleRunsSql(viewer),
+      ),
+    );
+  return new Set(rows.map((r) => r.routineId));
+}
+
 /** The trigger as the screen sees it: the email one says whether the mailbox is still connected. */
 async function withMailStatus(db: Db, rows: RoutineRow[]): Promise<Map<string, RoutineTrigger>> {
   const ids = rows.flatMap((r) => {
@@ -286,6 +306,11 @@ export async function toRoutines(
     rows.map((r) => r.id),
   );
   const triggers = await withMailStatus(deps.db, rows);
+  const running = await visiblyRunning(
+    deps.db,
+    viewer,
+    rows.filter((r) => r.runningSince).map((r) => r.id),
+  );
   return rows.map((row) => {
     const recent = (byRoutine.get(row.id) ?? []).map((r) => ({ at: r.at.toISOString(), status: r.status }));
     return {
@@ -298,7 +323,7 @@ export async function toRoutines(
       policy: policyOf(row),
       active: row.active,
       pausedReason: row.pausedReason === "failures" ? "failures" : null,
-      running: !!row.runningSince,
+      running: running.has(row.id),
       nextFireAt: row.active ? (row.nextFireAt?.toISOString() ?? null) : null,
       lastRun: recent[0] ?? null,
       recentFires: recent,

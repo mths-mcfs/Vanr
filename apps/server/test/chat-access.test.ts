@@ -418,17 +418,22 @@ describe("chat access", () => {
         clientId: newId("c"),
       });
       const reactions = `${w}/messages/${post.body.id}/reactions`;
+      const thumbs = `${reactions}?reaction=${encodeURIComponent("👍")}`;
       expect((await call(insider, "POST", reactions, { reaction: "👍" })).status).toBe(403);
-      expect(
-        (await call(insider, "DELETE", `${reactions}?reaction=${encodeURIComponent("👍")}`)).status,
-      ).toBe(403);
+      // Taking back has nothing of theirs to take: it changes nothing.
+      expect((await call(insider, "DELETE", thumbs)).body).toEqual({ reactions: [] });
       // Reading them stays open to whoever reads the channel.
       expect((await call(insider, "GET", reactions)).status).toBe(200);
       expect((await call(insider, "POST", `${w}/channels/${pub}/join`)).status).toBe(204);
       expect((await call(insider, "POST", reactions, { reaction: "👍" })).status).toBe(200);
-      expect(
-        (await call(insider, "DELETE", `${reactions}?reaction=${encodeURIComponent("👍")}`)).status,
-      ).toBe(200);
+      expect((await call(insider, "DELETE", thumbs)).status).toBe(200);
+      // Whoever left the channel can still take back their own reaction, and can't add one.
+      expect((await call(insider, "POST", reactions, { reaction: "👍" })).status).toBe(200);
+      const left = await call(insider, "DELETE", `${w}/channels/${pub}/members/people/${insider.user.id}`);
+      expect(left.status).toBe(204);
+      expect((await call(insider, "GET", reactions)).body.reactions.length).toBe(1);
+      expect((await call(insider, "DELETE", thumbs)).body).toEqual({ reactions: [] });
+      expect((await call(insider, "POST", reactions, { reaction: "👍" })).status).toBe(403);
 
       const secret = await call(owner, "POST", `${w}/channels/${priv}/messages`, {
         body: "inside",

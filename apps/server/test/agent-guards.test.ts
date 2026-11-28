@@ -8,6 +8,7 @@ import { newId } from "@vanr/engine/ids";
 import { eq } from "drizzle-orm";
 import { createAssignment } from "../src/assignments/engine";
 import { queueMemoryReview } from "../src/memory-reviews";
+import { recheckLiveViews } from "../src/runners/browser-live";
 import { revalidateInterventions } from "../src/runners/requests";
 import type { RunningServer } from "../src/server";
 import { SERVER_TEST_MS, signedIn, startTestServer, TestSocket } from "./harness";
@@ -718,6 +719,50 @@ describe("a runner someone else paired", () => {
       await revalidateInterventions(server.deps);
       expect(await interventionStatus(taken.body.id)).toBe("canceled");
       online.delete(runner);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "B5: an admin demoted to member loses the live view they watch on the next recheck",
+    async () => {
+      const t = await team();
+      const runner = await lentRunner(t, t.ana);
+      const sock = await TestSocket.open(t.carla.browser, t.workspaceId);
+      try {
+        sock.send({ type: "live_view.subscribe", agentId: t.lia.id });
+        await sock.event("live_view.status");
+        await server.deps.db
+          .update(schema.members)
+          .set({ role: "member" })
+          .where(eq(schema.members.userId, t.carla.user.id));
+        await recheckLiveViews(server.deps);
+        expect((await sock.event("live_view.unavailable")).event).toMatchObject({ reason: "forbidden" });
+      } finally {
+        sock.close();
+        online.delete(runner);
+      }
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+// ---- the agent's integrations ----
+
+describe("the agent's integrations", () => {
+  test(
+    "its mail list reads like its other integrations: open to any member, missing for another workspace",
+    async () => {
+      const t = await team();
+      const other = await team();
+      const reads = ["mail", "databases", "scopes", "access", "identity"];
+      const status = async (agentId: string) => {
+        const out: Record<string, number> = {};
+        for (const r of reads) out[r] = (await call(t.davi, "GET", `${t.w}/agents/${agentId}/${r}`)).status;
+        return out;
+      };
+      expect(await status(t.lia.id)).toEqual(Object.fromEntries(reads.map((r) => [r, 200])));
+      expect(await status(other.lia.id)).toEqual(Object.fromEntries(reads.map((r) => [r, 404])));
     },
     SERVER_TEST_MS,
   );

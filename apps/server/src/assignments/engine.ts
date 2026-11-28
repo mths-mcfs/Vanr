@@ -416,7 +416,13 @@ async function cancelJobsNow(deps: AppDeps, row: AssignmentRow, only?: string): 
   return running.length;
 }
 
-/** Stops the agent's run in this thread (if there is one). */
+/**
+ * Stops the agent's run in the assignment's thread (if there is one). It follows `actOn`, not `mayStopRun`, on
+ * purpose: the thread is the assignment's, and a paused or closed assignment has no work running in it. The engine
+ * halts that run itself (`halt` in the motor) whoever paused, so this is only the immediate form of that halt. Who
+ * may pause the assignment (its owner or who decides) therefore stops its run; the Stop button and a typed "stop"
+ * on a run outside an assignment still ask `mayStopRun`.
+ */
 export function stopAgentRun(deps: AppDeps, row: AssignmentRow, actorUserId: string): boolean {
   const runId = deps.runtime.activeRun(row.agentId, row.channelId, row.threadId);
   return runId ? deps.runtime.cancel(runId, actorUserId) : false;
