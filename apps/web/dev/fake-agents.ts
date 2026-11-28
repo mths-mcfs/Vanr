@@ -17,16 +17,22 @@ type Host = FilesHost & {
   people: (workspaceId: string) => { userId: string; name: string; handle: string }[];
   /** Whether the agent has a run going now (the server's active runs). */
   busy: (agentId: string) => boolean;
+  /** The agent's test cases, shared with the control center's fake (a proposal runs the same cases). */
+  cases: (agentId: string) => T.AgentTestCase[];
+  /** Every test run, shared with the control center's fake, oldest first. */
+  evals: () => T.AgentEval[];
 };
 type Extra = {
   channels: T.AgentChannel[];
   versions: T.InstructionVersion[];
   fallback: boolean;
   skills: Map<string, boolean>;
-  cases: T.AgentTestCase[];
 };
-/** A test run keeps the cases it started with: one added meanwhile is not part of it. */
-type FakeEval = T.AgentEval & { reads: number; after: string; before: string; cases: T.AgentTestCase[] };
+/**
+ * What the lab keeps about a run it started, beside the shared row: the two texts, the cases it started
+ * with (one added meanwhile is not part of it) and how many times it was read.
+ */
+type LabRun = { reads: number; after: string; before: string; cases: T.AgentTestCase[] };
 type FakeSkill = T.SkillDetail & { workspaceId: string };
 
 const reply = (status: number, body: unknown): FilesReply => ({ status, body });
@@ -63,7 +69,8 @@ export const FAKE_MODELS: T.Model[] = [
 export class FakeAgents {
   readonly extras = new Map<string, Extra>();
   skills: FakeSkill[] = [];
-  evals: FakeEval[] = [];
+  /** The runs the lab started, by id. A proposal evaluation has none and is never finished here. */
+  readonly labRuns = new Map<string, LabRun>();
   /** Finished runs, by agent, newest first. */
   runs: (T.Run & { workspaceId: string })[] = [];
   delegations: (T.Team["delegations"][number] & { workspaceId: string })[] = [];
@@ -74,7 +81,7 @@ export class FakeAgents {
 
   clear(): void {
     this.extras.clear();
-    this.evals = [];
+    this.labRuns.clear();
     this.skills = [];
     this.runs = [];
     this.delegations = [];
@@ -174,7 +181,6 @@ export class FakeAgents {
         versions: [this.version(agent.id, 1, agent.instructions, "initial", null, "")],
         fallback: false,
         skills: new Map(),
-        cases: [],
       };
       this.extras.set(agent.id, found);
     }
@@ -301,11 +307,6 @@ export class FakeAgents {
         .map((s) => `exclude:${s}`),
     ];
     return { pass: failed.length === 0, text: answer, failed };
-  }
-
-  private shownEval(row: FakeEval): T.AgentEval {
-    const { reads: _reads, after: _after, before: _before, cases: _cases, ...rest } = row;
-    return rest;
   }
 
   private skillOf(scope: Scope, params: Record<string, unknown>) {
@@ -677,11 +678,11 @@ export class FakeAgents {
         return reply(204, null);
       }),
 
-      listAgentTestCases: asLiveEditor((_scope, agent) => reply(200, { cases: this.extra(agent).cases })),
+      listAgentTestCases: asLiveEditor((_scope, agent) => reply(200, { cases: this.host.cases(agent.id) })),
       createAgentTestCase: asLiveEditor((_scope, agent, params) => {
         const input = text(params.input)?.trim() ?? "";
         if (input === "") return fail(400, "invalid_request", "Invalid body");
-        const cases = this.extra(agent).cases;
+        const cases = this.host.cases(agent.id);
         if (cases.length >= 50)
           return fail(409, "agent_test_case.full", "An agent holds up to 50 test cases");
         const at = this.host.now().toISOString();
@@ -698,18 +699,19 @@ export class FakeAgents {
         return reply(201, item);
       }),
       deleteAgentTestCase: asLiveEditor((_scope, agent, params) => {
-        const extra = this.extra(agent);
-        extra.cases = extra.cases.filter((item) => item.id !== text(params.testCaseId));
+        const cases = this.host.cases(agent.id);
+        const at = cases.findIndex((item) => item.id === text(params.testCaseId));
+        if (at >= 0) cases.splice(at, 1);
         return reply(204, null);
       }),
       createAgentEval: asLiveEditor((scope, agent, params) => {
         if (!can(scope.role, "manage_agents")) return forbidden();
-        const cases = this.extra(agent).cases;
+        const cases = this.host.cases(agent.id);
         if (cases.length === 0) return fail(409, "agent_eval.no_cases", "Add a test case first");
-        if (this.evals.some((row) => row.agentId === agent.id && row.status === "running")) {
+        if (this.host.evals().some((row) => row.agentId === agent.id && row.status === "running")) {
           return fail(409, "agent_eval.running", "A test run is already going");
         }
-        const row: FakeEval = {
+        const row: T.AgentEval = {
           id: this.host.id("evl"),
           agentId: agent.id,
           costUsd: 0,
@@ -722,28 +724,37 @@ export class FakeAgents {
           status: "running",
           summary: null,
           total: cases.length,
+        };
+        this.host.evals().push(row);
+        this.labRuns.set(row.id, {
           reads: 0,
           cases: [...cases],
           before: agent.instructions,
           after: text(params.instructions) ?? "",
-        };
-        this.evals.unshift(row);
-        return reply(201, this.shownEval(row));
+        });
+        return reply(201, row);
       }),
-      listAgentEvals: asLiveEditor((_scope, agent) =>
+      listAgentEvals: asLiveEditor((_scope, agent, params) =>
         reply(200, {
-          evals: this.evals.filter((row) => row.agentId === agent.id).map((row) => this.shownEval(row)),
+          evals: this.host
+            .evals()
+            .filter((row) => row.agentId === agent.id)
+            .filter((row) => params.proposalId === undefined || row.proposalId === params.proposalId)
+            .reverse(),
         }),
       ),
       getAgentEval: asLiveEditor((_scope, agent, params) => {
-        const row = this.evals.find(
-          (candidate) => candidate.agentId === agent.id && candidate.id === text(params.evalId),
-        );
+        const row = this.host
+          .evals()
+          .find((candidate) => candidate.agentId === agent.id && candidate.id === text(params.evalId));
         if (row === undefined) return notFound("Test run");
-        row.reads += 1;
-        // Still running the first time it is read; done from the second read on.
-        if (row.status === "running" && row.reads > 1) this.finish(row);
-        return reply(200, this.shownEval(row));
+        const lab = this.labRuns.get(row.id);
+        if (lab !== undefined) {
+          lab.reads += 1;
+          // Still running the first time it is read; done from the second read on.
+          if (row.status === "running" && lab.reads > 1) this.finish(row, lab);
+        }
+        return reply(200, row);
       }),
 
       createAgentDraft: asManager((_scope, params) => {
@@ -765,12 +776,12 @@ export class FakeAgents {
   }
 
   /** Ends a running test run now, with its results. */
-  finish(row: FakeEval): void {
-    const results = row.cases.map((item) => ({
+  finish(row: T.AgentEval, lab: LabRun): void {
+    const results = lab.cases.map((item) => ({
       caseId: item.id,
       input: item.input,
-      before: this.evaluate(item, row.before),
-      after: this.evaluate(item, row.after),
+      before: this.evaluate(item, lab.before),
+      after: this.evaluate(item, lab.after),
     }));
     row.results = results;
     row.done = results.length;
