@@ -91,7 +91,10 @@ test("an owner sets an agent's access to a connection and its channel access", a
     },
   });
   expect(asked.ok()).toBe(true);
-  await expect.poll(() => double.calls, { timeout: 30_000 }).toEqual(["lookup_invoice"]);
+  // Shorter than the test's own limit, so a miss reads as this check and not as a timeout.
+  await expect
+    .poll(() => double.calls, { message: "the agent called lookup_invoice", timeout: 15_000 })
+    .toEqual(["lookup_invoice"]);
 
   await grid.getByRole("link", { name: "Invoice Clerk" }).click();
   const reach = page.getByRole("region", { name: t("agents", "reach.title") });

@@ -58,7 +58,7 @@ function ReachForm({
   const enabled = new Map(access.builtins.map((each) => [each.scope, each.enabled]));
   const areas = AREAS.filter((area) => enabled.has(`${area}:read`));
   return (
-    <div className="reach" aria-busy={change.pending}>
+    <div className="reach" aria-busy={change.pending} onFocusCapture={change.onFocusCapture}>
       <Switch
         checked={access.all}
         disabled={locked}
