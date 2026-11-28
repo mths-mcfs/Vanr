@@ -18,7 +18,7 @@ import {
 } from "@vanr/ui";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { z } from "zod";
-import { useGo, useRouteParams, useSearch } from "../../../app/navigation.tsx";
+import { AppLink, useGo, useRouteParams, useSearch } from "../../../app/navigation.tsx";
 import { useErrorMessage } from "../../../app/screens.tsx";
 import { useLocale, useMessages } from "../../../i18n/react.tsx";
 import { useOutcome } from "../shared.tsx";
@@ -233,7 +233,16 @@ function Services({ workspaceId }: { workspaceId: string }) {
                         : def.description}
                   </span>
                   {connection.status === "reauth_required" && (
-                    <span className="wire-row__note">{t("svc.reauthBody")}</span>
+                    <span className="wire-row__note">
+                      {t("svc.reauthBody")}{" "}
+                      <AppLink
+                        className="app-link"
+                        route="settings"
+                        params={{ workspaceId, section: "access" }}
+                      >
+                        {t("svc.toAccess")}
+                      </AppLink>
+                    </span>
                   )}
                   {connection.scopeRequest != null && (
                     <span className="wire-row__note">

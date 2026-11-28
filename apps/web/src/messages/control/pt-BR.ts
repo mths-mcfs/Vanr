@@ -305,6 +305,7 @@ export default {
   "svc.reauth": "Login recusado",
   "svc.reauthBody":
     "O serviço parou de aceitar este login. Conecte de novo, dê aos agentes acesso à nova conexão e depois desconecte esta.",
+  "svc.toAccess": "Abrir o acesso dos agentes",
   "svc.moreAsked": "Uma ferramenta ({tool}) precisa de mais uma permissão: {scope}.",
   "svc.grantMore": "Conceder",
   "svc.later": "Ainda indisponível",

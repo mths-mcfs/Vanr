@@ -302,6 +302,7 @@ export default {
   "svc.reauth": "Sign-in refused",
   "svc.reauthBody":
     "The service stopped accepting this sign-in. Connect it again, give agents access to the new connection, then disconnect this one.",
+  "svc.toAccess": "Open the agents' access",
   "svc.moreAsked": "A tool ({tool}) needs one more permission: {scope}.",
   "svc.grantMore": "Grant it",
   "svc.later": "Not yet available",

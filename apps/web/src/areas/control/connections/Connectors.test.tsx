@@ -150,6 +150,8 @@ describe("services", () => {
     expect(stripe.getAttribute("data-state")).toBe("reauth_required");
     expect(within(stripe).getByText("Sign-in refused")).toBeDefined();
     expect(within(stripe).getByText(/give agents access to the new connection/)).toBeDefined();
+    const toAccess = within(stripe).getByRole("link", { name: "Open the agents' access" });
+    expect(toAccess.getAttribute("href")).toBe(`/workspace/${WS}/settings/access`);
     await app.user.click(within(stripe).getByRole("button", { name: "Connect again" }));
     expect(await screen.findByRole("dialog", { name: "Connect Stripe again" })).toBeDefined();
   });
