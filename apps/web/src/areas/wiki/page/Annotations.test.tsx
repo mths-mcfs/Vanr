@@ -6,7 +6,7 @@ import { act, screen, waitFor, within } from "@testing-library/react";
 import { newServer, renderApp } from "../../../../test/app.tsx";
 import { FakeCollabSocket } from "../../../../test/live-socket.ts";
 import { trimPicked } from "../editor/Editor.tsx";
-import { anchorFor } from "./Annotations.tsx";
+import { anchorFor, inPublished } from "./Annotations.tsx";
 
 const WIKI = "/workspace/workspace_birchwood/wiki";
 const PAGE = `${WIKI}/press-checklist`;
@@ -170,7 +170,8 @@ describe("access, comments and proposals", () => {
       wikiSocket: FakeCollabSocket as unknown as new (url: string) => WebSocket,
     });
     await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Version 1 published"));
-    app.server.force("getWikiPage", { kind: "error", status: 404, code: "not_found" }, 50);
+    // The refetch fails without saying "not found", so the cached page stays on screen to read.
+    app.server.force("getWikiPage", { kind: "error", status: 500, code: "internal" }, 50);
     await act(async () => FakeCollabSocket.instances[0]?.serverClose(4403, "access-revoked"));
     await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Read only"));
     await app.user.click(screen.getByRole("button", { name: "Page actions" }));
@@ -198,6 +199,33 @@ describe("access, comments and proposals", () => {
       expect(within(panel).queryByRole("region", { name: "1 proposal to review" }) === null).toBe(true),
     );
     expect(app.server.wiki.pages[0]?.versions.at(-1)?.body).toContain("Cover the press and switch it off.");
+  });
+
+  test("a proposed change that no longer applies is said so, and nothing is told saved", async () => {
+    const server = newServer();
+    const checklist = server.wiki.pages[0];
+    const last = checklist?.versions.at(-1);
+    // Someone published a new text of that sentence before the review.
+    if (last !== undefined) last.body = last.body.replace("Cover the press.", "Cover the stove.");
+    const app = await renderApp({ path: PAGE, signedInAs: "usr_ana", server });
+    const panel = await side();
+    const proposals = await within(panel).findByRole("region", { name: "1 proposal to review" });
+    await app.user.click(within(proposals).getByRole("button", { name: "Accept" }));
+    expect(
+      await screen.findByText("A change no longer applies to the page, so it was not saved."),
+    ).toBeDefined();
+    expect(await within(panel).findByText("No longer applies")).toBeDefined();
+    expect(screen.queryByText(/^Saved as version/) === null).toBe(true);
+    expect(checklist?.versions.length).toBe(2);
+  });
+
+  test("a rejected change says so, without a version it did not make", async () => {
+    const app = await renderApp({ path: PAGE, signedInAs: "usr_ana" });
+    const panel = await side();
+    const proposals = await within(panel).findByRole("region", { name: "1 proposal to review" });
+    await app.user.click(within(proposals).getByRole("button", { name: "Reject" }));
+    expect(await screen.findByText("Change rejected.")).toBeDefined();
+    expect(screen.queryByText(/^Saved as version/) === null).toBe(true);
   });
 
   test("when the live document turns read only, deciding a proposal goes away with it", async () => {
@@ -323,6 +351,25 @@ describe("access, comments and proposals", () => {
     expect(other.value).toBe("Still writing.");
   });
 
+  test("a failed write's alert goes once a later one succeeds", async () => {
+    const server = withThreads(2);
+    server.force("createWikiPageComment", { kind: "error", status: 500, code: "internal" }, 1);
+    const app = await renderApp({ path: PAGE, signedInAs: "usr_ana", server });
+    const panel = await side();
+    const list = await within(panel).findByRole("list", { name: "Comments" });
+    const [first] = within(list).getAllByRole("button", { name: "Reply" });
+    await app.user.click(first as HTMLElement);
+    await app.user.type(within(list).getByRole("textbox", { name: "Reply to Jonas Lind" }), "The blue one.");
+    await app.user.click(within(list).getByRole("button", { name: "Comment" }));
+    expect(await within(panel).findByRole("alert")).toBeDefined();
+    const [, second] = within(list).getAllByRole("button", { name: "Resolve" });
+    await app.user.click(second as HTMLElement);
+    await waitFor(() =>
+      expect(server.wiki.pages[0]?.comments?.find((each) => each.id === "ann_t1")?.status).toBe("resolved"),
+    );
+    await waitFor(() => expect(within(panel).queryByRole("alert") === null).toBe(true));
+  });
+
   test("comments and proposals that fail to load say so, and try again", async () => {
     const server = newServer();
     server.force("getWikiPageAnnotations", { kind: "error", status: 500, code: "internal" }, 50);
@@ -341,6 +388,15 @@ describe("access, comments and proposals", () => {
     const body = "A target Z\n\nB target Y";
     expect(anchorFor(body, picked as NonNullable<typeof picked>).position).toBe(14);
     expect(trimPicked("   ", "a", "b") === null).toBe(true);
+  });
+
+  test("a passage written since the last publish is not taken for the same words elsewhere", () => {
+    const body = "The oven is hot.";
+    // "oven" picked in a new sentence of the draft: the published text has the word, not this passage.
+    expect(inPublished(body, { quote: "oven", before: "The oven is hot.\n\nClean the ", after: "." })).toBe(
+      false,
+    );
+    expect(inPublished(body, { quote: "oven", before: "The ", after: " is hot." })).toBe(true);
   });
 
   test("a picked passage anchors where its surroundings match in the published text", () => {

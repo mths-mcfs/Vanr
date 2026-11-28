@@ -187,6 +187,137 @@ test("comment on a passage: the comment keeps the quoted passage", async ({
   await expect(comments.getByText(t("wiki", "comments.orphan"))).toHaveCount(0);
 });
 
+/** Selects from the first `start` to the end of the first `end` after it, in the editor's text. */
+async function pick(editor: import("@playwright/test").Locator, start: string, end: string) {
+  await editor.click();
+  await editor.evaluate(
+    (element, [start, end]) => {
+      const texts: Text[] = [];
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) texts.push(node as Text);
+      const from = texts.findIndex((each) => each.data.includes(start));
+      const first = texts[from];
+      if (first === undefined) throw new Error(`no "${start}"`);
+      const offset = first.data.indexOf(start);
+      const last = texts
+        .slice(from)
+        .find((each, n) => (n === 0 ? each.data.indexOf(end, offset) >= 0 : each.data.includes(end)));
+      if (last === undefined) throw new Error(`no "${end}"`);
+      const close = (last === first ? last.data.indexOf(end, offset) : last.data.indexOf(end)) + end.length;
+      window.getSelection()?.setBaseAndExtent(first, offset, last, close);
+    },
+    [start, end] as const,
+  );
+}
+
+test("comment on a passage over two paragraphs: the comment holds to it", async ({
+  page,
+  t,
+  seedUser,
+  signIn,
+  apiAs,
+}) => {
+  const owner = await seedUser({ workspace: "Harbour Café" });
+  const title = "Opening checklist";
+  const slug = await createPage(await apiAs(owner), owner, {
+    title,
+    body: "Doors open at nine.\n\nBring the keys.",
+  });
+  await signIn(owner);
+  await page.goto(`/workspace/${owner.workspace.id}/wiki/${slug}`);
+  await expect(
+    page.getByRole("status").filter({ hasText: t("wiki", "draft.published", { version: 1 }) }),
+  ).toBeVisible();
+  await pick(page.getByRole("textbox", { name: t("wiki", "page.editor", { title }) }), "at nine.", "Bring");
+  await page.getByRole("button", { name: t("wiki", "comments.onSelection") }).click();
+  await page.getByRole("textbox", { name: t("wiki", "comments.new") }).fill("Both on one sign.");
+  await page.getByRole("button", { name: t("wiki", "comments.send"), exact: true }).click();
+  const comments = page.getByRole("list", { name: t("wiki", "comments.list") });
+  await expect(comments.getByText("Both on one sign.")).toBeVisible();
+  await page.reload();
+  await expect(comments.getByText("Both on one sign.")).toBeVisible();
+  await expect(comments.getByText(t("wiki", "comments.orphan"))).toHaveCount(0);
+});
+
+test("comment on text not published yet: the person is told to publish, and it never holds elsewhere", async ({
+  page,
+  t,
+  seedUser,
+  signIn,
+  apiAs,
+}) => {
+  const owner = await seedUser({ workspace: "Harbour Café" });
+  const title = "Kitchen";
+  const slug = await createPage(await apiAs(owner), owner, { title, body: "The oven is hot." });
+  await signIn(owner);
+  await page.goto(`/workspace/${owner.workspace.id}/wiki/${slug}`);
+  await expect(
+    page.getByRole("status").filter({ hasText: t("wiki", "draft.published", { version: 1 }) }),
+  ).toBeVisible();
+  const editor = page.getByRole("textbox", { name: t("wiki", "page.editor", { title }) });
+  await editor.click();
+  await page.keyboard.press("Control+End");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("Clean the oven.");
+  await expect(page.getByRole("status").filter({ hasText: t("wiki", "draft.unpublished") })).toBeVisible();
+  // "oven" in the new sentence: the published text has the word, but not this passage.
+  await editor.evaluate((element) => {
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+      const at = node.textContent?.indexOf("Clean the oven") ?? -1;
+      if (at >= 0) {
+        const from = at + "Clean the ".length;
+        window.getSelection()?.setBaseAndExtent(node, from, node, from + "oven".length);
+        return;
+      }
+    }
+  });
+  await page.getByRole("button", { name: t("wiki", "comments.onSelection") }).click();
+  await expect(page.getByRole("alert").filter({ hasText: t("wiki", "comments.publishFirst") })).toBeVisible();
+  expect(await page.getByRole("textbox", { name: t("wiki", "comments.new") }).count()).toBe(0);
+});
+
+test("who reads a page by channel offers channels, not direct messages", async ({
+  page,
+  t,
+  seedUser,
+  signIn,
+  apiAs,
+}) => {
+  const owner = await seedUser({ workspace: "Harbour Café" });
+  const api = await apiAs(owner);
+  const base = `/api/v1/workspaces/${owner.workspace.id}`;
+  const agent = await api.post(`${base}/agents`, {
+    data: { name: "Scribe", handle: "scribe", role: "content" },
+  });
+  if (!agent.ok()) throw new Error(`create agent: HTTP ${agent.status()} ${await agent.text()}`);
+  const dm = await api.post(`${base}/dms`, {
+    data: { agentId: ((await agent.json()) as { id: string }).id },
+  });
+  if (!dm.ok()) throw new Error(`open DM: HTTP ${dm.status()} ${await dm.text()}`);
+  const { channelId: dmId } = (await dm.json()) as { channelId: string };
+  const listed = (await (await api.get(`${base}/channels`)).json()) as {
+    channels: { id: string; name: string }[];
+  };
+  const dmChannel = listed.channels.find((each) => each.id === dmId);
+  const real = listed.channels.filter((each) => each.id !== dmId);
+  // The list has the direct message too, which is why the dialog leaves it out.
+  expect(dmChannel !== undefined && real.length > 0).toBe(true);
+  const title = "Rota";
+  const slug = await createPage(api, owner, { title, body: "Mondays." });
+
+  await signIn(owner);
+  await page.goto(`/workspace/${owner.workspace.id}/wiki/${slug}`);
+  await page.getByRole("button", { name: t("wiki", "page.actions") }).click();
+  await page.getByRole("menuitem", { name: t("wiki", "access.open") }).click();
+  const dialog = page.getByRole("dialog", { name: t("wiki", "access.title", { title }) });
+  await dialog.getByRole("radio", { name: t("wiki", "access.channel") }).click();
+  await dialog.getByRole("combobox", { name: t("wiki", "access.pickChannel") }).click();
+  const options = page.getByRole("option");
+  await expect(options.first()).toBeVisible();
+  expect((await options.allTextContents()).sort()).toEqual(real.map((each) => `#${each.name}`).sort());
+});
+
 test("comment on a passage across formatting: the person is told instead of leaving a loose comment", async ({
   page,
   t,
@@ -275,19 +406,16 @@ test("comment on a passage while another comment is still sending: the new one s
   await expect(composer).toHaveValue("Both sets.");
 });
 
-// An agent proposes the change through its `propose_wiki_edit` tool, driven by the fake model's
-// directive in a direct message, and the harness runtime runs the tool.
-test("accept a proposal: an agent's change lands on the page as a new version", async ({
-  page,
-  t,
-  seedUser,
-  signIn,
-  apiAs,
-}) => {
-  const owner = await seedUser({ workspace: "Harbour Café" });
-  const title = "Closing checklist";
-  const api = await apiAs(owner);
-  const slug = await createPage(api, owner, { title, body: "Cover the oven." });
+/**
+ * An agent's proposed change to a page, made through its `propose_wiki_edit` tool: the fake model's
+ * directive in a direct message, run by the harness runtime. Returns once the proposal is on the page.
+ */
+async function propose(
+  api: APIRequestContext,
+  owner: SeededMember,
+  slug: string,
+  edit: { oldStr: string; newStr: string },
+) {
   const base = `/api/v1/workspaces/${owner.workspace.id}`;
   const made = await api.post(`${base}/agents`, {
     data: { name: "Scribe", handle: "scribe", role: "content" },
@@ -304,7 +432,7 @@ test("accept a proposal: an agent's change lands on the page as a new version", 
   const directive = JSON.stringify({
     slug,
     parent_version: 1,
-    edits: [{ old_str: "Cover the oven.", new_str: "Cover the oven and switch it off." }],
+    edits: [{ old_str: edit.oldStr, new_str: edit.newStr }],
     note: "The oven stays warm otherwise.",
   });
   const posted = await api.post(`${base}/channels/${channelId}/messages`, {
@@ -321,6 +449,20 @@ test("accept a proposal: an agent's change lands on the page as a new version", 
       { timeout: 20_000 },
     )
     .toBe(1);
+}
+
+test("accept a proposal: an agent's change lands on the page as a new version", async ({
+  page,
+  t,
+  seedUser,
+  signIn,
+  apiAs,
+}) => {
+  const owner = await seedUser({ workspace: "Harbour Café" });
+  const title = "Closing checklist";
+  const api = await apiAs(owner);
+  const slug = await createPage(api, owner, { title, body: "Cover the oven." });
+  await propose(api, owner, slug, { oldStr: "Cover the oven.", newStr: "Cover the oven and switch it off." });
 
   await signIn(owner);
   await page.goto(`/workspace/${owner.workspace.id}/wiki/${slug}`);
@@ -331,6 +473,40 @@ test("accept a proposal: an agent's change lands on the page as a new version", 
   await expect(page.getByRole("textbox", { name: t("wiki", "page.editor", { title }) })).toContainText(
     "Cover the oven and switch it off.",
   );
+});
+
+test("accept a proposal that no longer applies: the person is told, and nothing is saved", async ({
+  page,
+  t,
+  seedUser,
+  signIn,
+  apiAs,
+}) => {
+  const owner = await seedUser({ workspace: "Harbour Café" });
+  const title = "Closing checklist";
+  const api = await apiAs(owner);
+  const slug = await createPage(api, owner, { title, body: "Cover the oven." });
+  await propose(api, owner, slug, { oldStr: "Cover the oven.", newStr: "Cover the oven well." });
+  // Someone publishes a new text of that sentence before the review.
+  const base = `/api/v1/workspaces/${owner.workspace.id}`;
+  const edited = await api.put(`${base}/wiki/pages/${slug}`, {
+    data: { body: "Cover the stove.", parentVersion: 1 },
+  });
+  if (!edited.ok()) throw new Error(`edit: HTTP ${edited.status()} ${await edited.text()}`);
+
+  await signIn(owner);
+  await page.goto(`/workspace/${owner.workspace.id}/wiki/${slug}`);
+  const proposals = page.getByRole("region", { name: t("wiki", "proposals.title", { count: 1 }) });
+  await proposals.getByRole("button", { name: t("wiki", "proposals.accept") }).click();
+  await expect(page.getByText(t("wiki", "proposals.staleCount", { count: 1 })).first()).toBeVisible();
+  await expect(page.getByText(t("wiki", "proposals.state.stale"), { exact: true })).toBeVisible();
+  // Counted at once: both notices would come together, and a waiting check passes once one fades.
+  expect(await page.getByText(/^(Saved as version|Salva como versão)/).count()).toBe(0);
+  const now = (await (await api.get(`${base}/wiki/pages/${slug}`)).json()) as {
+    version: number;
+    body: string;
+  };
+  expect(now).toMatchObject({ version: 2, body: "Cover the stove." });
 });
 
 test("a shared address with ?at= opens the page at that heading", async ({

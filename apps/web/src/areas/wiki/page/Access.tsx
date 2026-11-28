@@ -51,6 +51,9 @@ export function AccessDialog({
   const members = useApiQuery("listMembers", { workspaceId });
   const agents = useApiQuery("listAgents", { workspaceId });
   const channels = useApiQuery("listChannels", { workspaceId });
+  // The channels list has this person's direct messages too: a page can't be given to one of those.
+  const dms = useApiQuery("getDms", { workspaceId });
+  const direct = new Set((dms.data ?? []).map((dm) => dm.channelId));
   const current = page.access;
   const [kind, setKind] = useState<Kind>(current === null ? "workspace" : current.kind);
   const [people, setPeople] = useState<string[]>(
@@ -160,11 +163,13 @@ export function AccessDialog({
               disabled={busy}
               onValueChange={setChannelId}
             >
-              {(channels.data ?? []).map((channel) => (
-                <SelectItem key={channel.id} value={channel.id}>
-                  #{channel.name}
-                </SelectItem>
-              ))}
+              {(channels.data ?? [])
+                .filter((channel) => !direct.has(channel.id))
+                .map((channel) => (
+                  <SelectItem key={channel.id} value={channel.id}>
+                    #{channel.name}
+                  </SelectItem>
+                ))}
             </Select>
           )}
           {unsent && (

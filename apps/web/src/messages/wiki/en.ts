@@ -120,6 +120,7 @@ export default {
   "comments.failed": "The comments and proposals could not be loaded.",
   "comments.cantAnchor":
     "This passage crosses formatting, so a comment can’t hold to it. Select plain text instead.",
+  "comments.publishFirst": "This passage isn’t published yet. Publish the page, then comment on it.",
   "comments.onSelection": "Comment on the selection",
   "comments.new": "Your comment",
   "comments.send": "Comment",
@@ -139,6 +140,11 @@ export default {
   "proposals.reject": "Reject",
   "proposals.acceptAll": "Accept all",
   "proposals.decided": "Saved as version {version}.",
+  "proposals.rejected": { one: "Change rejected.", other: "{count} changes rejected." },
+  "proposals.staleCount": {
+    one: "A change no longer applies to the page, so it was not saved.",
+    other: "{count} changes no longer apply to the page, so they were not saved.",
+  },
   "proposals.state.pending": "Waiting",
   "proposals.state.accepted": "Accepted",
   "proposals.state.rejected": "Rejected",
@@ -247,6 +253,7 @@ export default {
 
   "error.wiki.access.channel": "Pick a channel you read.",
   "error.wiki.access.principal": "Someone picked is not in this workspace any more.",
+  "error.wiki.access.owner": "Only who created the page or an admin can change who reads it.",
   "error.wiki.busy": "The wiki is busy saving this page. Try again in a moment.",
   "error.wiki.checks.too_soon": "The wiki was checked less than a minute ago.",
   "error.wiki.comment.too_many": "This page has too many comments. Delete some first.",

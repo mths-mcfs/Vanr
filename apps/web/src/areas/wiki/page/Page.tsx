@@ -2,8 +2,9 @@
 // shared draft, kept in sync with everyone on the page and saved by the server on its own; "Publish"
 // makes it a version. The header says who changed it last, the version, the lock, who is here and
 // where the draft stands. Beside it, the outline, the links and who reads it.
+import { useQueryClient } from "@tanstack/react-query";
 import { isApiError } from "@vanr/client";
-import { useApiQuery, useVanrClient } from "@vanr/client/react";
+import { type KeyPrefix, prefixKey, useApiQuery, useVanrClient } from "@vanr/client/react";
 import { can, type WikiAnchor, type WikiPropDef } from "@vanr/contract";
 import {
   Avatar,
@@ -44,7 +45,7 @@ import { Editor, type EditorHandle, type EditorSource, type Picked } from "../ed
 import type { ResolvedLink } from "../editor/plugins.ts";
 import { linkResolver, REFRESH_MS, TITLE_MAX, useActorName, useRole, useWikiRefresh } from "../shared.tsx";
 import { AccessDialog, accessSummary } from "./Access.tsx";
-import { Annotations, anchorFor } from "./Annotations.tsx";
+import { Annotations, anchorFor, inPublished } from "./Annotations.tsx";
 import { type LiveEvent, settle, useLive } from "./collab.ts";
 import { HistoryDialog } from "./History.tsx";
 import { type MetaWrite, PropsBar } from "./Props.tsx";
@@ -94,6 +95,11 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
   const [sharing, setSharing] = useState(false);
   // Who reads the page is being saved: restricting moves it to a new address and closes this live document.
   const [restricting, setRestricting] = useState(false);
+  const restrictingNow = useRef(false);
+  restrictingNow.current = restricting;
+  // Restricted by this person, the page is on its way to its new address: the old one answering
+  // "not found" meanwhile is expected, not a loss.
+  const [moving, setMoving] = useState(false);
   const [picked, setPicked] = useState<Picked | null>(null);
   const [anchor, setAnchor] = useState<WikiAnchor | null>(null);
   const editor = useRef<EditorHandle>(null);
@@ -103,7 +109,39 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
   const { at } = useSearch(PageAddress, NO_ANCHOR);
   /** The `?at=` heading the live editor reached: a new one in the address is sought again. */
   const reachedAnchor = useRef<string | null>(null);
-  const p = page.data;
+  // Not found or not readable any more (a restriction, a trash): what was read of it before leaves the
+  // screen and the cache, so no title, text, comment or button of it stays for who lost it.
+  const gone =
+    !restricting &&
+    !moving &&
+    page.isError &&
+    isApiError(page.error) &&
+    (page.error.status === 404 || page.error.status === 403);
+  const p = gone ? undefined : page.data;
+  const queries = useQueryClient();
+  const client = useVanrClient();
+  useEffect(() => {
+    if (!gone) return;
+    for (const method of ["getWikiPageAnnotations", "getWikiPagePanel"] as const)
+      queries.removeQueries({
+        queryKey: prefixKey(client, { method, args: { workspaceId, pageId: slug } } as KeyPrefix),
+      });
+  }, [client, gone, queries, slug, workspaceId]);
+  // The page's own read goes when this view does, so coming back never shows it again first.
+  const goneNow = useRef(gone);
+  goneNow.current = gone;
+  useEffect(
+    () => () => {
+      if (goneNow.current)
+        queries.removeQueries({
+          queryKey: prefixKey(client, {
+            method: "getWikiPage",
+            args: { workspaceId, pageId: slug },
+          } as KeyPrefix),
+        });
+    },
+    [client, queries, slug, workspaceId],
+  );
   useDocumentTitle(p?.title ?? t("index.title"));
 
   const onEvent = useCallback(
@@ -113,6 +151,9 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
       if (event.type === "rights") {
         setConflict(null);
         setDeleting(false);
+        // Who reads the page is the creator's or an admin's: a lock or a lost read takes it away. The
+        // close this person's own restriction causes leaves their save to finish.
+        if (!restrictingNow.current) setSharing(false);
       }
       if (event.type === "publish_failed" || event.type === "draft_save_failed")
         setFailure(
@@ -614,10 +655,12 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
               disabled={picked === null}
               onClick={() => {
                 if (picked === null) return;
-                // A passage across Markdown marks (bold, a link) has no exact place in the published text:
-                // it can't hold a comment there, so the person is told instead of making an orphan.
+                // A comment holds to the published text. A passage written since isn't there yet (nor
+                // should it hold to the same words elsewhere), and one across Markdown marks (bold, a
+                // link) has no exact place in it: the person is told instead of making an orphan.
                 const found = anchorFor(p.body, picked);
-                if (found.position === undefined) setFailure(new Error(t("comments.cantAnchor")));
+                if (dirty && !inPublished(p.body, picked)) setFailure(new Error(t("comments.publishFirst")));
+                else if (found.position === undefined) setFailure(new Error(t("comments.cantAnchor")));
                 else setAnchor(found);
               }}
             >
@@ -655,8 +698,14 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
             page={{ ...p, editable: canWrite }}
             draft={anchor}
             onDraftDone={() => setAnchor(null)}
-            onDecided={(saved) => {
-              toast.push({ tone: "success", title: t("proposals.decided", { version: saved.version }) });
+            onDecided={({ page: saved, applied, rejected, stale }) => {
+              // Only a change that landed made a version; a stale one is said not to have.
+              if (applied > 0)
+                toast.push({ tone: "success", title: t("proposals.decided", { version: saved.version }) });
+              if (stale > 0)
+                toast.push({ tone: "warning", title: t("proposals.staleCount", { count: stale }) });
+              if (applied === 0 && stale === 0 && rejected > 0)
+                toast.push({ tone: "info", title: t("proposals.rejected", { count: rejected }) });
               void refresh();
             }}
           />
@@ -675,11 +724,13 @@ function PageView({ workspaceId, slug }: { workspaceId: string; slug: string }) 
           onBusy={setRestricting}
           onClose={() => setSharing(false)}
           onSaved={(saved) => {
-            setSharing(false);
             void refresh();
-            // Restricting gives the page a new address, so the old one no longer tells it exists.
-            if (saved.slug !== slug)
+            // Restricting gives the page a new address, so the old one no longer tells it exists. This
+            // view stays as it is until the new address opens its own.
+            if (saved.slug !== slug) {
+              setMoving(true);
               void go("wikiPage", { workspaceId, pageId: saved.slug }, { replace: true });
+            } else setSharing(false);
           }}
         />
       )}

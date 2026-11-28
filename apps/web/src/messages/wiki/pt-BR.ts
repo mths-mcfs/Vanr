@@ -125,6 +125,7 @@ export default {
   "comments.failed": "Não foi possível carregar os comentários e as propostas.",
   "comments.cantAnchor":
     "Este trecho atravessa uma formatação, então um comentário não consegue se prender a ele. Selecione texto simples.",
+  "comments.publishFirst": "Este trecho ainda não foi publicado. Publique a página e depois comente.",
   "comments.onSelection": "Comentar o trecho selecionado",
   "comments.new": "Seu comentário",
   "comments.send": "Comentar",
@@ -144,6 +145,11 @@ export default {
   "proposals.reject": "Recusar",
   "proposals.acceptAll": "Aceitar todas",
   "proposals.decided": "Salva como versão {version}.",
+  "proposals.rejected": { one: "Mudança recusada.", other: "{count} mudanças recusadas." },
+  "proposals.staleCount": {
+    one: "Uma mudança não se aplica mais à página, então não foi salva.",
+    other: "{count} mudanças não se aplicam mais à página, então não foram salvas.",
+  },
   "proposals.state.pending": "Aguardando",
   "proposals.state.accepted": "Aceita",
   "proposals.state.rejected": "Recusada",
@@ -254,6 +260,7 @@ export default {
 
   "error.wiki.access.channel": "Escolha um canal que você lê.",
   "error.wiki.access.principal": "Alguém escolhido não está mais neste espaço de trabalho.",
+  "error.wiki.access.owner": "Só quem criou a página ou um admin pode mudar quem a lê.",
   "error.wiki.busy": "A wiki está ocupada salvando esta página. Tente de novo em instantes.",
   "error.wiki.checks.too_soon": "A wiki foi verificada há menos de um minuto.",
   "error.wiki.comment.too_many": "Esta página tem comentários demais. Apague alguns antes.",

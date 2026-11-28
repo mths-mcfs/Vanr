@@ -287,7 +287,12 @@ export class FakeWiki {
     return {
       ...this.summary(page),
       access: this.accessOf(page),
-      accessEditable: admin || page.versions[0]?.author.id === scope.user.id,
+      // The server's rule (canManageAccess): an admin, or who created the page while it is unlocked.
+      accessEditable:
+        admin ||
+        (!page.locked &&
+          page.versions[0]?.author.type === "person" &&
+          page.versions[0]?.author.id === scope.user.id),
       authors: [...new Map(page.versions.map((v) => [`${v.author.type}:${v.author.id}`, v.author])).values()],
       body: page.versions.at(-1)?.body ?? "",
       draft: null,
@@ -599,8 +604,14 @@ export class FakeWiki {
         return reply(200, next);
       }),
       setWikiPageAccess: onPage((scope, page, params) => {
+        // As the server's accessManagerOnly: an admin, or who created the page while it is unlocked.
+        if (!admin(scope) && page.locked) return fail(403, "wiki.page_locked", "This page is locked");
         if (!admin(scope) && page.versions[0]?.author.id !== scope.user.id)
-          return fail(403, "forbidden", "Only who created the page or an admin can change who reads it");
+          return fail(
+            403,
+            "wiki.access.owner",
+            "Only who created the page or an admin can change who reads it",
+          );
         const access = params.access as T.WikiAccessInput;
         // As the server does: a page that becomes restricted gets a new address, so the old one no
         // longer tells it exists.

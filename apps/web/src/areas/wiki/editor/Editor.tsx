@@ -70,6 +70,7 @@ export function trimPicked(raw: string, before: string, after: string): Picked |
 }
 
 const AROUND = 64;
+const BLOCKS = "\n\n";
 
 /** Tells the screen which passage is selected, for a comment on it. */
 const pickPlugin = (onPick: () => ((picked: Picked | null) => void) | undefined) =>
@@ -82,13 +83,15 @@ const pickPlugin = (onPick: () => ((picked: Picked | null) => void) | undefined)
             const report = onPick();
             if (report === undefined) return;
             const { from, to, empty } = view.state.selection;
-            const raw = empty ? "" : view.state.doc.textBetween(from, to, "\n");
+            // Blocks are apart by a blank line, as in the Markdown, so a passage over two paragraphs is
+            // found in the published text.
+            const raw = empty ? "" : view.state.doc.textBetween(from, to, BLOCKS);
             const size = view.state.doc.content.size;
             report(
               trimPicked(
                 raw,
-                view.state.doc.textBetween(Math.max(0, from - AROUND), from, "\n"),
-                view.state.doc.textBetween(to, Math.min(size, to + AROUND), "\n"),
+                view.state.doc.textBetween(Math.max(0, from - AROUND), from, BLOCKS),
+                view.state.doc.textBetween(to, Math.min(size, to + AROUND), BLOCKS),
               ),
             );
           },

@@ -22,7 +22,8 @@ type Props = {
   /** A passage picked in the editor, waiting for its comment. */
   draft: WikiAnchor | null;
   onDraftDone: () => void;
-  onDecided: (page: WikiPage) => void;
+  /** How a decision ended: the changes saved into the page, the ones rejected, and the stale ones. */
+  onDecided: (decided: Decided) => void;
 };
 
 function Composer({
@@ -82,6 +83,8 @@ function Composer({
   );
 }
 
+export type Decided = { page: WikiPage; applied: number; rejected: number; stale: number };
+
 export function Annotations({ workspaceId, page, draft, onDraftDone, onDecided }: Props) {
   const t = useMessages("wiki");
   const common = useMessages("common");
@@ -91,23 +94,44 @@ export function Annotations({ workspaceId, page, draft, onDraftDone, onDecided }
   const { role, userId } = useRole(workspaceId);
   const notes = useApiQuery("getWikiPageAnnotations", { workspaceId, pageId: page.slug });
   const refetch = [{ method: "getWikiPageAnnotations" as const, args: { workspaceId, pageId: page.slug } }];
-  const comment = useApiMutation("createWikiPageComment", { invalidates: () => refetch });
+  // The last write's failure: a later one that succeeds clears it.
+  const [failure, setFailure] = useState<unknown>(null);
+  const settled = { onError: setFailure, onSuccess: () => setFailure(null) };
+  const comment = useApiMutation("createWikiPageComment", { invalidates: () => refetch, ...settled });
   const draftNow = useRef(draft);
   draftNow.current = draft;
-  const resolve = useApiMutation("resolveWikiAnnotation", { invalidates: () => refetch });
-  const reopen = useApiMutation("reopenWikiAnnotation", { invalidates: () => refetch });
-  const remove = useApiMutation("deleteWikiAnnotation", { invalidates: () => refetch });
+  const resolve = useApiMutation("resolveWikiAnnotation", { invalidates: () => refetch, ...settled });
+  const reopen = useApiMutation("reopenWikiAnnotation", { invalidates: () => refetch, ...settled });
+  const remove = useApiMutation("deleteWikiAnnotation", { invalidates: () => refetch, ...settled });
+  // A proposal whose accepted change no longer applied stays in view with that said, so the person sees
+  // why nothing was saved; it goes with the page.
+  const [stale, setStale] = useState<ReadonlySet<string>>(new Set());
   const decide = useApiMutation("decideWikiAnnotation", {
     invalidates: () => refetch,
-    onSuccess: (decision) => onDecided(decision.page),
+    onError: setFailure,
+    onSuccess: (decision, input) => {
+      setFailure(null);
+      const asked = new Set(input.body.decisions.map((each) => each.hunkId));
+      const decided = decision.proposal.hunks.filter((hunk) => asked.has(hunk.id));
+      const count = (status: WikiProposal["hunks"][number]["status"]) =>
+        decided.filter((hunk) => hunk.status === status).length;
+      if (count("stale") > 0) setStale((now) => new Set([...now, decision.proposal.id]));
+      onDecided({
+        page: decision.page,
+        applied: count("accepted"),
+        rejected: count("rejected"),
+        stale: count("stale"),
+      });
+    },
   });
   const [replying, setReplying] = useState<string | null>(null);
-  const failure = comment.error ?? resolve.error ?? reopen.error ?? remove.error ?? decide.error;
 
   const comments = notes.data?.comments ?? [];
   const threads = comments.filter((each) => each.parentId === null);
   const repliesOf = (root: WikiComment) => comments.filter((each) => each.parentId === root.id);
-  const pending = (notes.data?.proposals ?? []).filter((proposal) => proposal.status === "pending");
+  const proposals = notes.data?.proposals ?? [];
+  const pending = proposals.filter((proposal) => proposal.status === "pending");
+  const shown = proposals.filter((proposal) => proposal.status === "pending" || stale.has(proposal.id));
   const mine = (each: WikiComment) => each.author.type === "person" && each.author.id === userId;
 
   const commentView = (each: WikiComment) => (
@@ -209,12 +233,12 @@ export function Annotations({ workspaceId, page, draft, onDraftDone, onDecided }
 
   return (
     <>
-      {pending.length > 0 && (
+      {shown.length > 0 && (
         <section className="wiki-side__section" aria-labelledby="wiki-proposals">
           <h2 id="wiki-proposals" className="wiki-side__heading">
             {t("proposals.title", { count: pending.length })}
           </h2>
-          <ul className="wiki-notes">{pending.map(proposalView)}</ul>
+          <ul className="wiki-notes">{shown.map(proposalView)}</ul>
         </section>
       )}
       <section className="wiki-side__section" aria-labelledby="wiki-comments">
@@ -361,6 +385,25 @@ export function Annotations({ workspaceId, page, draft, onDraftDone, onDecided }
  * The anchor of a passage picked in the editor, on the published Markdown: the occurrence of the quote
  * whose surroundings match the editor's best, with up to 32 characters before and after it.
  */
+/**
+ * Whether a picked passage stands in the published Markdown as it does in the editor: some occurrence
+ * of it has the same text on both sides, as far as the editor gave it. Text not published yet doesn't.
+ */
+export function inPublished(body: string, picked: { quote: string; before: string; after: string }): boolean {
+  const { quote, before, after } = picked;
+  for (let at = body.indexOf(quote); at !== -1; at = body.indexOf(quote, at + 1)) {
+    const end = at + quote.length;
+    const left = Math.min(before.length, at);
+    const right = Math.min(after.length, body.length - end);
+    if (
+      body.slice(at - left, at) === before.slice(before.length - left) &&
+      body.slice(end, end + right) === after.slice(0, right)
+    )
+      return true;
+  }
+  return false;
+}
+
 export function anchorFor(
   body: string,
   picked: { quote: string; before: string; after: string },
