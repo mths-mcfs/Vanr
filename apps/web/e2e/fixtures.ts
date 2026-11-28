@@ -43,6 +43,8 @@ import shellEn from "../src/messages/shell/en.ts";
 import shellPt from "../src/messages/shell/pt-BR.ts";
 import wikiEn from "../src/messages/wiki/en.ts";
 import wikiPt from "../src/messages/wiki/pt-BR.ts";
+import workEn from "../src/messages/work/en.ts";
+import workPt from "../src/messages/work/pt-BR.ts";
 import { type Bucket, startBucket } from "./bucket.ts";
 import { type RunningServer, startServer } from "./server.ts";
 
@@ -59,6 +61,7 @@ const CATALOGS = {
     settings: settingsEn,
     inbox: inboxEn,
     wiki: wikiEn,
+    work: workEn,
   },
   "pt-BR": {
     account: accountPt,
@@ -70,6 +73,7 @@ const CATALOGS = {
     settings: settingsPt,
     inbox: inboxPt,
     wiki: wikiPt,
+    work: workPt,
   },
 } as const;
 type Catalogs = (typeof CATALOGS)["en"];
