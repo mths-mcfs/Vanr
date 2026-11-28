@@ -228,6 +228,15 @@ describe("losing a page", () => {
     expect(options.includes("#print-queue") || !options.includes("#general")).toBe(false);
   });
 
+  test("the fake's direct messages start over with the rest of its data", () => {
+    const server = newServer();
+    server.dms.set("workspace_birchwood", [
+      { channelId: "ch_print", unread: 0, with: { id: "usr_jonas", name: "Jonas Lind", type: "person" } },
+    ]);
+    server.reset("team");
+    expect(server.dms.size).toBe(0);
+  });
+
   test("a refusal goes once who reads it is picked again", async () => {
     const server = newServer();
     server.force("setWikiPageAccess", { kind: "error", status: 500, code: "internal" }, 1);

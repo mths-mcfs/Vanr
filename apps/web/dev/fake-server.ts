@@ -655,6 +655,7 @@ export class FakeServer {
     this.settings.clear();
     this.storage.clear();
     this.notifications = [];
+    this.dms.clear();
     this.notificationSettings.clear();
     this.approvals.clear();
     this.accounts.clear();
