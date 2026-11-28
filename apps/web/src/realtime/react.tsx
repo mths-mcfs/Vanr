@@ -27,24 +27,40 @@ import { useRuntime } from "../app/context.tsx";
 /** Opens the workspace's connection while mounted and stops it on the way out. */
 export function WorkspaceRealtime({ workspaceId, children }: { workspaceId: string; children: ReactNode }) {
   const client = useVanrClient();
+  const queryClient = useQueryClient();
   const { openSocket, clock, gate, session } = useRuntime();
-  const realtime = useMemo(
-    () =>
-      createRealtime({
-        workspaceId,
-        baseUrl: openSocket.baseUrl,
-        clock,
-        ...(openSocket.createSocket !== undefined && { createSocket: openSocket.createSocket }),
-        ...(openSocket.random !== undefined && { random: openSocket.random }),
-        onEnded: (why) => {
-          // The session is over: the same road as a 401. Removed from the workspace: ask again who
-          // the person is, and the frame shows they are no longer a member.
-          if (why === "signed_out") gate.ended();
-          else void session.load(true);
-        },
-      }),
-    [workspaceId, openSocket, clock, gate, session],
-  );
+  const realtime = useMemo(() => {
+    const created: RealtimeClient = createRealtime({
+      workspaceId,
+      baseUrl: openSocket.baseUrl,
+      clock,
+      // The server stopped this browser's subscription to a channel: the person may have lost it.
+      // Its list and its history are read again; a channel they can no longer read answers 404 there.
+      onUnsubscribed: (channelId) => {
+        // Nothing follows the channel anymore: a later follow subscribes again from scratch.
+        followers.get(created)?.delete(channelId);
+        for (const listener of lostListeners.get(created) ?? []) listener(channelId);
+        // What was cached about it goes, open or not; an open conversation reads again and is told.
+        for (const method of CHANNEL_QUERIES)
+          queryClient.removeQueries({
+            queryKey: prefixKey(client, { method, args: { workspaceId, channelId } }),
+          });
+        for (const method of ["listChannels", "getDms"] as const)
+          void queryClient.invalidateQueries({
+            queryKey: prefixKey(client, { method, args: { workspaceId } }),
+          });
+      },
+      ...(openSocket.createSocket !== undefined && { createSocket: openSocket.createSocket }),
+      ...(openSocket.random !== undefined && { random: openSocket.random }),
+      onEnded: (why) => {
+        // The session is over: the same road as a 401. Removed from the workspace: ask again who
+        // the person is, and the frame shows they are no longer a member.
+        if (why === "signed_out") gate.ended();
+        else void session.load(true);
+      },
+    });
+    return created;
+  }, [workspaceId, openSocket, clock, gate, session, queryClient, client]);
   return (
     <VanrProvider client={client} realtime={realtime}>
       {children}
@@ -81,25 +97,60 @@ export function useReconnectNow(): () => void {
 
 // How many mounted components follow each channel of each connection.
 const followers = new WeakMap<RealtimeClient, Map<string, number>>();
+// Who wants to hear when the server stops a channel's subscription, per connection.
+const lostListeners = new WeakMap<RealtimeClient, Set<(channelId: string) => void>>();
+
+/** The per-channel queries that hold what a channel says, dropped when the person loses it. */
+const CHANNEL_QUERIES = [
+  "listChannelMessages",
+  "getChannelDirectory",
+  "listChannelActiveRuns",
+  "listChannelMembers",
+  "listChannelPinnedMessages",
+] as const;
+
+/** Calls `listener` with each channel whose subscription the server ends on this connection. */
+export function onChannelLost(realtime: RealtimeClient, listener: (channelId: string) => void): () => void {
+  const set = lostListeners.get(realtime) ?? new Set();
+  lostListeners.set(realtime, set);
+  set.add(listener);
+  return () => {
+    set.delete(listener);
+  };
+}
+
+/**
+ * Follows a channel's events until the returned function is called. Every follower of a channel
+ * shares one subscription, so one leaving never ends another's.
+ */
+export function followChannel(realtime: RealtimeClient, channelId: string): () => void {
+  const counts = followers.get(realtime) ?? new Map<string, number>();
+  followers.set(realtime, counts);
+  const before = counts.get(channelId) ?? 0;
+  counts.set(channelId, before + 1);
+  if (before === 0) realtime.subscribe(channelId);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    // The server already ended it: nothing is left to let go of.
+    const current = counts.get(channelId);
+    if (current === undefined) return;
+    const left = current - 1;
+    if (left > 0) counts.set(channelId, left);
+    else {
+      counts.delete(channelId);
+      realtime.unsubscribe(channelId);
+    }
+  };
+}
 
 /** Follows a channel's events while mounted. Two components on the same channel share one subscription. */
 export function useChannelSubscription(channelId: string | undefined): void {
   const realtime = useRealtime();
   useEffect(() => {
     if (realtime === null || channelId === undefined) return;
-    const counts = followers.get(realtime) ?? new Map<string, number>();
-    followers.set(realtime, counts);
-    const before = counts.get(channelId) ?? 0;
-    counts.set(channelId, before + 1);
-    if (before === 0) realtime.subscribe(channelId);
-    return () => {
-      const left = (counts.get(channelId) ?? 1) - 1;
-      if (left > 0) counts.set(channelId, left);
-      else {
-        counts.delete(channelId);
-        realtime.unsubscribe(channelId);
-      }
-    };
+    return followChannel(realtime, channelId);
   }, [realtime, channelId]);
 }
 

@@ -17,6 +17,7 @@ import { FakeAgentAccess } from "./fake-agent-access.ts";
 import { FakeAgents } from "./fake-agents.ts";
 import { FakeAssignments } from "./fake-assignments.ts";
 import { FakeBases } from "./fake-bases.ts";
+import { FakeChat } from "./fake-chat.ts";
 import { FakeControl } from "./fake-control.ts";
 import { FakeFiles } from "./fake-files.ts";
 import { FakeRunners } from "./fake-runners.ts";
@@ -292,6 +293,7 @@ export class FakeServer {
   readonly wiki: FakeWiki;
   readonly control: FakeControl;
   readonly agentWork: FakeAgents;
+  readonly chat: FakeChat;
   readonly agentAccess: FakeAgentAccess;
   readonly runnerWork: FakeRunners;
   readonly work: FakeWork;
@@ -361,6 +363,20 @@ export class FakeServer {
       },
       evals: () => this.control.evals,
     });
+    this.chat = new FakeChat({
+      ...host,
+      channels: () => this.state.channels,
+      people: (workspaceId) => this.state.members.filter((member) => member.workspaceId === workspaceId),
+      agents: (workspaceId) => this.agents.filter((candidate) => candidate.workspaceId === workspaceId),
+      dms: (workspaceId) => {
+        let list = this.dms.get(workspaceId);
+        if (list === undefined) {
+          list = [];
+          this.dms.set(workspaceId, list);
+        }
+        return list;
+      },
+    });
     this.agentAccess = new FakeAgentAccess({
       ...host,
       agents: () => this.agents,
@@ -401,6 +417,7 @@ export class FakeServer {
       nameOf: (userId) => this.state.users.find((user) => user.id === userId)?.name ?? userId,
     });
     this.fileOperations = {
+      ...this.chat.operations(),
       ...this.files.operations(),
       ...this.work.operations(),
       ...this.assignments.operations(),
@@ -744,6 +761,7 @@ export class FakeServer {
     this.storage.clear();
     this.notifications = [];
     this.dms.clear();
+    this.chat.runs = [];
     this.notificationSettings.clear();
     this.approvals.clear();
     this.accounts.clear();
@@ -863,6 +881,14 @@ export class FakeServer {
 
   private dropSocket(socket: ServedSocket, code: number): void {
     if (this.sockets.delete(socket)) socket.drop(code);
+  }
+
+  /** The server stops a person's subscription to a channel, as when they are taken out of it. */
+  dropFromChannel(userId: string, channelId: string): void {
+    for (const socket of this.sockets) {
+      if (socket.userId !== userId || !socket.channels.delete(channelId)) continue;
+      socket.push({ type: "unsubscribed", channelId });
+    }
   }
 
   /** Sends an event to everyone in a workspace, or to the followers of one channel. */
@@ -1309,7 +1335,12 @@ export class FakeServer {
     getDms: (params, session) => {
       const scope = this.scope(params, session);
       if ("status" in scope) return scope;
-      return reply(200, { dms: this.dms.get(scope.workspaceId) ?? [] });
+      // Only the caller's: a direct message whose channel is known lists for its members alone.
+      const mine = (this.dms.get(scope.workspaceId) ?? []).filter((dm) => {
+        const channel = this.state.channels.find((candidate) => candidate.id === dm.channelId);
+        return channel === undefined || channel.memberIds.includes(scope.user.id);
+      });
+      return reply(200, { dms: mine });
     },
     getInvitation: (params, session) => {
       const body = Bodies.invitation.safeParse(params);
