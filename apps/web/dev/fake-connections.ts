@@ -29,6 +29,48 @@ export type FakeInstallation = T.GitHubAppInstallation & {
 };
 
 const reply = (status: number, body: unknown): FilesReply => ({ status, body });
+
+/**
+ * Whether a dotted SQL name has between `min` and `max` parts, as the server's nameParts (sql-guard.ts) reads
+ * it: a part is bare (a letter or `_`, then letters, digits, `_` or `$`) or quoted (`""` for a quote), and no
+ * part is empty or longer than the 63 bytes Postgres keeps; no NUL and no lone surrogate.
+ */
+function partsOf(text: string, min: number, max: number): boolean {
+  if (
+    text.includes("\0") ||
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text)
+  )
+    return false;
+  const bytes = new TextEncoder();
+  let count = 0;
+  let i = 0;
+  for (;;) {
+    let part = "";
+    if (text[i] === '"') {
+      let j = i + 1;
+      for (;;) {
+        if (j >= text.length) return false;
+        if (text[j] === '"') {
+          if (text[j + 1] !== '"') break;
+          j++;
+        }
+        part += text[j];
+        j++;
+      }
+      i = j + 1;
+    } else {
+      const end = text.indexOf(".", i);
+      part = text.slice(i, end < 0 ? text.length : end);
+      if (!/^[A-Za-z_\u0080-\uffff][A-Za-z0-9_$\u0080-\uffff]*$/.test(part)) return false;
+      i += part.length;
+    }
+    if (part === "" || bytes.encode(part).length > 63) return false;
+    count++;
+    if (i === text.length) return count >= min && count <= max;
+    if (text[i] !== ".") return false;
+    i++;
+  }
+}
 const fail = (status: number, code: string, message: string) => reply(status, { error: { code, message } });
 const text = (value: unknown) => (typeof value === "string" ? value : undefined);
 const ACCESS = new Set<T.ToolAccess>(["read", "write", "approval", "off"]);
@@ -345,19 +387,17 @@ export class FakeConnections {
         ) as Partial<T.DatabasePolicy>;
         // As the server's databasePolicyInput: up to 500 tables named `table` or `schema.table`, and a
         // hidden column is `table.column` or `schema.table.column`, up to 1000 of them.
-        // A name part as the server's nameParts reads it: bare, or quoted with "" for a quote.
-        const part = String.raw`(?:[A-Za-z_\u0080-\uffff][A-Za-z0-9_$\u0080-\uffff]*|"(?:[^"]|"")+")`;
-        const column = new RegExp(`^${part}(?:\\.${part}){1,2}$`, "u");
-        const relation = new RegExp(`^${part}(?:\\.${part})?$`, "u");
+        const column = (text: string) => partsOf(text, 2, 3);
+        const relation = (text: string) => partsOf(text, 1, 2);
         if (
           (asked.tables !== undefined &&
             (!Array.isArray(asked.tables) ||
               asked.tables.length > 500 ||
-              !asked.tables.every((each) => typeof each === "string" && relation.test(each)))) ||
+              !asked.tables.every((each) => typeof each === "string" && relation(each)))) ||
           (asked.maskedColumns !== undefined &&
             (!Array.isArray(asked.maskedColumns) ||
               asked.maskedColumns.length > 1000 ||
-              !asked.maskedColumns.every((each) => typeof each === "string" && column.test(each))))
+              !asked.maskedColumns.every((each) => typeof each === "string" && column(each))))
         )
           return fail(400, "validation", "Invalid body");
         // The first time, as the server: reading starts from every table there is and the suggested

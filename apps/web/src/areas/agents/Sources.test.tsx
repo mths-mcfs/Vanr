@@ -1016,6 +1016,13 @@ describe("the fake server's source rules, as the server's", () => {
     expect(await statusOf(database(client, { level: "read", policy: { tables: ["foo;bar"] } }))).toBe(
       "400 validation",
     );
+    for (const bad of [`public.${"a".repeat(64)}`, 'public."a\u0000b"', "public..orders"])
+      expect(await statusOf(database(client, { level: "read", policy: { tables: [bad] } }))).toBe(
+        "400 validation",
+      );
+    expect(
+      await statusOf(database(client, { level: "read", policy: { tables: [`public.${"a".repeat(63)}`] } })),
+    ).toBe("ok");
     expect(
       await statusOf(database(client, { level: "read", policy: { tables: ['public."order items"'] } })),
     ).toBe("ok");
