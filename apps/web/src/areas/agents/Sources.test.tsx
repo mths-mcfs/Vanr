@@ -275,7 +275,7 @@ describe("mailboxes", () => {
     expect(await within(await part()).findByText("The workspace has no mailboxes")).toBeDefined();
   });
 
-  test("while a save is on its way the form waits, and the button keeps the focus", async () => {
+  test("while a save is on its way the form waits, then the button gets the focus back", async () => {
     const stop = blurOnDisable();
     try {
       const server = seeded();
@@ -290,6 +290,9 @@ describe("mailboxes", () => {
       await app.user.click(button);
       expect(form.getAttribute("aria-busy")).toBe("true");
       expect(days.hasAttribute("disabled")).toBe(true);
+      // The focus leaves the button while the save is on its way (a click on the page, say).
+      act(() => button.blur());
+      expect(document.activeElement === document.body).toBe(true);
       held.release();
       expect(await screen.findByText("Access to orders@birchwood.example is saved.")).toBeDefined();
       await waitFor(() => expect(document.activeElement === button).toBe(true));
@@ -428,6 +431,9 @@ describe("databases", () => {
         fireEvent.submit(form);
       });
       expect(form.getAttribute("aria-busy")).toBe("true");
+      // The focus leaves the button while the save is on its way (a click on the page, say).
+      act(() => button.blur());
+      expect(document.activeElement === document.body).toBe(true);
       expect(queries.hasAttribute("disabled")).toBe(true);
       held.release();
       expect(await screen.findByText("Access to Shop is saved.")).toBeDefined();
@@ -490,6 +496,16 @@ describe("databases", () => {
       ["public.customers", "public.orders", 'sales."Leads"'],
       ["public.customers.card_number"],
     ]);
+  });
+
+  test("a link at none that kept its own limits shows them when raised", async () => {
+    const server = seeded();
+    server.connections.agentDatabases.set("agt_scout", [dbLink({ tables: [], queriesPerDay: 9 }, "none")]);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "Shop" });
+    await app.user.click(within(form).getByRole("checkbox", { name: "May query Shop" }));
+    expect((within(form).getByLabelText(/^Queries a day/) as HTMLInputElement).value).toBe("9");
+    expect((within(form).getByLabelText(/^Hidden columns/) as HTMLTextAreaElement).value).toBe("");
   });
 
   test("a saved table the list no longer has shows as saved, and can be taken away", async () => {
@@ -762,6 +778,69 @@ describe("GitHub repositories", () => {
     ]);
   });
 
+  test("no limit arriving on a refresh keeps the person's ticks and says so", async () => {
+    const server = seeded();
+    birchwoodGitHub(server);
+    server.connections.repositories.set("agt_scout", ["birchwood-labs/print-shop"]);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "GitHub repositories" });
+    await app.user.click(within(form).getByRole("checkbox", { name: /birchwood-labs\/site/ }));
+    server.connections.repositories.set("agt_scout", []);
+    await refresh(app);
+    expect(
+      await within(form).findByText(/Meanwhile someone let this agent reach every repository/),
+    ).toBeDefined();
+    expect(
+      within(form).getByRole("radio", { name: "Only the ones ticked below" }).getAttribute("aria-checked"),
+    ).toBe("true");
+    await app.user.click(within(form).getByRole("button", { name: "Save repositories" }));
+    expect(await screen.findByText("The repositories are saved.")).toBeDefined();
+    expect(server.connections.repositories.get("agt_scout")).toEqual([
+      "birchwood-labs/print-shop",
+      "birchwood-labs/site",
+    ]);
+  });
+
+  test("a limit set by someone else meanwhile is not taken away by a save that didn't choose no limit", async () => {
+    const server = seeded();
+    birchwoodGitHub(server);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "GitHub repositories" });
+    server.connections.repositories.set("agt_scout", ["birchwood-labs/site"]);
+    await app.user.click(within(form).getByRole("button", { name: "Save repositories" }));
+    expect(await within(form).findByText(/Meanwhile someone limited this agent/)).toBeDefined();
+    expect(count(server, "setAgentRepositories")).toBe(0);
+    await waitFor(() =>
+      expect(
+        within(form).getByRole("radio", { name: "Only the ones ticked below" }).getAttribute("aria-checked"),
+      ).toBe("true"),
+    );
+    // Choosing no limit is still the person's to do.
+    await app.user.click(within(form).getByRole("radio", { name: /No limit/ }));
+    await app.user.click(within(form).getByRole("button", { name: "Save repositories" }));
+    expect(await screen.findByText("The repositories are saved.")).toBeDefined();
+    expect(server.connections.repositories.get("agt_scout")).toEqual([]);
+  });
+
+  test("a kept repository GitHub no longer lists stays visible", async () => {
+    const server = seeded();
+    birchwoodGitHub(server);
+    server.connections.repositories.set("agt_scout", ["birchwood-labs/print-shop", "old-org/archive"]);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "GitHub repositories" });
+    await app.user.click(within(form).getByRole("checkbox", { name: /birchwood-labs\/site/ }));
+    server.connections.repositories.set("agt_scout", []);
+    await app.user.click(within(form).getByRole("button", { name: "Save repositories" }));
+    expect(
+      await within(form).findByText(/Meanwhile someone let this agent reach every repository/),
+    ).toBeDefined();
+    await waitFor(() =>
+      expect(
+        within(form).getByRole("checkbox", { name: "old-org/archive" }).getAttribute("aria-checked"),
+      ).toBe("true"),
+    );
+  });
+
   test("ticks survive a refresh, and another's change shows in the entries left alone", async () => {
     const server = seeded();
     birchwoodGitHub(server);
@@ -802,6 +881,9 @@ describe("GitHub repositories", () => {
         fireEvent.submit(form);
       });
       expect(form.getAttribute("aria-busy")).toBe("true");
+      // The focus leaves the button while the save is on its way (a click on the page, say).
+      act(() => button.blur());
+      expect(document.activeElement === document.body).toBe(true);
       expect(site.hasAttribute("disabled")).toBe(true);
       held.release();
       expect(await screen.findByText("The repositories are saved.")).toBeDefined();
@@ -916,6 +998,9 @@ describe("the fake server's source rules, as the server's", () => {
   test("a hidden column needs its table, and the lists have the server's caps", async () => {
     const { client } = admin();
     expect(await statusOf(database(client, { level: "read", policy: { maskedColumns: ["ssn"] } }))).toBe(
+      "400 validation",
+    );
+    expect(await statusOf(database(client, { level: "read", policy: { tables: ["not a table"] } }))).toBe(
       "400 validation",
     );
     const many = Array.from({ length: 501 }, (_, i) => `public.t${i}`);

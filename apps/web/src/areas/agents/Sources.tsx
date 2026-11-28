@@ -34,7 +34,7 @@ import {
   SelectItem,
   Textarea,
 } from "@vanr/ui";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { useErrorMessage } from "../../app/screens.tsx";
 import { useMessages } from "../../i18n/react.tsx";
 import { useForgetOnLoss, useOneChange } from "../control/connections/shared.tsx";
@@ -485,7 +485,11 @@ function Databases({ agent, workspaceId, rights }: Props) {
  */
 const unset = (link: AgentDatabase | undefined) =>
   link === undefined ||
-  (link.level === "none" && link.policy.tables.length === 0 && link.policy.maskedColumns.length === 0);
+  (link.level === "none" &&
+    link.policy.tables.length === 0 &&
+    link.policy.maskedColumns.length === 0 &&
+    link.policy.queriesPerDay === 200 &&
+    link.policy.timeoutSeconds === 30);
 
 /** A database link's settings as its form shows them (for an unset one, the server's first-time defaults). */
 const databaseFields = (saved: AgentDatabase | undefined, connection: DatabaseConnection) => {
@@ -792,17 +796,35 @@ function RepositoryForm({
   const scope = form.shown.scope;
   const picked = useToggles(savedScope === "some" ? saved : []);
   const chosen = picked.shown;
-  const [notice, setNotice] = useState<"keepOne" | "becameAll" | null>(null);
+  const [notice, setNotice] = useState<"keepOne" | "becameAll" | "becameSome" | null>(null);
   const save = useApiMutation("setAgentRepositories", {
     invalidates: () => [{ method: "listAgentRepositories" as const, args: { workspaceId, agentId } }],
   });
   const known = new Set(
     accounts.flatMap((account) => [`${account.login}/*`, ...account.repositories.map((r) => r.fullName)]),
   );
-  // Saved entries GitHub no longer lists stay visible, so a save never drops them unseen.
-  const elsewhere = saved.filter((entry) => !known.has(entry));
+  // Entries GitHub no longer lists (saved, or kept from the person's ticks) stay visible, so a save never
+  // sends or drops them unseen.
+  const elsewhere = [...new Set([...saved, ...(scope === "some" ? chosen : [])])].filter(
+    (entry) => !known.has(entry),
+  );
   const locked = !edit || change.busy;
   const limited = scope === "some";
+  // "No limit" set by someone else while the person has ticks on screen: their ticks stay, as their own
+  // choice, with a word on what changed; nothing reaches every repository without them choosing it.
+  const pending = picked.changed || form.picks.scope !== undefined;
+  const before = useRef({ savedScope, limited, pending, chosen });
+  useEffect(() => {
+    const was = before.current;
+    if (was.savedScope === "some" && savedScope === "all" && was.limited && was.pending) {
+      form.keep("scope", "some");
+      picked.keep(was.chosen);
+      setNotice("becameAll");
+    }
+  });
+  useEffect(() => {
+    before.current = { savedScope, limited, pending, chosen };
+  });
   const tooMany = limited && chosen.size > POLICY.repositories;
   const empty = limited && chosen.size === 0;
   const toggle = (entry: string, on: boolean) => {
@@ -830,6 +852,13 @@ function RepositoryForm({
       try {
         const fresh = await client.call("listAgentRepositories", { workspaceId, agentId });
         let repositories: string[] = [];
+        if (!limited && form.picks.scope !== "all" && scopeOf(fresh) === "some") {
+          // The form showed no limit only because that was saved; someone has limited it since. Taking
+          // their limit away needs the person to choose "no limit" themselves.
+          setNotice("becameSome");
+          await failure.reload();
+          return;
+        }
         if (limited) {
           // Someone set "no limit" meanwhile: the person's ticks stay on screen as their own choice, and
           // nothing is sent until they save again or pick "no limit" too.
@@ -905,8 +934,14 @@ function RepositoryForm({
         </fieldset>
       )}
       {(notice !== null || empty) && (
-        <Callout tone={notice === "becameAll" ? "warning" : "info"} role="status">
-          {t(notice === "becameAll" ? "repo.becameAll" : "repo.keepOne")}
+        <Callout tone={notice === "becameAll" || notice === "becameSome" ? "warning" : "info"} role="status">
+          {t(
+            notice === "becameAll"
+              ? "repo.becameAll"
+              : notice === "becameSome"
+                ? "repo.becameSome"
+                : "repo.keepOne",
+          )}
         </Callout>
       )}
       {tooMany && (

@@ -343,11 +343,15 @@ export class FakeConnections {
         const asked = (
           typeof params.policy === "object" && params.policy !== null ? params.policy : {}
         ) as Partial<T.DatabasePolicy>;
-        // As the server's databasePolicyInput: up to 500 tables, and a hidden column is `table.column` or
-        // `schema.table.column`, up to 1000 of them.
+        // As the server's databasePolicyInput: up to 500 tables named `table` or `schema.table`, and a
+        // hidden column is `table.column` or `schema.table.column`, up to 1000 of them.
         const column = /^[^.\s]+(?:\.[^.\s]+){1,2}$/;
+        const relation = /^[^.\s]+(?:\.[^.\s]+)?$/;
         if (
-          (asked.tables !== undefined && (!Array.isArray(asked.tables) || asked.tables.length > 500)) ||
+          (asked.tables !== undefined &&
+            (!Array.isArray(asked.tables) ||
+              asked.tables.length > 500 ||
+              !asked.tables.every((each) => typeof each === "string" && relation.test(each)))) ||
           (asked.maskedColumns !== undefined &&
             (!Array.isArray(asked.maskedColumns) ||
               asked.maskedColumns.length > 1000 ||

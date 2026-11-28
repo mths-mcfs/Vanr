@@ -791,4 +791,6 @@ export default {
     "Keep at least one repository ticked. To take GitHub away from this agent, set GitHub to Nothing under What it reaches.",
   "repo.becameAll":
     "Meanwhile someone let this agent reach every repository. Your ticks are still below: save to limit it to them, or choose No limit.",
+  "repo.becameSome":
+    "Meanwhile someone limited this agent to the repositories ticked below. Nothing was saved: check the list, or choose No limit and save again.",
 } as const satisfies Catalog;

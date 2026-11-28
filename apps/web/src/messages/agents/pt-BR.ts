@@ -780,4 +780,6 @@ export default {
     "Deixe pelo menos um repositório marcado. Para tirar o GitHub deste agente, ponha o GitHub em Nada em O que alcança.",
   "repo.becameAll":
     "Nesse meio-tempo, alguém liberou todos os repositórios para este agente. Suas marcações continuam abaixo: salve para limitar a elas, ou escolha Sem limite.",
+  "repo.becameSome":
+    "Nesse meio-tempo, alguém limitou este agente aos repositórios marcados abaixo. Nada foi salvo: confira a lista, ou escolha Sem limite e salve de novo.",
 } as const satisfies TranslationOf<typeof en>;
