@@ -265,6 +265,135 @@
     color: var(--vr-fg-subtle);
   }
 
+  /* Usage: the month's figure, its meter, and the rows by kind and by agent. */
+  .spend {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-5);
+  }
+
+  .spend__total {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-2);
+    padding: var(--vr-space-5);
+  }
+
+  .spend__since {
+    margin: 0;
+    font-size: var(--vr-text-sm);
+    color: var(--vr-fg-muted);
+  }
+
+  .spend__figure {
+    margin: 0;
+  }
+
+  .spend__amount {
+    font-family: var(--vr-font-title);
+    font-size: var(--vr-text-2xl);
+    line-height: var(--vr-text-2xl-lh);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .spend__of {
+    color: var(--vr-fg-muted);
+  }
+
+  .spend__why {
+    max-width: 40rem;
+  }
+
+  .spend__part {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-2);
+  }
+
+  .spend-meter {
+    display: block;
+    inline-size: 100%;
+    block-size: 6px;
+    appearance: none;
+    border: 0;
+    border-radius: var(--vr-radius-1);
+    background: var(--vr-bg-sunken);
+  }
+
+  .spend-meter::-webkit-meter-bar {
+    border: 0;
+    border-radius: var(--vr-radius-1);
+    background: var(--vr-bg-sunken);
+  }
+
+  .spend-meter::-webkit-meter-optimum-value,
+  .spend-meter::-webkit-meter-suboptimum-value,
+  .spend-meter::-webkit-meter-even-less-good-value {
+    border-radius: var(--vr-radius-1);
+    background: var(--vr-success-fg);
+  }
+
+  .spend-meter::-moz-meter-bar {
+    border-radius: var(--vr-radius-1);
+    background: var(--vr-success-fg);
+  }
+
+  .spend-meter[data-tone="near"]::-webkit-meter-optimum-value {
+    background: var(--vr-warning-fg);
+  }
+
+  .spend-meter[data-tone="near"]::-moz-meter-bar {
+    background: var(--vr-warning-fg);
+  }
+
+  .spend-meter[data-tone="over"]::-webkit-meter-optimum-value {
+    background: var(--vr-danger-fg);
+  }
+
+  .spend-meter[data-tone="over"]::-moz-meter-bar {
+    background: var(--vr-danger-fg);
+  }
+
+  .spend-list {
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+    padding: 0;
+    border-top: var(--vr-border) solid var(--vr-line);
+    list-style: none;
+  }
+
+  .spend-list__row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: baseline;
+    gap: var(--vr-space-1) var(--vr-space-4);
+    padding-block: var(--vr-space-2);
+    border-bottom: var(--vr-border) solid var(--vr-line);
+  }
+
+  .spend-list__row--agent .spend-meter {
+    grid-column: 1 / -1;
+  }
+
+  .spend-list__name {
+    font-weight: var(--vr-weight-medium);
+  }
+
+  .spend-list__calls {
+    font-size: var(--vr-text-sm);
+    color: var(--vr-fg-muted);
+  }
+
+  .spend-list__amount {
+    font-variant-numeric: tabular-nums;
+    text-align: end;
+  }
+
+  .spend__default {
+    max-width: 24rem;
+  }
+
   @media (max-width: 40rem) {
     .wire-row {
       grid-template-columns: minmax(0, 1fr);

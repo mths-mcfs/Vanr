@@ -275,6 +275,58 @@ describe("the workspace's month budget", () => {
   );
 
   test(
+    "the usage report's budget is the cap's own: an anonymous debate counts, an old index row doesn't",
+    async () => {
+      const { ana, me, workspaceId } = await team(0.1);
+      // Three agents on the default: a $0.30 cap.
+      const first = await seedAgent(server, workspaceId, ana, `cap${n}x1`);
+      for (const k of [2, 3]) await seedAgent(server, workspaceId, ana, `cap${n}x${k}`);
+      const runOf = (id: string, costUsd: number, debateId: string | null) =>
+        server.deps.db.insert(schema.runs).values({
+          debateId,
+          id,
+          workspaceId,
+          agentId: first.id,
+          status: "done",
+          model: "claude-haiku-5-5",
+          costUsd,
+          createdAt: server.deps.now(),
+        });
+      const debateId = `deb_cap${n}`;
+      await server.deps.db.insert(schema.debates).values({
+        id: debateId,
+        workspaceId,
+        title: "Anon",
+        goal: "g",
+        createdBy: { type: "person", id: me.userId },
+      });
+      await runOf(`run_cap_anon${n}`, 0.2, debateId);
+      // $3 of an old embedding row, written as search with nobody behind it.
+      await server.deps.ledger.record(
+        {
+          workspaceId,
+          agentId: null,
+          userId: null,
+          runId: null,
+          source: "search",
+          model: "voyage-4",
+          usage: { inputTokens: 50_000_000, cachedTokens: 0, cacheWriteTokens: 0, outputTokens: 0 },
+          at: server.deps.now(),
+        },
+        [],
+      );
+      const budget = async () => (await call(ana, "GET", `${ws(workspaceId)}/usage/report`)).body.budget;
+      expect(await budget()).toEqual({ capUsd: 0.30000000000000004, countedUsd: 0.2, exhausted: false });
+      // Ten cents more reaches the cap to the micro: the report says so, and the next call is refused.
+      await runOf(`run_cap_last${n}`, 0.1, null);
+      const spent = await budget();
+      expect([spent.countedUsd, spent.exhausted]).toEqual([0.3, true]);
+      await expect(askSources(paid, me, "where is the onboarding checklist?")).rejects.toMatchObject(refused);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "the usage report shows what they cost to whoever has view_usage",
     async () => {
       const { ana, me, workspaceId } = await team(20);

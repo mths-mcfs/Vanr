@@ -317,7 +317,7 @@ export function registerWorkspaces(app: Hono<AppEnv>) {
       c,
       z.object({ since: z.iso.datetime({ offset: true }).or(z.iso.date()).optional() }),
     );
-    const { db, now } = c.get("deps");
+    const { db, now, ledger } = c.get("deps");
     const from = since ? new Date(since) : monthStart(now());
     if (Number.isNaN(from.getTime())) throw badRequest("Invalid since");
     const { workspaceId } = requireMember(c);
@@ -332,7 +332,16 @@ export function registerWorkspaces(app: Hono<AppEnv>) {
     const calls = [...usage.values()].reduce((sum, u) => sum + u.calls, 0);
     // The agents' runs, then what the workspace paid with no agent (search, wiki checks, agent drafts) by source.
     const unowned = await workspaceCallsSince(db, workspaceId, from);
+    // The month's cap, read as `reserve` reads it: in micros, refused once the spend reaches the limit.
+    const scope = await workspaceBudgetScope(db, workspaceId);
+    const counted = await ledger.spent(scope, now());
+    const micros = (usd: number) => Math.round(usd * 1_000_000);
     const report: UsageReport = {
+      budget: {
+        capUsd: scope.limitUsd,
+        countedUsd: counted,
+        exhausted: micros(counted) >= micros(scope.limitUsd),
+      },
       spendUsd: runsUsd + unowned.reduce((sum, k) => sum + k.costUsd, 0),
       since: from.toISOString(),
       perKind: [...(calls > 0 ? [{ kind: "model", calls, costUsd: runsUsd }] : []), ...unowned],

@@ -9,6 +9,7 @@ import { ApprovalsScreen } from "./approvals/Approvals.tsx";
 import { AccessSection } from "./connections/AccessMatrix.tsx";
 import { ConnectorsSection } from "./connections/Connectors.tsx";
 import { DataSourcesSection } from "./connections/DataSources.tsx";
+import { UsageSection } from "./connections/Usage.tsx";
 import { ProposalsScreen } from "./proposals/Proposals.tsx";
 
 export const screens: AreaModule<"control">["screens"] = {
@@ -20,4 +21,5 @@ export const settings: AreaModule<"control">["settings"] = {
   connectors: ConnectorsSection,
   "data-sources": DataSourcesSection,
   access: AccessSection,
+  usage: UsageSection,
 };

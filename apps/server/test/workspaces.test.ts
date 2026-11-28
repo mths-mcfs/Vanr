@@ -137,7 +137,13 @@ describe("workspaces", () => {
     // The overview counts the viewer's own approval queue: no cache keeps it.
     expect((await browser.fetch(`${ws(id)}/overview`)).headers.get("cache-control")).toBe("no-store");
     const report = (await call(browser, "GET", `${ws(id)}/usage/report?since=2026-10-01`)).body;
-    expect(report).toEqual({ spendUsd: 0, since: "2026-10-01T00:00:00.000Z", perKind: [], agents: [] });
+    expect(report).toEqual({
+      budget: { capUsd: 35, countedUsd: 0, exhausted: false },
+      spendUsd: 0,
+      since: "2026-10-01T00:00:00.000Z",
+      perKind: [],
+      agents: [],
+    });
   });
 
   test("logo and avatar: the image is checked by its content and served only to members", async () => {
@@ -931,6 +937,7 @@ describe("workspace route rules", () => {
       });
       const report = (await call(bento.browser, "GET", `${ws(id)}/usage/report`)).body;
       expect(report).toEqual({
+        budget: { capUsd: 30, countedUsd: 5, exhausted: false },
         spendUsd: 5,
         since: "2026-11-01T00:00:00.000Z",
         perKind: [{ kind: "model", calls: 2, costUsd: 5 }],

@@ -116,6 +116,11 @@ export interface UsageReport {
     costUsd: number;
     name: string;
   }[];
+  /**
+   * The month's budget as the cap counts it, whatever `since` asks: its limit, the spend it counts (an anonymous
+   * debate's runs in, the platform's embeddings out) and whether the next call would be refused.
+   */
+  budget: { capUsd: number; countedUsd: number; exhausted: boolean };
   perKind: { calls: number; costUsd: number; kind: string }[];
   since: string;
   spendUsd: number;
