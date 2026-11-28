@@ -211,7 +211,7 @@ describe("the fake's rule for more connector scope, as the server's", () => {
     const create = server.connections.operations().createConnector;
     if (create === undefined) throw new Error("the fake has createConnector");
     const made = create(
-      { workspaceId: WORKSPACE, connector: "stripe", apiKey: "sk_123456789" },
+      { workspaceId: WORKSPACE, connector: "stripe", apiKey: "12345678" },
       server.sessionFor(JONAS.userId),
     ) as { status: number; body: { id: string } };
     const keyed = server.agentAccess.shared.find((each) => each.id === made.body.id);
