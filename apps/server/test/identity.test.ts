@@ -235,6 +235,21 @@ describe("the agent's own account", () => {
   );
 
   test(
+    "an OAuth started before the agent is archived doesn't turn the account on when it comes back",
+    async () => {
+      const t = await team();
+      const started = await ok(connectOwn(t, t.ana, t.lia.id, { connector: "linear", nextPath: "/" }));
+      if (started.status !== "oauth") throw new Error("expected oauth");
+      expect(await status(call(t.ana, "DELETE", `${t.w}/agents/${t.lia.id}`))).toBe(204);
+      const res = await comeBack(t.ana, started.consentUrl);
+      expect(res.headers.get("location")).toContain("connector_error=gone");
+      const own = await server.deps.db.select().from(connections).where(eq(connections.agentId, t.lia.id));
+      expect(own).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "two connects of the same service at once leave one own account",
     async () => {
       const t = await team();

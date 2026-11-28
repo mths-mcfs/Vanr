@@ -652,6 +652,14 @@ export async function connectCustom(
   return { status: "server", server: toCustomServer(row) };
 }
 
+async function archivedAgent(db: Pick<AppDeps["db"], "select">, agentId: string): Promise<boolean> {
+  const [agent] = await db
+    .select({ archivedAt: agents.archivedAt })
+    .from(agents)
+    .where(eq(agents.id, agentId));
+  return !agent || agent.archivedAt !== null;
+}
+
 /**
  * The OAuth callback: checks the issuer, exchanges the code, turns the connection on and lists the tools.
  * Returns where to go. The `iss` is checked before everything, including showing the `error` (RFC 9207 §2.4):
@@ -683,6 +691,11 @@ export async function finishOAuth(
       .where(
         and(eq(connections.id, row.id), eq(connections.status, "pending"), isNull(connections.revokedAt)),
       );
+  // An agent's own account doesn't come alive once the agent is archived (the archive leaves a pending row).
+  if (row.agentId && (await archivedAgent(deps.db, row.agentId))) {
+    await dropPending();
+    return back("connector_error=gone");
+  }
   if (s.issuer !== undefined) {
     try {
       checkIssuer({ iss: query.iss, expected: s.issuer, supported: s.issParameterSupported === true });
@@ -720,6 +733,7 @@ export async function finishOAuth(
     const active = await deps.db.transaction(async (tx) => {
       const [locked] = await tx.select().from(connections).where(eq(connections.id, row.id)).for("update");
       if (!locked || locked.revokedAt) return null;
+      if (locked.agentId && (await archivedAgent(tx, locked.agentId))) return null;
       if (locked.secret !== s.credential) {
         const started = s.credential ? openSecret(deps, s.credential) : null;
         const current = locked.secret ? openSecret(deps, locked.secret) : null;
