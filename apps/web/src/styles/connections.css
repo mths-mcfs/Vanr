@@ -138,6 +138,45 @@
     border-top: var(--vr-border) solid var(--vr-line);
   }
 
+  .wire-way__start {
+    justify-content: flex-start;
+  }
+
+  /* Fields that belong together side by side: a host and its port, a provider and a name. */
+  .wire-pair {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--vr-space-3) var(--vr-space-4);
+  }
+
+  /* What agents may do with each action of a mailbox or a database. */
+  .wire-rules {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-2);
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+
+  .wire-rules__list {
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+    padding: 0;
+    border-top: var(--vr-border) solid var(--vr-line);
+    list-style: none;
+  }
+
+  .wire-rules__row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 14rem;
+    align-items: center;
+    gap: var(--vr-space-3);
+    padding-block: var(--vr-space-2);
+    border-bottom: var(--vr-border) solid var(--vr-line);
+  }
+
   /* A server's tools under review: what each one is, then its name for people and what agents may do. */
   .tool-review {
     display: flex;
@@ -186,7 +225,9 @@
       justify-content: flex-start;
     }
 
-    .tool-review__row {
+    .tool-review__row,
+    .wire-pair,
+    .wire-rules__row {
       grid-template-columns: minmax(0, 1fr);
     }
   }

@@ -18,6 +18,7 @@ import {
   useForgetOnLoss,
   useForgetReadOnLoss,
   useLatch,
+  useReturnFocus,
 } from "./shared.tsx";
 
 const READS = ["getGithubApp", "listGithubRepositories"] as const;
@@ -27,6 +28,7 @@ export function GitHubApp({ workspaceId }: { workspaceId: string }) {
   const common = useMessages("common");
   const outcome = useOutcome();
   const latch = useLatch();
+  const focus = useReturnFocus();
   const forget = useForgetOnLoss(workspaceId, READS);
   const app = useApiQuery("getGithubApp", { workspaceId });
   const installed = (app.data?.installations.length ?? 0) > 0;
@@ -78,7 +80,10 @@ export function GitHubApp({ workspaceId }: { workspaceId: string }) {
                   size="sm"
                   variant="ghost"
                   aria-label={t("gh.removeNamed", { account: each.accountUsername })}
-                  onClick={() => setRemoving(each)}
+                  onClick={() => {
+                    focus.remember();
+                    setRemoving(each);
+                  }}
                 >
                   {t("gh.remove")}
                 </Button>
@@ -127,6 +132,7 @@ export function GitHubApp({ workspaceId }: { workspaceId: string }) {
         </p>
       )}
       <ConfirmDialog
+        returnFocus={focus.back}
         open={removing !== null}
         onOpenChange={(next) => {
           if (!next && !remove.isPending) setRemoving(null);

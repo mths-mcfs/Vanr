@@ -68,3 +68,36 @@ test("the connectors section, in Portuguese", async () => {
   const github = screen.getByRole("region", { name: "GitHub" });
   expect(await within(github).findByText("Nenhuma conta do GitHub vinculada")).toBeDefined();
 });
+
+test("the data sources section, in Portuguese", async () => {
+  const app = await renderApp({
+    path: "/workspace/workspace_birchwood/settings/data-sources?mail_error=denied",
+    signedInAs: "usr_jonas",
+    languages,
+  });
+  expect(await screen.findByText("O provedor não liberou o acesso à caixa.")).toBeDefined();
+  const boxes = await screen.findByRole("region", { name: "Caixas de e-mail" });
+  expect(await within(boxes).findByText("Nenhuma caixa de e-mail ainda")).toBeDefined();
+  const databases = screen.getByRole("region", { name: "Bancos de dados" });
+  await app.user.click(within(databases).getByRole("button", { name: "Conectar banco" }));
+  const form = await screen.findByRole("form", { name: "Conectar banco de dados" });
+  expect(within(form).getByRole("combobox", { name: "Criptografia" }).textContent).toBe("Criptografado");
+  await app.user.click(within(form).getByRole("radio", { name: /Campos separados/ }));
+  const port = within(form).getByLabelText(/^Porta/);
+  await app.user.clear(port);
+  await app.user.type(port, "70000");
+  expect(within(form).getByText("Uma porta é um número inteiro de 1 a 65535.")).toBeDefined();
+  await app.user.clear(port);
+  await app.user.type(port, "5432");
+  await app.user.type(within(form).getByRole("textbox", { name: /^Host/ }), "db.birchwood.example");
+  await app.user.type(within(form).getByLabelText(/^Banco$/), "loja");
+  await app.user.type(within(form).getByLabelText(/^Usuário/), "leitor");
+  await app.user.type(within(form).getByLabelText(/^Senha/), "senha-1");
+  await app.user.click(within(form).getByRole("button", { name: "Conectar" }));
+  expect(await screen.findByText("loja @ db.birchwood.example está conectado.")).toBeDefined();
+  const row = within(await within(databases).findByRole("list", { name: "Bancos de dados" })).getByRole(
+    "listitem",
+  );
+  expect(within(row).getByText("Supabase: leitor em db.birchwood.example, banco loja")).toBeDefined();
+  expect(within(row).getByText("Nenhum agente")).toBeDefined();
+});

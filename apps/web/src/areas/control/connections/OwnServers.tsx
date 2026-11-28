@@ -35,6 +35,7 @@ import {
   useForgetOnLoss,
   useForgetReadOnLoss,
   useLatch,
+  useReturnFocus,
 } from "./shared.tsx";
 
 // The server's limits (routes/connectors.ts, customInput and toolsInput).
@@ -56,6 +57,7 @@ export function OwnServers({
   const t = useMessages("control");
   const outcome = useOutcome();
   const latch = useLatch();
+  const focus = useReturnFocus(t("mcp.title"));
   const forget = useForgetOnLoss(workspaceId, READS);
   const servers = useApiQuery("getConnectorCustom", { workspaceId });
   const [adding, setAdding] = useState(false);
@@ -95,7 +97,10 @@ export function OwnServers({
                 <Button
                   size="sm"
                   variant={waiting > 0 ? "primary" : "secondary"}
-                  onClick={() => onReview(server.id)}
+                  onClick={() => {
+                    focus.remember();
+                    onReview(server.id);
+                  }}
                 >
                   {t("mcp.review")}
                 </Button>
@@ -124,7 +129,10 @@ export function OwnServers({
                   size="sm"
                   variant="ghost"
                   aria-label={t("mcp.removeNamed", { name: server.label })}
-                  onClick={() => setRemoving(server)}
+                  onClick={() => {
+                    focus.remember();
+                    setRemoving(server);
+                  }}
                 >
                   {t("mcp.remove")}
                 </Button>
@@ -140,7 +148,13 @@ export function OwnServers({
       title={t("mcp.title")}
       lead={t("mcp.lead")}
       action={
-        <Button icon={<Icon icon={Plus} />} onClick={() => setAdding(true)}>
+        <Button
+          icon={<Icon icon={Plus} />}
+          onClick={() => {
+            focus.remember();
+            setAdding(true);
+          }}
+        >
           {t("mcp.add")}
         </Button>
       }
@@ -151,6 +165,7 @@ export function OwnServers({
           key={workspaceId}
           workspaceId={workspaceId}
           onClose={() => setAdding(false)}
+          onCloseAutoFocus={focus.onCloseAutoFocus}
           onAdded={(server) => {
             setAdding(false);
             onReview(server.id);
@@ -165,9 +180,11 @@ export function OwnServers({
           workspaceId={workspaceId}
           server={open}
           onClose={() => onReview(null)}
+          onCloseAutoFocus={focus.onCloseAutoFocus}
         />
       )}
       <ConfirmDialog
+        returnFocus={focus.back}
         open={removing !== null}
         onOpenChange={(next) => {
           if (!next && !remove.isPending) setRemoving(null);
@@ -204,16 +221,20 @@ export function OwnServers({
 function AddServer({
   workspaceId,
   onClose,
+  onCloseAutoFocus,
   onAdded,
 }: {
   workspaceId: string;
   onClose: () => void;
+  onCloseAutoFocus: (event: Event) => void;
   onAdded: (server: CustomServer) => void;
 }) {
   const t = useMessages("control");
   const common = useMessages("common");
   const describe = useErrorMessage("control");
+  const outcome = useOutcome();
   const latch = useLatch();
+  const forget = useForgetOnLoss(workspaceId, READS);
   const [address, setAddress] = useState("");
   const [name, setName] = useState("");
   const [key, setKey] = useState("");
@@ -223,6 +244,14 @@ function AddServer({
     invalidates: () => [{ method: "getConnectorCustom" as const, args: { workspaceId } }],
   });
   const ready = address.trim() !== "" && (!askedForKey || key.trim() !== "");
+  // Access lost while the dialog was open closes it and says why, as every other action here does.
+  const lost = (error: unknown) => {
+    forget(error);
+    if (isLost(error)) {
+      outcome.failed(error);
+      onClose();
+    }
+  };
   return (
     <Dialog
       open
@@ -231,6 +260,7 @@ function AddServer({
       }}
     >
       <DialogContent
+        onCloseAutoFocus={onCloseAutoFocus}
         size="md"
         closeLabel={common("action.close")}
         title={t("mcp.addTitle")}
@@ -267,7 +297,7 @@ function AddServer({
                   setKey("");
                   add.reset();
                   onAdded(answer.server);
-                }),
+                }, lost),
             );
           }}
         >
@@ -310,7 +340,7 @@ function AddServer({
               onChange={(event) => setKey(event.target.value)}
             />
           </Field>
-          {add.isError && (
+          {add.isError && !isLost(add.error) && (
             <Callout tone="danger" role="alert">
               {describe(add.error)}
             </Callout>
@@ -336,10 +366,12 @@ function ReviewTools({
   workspaceId,
   server,
   onClose,
+  onCloseAutoFocus,
 }: {
   workspaceId: string;
   server: CustomServer;
   onClose: () => void;
+  onCloseAutoFocus: (event: Event) => void;
 }) {
   const t = useMessages("control");
   const common = useMessages("common");
@@ -365,6 +397,7 @@ function ReviewTools({
       }}
     >
       <DialogContent
+        onCloseAutoFocus={onCloseAutoFocus}
         size="lg"
         closeLabel={common("action.close")}
         title={t("mcp.reviewTitle", { name: server.label })}

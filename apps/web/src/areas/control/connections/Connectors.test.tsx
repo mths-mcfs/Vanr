@@ -169,7 +169,7 @@ describe("services", () => {
     expect(linear.map((item) => item.getAttribute("data-state"))).toEqual(["reauth_required", "active"]);
     // With a working connection beside it, the refused one only offers to be disconnected.
     expect(within(list).queryByRole("button", { name: "Connect again" }) === null).toBe(true);
-    await app.user.click(within(list).getByRole("button", { name: "Disconnect Linear (old@birch)" }));
+    await app.user.click(within(list).getByRole("button", { name: "Disconnect Linear (old@birch, 1)" }));
     const confirm = await screen.findByRole("alertdialog", { name: "Disconnect Linear?" });
     await app.user.click(within(confirm).getByRole("button", { name: "Disconnect" }));
     expect(await toast("Linear is disconnected.")).toBeDefined();
@@ -223,6 +223,123 @@ describe("services", () => {
     expect(
       await within(row(await services(), "Stripe")).findByRole("button", { name: "Connect" }),
     ).toBeDefined();
+  });
+
+  test("closing a dialog gives the focus back to what opened it", async () => {
+    const server = newServer();
+    server.agentAccess.shared.push(connection("stripe"));
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const disconnect = within(row(await services(), "Stripe")).getByRole("button", {
+      name: "Disconnect Stripe",
+    });
+    await app.user.click(disconnect);
+    await screen.findByRole("alertdialog", { name: "Disconnect Stripe?" });
+    await app.user.keyboard("{Escape}");
+    await act(async () => {});
+    expect(document.activeElement === disconnect).toBe(true);
+  });
+
+  test("once the row it came from is gone, the focus goes to the block's heading", async () => {
+    const server = newServer();
+    server.agentAccess.shared.push(connection("stripe"));
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    await app.user.click(
+      within(row(await services(), "Stripe")).getByRole("button", { name: "Disconnect Stripe" }),
+    );
+    const confirm = await screen.findByRole("alertdialog", { name: "Disconnect Stripe?" });
+    await app.user.click(within(confirm).getByRole("button", { name: "Disconnect" }));
+    expect(await toast("Stripe is disconnected.")).toBeDefined();
+    await act(async () => {});
+    expect(document.activeElement?.textContent).toBe("Services");
+  });
+
+  test("a sign-in link naming a service the catalog doesn't have announces nothing", async () => {
+    const app = await renderApp({ path: `${PATH}?connected=your-bank-account`, signedInAs: "usr_jonas" });
+    expect(await toast("A sign-in came back. The list below shows what is connected now.")).toBeDefined();
+    expect(screen.queryByText(/your-bank-account/) === null).toBe(true);
+    expect(app.address()).toBe(BACK);
+  });
+
+  test("a sign-in link naming a service that is not available announces nothing", async () => {
+    const server = newServer();
+    const catalog = (await import("../../../../dev/fake-agent-access.ts")).FAKE_CATALOG;
+    const stripe = catalog.connectors.find((each) => each.id === "stripe");
+    if (stripe === undefined) throw new Error("no Stripe in the fake catalog");
+    stripe.available = false;
+    try {
+      await renderApp({ path: `${PATH}?connected=stripe`, signedInAs: "usr_jonas", server });
+      expect(await toast("A sign-in came back. The list below shows what is connected now.")).toBeDefined();
+      expect(screen.queryByText("Stripe is connected.") === null).toBe(true);
+    } finally {
+      stripe.available = true;
+    }
+  });
+
+  test("a sign-in link naming an MCP server the workspace doesn't have announces nothing", async () => {
+    await renderApp({ path: `${PATH}?connected=custom:con_nowhere`, signedInAs: "usr_jonas" });
+    expect(await toast("A sign-in came back. The list below shows what is connected now.")).toBeDefined();
+    expect(screen.queryByText("The server is connected. Choose what its tools may do.") === null).toBe(true);
+    expect(screen.queryByRole("dialog") === null).toBe(true);
+  });
+
+  test("two key connections of one service are told apart by when they were made", async () => {
+    const server = newServer();
+    server.agentAccess.shared.push(
+      connection("stripe", { id: "con_a", label: "Stripe", createdAt: "2026-11-01T10:00:00.000Z" }),
+      connection("stripe", { id: "con_b", label: "Stripe", createdAt: "2026-11-10T15:30:00.000Z" }),
+    );
+    await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const list = await services();
+    const names = within(list)
+      .getAllByRole("button", { name: /^Disconnect Stripe/ })
+      .map((button) => button.getAttribute("aria-label"));
+    expect(names.length).toBe(2);
+    expect(new Set(names).size).toBe(2);
+    expect(names.every((name) => name?.startsWith("Disconnect Stripe (Connected Nov"))).toBe(true);
+  });
+
+  test("two connections made in the same minute still get different names", async () => {
+    const server = newServer();
+    server.agentAccess.shared.push(
+      connection("stripe", { id: "con_a", label: "Stripe", createdAt: "2026-11-10T15:30:01.000Z" }),
+      connection("stripe", { id: "con_b", label: "Stripe", createdAt: "2026-11-10T15:30:45.000Z" }),
+    );
+    await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const names = within(await services())
+      .getAllByRole("button", { name: /^Disconnect Stripe/ })
+      .map((button) => button.getAttribute("aria-label"));
+    expect(names.length).toBe(2);
+    expect(new Set(names).size).toBe(2);
+  });
+
+  test("an account already named like a numbered one never shares its button's name", async () => {
+    const server = newServer();
+    server.agentAccess.shared.push(
+      connection("stripe", { id: "con_a", accountDisplayName: "Team" }),
+      connection("stripe", { id: "con_b", accountDisplayName: "Team, 1" }),
+      connection("stripe", { id: "con_c", accountDisplayName: "Team" }),
+    );
+    await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const names = within(await services())
+      .getAllByRole("button", { name: /^Disconnect Stripe/ })
+      .map((button) => button.getAttribute("aria-label"));
+    expect(names.length).toBe(3);
+    expect(new Set(names).size).toBe(3);
+  });
+
+  test("an account already named like a numbered one never shares its button's name", async () => {
+    const server = newServer();
+    server.agentAccess.shared.push(
+      connection("stripe", { id: "con_a", accountDisplayName: "Team" }),
+      connection("stripe", { id: "con_b", accountDisplayName: "Team, 1" }),
+      connection("stripe", { id: "con_c", accountDisplayName: "Team" }),
+    );
+    await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const names = within(await services())
+      .getAllByRole("button", { name: /^Disconnect Stripe/ })
+      .map((button) => button.getAttribute("aria-label"));
+    expect(names.length).toBe(3);
+    expect(new Set(names).size).toBe(3);
   });
 
   test("a list that fails to load offers a retry", async () => {
@@ -333,6 +450,21 @@ describe("own MCP servers", () => {
     expect(screen.queryByRole("dialog", { name: "Tools of Billing" }) === null).toBe(true);
   });
 
+  test("access lost while adding a server closes the dialog and says so", async () => {
+    const server = newServer();
+    server.force("createConnectorCustom", { kind: "error", status: 403, code: "forbidden" });
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const opener = within(await servers()).getByRole("button", { name: "Add a server" });
+    await app.user.click(opener);
+    const add = await screen.findByRole("dialog", { name: "Add an MCP server" });
+    await app.user.type(within(add).getByLabelText("Address"), "https://billing.example/mcp");
+    await app.user.click(within(add).getByRole("button", { name: "Add server" }));
+    expect(await toast("You don't have permission to do that.")).toBeDefined();
+    expect(screen.queryByRole("dialog", { name: "Add an MCP server" }) === null).toBe(true);
+    await act(async () => {});
+    expect(document.activeElement === opener).toBe(true);
+  });
+
   test("a server that wants a sign-in leaves for it", async () => {
     const server = newServer();
     server.connections.oauthServers.add("https://sso.example/mcp");
@@ -404,6 +536,10 @@ describe("own MCP servers", () => {
     const review = await screen.findByRole("dialog", { name: "Tools of Helpdesk" });
     expect(within(review).getByText("The server lists no tools. Refresh it once it has some.")).toBeDefined();
     expect(app.address()).toBe(BACK);
+    // Nothing on the page opened it: closing it leaves the focus on its block's heading.
+    await app.user.keyboard("{Escape}");
+    await act(async () => {});
+    expect(document.activeElement?.textContent).toBe("Your MCP servers");
   });
 });
 

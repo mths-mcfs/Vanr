@@ -24,6 +24,14 @@ export const KEY_MIN = 8;
 export const KEY_MAX = 2000;
 export const ADDRESS_MAX = 500;
 
+/** A port as typed: a whole number from 1 to 65535, or null. */
+export function portOf(text: string): number | null {
+  const typed = text.trim();
+  if (!/^\d{1,5}$/.test(typed)) return null;
+  const port = Number(typed);
+  return port >= 1 && port <= 65_535 ? port : null;
+}
+
 /** Where a sign-in on another site sends the person back: a section of this workspace's settings. */
 export const comeBackTo = (workspaceId: string, section: SettingsSection) =>
   href("settings", { workspaceId, section });
@@ -49,7 +57,9 @@ export function Block({
     <section className="wire-block" aria-label={title}>
       <header className="wire-block__head">
         <div className="wire-block__title">
-          <h3 className="page__heading">{title}</h3>
+          <h3 className="page__heading" tabIndex={-1}>
+            {title}
+          </h3>
           {lead !== undefined && <p className="page__muted">{lead}</p>}
         </div>
         {action}
@@ -142,4 +152,40 @@ export function useForgetReadOnLoss(workspaceId: string, methods: readonly Metho
       });
     }
   }, [lost, client, queryClient, workspaceId, methods]);
+}
+
+/**
+ * The control that opened a dialog gets the focus back when the dialog closes. When it is gone by then
+ * (its row was removed) or can't take it (it is disabled), the heading of its block does, so the
+ * focus never falls back to the page itself.
+ */
+export function useReturnFocus(
+  /** The block's title, whose heading takes the focus when nothing opened the dialog (it opened by itself). */
+  block?: string,
+) {
+  const opener = useRef<HTMLElement | null>(null);
+  const heading = useRef<HTMLElement | null>(null);
+  const remember = useCallback(() => {
+    const active = document.activeElement;
+    opener.current = active instanceof HTMLElement && active !== document.body ? active : null;
+    heading.current = opener.current?.closest(".wire-block")?.querySelector<HTMLElement>("h3") ?? null;
+  }, []);
+  const back = useCallback(() => {
+    const target = opener.current;
+    if (target?.isConnected === true && !target.hasAttribute("disabled")) target.focus();
+    else if (heading.current?.isConnected === true) heading.current.focus();
+    else if (block !== undefined)
+      document
+        .querySelector<HTMLElement>(`section.wire-block[aria-label="${CSS.escape(block)}"] h3`)
+        ?.focus();
+  }, [block]);
+  /** For a dialog's `onCloseAutoFocus`. */
+  const onCloseAutoFocus = useCallback(
+    (event: Event) => {
+      event.preventDefault();
+      back();
+    },
+    [back],
+  );
+  return { remember, back, onCloseAutoFocus };
 }

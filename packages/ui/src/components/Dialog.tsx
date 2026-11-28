@@ -70,6 +70,11 @@ export type ConfirmDialogProps = {
   tone?: "default" | "danger";
   /** Keeps the dialog open with a busy confirm button while the action runs. */
   confirming?: boolean;
+  /**
+   * Where the focus goes when it closes, for a dialog opened without `trigger` (the default sends it
+   * to the element focused before it opened, which may be gone by then).
+   */
+  returnFocus?: () => void;
 };
 
 /** Asks before an action. Escape and the cancel button close it; focus starts on cancel. */
@@ -85,6 +90,7 @@ export function ConfirmDialog({
   onConfirm,
   tone = "default",
   confirming,
+  returnFocus,
 }: ConfirmDialogProps) {
   return (
     <AlertPrimitive.Root
@@ -95,7 +101,16 @@ export function ConfirmDialog({
       {trigger !== undefined && <AlertPrimitive.Trigger asChild>{trigger}</AlertPrimitive.Trigger>}
       <AlertPrimitive.Portal>
         <AlertPrimitive.Overlay className="vr-dialog__overlay" />
-        <AlertPrimitive.Content className="vr-dialog vr-dialog--sm" data-tone={tone}>
+        <AlertPrimitive.Content
+          className="vr-dialog vr-dialog--sm"
+          data-tone={tone}
+          {...(returnFocus !== undefined && {
+            onCloseAutoFocus: (event: Event) => {
+              event.preventDefault();
+              returnFocus();
+            },
+          })}
+        >
           <header className="vr-dialog__header">
             <AlertPrimitive.Title className="vr-dialog__title">{title}</AlertPrimitive.Title>
           </header>
