@@ -1,10 +1,10 @@
 // An agent's mailboxes, databases and repositories, on its Access tab, against the fake server. Scout is
 // Ana's agent in Birchwood; Jonas manages agents there, Íris is a member.
 import { describe, expect, test } from "bun:test";
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import type * as T from "@vanr/contract";
 import type { FakeDatabase, FakeMailAccount } from "../../../dev/fake-connections.ts";
-import { chooseOption, newServer, renderApp } from "../../../test/app.tsx";
+import { chooseOption, newServer, newTestRuntime, renderApp } from "../../../test/app.tsx";
 import { blurOnDisable } from "../../../test/focus.ts";
 
 const WS = "workspace_birchwood";
@@ -72,6 +72,32 @@ const seeded = () => {
   ]);
   return server;
 };
+
+const count = (server: ReturnType<typeof newServer>, method: string) =>
+  server.calls.filter((call) => call.method === method).length;
+const birchwoodGitHub = (server: ReturnType<typeof newServer>) =>
+  server.connections.installations.push({
+    id: "ins_birch",
+    workspaceId: WS,
+    accountUsername: "birchwood-labs",
+    repoScope: "selected",
+    suspended: false,
+    repositories: [
+      { fullName: "birchwood-labs/print-shop", private: true },
+      { fullName: "birchwood-labs/site", private: false },
+    ],
+  });
+const dbLink = (patch: Partial<T.DatabasePolicy> = {}, level: "read" | "none" = "read"): T.AgentDatabase => ({
+  connectionId: "dbc_shop",
+  level,
+  policy: {
+    tables: ["public.customers"],
+    maskedColumns: [],
+    queriesPerDay: 200,
+    timeoutSeconds: 30,
+    ...patch,
+  },
+});
 
 describe("mailboxes", () => {
   const part = () => screen.findByRole("region", { name: "Mailboxes" });
@@ -273,6 +299,34 @@ describe("mailboxes", () => {
     }
   });
 
+  test("a server error keeps what was typed, and the next save sends it", async () => {
+    const server = seeded();
+    server.connections.mailboxes.set("agt_scout", [readOnly()]);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "orders@birchwood.example" });
+    const days = within(form).getByLabelText(/^Days back/);
+    await app.user.clear(days);
+    await app.user.type(days, "7");
+    server.force("replaceAgentMail", { kind: "error", status: 400, code: "validation" });
+    await app.user.click(within(form).getByRole("button", { name: "Save mailbox access" }));
+    expect(await within(form).findByRole("alert")).toBeDefined();
+    expect((within(form).getByLabelText(/^Days back/) as HTMLInputElement).value).toBe("7");
+    await app.user.click(within(form).getByRole("button", { name: "Save mailbox access" }));
+    expect(await screen.findByText("Access to orders@birchwood.example is saved.")).toBeDefined();
+    expect(server.connections.mailboxes.get("agt_scout")?.[0]?.policy.lookbackDays).toBe(7);
+  });
+
+  test("mailboxes that fail to load offer a retry", async () => {
+    const server = seeded();
+    server.force("getAgentMail", { kind: "error", status: 500, code: "internal" }, 4);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const region = await part();
+    expect(await within(region).findByText("This agent's mailboxes could not be loaded")).toBeDefined();
+    server.unforce("getAgentMail");
+    await app.user.click(within(region).getByRole("button", { name: "Retry" }));
+    expect(await within(await part()).findByRole("form", { name: "orders@birchwood.example" })).toBeDefined();
+  });
+
   test("without mailboxes it says where they are connected", async () => {
     await renderApp({ path: PATH, signedInAs: "usr_jonas" });
     expect(await within(await part()).findByText("The workspace has no mailboxes")).toBeDefined();
@@ -355,6 +409,117 @@ describe("databases", () => {
     expect(
       within(tables).getByRole("checkbox", { name: "public.customers" }).getAttribute("aria-checked"),
     ).toBe("false");
+  });
+
+  test("while a save is on its way the form waits, one save goes out, and the focus comes back", async () => {
+    const stop = blurOnDisable();
+    try {
+      const server = seeded();
+      server.connections.agentDatabases.set("agt_scout", [dbLink()]);
+      const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+      const form = await within(await part()).findByRole("form", { name: "Shop" });
+      const queries = within(form).getByLabelText(/^Queries a day/);
+      await app.user.clear(queries);
+      await app.user.type(queries, "50");
+      const held = server.hold("listAgentDatabases");
+      const button = within(form).getByRole("button", { name: "Save database access" });
+      await app.user.click(button);
+      act(() => {
+        fireEvent.submit(form);
+      });
+      expect(form.getAttribute("aria-busy")).toBe("true");
+      expect(queries.hasAttribute("disabled")).toBe(true);
+      held.release();
+      expect(await screen.findByText("Access to Shop is saved.")).toBeDefined();
+      await waitFor(() => expect(document.activeElement === button).toBe(true));
+      expect(count(server, "replaceAgentDatabase")).toBe(1);
+    } finally {
+      stop();
+    }
+  });
+
+  test("a server error keeps what was typed", async () => {
+    const server = seeded();
+    server.connections.agentDatabases.set("agt_scout", [dbLink()]);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "Shop" });
+    const queries = within(form).getByLabelText(/^Queries a day/);
+    await app.user.clear(queries);
+    await app.user.type(queries, "50");
+    server.force("replaceAgentDatabase", { kind: "error", status: 400, code: "validation" });
+    await app.user.click(within(form).getByRole("button", { name: "Save database access" }));
+    expect(await within(form).findByRole("alert")).toBeDefined();
+    expect((within(form).getByLabelText(/^Queries a day/) as HTMLInputElement).value).toBe("50");
+  });
+
+  test("unticking May query saves none and keeps the saved policy", async () => {
+    const server = seeded();
+    server.connections.agentDatabases.set("agt_scout", [dbLink({ queriesPerDay: 9 })]);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "Shop" });
+    await app.user.click(within(form).getByRole("checkbox", { name: "May query Shop" }));
+    await app.user.click(within(form).getByRole("button", { name: "Save database access" }));
+    expect(await screen.findByText("Access to Shop is saved.")).toBeDefined();
+    const saved = server.connections.agentDatabases.get("agt_scout")?.[0];
+    expect([saved?.level, saved?.policy.queriesPerDay, saved?.policy.tables]).toEqual([
+      "none",
+      9,
+      ["public.customers"],
+    ]);
+  });
+
+  test("a link first saved at none shows the first-time defaults again, and saves them when raised", async () => {
+    const server = seeded();
+    server.connections.agentDatabases.set("agt_scout", [dbLink({ tables: [] }, "none")]);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "Shop" });
+    await app.user.click(within(form).getByRole("checkbox", { name: "May query Shop" }));
+    const tables = await within(form).findByRole("list", { name: "Tables" });
+    expect(
+      within(tables)
+        .getAllByRole("checkbox")
+        .map((each) => each.getAttribute("aria-checked")),
+    ).toEqual(["true", "true", "true"]);
+    expect((within(form).getByLabelText(/^Hidden columns/) as HTMLTextAreaElement).value).toBe(
+      "public.customers.card_number",
+    );
+    await app.user.click(within(form).getByRole("button", { name: "Save database access" }));
+    expect(await screen.findByText("Access to Shop is saved.")).toBeDefined();
+    const policy = server.connections.agentDatabases.get("agt_scout")?.[0]?.policy;
+    expect([policy?.tables, policy?.maskedColumns]).toEqual([
+      ["public.customers", "public.orders", 'sales."Leads"'],
+      ["public.customers.card_number"],
+    ]);
+  });
+
+  test("a saved table the list no longer has shows as saved, and can be taken away", async () => {
+    const server = seeded();
+    server.connections.agentDatabases.set("agt_scout", [
+      dbLink({ tables: ["public.customers", "public.gone"] }),
+    ]);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "Shop" });
+    const tables = await within(form).findByRole("list", { name: "Tables" });
+    const gone = within(tables).getByRole("checkbox", { name: /public\.gone/ });
+    expect(gone.getAttribute("aria-checked")).toBe("true");
+    expect(within(tables).getByText("(saved, not in the list now)")).toBeDefined();
+    await app.user.click(gone);
+    await app.user.click(within(form).getByRole("button", { name: "Save database access" }));
+    expect(await screen.findByText("Access to Shop is saved.")).toBeDefined();
+    expect(server.connections.agentDatabases.get("agt_scout")?.[0]?.policy.tables).toEqual([
+      "public.customers",
+    ]);
+  });
+
+  test("databases that fail to load offer a retry", async () => {
+    const server = seeded();
+    server.force("listAgentDatabases", { kind: "error", status: 500, code: "internal" }, 4);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const region = await part();
+    expect(await within(region).findByText("This agent's databases could not be loaded")).toBeDefined();
+    server.unforce("listAgentDatabases");
+    await app.user.click(within(region).getByRole("button", { name: "Retry" }));
+    expect(await within(await part()).findByRole("form", { name: "Shop" })).toBeDefined();
   });
 
   test("a member reads the chosen tables without asking the database for its list", async () => {
@@ -487,28 +652,193 @@ describe("GitHub repositories", () => {
     expect(site.hasAttribute("disabled")).toBe(true);
   });
 
+  const narrow = async (app: Awaited<ReturnType<typeof renderApp>>, form: HTMLElement) =>
+    app.user.click(within(form).getByRole("radio", { name: "Only the ones ticked below" }));
+
+  test("an agent without a list reaches every repository, and the form says so", async () => {
+    const server = seeded();
+    birchwoodGitHub(server);
+    await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "GitHub repositories" });
+    expect(
+      within(form)
+        .getByRole("radio", { name: /No limit: every repository the GitHub connection reaches/ })
+        .getAttribute("aria-checked"),
+    ).toBe("true");
+    for (const box of within(form).getAllByRole("checkbox")) {
+      expect(box.getAttribute("aria-checked")).toBe("true");
+      expect(box.hasAttribute("disabled")).toBe(true);
+    }
+  });
+
+  test("narrowing from no limit saves only the ticked ones, never an empty list", async () => {
+    const server = seeded();
+    birchwoodGitHub(server);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "GitHub repositories" });
+    await narrow(app, form);
+    const save = within(form).getByRole("button", { name: "Save repositories" });
+    expect(save.hasAttribute("disabled")).toBe(true);
+    expect(within(form).getByText(/Keep at least one repository ticked/)).toBeDefined();
+    await app.user.click(within(form).getByRole("checkbox", { name: /birchwood-labs\/site/ }));
+    await app.user.click(save);
+    expect(await screen.findByText("The repositories are saved.")).toBeDefined();
+    expect(server.connections.repositories.get("agt_scout")).toEqual(["birchwood-labs/site"]);
+  });
+
+  test("the last ticked repository can't be unticked, and the form says how to take GitHub away", async () => {
+    const server = seeded();
+    birchwoodGitHub(server);
+    server.connections.repositories.set("agt_scout", ["birchwood-labs/site"]);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "GitHub repositories" });
+    const site = within(form).getByRole("checkbox", { name: /birchwood-labs\/site/ });
+    await app.user.click(site);
+    expect(site.getAttribute("aria-checked")).toBe("true");
+    expect(within(form).getByText(/set GitHub to Nothing under What it reaches/)).toBeDefined();
+    await app.user.click(within(form).getByRole("button", { name: "Save repositories" }));
+    expect(await screen.findByText("The repositories are saved.")).toBeDefined();
+    expect(server.connections.repositories.get("agt_scout")).toEqual(["birchwood-labs/site"]);
+  });
+
+  test("no limit is its own choice", async () => {
+    const server = seeded();
+    birchwoodGitHub(server);
+    server.connections.repositories.set("agt_scout", ["birchwood-labs/site"]);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "GitHub repositories" });
+    await app.user.click(within(form).getByRole("radio", { name: /No limit/ }));
+    await app.user.click(within(form).getByRole("button", { name: "Save repositories" }));
+    expect(await screen.findByText("The repositories are saved.")).toBeDefined();
+    expect(server.connections.repositories.get("agt_scout")).toEqual([]);
+  });
+
   test("ticks go over the repositories saved now", async () => {
     const server = seeded();
-    server.connections.installations.push({
-      id: "ins_birch",
-      workspaceId: WS,
-      accountUsername: "birchwood-labs",
-      repoScope: "selected",
-      suspended: false,
-      repositories: [
-        { fullName: "birchwood-labs/print-shop", private: true },
-        { fullName: "birchwood-labs/site", private: false },
-      ],
-    });
+    birchwoodGitHub(server);
     server.connections.repositories.set("agt_scout", ["birchwood-labs/print-shop"]);
     const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
     const form = await within(await part()).findByRole("form", { name: "GitHub repositories" });
     await app.user.click(within(form).getByRole("checkbox", { name: /birchwood-labs\/site/ }));
-    // Another admin takes print-shop away after this form loaded.
-    server.connections.repositories.set("agt_scout", []);
+    // Another admin swaps print-shop for another repository after this form loaded.
+    server.connections.repositories.set("agt_scout", ["old-org/archive"]);
     await app.user.click(within(form).getByRole("button", { name: "Save repositories" }));
     expect(await screen.findByText("The repositories are saved.")).toBeDefined();
-    expect(server.connections.repositories.get("agt_scout")).toEqual(["birchwood-labs/site"]);
+    expect(server.connections.repositories.get("agt_scout")).toEqual([
+      "old-org/archive",
+      "birchwood-labs/site",
+    ]);
+  });
+
+  test("no limit set by someone else meanwhile is shown, and the ticks wait for a second save", async () => {
+    const server = seeded();
+    birchwoodGitHub(server);
+    server.connections.repositories.set("agt_scout", ["birchwood-labs/print-shop"]);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "GitHub repositories" });
+    await app.user.click(within(form).getByRole("checkbox", { name: /birchwood-labs\/site/ }));
+    server.connections.repositories.set("agt_scout", []);
+    await app.user.click(within(form).getByRole("button", { name: "Save repositories" }));
+    expect(
+      await within(form).findByText(/Meanwhile someone let this agent reach every repository/),
+    ).toBeDefined();
+    expect(count(server, "setAgentRepositories")).toBe(0);
+    expect(server.connections.repositories.get("agt_scout")).toEqual([]);
+    const ticked = () =>
+      ["print-shop", "site"].map((name) =>
+        within(form)
+          .getByRole("checkbox", { name: new RegExp(`birchwood-labs/${name}`) })
+          .getAttribute("aria-checked"),
+      );
+    await waitFor(() => expect(ticked()).toEqual(["true", "true"]));
+    expect(
+      within(form).getByRole("radio", { name: "Only the ones ticked below" }).getAttribute("aria-checked"),
+    ).toBe("true");
+    await app.user.click(within(form).getByRole("button", { name: "Save repositories" }));
+    expect(await screen.findByText("The repositories are saved.")).toBeDefined();
+    expect(server.connections.repositories.get("agt_scout")).toEqual([
+      "birchwood-labs/print-shop",
+      "birchwood-labs/site",
+    ]);
+  });
+
+  test("ticks survive a refresh, and another's change shows in the entries left alone", async () => {
+    const server = seeded();
+    birchwoodGitHub(server);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "GitHub repositories" });
+    await narrow(app, form);
+    await app.user.click(within(form).getByRole("checkbox", { name: /birchwood-labs\/site/ }));
+    server.connections.repositories.set("agt_scout", ["birchwood-labs/print-shop"]);
+    await refresh(app);
+    await waitFor(() =>
+      expect(
+        within(form)
+          .getByRole("checkbox", { name: /birchwood-labs\/print-shop/ })
+          .getAttribute("aria-checked"),
+      ).toBe("true"),
+    );
+    expect(
+      within(form)
+        .getByRole("checkbox", { name: /birchwood-labs\/site/ })
+        .getAttribute("aria-checked"),
+    ).toBe("true");
+  });
+
+  test("while a save is on its way the form waits, one save goes out, and the focus comes back", async () => {
+    const stop = blurOnDisable();
+    try {
+      const server = seeded();
+      birchwoodGitHub(server);
+      const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+      const form = await within(await part()).findByRole("form", { name: "GitHub repositories" });
+      await narrow(app, form);
+      const site = within(form).getByRole("checkbox", { name: /birchwood-labs\/site/ });
+      await app.user.click(site);
+      const held = server.hold("listAgentRepositories");
+      const button = within(form).getByRole("button", { name: "Save repositories" });
+      await app.user.click(button);
+      act(() => {
+        fireEvent.submit(form);
+      });
+      expect(form.getAttribute("aria-busy")).toBe("true");
+      expect(site.hasAttribute("disabled")).toBe(true);
+      held.release();
+      expect(await screen.findByText("The repositories are saved.")).toBeDefined();
+      await waitFor(() => expect(document.activeElement === button).toBe(true));
+      expect(count(server, "setAgentRepositories")).toBe(1);
+    } finally {
+      stop();
+    }
+  });
+
+  test("a server error keeps the ticks", async () => {
+    const server = seeded();
+    birchwoodGitHub(server);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "GitHub repositories" });
+    await narrow(app, form);
+    await app.user.click(within(form).getByRole("checkbox", { name: /birchwood-labs\/site/ }));
+    server.force("setAgentRepositories", { kind: "error", status: 400, code: "validation" });
+    await app.user.click(within(form).getByRole("button", { name: "Save repositories" }));
+    expect(await within(form).findByRole("alert")).toBeDefined();
+    expect(
+      within(form)
+        .getByRole("checkbox", { name: /birchwood-labs\/site/ })
+        .getAttribute("aria-checked"),
+    ).toBe("true");
+  });
+
+  test("repositories that fail to load offer a retry", async () => {
+    const server = seeded();
+    birchwoodGitHub(server);
+    server.force("listAgentRepositories", { kind: "error", status: 500, code: "internal" }, 4);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const region = await part();
+    expect(await within(region).findByText("The repositories could not be loaded")).toBeDefined();
+    server.unforce("listAgentRepositories");
+    await app.user.click(within(region).getByRole("button", { name: "Retry" }));
+    expect(await within(await part()).findByRole("form", { name: "GitHub repositories" })).toBeDefined();
   });
 
   test("an agent archived meanwhile is refused, and its repositories turn read-only", async () => {
@@ -557,5 +887,79 @@ describe("GitHub repositories", () => {
   test("without GitHub it says where to install it", async () => {
     await renderApp({ path: PATH, signedInAs: "usr_jonas" });
     expect(await within(await part()).findByText("GitHub is not linked")).toBeDefined();
+  });
+});
+
+describe("the fake server's source rules, as the server's", () => {
+  const statusOf = async (call: () => Promise<unknown>) => {
+    try {
+      await call();
+      return "ok";
+    } catch (error) {
+      const { status, rawCode } = error as { status?: number; rawCode?: string };
+      return `${status} ${rawCode}`;
+    }
+  };
+  const admin = () => {
+    const server = seeded();
+    const { runtime } = newTestRuntime({ path: "/", signedInAs: "usr_jonas", server });
+    return { server, client: runtime.api.client };
+  };
+  const database = (client: ReturnType<typeof admin>["client"], body: T.SetAgentDatabaseInput) => () =>
+    client.call("replaceAgentDatabase", {
+      workspaceId: WS,
+      agentId: "agt_scout",
+      databaseId: "dbc_shop",
+      body,
+    });
+
+  test("a hidden column needs its table, and the lists have the server's caps", async () => {
+    const { client } = admin();
+    expect(await statusOf(database(client, { level: "read", policy: { maskedColumns: ["ssn"] } }))).toBe(
+      "400 validation",
+    );
+    const many = Array.from({ length: 501 }, (_, i) => `public.t${i}`);
+    expect(await statusOf(database(client, { level: "read", policy: { tables: many } }))).toBe(
+      "400 validation",
+    );
+    const repositories = Array.from({ length: 201 }, (_, i) => `acme/r${i}`);
+    expect(
+      await statusOf(() =>
+        client.call("setAgentRepositories", {
+          workspaceId: WS,
+          agentId: "agt_scout",
+          body: { repositories },
+        }),
+      ),
+    ).toBe("400 validation");
+  });
+
+  test("a first save at none keeps an empty policy", async () => {
+    const { server, client } = admin();
+    expect(await statusOf(database(client, { level: "none" }))).toBe("ok");
+    expect(server.connections.agentDatabases.get("agt_scout")?.[0]?.policy).toEqual({
+      tables: [],
+      maskedColumns: [],
+      queriesPerDay: 200,
+      timeoutSeconds: 30,
+    });
+  });
+
+  test("mailbox and database writes refuse an archived agent", async () => {
+    const { server, client } = admin();
+    const scout = server.agents.find((agent) => agent.id === "agt_scout");
+    if (scout === undefined) throw new Error("no Scout");
+    scout.archivedAt = new Date().toISOString();
+    expect(
+      await statusOf(() =>
+        client.call("replaceAgentMail", {
+          workspaceId: WS,
+          agentId: "agt_scout",
+          mailId: "mail_orders",
+          body: { level: "read" },
+        }),
+      ),
+    ).toBe("409 agent.archived");
+    expect(await statusOf(database(client, { level: "read" }))).toBe("409 agent.archived");
   });
 });

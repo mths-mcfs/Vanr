@@ -756,6 +756,7 @@ export default {
     "The database refused the saved password. Renew it in Settings, under Data sources, to choose tables.",
   "dbx.noTables": "No tables chosen.",
   "dbx.noTablesThere": "The database has no tables this login can see.",
+  "dbx.notListed": "(saved, not in the list now)",
   "dbx.hidden": "Hidden columns",
   "dbx.hiddenHint":
     "table.column or schema.table.column, one per line. They come back empty in every answer.",
@@ -782,4 +783,12 @@ export default {
     "At most {max} entries; {count} are chosen. Choose a whole account instead of its repositories one by one.",
   "repo.save": "Save repositories",
   "repo.saved": "The repositories are saved.",
+  "repo.scope": "Which repositories",
+  "repo.scopeAll": "No limit: every repository the GitHub connection reaches",
+  "repo.scopeAllHint": "Repositories added to GitHub later count too.",
+  "repo.scopeSome": "Only the ones ticked below",
+  "repo.keepOne":
+    "Keep at least one repository ticked. To take GitHub away from this agent, set GitHub to Nothing under What it reaches.",
+  "repo.becameAll":
+    "Meanwhile someone let this agent reach every repository. Your ticks are still below: save to limit it to them, or choose No limit.",
 } as const satisfies Catalog;

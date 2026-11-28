@@ -256,8 +256,6 @@ export class FakeConnections {
     const withAgent = (
       handler: (scope: Scope, agent: FakeAgentRow, params: Record<string, unknown>) => FilesReply,
       manage = false,
-      /** As on the server, most writes refuse an archived agent; the mailbox and database ones don't. */
-      active = manage,
     ) =>
       within((scope, params) => {
         // As on the server: the permission first, then the agent.
@@ -266,7 +264,8 @@ export class FakeConnections {
           .agents()
           .find((each) => each.workspaceId === scope.workspaceId && each.id === text(params.agentId));
         if (agent === undefined) return fail(404, "not_found", "Agent not found");
-        if (active && agent.archivedAt !== null) return fail(409, "agent.archived", "The agent is archived");
+        // As on the server (registerArchivedAgentGuard): every write to an archived agent is refused.
+        if (manage && agent.archivedAt !== null) return fail(409, "agent.archived", "The agent is archived");
         return handler(scope, agent, params);
       });
 
@@ -281,54 +280,50 @@ export class FakeConnections {
       getAgentMail: withAgent((_scope, agent) =>
         reply(200, { mailboxes: this.mailboxes.get(agent.id) ?? [] }),
       ),
-      replaceAgentMail: withAgent(
-        (scope, agent, params) => {
-          const account = mailOf(scope, params.mailId);
-          if (account === undefined) return fail(404, "not_found", "Mail account not found");
-          const level = text(params.level) as T.MailLevel | undefined;
-          if (level !== "none" && level !== "read" && level !== "read_write")
-            return fail(400, "validation", "Invalid body");
-          const asked = (
-            typeof params.policy === "object" && params.policy !== null ? params.policy : {}
-          ) as Partial<T.MailPolicy>;
-          if (!addresses(asked.senderAllowlist) || !addresses(asked.recipientAllowlist)) {
-            return fail(400, "validation", "Invalid body");
-          }
-          const own = this.mailboxes.get(agent.id) ?? [];
-          const current = own.find((each) => each.accountId === account.id);
-          const merged: T.MailPolicy = {
-            folders: [],
-            senderAllowlist: [],
-            lookbackDays: null,
-            recipientAllowlist: [],
-            sendsPerDay: 25,
-            autoSend: false,
-            senderAddress: null,
-            ...current?.policy,
-            ...asked,
-          };
-          const box: T.AgentMailbox = {
-            accountId: account.id,
-            level,
-            // As on the server: left out, the saved choice stays.
-            deletable:
-              level === "read_write"
-                ? typeof params.deletable === "boolean"
-                  ? params.deletable
-                  : (current?.deletable ?? false)
-                : false,
-            policy: { ...merged, autoSend: merged.autoSend && merged.recipientAllowlist.length > 0 },
-          };
-          this.mailboxes.set(agent.id, [...own.filter((each) => each.accountId !== account.id), box]);
-          account.agents = [
-            ...account.agents.filter((each) => each.agentId !== agent.id),
-            { agentId: agent.id, level },
-          ];
-          return reply(200, box);
-        },
-        true,
-        false,
-      ),
+      replaceAgentMail: withAgent((scope, agent, params) => {
+        const account = mailOf(scope, params.mailId);
+        if (account === undefined) return fail(404, "not_found", "Mail account not found");
+        const level = text(params.level) as T.MailLevel | undefined;
+        if (level !== "none" && level !== "read" && level !== "read_write")
+          return fail(400, "validation", "Invalid body");
+        const asked = (
+          typeof params.policy === "object" && params.policy !== null ? params.policy : {}
+        ) as Partial<T.MailPolicy>;
+        if (!addresses(asked.senderAllowlist) || !addresses(asked.recipientAllowlist)) {
+          return fail(400, "validation", "Invalid body");
+        }
+        const own = this.mailboxes.get(agent.id) ?? [];
+        const current = own.find((each) => each.accountId === account.id);
+        const merged: T.MailPolicy = {
+          folders: [],
+          senderAllowlist: [],
+          lookbackDays: null,
+          recipientAllowlist: [],
+          sendsPerDay: 25,
+          autoSend: false,
+          senderAddress: null,
+          ...current?.policy,
+          ...asked,
+        };
+        const box: T.AgentMailbox = {
+          accountId: account.id,
+          level,
+          // As on the server: left out, the saved choice stays.
+          deletable:
+            level === "read_write"
+              ? typeof params.deletable === "boolean"
+                ? params.deletable
+                : (current?.deletable ?? false)
+              : false,
+          policy: { ...merged, autoSend: merged.autoSend && merged.recipientAllowlist.length > 0 },
+        };
+        this.mailboxes.set(agent.id, [...own.filter((each) => each.accountId !== account.id), box]);
+        account.agents = [
+          ...account.agents.filter((each) => each.agentId !== agent.id),
+          { agentId: agent.id, level },
+        ];
+        return reply(200, box);
+      }, true),
       listDatabaseTables: within((scope, params) => {
         if (!can(scope.role, "manage_agents")) return fail(403, "forbidden", "Forbidden");
         const connection = databaseOf(scope, params.databaseId);
@@ -338,43 +333,54 @@ export class FakeConnections {
       listAgentDatabases: withAgent((_scope, agent) =>
         reply(200, { databases: this.agentDatabases.get(agent.id) ?? [] }),
       ),
-      replaceAgentDatabase: withAgent(
-        (scope, agent, params) => {
-          const connection = databaseOf(scope, params.databaseId);
-          if (connection === undefined) return fail(404, "not_found", "Database not found");
-          const level = text(params.level);
-          if (level !== "none" && level !== "read") return fail(400, "validation", "Invalid body");
-          const own = this.agentDatabases.get(agent.id) ?? [];
-          const current = own.find((each) => each.connectionId === connection.id);
-          const asked = (
-            typeof params.policy === "object" && params.policy !== null ? params.policy : {}
-          ) as Partial<T.DatabasePolicy>;
-          const link: T.AgentDatabase = {
-            connectionId: connection.id,
-            level,
-            policy: {
-              // As the server names them (sql-guard.ts relationText).
-              tables: (this.tables.get(connection.id) ?? []).map(tableName),
-              maskedColumns: connection.hiddenSuggestion,
-              queriesPerDay: 200,
-              timeoutSeconds: 30,
-              ...current?.policy,
-              ...asked,
-            },
-          };
-          this.agentDatabases.set(agent.id, [
-            ...own.filter((each) => each.connectionId !== connection.id),
-            link,
-          ]);
-          connection.agents = [
-            ...connection.agents.filter((each) => each.agentId !== agent.id),
-            { agentId: agent.id, level },
-          ];
-          return reply(200, link);
-        },
-        true,
-        false,
-      ),
+      replaceAgentDatabase: withAgent((scope, agent, params) => {
+        const connection = databaseOf(scope, params.databaseId);
+        if (connection === undefined) return fail(404, "not_found", "Database not found");
+        const level = text(params.level);
+        if (level !== "none" && level !== "read") return fail(400, "validation", "Invalid body");
+        const own = this.agentDatabases.get(agent.id) ?? [];
+        const current = own.find((each) => each.connectionId === connection.id);
+        const asked = (
+          typeof params.policy === "object" && params.policy !== null ? params.policy : {}
+        ) as Partial<T.DatabasePolicy>;
+        // As the server's databasePolicyInput: up to 500 tables, and a hidden column is `table.column` or
+        // `schema.table.column`, up to 1000 of them.
+        const column = /^[^.\s]+(?:\.[^.\s]+){1,2}$/;
+        if (
+          (asked.tables !== undefined && (!Array.isArray(asked.tables) || asked.tables.length > 500)) ||
+          (asked.maskedColumns !== undefined &&
+            (!Array.isArray(asked.maskedColumns) ||
+              asked.maskedColumns.length > 1000 ||
+              !asked.maskedColumns.every((each) => typeof each === "string" && column.test(each))))
+        )
+          return fail(400, "validation", "Invalid body");
+        // The first time, as the server: reading starts from every table there is and the suggested
+        // hidden columns; "none" stores an empty policy.
+        const first: T.DatabasePolicy =
+          level === "read"
+            ? {
+                // As the server names them (sql-guard.ts relationText).
+                tables: (this.tables.get(connection.id) ?? []).map(tableName),
+                maskedColumns: connection.hiddenSuggestion,
+                queriesPerDay: 200,
+                timeoutSeconds: 30,
+              }
+            : { tables: [], maskedColumns: [], queriesPerDay: 200, timeoutSeconds: 30 };
+        const link: T.AgentDatabase = {
+          connectionId: connection.id,
+          level,
+          policy: { ...(current?.policy ?? first), ...asked },
+        };
+        this.agentDatabases.set(agent.id, [
+          ...own.filter((each) => each.connectionId !== connection.id),
+          link,
+        ]);
+        connection.agents = [
+          ...connection.agents.filter((each) => each.agentId !== agent.id),
+          { agentId: agent.id, level },
+        ];
+        return reply(200, link);
+      }, true),
       listAgentRepositories: withAgent((_scope, agent) =>
         reply(200, { repositories: this.repositories.get(agent.id) ?? [] }),
       ),
@@ -382,6 +388,7 @@ export class FakeConnections {
         const asked = params.repositories;
         if (
           !Array.isArray(asked) ||
+          asked.length > 200 ||
           !asked.every((each) => typeof each === "string" && /^[\w.-]+\/(?:\*|[\w.-]+)$/.test(each))
         ) {
           return fail(400, "validation", "Use owner/repo or owner/*");

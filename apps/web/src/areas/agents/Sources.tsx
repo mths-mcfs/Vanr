@@ -21,7 +21,19 @@ import type {
   MailAccount,
   MailLevel,
 } from "@vanr/contract";
-import { Button, Callout, Checkbox, EmptyState, Field, Input, Select, SelectItem, Textarea } from "@vanr/ui";
+import {
+  Button,
+  Callout,
+  Checkbox,
+  EmptyState,
+  Field,
+  Input,
+  Radio,
+  RadioGroup,
+  Select,
+  SelectItem,
+  Textarea,
+} from "@vanr/ui";
 import { type ReactNode, useState } from "react";
 import { useErrorMessage } from "../../app/screens.tsx";
 import { useMessages } from "../../i18n/react.tsx";
@@ -87,7 +99,10 @@ function usePicks<F extends Record<string, unknown>>(server: F) {
       else next[key] = value;
       return next;
     });
-  return { shown, picks, pick, clear: () => setPicks({}) };
+  /** Keeps a value as the person's own even if it equals what the screen shows as saved now. */
+  const keep = <K extends keyof F>(key: K, value: F[K]) =>
+    setPicks((before) => ({ ...before, [key]: value }));
+  return { shown, picks, pick, keep, clear: () => setPicks({}) };
 }
 
 /** A set as the person sees it: the server's entries with the ones they ticked or unticked. */
@@ -108,7 +123,16 @@ function useToggles(server: readonly string[]) {
       else next.set(entry, on);
       return next;
     });
-  return { shown: over(server), over, changed: toggles.size > 0, toggle, clear: () => setToggles(new Map()) };
+  /** Keeps these entries ticked as the person's own, whatever the saved list becomes. */
+  const keep = (entries: Iterable<string>) => setToggles(new Map([...entries].map((entry) => [entry, true])));
+  return {
+    shown: over(server),
+    over,
+    changed: toggles.size > 0,
+    toggle,
+    keep,
+    clear: () => setToggles(new Map()),
+  };
 }
 
 /**
@@ -124,6 +148,13 @@ function useSaveFailure(workspaceId: string, reads: readonly MethodName[]) {
   return {
     error,
     clear: () => setError(null),
+    /** Loads these reads again. */
+    reload: () =>
+      Promise.all(
+        reads.map((method) =>
+          queryClient.invalidateQueries({ queryKey: prefixKey(client, { method, args: { workspaceId } }) }),
+        ),
+      ),
     failed: (failure: unknown) => {
       setError(failure);
       forget(failure);
@@ -448,14 +479,29 @@ function Databases({ agent, workspaceId, rights }: Props) {
   );
 }
 
-/** A database link's settings as its form shows them (before the first save, the server's defaults). */
-const databaseFields = (link: AgentDatabase | undefined, connection: DatabaseConnection) => ({
-  reads: (link?.level ?? "none") === "read",
-  hidden: (link?.policy.maskedColumns ?? connection.hiddenSuggestion).join("\n"),
-  queries:
-    link === undefined ? "200" : link.policy.queriesPerDay === null ? "" : String(link.policy.queriesPerDay),
-  timeout: (link?.policy.timeoutSeconds ?? 30) as (typeof TIMEOUTS)[number],
-});
+/**
+ * A link with no policy of its own: never saved, or saved at "none" before it ever read (the server keeps
+ * that one empty). Its form shows the server's first-time defaults, and raising it sends them in full.
+ */
+const unset = (link: AgentDatabase | undefined) =>
+  link === undefined ||
+  (link.level === "none" && link.policy.tables.length === 0 && link.policy.maskedColumns.length === 0);
+
+/** A database link's settings as its form shows them (for an unset one, the server's first-time defaults). */
+const databaseFields = (saved: AgentDatabase | undefined, connection: DatabaseConnection) => {
+  const link = unset(saved) ? undefined : saved;
+  return {
+    reads: (saved?.level ?? "none") === "read",
+    hidden: (link?.policy.maskedColumns ?? connection.hiddenSuggestion).join("\n"),
+    queries:
+      link === undefined
+        ? "200"
+        : link.policy.queriesPerDay === null
+          ? ""
+          : String(link.policy.queriesPerDay),
+    timeout: (link?.policy.timeoutSeconds ?? 30) as (typeof TIMEOUTS)[number],
+  };
+};
 
 function DatabaseForm({
   workspaceId,
@@ -501,7 +547,9 @@ function DatabaseForm({
   const locked = !edit || change.busy;
   const allTables = listed.data?.map(tableName) ?? [];
   // Before the first save, every table there is now is checked: the server's own default.
-  const tables = useToggles(link?.policy.tables ?? allTables);
+  const tables = useToggles(unset(link) ? allTables : (link?.policy.tables ?? []));
+  // Saved tables the list no longer has (dropped, or past what the database lists) stay visible.
+  const unlisted = unset(link) ? [] : (link?.policy.tables ?? []).filter((name) => !allTables.includes(name));
   const chosen = tables.shown;
   const refusedPassword = isApiError(listed.error) && listed.error.rawCode === "database.auth";
   let tablePicker: ReactNode;
@@ -525,16 +573,22 @@ function DatabaseForm({
     tablePicker = (
       <PartError title={t("dbx.tablesFailed")} error={listed.error} onRetry={() => void listed.refetch()} />
     );
-  else if (allTables.length === 0) tablePicker = <p className="page__muted">{t("dbx.noTablesThere")}</p>;
+  else if (allTables.length === 0 && unlisted.length === 0)
+    tablePicker = <p className="page__muted">{t("dbx.noTablesThere")}</p>;
   else
     tablePicker = (
       <ul className="source__tables" aria-label={t("dbx.tables")}>
-        {allTables.map((name) => (
+        {[...allTables, ...unlisted].map((name) => (
           <li key={name}>
             <Checkbox
               checked={chosen.has(name)}
               disabled={locked}
-              label={<code>{name}</code>}
+              label={
+                <>
+                  <code>{name}</code>
+                  {!allTables.includes(name) && <span className="page__muted"> {t("dbx.notListed")}</span>}
+                </>
+              }
               onCheckedChange={(on) => tables.toggle(name, on === true)}
             />
           </li>
@@ -543,7 +597,7 @@ function DatabaseForm({
     );
   // The list is needed for a first save (the server takes every table there is) or for ticked tables;
   // a saved link whose tables stay as they are saves without it, even while the database is down.
-  const tablesReady = !edit || !reads || listed.isSuccess || (link !== undefined && !tables.changed);
+  const tablesReady = !edit || !reads || listed.isSuccess || (!unset(link) && !tables.changed);
   const { picks } = form;
   const submit = () =>
     change.run(async () => {
@@ -553,15 +607,24 @@ function DatabaseForm({
           (each) => each.connectionId === connection.id,
         );
         const reading = picks.reads ?? fresh?.level === "read";
-        const policy = {
-          ...(picks.hidden !== undefined && { maskedColumns: columns }),
-          ...(picks.queries !== undefined && { queriesPerDay: queriesPerDay ?? null }),
-          ...(picks.timeout !== undefined && { timeoutSeconds: timeout }),
-          // Over the tables saved now (or, the first time, every table there is); only once the list is
-          // known, and only when the person ticked some: otherwise the saved ones stay.
-          ...(listed.isSuccess &&
-            tables.changed && { tables: [...tables.over(fresh?.policy.tables ?? allTables)] }),
-        };
+        // A link with no policy yet gets the whole form; the server would otherwise keep an empty one.
+        const whole = unset(fresh);
+        const policy = whole
+          ? {
+              maskedColumns: columns,
+              queriesPerDay: queriesPerDay ?? null,
+              timeoutSeconds: timeout,
+              ...(listed.isSuccess && { tables: [...tables.over(allTables)] }),
+            }
+          : {
+              ...(picks.hidden !== undefined && { maskedColumns: columns }),
+              ...(picks.queries !== undefined && { queriesPerDay: queriesPerDay ?? null }),
+              ...(picks.timeout !== undefined && { timeoutSeconds: timeout }),
+              // Over the tables saved now (or, the first time, every table there is); only once the list is
+              // known, and only when the person ticked some: otherwise the saved ones stay.
+              ...(listed.isSuccess &&
+                tables.changed && { tables: [...tables.over(fresh?.policy.tables ?? [])] }),
+            };
         await save.mutateAsync({
           workspaceId,
           agentId,
@@ -699,6 +762,10 @@ function Repositories({ agent, workspaceId, rights }: Props) {
   );
 }
 
+type RepoScope = "all" | "some";
+/** How the server reads an agent's list (github-app.ts repoRefusal): empty is no limit at all. */
+const scopeOf = (list: readonly string[]): RepoScope => (list.length === 0 ? "all" : "some");
+
 function RepositoryForm({
   workspaceId,
   agentId,
@@ -718,8 +785,14 @@ function RepositoryForm({
   const client = useVanrClient();
   const change = useOneChange();
   const failure = useSaveFailure(workspaceId, REPOSITORY_READS);
-  const picked = useToggles(saved);
+  // An empty list reaches every repository, so it is a choice of its own ("no limit"), never what is left
+  // after unticking: the web never turns a narrowing into a widening.
+  const savedScope = scopeOf(saved);
+  const form = usePicks({ scope: savedScope });
+  const scope = form.shown.scope;
+  const picked = useToggles(savedScope === "some" ? saved : []);
   const chosen = picked.shown;
+  const [notice, setNotice] = useState<"keepOne" | "becameAll" | null>(null);
   const save = useApiMutation("setAgentRepositories", {
     invalidates: () => [{ method: "listAgentRepositories" as const, args: { workspaceId, agentId } }],
   });
@@ -729,14 +802,25 @@ function RepositoryForm({
   // Saved entries GitHub no longer lists stay visible, so a save never drops them unseen.
   const elsewhere = saved.filter((entry) => !known.has(entry));
   const locked = !edit || change.busy;
-  const tooMany = chosen.size > POLICY.repositories;
+  const limited = scope === "some";
+  const tooMany = limited && chosen.size > POLICY.repositories;
+  const empty = limited && chosen.size === 0;
+  const toggle = (entry: string, on: boolean) => {
+    // Unticking the last one would save an empty list, which reaches everything.
+    if (!on && chosen.size === 1 && chosen.has(entry)) {
+      setNotice("keepOne");
+      return;
+    }
+    setNotice(null);
+    picked.toggle(entry, on);
+  };
   const box = (entry: string, label: ReactNode, under?: string) => (
     <li key={entry}>
       <Checkbox
-        checked={chosen.has(entry) || (under !== undefined && chosen.has(under))}
-        disabled={locked || (under !== undefined && chosen.has(under))}
+        checked={!limited || chosen.has(entry) || (under !== undefined && chosen.has(under))}
+        disabled={locked || !limited || (under !== undefined && chosen.has(under))}
         label={label}
-        onCheckedChange={(on) => picked.toggle(entry, on === true)}
+        onCheckedChange={(on) => toggle(entry, on === true)}
       />
     </li>
   );
@@ -744,11 +828,30 @@ function RepositoryForm({
     change.run(async () => {
       failure.clear();
       try {
-        // The person's ticks over the repositories saved now, not over the ones this screen loaded with.
         const fresh = await client.call("listAgentRepositories", { workspaceId, agentId });
+        let repositories: string[] = [];
+        if (limited) {
+          // Someone set "no limit" meanwhile: the person's ticks stay on screen as their own choice, and
+          // nothing is sent until they save again or pick "no limit" too.
+          if (savedScope === "some" && scopeOf(fresh) === "all") {
+            form.keep("scope", "some");
+            picked.keep(chosen);
+            setNotice("becameAll");
+            await failure.reload();
+            return;
+          }
+          // The person's ticks over the repositories saved now, not over the ones this screen loaded with.
+          repositories = [...picked.over(scopeOf(fresh) === "some" ? fresh : [])];
+          if (repositories.length === 0) {
+            setNotice("keepOne");
+            return;
+          }
+        }
         // More than the server keeps is its refusal to give, not a cut made here.
-        await save.mutateAsync({ workspaceId, agentId, body: { repositories: [...picked.over(fresh)] } });
+        await save.mutateAsync({ workspaceId, agentId, body: { repositories } });
+        form.clear();
         picked.clear();
+        setNotice(null);
         outcome.done(t("repo.saved"));
       } catch (error) {
         failure.failed(error);
@@ -762,9 +865,21 @@ function RepositoryForm({
       onFocusCapture={change.onFocusCapture}
       onSubmit={(event) => {
         event.preventDefault();
-        if (edit && !tooMany) submit();
+        if (edit && !tooMany && !empty) submit();
       }}
     >
+      <RadioGroup
+        aria-label={t("repo.scope")}
+        value={scope}
+        disabled={locked}
+        onValueChange={(next) => {
+          setNotice(null);
+          form.pick("scope", next === "all" ? "all" : "some");
+        }}
+      >
+        <Radio value="all" label={t("repo.scopeAll")} hint={t("repo.scopeAllHint")} />
+        <Radio value="some" label={t("repo.scopeSome")} />
+      </RadioGroup>
       {accounts.map((account) => (
         <fieldset key={account.login} className="source__fieldset">
           <legend>{account.login}</legend>
@@ -789,6 +904,11 @@ function RepositoryForm({
           <ul className="source__tables">{elsewhere.map((entry) => box(entry, <code>{entry}</code>))}</ul>
         </fieldset>
       )}
+      {(notice !== null || empty) && (
+        <Callout tone={notice === "becameAll" ? "warning" : "info"} role="status">
+          {t(notice === "becameAll" ? "repo.becameAll" : "repo.keepOne")}
+        </Callout>
+      )}
       {tooMany && (
         <Callout tone="danger" role="alert">
           {t("repo.tooMany", { max: POLICY.repositories, count: chosen.size })}
@@ -801,7 +921,7 @@ function RepositoryForm({
       )}
       {edit && (
         <div className="section-form__actions">
-          <Button type="submit" size="sm" variant="primary" disabled={tooMany} loading={change.busy}>
+          <Button type="submit" size="sm" variant="primary" disabled={tooMany || empty} loading={change.busy}>
             {t("repo.save")}
           </Button>
         </div>
