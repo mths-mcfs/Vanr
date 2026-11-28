@@ -120,6 +120,7 @@ export function MembersDialog({ channel, onClose }: { channel: Channel; onClose:
       }),
     );
   };
+  const [addFailed, setAddFailed] = useState<unknown>(null);
   const inside = new Set((members.data ?? []).map((entry) => `${entry.type}:${entry.id}`));
   const q = query.trim().toLowerCase();
   const fits = (entry: { name: string; handle: string }) =>
@@ -253,7 +254,8 @@ export function MembersDialog({ channel, onClose }: { channel: Channel; onClose:
                       size="sm"
                       loading={busy.has(`add:${entry.type}:${entry.id}`)}
                       aria-label={t("people.addNamed", { name: entry.name })}
-                      onClick={() =>
+                      onClick={() => {
+                        setAddFailed(null);
                         track(
                           `add:${entry.type}:${entry.id}`,
                           add
@@ -265,10 +267,10 @@ export function MembersDialog({ channel, onClose }: { channel: Channel; onClose:
                               outcome.done(t("people.added", { name: entry.name }));
                               setQuery("");
                             }),
-                          // Said under the search, where it was asked.
-                          () => {},
-                        )
-                      }
+                          // Said under the search, where it was asked: each add's own failure.
+                          (error) => setAddFailed(error),
+                        );
+                      }}
                     >
                       {t("people.addOne")}
                     </Button>
@@ -276,9 +278,9 @@ export function MembersDialog({ channel, onClose }: { channel: Channel; onClose:
                 ))}
               </ul>
             )}
-            {add.isError && (
+            {addFailed !== null && (
               <p className="chat-note chat-note--danger" role="alert">
-                {describe(add.error)}
+                {describe(addFailed)}
               </p>
             )}
           </div>

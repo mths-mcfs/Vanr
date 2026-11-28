@@ -688,6 +688,28 @@ describe("what CodeRabbit found on round two", () => {
     await act(async () => held.release());
   });
 
+  test("an add that fails while another succeeds still says why", async () => {
+    const server = newServer();
+    server.chat.agentMembers.set("ch_print", new Set());
+    const app = await open("/channel/ch_print", "usr_ana", server);
+    await app.user.click(await screen.findByRole("button", { name: /in the channel/ }));
+    const dialog = await screen.findByRole("dialog", { name: "People in #print-queue" });
+    await app.user.type(within(dialog).getByRole("searchbox", { name: "Add someone" }), "l");
+    const ledger = await within(dialog).findByRole("button", { name: "Add Ledger" });
+    const tally = within(dialog).getByRole("button", { name: "Add Tally" });
+    server.force(
+      "createChannelMember",
+      { kind: "error", status: 404, code: "not_found", message: "Agent not found" },
+      1,
+      (params) => params.agentId === "agt_ledger",
+    );
+    const held = server.hold("createChannelMember");
+    await app.user.click(ledger);
+    await app.user.click(tally);
+    await act(async () => held.release());
+    expect(await within(dialog).findByRole("alert")).toBeDefined();
+  });
+
   test("a budget the field can't write, left alone, neither blocks saving nor is sent", async () => {
     const server = newServer();
     const print = server.state.channels.find((channel) => channel.id === "ch_print");
