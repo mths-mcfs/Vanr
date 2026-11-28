@@ -18,6 +18,7 @@ import { useHistory, useLiveRuns, useTicker, useTypingSignal } from "./hooks.ts"
 import { LiveRuns } from "./LiveRuns.tsx";
 import { showing } from "./live.ts";
 import { MessageItem } from "./Message.tsx";
+import { AgentNotices } from "./Notices.tsx";
 
 const NEXT_STATE: Record<ThreadState, "close" | "reopen" | "unarchive"> = {
   open: "close",
@@ -208,6 +209,7 @@ export function ThreadPanel({
         )}
         <LiveRuns runs={live} now={now} onCheck={() => void active.refetch()} scope={scope} thread={rootId} />
       </div>
+      <AgentNotices thread={rootId} />
       {root !== undefined && member && state !== "archived" && (
         <Composer
           quoting={quoting}

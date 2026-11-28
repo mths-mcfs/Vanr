@@ -61,7 +61,6 @@ export default {
   "receipt.failed": "{agent} couldn't answer",
   "receipt.canceled": "{agent} was stopped",
   "receipt.blocked": "{agent} was held back",
-  "receipt.blockedBecause": "{agent} was held back: {reason}",
 
   "reaction.label": "{reaction} from {names}",
   "reaction.you": "you",

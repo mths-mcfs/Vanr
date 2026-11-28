@@ -17,7 +17,6 @@ import { useDirectory } from "../control/cards.ts";
 import { Composer } from "./Composer.tsx";
 import { ConversationProvider, useConversation } from "./context.tsx";
 import {
-  useAgentNotices,
   useForgetChannel,
   useHistory,
   useLiveRuns,
@@ -29,6 +28,7 @@ import {
 import { LiveRuns } from "./LiveRuns.tsx";
 import { LANDING_MS, type LiveRun, showing } from "./live.ts";
 import { MessageItem } from "./Message.tsx";
+import { AgentNotices } from "./Notices.tsx";
 import { ThreadPanel } from "./Thread.tsx";
 
 const ThreadAddress = z.object({ thread: z.string().min(1).max(64).optional() });
@@ -414,34 +414,6 @@ function ConversationView({
 function Forgotten({ workspaceId, channelId }: { workspaceId: string; channelId: string }) {
   useForgetChannel(workspaceId, channelId);
   return <NotFound />;
-}
-
-/** Agents the person called that can't take their message, each with why. The code never shows. */
-function AgentNotices() {
-  const t = useMessages("chat");
-  const lookup = useLookup("chat");
-  const { channelId, directory } = useConversation();
-  const { notices, dismiss } = useAgentNotices(channelId);
-  const here = notices.filter((notice) => notice.threadId === null);
-  if (here.length === 0) return null;
-  return (
-    <div className="chat__notices">
-      {here.map((notice) => {
-        const agent = directory.agentName(notice.agentId);
-        const text =
-          lookup(`blocked.${notice.reason}`, { agent }) ??
-          (notice.text !== "" ? notice.text : t("blocked.other", { agent }));
-        return (
-          <p key={notice.key} className="chat-note chat-note--warning" role="status">
-            <span>{text}</span>
-            <button type="button" className="app-link-button" onClick={() => dismiss(notice.key)}>
-              {t("blocked.dismiss")}
-            </button>
-          </p>
-        );
-      })}
-    </div>
-  );
 }
 
 /** Above the composer: which agents are at work here, with a way to the run. */

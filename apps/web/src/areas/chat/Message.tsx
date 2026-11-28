@@ -143,7 +143,10 @@ function Receipts({ message }: { message: Message }) {
     })),
     ...blocked.map((entry) => ({
       key: `blocked-${entry.agentId}`,
-      text: t("receipt.blockedBecause", { agent: directory.agentName(entry.agentId), reason: entry.reason }),
+      // The reason is a code: it reads in the person's words, and an unknown one says only that it was held.
+      text:
+        lookup(`blocked.${entry.reason}`, { agent: directory.agentName(entry.agentId) }) ??
+        t("receipt.blocked", { agent: directory.agentName(entry.agentId) }),
       tone: "danger" as const,
     })),
   ];

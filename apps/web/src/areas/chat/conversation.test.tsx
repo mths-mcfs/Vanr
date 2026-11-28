@@ -396,7 +396,7 @@ describe("what the second round of review found", () => {
     ).toBe(true);
   });
 
-  test("receipts on older pages follow the events (the reply count is drawn with threads)", async () => {
+  test("reply counts and receipts on older pages follow the events", async () => {
     const server = newServer();
     for (let i = 1; i <= 120; i += 1)
       server.state.messages.push(message({ id: `msg_${i}`, body: `line ${i}`, createdAt: at(-200 + i) }));
@@ -425,6 +425,7 @@ describe("what the second round of review found", () => {
     });
     expect(await screen.findByText("Scout picked this up")).toBeDefined();
     expect(screen.getByText("Ledger answered")).toBeDefined();
+    expect(screen.getByRole("button", { name: "2 replies" })).toBeDefined();
   });
 
   test("a quick reaction that fails says so", async () => {
@@ -471,3 +472,30 @@ describe("what the second round of review found", () => {
     await waitFor(() => expect(follows()).toBe(false));
   });
 });
+
+describe("a receipt for an agent that was held back", () => {
+  test("reads in the person's words, never the reason's code", async () => {
+    const server = newServer();
+    server.state.messages.push(
+      message({
+        id: "msg_held",
+        body: "@scout check this",
+        author: { type: "person", id: "usr_ana" },
+        receipts: {
+          claimedBy: [],
+          handled: [],
+          viewedBy: [],
+          blocked: [
+            { agentId: "agt_scout", reason: "not_in_channel" },
+            { agentId: "agt_ledger", reason: "something_new" },
+          ],
+        },
+      }),
+    );
+    await open("/channel/ch_general", "usr_ana", server);
+    expect(await screen.findByText("Scout isn't in this conversation. Add it to the channel to bring it in.")).toBeDefined();
+    expect(screen.getByText("Ledger was held back")).toBeDefined();
+    expect(screen.queryByText(/not_in_channel|something_new/) === null).toBe(true);
+  });
+});
+
