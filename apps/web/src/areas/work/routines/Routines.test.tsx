@@ -163,4 +163,11 @@ describe("the routines", () => {
     await app.user.click(dialog.getByRole("button", { name: "Retry" }));
     expect(await dialog.findByText(/^Every day at 09:00\. Next run /)).toBeDefined();
   });
+  test("a time with impossible minutes isn't taken as a schedule", async () => {
+    const app = await renderApp({ path: ROUTINES, signedInAs: "usr_ana" });
+    await app.user.click(await screen.findByRole("button", { name: "New routine" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "New routine" }));
+    await app.user.type(dialog.getByRole("textbox", { name: "Schedule" }), "every day at 09:99");
+    expect(await dialog.findByText(/That schedule wasn't understood/)).toBeDefined();
+  });
 });
