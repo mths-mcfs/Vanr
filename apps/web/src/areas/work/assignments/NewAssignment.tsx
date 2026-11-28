@@ -12,7 +12,11 @@ import { type Actors, useOutcome } from "../issues/shared.tsx";
 import { PartError, PartLoading } from "../parts.tsx";
 import { ASSIGNMENT_TITLE_MAX, GOAL_MAX } from "./shared.tsx";
 
-const POLICIES = ["when_safe", "always", "never"] as const satisfies readonly CommandPolicy[];
+// "agent" sends none, so the agent's own setting holds; the others set this assignment's.
+const POLICIES = ["agent", "when_safe", "always", "never"] as const satisfies readonly (
+  | CommandPolicy
+  | "agent"
+)[];
 
 export function NewAssignmentDialog({
   workspaceId,
@@ -32,10 +36,13 @@ export function NewAssignmentDialog({
   const qualified = (eligible.data ?? []).filter((agent) => agent.qualifies);
   // The channels come with the agents: the form waits for both, and a failed load is retried here.
   const channels = useApiQuery("listChannels", { workspaceId });
+  // The channels list has the person's direct messages too, and an assignment never lives in one.
+  const dms = useApiQuery("getDms", { workspaceId });
+  const direct = new Set((dms.data ?? []).map((dm) => dm.channelId));
   // Where the person may write, as the server takes it: any public channel (creating there joins
   // it, and the form says so), a private one only as a member.
   const writable = (channels.data ?? []).filter(
-    (channel) => channel.visibility === "public" || channel.isMember,
+    (channel) => !direct.has(channel.id) && (channel.visibility === "public" || channel.isMember),
   );
   const [goal, setGoal] = useState("");
   const [title, setTitle] = useState("");
@@ -46,7 +53,7 @@ export function NewAssignmentDialog({
     : (writable.find((channel) => channel.isGeneral)?.id ?? writable[0]?.id ?? "");
   const joining = writable.find((channel) => channel.id === channelId && !channel.isMember);
   const [chosenExecutor, setExecutor] = useState<AssignmentExecutor | "">("");
-  const [policy, setPolicy] = useState<CommandPolicy>("when_safe");
+  const [policy, setPolicy] = useState<(typeof POLICIES)[number]>("agent");
   const agentId = chosenAgent === "" ? (qualified[0]?.agentId ?? "") : chosenAgent;
   const executors = qualified.find((agent) => agent.agentId === agentId)?.executors ?? [];
   const executor =
@@ -65,7 +72,7 @@ export function NewAssignmentDialog({
           goal: goal.trim(),
           agentId,
           channelId,
-          commandPolicy: policy,
+          ...(policy !== "agent" && { commandPolicy: policy }),
           ...(title.trim() !== "" && { title: title.trim() }),
           ...(executor !== undefined && { executor }),
         },
@@ -103,7 +110,7 @@ export function NewAssignmentDialog({
           </>
         }
       >
-        {eligible.isPending || channels.isPending ? (
+        {eligible.isPending || channels.isPending || dms.isPending ? (
           <PartLoading />
         ) : eligible.isError && eligible.data === undefined ? (
           <PartError
@@ -111,11 +118,14 @@ export function NewAssignmentDialog({
             error={eligible.error}
             onRetry={() => void eligible.refetch()}
           />
-        ) : channels.isError && channels.data === undefined ? (
+        ) : (channels.isError && channels.data === undefined) || (dms.isError && dms.data === undefined) ? (
           <PartError
             title={t("asg.form.channelsFailed")}
-            error={channels.error}
-            onRetry={() => void channels.refetch()}
+            error={channels.error ?? dms.error}
+            onRetry={() => {
+              void channels.refetch();
+              void dms.refetch();
+            }}
           />
         ) : qualified.length === 0 ? (
           <p className="work-note">{t("asg.form.noAgent")}</p>
@@ -185,7 +195,7 @@ export function NewAssignmentDialog({
               <Field label={t("asg.form.policy")}>
                 <Select
                   value={policy}
-                  onValueChange={(value) => setPolicy(POLICIES.find((each) => each === value) ?? "when_safe")}
+                  onValueChange={(value) => setPolicy(POLICIES.find((each) => each === value) ?? "agent")}
                 >
                   {POLICIES.map((each) => (
                     <SelectItem key={each} value={each}>

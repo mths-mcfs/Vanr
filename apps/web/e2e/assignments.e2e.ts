@@ -1,6 +1,7 @@
 // An assignment end to end, against the real server and its runtime with the fake model: the owner gives an
 // agent a goal from the assignments page, starts it, pauses and resumes it, and closes it as done; the list
-// then shows it among the closed ones, and the server holds the outcome.
+// then shows it among the closed ones, and the server holds the outcome. In another, the agent asks a
+// decision and a review (the fake model calls the tools its goal names) and the owner answers both.
 import { expect, test } from "./fixtures.ts";
 
 test.describe("the assignments", () => {
@@ -68,5 +69,70 @@ test.describe("the assignments", () => {
       assignments: { title: string; outcome: string | null }[];
     };
     expect(assignments.find((each) => each.title === "Label the shelves")?.outcome).toBe("done");
+  });
+
+  test("a decision and a review wait on the owner, who answers them", async ({
+    page,
+    t,
+    seedUser,
+    signIn,
+    apiAs,
+  }) => {
+    const owner = await seedUser({ workspace: "Assignment Cards" });
+    const api = await apiAs(owner);
+    const base = `/api/v1/workspaces/${owner.workspace.id}`;
+    const { channels } = (await (await api.get(`${base}/channels`)).json()) as {
+      channels: { id: string; isGeneral: boolean }[];
+    };
+    const general = channels.find((channel) => channel.isGeneral)?.id ?? "";
+    const agent = await api.post(`${base}/agents`, {
+      data: {
+        name: "Scout",
+        handle: `scout${Date.now().toString(36)}`,
+        role: "assistant",
+        channelIds: [general],
+      },
+    });
+    expect(agent.ok()).toBe(true);
+    const { id: agentId } = (await agent.json()) as { id: string };
+    // The fake model calls the tools named in what it reads: the goal is in the planning turn.
+    const goal = [
+      "Restock the paper room.",
+      '[[tool:ask_decision {"question":"Which supplier?","options":["Northpaper","Mill & Co"]}]]',
+      '[[tool:request_review {"title":"Count sheet","summary":"Six printers counted."}]]',
+    ].join("\n");
+    const made = await api.post(`${base}/assignments`, {
+      data: { goal, title: "Paper room", agentId, channelId: general },
+    });
+    expect(made.ok()).toBe(true);
+    const { id } = (await made.json()) as { id: string };
+
+    await signIn(owner);
+    await page.goto(`/workspace/${owner.workspace.id}/assignments/${id}`);
+    const panel = page.getByRole("region", { name: t("work", "asg.panel") });
+    await panel.getByRole("button", { name: t("work", "asg.start") }).click();
+    await expect(panel.getByText(t("work", "asg.status.active"), { exact: true })).toBeVisible();
+
+    await panel.getByRole("tab", { name: new RegExp(`^${t("work", "asg.tab.waiting")}`) }).click();
+    const decision = panel.getByRole("article", { name: t("work", "card.decision") });
+    await expect(decision.getByText("Which supplier?")).toBeVisible({ timeout: 60_000 });
+    await decision
+      .getByRole("button", { name: t("work", "card.decision.choose", { option: "Northpaper" }) })
+      .click();
+    await expect(
+      decision.getByText(t("work", "card.decision.chosen", { option: "Northpaper" })),
+    ).toBeVisible();
+
+    const review = panel.getByRole("article", { name: `${t("work", "card.review")}: Count sheet` });
+    await expect(review).toBeVisible({ timeout: 60_000 });
+    const changes = review.getByRole("button", { name: t("work", "card.review.changes") });
+    await expect(changes).toBeDisabled();
+    await review.getByRole("button", { name: t("work", "card.review.approve") }).click();
+    await expect(review.getByText(t("work", "card.review.approved"), { exact: true })).toBeVisible();
+
+    const { decisions } = (await (await api.get(`${base}/assignments/${id}/decisions`)).json()) as {
+      decisions: { question: string; chosen: string | null }[];
+    };
+    expect(decisions.find((each) => each.question === "Which supplier?")?.chosen).toBe("Northpaper");
   });
 });

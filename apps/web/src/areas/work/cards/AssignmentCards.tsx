@@ -2,6 +2,7 @@
 // accept, a command waiting for leave to run, and the answer to a suggestion. Each card takes the workspace,
 // the assignment and what the person may do on it (`act`: the owner and whoever decides; `comment`: whoever
 // may weigh in); the server decides, these only hide. The chat mounts them under the messages that carry them.
+import { isApiError } from "@vanr/client";
 import { useApiMutation } from "@vanr/client/react";
 import type {
   AssignmentCommand,
@@ -12,7 +13,7 @@ import type {
 import { Button, Checkbox, Chip, Field, Textarea } from "@vanr/ui";
 import { useState } from "react";
 import { useMessages } from "../../../i18n/react.tsx";
-import { assignmentKeys, REVIEW_NOTE_MAX } from "../assignments/shared.tsx";
+import { assignmentKeys, REVIEW_NOTE_MAX, useAssignmentRefresh } from "../assignments/shared.tsx";
 import { useOutcome } from "../issues/shared.tsx";
 import { RichText, safeHref } from "../RichText.tsx";
 
@@ -22,9 +23,14 @@ type CardBase = { workspaceId: string; assignmentId: string; rights: CardRights 
 
 function useCardMutation<M extends Parameters<typeof useApiMutation>[0]>(method: M, base: CardBase) {
   const outcome = useOutcome();
+  const refresh = useAssignmentRefresh(base.workspaceId, base.assignmentId);
   return useApiMutation(method, {
     invalidates: () => assignmentKeys(base.workspaceId, base.assignmentId),
-    onError: (error) => outcome.failed(error),
+    onError: (error) => {
+      outcome.failed(error);
+      // Someone else answered first: the card loads again and shows what they chose.
+      if (isApiError(error) && error.status === 409) refresh();
+    },
   });
 }
 
@@ -67,13 +73,19 @@ export function DecisionCard({ decision, ...base }: CardBase & { decision: Assig
               <Button
                 size="sm"
                 loading={choose.isPending && choose.variables?.body.option === option}
+                disabled={choose.isPending}
                 onClick={() => choose.mutate({ ...args, body: { option } })}
               >
                 {t("card.decision.choose", { option })}
               </Button>
             )}
             {open && !base.rights.act && base.rights.comment && (
-              <Button size="sm" variant="ghost" onClick={() => lean.mutate({ ...args, body: { option } })}>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={lean.isPending}
+                onClick={() => lean.mutate({ ...args, body: { option } })}
+              >
                 {t("card.decision.lean", { option })}
               </Button>
             )}
@@ -129,7 +141,12 @@ export function ReviewCard({ review, ...base }: CardBase & { review: AssignmentR
             <Button variant="primary" size="sm" loading={decide.isPending} onClick={() => send("approve")}>
               {t("card.review.approve")}
             </Button>
-            <Button size="sm" disabled={decide.isPending} onClick={() => send("changes")}>
+            {/* Asking for changes says what to change: the server refuses it without a note. */}
+            <Button
+              size="sm"
+              disabled={decide.isPending || note.trim() === ""}
+              onClick={() => send("changes")}
+            >
               {t("card.review.changes")}
             </Button>
           </div>
@@ -279,7 +296,14 @@ export function CommandCard({ command, ...base }: CardBase & { command: Assignme
 }
 
 /** The answer to a change an agent suggested in the conversation (the chat draws the suggestion itself). */
-export function SuggestionActions({ suggestionId, ...base }: CardBase & { suggestionId: string }) {
+export function SuggestionActions(props: CardBase & { suggestionId: string }) {
+  // One per suggestion: an answer given to one never shows on another the chat mounts in its place.
+  return (
+    <SuggestionAnswer key={`${props.workspaceId}/${props.assignmentId}/${props.suggestionId}`} {...props} />
+  );
+}
+
+function SuggestionAnswer({ suggestionId, ...base }: CardBase & { suggestionId: string }) {
   const t = useMessages("work");
   const answer = useCardMutation("runActionOnAssignmentSuggestion", base);
   if (answer.data !== undefined) return <Chip>{t(`card.suggestion.${answer.data.status}`)}</Chip>;

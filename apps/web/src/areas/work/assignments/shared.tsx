@@ -1,7 +1,8 @@
 // What the assignment screens and cards share: the server's limits, who acted on the trail, where an
 // assignment lives, and the queries a change on an assignment makes stale.
 
-import type { KeyPrefix } from "@vanr/client/react";
+import { useQueryClient } from "@tanstack/react-query";
+import { type KeyPrefix, prefixKey, useVanrClient } from "@vanr/client/react";
 import type { Assignment, AssignmentActorRef } from "@vanr/contract";
 import { useMessages } from "../../../i18n/react.tsx";
 import type { Actors } from "../issues/shared.tsx";
@@ -14,19 +15,25 @@ export const REVIEW_NOTE_MAX = 4_000;
 export const isClosedAssignment = (assignment: Pick<Assignment, "status">) =>
   assignment.status === "done" || assignment.status === "canceled";
 
-/** Everything a change on one assignment can make stale: its own reads and the lists it shows in. */
 /**
- * How much of an assignment is open, and how much of it waits on this person: requests to take
- * part only on who may let people in, the rest only on someone who may act.
+ * How much of an assignment is open, and how much of it waits on this person, as the server's "waiting
+ * on you": nothing for who may not act; never a provisional decision; requests to take part only for
+ * the owner, who answers them.
  */
-export function pendingOf(assignment: Pick<Assignment, "pending" | "actionable" | "manageable">) {
-  const open = Object.values(assignment.pending).reduce((sum, count) => sum + count, 0);
-  const mine =
-    (assignment.actionable ? open - assignment.pending.joinRequests : 0) +
-    (assignment.manageable ? assignment.pending.joinRequests : 0);
-  return { open, waiting: mine };
+export function pendingOf(assignment: Pick<Assignment, "pending" | "actionable" | "role">) {
+  const p = assignment.pending;
+  const open = Object.values(p).reduce((sum, count) => sum + count, 0);
+  const waiting = assignment.actionable
+    ? p.decisions +
+      p.reviews +
+      p.commands +
+      p.submissions +
+      (assignment.role === "owner" ? p.joinRequests : 0)
+    : 0;
+  return { open, waiting };
 }
 
+/** Everything a change on one assignment can make stale: its own reads and the lists it shows in. */
 export function assignmentKeys(workspaceId: string, assignmentId: string): KeyPrefix[] {
   const own = { workspaceId, assignmentId };
   return [
@@ -51,5 +58,15 @@ export function useActorName(actors: Actors): (actor: AssignmentActorRef) => str
     if (actor.type === "verifier") return t("asg.who.verifier");
     if (actor.type === "system" || actor.id === null) return t("asg.who.system");
     return actors.name({ type: actor.type, id: actor.id });
+  };
+}
+
+/** Loads the assignment's reads again: after a 409, someone else changed it first. */
+export function useAssignmentRefresh(workspaceId: string, assignmentId: string): () => void {
+  const queries = useQueryClient();
+  const client = useVanrClient();
+  return () => {
+    for (const prefix of assignmentKeys(workspaceId, assignmentId))
+      void queries.invalidateQueries({ queryKey: prefixKey(client, prefix) });
   };
 }

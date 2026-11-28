@@ -11,6 +11,14 @@ type Host = FilesHost & {
   agents: (workspaceId: string) => T.Agent[];
   /** Whether the person reads the channel, which must be one of this workspace. */
   readsChannel: (userId: string, channelId: string, workspaceId: string) => boolean;
+  /** Whether the channel is someone's direct messages. */
+  isDm: (channelId: string, workspaceId: string) => boolean;
+  /** Whether the agent is a member of the channel. */
+  agentIn: (agentId: string, channelId: string) => boolean;
+  /** Makes the person a member of the channel (writing in a public one joins it). */
+  join: (userId: string, channelId: string) => void;
+  /** Whether the person's workspace role lets them see what things cost. */
+  seesUsage: (role: T.Role) => boolean;
   nameOf: (userId: string) => string;
 };
 type Stored = Omit<T.Assignment, "role" | "actionable" | "manageable"> & {
@@ -216,6 +224,31 @@ export class FakeAssignments {
     return row.people.find((person) => person.userId === scope.user.id)?.role ?? "view";
   }
 
+  /** As the server: the owner always sees their assignment; anyone else when they read its channel. */
+  private sees(scope: Scope, row: Stored): boolean {
+    return (
+      row.workspaceId === scope.workspaceId &&
+      (row.ownerId === scope.user.id ||
+        this.host.readsChannel(scope.user.id, row.channelId, scope.workspaceId))
+    );
+  }
+
+  /**
+   * Whether something waits on the person, as the server's waitingFor: only for who may act; a pause on
+   * the cost ceiling and requests to take part only for the owner; never a provisional decision; and a
+   * step that is blocked on someone or stuck.
+   */
+  private waitsOn(scope: Scope, row: Stored): boolean {
+    if (row.status === "done" || row.status === "canceled") return false;
+    const role = this.roleOf(scope, row);
+    if (role !== "owner" && role !== "decide") return false;
+    const owner = role === "owner";
+    if (row.status === "paused" && row.ceiling !== null && owner) return true;
+    const p = row.pending;
+    if (p.decisions + p.reviews + p.commands + p.submissions + (owner ? p.joinRequests : 0) > 0) return true;
+    return row.plan.items.some((item) => item.status === "blocked_on_you" || item.stallReason !== null);
+  }
+
   private view(scope: Scope, row: Stored): T.Assignment {
     const {
       workspaceId: _w,
@@ -234,6 +267,8 @@ export class FakeAssignments {
     const last = events.reduce((most, event) => Math.max(most, event.seq), 0);
     return {
       ...rest,
+      // What it cost (money and the runner's tokens) only for who may view usage, as the server.
+      usage: this.host.seesUsage(scope.role) ? rest.usage : { ...rest.usage, dollars: null, jobTokens: null },
       role,
       actionable: role === "owner" || role === "decide",
       manageable: role === "owner" || scope.role !== "member",
@@ -269,10 +304,7 @@ export class FakeAssignments {
     ) =>
       within((scope, params) => {
         const row = this.assignments.find(
-          (each) =>
-            each.id === params.assignmentId &&
-            each.workspaceId === scope.workspaceId &&
-            this.host.readsChannel(scope.user.id, each.channelId, scope.workspaceId),
+          (each) => each.id === params.assignmentId && this.sees(scope, each),
         );
         if (row === undefined) return missing();
         const shown = this.view(scope, row);
@@ -287,14 +319,9 @@ export class FakeAssignments {
 
     return {
       listAssignments: within((scope, params) => {
-        const visible = this.assignments.filter(
-          (row) =>
-            row.workspaceId === scope.workspaceId &&
-            this.host.readsChannel(scope.user.id, row.channelId, scope.workspaceId),
-        );
+        const visible = this.assignments.filter((row) => this.sees(scope, row));
         const q = text(params.q)?.toLowerCase() ?? "";
-        const waitsOn = (row: Stored) =>
-          Object.values(row.pending).some((count) => count > 0) && this.view(scope, row).actionable;
+        const waitsOn = (row: Stored) => this.waitsOn(scope, row);
         const counts = {
           active: visible.filter((row) => !closed(row)).length,
           closed: visible.filter(closed).length,
@@ -329,14 +356,22 @@ export class FakeAssignments {
       createAssignment: within((scope, params) => {
         const goal = text(params.goal)?.trim() ?? "";
         if (goal === "") return fail(400, "invalid_request", "A goal is needed");
+        // As the server: a channel the person can write in (writing in a public one joins it), never a
+        // direct message, and one the agent is in.
         const channelId = text(params.channelId) ?? "";
+        const agentId = text(params.agentId) ?? "";
         if (!this.host.readsChannel(scope.user.id, channelId, scope.workspaceId))
           return fail(404, "not_found", "Channel not found");
+        if (this.host.isDm(channelId, scope.workspaceId))
+          return fail(400, "invalid_request", "Assignments live in channels");
+        if (!this.host.agentIn(agentId, channelId))
+          return fail(409, "assignment.agent_not_in_channel", "Add the agent to this channel first");
+        this.host.join(scope.user.id, channelId);
         const row = this.make(scope.workspaceId, {
           id: this.host.id("asg"),
           title: text(params.title)?.trim() || goal.slice(0, 60),
           goal,
-          agentId: text(params.agentId) ?? "",
+          agentId,
           ownerId: scope.user.id,
           channelId,
           commandPolicy: (params.commandPolicy as T.CommandPolicy | undefined) ?? "when_safe",
@@ -394,10 +429,16 @@ export class FakeAssignments {
         const item = row.plan.items.find((each) => each.id === params.itemId);
         return item === undefined ? fail(404, "not_found", "Item not found") : reply(200, item);
       }, "act"),
-      listAssignmentEvents: withOne((scope, row) => {
+      // Newest first, a page at a time: `before` a seq, at most `limit` (200 by default), as the server.
+      listAssignmentEvents: withOne((scope, row, params) => {
         const lastSeq = row.events.reduce((most, event) => Math.max(most, event.seq), 0);
+        const before = Number(params.before) || Number.POSITIVE_INFINITY;
+        const limit = Number(params.limit) || 200;
         return reply(200, {
-          events: [...row.events].sort((a, b) => b.seq - a.seq),
+          events: [...row.events]
+            .filter((event) => event.seq < before)
+            .sort((a, b) => b.seq - a.seq)
+            .slice(0, limit),
           seenSeq: row.seen.get(scope.user.id) ?? 0,
           lastSeq,
         });
@@ -410,6 +451,8 @@ export class FakeAssignments {
       chooseAssignmentDecision: withOne((scope, row, params) => {
         const decision = row.decisions.find((each) => each.id === params.decisionId);
         if (decision === undefined) return fail(404, "not_found", "Decision not found");
+        if (decision.status === "taken")
+          return fail(409, "assignment.decision_taken", "This decision was already taken");
         decision.status = "taken";
         decision.chosen = text(params.option) ?? null;
         decision.selectedBy = scope.user.id;
@@ -417,6 +460,8 @@ export class FakeAssignments {
         return reply(200, decision);
       }, "act"),
       opinionAssignmentDecision: withOne((scope, row, params) => {
+        if (this.roleOf(scope, row) === "view")
+          return fail(403, "assignment.forbidden", "Join the assignment to give an opinion");
         const decision = row.decisions.find((each) => each.id === params.decisionId);
         if (decision === undefined) return fail(404, "not_found", "Decision not found");
         decision.opinions.push({
@@ -498,7 +543,8 @@ export class FakeAssignments {
         row.people = row.people.filter((each) => each.userId !== params.participantId);
         return reply(204, null);
       }),
-      listAssignmentJoinRequests: withOne((_scope, row) => reply(200, { requests: row.requests }), "manage"),
+      // Listing the requests asks who may act (the server's actOn); answering them, who manages.
+      listAssignmentJoinRequests: withOne((_scope, row) => reply(200, { requests: row.requests }), "act"),
       // One request per person, as on the server: asking again after a no opens the same one again.
       createAssignmentJoinRequest: withOne((scope, row) => {
         if (this.roleOf(scope, row) !== "view")
@@ -558,6 +604,14 @@ export class FakeAssignments {
         row.rules = row.rules.filter((rule) => rule.id !== params.commandRuleId);
         return reply(200, { rules: row.rules });
       }, "manage"),
+      runActionOnAssignmentSuggestion: withOne(
+        (_scope, _row, params) =>
+          reply(200, {
+            messageId: text(params.suggestionId) ?? "",
+            status: params.action === "accept" ? "accepted" : "declined",
+          }),
+        "act",
+      ),
       listAssignmentFiles: withOne(() =>
         reply(200, {
           files: [

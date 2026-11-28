@@ -50,7 +50,15 @@ export function AssignmentPanel({
       />
     );
   }
-  return <PanelBody workspaceId={workspaceId} assignment={assignment.data} actors={actors} />;
+  // A body per assignment: what was typed, the trail read so far and an open dialog stay with theirs.
+  return (
+    <PanelBody
+      key={`${workspaceId}/${assignmentId}`}
+      workspaceId={workspaceId}
+      assignment={assignment.data}
+      actors={actors}
+    />
+  );
 }
 
 function PanelBody({

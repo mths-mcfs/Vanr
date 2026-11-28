@@ -20,6 +20,7 @@ import { useEffect, useState } from "react";
 import { useErrorMessage } from "../../../app/screens.tsx";
 import { useLocale, useMessages } from "../../../i18n/react.tsx";
 import { type Actors, useOutcome } from "../issues/shared.tsx";
+import { readLimit } from "../limits.ts";
 import { browserTimezone } from "../time.ts";
 import { ROUTINE_EVENTS, useTriggerText } from "./words.ts";
 
@@ -54,17 +55,6 @@ const NUMBERS = [
 ] as const;
 type NumberKey = (typeof NUMBERS)[number]["key"];
 
-/** A limit as typed: a number inside its bounds (a whole one unless it is money), or undefined. */
-export function readLimit(text: string, limit: (typeof NUMBERS)[number]): number | undefined {
-  // A count is digits only. An amount is dollars with up to two decimals after "." or ",", so
-  // "1,000" is no amount at all rather than one dollar; neither is "0x10" or "1e3".
-  const typed = text.trim();
-  if (!(limit.step === 1 ? /^\d+$/ : /^\d+([.,]\d{1,2})?$/).test(typed)) return undefined;
-  const value = Number(typed.replace(",", "."));
-  if (value < limit.min || value > limit.max) return undefined;
-  if (limit.step === 1 && !Number.isInteger(value)) return undefined;
-  return value;
-}
 const NUMBER_LABEL = {
   maxCostUsd: "recur.form.maxCost",
   maxSteps: "recur.form.maxSteps",

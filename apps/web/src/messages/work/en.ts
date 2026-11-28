@@ -530,6 +530,8 @@ export default {
   "asg.settings.steps": "Step limit",
   "asg.settings.minutes": "Time limit (minutes)",
   "asg.settings.noLimit": "Empty for no limit",
+  "asg.settings.dollarsHint":
+    "Dollars, up to two decimals (1.50 or 1,50), no thousands separator. Empty for no limit",
   "asg.settings.saveLimits": "Save limits",
   "asg.settings.resumeJobs": "Resume interrupted jobs on their own",
   "asg.settings.failed": "The command rules could not be loaded",
@@ -538,6 +540,7 @@ export default {
   "asg.open": { one: "{count} open item", other: "{count} open items" },
   "asg.form.agentsFailed": "The agents that can take an assignment could not be loaded",
   "asg.form.joins": "You aren't in #{channel} yet: creating the assignment there adds you to it.",
+  "asg.form.policy.agent": "As set on the agent",
   "asg.form.channelsFailed": "The channels an assignment can live in could not be loaded",
   "asg.people.requestsFailed": "The requests to take part could not be loaded",
   "recur.form.limitRange": "A number from {min} to {max}.",

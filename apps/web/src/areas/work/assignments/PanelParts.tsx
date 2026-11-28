@@ -14,6 +14,7 @@ import { Button, Chip, Field, Input, Select, SelectItem, Switch } from "@vanr/ui
 import { useEffect, useState } from "react";
 import { useLocale, useMessages } from "../../../i18n/react.tsx";
 import { useRelativeTime } from "../../../i18n/relative-time.tsx";
+import { useInvalidateOn } from "../../../realtime/react.tsx";
 import {
   type CardRights,
   CommandCard,
@@ -21,7 +22,8 @@ import {
   ReviewCard,
   SubmissionCard,
 } from "../cards/AssignmentCards.tsx";
-import { type Actors, useMyId, useOutcome } from "../issues/shared.tsx";
+import { type Actors, useMyId, useOutcome, useSeesUsage } from "../issues/shared.tsx";
+import { type Limit, readLimit } from "../limits.ts";
 import { PartError, PartLoading } from "../parts.tsx";
 import { assignmentKeys, useActorName } from "./shared.tsx";
 
@@ -32,6 +34,7 @@ export function Summary({ workspaceId, assignment }: Part) {
   const t = useMessages("work");
   const { locale } = useLocale();
   const summary = useApiQuery("getAssignmentSummary", { workspaceId, assignmentId: assignment.id });
+  const seesUsage = useSeesUsage(workspaceId);
   const usd = new Intl.NumberFormat(locale, { style: "currency", currency: "USD" });
   if (summary.isPending) return <PartLoading />;
   if (summary.isError && summary.data === undefined) {
@@ -45,6 +48,8 @@ export function Summary({ workspaceId, assignment }: Part) {
   }
   const { plan } = summary.data;
   const { usage, limits } = assignment;
+  // Money only for who may view usage; the server sends no amount (null) to anyone else.
+  const spent = seesUsage ? usage.dollars : null;
   const meter = (used: string, limit: string | null) =>
     limit === null ? used : t("asg.summary.of", { used, limit });
   return (
@@ -59,10 +64,12 @@ export function Summary({ workspaceId, assignment }: Part) {
       </p>
       <h3 className="work-subhead">{t("asg.summary.usage")}</h3>
       <dl className="work-facts">
-        <dt>{t("asg.summary.usd")}</dt>
-        <dd>
-          {meter(usd.format(usage.dollars), limits.dollars === null ? null : usd.format(limits.dollars))}
-        </dd>
+        {spent !== null && (
+          <>
+            <dt>{t("asg.summary.usd")}</dt>
+            <dd>{meter(usd.format(spent), limits.dollars === null ? null : usd.format(limits.dollars))}</dd>
+          </>
+        )}
         <dt>{t("asg.summary.steps")}</dt>
         <dd>{meter(String(usage.steps), limits.steps === null ? null : String(limits.steps))}</dd>
         <dt>{t("asg.summary.minutes")}</dt>
@@ -205,6 +212,10 @@ export function Trail({ workspaceId, assignment, actors }: Part & { actors: Acto
   ].sort((a, b) => b.seq - a.seq);
   if (events.length === 0) return <p className="page__muted">{t("asg.trail.empty")}</p>;
   const first = events[events.length - 1]?.seq ?? 0;
+  // The seq counts every assignment's events, so it says nothing of what is left: older ones may be
+  // there only while the last page asked for came back full.
+  const lastPage = before === undefined ? latest.data : page.data;
+  const more = lastPage === undefined || lastPage.events.length >= TRAIL_PAGE;
   const what = (kind: AssignmentEventKind) => {
     const known = KNOWN_EVENTS.find((each) => each === kind);
     return known === undefined ? t("asg.ev.other") : t(`asg.ev.${known}`);
@@ -227,7 +238,7 @@ export function Trail({ workspaceId, assignment, actors }: Part & { actors: Acto
       {page.isError && page.data === undefined ? (
         <PartError title={t("asg.trail.failed")} error={page.error} onRetry={() => void page.refetch()} />
       ) : (
-        first > 1 && (
+        more && (
           <Button size="sm" variant="ghost" loading={page.isFetching} onClick={() => setBefore(first)}>
             {t("asg.trail.older")}
           </Button>
@@ -293,8 +304,16 @@ export function People({ workspaceId, assignment }: Part) {
   const outcome = useOutcome();
   const me = useMyId();
   const args = { workspaceId, assignmentId: assignment.id };
-  const people = useApiQuery("listAssignmentParticipants", args);
-  const requests = useApiQuery("listAssignmentJoinRequests", args, { enabled: assignment.manageable });
+  // Requests are listed to who may act and manages (the server lists them only to who may act).
+  const answers = assignment.manageable && assignment.actionable;
+  const people = useApiQuery("listAssignmentParticipants", args, { refetchOnWindowFocus: true });
+  const requests = useApiQuery("listAssignmentJoinRequests", args, {
+    enabled: answers,
+    refetchOnWindowFocus: true,
+  });
+  // A change on the assignment (someone joined, left or asked) reaches this tab as it happens.
+  useInvalidateOn("assignment.updated", { method: "listAssignmentParticipants", args });
+  useInvalidateOn("assignment.updated", { method: "listAssignmentJoinRequests", args });
   const refresh = {
     invalidates: () => assignmentKeys(workspaceId, assignment.id),
     onError: (error: unknown) => outcome.failed(error),
@@ -316,7 +335,7 @@ export function People({ workspaceId, assignment }: Part) {
     );
   }
   const pending = (requests.data ?? []).filter((request) => request.status === "pending");
-  const requestsFailed = assignment.manageable && requests.isError && requests.data === undefined;
+  const requestsFailed = answers && requests.isError && requests.data === undefined;
   return (
     <div className="work-section">
       <p>{t("asg.people.owner", { name: people.data.owner.name })}</p>
@@ -347,6 +366,7 @@ export function People({ workspaceId, assignment }: Part) {
               <Button
                 size="sm"
                 variant="ghost"
+                disabled={remove.isPending}
                 onClick={() => remove.mutate({ ...args, participantId: person.userId })}
               >
                 {person.userId === me ? t("asg.people.leave") : t("asg.people.remove", { name: person.name })}
@@ -380,6 +400,7 @@ export function People({ workspaceId, assignment }: Part) {
                 <Button
                   size="sm"
                   variant="primary"
+                  disabled={answer.isPending}
                   onClick={() =>
                     answer.mutate({
                       ...args,
@@ -394,6 +415,7 @@ export function People({ workspaceId, assignment }: Part) {
                 <Button
                   size="sm"
                   variant="ghost"
+                  disabled={answer.isPending}
                   onClick={() =>
                     answer.mutate({ ...args, joinRequestId: request.userId, action: "decline", body: {} })
                   }
@@ -437,6 +459,12 @@ export function Files({ workspaceId, assignment }: Part) {
 
 const POLICIES = ["when_safe", "always", "never"] as const satisfies readonly CommandPolicy[];
 const LIMITS = ["dollars", "steps", "minutes"] as const;
+// The server takes 0 to a million of each; dollars with cents, the others whole.
+const BOUNDS: Record<(typeof LIMITS)[number], Limit> = {
+  dollars: { min: 0, max: 1_000_000, step: "any" },
+  steps: { min: 0, max: 1_000_000, step: 1 },
+  minutes: { min: 0, max: 1_000_000, step: 1 },
+};
 
 /** How the assignment runs: command approval on the runner, its limits and due date, and resuming jobs. */
 export function Settings({ workspaceId, assignment }: Part) {
@@ -461,11 +489,10 @@ export function Settings({ workspaceId, assignment }: Part) {
     minutes: assignment.limits.minutes === null ? "" : String(assignment.limits.minutes),
   }));
   if (!assignment.manageable) return <p className="page__muted">{t("asg.settings.owner")}</p>;
-  const parsed = (value: string) => (value.trim() === "" ? null : Number(value));
-  const valid = LIMITS.every((key) => {
-    const value = parsed(limits[key]);
-    return value === null || (Number.isFinite(value) && value >= 0 && value <= 1_000_000);
-  });
+  // Empty is no limit; anything else has to read as the limit it is.
+  const parsed = (key: (typeof LIMITS)[number]) =>
+    limits[key].trim() === "" ? null : readLimit(limits[key], BOUNDS[key]);
+  const valid = LIMITS.every((key) => parsed(key) !== undefined);
   return (
     <div className="work-section">
       <Field label={t("asg.form.policy")}>
@@ -492,9 +519,9 @@ export function Settings({ workspaceId, assignment }: Part) {
             ...args,
             body: {
               limits: {
-                dollars: parsed(limits.dollars),
-                steps: parsed(limits.steps),
-                minutes: parsed(limits.minutes),
+                dollars: parsed("dollars") ?? null,
+                steps: parsed("steps") ?? null,
+                minutes: parsed("minutes") ?? null,
               },
             },
           });
@@ -502,11 +529,16 @@ export function Settings({ workspaceId, assignment }: Part) {
       >
         <div className="work-form__row">
           {LIMITS.map((key) => (
-            <Field key={key} label={t(`asg.settings.${key}`)} hint={t("asg.settings.noLimit")}>
+            <Field
+              key={key}
+              label={t(`asg.settings.${key}`)}
+              hint={t(key === "dollars" ? "asg.settings.dollarsHint" : "asg.settings.noLimit")}
+              {...(parsed(key) === undefined && {
+                error: t("recur.form.limitRange", { min: BOUNDS[key].min, max: BOUNDS[key].max }),
+              })}
+            >
               <Input
-                type="number"
-                min={0}
-                step="any"
+                inputMode={key === "dollars" ? "decimal" : "numeric"}
                 value={limits[key]}
                 onChange={(event) => setLimits({ ...limits, [key]: event.target.value })}
               />
@@ -522,6 +554,7 @@ export function Settings({ workspaceId, assignment }: Part) {
       <Switch
         label={t("asg.settings.resumeJobs")}
         checked={assignment.resumeJobs}
+        disabled={update.isPending}
         onCheckedChange={(resumeJobs) => update.mutate({ ...args, body: { resumeJobs } })}
       />
       {settings.isError && settings.data === undefined ? (
@@ -541,6 +574,7 @@ export function Settings({ workspaceId, assignment }: Part) {
                   <Button
                     size="sm"
                     variant="ghost"
+                    disabled={dropRule.isPending}
                     onClick={() => dropRule.mutate({ ...args, commandRuleId: rule.id })}
                   >
                     {t("asg.settings.dropRule")}

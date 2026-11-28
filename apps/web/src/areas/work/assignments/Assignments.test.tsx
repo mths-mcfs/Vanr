@@ -170,10 +170,17 @@ describe("an assignment's page", () => {
     const panel = within(await screen.findByRole("region", { name: "Assignment" }));
     await app.user.click(panel.getByRole("tab", { name: "Settings" }));
     expect(await panel.findByText("lpstat *")).toBeDefined();
-    const steps = panel.getByRole("spinbutton", { name: "Step limit" });
-    await app.user.type(steps, "40");
+    await app.user.type(panel.getByRole("textbox", { name: "Step limit" }), "40");
+    // A thousands separator is no amount: the field says so and nothing is saved.
+    const dollars = panel.getByRole("textbox", { name: "Spending limit (USD)" });
+    await app.user.type(dollars, "1,000");
+    expect(panel.getByText(/^A number from 0 to 1/)).toBeDefined();
+    expect((panel.getByRole("button", { name: "Save limits" }) as HTMLButtonElement).disabled).toBe(true);
+    await app.user.clear(dollars);
+    await app.user.type(dollars, "1,50");
     await app.user.click(panel.getByRole("button", { name: "Save limits" }));
     await waitFor(() => expect(app.server.assignments.assignments[0]?.limits.steps).toBe(40));
+    expect(app.server.assignments.assignments[0]?.limits.dollars).toBe(1.5);
     await app.user.click(panel.getByRole("switch", { name: "Resume interrupted jobs on their own" }));
     await waitFor(() => expect(app.server.assignments.assignments[0]?.resumeJobs).toBe(true));
   });
@@ -268,6 +275,9 @@ describe("an assignment's states, as each person sees them", () => {
       createdAt: "2026-11-02T09:00:00.000Z",
       memberIds: [],
     });
+    // The agents are in #press: the server takes an assignment only where its agent is.
+    for (const agent of server.agents)
+      server.agentWork.extra(agent).channels.push({ id: "ch_press", autoAnswer: false });
     const app = await renderApp({ path: LIST, signedInAs: "usr_ana", server });
     await app.user.click(await screen.findByRole("button", { name: "New assignment" }));
     const dialog = within(await screen.findByRole("dialog", { name: "New assignment" }));
@@ -279,6 +289,10 @@ describe("an assignment's states, as each person sees them", () => {
     await app.user.click(dialog.getByRole("button", { name: "Create assignment" }));
     await waitFor(() =>
       expect(app.server.assignments.assignments.some((row) => row.channelId === "ch_press")).toBe(true),
+    );
+    // Creating there joined the person, as on the server.
+    expect(server.state.channels.find((channel) => channel.id === "ch_press")?.memberIds).toContain(
+      "usr_ana",
     );
   });
 

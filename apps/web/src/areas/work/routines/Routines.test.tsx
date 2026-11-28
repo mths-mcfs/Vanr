@@ -5,7 +5,7 @@ process.env.TZ = "UTC";
 
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { newServer, renderApp } from "../../../../test/app.tsx";
-import { readLimit } from "./NewRoutine.tsx";
+import { readLimit } from "../limits.ts";
 
 const ROUTINES = "/workspace/workspace_birchwood/routines";
 const card = (name: string) => within(screen.getByRole("article", { name }));

@@ -417,6 +417,19 @@ export class FakeServer {
         );
       },
       nameOf: (userId) => this.state.users.find((user) => user.id === userId)?.name ?? userId,
+      isDm: (channelId, workspaceId) =>
+        (this.dms.get(workspaceId) ?? []).some((dm) => dm.channelId === channelId),
+      agentIn: (agentId, channelId) => {
+        const agent = this.agents.find((candidate) => candidate.id === agentId);
+        return (
+          agent !== undefined && this.agentWork.extra(agent).channels.some((each) => each.id === channelId)
+        );
+      },
+      join: (userId, channelId) => {
+        const channel = this.state.channels.find((candidate) => candidate.id === channelId);
+        if (channel !== undefined && !channel.memberIds.includes(userId)) channel.memberIds.push(userId);
+      },
+      seesUsage: (role) => can(role, "view_usage"),
     });
     this.fileOperations = {
       ...this.chat.operations(),
