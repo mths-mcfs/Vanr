@@ -132,7 +132,8 @@ function targetOf(input: DatabaseConnectInput): SqlTarget {
       database: decodeURIComponent(url.pathname.replace(/^\//, "")),
       username: decodeURIComponent(url.username),
       password: input.password ?? decodeURIComponent(url.password),
-      sslmode: ssl === "disable" || ssl === "verify-full" ? ssl : (input.sslmode ?? "require"),
+      sslmode:
+        ssl === "disable" || ssl === "verify-full" || ssl === "require" ? ssl : (input.sslmode ?? "require"),
     };
   }
   const { host, port, database, username, password, sslmode } = t;

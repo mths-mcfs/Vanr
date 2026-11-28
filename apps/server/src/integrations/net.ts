@@ -87,6 +87,13 @@ export async function checkServerUrl(
 
 const MAX_REDIRECTS = 5;
 
+/**
+ * The only headers that follow a redirect to another origin: none of them carries a credential. Every other
+ * header (`authorization`, `cookie`, `x-api-key` and any other a caller adds) stays with the origin it was
+ * meant for. `range` keeps a ranged S3 read ranged; the S3 signer adds its own headers again on each hop.
+ */
+const CROSS_ORIGIN_HEADERS = new Set(["accept", "content-type", "user-agent", "range"]);
+
 /** The fetch a guard wraps, kept on the guard so that guarding it again replaces the guard. */
 const UNGUARDED = Symbol("unguarded");
 
@@ -105,9 +112,9 @@ function pinned(url: URL, ip: string, init: RequestInit): [string, RequestInit] 
 /**
  * fetch for outside servers. Every address goes through the `checkServerUrl` rule: the request and also each
  * redirect, followed here by hand. Without this, a remote server points ours at the internal network through
- * what it returns (OAuth metadata, client registration, `Location`). `Authorization` and `Cookie` don't follow
- * to another origin. Without the local network allowed, every hop connects to the checked IP. A caller that
- * asks for `redirect: "manual"` gets the first answer, redirect included, and nothing is followed.
+ * what it returns (OAuth metadata, client registration, `Location`). Only `CROSS_ORIGIN_HEADERS` follow to
+ * another origin. Without the local network allowed, every hop connects to the checked IP. A caller that asks
+ * for `redirect: "manual"` gets the first answer, redirect included, and nothing is followed.
  *
  * Guarding a guarded fetch wraps the fetch underneath with the new rule: two layers would pin the first hop
  * to its IP, and the inner one would then see a redirect back to the name as another origin and drop the
@@ -139,9 +146,9 @@ export function guardedFetch(
       if (res.status === 303 || ((res.status === 301 || res.status === 302) && method === "POST"))
         req = { ...req, method: "GET", body: undefined };
       if (next.origin !== checked.origin) {
-        const headers = new Headers(req.headers);
-        headers.delete("authorization");
-        headers.delete("cookie");
+        const headers = new Headers();
+        for (const [name, value] of new Headers(req.headers))
+          if (CROSS_ORIGIN_HEADERS.has(name)) headers.set(name, value);
         req = { ...req, headers };
       }
       url = next.toString();

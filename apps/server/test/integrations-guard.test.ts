@@ -105,16 +105,27 @@ describe("guardedFetch", () => {
     expect(await failureOf(guardedFetch(fetchFn, false, dns, true)("http://ok.test/"))).toBe("ok");
   });
 
-  test("credentials follow a redirect on the same origin but stop when the origin changes", async () => {
-    const received: (string | null)[][] = [];
-    const record = (req: Request) => {
-      received.push([req.headers.get("authorization"), req.headers.get("cookie"), req.headers.get("x-test")]);
+  test("a same-origin redirect keeps every header; another origin gets only the allowlisted ones", async () => {
+    const sentHeaders = {
+      authorization: "Bearer test-token",
+      cookie: "session=test-cookie",
+      "x-api-key": "composio-key",
+      "x-secret": "made-up-secret",
+      accept: "application/json",
+      "content-type": "application/json",
+      "user-agent": "vanr-test",
+      range: "bytes=0-9",
+    };
+    const received: { method: string; body: string; headers: Record<string, string | null> }[] = [];
+    const record = async (req: Request) => {
+      const headers = Object.fromEntries(Object.keys(sentHeaders).map((k) => [k, req.headers.get(k)]));
+      received.push({ method: req.method, body: await req.text(), headers });
     };
     const target = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
-      fetch(req) {
-        record(req);
+      async fetch(req) {
+        await record(req);
         return new Response("ok");
       },
     });
@@ -124,23 +135,39 @@ describe("guardedFetch", () => {
     const source = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
-      fetch(req) {
+      async fetch(req) {
         if (new URL(req.url).pathname === "/start")
-          return new Response(null, { status: 302, headers: { location: "/same" } });
-        record(req);
-        return new Response(null, { status: 302, headers: { location: target.url.toString() } });
+          return new Response(null, { status: 307, headers: { location: "/same" } });
+        await record(req);
+        return new Response(null, { status: 307, headers: { location: target.url.toString() } });
       },
     });
     stops.push(async () => {
       await source.stop(true);
     });
+    // 307 keeps the method and replays the body on both hops; only the headers change at the new origin.
     const res = await guardedFetch(fetch, true)(new URL("/start", source.url), {
-      headers: { Authorization: "Bearer test-token", Cookie: "session=test-cookie", "x-test": "kept" },
+      method: "POST",
+      headers: sentHeaders,
+      body: '{"q":1}',
     });
     expect(await res.text()).toBe("ok");
     expect(received).toEqual([
-      ["Bearer test-token", "session=test-cookie", "kept"],
-      [null, null, "kept"],
+      { method: "POST", body: '{"q":1}', headers: sentHeaders },
+      {
+        method: "POST",
+        body: '{"q":1}',
+        headers: {
+          authorization: null,
+          cookie: null,
+          "x-api-key": null,
+          "x-secret": null,
+          accept: "application/json",
+          "content-type": "application/json",
+          "user-agent": "vanr-test",
+          range: "bytes=0-9",
+        },
+      },
     ]);
   });
 
