@@ -16,6 +16,7 @@ import { useDirectory } from "../control/cards.ts";
 import { Composer } from "./Composer.tsx";
 import { ConversationProvider, useConversation } from "./context.tsx";
 import {
+  useAgentNotices,
   useForgetChannel,
   useHistory,
   useLiveRuns,
@@ -157,7 +158,20 @@ function AgentHeader({ agentId }: { agentId: string }) {
   const agent = listed.data?.find((candidate) => candidate.id === agentId);
   const owner = directory.agentOwner(agentId);
   const role = agent === undefined ? undefined : agents(`role.${agent.role}`);
-  const harness = agent === undefined ? undefined : agents(`harness.kind.${agent.harness.kind}`);
+  // An agent on the API is described by its model alone; Claude Code and Codex by name, then model.
+  const runsOn =
+    agent === undefined
+      ? undefined
+      : agent.harness.kind === "model"
+        ? agent.harness.model === ""
+          ? undefined
+          : t("dm.agentModel", { model: agent.harness.model })
+        : agent.harness.model === ""
+          ? t("dm.agentHarnessOnly", { harness: agents(`harness.kind.${agent.harness.kind}`) ?? "" })
+          : t("dm.agentHarness", {
+              harness: agents(`harness.kind.${agent.harness.kind}`) ?? "",
+              model: agent.harness.model,
+            });
   return (
     <header className="chat__head">
       <h1 className="chat__title">
@@ -167,9 +181,7 @@ function AgentHeader({ agentId }: { agentId: string }) {
       <ul className="chat__facts" aria-label={t("dm.agentFacts")}>
         {role !== undefined && <li>{role}</li>}
         {owner !== undefined && <li>{t("dm.agentOwner", { name: directory.personName(owner) })}</li>}
-        {harness !== undefined && agent !== undefined && (
-          <li>{t("dm.agentHarness", { harness, model: agent.harness.model })}</li>
-        )}
+        {runsOn !== undefined && <li>{runsOn}</li>}
       </ul>
     </header>
   );
@@ -312,6 +324,7 @@ function History({
       </div>
       <TypingLine userIds={typing} />
       <WorkingNotice runs={live} onJump={jumpTo} />
+      <AgentNotices />
       {status === "reconnecting" && (
         <p className="chat-note chat__offline" role="status">
           <Icon icon={WifiOff} size="sm" />
@@ -368,6 +381,34 @@ function ConversationView({
 function Forgotten({ workspaceId, channelId }: { workspaceId: string; channelId: string }) {
   useForgetChannel(workspaceId, channelId);
   return <NotFound />;
+}
+
+/** Agents the person called that can't take their message, each with why. The code never shows. */
+function AgentNotices() {
+  const t = useMessages("chat");
+  const lookup = useLookup("chat");
+  const { channelId, directory } = useConversation();
+  const { notices, dismiss } = useAgentNotices(channelId);
+  const here = notices.filter((notice) => notice.threadId === null);
+  if (here.length === 0) return null;
+  return (
+    <div className="chat__notices">
+      {here.map((notice) => {
+        const agent = directory.agentName(notice.agentId);
+        const text =
+          lookup(`blocked.${notice.reason}`, { agent }) ??
+          (notice.text !== "" ? notice.text : t("blocked.other", { agent }));
+        return (
+          <p key={notice.key} className="chat-note chat-note--warning" role="status">
+            <span>{text}</span>
+            <button type="button" className="app-link-button" onClick={() => dismiss(notice.key)}>
+              {t("blocked.dismiss")}
+            </button>
+          </p>
+        );
+      })}
+    </div>
+  );
 }
 
 /** Above the composer: which agents are at work here, with a way to the run. */

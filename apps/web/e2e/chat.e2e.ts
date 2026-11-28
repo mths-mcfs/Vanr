@@ -188,4 +188,29 @@ test.describe("chat", () => {
     await expect(page.getByText("Bonuses go out on the 30th.")).toHaveCount(0);
     await expect(page.getByText("payroll")).toHaveCount(0);
   });
+
+  test("calling an agent that isn't in the channel tells the author why", async ({
+    page,
+    t,
+    seedUser,
+    signIn,
+    apiAs,
+  }) => {
+    const owner = await seedUser({ workspace: "Chat Absent Journey" });
+    const api = await apiAs(owner);
+    const { general, announce } = await channelsOf(api, owner);
+    // The agent lives in #general only; the author calls it from #announce.
+    const agent = await agentIn(api, owner, "Quill", [general]);
+    await signIn(owner);
+    await page.goto(`/workspace/${owner.workspace.id}/channel/${announce}`);
+    const field = page.getByRole("textbox", {
+      name: t("chat", "composer.hintChannel", { channel: "announce" }),
+    });
+    await field.fill(`@${agent.handle} can you check this?`);
+    await field.press("Enter");
+    await expect(page.getByText(t("chat", "blocked.not_in_channel", { agent: "Quill" }))).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(page.getByText("not_in_channel")).toHaveCount(0);
+  });
 });

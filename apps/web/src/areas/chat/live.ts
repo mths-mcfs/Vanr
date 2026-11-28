@@ -37,8 +37,6 @@ export type LiveRun = {
   endedAt: number | null;
   /** The agent this run is asking right now, while a delegation is open. */
   consulting: string | null;
-  /** Why the agent can't work right now, when the server said so. */
-  unavailable: string | null;
 };
 
 /** The run events this file reads, by name, with the fields it reads. */
@@ -52,7 +50,6 @@ export type RunEvent =
   | { type: "run.stopped" }
   | { type: "run.idle" }
   | { type: "run.thinking" }
-  | { type: "run.agent_unavailable"; reason?: string }
   | { type: "delegation.started"; delegateAgentId?: string }
   | { type: "delegation.completed" };
 
@@ -78,7 +75,6 @@ function fresh(base: RunEventBase & { runId: string }, now: number): LiveRun {
     answerId: null,
     endedAt: null,
     consulting: null,
-    unavailable: null,
   };
 }
 
@@ -116,8 +112,6 @@ export function applyRunEvent(
       return withRun(runs, at, now, (run) => ({ ...run, answerId: event.messageId ?? null, endedAt: now }));
     case "run.thinking":
       return withRun(runs, at, now, (run) => run);
-    case "run.agent_unavailable":
-      return withRun(runs, at, now, (run) => ({ ...run, unavailable: event.reason ?? "" }));
     case "delegation.started":
       return withRun(runs, at, now, (run) => ({ ...run, consulting: event.delegateAgentId ?? null }));
     case "delegation.completed":
