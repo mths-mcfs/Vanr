@@ -140,6 +140,22 @@ export function forgetChannelQueries(
   for (const threadId of lostThreads)
     for (const method of ["getThread", "getThreadAssignment"] as const)
       queryClient.removeQueries({ queryKey: prefixKey(client, { method, args: { workspaceId, threadId } }) });
+  // The channel list keeps the others; the lost one leaves it at once, before any refetch.
+  queryClient.setQueriesData<unknown>(
+    { queryKey: prefixKey(client, { method: "listChannels", args: { workspaceId } }) },
+    (data: unknown) =>
+      Array.isArray(data)
+        ? data.filter(
+            (channel: unknown) =>
+              !(
+                typeof channel === "object" &&
+                channel !== null &&
+                "id" in channel &&
+                channel.id === channelId
+              ),
+          )
+        : data,
+  );
   // A list of threads keeps its other rows; the lost channel's leave it at once, before any refetch.
   queryClient.setQueriesData<unknown>(
     { queryKey: prefixKey(client, { method: "listThreads", args: { workspaceId } }) },

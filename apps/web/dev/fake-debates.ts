@@ -14,6 +14,12 @@ type Host = FilesHost & {
   /** Whether the person reads the channel, which must be one of this workspace. */
   readsChannel: (userId: string, channelId: string, workspaceId: string) => boolean;
   isMember: (workspaceId: string, userId: string) => boolean;
+  /** Makes an issue as the person, in the channel given; its id and number, or the error answer. */
+  createIssue: (
+    workspaceId: string,
+    userId: string,
+    issue: { title: string; description: string; channelId: string | null },
+  ) => { id: string; number: number; title: string } | FilesReply;
   /** An issue the person sees, with the channel it lives in and whether that channel is public. */
   issue: (
     workspaceId: string,
@@ -21,7 +27,17 @@ type Host = FilesHost & {
     issueId: string,
   ) => { number: number; channelId: string | null; publicChannel: boolean } | undefined;
 };
-export type StoredDebate = T.DebateDetail & { workspaceId: string; spent: number };
+/** As kept: the real author of every post, and each agent's letter, which show only once revealed. */
+export type StoredDebate = T.DebateDetail & {
+  workspaceId: string;
+  spent: number;
+  letters: Record<string, string>;
+  /** Positions given in the open round: sealed (counted, never sent) until the round closes. */
+  sealed: T.DebatePost[];
+};
+const LETTERS = "ABCDEFGH";
+/** While the debate hasn't closed, an agent shows only by its letter (the server's `isAnonymous`). */
+const isBlind = (row: Pick<T.Debate, "status">) => row.status === "open" || row.status === "stalled";
 
 const reply = (status: number, body: unknown): FilesReply => ({ status, body });
 const fail = (status: number, code: string, message: string) => reply(status, { error: { code, message } });
@@ -35,8 +51,11 @@ export class FakeDebates {
   debates: StoredDebate[] = [];
   /** Who paired each personal-plan agent's runner, by agent id: only they can seat it. */
   planOwners = new Map<string, string>();
-  /** Each person's blind pick, by `${debateId}/${userId}`; null once opened and not picked. */
-  picks = new Map<string, "a" | "b" | "tie" | null>();
+  /**
+   * Each person's blind read, by `${debateId}/${userId}`: whether the synthesis came first (drawn once,
+   * as the server does) and what they picked, as "debate", "single" or "tie" (null until they pick).
+   */
+  picks = new Map<string, { debateFirst: boolean; pick: "debate" | "single" | "tie" | null }>();
 
   constructor(private readonly host: Host) {}
 
@@ -46,11 +65,90 @@ export class FakeDebates {
     this.picks = new Map();
   }
 
+  /** The majority of a round's positions (agents' turns and people's answers), as the server counts it. */
+  roundMajority(row: StoredDebate, ids: readonly string[]): T.DebateMajority | null {
+    // Grouped by the answer's key, as the server does: "Yes" and "yes" are one answer, labelled as first seen.
+    const groups = new Map<string, { answer: string; count: number }>();
+    for (const post of row.posts)
+      if (
+        ids.includes(post.id) &&
+        post.claimData !== null &&
+        (post.kind === "turn" || post.kind === "speaker")
+      ) {
+        const hit = groups.get(post.claimData.key) ?? { answer: post.claimData.answer, count: 0 };
+        groups.set(post.claimData.key, { answer: hit.answer, count: hit.count + 1 });
+      }
+    return groups.size === 0
+      ? null
+      : this.majority([...groups.values()].map((group): [string, number] => [group.answer, group.count]));
+  }
+
+  /** Closes the debate with a synthesis from the last round's majority, revealing who spoke. */
+  synthesize(workspaceId: string, row: StoredDebate): void {
+    if (row.status !== "open" || row.phase !== "concluding") return;
+    // The round closes: what was sealed in it is published, as the server's `revealHidden` does.
+    if (row.sealed.length > 0) {
+      row.posts.push(...row.sealed);
+      const ids = row.sealed.map((post) => post.id);
+      const current = row.track.roundLimit.find((view) => view.round === row.round);
+      const view = current ?? { round: row.round, posts: [], majority: null };
+      if (current === undefined) row.track.roundLimit.push(view);
+      view.posts.push(...ids);
+      // The round's majority now counts what was just published.
+      view.majority = this.roundMajority(row, view.posts);
+      row.sealed = [];
+      row.sealedCount = 0;
+    }
+    const rounds = row.track.roundLimit;
+    const final = rounds.at(-1)?.majority ?? null;
+    const winner = final?.winner ?? null;
+    Object.assign(row, {
+      status: "done",
+      phase: null,
+      engagedAgentIds: [],
+      synthesis: {
+        format: row.format,
+        revision: (row.synthesis?.revision ?? 0) + 1,
+        endReason: row.endReason,
+        baseline: rounds[0]?.majority ?? null,
+        final,
+        structured: {
+          summary: winner === null ? "The table did not settle." : `The table settled on ${winner}.`,
+          ...(winner !== null && { decision: winner }),
+        },
+      },
+      updatedAt: this.host.now().toISOString(),
+    });
+    this.host.emit(workspaceId, { type: "debate.concluded", debateId: row.id, title: row.title });
+  }
+
+  /** The blind pair in the order drawn for this person, and their pick as "a", "b" or "tie". */
+  pair(
+    row: StoredDebate,
+    read: { debateFirst: boolean; pick: "debate" | "single" | "tie" | null },
+  ): T.DebateBlindReview {
+    const s = row.synthesis?.structured;
+    const opening = row.posts.find((post) => post.round === 0 && post.kind === "turn");
+    const debate = [s?.decision, s?.summary].filter(Boolean).join("\n\n");
+    const single = [opening?.claimData?.answer, opening?.body].filter(Boolean).join("\n\n");
+    const pick =
+      read.pick === null
+        ? null
+        : read.pick === "tie"
+          ? "tie"
+          : (read.pick === "debate") === read.debateFirst
+            ? "a"
+            : "b";
+    return read.debateFirst ? { a: debate, b: single, pick } : { a: single, b: debate, pick };
+  }
+
   seed(): void {
     this.clear();
     const now = this.host.now().getTime();
     const ago = (hours: number) => new Date(now - hours * 3_600_000).toISOString();
     const ana = { type: "person" as const, id: "usr_ana" };
+    // Kept as a value, so it fits both the stall shape with a pseudonym and the one without.
+    const stalled = { agentId: "agt_ledger", pseudonym: null, reason: "The model did not answer", round: 1 };
     this.debates = [
       this.make("workspace_birchwood", {
         id: "deb_paper",
@@ -97,11 +195,12 @@ export class FakeDebates {
         phase: null,
         round: 1,
         roundLimit: 3,
-        stallInfo: { agentId: "agt_ledger", pseudonym: null, reason: "The model did not answer", round: 1 },
+        stallInfo: stalled,
         updatedAt: ago(5),
       }),
       this.make("workspace_birchwood", {
         id: "deb_logo",
+        format: "plan",
         title: "Which logo goes on the new sign?",
         goal: "Pick the logo for the shop front.",
         createdBy: ana,
@@ -118,8 +217,121 @@ export class FakeDebates {
         updatedAt: ago(24),
       }),
     ];
+    const paper = this.debates[0];
+    if (paper !== undefined) {
+      // The opening round closed: the agents speak under their letters, as an open debate shows them.
+      paper.posts = [
+        this.post(
+          "pst_p1",
+          0,
+          { type: "agent", id: "agt_scout" },
+          "A",
+          "Northpaper delivers in two days.",
+          this.claim("Northpaper", 0.8),
+        ),
+        this.post(
+          "pst_p2",
+          0,
+          { type: "agent", id: "agt_ledger" },
+          "B",
+          "Mill & Co is cheaper by a tenth.",
+          this.claim("Mill & Co", 0.6),
+        ),
+        this.post(
+          "pst_p3",
+          0,
+          { type: "person", id: "usr_ana" },
+          null,
+          "I like the faster one.",
+          this.claim("Northpaper", null),
+        ),
+      ];
+      paper.track = {
+        roundLimit: [
+          {
+            round: 0,
+            posts: ["pst_p1", "pst_p2", "pst_p3"],
+            // The server's round majority counts the people's positions too.
+            majority: this.majority([
+              ["Northpaper", 2],
+              ["Mill & Co", 1],
+            ]),
+          },
+        ],
+        synthesis: null,
+      };
+      // Scout already answered round 1: sealed (counted, not shown) until the round closes.
+      paper.sealed = [
+        this.post(
+          "pst_p4",
+          1,
+          { type: "agent", id: "agt_scout" },
+          "A",
+          "Still Northpaper.",
+          this.claim("Northpaper", 0.8),
+        ),
+      ];
+      paper.sealedCount = paper.sealed.length;
+    }
     const logo = this.debates[3];
-    if (logo !== undefined) logo.spent = 0.0123;
+    if (logo !== undefined) {
+      logo.spent = 0.0123;
+      const scout = { type: "agent" as const, id: "agt_scout" };
+      const ledger = { type: "agent" as const, id: "agt_ledger" };
+      logo.posts = [
+        this.post(
+          "pst_l1",
+          0,
+          scout,
+          "A",
+          "The round mark reads at any size.",
+          this.claim("Round mark", 0.7),
+        ),
+        this.post(
+          "pst_l2",
+          0,
+          ledger,
+          "B",
+          "The wordmark is clearer from the street.",
+          this.claim("Wordmark", 0.5),
+        ),
+        this.post("pst_l3", 1, scout, "A", "Still the round mark.", this.claim("Round mark", 0.8)),
+        this.post("pst_l4", 1, ledger, "B", "The street test convinced me.", {
+          ...this.claim("Round mark", 0.7),
+          changed: true,
+          reason: "It reads from across the road",
+        }),
+        this.post("pst_l5", 1, scout, "A", "Both agree on the round mark.", null, "synthesis"),
+      ];
+      const split = this.majority([
+        ["Round mark", 1],
+        ["Wordmark", 1],
+      ]);
+      const both = this.majority([["Round mark", 2]]);
+      logo.track = {
+        roundLimit: [
+          { round: 0, posts: ["pst_l1", "pst_l2"], majority: split },
+          { round: 1, posts: ["pst_l3", "pst_l4"], majority: both },
+        ],
+        synthesis: "pst_l5",
+      };
+      logo.synthesis = {
+        format: "plan",
+        revision: 1,
+        endReason: "unanimous",
+        baseline: split,
+        final: both,
+        structured: {
+          decision: "Use the round mark on the sign.",
+          summary: "Both agents ended on the round mark after the street test.",
+          agreements: ["It reads at any size"],
+          disagreements: [
+            { point: "Colour", sides: [{ position: "Keep it black", mustProve: "that it shows at night" }] },
+          ],
+          items: [{ title: "Order the sign", owner: "Scout" }, { title: "Tell the landlord" }],
+        },
+      };
+    }
   }
 
   /** A debate as the server would keep it, with the defaults of a fresh one. */
@@ -132,6 +344,8 @@ export class FakeDebates {
     const debate: StoredDebate = {
       workspaceId,
       spent: 0,
+      letters: Object.fromEntries(agentIds.map((id, index) => [id, LETTERS[index] ?? "?"])),
+      sealed: [],
       goal: fields.title,
       agentIds,
       anonymous: true,
@@ -201,6 +415,38 @@ export class FakeDebates {
     return { answer, key: answer.toLowerCase(), confidence, changed: false, evidence: [], reason: "" };
   }
 
+  majority(groups: [string, number][]): T.DebateMajority {
+    const total = groups.reduce((sum, [, count]) => sum + count, 0);
+    const sorted = [...groups].sort((a, b) => b[1] - a[1]);
+    const top = sorted[0];
+    const winner = top !== undefined && (sorted[1] === undefined || sorted[1][1] < top[1]) ? top[0] : null;
+    return {
+      total,
+      tie: winner === null,
+      unanimous: sorted.length === 1,
+      winner,
+      winnerKey: winner?.toLowerCase() ?? null,
+      groups: sorted.map(([answer, count]) => ({
+        answer,
+        count,
+        key: answer.toLowerCase(),
+        meanConfidence: null,
+        members: [],
+      })),
+    };
+  }
+
+  /** Who steers: who opened, asked for or leads the debate, or who sets the workspace up. */
+  steers(scope: Scope, row: StoredDebate): boolean {
+    const me = scope.user.id;
+    return (
+      (row.createdBy.type === "person" && row.createdBy.id === me) ||
+      row.requesterUserId === me ||
+      row.leadUserId === me ||
+      can(scope.role, "configure")
+    );
+  }
+
   /** The server's rule: a debate without a channel, or of a channel the person reads, or one they take part in. */
   sees(scope: Scope, row: StoredDebate): boolean {
     if (row.workspaceId !== scope.workspaceId) return false;
@@ -218,6 +464,8 @@ export class FakeDebates {
     const {
       workspaceId: _workspace,
       spent: _spent,
+      letters,
+      sealed: _sealedPosts,
       issues: _issues,
       posts: _posts,
       sealedCount: _sealed,
@@ -226,13 +474,37 @@ export class FakeDebates {
       track: _track,
       ...debate
     } = row;
-    return debate;
+    const blind = isBlind(row);
+    // The stall goes out with its pseudonym field (null when unknown), which newer contracts require.
+    const stall = row.stallInfo as
+      | (NonNullable<T.Debate["stallInfo"]> & { pseudonym?: string | null })
+      | null;
+    const stallInfo = (
+      stall === null ? null : { ...stall, pseudonym: stall.pseudonym ?? null }
+    ) as T.Debate["stallInfo"];
+    return { ...debate, stallInfo, anonymous: blind, pseudonyms: blind ? null : letters };
   }
 
-  /** The detail as the person reads it: spend only to who may see usage, null for everyone else. */
+  /**
+   * The detail as the person reads it: while blind an agent's post loses its author and run (its letter
+   * stays), and spend goes only to who may see usage, null for everyone else.
+   */
   detail(scope: Scope, row: StoredDebate): T.DebateDetail {
-    const { workspaceId: _workspace, spent, ...debate } = row;
-    return { ...debate, spentUsd: can(scope.role, "view_usage") ? spent : null };
+    const blind = isBlind(row);
+    const posts = row.posts.map((post) =>
+      blind && post.author?.type === "agent" && post.kind !== "synthesis"
+        ? { ...post, author: null, runId: null }
+        : post,
+    );
+    return {
+      ...this.summary(row),
+      posts,
+      issues: row.issues,
+      sealedCount: row.sealedCount,
+      synthesis: row.synthesis,
+      track: row.track,
+      spentUsd: can(scope.role, "view_usage") ? row.spent : null,
+    };
   }
 
   operations(): Record<string, (params: Record<string, unknown>, session: string | undefined) => FilesReply> {
@@ -244,7 +516,173 @@ export class FakeDebates {
       };
     const visible = (scope: Scope) => this.debates.filter((row) => this.sees(scope, row));
 
+    const withOne = (
+      handler: (scope: Scope, row: StoredDebate, params: Record<string, unknown>) => FilesReply,
+      host?: "host",
+    ) =>
+      within((scope, params) => {
+        const row = visible(scope).find((each) => each.id === params.debateId);
+        if (row === undefined) return missing();
+        if (host === "host" && !this.steers(scope, row))
+          return fail(403, "forbidden", "Only who opened the debate or an admin can do that");
+        return handler(scope, row, params);
+      });
+    const closed = (row: StoredDebate) => row.status === "done" || row.status === "canceled";
+    const changed = (scope: Scope, row: StoredDebate, status = 200) => {
+      row.updatedAt = this.host.now().toISOString();
+      this.host.emit(scope.workspaceId, { type: "debate.updated", debateId: row.id });
+      return reply(status, this.detail(scope, row));
+    };
+
     return {
+      createDebatePost: withOne((scope, row, params) => {
+        if (closed(row)) return fail(409, "debate.closed", "This debate is closed");
+        const body = typeof params.body === "string" ? params.body.trim() : "";
+        if (body === "" || body.length > 20_000) return invalid("A post has 1 to 20000 characters");
+        const me = { type: "person" as const, id: scope.user.id };
+        const turn =
+          row.status === "open" && row.phase !== "concluding" && row.waitingUserIds.includes(scope.user.id);
+        const answer = typeof params.answer === "string" ? params.answer : null;
+        const confidence = typeof params.confidence === "number" ? params.confidence : null;
+        const post = this.post(
+          this.host.id("pst"),
+          row.round,
+          me,
+          null,
+          body,
+          turn && answer !== null ? this.claim(answer, confidence) : null,
+          turn ? "speaker" : "comment",
+        );
+        if (turn) {
+          // The position stays sealed until the round closes.
+          row.sealed.push(post);
+          row.sealedCount += 1;
+          row.waitingUserIds = row.waitingUserIds.filter((id) => id !== scope.user.id);
+          row.awaitedUserId = row.waitingUserIds[0] ?? null;
+          if (row.waitingUserIds.length === 0 && row.phase === "human_turn") row.phase = "debating";
+        } else {
+          row.posts.push(post);
+          // Whoever comments takes part from then on, and keeps reading the debate (the server's `commentOn`).
+          if (!row.userIds.includes(scope.user.id)) row.userIds = [...row.userIds, scope.user.id];
+        }
+        this.host.emit(scope.workspaceId, { type: "debate.post_created", debateId: row.id, postId: post.id });
+        row.updatedAt = this.host.now().toISOString();
+        return reply(201, post);
+      }),
+      skipDebate: withOne((scope, row) => {
+        if (
+          !(row.status === "open" && row.phase !== "concluding" && row.waitingUserIds.includes(scope.user.id))
+        )
+          return fail(409, "debate.out_of_turn", "It isn't your round to answer");
+        row.waitingUserIds = row.waitingUserIds.filter((id) => id !== scope.user.id);
+        row.awaitedUserId = row.waitingUserIds[0] ?? null;
+        if (row.waitingUserIds.length === 0 && row.phase === "human_turn") row.phase = "debating";
+        return changed(scope, row);
+      }),
+      concludeDebate: withOne((scope, row) => {
+        if (closed(row)) return fail(409, "debate.closed", "This debate is closed");
+        Object.assign(row, {
+          status: "open",
+          phase: "concluding",
+          stallInfo: null,
+          waitingUserIds: [],
+          awaitedUserId: null,
+          engagedAgentIds: row.agentIds.slice(0, 1),
+          endReason: "concluded",
+        });
+        // The lead agent writes the synthesis after the answer, as the server's step does.
+        queueMicrotask(() => this.synthesize(scope.workspaceId, row));
+        return changed(scope, row);
+      }, "host"),
+      cancelDebate: withOne((scope, row) => {
+        if (closed(row)) return fail(409, "debate.closed", "This debate is closed");
+        // A canceled debate is no longer blind: its authors show, as on the server.
+        Object.assign(row, { status: "canceled", phase: null, waitingUserIds: [], awaitedUserId: null });
+        return changed(scope, row);
+      }, "host"),
+      resumeDebate: withOne((scope, row) => {
+        if (row.status !== "stalled") return fail(409, "debate.not_stalled", "This debate is not stalled");
+        // With nobody left to answer in the round, it goes on to the synthesis.
+        const nobodyLeft = row.waitingUserIds.length === 0 && row.engagedAgentIds.length === 0;
+        Object.assign(row, {
+          status: "open",
+          phase: nobodyLeft ? "concluding" : "debating",
+          stallInfo: null,
+        });
+        if (nobodyLeft) queueMicrotask(() => this.synthesize(scope.workspaceId, row));
+        return changed(scope, row);
+      }, "host"),
+      setDebateVerdict: withOne((scope, row, params) => {
+        if (row.status !== "done") return fail(409, "debate.not_done", "The debate has no verdict yet");
+        const at = this.host.now().toISOString();
+        if (params.action === "accept" && row.verdictState?.state !== "accepted")
+          row.verdictState = { state: "accepted", acceptedAt: at, endorsedBy: scope.user.id };
+        else if (params.action === "revert") {
+          if (row.verdictState === null)
+            return fail(409, "debate.verdict_not_accepted", "Accept the verdict before reverting it");
+          if (row.verdictState.state === "accepted")
+            row.verdictState = {
+              ...row.verdictState,
+              state: "reverted",
+              revertedAt: at,
+              revertedBy: scope.user.id,
+            };
+        }
+        return changed(scope, row);
+      }, "host"),
+      createDebateIssue: withOne((scope, row, params) => {
+        const items = Array.isArray(params.items)
+          ? (params.items as { title?: unknown; owner?: unknown; step?: unknown; description?: unknown }[])
+          : [];
+        if (items.length < 1 || items.length > 30) return invalid("Send 1 to 30 items");
+        const text = (value: unknown) => (typeof value === "string" ? value : undefined);
+        for (const item of items) {
+          const title = text(item.title)?.trim() ?? "";
+          if (title === "" || [...title].length > 300) return invalid("A title of 1 to 300 characters");
+          if ([...(text(item.owner) ?? "")].length > 100) return invalid("An owner of up to 100 characters");
+          if ([...(text(item.step) ?? "")].length > 500) return invalid("A step of up to 500 characters");
+        }
+        // The issues live where the debate lives.
+        const issues: { id: string; number: number; title: string }[] = [];
+        for (const item of items) {
+          const made = this.host.createIssue(scope.workspaceId, scope.user.id, {
+            title: (text(item.title) ?? "").trim(),
+            description: [text(item.description), text(item.step)].filter(Boolean).join("\n\n"),
+            channelId: row.channelId,
+          });
+          if ("status" in made) return made;
+          issues.push(made);
+          // Linked at once: a later item that fails leaves the ones made already on the debate.
+          row.issues.push(made);
+        }
+        return reply(201, { numbers: issues.map((issue) => issue.number), issues });
+      }, "host"),
+      reviewDebate: withOne((scope, row) => {
+        if (row.status !== "done") return fail(409, "debate.not_done", "The debate has no verdict yet");
+        const key = `${row.id}/${scope.user.id}`;
+        // The order is drawn once per person; the fake draws it from the person's id, so tests can tell.
+        const read = this.picks.get(key) ?? { debateFirst: [...scope.user.id].length % 2 === 0, pick: null };
+        this.picks.set(key, read);
+        return reply(200, this.pair(row, read));
+      }),
+      reviewDebatePickReview: withOne((scope, row, params) => {
+        const key = `${row.id}/${scope.user.id}`;
+        const read = this.picks.get(key);
+        if (read === undefined) return fail(409, "debate.review_not_started", "Open the blind review first");
+        const pick = params.pick === "a" || params.pick === "b" || params.pick === "tie" ? params.pick : null;
+        if (pick === null) return invalid("Pick a, b or tie");
+        const next = {
+          ...read,
+          pick:
+            pick === "tie"
+              ? ("tie" as const)
+              : (pick === "a") === read.debateFirst
+                ? ("debate" as const)
+                : ("single" as const),
+        };
+        this.picks.set(key, next);
+        return reply(200, this.pair(row, next));
+      }),
       listDebates: within((scope) =>
         reply(200, {
           debates: visible(scope)
@@ -284,11 +722,9 @@ export class FakeDebates {
         for (const row of done)
           if (row.endReason !== null) endReasons[row.endReason] = (endReasons[row.endReason] ?? 0) + 1;
         const blindReviews = { debate: 0, single: 0, tie: 0 };
-        for (const [key, pick] of this.picks) {
+        for (const [key, read] of this.picks) {
           const row = done.find((each) => key.startsWith(`${each.id}/`));
-          // The fake shows the synthesis first, so "a" is the debate's own answer.
-          if (row !== undefined && pick !== null)
-            blindReviews[pick === "a" ? "debate" : pick === "b" ? "single" : "tie"]++;
+          if (row !== undefined && read.pick !== null) blindReviews[read.pick]++;
         }
         const cost = done.reduce((sum, row) => sum + row.spent, 0);
         const metrics: T.DebateMetrics = {

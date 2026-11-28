@@ -154,21 +154,47 @@ describe("the routines", () => {
     }
   });
 
-  test("a limit is digits with one decimal mark", () => {
-    const cost = { key: "maxCostUsd", min: 0.01, max: 100, step: "any" } as const;
-    expect(readLimit("1.5", cost)).toBe(1.5);
-    expect(readLimit("1,5", cost)).toBe(1.5);
-    expect(readLimit("0x10", cost)).toBeUndefined();
-    expect(readLimit("1e1", cost)).toBeUndefined();
-    expect(readLimit("1.000.5", cost)).toBeUndefined();
-    // A thousands separator is no amount, not one dollar.
-    expect(readLimit("1,000", cost)).toBeUndefined();
-    expect(readLimit("1,50", cost)).toBe(1.5);
+  test("a limit is digits with the language's own decimal mark", () => {
+    const cost = { key: "maxCostUsd", min: 0.01, max: 100_000, step: "any" } as const;
+    // English writes a point; a comma is a thousands separator, so no amount at all.
+    expect(readLimit("1.5", cost, ".")).toBe(1.5);
+    expect(readLimit("1,5", cost, ".")).toBeUndefined();
+    expect(readLimit("10,000", cost, ".")).toBeUndefined();
+    expect(readLimit("1,000", cost, ".")).toBeUndefined();
+    // Portuguese writes a comma; a point there is the thousands separator.
+    expect(readLimit("1,5", cost, ",")).toBe(1.5);
+    expect(readLimit("1,50", cost, ",")).toBe(1.5);
+    expect(readLimit("1.5", cost, ",")).toBeUndefined();
+    expect(readLimit("1.000", cost, ",")).toBeUndefined();
+    for (const mark of [".", ","] as const) {
+      expect(readLimit("0x10", cost, mark)).toBeUndefined();
+      expect(readLimit("1e1", cost, mark)).toBeUndefined();
+      expect(readLimit("1.000.5", cost, mark)).toBeUndefined();
+    }
     // A count is digits only.
     const steps = { key: "maxSteps", min: 1, max: 50, step: 1 } as const;
-    expect(readLimit("12", steps)).toBe(12);
-    expect(readLimit("1,0", steps)).toBeUndefined();
-    expect(readLimit("12.0", steps)).toBeUndefined();
+    expect(readLimit("12", steps, ".")).toBe(12);
+    expect(readLimit("1,0", steps, ",")).toBeUndefined();
+    expect(readLimit("12.0", steps, ".")).toBeUndefined();
+  });
+
+  test("a cost written with a thousands separator is refused, a point is the decimal mark", async () => {
+    const app = await renderApp({ path: ROUTINES, signedInAs: "usr_ana" });
+    await app.user.click(await screen.findByRole("button", { name: "New routine" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "New routine" }));
+    await app.user.click(dialog.getByText("Limits"));
+    const cost = dialog.getByRole("textbox", { name: "Most it may spend per run (USD)" });
+    await app.user.clear(cost);
+    await app.user.type(cost, "10,000");
+    expect(
+      dialog.getByText("An amount from 0.01 to 100, written like 1.50, with no thousands separator."),
+    ).toBeDefined();
+    await app.user.clear(cost);
+    await app.user.type(cost, "1,5");
+    expect(dialog.getByText(/^An amount from 0.01 to 100/)).toBeDefined();
+    await app.user.clear(cost);
+    await app.user.type(cost, "1.5");
+    expect(dialog.queryByText(/^An amount from/) === null).toBe(true);
   });
 
   test("the limits keep what is typed until the routine is sent", async () => {
@@ -176,7 +202,7 @@ describe("the routines", () => {
     await app.user.click(await screen.findByRole("button", { name: "New routine" }));
     const dialog = within(await screen.findByRole("dialog", { name: "New routine" }));
     expect(
-      dialog.getByText("Dollars, with up to two decimals: 1.50 or 1,50. No thousands separator."),
+      dialog.getByText("Dollars, with up to two decimals after a point: 1.50. No thousands separator."),
     ).toBeDefined();
     await app.user.type(dialog.getByRole("textbox", { name: "Name" }), "Limits");
     await app.user.type(dialog.getByRole("textbox", { name: "Instruction" }), "Do it.");

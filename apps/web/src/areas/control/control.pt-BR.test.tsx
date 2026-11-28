@@ -43,3 +43,28 @@ test("the proposals page, in Portuguese", async () => {
   const stale = screen.getByRole("article", { name: "Mention the new address" });
   expect(within(stale).getByText("O contexto do espaço de trabalho")).toBeDefined();
 });
+
+test("the connectors section, in Portuguese", async () => {
+  const app = await renderApp({
+    path: "/workspace/workspace_birchwood/settings/connectors?connector_error=access_denied",
+    signedInAs: "usr_jonas",
+    languages,
+  });
+  expect(await screen.findByText("O acesso foi recusado no serviço.")).toBeDefined();
+  const services = await screen.findByRole("list", { name: "Serviços" });
+  const stripe = within(services)
+    .getAllByRole("listitem")
+    .find((item) => item.textContent?.includes("Stripe"));
+  if (stripe === undefined) throw new Error("no Stripe row");
+  await app.user.click(within(stripe).getByRole("button", { name: "Conectar" }));
+  const dialog = await screen.findByRole("dialog", { name: "Conectar Stripe" });
+  await app.user.type(within(dialog).getByLabelText("Chave"), "sk_1");
+  expect(within(dialog).getByText("Uma chave tem no mínimo 8 caracteres.")).toBeDefined();
+  await app.user.type(within(dialog).getByLabelText("Chave"), "23456789");
+  await app.user.click(within(dialog).getByRole("button", { name: "Conectar com esta chave" }));
+  expect(await screen.findByText("Stripe está conectado.")).toBeDefined();
+  const mcp = screen.getByRole("region", { name: "Seus servidores MCP" });
+  expect(within(mcp).getByText("Nenhum servidor MCP ainda")).toBeDefined();
+  const github = screen.getByRole("region", { name: "GitHub" });
+  expect(await within(github).findByText("Nenhuma conta do GitHub vinculada")).toBeDefined();
+});

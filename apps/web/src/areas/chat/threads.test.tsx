@@ -831,6 +831,37 @@ describe("a thread beside its channel, by what the channel holds", () => {
   });
 });
 
+describe("a thread with more replies than its counts say", () => {
+  test("past the panel's page, the replies it knows count when the record and the root lag", async () => {
+    const server = newServer();
+    server.state.messages.push(message({ id: "msg_root", body: "Kiln log", replyCount: 100 }));
+    for (let i = 1; i <= 100; i += 1)
+      server.state.messages.push(
+        message({ id: `msg_r${i}`, body: `reply ${i}`, threadId: "msg_root", createdAt: at(-300 + i * 2) }),
+      );
+    // The record and the root were both read when the thread had 100 replies.
+    server.chat.thread("msg_root", "usr_jonas", { title: "Kiln log", replyCount: 100 });
+    await open("/channel/ch_general?thread=msg_root", "usr_ana", server);
+    const panel = await screen.findByRole("region", { name: "Thread" });
+    await within(panel).findByText("reply 100");
+    // Three more arrive live; neither the record nor the root is read again.
+    for (let i = 101; i <= 103; i += 1) {
+      const fresh = message({
+        id: `msg_r${i}`,
+        body: `reply ${i}`,
+        threadId: "msg_root",
+        createdAt: at(-5 + i - 100),
+      });
+      await act(async () => server.emit(WS, { type: "message.posted", message: fresh }, "ch_general"));
+    }
+    await within(panel).findByText("reply 103");
+    // The panel draws the latest 100; the count is of all 103 it knows.
+    expect(within(panel).queryByText("reply 3") === null).toBe(true);
+    const log = within(panel).getByRole("log", { name: "Messages in this thread" });
+    expect(within(log).getByText("103 replies")).toBeDefined();
+  });
+});
+
 describe("the thread list after a lost channel", () => {
   test("a first page the loss empties still leads to the next one", async () => {
     const server = newServer();

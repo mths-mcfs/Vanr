@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { act, screen, waitFor, within } from "@testing-library/react";
-import { type App, newServer, renderApp, setViewportWidth } from "../../test/app.tsx";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { type App, newServer, newTestRuntime, renderApp, setViewportWidth } from "../../test/app.tsx";
+import { AppProviders } from "../app/context.tsx";
+import { ReservedScreen } from "../app/screens.tsx";
 import { STORAGE_KEYS } from "../platform/storage.ts";
 import { ROUTE_IDS, ROUTES } from "../routes.ts";
 import { NAVIGATION } from "./Sidebar.tsx";
@@ -106,13 +108,21 @@ describe("navigation", () => {
   });
 
   test("a route its area has not built says what the area is and that it is not in this build", async () => {
-    await open(`${HOME}/debates/debate_7`);
+    // Every route of the table is built now, so the screen the router falls back to is rendered alone.
+    const { runtime } = newTestRuntime({ path: `${HOME}/debates`, signedInAs: "usr_ana" });
+    await act(async () =>
+      render(
+        <AppProviders runtime={runtime}>
+          <ReservedScreen id="debate" />
+        </AppProviders>,
+      ),
+    );
     await screen.findByRole("heading", { level: 1, name: "Debate" });
     expect(
-      screen.getByText("Questions that agents and people argue in rounds until there is a verdict."),
+      await screen.findByText("Questions that agents and people argue in rounds until there is a verdict."),
     ).toBeDefined();
     expect(screen.getByText("This area is not part of this build yet.")).toBeDefined();
-    expect(screen.queryByText(/soon/i)).toBeNull();
+    expect(screen.queryByText(/soon/i) === null).toBe(true);
   });
 
   test("Ctrl+K opens the search route", async () => {

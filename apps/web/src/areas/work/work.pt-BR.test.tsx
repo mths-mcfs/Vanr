@@ -4,8 +4,8 @@ import { expect, test } from "bun:test";
 // The fixtures are in UTC: the screens read them in the same zone wherever the tests run.
 process.env.TZ = "UTC";
 
-import { fireEvent, screen, within } from "@testing-library/react";
-import { renderApp } from "../../../test/app.tsx";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { newServer, renderApp } from "../../../test/app.tsx";
 
 test("the board and an issue, in Portuguese", async () => {
   const app = await renderApp({
@@ -79,4 +79,57 @@ test("the assignments, in Portuguese", async () => {
   const decision = within(await panel.findByRole("article", { name: "Decisão" }));
   expect(decision.getByRole("button", { name: "Escolher Northpaper" })).toBeDefined();
   expect(decision.getByText("Recomendada")).toBeDefined();
+});
+
+test("os limites em dólares usam a vírgula decimal: o ponto é separador de milhar", async () => {
+  const app = await renderApp({
+    path: "/workspace/workspace_birchwood/routines",
+    signedInAs: "usr_ana",
+    languages: ["pt-BR"],
+  });
+  await app.user.click(await screen.findByRole("button", { name: "Nova rotina" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "Nova rotina" }));
+  await app.user.click(dialog.getByText("Limites"));
+  const cost = dialog.getByRole("textbox", { name: "O máximo que pode gastar por execução (USD)" });
+  await app.user.clear(cost);
+  await app.user.type(cost, "1.000");
+  expect(
+    dialog.getByText(/^Um valor de 0,01 a 100, escrito como 1,50, sem separador de milhar\.$/),
+  ).toBeDefined();
+  await app.user.clear(cost);
+  await app.user.type(cost, "1.5");
+  expect(dialog.getByText(/^Um valor de 0,01 a 100/)).toBeDefined();
+  await app.user.clear(cost);
+  await app.user.type(cost, "1,5");
+  expect(dialog.queryByText(/^Um valor de 0,01 a 100/) === null).toBe(true);
+});
+
+test("o limite de gasto de uma atribuição usa a vírgula decimal", async () => {
+  const server = newServer();
+  const paper = server.assignments.assignments.find((each) => each.id === "asg_paper");
+  if (paper !== undefined) paper.limits = { ...paper.limits, dollars: 2.5 };
+  const app = await renderApp({
+    path: "/workspace/workspace_birchwood/assignments/asg_paper",
+    server,
+    signedInAs: "usr_ana",
+    languages: ["pt-BR"],
+  });
+  const panel = within(await screen.findByRole("region", { name: "Atribuição" }));
+  await app.user.click(panel.getByRole("tab", { name: "Configurações" }));
+  const dollars = await panel.findByRole("textbox", { name: "Limite de gasto (USD)" });
+  // What is saved shows as Portuguese writes it.
+  expect((dollars as HTMLInputElement).value).toBe("2,5");
+  await app.user.clear(dollars);
+  await app.user.type(dollars, "1.000");
+  expect(panel.getByText(/^Um valor de 0 a .*, escrito como 1,50, sem separador de milhar\.$/)).toBeDefined();
+  expect((panel.getByRole("button", { name: "Salvar limites" }) as HTMLButtonElement).disabled).toBe(true);
+  await app.user.clear(dollars);
+  await app.user.type(dollars, "1.5");
+  expect((panel.getByRole("button", { name: "Salvar limites" }) as HTMLButtonElement).disabled).toBe(true);
+  await app.user.clear(dollars);
+  await app.user.type(dollars, "1,5");
+  await app.user.click(panel.getByRole("button", { name: "Salvar limites" }));
+  await waitFor(() =>
+    expect(server.assignments.assignments.find((each) => each.id === "asg_paper")?.limits.dollars).toBe(1.5),
+  );
 });
