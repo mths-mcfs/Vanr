@@ -264,6 +264,13 @@ export class FakeConnections {
           if (params.all) next.push({ connectionId: "", scope: "*" });
         }
         if (typeof params.connectors === "object" && params.connectors !== null) {
+          // As on the server, a connection that is not active is refused, never stored.
+          const active = new Set(live(scope.workspaceId).map((each) => each.id));
+          const unknown = Object.keys(params.connectors as Record<string, boolean>).find(
+            (id) => !active.has(id),
+          );
+          if (unknown !== undefined)
+            return fail(400, "access.unknown_connection", "That connection is not active");
           for (const [connectionId, on] of Object.entries(params.connectors as Record<string, boolean>)) {
             next = next.filter((g) => g.connectionId !== connectionId);
             if (on) next.push({ connectionId, scope: "connector:*" });
