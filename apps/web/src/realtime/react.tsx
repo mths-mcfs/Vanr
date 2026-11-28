@@ -21,6 +21,7 @@ import {
   useVanrClient,
   VanrProvider,
 } from "@vanr/client/react";
+import type { ThreadInfo } from "@vanr/contract";
 import { type ReactNode, useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import { useRuntime } from "../app/context.tsx";
 
@@ -45,6 +46,25 @@ export function WorkspaceRealtime({ workspaceId, children }: { workspaceId: stri
           queryClient.removeQueries({
             queryKey: prefixKey(client, { method, args: { workspaceId, channelId } }),
           });
+        // Its threads (one moved out of it too) are keyed by thread: they go by what they say they belong to,
+        // and the workspace's thread lists start over.
+        const lostThreads = queryClient
+          .getQueriesData<ThreadInfo>({
+            queryKey: prefixKey(client, { method: "getThread", args: { workspaceId } }),
+          })
+          .flatMap(([, thread]) =>
+            thread !== undefined && (thread.channelId === channelId || thread.context.channelId === channelId)
+              ? [thread.id]
+              : [],
+          );
+        for (const threadId of lostThreads)
+          for (const method of ["getThread", "getThreadAssignment"] as const)
+            queryClient.removeQueries({
+              queryKey: prefixKey(client, { method, args: { workspaceId, threadId } }),
+            });
+        void queryClient.resetQueries({
+          queryKey: prefixKey(client, { method: "listThreads", args: { workspaceId } }),
+        });
         for (const method of ["listChannels", "getDms"] as const)
           void queryClient.invalidateQueries({
             queryKey: prefixKey(client, { method, args: { workspaceId } }),
@@ -103,6 +123,7 @@ const lostListeners = new WeakMap<RealtimeClient, Set<(channelId: string) => voi
 /** The per-channel queries that hold what a channel says, dropped when the person loses it. */
 const CHANNEL_QUERIES = [
   "listChannelMessages",
+  "listChannelThreads",
   "getChannelDirectory",
   "listChannelActiveRuns",
   "listChannelMembers",

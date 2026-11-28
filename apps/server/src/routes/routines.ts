@@ -60,6 +60,7 @@ import {
   toRun,
   triggerOf,
   triggerSchema,
+  visibleRunsSql,
   webhookUrl,
 } from "../routines";
 import { requireCanTalk, requirePlanOwners } from "../runners/plans";
@@ -277,7 +278,7 @@ export function registerRoutines(app: Hono<AppEnv>) {
       .limit(500);
     const visible: RoutineRow[] = [];
     for (const row of rows) if (await canSeeRoutine(deps, me, row)) visible.push(row);
-    return c.json<{ routines: Routine[] }>({ routines: await toRoutines(deps, visible) });
+    return c.json<{ routines: Routine[] }>({ routines: await toRoutines(deps, me, visible) });
   });
 
   app.post(`${WORKSPACE}/routines`, async (c) => {
@@ -307,7 +308,7 @@ export function registerRoutines(app: Hono<AppEnv>) {
       })
       .returning();
     if (!row) throw new Error("routine insert failed");
-    return c.json<Routine>(await toRoutine(deps, row), 201);
+    return c.json<Routine>(await toRoutine(deps, me, row), 201);
   });
 
   // One PATCH pauses/resumes and edits (only the fields that came). It reads, decides and writes under the
@@ -372,7 +373,7 @@ export function registerRoutines(app: Hono<AppEnv>) {
       return saved;
     });
     if (!updated) throw notFound("Routine not found");
-    return c.json<Routine>(await toRoutine(deps, updated));
+    return c.json<Routine>(await toRoutine(deps, me, updated));
   });
 
   app.delete(`${WORKSPACE}/routines/:routineId`, async (c) => {
@@ -392,7 +393,7 @@ export function registerRoutines(app: Hono<AppEnv>) {
     const { key } = await readJson(c, runBody);
     const reg = await registerFire(deps, row.id, { trigger: "manual", key: key ? `manual:${key}` : null });
     if (!reg.duplicate) deps.runtime.track(startRoutineRun(deps, reg.run), "routine.manual");
-    return c.json<Routine>({ ...(await toRoutine(deps, row)), running: true });
+    return c.json<Routine>({ ...(await toRoutine(deps, me, row)), running: true });
   });
 
   // The webhook's secret (Standard Webhooks): makes a new one and shows it only here; the old one stops working.
@@ -447,7 +448,7 @@ export function registerRoutines(app: Hono<AppEnv>) {
     const rows = await deps.db
       .select()
       .from(routineExecutions)
-      .where(eq(routineExecutions.routineId, row.id))
+      .where(and(eq(routineExecutions.routineId, row.id), visibleRunsSql(me)))
       .orderBy(desc(routineExecutions.at))
       .limit(30);
     return c.json<{ runs: RoutineRun[] }>({ runs: rows.map(toRun) });
@@ -490,7 +491,7 @@ export function registerRoutines(app: Hono<AppEnv>) {
       })
       .returning();
     if (!copy) throw new Error("routine insert failed");
-    return c.json<Routine>(await toRoutine(deps, copy), 201);
+    return c.json<Routine>(await toRoutine(deps, me, copy), 201);
   });
 
   app.post(`${WORKSPACE}/routines/parse-schedule`, async (c) => {
