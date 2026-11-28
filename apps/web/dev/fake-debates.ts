@@ -262,6 +262,10 @@ export class FakeDebates {
         const cap = params.spendCapPercent;
         if (cap !== undefined && (typeof cap !== "number" || cap < 0.1 || cap > 100))
           return invalid("The cap must be from 0.1 to 100");
+        // A channel the person doesn't read is refused as one that doesn't exist.
+        const channelId = typeof params.channelId === "string" ? params.channelId : null;
+        if (channelId !== null && !this.host.readsChannel(scope.user.id, channelId, scope.workspaceId))
+          return fail(404, "not_found", "Channel not found");
         const deadline = typeof params.deadline === "string" ? params.deadline : null;
         if (deadline !== null && Date.parse(deadline) <= this.host.now().getTime())
           return fail(400, "debate.deadline_past", "The deadline must be in the future");
@@ -282,6 +286,7 @@ export class FakeDebates {
           deadline,
           options: options ?? [],
           spendCapPercent: typeof cap === "number" ? cap : null,
+          channelId,
           createdBy: { type: "person", id: scope.user.id },
           requesterUserId: scope.user.id,
           engagedAgentIds: agentIds,

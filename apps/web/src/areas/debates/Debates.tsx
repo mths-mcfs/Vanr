@@ -191,15 +191,18 @@ function DebateRow({
         <span>{roundLabel(debate)}</span>
         <Table debate={debate} directory={directory} />
       </div>
-      {/* A goal left blank is the question again: shown once. */}
+      {/* A goal left blank is the question again: shown once. While the debate is blind, which agent
+          got stuck would give away its letter, so the row says only that someone is. */}
       {(stuck !== null || debate.goal.trim() !== debate.title.trim()) && (
         <p className="debate-row__goal" data-stuck={stuck !== null || undefined}>
           {stuck === null
             ? debate.goal
-            : t("row.stuck", {
-                who: directory.name({ type: "agent", id: stuck.agentId }),
-                reason: stuck.reason,
-              })}
+            : debate.anonymous
+              ? t("row.stuckBlind")
+              : t("row.stuck", {
+                  who: directory.name({ type: "agent", id: stuck.agentId }),
+                  reason: stuck.reason,
+                })}
         </p>
       )}
       <p className="debate-row__when">{t("list.updated", { when: when(debate.updatedAt) })}</p>

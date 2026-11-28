@@ -16,7 +16,7 @@ describe("the debates, in Portuguese", () => {
     expect(paper.getByText("Ana Beatriz Souza, aguardado")).toBeDefined();
     const live = within(screen.getByRole("region", { name: "Em discussão agora (1)" }));
     expect(live.getByText("Respostas iniciais, ainda lacradas")).toBeDefined();
-    expect(screen.getByText("Parado em Ledger: The model did not answer")).toBeDefined();
+    expect(screen.getByText("Um participante está demorando mais que o esperado")).toBeDefined();
   });
 
   test("the numbers, with the cost for who sees spend", async () => {

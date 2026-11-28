@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { act, screen, waitFor, within } from "@testing-library/react";
 import { chooseOption, newServer, renderApp } from "../../../test/app.tsx";
-import { optionsOf } from "./NewDebate.tsx";
+import { optionsFit, optionsOf } from "./NewDebate.tsx";
 import { usdText } from "./shared.tsx";
 
 const WORKSPACE = "workspace_birchwood";
@@ -23,7 +23,10 @@ describe("the debates", () => {
     expect(ink.getByText("Opening answers, still sealed")).toBeDefined();
     expect(ink.getByText("Tally, thinking")).toBeDefined();
     const rest = within(screen.getByRole("list", { name: "Everything else" }));
-    expect(rest.getByText("Stuck on Ledger: The model did not answer")).toBeDefined();
+    // While blind, the row never says which agent got stuck: that would give away its letter.
+    const hours = within(rest.getByRole("article", { name: "Do we open on Saturdays?" }));
+    expect(hours.getByText("A participant is taking longer than expected")).toBeDefined();
+    expect(hours.queryByText(/Stuck on/) === null).toBe(true);
     expect(rest.queryByRole("article", { name: "Which paper supplier do we keep?" }) === null).toBe(true);
     // A finished debate is not in the ongoing view.
     expect(article("Which logo goes on the new sign?") === null).toBe(true);
@@ -140,7 +143,8 @@ describe("the debates", () => {
       stallInfo: { agentId: "agt_tally", reason: "Out of time", round: 0 },
     });
     await act(async () => app.server.emit(WORKSPACE, { type: "debate.updated", debateId: "deb_ink" }));
-    expect(await screen.findByText("Stuck on Tally: Out of time")).toBeDefined();
+    expect(await screen.findByText("A participant is taking longer than expected")).toBeDefined();
+    expect(screen.getAllByText("A participant is taking longer than expected").length).toBe(2);
   });
 });
 
@@ -194,7 +198,9 @@ describe("starting a debate", () => {
     expect(start.hasAttribute("disabled")).toBe(false);
 
     await app.user.type(dialog.getByRole("textbox", { name: "Possible answers" }), "Laser\n Laser \n");
-    expect(dialog.getByText("Give at least 2 and at most 8 different answers, or none.")).toBeDefined();
+    expect(
+      dialog.getByText("Give 2 to 8 different answers of up to 200 characters each, or none."),
+    ).toBeDefined();
     expect(start.hasAttribute("disabled")).toBe(true);
     await app.user.type(dialog.getByRole("textbox", { name: "Possible answers" }), "\nInkjet");
     expect(start.hasAttribute("disabled")).toBe(false);
@@ -254,7 +260,28 @@ describe("starting a debate", () => {
     expect(usdText(0.0123, "en")).toBe("$0.0123");
   });
 
-  test("the answers are trimmed and repeats dropped", () => {
+  test("the answers are trimmed and repeats dropped, and a long one is refused, never cut", () => {
     expect(optionsOf(" Yes \n\nno\nYes\n")).toEqual(["Yes", "no"]);
+    const long = "a".repeat(201);
+    expect(optionsOf(`Yes\n${long}`)).toEqual(["Yes", long]);
+    expect(optionsFit(["Yes", long])).toBe(false);
+    expect(optionsFit(["Yes", "a".repeat(200)])).toBe(true);
+    expect(optionsFit([])).toBe(true);
+    expect(optionsFit(["Yes"])).toBe(false);
+  });
+
+  test("a new table's cost never shows the last table's figure while it loads", async () => {
+    const server = newServer();
+    const app = await renderApp({ path: LIST, signedInAs: "usr_ana", server });
+    await app.user.click(await screen.findByRole("button", { name: "Start a debate" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "Start a debate" }));
+    await app.user.click(await dialog.findByRole("checkbox", { name: "Scout" }));
+    expect(await dialog.findByText("At most 3 model calls, up to $0.1275")).toBeDefined();
+    const held = server.hold("estimateDebate");
+    await app.user.click(dialog.getByRole("checkbox", { name: "Tally" }));
+    expect(await dialog.findByText("Working out the cost…")).toBeDefined();
+    expect(dialog.queryByText("At most 3 model calls, up to $0.1275") === null).toBe(true);
+    held.release();
+    expect(await dialog.findByText("At most 5 model calls, up to $0.2125")).toBeDefined();
   });
 });

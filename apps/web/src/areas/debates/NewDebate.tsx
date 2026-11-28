@@ -49,10 +49,15 @@ const DEFAULT_ESTIMATE_ROUNDS = 1;
 
 /** The answers as typed, one per line: trimmed, blank lines dropped, repeats dropped. */
 export function optionsOf(text: string): string[] {
-  return [...new Set(text.split("\n").map((line) => line.trim().slice(0, OPTION_MAX)))].filter(
-    (line) => line !== "",
-  );
+  return [...new Set(text.split("\n").map((line) => line.trim()))].filter((line) => line !== "");
 }
+
+/** The answers the server takes: none, or 2 to 8, each within its length. Never cut to fit. */
+export const optionsFit = (options: readonly string[]) =>
+  options.length === 0 ||
+  (options.length >= OPTIONS_MIN &&
+    options.length <= OPTIONS_MAX &&
+    options.every((option) => option.length <= OPTION_MAX));
 
 /** Toggles an id in a picking order: added at the end, or taken out. */
 const toggle = (list: readonly string[], id: string, on: boolean) =>
@@ -88,7 +93,7 @@ export function NewDebateDialog({
   const [userIds, setUserIds] = useState<string[]>([]);
 
   const options = optionsOf(optionText);
-  const optionsBad = options.length > 0 && (options.length < OPTIONS_MIN || options.length > OPTIONS_MAX);
+  const optionsBad = !optionsFit(options);
   const capValue = cap.trim() === "" ? null : Number(cap.replace(",", "."));
   const capBad = capValue !== null && !(capValue >= CAP_MIN && capValue <= CAP_MAX);
   const deadlineAt = deadline === "" ? null : new Date(deadline);
@@ -103,7 +108,8 @@ export function NewDebateDialog({
       workspaceId,
       query: { agentIds, rounds: roundCount ?? DEFAULT_ESTIMATE_ROUNDS, format },
     },
-    { enabled: agentIds.length > 0, placeholderData: (previous) => previous },
+    // No placeholder: a figure for another table never shows as this one's while the new one loads.
+    { enabled: agentIds.length > 0 },
   );
   const create = useApiMutation("createDebate", {
     invalidates: () => [{ method: "listDebates", args: { workspaceId } }],
