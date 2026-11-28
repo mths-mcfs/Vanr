@@ -252,6 +252,70 @@ describe("mailboxes", () => {
     expect(await screen.findByText("orders@birchwood.example is connected.")).toBeDefined();
   });
 
+  test("saving only a new password leaves the action rules alone", async () => {
+    const server = newServer();
+    server.connections.mail.push(mailbox({ confirmActions: ["send"] }));
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const list = await within(await boxes()).findByRole("list", { name: "Mailboxes" });
+    await app.user.click(
+      within(row(list, "Orders")).getByRole("button", { name: "Edit orders@birchwood.example" }),
+    );
+    const form = await screen.findByRole("form", { name: "Edit orders@birchwood.example" });
+    await app.user.type(within(form).getByLabelText(/^New password/), "fresh-pass");
+    await app.user.click(within(form).getByRole("button", { name: "Save mailbox" }));
+    expect(await screen.findByText("orders@birchwood.example is saved.")).toBeDefined();
+    const sent = app.server.calls.find((call) => call.method === "updateMailAccount")?.params;
+    expect([sent?.confirmActions, sent?.disabledActions]).toEqual([undefined, undefined]);
+  });
+
+  test("a mailbox the person can no longer see closes its dialog for good", async () => {
+    const server = newServer();
+    server.connections.mail.push(mailbox());
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const list = await within(await boxes()).findByRole("list", { name: "Mailboxes" });
+    await app.user.click(
+      within(row(list, "Orders")).getByRole("button", { name: "Edit orders@birchwood.example" }),
+    );
+    await screen.findByRole("form", { name: "Edit orders@birchwood.example" });
+    server.force("listMailAccounts", { kind: "error", status: 403, code: "forbidden" }, 4);
+    await act(async () => {
+      await app.runtime.queryClient.refetchQueries();
+    });
+    expect(await within(await boxes()).findByText("The mailboxes could not be loaded")).toBeDefined();
+    expect(screen.queryByRole("form", { name: "Edit orders@birchwood.example" }) === null).toBe(true);
+    server.unforce("listMailAccounts");
+    await act(async () => {
+      await app.runtime.queryClient.refetchQueries();
+    });
+    expect(await within(await boxes()).findByRole("list", { name: "Mailboxes" })).toBeDefined();
+    expect(screen.queryByRole("form", { name: "Edit orders@birchwood.example" }) === null).toBe(true);
+  });
+
+  test("each connection attempt shows its own failure", async () => {
+    const server = newServer();
+    server.force("createMailAccountComposio", {
+      kind: "error",
+      status: 400,
+      code: "mail.composio_unavailable",
+    });
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    await app.user.click(within(await boxes()).getByRole("button", { name: "Connect a mailbox" }));
+    const form = await screen.findByRole("form", { name: "Connect with a password" });
+    await app.user.type(within(form).getByLabelText(/^Email address/), "orders@birchwood.example");
+    await app.user.type(within(form).getByLabelText(/^App password/), "wrong-password");
+    await app.user.click(within(form).getByRole("button", { name: "Connect" }));
+    expect((await within(form).findByRole("alert")).textContent).toBe(
+      "The mail server refused that address and password.",
+    );
+    await app.user.click(screen.getByRole("button", { name: "Sign in with Gmail" }));
+    expect(
+      await within(form).findByText("Signing in with this provider is not set up on this server."),
+    ).toBeDefined();
+    expect(within(form).queryByText("The mail server refused that address and password.") === null).toBe(
+      true,
+    );
+  });
+
   test("disconnecting asks first", async () => {
     const server = newServer();
     server.connections.mail.push(mailbox());
@@ -342,6 +406,55 @@ describe("databases", () => {
     expect(fields.hasAttribute("disabled")).toBe(true);
     held.release();
     expect(await screen.findByText("shop @ db.shop.example is connected.")).toBeDefined();
+  });
+
+  test("an sslmode written in the string is the one sent, whatever the choice below", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas" });
+    await app.user.click(within(await block()).getByRole("button", { name: "Connect a database" }));
+    const form = await screen.findByRole("form", { name: "Connect a database" });
+    await app.user.type(
+      within(form).getByLabelText(/^Connection string/),
+      "postgres://r:p@db.shop.example/shop?sslmode=require",
+    );
+    await chooseOption(
+      app,
+      within(form).getByRole("combobox", { name: "Encryption" }),
+      "Not encrypted (only where this server allows it)",
+    );
+    await app.user.click(within(form).getByRole("button", { name: "Connect" }));
+    expect(await screen.findByText("shop @ db.shop.example is connected.")).toBeDefined();
+    expect(app.server.calls.find((call) => call.method === "createDatabase")?.params.sslmode).toBe("require");
+  });
+
+  test("a string with an escape that does not decode is refused as not a URL", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas" });
+    await app.user.click(within(await block()).getByRole("button", { name: "Connect a database" }));
+    const form = await screen.findByRole("form", { name: "Connect a database" });
+    await app.user.type(
+      within(form).getByLabelText(/^Connection string/),
+      "postgres://r:p@db.shop.example/ledger%ZZ",
+    );
+    await app.user.click(within(form).getByRole("button", { name: "Connect" }));
+    expect((await within(form).findByRole("alert")).textContent).toBe(
+      "Use a connection string that starts with postgres://.",
+    );
+  });
+
+  test("renaming a database leaves its action list alone", async () => {
+    const server = newServer();
+    server.connections.databases.push(database());
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const list = await within(await block()).findByRole("list", { name: "Databases" });
+    await app.user.click(within(row(list, "Shop")).getByRole("button", { name: "Edit Shop" }));
+    const form = await screen.findByRole("form", { name: "Edit Shop" });
+    const name = within(form).getByLabelText(/^Name/);
+    await app.user.clear(name);
+    await app.user.type(name, "Shop replica");
+    await app.user.click(within(form).getByRole("button", { name: "Save database" }));
+    expect(await screen.findByText("Shop replica is saved.")).toBeDefined();
+    expect(
+      app.server.calls.find((call) => call.method === "updateDatabase")?.params.disabledActions,
+    ).toBeUndefined();
   });
 
   test("a refused login says why in the dialog", async () => {
