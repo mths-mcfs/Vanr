@@ -407,6 +407,25 @@ describe("databases", () => {
     expect(server.connections.databases.length).toBe(0);
   });
 
+  test("closing the connect and edit dialogs gives the focus back to their buttons", async () => {
+    const server = newServer();
+    server.connections.databases.push(database());
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const add = within(await block()).getByRole("button", { name: "Connect a database" });
+    await app.user.click(add);
+    await screen.findByRole("form", { name: "Connect a database" });
+    await app.user.keyboard("{Escape}");
+    await act(async () => {});
+    expect(document.activeElement === add).toBe(true);
+    const list = await within(await block()).findByRole("list", { name: "Databases" });
+    const edit = within(row(list, "Shop")).getByRole("button", { name: "Edit Shop" });
+    await app.user.click(edit);
+    await screen.findByRole("form", { name: "Edit Shop" });
+    await app.user.keyboard("{Escape}");
+    await act(async () => {});
+    expect(document.activeElement === edit).toBe(true);
+  });
+
   test("a list that fails to load offers a retry", async () => {
     const server = newServer();
     server.force("listDatabases", { kind: "error", status: 500, code: "internal" }, 4);

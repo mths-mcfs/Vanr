@@ -34,6 +34,7 @@ import {
   useForgetOnLoss,
   useForgetReadOnLoss,
   useLatch,
+  useReturnFocus,
 } from "./shared.tsx";
 
 // The server's limits (routes/integrations.ts, imapInput; integrations/mail.ts, mailUpdateInput).
@@ -60,6 +61,7 @@ export function MailAccounts({ workspaceId }: { workspaceId: string }) {
   const t = useMessages("control");
   const outcome = useOutcome();
   const latch = useLatch();
+  const focus = useReturnFocus();
   const forget = useForgetOnLoss(workspaceId, READS);
   const accounts = useApiQuery("listMailAccounts", { workspaceId });
   const [adding, setAdding] = useState(false);
@@ -105,7 +107,10 @@ export function MailAccounts({ workspaceId }: { workspaceId: string }) {
                   size="sm"
                   variant={account.status === "reauth_required" ? "primary" : "secondary"}
                   aria-label={t("box.editNamed", { address: account.address })}
-                  onClick={() => setEditing(account.id)}
+                  onClick={() => {
+                    focus.remember();
+                    setEditing(account.id);
+                  }}
                 >
                   {t(account.status === "reauth_required" ? "box.renew" : "wire.edit")}
                 </Button>
@@ -113,7 +118,10 @@ export function MailAccounts({ workspaceId }: { workspaceId: string }) {
                   size="sm"
                   variant="ghost"
                   aria-label={t("box.disconnectNamed", { address: account.address })}
-                  onClick={() => setRemoving(account)}
+                  onClick={() => {
+                    focus.remember();
+                    setRemoving(account);
+                  }}
                 >
                   {t("svc.disconnect")}
                 </Button>
@@ -129,22 +137,37 @@ export function MailAccounts({ workspaceId }: { workspaceId: string }) {
       title={t("box.title")}
       lead={t("box.lead")}
       action={
-        <Button icon={<Icon icon={Plus} />} onClick={() => setAdding(true)}>
+        <Button
+          icon={<Icon icon={Plus} />}
+          onClick={() => {
+            focus.remember();
+            setAdding(true);
+          }}
+        >
           {t("box.add")}
         </Button>
       }
     >
       {body}
-      {adding && <AddMailbox key={workspaceId} workspaceId={workspaceId} onClose={() => setAdding(false)} />}
+      {adding && (
+        <AddMailbox
+          key={workspaceId}
+          workspaceId={workspaceId}
+          onClose={() => setAdding(false)}
+          onCloseAutoFocus={focus.onCloseAutoFocus}
+        />
+      )}
       {open !== undefined && (
         <EditMailbox
           key={`${workspaceId}/${open.id}`}
           workspaceId={workspaceId}
           account={open}
           onClose={() => setEditing(null)}
+          onCloseAutoFocus={focus.onCloseAutoFocus}
         />
       )}
       <ConfirmDialog
+        returnFocus={focus.back}
         open={removing !== null}
         onOpenChange={(next) => {
           if (!next && !remove.isPending) setRemoving(null);
@@ -181,7 +204,15 @@ type Servers = { imapHost: string; imapPort: string; smtpHost: string; smtpPort:
 const NO_SERVERS: Servers = { imapHost: "", imapPort: "993", smtpHost: "", smtpPort: "587" };
 
 /** Connects a mailbox. The password lives only in this dialog and leaves with the one call. */
-function AddMailbox({ workspaceId, onClose }: { workspaceId: string; onClose: () => void }) {
+function AddMailbox({
+  workspaceId,
+  onClose,
+  onCloseAutoFocus,
+}: {
+  workspaceId: string;
+  onClose: () => void;
+  onCloseAutoFocus: (event: Event) => void;
+}) {
   const t = useMessages("control");
   const common = useMessages("common");
   const providers = useApiQuery("listMailProviders", { workspaceId });
@@ -209,6 +240,7 @@ function AddMailbox({ workspaceId, onClose }: { workspaceId: string; onClose: ()
       }}
     >
       <DialogContent
+        onCloseAutoFocus={onCloseAutoFocus}
         size="md"
         closeLabel={common("action.close")}
         title={t("box.addTitle")}
@@ -452,10 +484,12 @@ function EditMailbox({
   workspaceId,
   account,
   onClose,
+  onCloseAutoFocus,
 }: {
   workspaceId: string;
   account: MailAccount;
   onClose: () => void;
+  onCloseAutoFocus: (event: Event) => void;
 }) {
   const t = useMessages("control");
   const common = useMessages("common");
@@ -486,6 +520,7 @@ function EditMailbox({
       }}
     >
       <DialogContent
+        onCloseAutoFocus={onCloseAutoFocus}
         size="lg"
         closeLabel={common("action.close")}
         title={account.address}

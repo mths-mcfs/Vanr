@@ -57,7 +57,9 @@ export function Block({
     <section className="wire-block" aria-label={title}>
       <header className="wire-block__head">
         <div className="wire-block__title">
-          <h3 className="page__heading">{title}</h3>
+          <h3 className="page__heading" tabIndex={-1}>
+            {title}
+          </h3>
           {lead !== undefined && <p className="page__muted">{lead}</p>}
         </div>
         {action}
@@ -150,4 +152,33 @@ export function useForgetReadOnLoss(workspaceId: string, methods: readonly Metho
       });
     }
   }, [lost, client, queryClient, workspaceId, methods]);
+}
+
+/**
+ * The control that opened a dialog gets the focus back when the dialog closes. When it is gone by then
+ * (its row was removed) or can't take it (it is disabled), the heading of its block does, so the
+ * focus never falls back to the page itself.
+ */
+export function useReturnFocus() {
+  const opener = useRef<HTMLElement | null>(null);
+  const heading = useRef<HTMLElement | null>(null);
+  const remember = useCallback(() => {
+    const active = document.activeElement;
+    opener.current = active instanceof HTMLElement && active !== document.body ? active : null;
+    heading.current = opener.current?.closest(".wire-block")?.querySelector<HTMLElement>("h3") ?? null;
+  }, []);
+  const back = useCallback(() => {
+    const target = opener.current;
+    if (target?.isConnected === true && !target.hasAttribute("disabled")) target.focus();
+    else heading.current?.focus();
+  }, []);
+  /** For a dialog's `onCloseAutoFocus`. */
+  const onCloseAutoFocus = useCallback(
+    (event: Event) => {
+      event.preventDefault();
+      back();
+    },
+    [back],
+  );
+  return { remember, back, onCloseAutoFocus };
 }

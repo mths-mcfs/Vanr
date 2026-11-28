@@ -37,6 +37,7 @@ import {
   useForgetOnLoss,
   useForgetReadOnLoss,
   useLatch,
+  useReturnFocus,
 } from "./shared.tsx";
 
 // The server's limits (routes/integrations.ts, dbInput and dbUpdateInput).
@@ -61,6 +62,7 @@ export function Databases({ workspaceId }: { workspaceId: string }) {
   const t = useMessages("control");
   const outcome = useOutcome();
   const latch = useLatch();
+  const focus = useReturnFocus();
   const forget = useForgetOnLoss(workspaceId, READS);
   const list = useApiQuery("listDatabases", { workspaceId });
   const [adding, setAdding] = useState(false);
@@ -118,7 +120,10 @@ export function Databases({ workspaceId }: { workspaceId: string }) {
                   size="sm"
                   variant={each.status === "reauth_required" ? "primary" : "secondary"}
                   aria-label={t("db.editNamed", { name: each.label })}
-                  onClick={() => setEditing(each.id)}
+                  onClick={() => {
+                    focus.remember();
+                    setEditing(each.id);
+                  }}
                 >
                   {t(each.status === "reauth_required" ? "db.renew" : "wire.edit")}
                 </Button>
@@ -126,7 +131,10 @@ export function Databases({ workspaceId }: { workspaceId: string }) {
                   size="sm"
                   variant="ghost"
                   aria-label={t("db.disconnectNamed", { name: each.label })}
-                  onClick={() => setRemoving(each)}
+                  onClick={() => {
+                    focus.remember();
+                    setRemoving(each);
+                  }}
                 >
                   {t("svc.disconnect")}
                 </Button>
@@ -142,22 +150,37 @@ export function Databases({ workspaceId }: { workspaceId: string }) {
       title={t("db.title")}
       lead={t("db.lead")}
       action={
-        <Button icon={<Icon icon={Plus} />} onClick={() => setAdding(true)}>
+        <Button
+          icon={<Icon icon={Plus} />}
+          onClick={() => {
+            focus.remember();
+            setAdding(true);
+          }}
+        >
           {t("db.add")}
         </Button>
       }
     >
       {body}
-      {adding && <AddDatabase key={workspaceId} workspaceId={workspaceId} onClose={() => setAdding(false)} />}
+      {adding && (
+        <AddDatabase
+          key={workspaceId}
+          workspaceId={workspaceId}
+          onClose={() => setAdding(false)}
+          onCloseAutoFocus={focus.onCloseAutoFocus}
+        />
+      )}
       {open !== undefined && (
         <EditDatabase
           key={`${workspaceId}/${open.id}`}
           workspaceId={workspaceId}
           connection={open}
           onClose={() => setEditing(null)}
+          onCloseAutoFocus={focus.onCloseAutoFocus}
         />
       )}
       <ConfirmDialog
+        returnFocus={focus.back}
         open={removing !== null}
         onOpenChange={(next) => {
           if (!next && !remove.isPending) setRemoving(null);
@@ -194,7 +217,15 @@ type Fields = { host: string; port: string; database: string; username: string }
 const NO_FIELDS: Fields = { host: "", port: "5432", database: "", username: "" };
 
 /** Connects a database. The string and the password live only in this dialog and leave with the one call. */
-function AddDatabase({ workspaceId, onClose }: { workspaceId: string; onClose: () => void }) {
+function AddDatabase({
+  workspaceId,
+  onClose,
+  onCloseAutoFocus,
+}: {
+  workspaceId: string;
+  onClose: () => void;
+  onCloseAutoFocus: (event: Event) => void;
+}) {
   const t = useMessages("control");
   const common = useMessages("common");
   const describe = useErrorMessage("control");
@@ -243,6 +274,7 @@ function AddDatabase({ workspaceId, onClose }: { workspaceId: string; onClose: (
       }}
     >
       <DialogContent
+        onCloseAutoFocus={onCloseAutoFocus}
         size="lg"
         closeLabel={common("action.close")}
         title={t("db.addTitle")}
@@ -437,10 +469,12 @@ function EditDatabase({
   workspaceId,
   connection,
   onClose,
+  onCloseAutoFocus,
 }: {
   workspaceId: string;
   connection: DatabaseConnection;
   onClose: () => void;
+  onCloseAutoFocus: (event: Event) => void;
 }) {
   const t = useMessages("control");
   const common = useMessages("common");
@@ -471,6 +505,7 @@ function EditDatabase({
       }}
     >
       <DialogContent
+        onCloseAutoFocus={onCloseAutoFocus}
         size="md"
         closeLabel={common("action.close")}
         title={connection.label}

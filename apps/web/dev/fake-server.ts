@@ -452,6 +452,20 @@ export class FakeServer {
         );
       },
       isMember: (workspaceId, userId) => this.memberOf(workspaceId, userId) !== undefined,
+      createIssue: (workspaceId, userId, issue) => {
+        const answer = this.work.operations().createIssue?.(
+          {
+            workspaceId,
+            title: issue.title,
+            description: issue.description,
+            channelId: issue.channelId ?? undefined,
+          },
+          this.sessionFor(userId),
+        );
+        if (answer === undefined || answer.status !== 201) return answer ?? { status: 500, body: null };
+        const made = answer.body as T.Issue;
+        return { id: made.id, number: made.number, title: made.title };
+      },
       issue: (workspaceId, userId, issueId) => {
         const issue = this.work.issues.find(
           (each) => each.id === issueId && each.workspaceId === workspaceId,
