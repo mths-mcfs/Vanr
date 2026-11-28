@@ -12,6 +12,7 @@ import { addToChannel } from "../test/route-calls";
 import { memberOf, type Person, seedChannel, seedWorkspace } from "../test/seed";
 import type { AgentRow } from "./agents";
 import type { AppDeps } from "./context";
+import { recentRoutineCosts } from "./estimates";
 import {
   CATCH_UP_MAX_MS,
   canSeeRoutine,
@@ -1007,6 +1008,75 @@ describe("events", () => {
 });
 
 describe("what the screen sees", () => {
+  /** An agent run of the workspace, in `channelId` (none: a file's), that cost `costUsd`. */
+  async function agentRun(costUsd: number, channelId: string | null = null): Promise<string> {
+    const id = newId("run");
+    await server.deps.db
+      .insert(schema.runs)
+      .values({ id, workspaceId, agentId: agent.id, model: agent.model, status: "done", costUsd, channelId });
+    return id;
+  }
+  async function execution(routineId: string, values: Partial<Execution>): Promise<void> {
+    await server.deps.db
+      .insert(routineExecutions)
+      .values({ id: newId("rrun"), routineId, at: new Date(), status: "ok", ...values });
+  }
+
+  test(
+    "the estimate's recent cost leaves out a run fired for a channel the person doesn't read",
+    async () => {
+      const privateCh = await seedChannel(server, workspaceId, {
+        name: "recent-cost",
+        visibility: "private",
+        members: [ana],
+      });
+      const routine = await newRoutine({ target: { kind: "file" } });
+      // A file's run has no channel of its own: the channel it was fired for is what hides it.
+      await execution(routine.id, { channelId: privateCh, runId: await agentRun(5) });
+      await execution(routine.id, { runId: await agentRun(1) });
+      const viewer = (p: Person) => ({ workspaceId, userId: p.user.id });
+      expect(await recentRoutineCosts(server.deps.db, routine.id, viewer(bob))).toEqual([1]);
+      expect((await recentRoutineCosts(server.deps.db, routine.id, viewer(ana))).sort()).toEqual([1, 5]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a routine running for a channel the person doesn't read doesn't show as running to them",
+    async () => {
+      const privateCh = await seedChannel(server, workspaceId, {
+        name: "running-channel",
+        visibility: "private",
+        members: [ana],
+      });
+      // While it runs, an execution has no run yet: the channel it runs for is what hides it.
+      const routine = await newRoutine({ target: { kind: "file" }, runningSince: new Date() });
+      await execution(routine.id, { status: "running", channelId: privateCh });
+      const [asBob] = await toRoutines(server.deps, { workspaceId, userId: bob.user.id }, [routine]);
+      const [asAna] = await toRoutines(server.deps, { workspaceId, userId: ana.user.id }, [routine]);
+      expect([asBob?.running, asAna?.running]).toEqual([false, true]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a routine shows as running only through a run the person may read",
+    async () => {
+      const privateCh = await seedChannel(server, workspaceId, {
+        name: "running-run",
+        visibility: "private",
+        members: [ana],
+      });
+      const at = new Date();
+      const routine = await newRoutine({ target: { kind: "file" }, runningSince: at });
+      await execution(routine.id, { status: "running", runId: await agentRun(0, privateCh) });
+      const [asBob] = await toRoutines(server.deps, { workspaceId, userId: bob.user.id }, [routine]);
+      const [asAna] = await toRoutines(server.deps, { workspaceId, userId: ana.user.id }, [routine]);
+      expect([asBob?.running, asAna?.running]).toEqual([false, true]);
+    },
+    SERVER_TEST_MS,
+  );
+
   test(
     "the webhook's address carries the hook id and never the secret",
     async () => {

@@ -15,17 +15,38 @@ type Shared = T.Connection & { workspaceId: string; pending?: boolean };
 type Host = FilesHost & {
   /** The workspace's shared connections, kept with the agents' own accounts. */
   shared: () => Shared[];
+  /** The agents' own accounts, each with its agent and whether it was connected with a key. */
+  ownAccounts: () => {
+    connection: T.Connection;
+    agent: { workspaceId: string; ownerUserId: string };
+    keyed: boolean;
+  }[];
   agents: () => FakeAgentRow[];
 };
-export type FakeMcpServer = T.CustomServer & {
+/** `serverUrl` is the full saved address; members read it as the server shows it (`shown`). */
+export type FakeMcpServer = Omit<T.CustomServer, "queryHidden"> & {
   workspaceId: string;
   needsKey: boolean;
   oauth: boolean;
   pending?: boolean;
 };
+
+/** As on the server: the query string and the sign-in part of an address stay write-only. */
+const shown = (url: string) => {
+  if (!URL.canParse(url)) return { serverUrl: "", queryHidden: false };
+  const address = new URL(url);
+  const queryHidden = address.search !== "" || address.username !== "" || address.password !== "";
+  address.search = "";
+  address.hash = "";
+  address.username = "";
+  address.password = "";
+  return { serverUrl: address.toString(), queryHidden };
+};
 export type FakeInstallation = T.GitHubAppInstallation & {
   workspaceId: string;
   repositories: { fullName: string; private: boolean }[];
+  /** GitHub refuses to uninstall the app: removing it here still unlinks it. */
+  refusesUninstall?: boolean;
 };
 
 const reply = (status: number, body: unknown): FilesReply => ({ status, body });
@@ -162,6 +183,8 @@ const PROVIDERS = new Set<T.DatabaseProvider>(["neon", "other", "railway", "rds"
 
 export class FakeConnections {
   servers: FakeMcpServer[] = [];
+  /** The shared connections made with a key: no sign-in to widen, as on the server. */
+  keyed = new Set<string>();
   mail: FakeMailAccount[] = [];
   /** Each agent's raw scopes. */
   grants = new Map<string, T.ScopeGrant[]>();
@@ -191,6 +214,7 @@ export class FakeConnections {
 
   clear(): void {
     this.servers = [];
+    this.keyed = new Set();
     this.mail = [];
     this.grants = new Map();
     this.mailboxes = new Map();
@@ -228,8 +252,15 @@ export class FakeConnections {
       };
     const serverOf = (scope: Scope, id: unknown) =>
       this.servers.find((each) => each.workspaceId === scope.workspaceId && each.id === text(id));
-    const view = ({ workspaceId: _w, needsKey: _k, oauth: _o, ...server }: FakeMcpServer): T.CustomServer =>
-      server;
+    const view = ({
+      workspaceId: _w,
+      needsKey: _k,
+      oauth: _o,
+      ...server
+    }: FakeMcpServer): T.CustomServer => ({
+      ...server,
+      ...shown(server.serverUrl),
+    });
 
     const mailOf = (scope: Scope, id: unknown) =>
       this.mail.find((each) => each.workspaceId === scope.workspaceId && each.id === text(id));
@@ -723,6 +754,7 @@ export class FakeConnections {
           scopeRequest: null,
         };
         this.host.shared().push(connection);
+        this.keyed.add(connection.id);
         const { workspaceId: _w, ...rest } = connection;
         return reply(200, rest);
       }, true),
@@ -734,16 +766,27 @@ export class FakeConnections {
         }
         return reply(200, { consentUrl: `https://${def.id}.example/authorize` });
       }, true),
+      // As on the server: a workspace account asks for `configure`, an agent's own account for its editor.
       createConnectorScope: within((scope, params) => {
-        const row = this.host
+        const id = text(params.connectorId);
+        const shared = this.host
           .shared()
-          .find((each) => each.workspaceId === scope.workspaceId && each.id === text(params.connectorId));
+          .find((each) => each.workspaceId === scope.workspaceId && each.id === id);
+        const own = this.host
+          .ownAccounts()
+          .find((each) => each.agent.workspaceId === scope.workspaceId && each.connection.id === id);
+        const row = shared ?? own?.connection;
         if (row === undefined) return fail(404, "not_found", "Connection not found");
-        if (row.scopeRequest == null) {
+        const allowed = own
+          ? can(scope.role, "manage_agents") || own.agent.ownerUserId === scope.user.id
+          : can(scope.role, "configure");
+        if (!allowed) return fail(403, "forbidden", "Forbidden");
+        const keyed = own ? own.keyed : this.keyed.has(row.id);
+        if (keyed || row.scopeRequest == null) {
           return fail(400, "connector.no_scope_request", "This connection is not waiting for permission");
         }
         return reply(200, { consentUrl: `https://${row.connector}.example/authorize?more=1` });
-      }, true),
+      }),
       deleteConnector: within((scope, params) => {
         const shared = this.host.shared();
         const at = shared.findIndex(
@@ -849,7 +892,7 @@ export class FakeConnections {
         );
         if (found === undefined) return fail(404, "not_found", "Installation not found");
         this.installations = this.installations.filter((each) => each !== found);
-        return reply(204, null);
+        return reply(200, { uninstalledOnGitHub: found.refusesUninstall !== true });
       }, true),
       listGithubRepositories: within((scope) => {
         const mine = this.installations.filter((each) => each.workspaceId === scope.workspaceId);

@@ -148,9 +148,11 @@ export function GitHubApp({ workspaceId }: { workspaceId: string }) {
           if (target === null) return;
           latch(() =>
             remove.mutateAsync({ workspaceId, installationId: target.id }).then(
-              () => {
+              (removed) => {
                 setRemoving(null);
-                outcome.done(t("gh.removed", { account: target.accountUsername }));
+                const account = target.accountUsername;
+                if (removed.uninstalledOnGitHub) outcome.done(t("gh.removed", { account }));
+                else outcome.warn(t("gh.removedStillOnGitHub", { account }));
               },
               (error: unknown) => {
                 setRemoving(null);

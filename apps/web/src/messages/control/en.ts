@@ -352,6 +352,7 @@ export default {
   "mcp.keyNeeded": "This server wants a key (or rejected the one sent). Paste one to go on.",
   "mcp.addAction": "Add server",
   "mcp.toolCount": { one: "{count} tool", other: "{count} tools" },
+  "mcp.queryHidden": "Rest of the address kept private",
   "mcp.waiting": { one: "{count} to review", other: "{count} to review" },
   "mcp.review": "Review tools",
   "mcp.refresh": "Refresh",
@@ -400,6 +401,8 @@ export default {
   "gh.removeBody":
     "Agents stop reaching its repositories, and Vanr asks GitHub to uninstall the app there too.",
   "gh.removed": "The install on {account} is removed.",
+  "gh.removedStillOnGitHub":
+    "The {account} account is unlinked here, but GitHub didn't confirm the uninstall. Remove the app in {account}'s settings on GitHub.",
 
   "error.connector.unknown": "This service is not on this server.",
   "error.connector.key_unsupported": "This service connects with a sign-in, not a key.",

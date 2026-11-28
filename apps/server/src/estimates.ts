@@ -17,7 +17,7 @@ import { estimateUsd, utf8Bytes } from "@vanr/engine/usage";
 import { and, desc, eq, inArray, isNotNull } from "drizzle-orm";
 import type { AgentRow } from "./agents";
 import { MAX_ROUNDS, synthesisPrompt, TRANSCRIPT_CHARS, TURN_EXTRA_CHARS, turnPrompt } from "./debates";
-import { readableRuns } from "./run-access";
+import { visibleRunsSql } from "./routines";
 
 const { agents, routineExecutions, runs } = schema;
 
@@ -82,7 +82,8 @@ export async function speakerAgents(
 
 /**
  * What the routine's latest executions cost (the sum of each run's ledger), from the newest to the oldest. Only the
- * runs the person sees count (`readableRuns`): a run in a channel they can't read doesn't show through its cost.
+ * runs the person sees count (`visibleRunsSql`, the history's rule): a run they can't read, or one fired for a channel
+ * they don't read, doesn't show through its cost.
  */
 export async function recentRoutineCosts(
   db: Db,
@@ -97,7 +98,7 @@ export async function recentRoutineCosts(
       and(
         eq(routineExecutions.routineId, routineId),
         isNotNull(routineExecutions.runId),
-        readableRuns(db, viewer),
+        visibleRunsSql(db, viewer),
       ),
     )
     .orderBy(desc(routineExecutions.at))

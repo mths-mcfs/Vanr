@@ -16,7 +16,7 @@ const { connections, gateDecisions, runEvents, runs } = schema;
 
 const mcp = startFakeMcp();
 const keyOnly = startFakeMcp({ keyOnly: true });
-/** An MCP server that answers a tool call with an error quoting the Authorization it got. */
+/** An MCP server that answers a tool call with an error quoting the Authorization and the query string it got. */
 const QUOTED = "quoted-credential-value";
 let echoInitFails = false;
 const echo = Bun.serve({
@@ -52,10 +52,60 @@ const echo = Bun.serve({
     return Response.json({
       jsonrpc: "2.0",
       id: body.id,
-      error: { code: -32000, message: `call rejected for ${auth}` },
+      error: { code: -32000, message: `call rejected for ${auth} at ${new URL(req.url).search}` },
     });
   },
 });
+/**
+ * An MCP server whose failure quotes the address it was called at, by `quote`: on `initialize` with `quoteInit`,
+ * otherwise on `tools/list`. Without `quote` it answers normally.
+ */
+let quote: ((url: URL) => string) | null = null;
+let quoteInit = false;
+const quoting = Bun.serve({
+  port: 0,
+  async fetch(req) {
+    const body = (await req.json()) as { id?: number; method: string };
+    if (body.id === undefined) return new Response(null, { status: 202 });
+    const fail = (message: string) =>
+      Response.json({ jsonrpc: "2.0", id: body.id, error: { code: -32000, message } });
+    if (body.method === "initialize") {
+      if (quote && quoteInit) return fail(quote(new URL(req.url)));
+      return Response.json(
+        {
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            protocolVersion: "2025-06-18",
+            capabilities: { tools: {} },
+            serverInfo: { name: "quoting", version: "1" },
+          },
+        },
+        { headers: { "mcp-session-id": "s1" } },
+      );
+    }
+    if (body.method === "tools/list" && quote && !quoteInit) return fail(quote(new URL(req.url)));
+    return Response.json({
+      jsonrpc: "2.0",
+      id: body.id,
+      result: {
+        tools: [{ name: "ping", description: "Ping", inputSchema: { type: "object", properties: {} } }],
+      },
+    });
+  },
+});
+/** Runs `work` with the quoting server failing as `how` says. */
+async function quoted<T>(how: (url: URL) => string, work: () => Promise<T>, onInit = false): Promise<T> {
+  quote = how;
+  quoteInit = onInit;
+  try {
+    return await work();
+  } finally {
+    quote = null;
+    quoteInit = false;
+  }
+}
+
 const CATALOG_HOSTS = ["mcp.linear.app", "mcp.notion.com", "api.githubcopilot.com"];
 
 /** Each catalog origin answers from the fake MCP server, which speaks of itself by its own origin. */
@@ -85,6 +135,7 @@ afterAll(async () => {
   mcp.stop();
   keyOnly.stop();
   echo.stop(true);
+  quoting.stop(true);
 }, SERVER_TEST_MS);
 
 let n = 0;
@@ -169,6 +220,8 @@ const servers = async (t: Team, who: Person = t.ana) =>
   (await ok(call(who, "GET", `${t.w}/connectors/custom`))).servers as {
     id: string;
     label: string;
+    serverUrl: string;
+    queryHidden: boolean;
     tools: { name: string }[];
   }[];
 const connectKey = (t: Team, who: Person, input: unknown) => call(who, "POST", `${t.w}/connectors`, input);
@@ -712,6 +765,116 @@ describe("a connector's error text", () => {
         .from(runEvents)
         .where(eq(runEvents.runId, run?.id ?? ""));
       expect(JSON.stringify({ run, events })).not.toContain(QUOTED);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+test(
+  "an own server's address keeps its query string to itself: members read it without, and errors redact it",
+  async () => {
+    const t = await team();
+    const KEY = "address-key-12345";
+    const address = `http://localhost:${echo.port}/mcp`;
+    const started = await ok(
+      connectCustom(t, t.ana, {
+        serverUrl: `${address}?key=${KEY}`,
+        apiKey: QUOTED,
+        label: "Echo",
+        nextPath: "/",
+      }),
+    );
+    expect([started.server.serverUrl, started.server.queryHidden]).toEqual([address, true]);
+    const id: string = started.server.id;
+    const listed = await servers(t, t.beto);
+    expect(listed.map((each) => [each.serverUrl, each.queryHidden])).toEqual([[address, true]]);
+    const saved = await ok(
+      saveTools(t, id, { label: "Echo", tools: [{ name: "ping", access: "read", label: "" }] }),
+    );
+    const refreshed = await ok(call(t.ana, "POST", `${t.w}/connectors/custom/${id}/refresh`));
+    expect(JSON.stringify({ started, listed, saved, refreshed })).not.toContain(KEY);
+    await ok(setAccess(t, { connectors: { [id]: true } }));
+    // The service quotes the address it was called at: the run's error keeps its words, without the key.
+    await t.ask("mcp_echo__ping", {});
+    const [run] = await server.deps.db.select().from(runs).orderBy(desc(runs.createdAt)).limit(1);
+    expect(run?.error).toContain("Echo failed: call rejected for Bearer [redacted] at ?[redacted]");
+    const events = await server.deps.db
+      .select()
+      .from(runEvents)
+      .where(eq(runEvents.runId, run?.id ?? ""));
+    expect(JSON.stringify({ run, events })).not.toContain(KEY);
+  },
+  SERVER_TEST_MS,
+);
+
+describe("an own server's address quoted back by the server", () => {
+  const at = () => `http://localhost:${quoting.port}/mcp`;
+  const errorOf = (res: Called) => String(res.body?.error?.message ?? "");
+
+  test(
+    "another admin's refresh gets the server's words without the key in the address",
+    async () => {
+      const t = await team();
+      const KEY = "refresh-key-987654";
+      const started = await ok(
+        connectCustom(t, t.ana, { serverUrl: `${at()}?key=${KEY}`, label: "Quoting", nextPath: "/" }),
+      );
+      const carla = await memberOf(server, t.workspaceId, "Carla", email("carla"), "admin");
+      const res = await quoted(
+        (url) => `no tools at ${url.href}`,
+        () => call(carla, "POST", `${t.w}/connectors/custom/${started.server.id}/refresh`),
+      );
+      expect([res.status, errorOf(res)]).toEqual([400, `no tools at ${at()}?[redacted]`]);
+      expect(JSON.stringify(res.body)).not.toContain(KEY);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a connect that fails quoting the address answers without its key",
+    async () => {
+      const t = await team();
+      const KEY = "connect-key-24680";
+      const res = await quoted(
+        (url) => `no session at ${url.href}`,
+        () => connectCustom(t, t.ana, { serverUrl: `${at()}?key=${KEY}`, label: "Quoting", nextPath: "/" }),
+        true,
+      );
+      expect([res.status, errorOf(res)]).toEqual([400, `no session at ${at()}?[redacted]`]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a short query blanks nothing else, and a key with a + is redacted raw and decoded",
+    async () => {
+      const t = await team();
+      const short = await ok(
+        connectCustom(t, t.ana, { serverUrl: `${at()}?x`, label: "Short", nextPath: "/" }),
+      );
+      const words = await quoted(
+        (url) => `next index exhausted at ${url.href}`,
+        () => call(t.ana, "POST", `${t.w}/connectors/custom/${short.server.id}/refresh`),
+      );
+      expect(errorOf(words)).toBe(`next index exhausted at ${at()}?x`);
+
+      const RAW = "abc+def/ghi==";
+      const plus = await ok(
+        connectCustom(t, t.ana, { serverUrl: `${at()}?key=${RAW}`, label: "Plus", nextPath: "/" }),
+      );
+      const refresh = () => call(t.ana, "POST", `${t.w}/connectors/custom/${plus.server.id}/refresh`);
+      const raw = await quoted((url) => `bad key ${url.search.slice("?key=".length)}`, refresh);
+      const form = await quoted((url) => `bad key ${url.searchParams.get("key")}`, refresh);
+      // The query read and written again by the server: `+` for the space, the rest percent-encoded.
+      const again = await quoted(
+        (url) => `bad key ${new URLSearchParams(url.searchParams).toString().slice("key=".length)}`,
+        refresh,
+      );
+      expect([errorOf(raw), errorOf(form), errorOf(again)]).toEqual([
+        "bad key [redacted]",
+        "bad key [redacted]",
+        "bad key [redacted]",
+      ]);
     },
     SERVER_TEST_MS,
   );

@@ -2,7 +2,7 @@
 // repositories the app sees (the runners' git proxy uses the installation token).
 // Without GITHUB_APP_* in the config, `installable` is false and nothing here runs.
 import { createSign } from "node:crypto";
-import type { GitHubAppInstallation, GitHubRepositories } from "@vanr/contract";
+import type { GitHubAppInstallation, GitHubAppRemoval, GitHubRepositories } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { PRODUCT } from "@vanr/product";
 import { and, eq } from "drizzle-orm";
@@ -342,26 +342,43 @@ export async function finishInstall(
   return back("github_app=installed");
 }
 
-/** Uninstalls on GitHub (best effort) and takes it out of the workspace. */
-export async function removeInstallation(deps: AppDeps, workspaceId: string, id: string) {
+/**
+ * Takes the install out of the workspace and asks GitHub to uninstall the app. GitHub may refuse or not answer: the
+ * install still leaves the workspace, and the answer says the app may still be installed there. One GitHub no longer
+ * knows counts as uninstalled.
+ */
+export async function removeInstallation(
+  deps: AppDeps,
+  workspaceId: string,
+  id: string,
+): Promise<GitHubAppRemoval> {
   const [row] = await deps.db
     .select()
     .from(githubInstallations)
     .where(and(eq(githubInstallations.workspaceId, workspaceId), eq(githubInstallations.id, id)));
   if (!row) throw notFound("Installation not found");
   const cfg = deps.config.integrations.githubApp;
+  let uninstalledOnGitHub = false;
   if (cfg) {
-    await githubJson(
+    uninstalledOnGitHub = await githubJson(
       deps,
       cfg,
       `/app/installations/${encodeURIComponent(id)}`,
       { method: "DELETE", token: appJwt(cfg, deps.now()) },
       z.unknown(),
-    ).catch((err) => log.warn("github_app.uninstall_failed", { error: outsideText(err, []), id }));
+    ).then(
+      () => true,
+      (err) => {
+        if (err instanceof HttpError && err.status === 404) return true;
+        log.warn("github_app.uninstall_failed", { error: outsideText(err, []), id });
+        return false;
+      },
+    );
   }
   await deps.db
     .delete(githubInstallations)
     .where(and(eq(githubInstallations.workspaceId, workspaceId), eq(githubInstallations.id, id)));
+  return { uninstalledOnGitHub };
 }
 
 const repoPage = z.object({

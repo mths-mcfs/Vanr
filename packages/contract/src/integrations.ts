@@ -81,7 +81,10 @@ export interface CustomServer {
   id: string;
   createdAt: string;
   label: string;
+  /** The address without its query string or sign-in part, which can carry a key: those stay write-only. */
   serverUrl: string;
+  /** The saved address has a query string or a sign-in part that `serverUrl` leaves out. */
+  queryHidden: boolean;
   tools: CustomServerTool[];
   vettedAt: string | null;
 }
@@ -129,6 +132,11 @@ export interface GitHubAppInstallation {
   accountUsername: string;
   repoScope: "all" | "selected";
   suspended: boolean;
+}
+
+/** The workspace no longer has the install; `uninstalledOnGitHub` false: the app may still be installed on GitHub. */
+export interface GitHubAppRemoval {
+  uninstalledOnGitHub: boolean;
 }
 
 export interface GitHubRepositories {
