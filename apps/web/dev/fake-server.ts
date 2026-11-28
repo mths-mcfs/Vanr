@@ -15,6 +15,7 @@ import { z } from "zod";
 import { AUTH_ROUTES, type AuthMethod } from "../src/api/auth.ts";
 import { FakeAgents } from "./fake-agents.ts";
 import { FakeBases } from "./fake-bases.ts";
+import { FakeChat } from "./fake-chat.ts";
 import { FakeControl } from "./fake-control.ts";
 import { FakeFiles } from "./fake-files.ts";
 import { FakeWiki } from "./fake-wiki.ts";
@@ -288,6 +289,7 @@ export class FakeServer {
   readonly wiki: FakeWiki;
   readonly control: FakeControl;
   readonly agentWork: FakeAgents;
+  readonly chat: FakeChat;
   private readonly fileOperations: ReturnType<FakeFiles["operations"]>;
   private readonly accounts = new Map<string, Account>();
   private readonly now: () => Date;
@@ -353,7 +355,22 @@ export class FakeServer {
       },
       evals: () => this.control.evals,
     });
+    this.chat = new FakeChat({
+      ...host,
+      channels: () => this.state.channels,
+      people: (workspaceId) => this.state.members.filter((member) => member.workspaceId === workspaceId),
+      agents: (workspaceId) => this.agents.filter((candidate) => candidate.workspaceId === workspaceId),
+      dms: (workspaceId) => {
+        let list = this.dms.get(workspaceId);
+        if (list === undefined) {
+          list = [];
+          this.dms.set(workspaceId, list);
+        }
+        return list;
+      },
+    });
     this.fileOperations = {
+      ...this.chat.operations(),
       ...this.files.operations(),
       ...this.bases.operations(),
       ...this.wiki.operations(),
@@ -685,6 +702,7 @@ export class FakeServer {
     this.storage.clear();
     this.notifications = [];
     this.dms.clear();
+    this.chat.runs = [];
     this.notificationSettings.clear();
     this.approvals.clear();
     this.accounts.clear();

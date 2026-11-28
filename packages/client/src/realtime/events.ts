@@ -18,16 +18,34 @@ const runnerId = { runnerId: id };
 
 export const BROWSER_EVENTS = {
   // Runs and agents at work.
-  "run.status_changed": run({ status: opt(s.string) }),
-  "run.text_delta": run({ text: opt(s.string) }),
+  "run.status_changed": run({
+    status: opt(s.string),
+    sourceMessageId: opt(s.nullable(id)),
+    initiatedBy: opt(s.nullable(id)),
+    startedAt: opt(s.string),
+  }),
+  // `seq` counts the deltas of a run from 0, so a repeated one can be dropped; `turn` counts model turns.
+  "run.text_delta": run({ text: opt(s.string), seq: opt(s.number), turn: opt(s.number) }),
   "run.thinking": run({ text: opt(s.string) }),
-  "run.commentary": run({ text: opt(s.string) }),
-  "run.tool_call": run({ tool: opt(s.string), toolUseId: opt(s.string) }),
-  "run.tool_result": run({ tool: opt(s.string), toolUseId: opt(s.string), isError: opt(s.boolean) }),
+  "run.commentary": run({ text: opt(s.string), turn: opt(s.number) }),
+  // A call with `tool: null` closes the call that has that `toolUseId`.
+  "run.tool_call": run({
+    tool: opt(s.nullable(s.string)),
+    toolUseId: opt(s.string),
+    detail: opt(s.nullable(s.string)),
+    turn: opt(s.number),
+  }),
+  "run.tool_result": run({
+    tool: opt(s.string),
+    toolUseId: opt(s.string),
+    isError: opt(s.boolean),
+    text: opt(s.string),
+    turn: opt(s.number),
+  }),
   "run.steered": run({ messageId: opt(id) }),
   "run.idle": run({}),
   "run.stopped": run({}),
-  "run.completed": run({ status: opt(s.string) }),
+  "run.completed": run({ status: opt(s.string), messageId: opt(s.nullable(id)) }),
   "run.agent_unavailable": run({ reason: s.string }),
   "agent.typing": s.object({ agentId: id, ttlMs: opt(s.number) }),
   "delegation.started": s.object({ agentId: opt(id), delegateAgentId: opt(id), runId: opt(id) }),
