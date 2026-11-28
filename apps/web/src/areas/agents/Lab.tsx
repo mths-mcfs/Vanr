@@ -193,7 +193,9 @@ function Evaluate({ agent, workspaceId, rights }: Props) {
     },
   );
   const cases = useApiQuery("listAgentTestCases", args);
-  const noCases = cases.data?.length === 0;
+  // Running needs a case the server confirmed: not while the list is loading or failed.
+  const hasCases = cases.isSuccess && cases.data.length > 0;
+  const noCases = cases.isSuccess && cases.data.length === 0;
   const start = useApiMutation("createAgentEval", {
     invalidates: () => [{ method: "listAgentEvals" as const, args }],
   });
@@ -218,7 +220,7 @@ function Evaluate({ agent, workspaceId, rights }: Props) {
               variant="primary"
               icon={<Play size={16} />}
               loading={start.isPending}
-              disabled={running || noCases}
+              disabled={running || !hasCases}
               onClick={() =>
                 start.mutate(
                   { ...args, body: { instructions: text } },

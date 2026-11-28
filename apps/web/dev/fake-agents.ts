@@ -210,14 +210,22 @@ export class FakeAgents {
       .find((agent) => agent.workspaceId === scope.workspaceId && agent.id === text(params.agentId));
   }
 
-  private plain(agent: FakeAgentRow): T.Agent {
+  /**
+   * The agent as one person sees it. Whether they may talk to it follows its audience now, for them; a
+   * test can still close an agent to everyone by setting `reachable` to false on the row.
+   */
+  private plain(agent: FakeAgentRow, viewerId: string): T.Agent {
     const { workspaceId: _workspace, ...rest } = agent;
-    return { ...rest, busy: this.host.busy(agent.id) };
+    const audience =
+      agent.audience.mode === "everyone" ||
+      agent.ownerUserId === viewerId ||
+      (agent.audience.mode === "people" && agent.audience.userIds.includes(viewerId));
+    return { ...rest, busy: this.host.busy(agent.id), reachable: agent.reachable && audience };
   }
 
-  private detail(agent: FakeAgentRow): T.AgentDetail {
+  private detail(agent: FakeAgentRow, viewerId: string): T.AgentDetail {
     return {
-      ...this.plain(agent),
+      ...this.plain(agent, viewerId),
       budgetInherited: true,
       budgetPerMonthUsd: 50,
       budgetSpentPct: 10,
@@ -359,7 +367,7 @@ export class FakeAgents {
             role: agent.role,
             ownerUserId: agent.ownerUserId,
             busy: this.host.busy(agent.id),
-            reachable: agent.reachable,
+            reachable: this.plain(agent, scope.user.id).reachable,
             appearance: agent.appearance,
             capabilities: [],
             useWhen: agent.instructions.split(/(?<=\.)\s/)[0] ?? "",
@@ -411,11 +419,7 @@ export class FakeAgents {
           busy: false,
           createdAt: this.host.now().toISOString(),
           harness: { environment: null, kind: "model", model: text(params.model) ?? "claude-haiku-5-5" },
-          // Whether the creator may talk to it, as the server answers.
-          reachable:
-            (audience?.mode ?? "everyone") === "everyone" ||
-            (text(params.ownerUserId) ?? scope.user.id) === scope.user.id ||
-            (audience?.userIds ?? []).includes(scope.user.id),
+          reachable: true,
           testModel: false,
         };
         this.host.agents().push(agent);
@@ -425,10 +429,10 @@ export class FakeAgents {
           if (skill.workspaceId === scope.workspaceId && skill.autoGrantNewAgents)
             extra.skills.set(skill.id, true);
         }
-        return reply(201, this.plain(agent));
+        return reply(201, this.plain(agent, scope.user.id));
       }),
 
-      getAgent: withAgent((_scope, agent) => reply(200, this.detail(agent))),
+      getAgent: withAgent((scope, agent) => reply(200, this.detail(agent, scope.user.id))),
 
       updateAgent: asEditor((scope, agent, params) => {
         if (agent.archivedAt !== null) return fail(409, "agent.archived", "This agent was archived");
@@ -464,7 +468,7 @@ export class FakeAgents {
         if (text(params.model) !== undefined) agent.model = text(params.model) ?? agent.model;
         if (params.audience !== undefined) agent.audience = params.audience as T.AgentAudience;
         if (params.appearance !== undefined) agent.appearance = params.appearance as T.AgentAppearance;
-        return reply(200, this.plain(agent));
+        return reply(200, this.plain(agent, scope.user.id));
       }),
 
       deleteAgent: asManager((scope, params) => {

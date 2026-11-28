@@ -53,6 +53,23 @@ describe("an agent's profile", () => {
     expect(server.calls.filter((call) => call.method === "getAgent")).toHaveLength(1);
   });
 
+  test("whether a person may talk to the agent follows its audience, for that person", async () => {
+    const server = newServer();
+    const tally = server.agents.find((agent) => agent.id === "agt_tally");
+    if (tally !== undefined) tally.audience = { mode: "owner", userIds: [] };
+    await renderApp({ path: path("agt_tally"), signedInAs: "usr_iris", server });
+    await screen.findByRole("heading", { level: 1, name: "Tally" });
+    expect(screen.queryByRole("button", { name: "Message Tally" }) === null).toBe(true);
+  });
+
+  test("the agent's owner may talk to it when its audience is only the owner", async () => {
+    const server = newServer();
+    const tally = server.agents.find((agent) => agent.id === "agt_tally");
+    if (tally !== undefined) tally.audience = { mode: "owner", userIds: [] };
+    await renderApp({ path: path("agt_tally"), signedInAs: "usr_jonas", server });
+    expect(await screen.findByRole("button", { name: "Message Tally" })).toBeDefined();
+  });
+
   test("an archived agent says so and offers no conversation", async () => {
     const server = newServer();
     const scout = server.agents.find((agent) => agent.id === "agt_scout");
