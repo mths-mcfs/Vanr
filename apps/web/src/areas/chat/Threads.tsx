@@ -165,7 +165,7 @@ export function ThreadsScreen() {
           onRetry={() => void pages.refetch()}
           namespace="chat"
         />
-      ) : threads.length === 0 ? (
+      ) : threads.length === 0 && !pages.hasNextPage ? (
         <EmptyState
           icon={<Icon icon={MessagesSquare} size="lg" />}
           title={q !== "" ? t("threads.noMatch", { query: q }) : t("threads.empty")}
@@ -173,11 +173,14 @@ export function ThreadsScreen() {
         />
       ) : (
         <>
-          <ul className="chat-threads__list" aria-label={t("threads.rows")}>
-            {threads.map((thread) => (
-              <Row key={thread.id} thread={thread} />
-            ))}
-          </ul>
+          {/* A first page emptied by a lost channel still leads to the pages after it. */}
+          {threads.length > 0 && (
+            <ul className="chat-threads__list" aria-label={t("threads.rows")}>
+              {threads.map((thread) => (
+                <Row key={thread.id} thread={thread} />
+              ))}
+            </ul>
+          )}
           {pages.hasNextPage && (
             <Button loading={pages.isFetchingNextPage} onClick={() => void pages.fetchNextPage()}>
               {t("threads.next")}

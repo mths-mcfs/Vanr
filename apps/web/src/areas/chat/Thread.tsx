@@ -119,16 +119,23 @@ export function ThreadPanel({
   }, [lost, onLost]);
   const root = messages.find((message) => message.id === rootId);
   // The panel holds the latest page of replies; live ones push the oldest out (no paging up yet).
-  const replies = messages.filter((message) => message.id !== rootId).slice(-PAGE);
+  const known = messages.filter((message) => message.id !== rootId);
+  const replies = known.slice(-PAGE);
   const live = showing(
     runs.filter((run) => run.threadId === rootId),
     new Set(messages.map((message) => message.id)),
     now,
   );
+  // Who answers a message that names no one: the agents in the thread, the root's own agent among them.
   const spoke = [
-    ...new Set(replies.flatMap((message) => (message.author.type === "agent" ? [message.author.id] : []))),
+    ...new Set(
+      [...replies, ...(root === undefined ? [] : [root])].flatMap((message) =>
+        message.author.type === "agent" ? [message.author.id] : [],
+      ),
+    ),
   ];
-  const data = info.data;
+  // The record of a thread of another channel says nothing here: not its title, nor what it allows.
+  const data = info.data?.channelId === channelId ? info.data : undefined;
   const title =
     data !== undefined && data.title !== ""
       ? data.title
@@ -136,8 +143,8 @@ export function ThreadPanel({
         ? root.body.slice(0, EXCERPT)
         : t("thread.untitled");
   const state = data?.state ?? "open";
-  // The record counts every reply; the panel draws only the latest page of them.
-  const replyCount = Math.max(data?.replyCount ?? 0, replies.length);
+  // The record and the root count every reply; the panel draws only the latest page of them.
+  const replyCount = Math.max(data?.replyCount ?? 0, root?.replyCount ?? 0, known.length);
   const counted = replyCount === 0 ? t("thread.noReplies") : t("thread.replies", { count: replyCount });
 
   return (
@@ -160,7 +167,7 @@ export function ThreadPanel({
             {replyCount > 0 && <span>{counted}</span>}
           </p>
         </div>
-        <Controls rootId={rootId} info={data} />
+        {(data !== undefined || root !== undefined) && <Controls rootId={rootId} info={data} />}
         {onClose !== undefined && (
           <div className="chat-thread__window">
             {/* A thread with no record yet has no page of its own: it lives beside its channel. */}
@@ -287,11 +294,18 @@ function ThreadPage({ workspaceId, threadId }: { workspaceId: string; threadId: 
     unlistedIn.current !== null &&
     channels.data !== undefined &&
     !channels.data.some((c) => c.id === unlistedIn.current);
-  // A refusal answered while the channel was out of the list holds only until the list has it back,
-  // and the thread is read again then (below). Any other refusal, or a loss, stays gone for this
-  // thread: forgetting the cache must not bring a loading state back.
+  // A list that has the channel back reads the thread again, once, if its last read failed or was
+  // refused; a read that fails again stays on the error with its retry.
+  const listedAgain = unlistedIn.current !== null && !stillUnlisted;
+  const readOnce = useRef(false);
+  if (!listedAgain) readOnce.current = false;
+  // A refusal holds only while it may come from a read made while the channel was out: one answered
+  // while the list leaves it out, or after the list has it back but before that read again. Only a
+  // refusal from the read again, or from a read made while the channel was listed, stays gone for
+  // this thread, as a loss does: forgetting the cache must not bring a loading state back.
   const excusedAt = useRef<number | null>(null);
-  if (refused && stillUnlisted) excusedAt.current = info.errorUpdatedAt;
+  if (refused && (stillUnlisted || (listedAgain && !readOnce.current)))
+    excusedAt.current = info.errorUpdatedAt;
   const excused = refused && excusedAt.current === info.errorUpdatedAt;
   const goneFor = useRef<string | null>(null);
   if ((refused && !excused) || lostHere) goneFor.current = threadId;
@@ -300,11 +314,6 @@ function ThreadPage({ workspaceId, threadId }: { workspaceId: string; threadId: 
   // remount the clearing, which would forget it again, and loop.
   const forgotten = useRef<string | undefined>(undefined);
   if (missing) forgotten.current ??= unlistedIn.current ?? info.data?.channelId;
-  // A list that has the channel back reads the thread again, once, if its last read failed or was
-  // refused while gone; a read that fails again stays on the error with its retry.
-  const listedAgain = unlistedIn.current !== null && !stillUnlisted;
-  const readOnce = useRef(false);
-  if (!listedAgain) readOnce.current = false;
   const readAgain = info.refetch;
   useEffect(() => {
     if (!listedAgain || !info.isError || readOnce.current) return;
