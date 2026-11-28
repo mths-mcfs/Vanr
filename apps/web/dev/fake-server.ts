@@ -5,7 +5,7 @@
 // settings, members' roles and storage, the inbox and its preferences, agents and their runs,
 // sessions by cookie, the server's side of the real-time
 // socket, and a way to force any state (an error, a held answer, a busy server, an ended session,
-// a dropped connection). The Drive and the search live in `fake-files.ts`, bases in `fake-bases.ts`, the wiki in `fake-wiki.ts`, the agents' team, profile, lab and skills in `fake-agents.ts`. It is never part of the
+// a dropped connection). The Drive and the search live in `fake-files.ts`, bases in `fake-bases.ts`, the wiki in `fake-wiki.ts`, the agents' team, profile, lab and skills in `fake-agents.ts`, their memory and identity in `fake-agent-access.ts`, runners and pairing in `fake-runners.ts`. It is never part of the
 // production build.
 import { endpoints, type FetchLike, type MethodName, type SocketLike } from "@vanr/client";
 import { type FakeServer as ClientFake, createFakeServer, FakeSocket } from "@vanr/client/testing";
@@ -13,10 +13,12 @@ import type * as T from "@vanr/contract";
 import { can } from "@vanr/contract";
 import { z } from "zod";
 import { AUTH_ROUTES, type AuthMethod } from "../src/api/auth.ts";
+import { FakeAgentAccess } from "./fake-agent-access.ts";
 import { FakeAgents } from "./fake-agents.ts";
 import { FakeBases } from "./fake-bases.ts";
 import { FakeControl } from "./fake-control.ts";
 import { FakeFiles } from "./fake-files.ts";
+import { FakeRunners } from "./fake-runners.ts";
 import { FakeWiki } from "./fake-wiki.ts";
 
 /** Any operation the web calls: one of the client's, or one of the sign-in service's. */
@@ -288,6 +290,8 @@ export class FakeServer {
   readonly wiki: FakeWiki;
   readonly control: FakeControl;
   readonly agentWork: FakeAgents;
+  readonly agentAccess: FakeAgentAccess;
+  readonly runnerWork: FakeRunners;
   private readonly fileOperations: ReturnType<FakeFiles["operations"]>;
   private readonly accounts = new Map<string, Account>();
   private readonly now: () => Date;
@@ -353,12 +357,32 @@ export class FakeServer {
       },
       evals: () => this.control.evals,
     });
+    this.agentAccess = new FakeAgentAccess({
+      ...host,
+      agents: () => this.agents,
+      readsChannel: (userId, channelId) => {
+        const channel = this.state.channels.find((candidate) => candidate.id === channelId);
+        return (
+          channel !== undefined && (channel.visibility === "public" || channel.memberIds.includes(userId))
+        );
+      },
+      channelExists: (channelId) => this.state.channels.some((candidate) => candidate.id === channelId),
+    });
+    this.runnerWork = new FakeRunners({
+      ...host,
+      agents: () => this.agents,
+      user: (session) => this.userOf(session),
+      roles: (userId) =>
+        this.state.members.filter((member) => member.userId === userId).map((member) => member.role),
+    });
     this.fileOperations = {
       ...this.files.operations(),
       ...this.bases.operations(),
       ...this.wiki.operations(),
       ...this.control.operations(),
       ...this.agentWork.operations(),
+      ...this.agentAccess.operations(),
+      ...this.runnerWork.operations(),
     };
     // A proposal's evaluation stays the control fake's; the lab's own run (a candidate text) is the agents'.
     const proposalEval = this.control.operations().createAgentEval;
@@ -393,6 +417,8 @@ export class FakeServer {
     this.control.testCases = new Map();
     this.control.evals = [];
     this.agentWork.clear();
+    this.agentAccess.clear();
+    this.runnerWork.clear();
     if (name === "empty") return;
     const inDays = (days: number) => new Date(this.now().getTime() + days * DAY_MS);
     const people: [string, string, string][] = [
@@ -461,6 +487,8 @@ export class FakeServer {
     this.bases.seed();
     this.wiki.seed();
     this.agentWork.seed();
+    this.agentAccess.seed();
+    this.runnerWork.seed();
     this.agents = [
       agent("agt_scout", "workspace_birchwood", "Scout", "usr_ana"),
       agent("agt_ledger", "workspace_birchwood", "Ledger", "usr_ana"),

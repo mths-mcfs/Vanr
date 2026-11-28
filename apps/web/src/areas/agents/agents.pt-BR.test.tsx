@@ -39,6 +39,37 @@ test("as skills, em português", async () => {
   expect(screen.getByRole("button", { name: "Baixar Release notes como SKILL.md" })).toBeDefined();
 });
 
+test("memória, acesso e ambiente, em português", async () => {
+  const app = await renderApp({
+    path: `${BASE}/agents/agt_scout?tab=memory`,
+    signedInAs: "usr_iris",
+    languages,
+  });
+  expect(await screen.findByRole("tab", { name: "Registradas (2)" })).toBeDefined();
+  expect(screen.getByRole("tab", { name: "Guardadas (1)" })).toBeDefined();
+  await app.user.click(screen.getByRole("tab", { name: "Acesso" }));
+  expect(await screen.findByRole("list", { name: "Regras por canal" })).toBeDefined();
+  expect(screen.getByText("Todas as conexões")).toBeDefined();
+  await app.user.click(screen.getByRole("tab", { name: "Ambiente" }));
+  expect(await screen.findByText("Trabalha em Studio Mac, que está conectado.")).toBeDefined();
+  expect(screen.getByText("Ninguém está conduzindo o navegador do agente.")).toBeDefined();
+});
+
+test("runners e pareamento, em português", async () => {
+  await renderApp({ path: `${BASE}/settings/runners`, signedInAs: "usr_iris", languages });
+  const list = await screen.findByRole("list", { name: "Runners" });
+  expect(list.textContent).toContain("Pareado por Ana Beatriz Souza");
+  expect(list.textContent).toContain("Conectado");
+});
+
+test("o pareamento por código, em português", async () => {
+  await renderApp({ path: "/connect?code=BIRCH7", signedInAs: "usr_jonas", languages });
+  await screen.findByRole("heading", { name: "Parear Garage laptop?" });
+  expect(screen.getByText("O código expira em 9 minutos.")).toBeDefined();
+  expect(screen.getByRole("button", { name: "Parear" })).toBeDefined();
+  expect(screen.getByRole("button", { name: "Recusar" })).toBeDefined();
+});
+
 test("o dinheiro do mês no formato do português", async () => {
   await renderApp({ path: `${BASE}/agents/agt_scout`, signedInAs: "usr_iris", languages });
   await screen.findByRole("heading", { level: 1, name: "Scout" });
