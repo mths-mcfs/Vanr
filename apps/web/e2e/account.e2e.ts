@@ -1,5 +1,8 @@
-// The account journeys: a person signs up, names a workspace, signs out and signs back in.
-// Each one checks what the person sees on the way, in the project's language.
+// The account journeys: a person signs up, names a workspace, signs out and signs back in, is turned
+// away with a wrong password, picks the language before signing in, and opens an invitation that was
+// already accepted. Each one checks what the person sees on the way, in the project's language.
+import accountEn from "../src/messages/account/en.ts";
+import accountPt from "../src/messages/account/pt-BR.ts";
 import { expect, test } from "./fixtures.ts";
 
 test("sign up: a new person creates an account and is asked to name a workspace", async ({ page, t }) => {
@@ -78,4 +81,71 @@ test("sign in: a member signs out, then signs back in to the workspace", async (
     sidebar.getByRole("button", { name: t("shell", "person.menu", { name: user.name }) }),
   ).toBeVisible();
   await expect(page).toHaveURL(new RegExp(`/workspace/${user.workspace.id}$`));
+});
+
+test("sign in with a wrong password: the person is told, and stays on the sign-in page", async ({
+  page,
+  t,
+  seedUser,
+}) => {
+  const user = await seedUser({ workspace: "Flint Desk" });
+  await page.goto("/login");
+  await page.getByLabel(t("account", "field.email")).fill(user.email);
+  await page.getByLabel(t("account", "field.password"), { exact: true }).fill(`${user.password}-not`);
+  await page.getByRole("button", { name: t("account", "signIn.submit"), exact: true }).click();
+
+  await expect(page.getByText(t("errors", "invalid_email_or_password"))).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: t("account", "signIn.title") })).toBeVisible();
+  await expect(page).toHaveURL(/\/login/);
+});
+
+test("the language picked before signing in changes the page and the document's language", async ({
+  page,
+  locale,
+  t,
+}) => {
+  const other = locale?.toLowerCase().startsWith("pt") ? "en" : "pt-BR";
+  const title = (other === "en" ? accountEn : accountPt)["signIn.title"];
+  await page.goto("/login");
+  await page.getByRole("combobox", { name: t("common", "language.label") }).click();
+  await page.getByRole("option", { name: t("common", `language.${other}`) }).click();
+
+  await expect(page.locator("html")).toHaveAttribute("lang", other);
+  await expect(page.getByRole("heading", { level: 1, name: title })).toBeVisible();
+  await expect(page).toHaveTitle(new RegExp(`^${title} \\|`));
+});
+
+test("an invitation already accepted leads its member in and is closed to a visitor", async ({
+  page,
+  t,
+  seedUser,
+  signIn,
+  invite,
+  apiAs,
+}) => {
+  const owner = await seedUser({ workspace: "Quarry Hall" });
+  const member = await seedUser();
+  const invitation = await invite(owner, { email: member.email });
+  const accepted = await (await apiAs(member)).post(`/api/v1/invitations/${invitation.token}/accept`, {
+    data: {},
+  });
+  expect(accepted.ok()).toBe(true);
+  const link = new URL(invitation.url).pathname;
+
+  // Without a session, the link says it was used and offers the sign-in.
+  await page.goto(link);
+  await expect(
+    page.getByRole("heading", { level: 1, name: t("account", "invite.used.title") }),
+  ).toBeVisible();
+  await expect(page.getByText(t("account", "invite.used.body"))).toBeVisible();
+  await expect(page.getByRole("button", { name: t("account", "invite.accept.submit") })).toHaveCount(0);
+
+  // The member who accepted it is only led into the workspace.
+  const workspace = owner.workspace.name;
+  await signIn(member);
+  await page.goto(link);
+  await expect(page.getByText(t("account", "invite.member.body", { workspace }))).toBeVisible();
+  await page.getByRole("button", { name: t("account", "invite.member.action", { workspace }) }).click();
+  await expect(page.getByRole("heading", { level: 1, name: workspace })).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`/workspace/${owner.workspace.id}$`));
 });
