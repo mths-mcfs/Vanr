@@ -1654,8 +1654,9 @@ export class FakeServer {
     listAgents: (params, session) => {
       const scope = this.scope(params, session);
       if ("status" in scope) return scope;
+      // As on the server: an archived agent leaves the list (its row and its handle stay).
       const agents: T.Agent[] = this.agents
-        .filter((candidate) => candidate.workspaceId === scope.workspaceId)
+        .filter((candidate) => candidate.workspaceId === scope.workspaceId && candidate.archivedAt === null)
         .map(({ workspaceId: _workspace, ...rest }) => ({
           ...rest,
           busy: this.runs.some((candidate) => candidate.agentId === rest.id),
