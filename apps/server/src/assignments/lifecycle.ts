@@ -477,7 +477,7 @@ export async function finishAssignment(
     return moved;
   });
   publishAssignment(deps, next, "status");
-  stopAgentRun(deps, next, me.userId);
+  stopAgentRun(deps, next, me);
   await cancelJobs(deps, next);
   // The copy is extra: the assignment is closed already, so a failed copy is logged and the close goes on.
   if (input.wiki) {

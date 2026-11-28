@@ -101,7 +101,7 @@ export const integrations = {
   deleteGithubAppInstallation: e(
     "DELETE",
     "/api/v1/workspaces/:workspaceId/github-app/installations/:installationId",
-    NOTHING,
+    C.GitHubAppRemoval,
   ),
   listGithubRepositories: e(
     "GET",

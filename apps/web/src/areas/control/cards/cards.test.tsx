@@ -1,7 +1,7 @@
 // The cards a conversation shows, rendered on their own against the fake server: the agent's question
 // and the missing connector permission. Who may answer or grant follows the server.
-import { describe, expect, test } from "bun:test";
-import { act, render, screen, within } from "@testing-library/react";
+import { describe, expect, spyOn, test } from "bun:test";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { AgentQuestion, MessageMeta, Role } from "@vanr/contract";
 import type { ReactNode } from "react";
@@ -136,5 +136,36 @@ describe("the missing connector permission", () => {
     expect(
       within(region).getByText("Ask the agent's owner, or someone who manages agents, to grant it."),
     ).toBeDefined();
+  });
+
+  test("the agent's own account: its owner grants it without configuring connectors", async () => {
+    const server = newServer();
+    const scout = server.agents.find((each) => each.id === "agt_scout");
+    const own = server.agentAccess.accounts.get("agt_scout")?.[0];
+    if (scout === undefined || own === undefined) throw new Error("the seed has Scout's own Linear account");
+    // Tomás is a member: he may not configure connectors, but he edits the agent he owns.
+    scout.ownerUserId = TOMAS.userId;
+    own.scopeRequest = { scope: "issues:write", tool: "Create an issue" };
+    const left: string[] = [];
+    const assign = spyOn(window.location, "assign").mockImplementation((url: string | URL) => {
+      left.push(String(url));
+    });
+    try {
+      await show(TOMAS, server, (props) => (
+        <ConnectorScopeCard
+          workspaceId={WORKSPACE}
+          card={{ ...card("agent"), connectionId: own.id, connector: "linear", label: "Linear" }}
+          agentId="agt_scout"
+          {...props}
+        />
+      ));
+      const region = await screen.findByRole("region", {
+        name: "Scout needs more access to its own Linear account",
+      });
+      await userEvent.setup().click(within(region).getByRole("button", { name: "Grant access" }));
+      await waitFor(() => expect(left).toEqual(["https://linear.example/authorize?more=1"]));
+    } finally {
+      assign.mockRestore();
+    }
   });
 });

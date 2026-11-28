@@ -9,7 +9,8 @@ import type { Starter } from "../src/integrations/connectors";
 import { finishInstall, installUrl, repoRefusal, repositoriesOf } from "../src/integrations/github-app";
 import type { RunningServer } from "../src/server";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
-import { seedWorkspace } from "./seed";
+import { call, ws } from "./route-calls";
+import { type Person, seedWorkspace } from "./seed";
 
 const STATE_TTL_MS = 30 * 60_000;
 const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -37,6 +38,24 @@ function fakeGitHub() {
       {
         id: 202,
         account: { id: 22, login: "other", type: "User" },
+        repository_selection: "all",
+        suspended_at: null,
+      },
+    ],
+    [
+      "808",
+      {
+        id: 808,
+        account: { id: 80, login: "leaving", type: "Organization" },
+        repository_selection: "all",
+        suspended_at: null,
+      },
+    ],
+    [
+      "707",
+      {
+        id: 707,
+        account: { id: 70, login: "stuck", type: "Organization" },
         repository_selection: "all",
         suspended_at: null,
       },
@@ -103,7 +122,8 @@ function fakeGitHub() {
       const install = installs.get(m[1]);
       if (!install) return new Response("not found", { status: 404 });
       if (m[2]) return Response.json({ token: "inst-token" }, { status: 201 });
-      if (method === "DELETE") return new Response(null, { status: 204 });
+      // GitHub refuses to uninstall 707.
+      if (method === "DELETE") return new Response(null, { status: m[1] === "707" ? 500 : 204 });
       return Response.json(install);
     }
     if (url.pathname === "/user" && jwt === "user")
@@ -131,6 +151,7 @@ const github = fakeGitHub();
 let server: RunningServer;
 let ana: Starter;
 let bob: Starter;
+let anaPerson: Person;
 
 beforeAll(async () => {
   server = await startTestServer({
@@ -147,6 +168,7 @@ beforeAll(async () => {
     now: () => clock,
   });
   const a = await signedIn(server, "Ana", "ana@github.test");
+  anaPerson = a;
   const b = await signedIn(server, "Bob", "bob@github.test");
   const wa = await seedWorkspace(server, a, "Acme");
   const wb = await seedWorkspace(server, b, "Other");
@@ -280,6 +302,42 @@ describe("GitHub App installation", () => {
       await expect(installUrl(deps, ana, "/back")).rejects.toMatchObject({
         code: "github_app.not_configured",
       });
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "removing an install says whether GitHub uninstalled the app; it leaves the workspace either way",
+    async () => {
+      const ids = ["808", "707", "606"];
+      await server.deps.db.insert(schema.githubInstallations).values(
+        ids.map((id) => ({
+          id,
+          workspaceId: ana.workspaceId,
+          createdBy: ana.userId,
+          accountUsername: `account-${id}`,
+          suspended: false,
+          repoScope: "all" as const,
+        })),
+      );
+      const remove = (id: string) =>
+        call(anaPerson, "DELETE", `${ws(ana.workspaceId)}/github-app/installations/${id}`);
+      // 808 uninstalls, 707 GitHub refuses, 606 GitHub no longer knows (it is gone there already).
+      const answers = [];
+      for (const id of ids) {
+        const res = await remove(id);
+        answers.push([id, res.status, res.body]);
+      }
+      expect(answers).toEqual([
+        ["808", 200, { uninstalledOnGitHub: true }],
+        ["707", 200, { uninstalledOnGitHub: false }],
+        ["606", 200, { uninstalledOnGitHub: true }],
+      ]);
+      const left = await server.deps.db
+        .select({ id: schema.githubInstallations.id })
+        .from(schema.githubInstallations)
+        .where(eq(schema.githubInstallations.workspaceId, ana.workspaceId));
+      expect(left.map((r) => r.id).filter((id) => ids.includes(id))).toEqual([]);
     },
     SERVER_TEST_MS,
   );

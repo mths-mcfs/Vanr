@@ -393,7 +393,15 @@ export class FakeServer {
       },
       channelExists: (channelId) => this.state.channels.some((candidate) => candidate.id === channelId),
     });
-    this.connections = new FakeConnections({ ...host, shared: () => this.agentAccess.shared });
+    this.connections = new FakeConnections({
+      ...host,
+      shared: () => this.agentAccess.shared,
+      ownAccounts: () =>
+        [...this.agentAccess.accounts].flatMap(([agentId, connections]) => {
+          const agent = this.agents.find((candidate) => candidate.id === agentId);
+          return agent ? connections.map((connection) => ({ connection, agent })) : [];
+        }),
+    });
     this.runnerWork = new FakeRunners({
       ...host,
       agents: () => this.agents,

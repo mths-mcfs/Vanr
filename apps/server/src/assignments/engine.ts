@@ -5,11 +5,12 @@ import { newId } from "@vanr/engine/ids";
 import { and, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { agentInWorkspace } from "../agents";
 import { channelInWorkspace } from "../channels";
-import type { AppDeps } from "../context";
+import type { AppDeps, WorkspaceMember } from "../context";
 import { HttpError } from "../http";
 import { log } from "../logger";
 import { ensureThread, postMessage } from "../messages";
 import { closeNotifications, notify } from "../notifications";
+import { mayStopRun } from "../run-access";
 import { RunnerCallError } from "../runners/hub";
 import { onJobDone, startJob } from "../runners/jobs";
 import { canUsePlan } from "../runners/plans";
@@ -419,15 +420,20 @@ async function cancelJobsNow(deps: AppDeps, row: AssignmentRow, only?: string): 
 }
 
 /**
- * Stops the agent's run in the assignment's thread (if there is one). It follows `actOn`, not `mayStopRun`, on
- * purpose: the thread is the assignment's, and a paused or closed assignment has no work running in it. The engine
- * halts that run itself (`halt` in the motor) whoever paused, so this is only the immediate form of that halt. Who
- * may pause the assignment (its owner or who decides) therefore stops its run; the Stop button and a typed "stop"
- * on a run outside an assignment still ask `mayStopRun`.
+ * Stops the agent's run in the assignment's thread (if there is one), at once and in the person's name, only for
+ * someone who may stop that run anywhere (`mayStopRun`): the callers already checked that they may act on the
+ * assignment (`actOn`), so both rules hold. A pause or a close by someone who passes only `actOn` still ends the run:
+ * the engine halts the run of a paused or closed assignment (`halt` in the motor), in nobody's name.
  */
-export function stopAgentRun(deps: AppDeps, row: AssignmentRow, actorUserId: string): boolean {
+export function stopAgentRun(
+  deps: AppDeps,
+  row: AssignmentRow,
+  person: Pick<WorkspaceMember, "userId" | "role">,
+): boolean {
   const runId = deps.runtime.activeRun(row.agentId, row.channelId, row.threadId);
-  return runId ? deps.runtime.cancel(runId, actorUserId) : false;
+  if (!runId) return false;
+  const info = deps.runtime.liveInfo(runId);
+  return !!info && mayStopRun(person, info) && deps.runtime.cancel(runId, person.userId);
 }
 
 // ---- submission ----

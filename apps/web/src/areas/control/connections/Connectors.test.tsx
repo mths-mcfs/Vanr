@@ -425,6 +425,25 @@ describe("own MCP servers", () => {
     expect(await screen.findByRole("dialog", { name: /^Tools of open\.example/ })).toBeDefined();
   });
 
+  test("a server added with a key in its address lists without it, and says the rest is private", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas" });
+    await app.user.click(within(await servers()).getByRole("button", { name: "Add a server" }));
+    const add = await screen.findByRole("dialog", { name: "Add an MCP server" });
+    await app.user.type(
+      within(add).getByLabelText("Address"),
+      "https://billing.example/mcp?key=sk_live_9876",
+    );
+    await app.user.type(within(add).getByLabelText("Name"), "Billing");
+    await app.user.click(within(add).getByRole("button", { name: "Add server" }));
+    const review = await screen.findByRole("dialog", { name: "Tools of Billing" });
+    await app.user.click(within(review).getByRole("button", { name: "Cancel" }));
+    const listed = within(await servers()).getByRole("list", { name: "Your MCP servers" });
+    const billing = row(listed, "Billing");
+    expect(within(billing).getByText("https://billing.example/mcp")).toBeDefined();
+    expect(within(billing).getByText("Rest of the address kept private")).toBeDefined();
+    expect(billing.textContent?.includes("sk_live_9876")).toBe(false);
+  });
+
   test("a review closes when its server turns out to be gone", async () => {
     const server = newServer();
     server.connections.servers.push({
@@ -625,5 +644,32 @@ describe("GitHub", () => {
     await app.user.click(within(confirm).getByRole("button", { name: "Remove" }));
     expect(await toast("The install on old-shop is removed.")).toBeDefined();
     expect(server.connections.installations.map((each) => each.id)).toEqual(["ins_birch"]);
+  });
+
+  test("an install GitHub refused to uninstall is unlinked, and the warning says to finish on GitHub", async () => {
+    const server = newServer();
+    server.connections.installations.push({
+      id: "ins_stuck",
+      workspaceId: WS,
+      accountUsername: "stuck-shop",
+      repoScope: "all",
+      suspended: false,
+      repositories: [],
+      refusesUninstall: true,
+    });
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const list = await within(await github()).findByRole("list", { name: "GitHub" });
+    await app.user.click(
+      within(row(list, "stuck-shop")).getByRole("button", { name: "Remove the install on stuck-shop" }),
+    );
+    const confirm = await screen.findByRole("alertdialog", { name: "Remove the install on stuck-shop?" });
+    await app.user.click(within(confirm).getByRole("button", { name: "Remove" }));
+    expect(
+      await toast(
+        "The stuck-shop account is unlinked here, but GitHub didn't confirm the uninstall. Remove the app in stuck-shop's settings on GitHub.",
+      ),
+    ).toBeDefined();
+    expect(screen.queryByText("The install on stuck-shop is removed.") === null).toBe(true);
+    expect(server.connections.installations.length).toBe(0);
   });
 });

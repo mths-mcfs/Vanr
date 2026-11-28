@@ -16,7 +16,7 @@ const { connections, gateDecisions, runEvents, runs } = schema;
 
 const mcp = startFakeMcp();
 const keyOnly = startFakeMcp({ keyOnly: true });
-/** An MCP server that answers a tool call with an error quoting the Authorization it got. */
+/** An MCP server that answers a tool call with an error quoting the Authorization and the query string it got. */
 const QUOTED = "quoted-credential-value";
 let echoInitFails = false;
 const echo = Bun.serve({
@@ -52,7 +52,7 @@ const echo = Bun.serve({
     return Response.json({
       jsonrpc: "2.0",
       id: body.id,
-      error: { code: -32000, message: `call rejected for ${auth}` },
+      error: { code: -32000, message: `call rejected for ${auth} at ${new URL(req.url).search}` },
     });
   },
 });
@@ -169,6 +169,8 @@ const servers = async (t: Team, who: Person = t.ana) =>
   (await ok(call(who, "GET", `${t.w}/connectors/custom`))).servers as {
     id: string;
     label: string;
+    serverUrl: string;
+    queryHidden: boolean;
     tools: { name: string }[];
   }[];
 const connectKey = (t: Team, who: Person, input: unknown) => call(who, "POST", `${t.w}/connectors`, input);
@@ -716,6 +718,43 @@ describe("a connector's error text", () => {
     SERVER_TEST_MS,
   );
 });
+
+test(
+  "an own server's address keeps its query string to itself: members read it without, and errors redact it",
+  async () => {
+    const t = await team();
+    const KEY = "address-key-12345";
+    const address = `http://localhost:${echo.port}/mcp`;
+    const started = await ok(
+      connectCustom(t, t.ana, {
+        serverUrl: `${address}?key=${KEY}`,
+        apiKey: QUOTED,
+        label: "Echo",
+        nextPath: "/",
+      }),
+    );
+    expect([started.server.serverUrl, started.server.queryHidden]).toEqual([address, true]);
+    const id: string = started.server.id;
+    const listed = await servers(t, t.beto);
+    expect(listed.map((each) => [each.serverUrl, each.queryHidden])).toEqual([[address, true]]);
+    const saved = await ok(
+      saveTools(t, id, { label: "Echo", tools: [{ name: "ping", access: "read", label: "" }] }),
+    );
+    const refreshed = await ok(call(t.ana, "POST", `${t.w}/connectors/custom/${id}/refresh`));
+    expect(JSON.stringify({ started, listed, saved, refreshed })).not.toContain(KEY);
+    await ok(setAccess(t, { connectors: { [id]: true } }));
+    // The service quotes the address it was called at: the run's error keeps its words, without the key.
+    await t.ask("mcp_echo__ping", {});
+    const [run] = await server.deps.db.select().from(runs).orderBy(desc(runs.createdAt)).limit(1);
+    expect(run?.error).toContain("Echo failed: call rejected for Bearer [redacted] at ?[redacted]");
+    const events = await server.deps.db
+      .select()
+      .from(runEvents)
+      .where(eq(runEvents.runId, run?.id ?? ""));
+    expect(JSON.stringify({ run, events })).not.toContain(KEY);
+  },
+  SERVER_TEST_MS,
+);
 
 test(
   "redaction knows the credential a client sends, even when the kept one changed after it was read",

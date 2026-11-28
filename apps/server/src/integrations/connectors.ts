@@ -119,13 +119,25 @@ function secretsOf(secret: ConnSecret | null): string[] {
   return [];
 }
 
-/** The kept credential of a row for redaction, or none when it can't be opened. */
-function rowSecrets(deps: AppDeps, row: { secret: string | null }): string[] {
-  if (!row.secret) return [];
+/**
+ * What an own server's address can carry as a credential, for redaction: its query string (`?key=…`) and each
+ * value long enough to be a key, and a sign-in part (`user:pass@`).
+ */
+function addressSecrets(url: string | null | undefined): string[] {
+  if (!url || !URL.canParse(url)) return [];
+  const address = new URL(url);
+  const values = [...address.searchParams.values()].filter((v) => v.length >= 6);
+  return [address.search.slice(1), ...values, address.username, address.password].filter((v) => v !== "");
+}
+
+/** The kept credential of a row (and what its address carries) for redaction, or none when it can't be opened. */
+function rowSecrets(deps: AppDeps, row: { secret: string | null; serverUrl?: string | null }): string[] {
+  const inAddress = addressSecrets(row.serverUrl);
+  if (!row.secret) return inAddress;
   try {
-    return secretsOf(openSecret(deps, row.secret));
+    return [...secretsOf(openSecret(deps, row.secret)), ...inAddress];
   } catch {
-    return [];
+    return inAddress;
   }
 }
 
@@ -263,10 +275,25 @@ export const toConnection = (row: ConnectionRow): Connection => ({
   scopeRequest: row.scopeRequest ? { scope: row.scopeRequest.scope, tool: row.scopeRequest.tool } : null,
 });
 
+/**
+ * An own server's address as members read it: without the query string and the sign-in part, which can carry a key
+ * and stay write-only like the other credentials. `queryHidden` says the saved address has one of them.
+ */
+function shownAddress(url: string | null): { serverUrl: string; queryHidden: boolean } {
+  if (!url || !URL.canParse(url)) return { serverUrl: "", queryHidden: false };
+  const address = new URL(url);
+  const queryHidden = address.search !== "" || address.username !== "" || address.password !== "";
+  address.search = "";
+  address.hash = "";
+  address.username = "";
+  address.password = "";
+  return { serverUrl: address.toString(), queryHidden };
+}
+
 export const toCustomServer = (row: ConnectionRow): CustomServer => ({
   id: row.id,
   label: row.label,
-  serverUrl: row.serverUrl ?? "",
+  ...shownAddress(row.serverUrl),
   createdAt: row.createdAt.toISOString(),
   vettedAt: row.vettedAt?.toISOString() ?? null,
   tools: row.tools.map((t) => ({
@@ -361,7 +388,7 @@ export async function mcpFor(deps: AppDeps, row: ConnectionRow): Promise<McpClie
     policy: netPolicy(deps.config.integrations),
     headers: headersFor(secret),
   });
-  sentBy.set(client, secretsOf(secret));
+  sentBy.set(client, [...secretsOf(secret), ...addressSecrets(row.serverUrl)]);
   return client;
 }
 
@@ -609,7 +636,8 @@ export async function connectCustom(
   try {
     tools = await probe(deps, url, secret);
   } catch (err) {
-    if (!(err instanceof McpAuthRequired)) throw unreachable(err, secretsOf(secret));
+    if (!(err instanceof McpAuthRequired))
+      throw unreachable(err, [...secretsOf(secret), ...addressSecrets(url)]);
     // With a rejected key, or without OAuth on the server, the person needs (another) key.
     if (input.apiKey) return { status: "key_missing", serverId: null };
     const row = await pendingConnection(deps, me, {
@@ -775,7 +803,13 @@ export async function finishOAuth(
   } catch (err) {
     log.warn("connector.oauth_failed", {
       connectionId: row.id,
-      error: outsideText(err, [s.clientSecret, s.verifier, query.code, ...received]),
+      error: outsideText(err, [
+        s.clientSecret,
+        s.verifier,
+        query.code,
+        ...received,
+        ...addressSecrets(row.serverUrl),
+      ]),
     });
     await dropPending();
     // The agent got its own account on this service by another route meanwhile (one per service).

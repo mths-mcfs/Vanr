@@ -449,7 +449,7 @@ export function registerRoutines(app: Hono<AppEnv>) {
     const rows = await deps.db
       .select()
       .from(routineExecutions)
-      .where(and(eq(routineExecutions.routineId, row.id), visibleRunsSql(me)))
+      .where(and(eq(routineExecutions.routineId, row.id), visibleRunsSql(deps.db, me)))
       .orderBy(desc(routineExecutions.at))
       .limit(30);
     return c.json<{ runs: RoutineRun[] }>({ runs: rows.map(toRun) });

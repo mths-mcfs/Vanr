@@ -291,8 +291,7 @@ export function registerConnectors(app: Hono<AppEnv>) {
 
   app.delete(`${WORKSPACE}/github-app/installations/:installationId`, async (c) => {
     const me = requirePermission(c, "configure");
-    await removeInstallation(c.get("deps"), me.workspaceId, param(c, "installationId"));
-    return c.body(null, 204);
+    return c.json(await removeInstallation(c.get("deps"), me.workspaceId, param(c, "installationId")));
   });
 
   app.get(`${WORKSPACE}/github/repositories`, async (c) => {
