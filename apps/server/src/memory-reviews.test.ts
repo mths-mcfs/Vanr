@@ -17,8 +17,8 @@ import {
   queueMemoryReview,
   rejectReview,
   reviewsFor,
-  toMemoryReview,
 } from "./memory-reviews";
+import { viewMemoryReview } from "./memory-view";
 import type { RunningServer } from "./server";
 
 let server: RunningServer;
@@ -98,7 +98,7 @@ describe("memory reviews", () => {
       await code(approveReview(server.deps, { ...ana, workspaceId: "workspace_other" }, agentStore.id)),
     ).toBe("not_found");
     const done = await approveReview(server.deps, beto, agentStore.id);
-    expect(toMemoryReview(done)).toMatchObject({
+    expect(await viewMemoryReview(server.deps.db, beto, done)).toMatchObject({
       status: "approved",
       deciderUserId: beto.userId,
       reasons: ["mail_read inbox/1"],

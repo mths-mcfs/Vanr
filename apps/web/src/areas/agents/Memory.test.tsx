@@ -25,6 +25,19 @@ describe("the agent's memory", () => {
     expect(screen.getByText("Nothing here matches “zebra”.")).toBeDefined();
   });
 
+  test("a note's channel shows when the server names it, and nothing shows when it withholds it", async () => {
+    const server = newServer();
+    const late = server.agentAccess.memories.find((memory) => memory.text === "Late orders go to Jonas.");
+    if (late?.origin) late.origin = { ...late.origin, channel: null };
+    await renderApp({ path: `${BASE}?tab=memory`, signedInAs: "usr_iris", server });
+    const rows = within(await screen.findByRole("list", { name: /^On record/ })).getAllByRole("listitem");
+    const paper = rows.find((row) => row.textContent?.includes("paper on Mondays"));
+    const other = rows.find((row) => row.textContent?.includes("Late orders go to Jonas."));
+    expect(paper?.querySelector(".memory-note__meta")?.textContent).toContain("#general");
+    // No channel at all: the server names one with its #, and withheld means none shows.
+    expect(other?.querySelector(".memory-note__meta")?.textContent?.includes("#")).toBe(false);
+  });
+
   test("a member reads the notes and their history, without the controls", async () => {
     const app = await renderApp({ path: `${BASE}?tab=memory`, signedInAs: "usr_iris" });
     await screen.findByRole("list", { name: /^On record/ });

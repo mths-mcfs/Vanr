@@ -88,11 +88,18 @@ export async function writeInstructions(
 ): Promise<{ changed: boolean; version: InstructionVersionRow | null } | null> {
   return db.transaction(async (tx) => {
     const [row] = await tx
-      .select({ id: agents.id, workspaceId: agents.workspaceId, instructions: agents.instructions })
+      .select({
+        id: agents.id,
+        workspaceId: agents.workspaceId,
+        instructions: agents.instructions,
+        archivedAt: agents.archivedAt,
+      })
       .from(agents)
       .where(eq(agents.id, w.agentId))
       .for("update");
     if (!row) throw notFound("Agent not found");
+    // Every write of the instructions comes here (edit, restore, an accepted proposal): an archived agent's stay.
+    if (row.archivedAt) throw conflict("agent.archived", "This agent was archived");
     if (w.expected !== undefined && row.instructions !== w.expected) return null;
     if (row.instructions === w.text) return { changed: false, version: null };
     let seq = await nextInstructionSeq(tx, row.id);

@@ -32,7 +32,11 @@ export function HomeScreen() {
   );
   const { people, agents: agentCount, myApprovalQueue, budgetSpentPct } = overview.data;
   const justStarted = people <= 1 || agentCount === 0;
-  const seesBudget = workspace !== undefined && can(workspace.role, "view_usage") && budgetSpentPct > 0;
+  const seesBudget =
+    workspace !== undefined &&
+    can(workspace.role, "view_usage") &&
+    budgetSpentPct !== null &&
+    budgetSpentPct > 0;
 
   return (
     <div className="page">
