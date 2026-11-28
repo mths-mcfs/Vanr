@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { AssignmentEvent } from "@vanr/contract";
+import type { Assignment, AssignmentEvent } from "@vanr/contract";
 import { newServer, newTestRuntime, renderApp } from "../../../../test/app.tsx";
 import { AppProviders } from "../../../app/context.tsx";
 import { SuggestionActions } from "../cards.ts";
 import { AssignmentPanel } from "./Panel.tsx";
+import { Summary } from "./PanelParts.tsx";
 
 const WS = "workspace_birchwood";
 const LIST = `/workspace/${WS}/assignments`;
@@ -195,8 +196,7 @@ describe("who sees an assignment and what waits on them", () => {
 describe("what an assignment cost", () => {
   test("a member who may not view usage sees no amount, even if one came", async () => {
     const server = newServer();
-    // As if the server sent the amount anyway: the page still keeps it to who may view usage.
-    (server.assignments as unknown as { host: { seesUsage: () => boolean } }).host.seesUsage = () => true;
+    // The server sends the amount today: the page still keeps it to who may view usage.
     await renderApp({ path: PAGE("asg_paper"), signedInAs: "usr_iris", server });
     const panel = within(await screen.findByRole("region", { name: "Assignment" }));
     expect(await panel.findByText("Steps")).toBeDefined();
@@ -204,29 +204,28 @@ describe("what an assignment cost", () => {
     expect(panel.queryByText("Spent") === null).toBe(true);
   });
 
-  test("with no amount sent (null), the panel loads and shows no money", async () => {
-    const server = newServer();
-    paperOf(server).usage = { ...paperOf(server).usage, dollars: null };
-    paperOf(server).limits = { dollars: 5, minutes: null, steps: null };
-    (server.assignments as unknown as { host: { seesUsage: () => boolean } }).host.seesUsage = () => true;
-    await renderApp({ path: PAGE("asg_paper"), signedInAs: "usr_ana", server });
-    const panel = within(await screen.findByRole("region", { name: "Assignment" }));
-    expect(await panel.findByText("Steps")).toBeDefined();
-    expect(panel.queryByText("Spent") === null).toBe(true);
-    expect(panel.queryByText(/\$0\.00/) === null).toBe(true);
-  });
-
-  test("the money and the runner's tokens come only to who may view usage", async () => {
-    const server = newServer();
-    paperOf(server).usage = { ...paperOf(server).usage, jobTokens: 1200 };
-    const usage = async (userId: string) =>
-      (
-        (await (await call(server, userId, "GET", "/assignments/asg_paper")).json()) as {
-          usage: { dollars: number | null; jobTokens: number | null };
-        }
-      ).usage;
-    expect(await usage("usr_iris")).toMatchObject({ dollars: null, jobTokens: null });
-    expect(await usage("usr_ana")).toMatchObject({ dollars: 0.42, jobTokens: 1200 });
+  test("with no amount sent (null), the summary shows no money", async () => {
+    const test = newTestRuntime({ path: "/", signedInAs: "usr_ana" });
+    const shown = (await (
+      await call(test.server, "usr_ana", "GET", "/assignments/asg_paper")
+    ).json()) as Assignment;
+    // As X10's server sends it to who may not view usage: the amount and the runner's tokens are null.
+    const assignment = {
+      ...shown,
+      usage: { ...shown.usage, dollars: null, jobTokens: null } as unknown as Assignment["usage"],
+      limits: { dollars: 5, minutes: null, steps: null },
+    };
+    const view = await act(async () =>
+      render(
+        <AppProviders runtime={test.runtime}>
+          <Summary workspaceId={WS} assignment={assignment} />
+        </AppProviders>,
+      ),
+    );
+    expect(await screen.findByText("Steps")).toBeDefined();
+    expect(screen.queryByText("Spent") === null).toBe(true);
+    expect(screen.queryByText(/\$0\.00/) === null).toBe(true);
+    view.unmount();
   });
 
   test("an admin sees what it cost", async () => {

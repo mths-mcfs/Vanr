@@ -17,8 +17,6 @@ type Host = FilesHost & {
   agentIn: (agentId: string, channelId: string) => boolean;
   /** Makes the person a member of the channel (writing in a public one joins it). */
   join: (userId: string, channelId: string) => void;
-  /** Whether the person's workspace role lets them see what things cost. */
-  seesUsage: (role: T.Role) => boolean;
   nameOf: (userId: string) => string;
 };
 type Stored = Omit<T.Assignment, "role" | "actionable" | "manageable"> & {
@@ -267,8 +265,6 @@ export class FakeAssignments {
     const last = events.reduce((most, event) => Math.max(most, event.seq), 0);
     return {
       ...rest,
-      // What it cost (money and the runner's tokens) only for who may view usage, as the server.
-      usage: this.host.seesUsage(scope.role) ? rest.usage : { ...rest.usage, dollars: null, jobTokens: null },
       role,
       actionable: role === "owner" || role === "decide",
       manageable: role === "owner" || scope.role !== "member",

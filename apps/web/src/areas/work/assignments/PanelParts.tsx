@@ -48,8 +48,10 @@ export function Summary({ workspaceId, assignment }: Part) {
   }
   const { plan } = summary.data;
   const { usage, limits } = assignment;
-  // Money only for who may view usage; the server sends no amount (null) to anyone else.
-  const spent = seesUsage ? usage.dollars : null;
+  // Money only for who may view usage. The server may send no amount (null) to anyone else, so the
+  // amount is read as one that can be missing, whichever the contract says today.
+  const amount: number | null = usage.dollars;
+  const spent = seesUsage ? amount : null;
   const meter = (used: string, limit: string | null) =>
     limit === null ? used : t("asg.summary.of", { used, limit });
   return (

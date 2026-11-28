@@ -429,7 +429,6 @@ export class FakeServer {
         const channel = this.state.channels.find((candidate) => candidate.id === channelId);
         if (channel !== undefined && !channel.memberIds.includes(userId)) channel.memberIds.push(userId);
       },
-      seesUsage: (role) => can(role, "view_usage"),
     });
     this.fileOperations = {
       ...this.chat.operations(),
