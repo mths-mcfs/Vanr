@@ -8,7 +8,7 @@ import { useApiMutation, useApiQuery } from "@vanr/client/react";
 import type { AgentDetail, ChannelAccessLevel, ChannelAccessRule, Connection } from "@vanr/contract";
 import { Button, Callout, Chip, ConfirmDialog, EmptyState, Field, Input, Select, SelectItem } from "@vanr/ui";
 import { Trash2 } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { useErrorMessage } from "../../app/screens.tsx";
 import { useMessages } from "../../i18n/react.tsx";
 import { type AgentRights, PartError, PartLoading, Section, useOutcome } from "./shared.tsx";
@@ -47,7 +47,14 @@ export function Access(props: Props) {
     rules = null;
   } else {
     accounts = <Accounts {...props} connections={identity.data.connections} />;
-    rules = <Rules {...props} rules={identity.data.channels} own={identity.data.connections} />;
+    rules = (
+      <Rules
+        {...props}
+        rules={identity.data.channels}
+        own={identity.data.connections}
+        onStale={identity.refetch}
+      />
+    );
   }
   return (
     <>
@@ -157,6 +164,8 @@ function Accounts({ agent, workspaceId, rights, connections }: Props & { connect
                       // A key typed for one service never goes to another.
                       setService(next);
                       setKey("");
+                      // An error about the service before is not about this one.
+                      connect.reset();
                     }}
                   >
                     {offered.map((each) => (
@@ -235,7 +244,13 @@ function Rules({
   rights,
   rules,
   own,
-}: Props & { rules: ChannelAccessRule[]; own: Connection[] }) {
+  onStale,
+}: Props & {
+  rules: ChannelAccessRule[];
+  own: Connection[];
+  /** A rule names a channel the person no longer sees: ask the server again. */
+  onStale: () => unknown;
+}) {
   const t = useMessages("agents");
   const outcome = useOutcome();
   const channels = useApiQuery("listChannels", { workspaceId });
@@ -261,6 +276,14 @@ function Rules({
   };
   // Only channels the agent is in and the person may read can take a new rule.
   const choosable = agent.channels.filter((channel) => names.has(channel.id));
+  // Once the channels are known, a rule on one the person cannot see any more (they left it) is neither
+  // shown nor sent again, and the server is asked for the rules again.
+  const shown = channels.isSuccess ? rules.filter((rule) => names.has(rule.channelId)) : rules;
+  const stale = shown.length !== rules.length;
+  useEffect(() => {
+    if (stale) onStale();
+  }, [stale, onStale]);
+  const picked = choosable.some((channel) => channel.id === channelId) ? channelId : "";
   const send = (next: ChannelAccessRule[], done: string) =>
     save.mutate(
       { ...args, body: { channels: next } },
@@ -269,11 +292,11 @@ function Rules({
 
   return (
     <>
-      {rules.length === 0 ? (
+      {shown.length === 0 ? (
         <EmptyState title={t("access.noRules")} description={t("access.noRulesBody")} />
       ) : (
         <ul className="agent-plain" aria-label={t("access.rules")}>
-          {rules.map((rule) => {
+          {shown.map((rule) => {
             const where = names.has(rule.channelId)
               ? `#${names.get(rule.channelId)}`
               : t("overview.privateChannel");
@@ -292,7 +315,7 @@ function Rules({
                     aria-label={t("access.removeRule", { channel: where, connection: what })}
                     onClick={() =>
                       send(
-                        rules.filter((each) => each !== rule),
+                        shown.filter((each) => each !== rule),
                         t("access.ruleRemoved"),
                       )
                     }
@@ -325,13 +348,13 @@ function Rules({
             aria-label={t("access.addRule")}
             onSubmit={(event) => {
               event.preventDefault();
-              if (channelId === "") return;
-              send(withRule(rules, { channelId, connectionId, level }), t("access.ruleSaved"));
+              if (picked === "") return;
+              send(withRule(shown, { channelId: picked, connectionId, level }), t("access.ruleSaved"));
             }}
           >
             <Field label={t("access.channel")}>
               <Select
-                value={channelId}
+                value={picked}
                 placeholder={t("access.pickChannel")}
                 disabled={save.isPending}
                 onValueChange={setChannelId}
@@ -366,7 +389,7 @@ function Rules({
                 ))}
               </Select>
             </Field>
-            <Button type="submit" disabled={channelId === ""} loading={save.isPending}>
+            <Button type="submit" disabled={picked === ""} loading={save.isPending}>
               {t("access.addRule")}
             </Button>
           </form>

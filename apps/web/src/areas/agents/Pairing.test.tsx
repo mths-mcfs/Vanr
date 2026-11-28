@@ -43,6 +43,20 @@ describe("pairing a runner by code", () => {
     await screen.findByRole("heading", { name: "Pair Garage laptop?" });
   });
 
+  test("someone with no workspace where they may post can neither pair nor decline", async () => {
+    await renderApp({ path: "/connect?code=BIRCH7", signedInAs: "usr_noor" });
+    await screen.findByRole("heading", { name: "Pair Garage laptop?" });
+    expect(screen.getByText("You are not in a workspace where you may pair a runner.")).toBeDefined();
+    expect(screen.getByRole("button", { name: "Pair it" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Decline" }).hasAttribute("disabled")).toBe(true);
+  });
+
+  test("a code with a character no code has asks for it again", async () => {
+    await renderApp({ path: "/connect?code=BIRCH-7", signedInAs: "usr_ana" });
+    await screen.findByRole("heading", { name: "This code is not valid" });
+    expect(screen.getByLabelText("Code")).toBeDefined();
+  });
+
   test("without a code the person types it, trimmed and uppercased", async () => {
     const app = await renderApp({ path: "/connect", signedInAs: "usr_ana" });
     await screen.findByRole("heading", { name: "Pair a runner" });

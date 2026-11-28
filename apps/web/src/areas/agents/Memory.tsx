@@ -46,8 +46,13 @@ export function notesIn(memories: readonly Memory[], group: Group, query: string
 }
 
 export function MemoryScreen() {
-  const t = useMessages("agents");
   const { workspaceId, agentId } = useRouteParams("agentMemory");
+  // Another agent starts over: its search and open tab are its own.
+  return <MemoryPage key={`${workspaceId}/${agentId}`} workspaceId={workspaceId} agentId={agentId} />;
+}
+
+function MemoryPage({ workspaceId, agentId }: { workspaceId: string; agentId: string }) {
+  const t = useMessages("agents");
   const agent = useApiQuery("getAgent", { workspaceId, agentId });
   const rights = useAgentRights(workspaceId, agent.data);
   useDocumentTitle(
@@ -229,7 +234,10 @@ function Note({
         {memory.verified && <Chip>{t("memory.verified")}</Chip>}
         {memory.untrustedSource && <Chip>{t("memory.untrusted")}</Chip>}
         {memory.about !== null && <span>{t("memory.about", { about: memory.about })}</span>}
-        {memory.origin?.channel != null && <span>#{memory.origin.channel}</span>}
+        {/* The server names the channel with its # already, and only for someone who may read it. */}
+        {memory.origin?.channel != null && memory.origin.channel !== "" && (
+          <span>{memory.origin.channel}</span>
+        )}
         <span className="page__muted">{when}</span>
         {memory.uses > 0 && <span className="page__muted">{t("memory.uses", { count: memory.uses })}</span>}
       </p>

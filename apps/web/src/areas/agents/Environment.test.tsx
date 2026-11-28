@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import { chooseOption, newServer, renderApp } from "../../../test/app.tsx";
 
 const tab = (agentId: string) => `/workspace/workspace_birchwood/agents/${agentId}?tab=environment`;
@@ -113,6 +113,30 @@ describe("the agent's environment", () => {
     expect(await screen.findByText("You are driving the agent's browser.")).toBeDefined();
     await app.user.click(screen.getByRole("button", { name: "Give control back" }));
     expect(await screen.findByText("Nobody is driving the agent's browser.")).toBeDefined();
+  });
+
+  test("an archived agent's browser cannot be taken over", async () => {
+    const server = newServer();
+    const scout = server.agents.find((agent) => agent.id === "agt_scout");
+    if (scout !== undefined) scout.archivedAt = "2026-11-10T09:00:00.000Z";
+    await renderApp({ path: tab("agt_scout"), signedInAs: "usr_ana", server });
+    expect(await screen.findByText("An archived agent has no browser to take over.")).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Take over the browser" }) === null).toBe(true);
+  });
+
+  test("the runner going offline is said at once, as in the picker", async () => {
+    const app = await renderApp({ path: tab("agt_scout"), signedInAs: "usr_ana" });
+    await screen.findByText("Works on Studio Mac, which is online.");
+    await act(async () => {
+      const studio = app.server.runnerWork.runners.find((runner) => runner.id === "rnr_studio");
+      if (studio !== undefined) studio.online = false;
+      app.server.emit("workspace_birchwood", {
+        type: "runner.presence_changed",
+        runnerId: "rnr_studio",
+        online: false,
+      });
+    });
+    expect(await screen.findByText("Works on Studio Mac, which is offline.")).toBeDefined();
   });
 
   test("an offline runner says why the browser is not there", async () => {

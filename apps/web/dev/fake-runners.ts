@@ -246,7 +246,8 @@ export class FakeRunners {
         }
         return reply(200, runner.access);
       }),
-      moveRunnerAgents: withRunner((_scope, runner, params) => {
+      moveRunnerAgents: withRunner((scope, runner, params) => {
+        if (!can(scope.role, "manage_agents")) return forbidden();
         const to = text(params.toRunnerId) ?? null;
         const moved = [...this.targets]
           .filter(([, runnerId]) => runnerId === runner.id)
@@ -257,6 +258,9 @@ export class FakeRunners {
 
       getRunnerPairing: (params, session) => {
         if (this.host.user(session) === undefined) return fail(401, "unauthorized", "Sign in to continue");
+        if (!/^[A-Z0-9]{1,12}$/.test(text(params.pairingCode) ?? "")) {
+          return fail(400, "invalid_request", "That is not a pairing code");
+        }
         const found = pending(params.pairingCode);
         if (found === undefined) return invalid();
         const { status: _status, ...rest } = found;

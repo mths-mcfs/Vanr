@@ -566,6 +566,7 @@ export default {
   "browser.saved": "Browser policy saved",
   "takeover.title": "Taking over the browser",
   "takeover.help": "A person can drive the agent's browser, for a login or a check, and hand it back.",
+  "takeover.archived": "An archived agent has no browser to take over.",
   "takeover.notAllowed": "Only people who may talk to the agent take over its browser.",
   "takeover.offline": "The agent's runner is offline, so its browser is not running.",
   "takeover.noBrowser": "The browser is turned off on the agent's runner.",

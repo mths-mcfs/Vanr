@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import { newServer, renderApp } from "../../../test/app.tsx";
 
 const BASE = "/workspace/workspace_birchwood/agents/agt_scout";
@@ -89,6 +89,28 @@ describe("the agent's memory", () => {
     await app.user.click(screen.getByRole("button", { name: "Save note" }));
     expect(await screen.findByText(/This note changed since you opened it/)).toBeDefined();
     expect(note?.text).toBe("Paper now comes on Fridays.");
+  });
+
+  test("the channel a note came from shows as the server names it", async () => {
+    await renderApp({ path: `${BASE}?tab=memory`, signedInAs: "usr_iris" });
+    const list = await screen.findByRole("list", { name: /^On record/ });
+    const paper = within(list).getAllByRole("listitem")[0];
+    expect(paper?.textContent).toContain("#general");
+    expect(paper?.textContent).not.toContain("##general");
+  });
+
+  test("another agent's memory page starts with an empty search", async () => {
+    // Tally's page is already in the cache, so the switch shows no loading screen in between.
+    const tally = "/workspace/workspace_birchwood/agents/agt_tally/memory";
+    const app = await renderApp({ path: tally, signedInAs: "usr_iris" });
+    await screen.findByRole("heading", { level: 1, name: "Tally's memory" });
+    await screen.findByText("No memory files yet");
+    await act(() => app.runtime.router.navigate({ to: `${BASE}/memory` }));
+    await screen.findByRole("heading", { level: 1, name: "Scout's memory" });
+    await app.user.type(screen.getByLabelText("Search the memory"), "paper");
+    await act(() => app.runtime.router.navigate({ to: tally }));
+    await screen.findByRole("heading", { level: 1, name: "Tally's memory" });
+    expect((screen.getByLabelText("Search the memory") as HTMLInputElement).value).toBe("");
   });
 
   test("a memory that fails to load can be tried again", async () => {

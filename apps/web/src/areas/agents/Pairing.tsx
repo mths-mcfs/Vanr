@@ -106,7 +106,8 @@ function Request({ code, onCode }: { code: string; onCode: (code: string) => voi
     );
   }
   if (pairing.isError) {
-    if (isApiError(pairing.error) && pairing.error.status === 404) {
+    // A code that expired, was used, or is not a code at all: type it again.
+    if (isApiError(pairing.error) && (pairing.error.status === 404 || pairing.error.status === 400)) {
       return (
         <StandalonePage title={t("pair.invalid")} why={t("pair.invalidWhy")}>
           {/* The same code typed again asks again: it may have been a moment too early. */}
@@ -183,7 +184,8 @@ function Request({ code, onCode }: { code: string; onCode: (code: string) => voi
       <div className="section-form__actions">
         <Button
           variant="ghost"
-          disabled={busy && !deny.isPending}
+          // Declining needs the same standing as pairing: a workspace where the person may post.
+          disabled={(fixed === null && eligible.length === 0) || (busy && !deny.isPending)}
           loading={deny.isPending}
           onClick={() =>
             deny.mutate({ pairingCode: code }, { onSuccess: () => setOutcome({ kind: "declined" }) })

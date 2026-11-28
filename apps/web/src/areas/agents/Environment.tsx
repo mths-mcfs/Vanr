@@ -111,12 +111,14 @@ function Target({
     const target = environment.data.target;
     const currentId = target?.kind === "runner" ? target.runnerId : null;
     const options = targetsFor(runners.data, rights.userId, currentId, rights.manage);
+    // Whether the runner is online comes from the runner list, which the runner events keep current.
+    const online = runners.data.find((runner) => runner.id === currentId)?.online ?? target?.online === true;
     body = (
       <>
         <p role="status">
           {target === null || target.kind === "cloud"
             ? t("env.noRunner")
-            : t(target.online ? "env.onRunner" : "env.onRunnerOffline", { name: target.name ?? "" })}
+            : t(online ? "env.onRunner" : "env.onRunnerOffline", { name: target.name ?? "" })}
           {environment.data.lastUsedAt !== null && (
             <span className="page__muted">
               {" "}
@@ -546,7 +548,8 @@ function Takeover({ agent, workspaceId, rights, runners, runnerId }: Props & OnR
   const outcome = useOutcome();
   const args = { workspaceId, agentId: agent.id };
   const runner = runners.find((each) => each.id === runnerId);
-  const usable = agent.reachable && runner?.online === true && runner.browser;
+  const archived = agent.archivedAt !== null;
+  const usable = !archived && agent.reachable && runner?.online === true && runner.browser;
   const open = useApiQuery("listAgentBrowserInterventions", args, {
     enabled: usable,
     refetchInterval: ENVIRONMENT_REFRESH_MS,
@@ -556,7 +559,8 @@ function Takeover({ agent, workspaceId, rights, runners, runnerId }: Props & OnR
   const complete = useApiMutation("completeBrowserIntervention", { invalidates });
   const stop = useApiMutation("stopAgentBrowser", { invalidates });
   let body: ReactNode;
-  if (!agent.reachable) body = <p className="page__muted">{t("takeover.notAllowed")}</p>;
+  if (archived) body = <p className="page__muted">{t("takeover.archived")}</p>;
+  else if (!agent.reachable) body = <p className="page__muted">{t("takeover.notAllowed")}</p>;
   else if (runner === undefined || !runner.online)
     body = <p className="page__muted">{t("takeover.offline")}</p>;
   else if (!runner.browser) body = <p className="page__muted">{t("takeover.noBrowser")}</p>;

@@ -10,7 +10,7 @@ import { type ReactNode, useState } from "react";
 import { AppLink, useGo, useRouteParams } from "../../app/navigation.tsx";
 import { ScreenLoading, useDocumentTitle } from "../../app/screens.tsx";
 import { useLocale, useMessages } from "../../i18n/react.tsx";
-import { PartError, PartLoading, Section, useOutcome } from "./shared.tsx";
+import { PartError, PartLoading, Section, useAgentRights, useOutcome } from "./shared.tsx";
 
 export const RUNNER_NAME_MAX = 80;
 const TOOLS = ["commands", "claude", "codex", "browser"] as const;
@@ -104,7 +104,13 @@ export function RunnerScreen() {
   return (
     <div className="page page--wide agent-page">
       {back}
-      <RunnerDetails key={runner.name} runner={runner} others={runners.data} workspaceId={workspaceId} />
+      <RunnerDetails
+        // Another runner, or the same name in another workspace, is another page: no dialog carries over.
+        key={`${workspaceId}/${runner.id}`}
+        runner={runner}
+        others={runners.data}
+        workspaceId={workspaceId}
+      />
     </div>
   );
 }
@@ -136,6 +142,8 @@ function RunnerDetails({
   const revoke = useApiMutation("revokeRunner", { invalidates });
   const remove = useApiMutation("deleteRunner", { invalidates });
   const manage = runner.manageable;
+  // Moving agents changes where agents work: the server keeps it to whoever manages agents.
+  const moveAllowed = useAgentRights(workspaceId).manage;
   const names = new Map((agents.data ?? []).map((agent) => [agent.id, agent.name]));
   const destinations = others.filter((each) => each.id !== runner.id && each.revokedAt === null);
   const when = (iso: string | null) =>
@@ -247,7 +255,7 @@ function RunnerDetails({
             ))}
           </ul>
         )}
-        {manage && runner.agents.length > 0 && destinations.length > 0 && (
+        {moveAllowed && runner.agents.length > 0 && destinations.length > 0 && (
           <form
             className="access-add"
             aria-label={t("runner.move")}
@@ -292,43 +300,45 @@ function RunnerDetails({
           </div>
         </Section>
       )}
-      <ConfirmDialog
-        open={asking !== null}
-        onOpenChange={(open) => {
-          if (!open) setAsking(null);
-        }}
-        tone="danger"
-        title={t(asking === "delete" ? "runner.deleteTitle" : "runner.revokeTitle", { name: runner.name })}
-        description={t(asking === "delete" ? "runner.deleteBody" : "runner.revokeBody")}
-        confirmLabel={t(asking === "delete" ? "runner.delete" : "runner.revoke")}
-        cancelLabel={t("instructions.discard")}
-        confirming={revoke.isPending || remove.isPending}
-        onConfirm={() => {
-          if (asking === "revoke") {
-            revoke.mutate(args, {
-              onSuccess: () => {
-                setAsking(null);
-                outcome.done(t("runner.revokedDone", { name: runner.name }));
-              },
-              onError: (error) => {
-                setAsking(null);
-                outcome.failed(error);
-              },
-            });
-          } else if (asking === "delete") {
-            remove.mutate(args, {
-              onSuccess: () => {
-                outcome.done(t("runner.deleted", { name: runner.name }));
-                void go("settings", { workspaceId, section: "runners" });
-              },
-              onError: (error) => {
-                setAsking(null);
-                outcome.failed(error);
-              },
-            });
-          }
-        }}
-      />
+      {manage && asking !== null && (
+        <ConfirmDialog
+          open={asking !== null}
+          onOpenChange={(open) => {
+            if (!open) setAsking(null);
+          }}
+          tone="danger"
+          title={t(asking === "delete" ? "runner.deleteTitle" : "runner.revokeTitle", { name: runner.name })}
+          description={t(asking === "delete" ? "runner.deleteBody" : "runner.revokeBody")}
+          confirmLabel={t(asking === "delete" ? "runner.delete" : "runner.revoke")}
+          cancelLabel={t("instructions.discard")}
+          confirming={revoke.isPending || remove.isPending}
+          onConfirm={() => {
+            if (asking === "revoke") {
+              revoke.mutate(args, {
+                onSuccess: () => {
+                  setAsking(null);
+                  outcome.done(t("runner.revokedDone", { name: runner.name }));
+                },
+                onError: (error) => {
+                  setAsking(null);
+                  outcome.failed(error);
+                },
+              });
+            } else if (asking === "delete") {
+              remove.mutate(args, {
+                onSuccess: () => {
+                  outcome.done(t("runner.deleted", { name: runner.name }));
+                  void go("settings", { workspaceId, section: "runners" });
+                },
+                onError: (error) => {
+                  setAsking(null);
+                  outcome.failed(error);
+                },
+              });
+            }
+          }}
+        />
+      )}
     </>
   );
 }

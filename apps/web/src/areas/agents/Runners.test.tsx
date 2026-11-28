@@ -77,6 +77,47 @@ describe("a runner's page", () => {
     expect(screen.queryByRole("button", { name: "Remove" }) === null).toBe(true);
   });
 
+  test("a member who paired a runner manages it but does not move agents", async () => {
+    const server = newServer();
+    const shed = server.runnerWork.runners.find((runner) => runner.id === "rnr_shed");
+    if (shed !== undefined) Object.assign(shed, { pairedByUserId: "usr_iris", pairedByName: "Íris Valença" });
+    server.runnerWork.targets.set("agt_tally", "rnr_shed");
+    await renderApp({ path: page("rnr_shed"), signedInAs: "usr_iris", server });
+    await screen.findByRole("heading", { level: 1, name: "Shed box" });
+    expect(screen.getByRole("button", { name: "Rename" })).toBeDefined();
+    expect(screen.getByRole("list", { name: "Agents on it" }).textContent).toContain("Tally");
+    expect(screen.queryByRole("form", { name: "Move agents" }) === null).toBe(true);
+  });
+
+  test("a dialog opened on one runner does not stay open on a runner of another workspace", async () => {
+    const server = newServer();
+    server.runnerWork.runners.push(
+      server.runnerWork.runner(
+        "rnr_night",
+        "Studio Mac",
+        "usr_jonas",
+        "Jonas Lind",
+        true,
+        [],
+        "workspace_nightshift",
+      ),
+    );
+    // Night Shift's runners are already in the cache, so the switch shows no loading screen in between.
+    const night = "/workspace/workspace_nightshift/settings/runners/rnr_night";
+    const app = await renderApp({ path: night, signedInAs: "usr_ana", server });
+    await screen.findByRole("heading", { level: 1, name: "Studio Mac" });
+    await act(() =>
+      app.runtime.router.navigate({ to: "/workspace/workspace_birchwood/settings/runners/rnr_studio" }),
+    );
+    await app.user.click(await screen.findByRole("button", { name: "Remove" }));
+    await screen.findByRole("alertdialog", { name: "Remove Studio Mac?" });
+    // Ana is only a member of Night Shift, where another runner has the same name.
+    await act(() => app.runtime.router.navigate({ to: night }));
+    await screen.findByRole("heading", { level: 1, name: "Studio Mac" });
+    await waitFor(() => expect(screen.queryByRole("alertdialog") === null).toBe(true));
+    expect(screen.queryByRole("button", { name: "Remove" }) === null).toBe(true);
+  });
+
   test("a runner that is not there says so", async () => {
     await renderApp({ path: page("rnr_gone"), signedInAs: "usr_iris" });
     expect(await screen.findByText("No such runner")).toBeDefined();

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import { type App, chooseOption, newServer, renderApp } from "../../../test/app.tsx";
 
 const tab = (agentId: string) => `/workspace/workspace_birchwood/agents/${agentId}?tab=access`;
@@ -140,6 +140,55 @@ describe("the rules per channel", () => {
     await waitFor(() => expect(screen.queryByRole("alert") === null).toBe(true));
     await app.user.click(within(form).getByRole("combobox", { name: "Connection" }));
     expect(await screen.findByRole("option", { name: "Linear · Team Linear" })).toBeDefined();
+  });
+
+  test("after the person leaves a private channel its rule is neither shown nor sent again", async () => {
+    const server = withPayroll(newServer(), "agt_tally");
+    const payroll = server.state.channels.find((channel) => channel.id === "ch_secret");
+    if (payroll !== undefined) payroll.memberIds = ["usr_ana", "usr_iris"];
+    const tally = server.agents.find((each) => each.id === "agt_tally");
+    if (tally !== undefined) tally.ownerUserId = "usr_iris";
+    server.agentAccess.rules.push(
+      { agentId: "agt_tally", channelId: "ch_general", connectionId: "*", level: "read" },
+      { agentId: "agt_tally", channelId: "ch_secret", connectionId: "*", level: "off" },
+    );
+    const app = await renderApp({ path: tab("agt_tally"), signedInAs: "usr_iris", server });
+    await screen.findByRole("list", { name: "Rules per channel" });
+    expect(rules()).toContain("#payrollAll connectionsOff");
+    const form = screen.getByRole("form", { name: "Add rule" });
+    await chooseOption(app, within(form).getByRole("combobox", { name: "Channel" }), "#payroll");
+    // Iris leaves #payroll; the channel list is read again.
+    if (payroll !== undefined) payroll.memberIds = ["usr_ana"];
+    await act(async () => {
+      server.emit("workspace_birchwood", { type: "channel.unread", channelId: "ch_general" });
+    });
+    await waitFor(() => expect(rules()).toEqual(["#generalAll connectionsRead only"]));
+    expect(document.body.textContent).not.toContain("A private channel");
+    expect(within(form).getByRole("button", { name: "Add rule" }).hasAttribute("disabled")).toBe(true);
+    await app.user.click(
+      screen.getByRole("button", { name: "Remove the rule for All connections in #general" }),
+    );
+    await screen.findByText("Rule removed");
+    const sent = server.calls.filter((call) => call.method === "setAgentIdentityChannels");
+    expect(sent.some((call) => JSON.stringify(call.params.channels).includes("ch_secret"))).toBe(false);
+  });
+
+  test("an error about one service goes away when another is picked", async () => {
+    const server = newServer();
+    server.force("createAgentIdentityConnection", {
+      kind: "error",
+      status: 400,
+      code: "connector.key_rejected",
+      message: "The service refused that key",
+    });
+    const app = await renderApp({ path: tab("agt_tally"), signedInAs: "usr_jonas", server });
+    const form = await screen.findByRole("form", { name: "Connect an account" });
+    await chooseOption(app, within(form).getByRole("combobox", { name: "Service" }), "Stripe");
+    await app.user.type(within(form).getByLabelText("Key"), "a-long-enough-key");
+    await app.user.click(within(form).getByRole("button", { name: "Connect" }));
+    expect(await within(form).findByRole("alert")).toBeDefined();
+    await chooseOption(app, within(form).getByRole("combobox", { name: "Service" }), "Linear");
+    expect(within(form).queryByRole("alert") === null).toBe(true);
   });
 
   test("rules that fail to load can be tried again", async () => {

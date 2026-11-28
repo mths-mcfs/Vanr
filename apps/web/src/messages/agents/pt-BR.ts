@@ -560,6 +560,7 @@ export default {
   "takeover.title": "Assumir o navegador",
   "takeover.help":
     "Uma pessoa pode conduzir o navegador do agente, para um login ou uma conferência, e devolvê-lo.",
+  "takeover.archived": "Um agente arquivado não tem navegador para assumir.",
   "takeover.notAllowed": "Só quem pode conversar com o agente assume o navegador dele.",
   "takeover.offline": "O runner do agente está desconectado, então o navegador não está rodando.",
   "takeover.noBrowser": "O navegador está desligado no runner do agente.",

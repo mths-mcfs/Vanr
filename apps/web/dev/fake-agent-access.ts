@@ -91,7 +91,7 @@ export class FakeAgentAccess {
       editorUserId: null,
       kind,
       lastUsedAt: null,
-      origin: { at, by: null, channel: "general", name: null },
+      origin: { at, by: null, channel: "#general", name: null },
       path: null,
       pinned: false,
       replaces: null,
