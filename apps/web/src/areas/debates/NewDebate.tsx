@@ -124,6 +124,9 @@ export function NewDebateDialog({
   const ready =
     question.trim() !== "" &&
     agentIds.length > 0 &&
+    // A pick can come back to the lists after a replacement was chosen: the table may then be over.
+    agentIds.length <= AGENTS_MAX &&
+    seats <= SEATS_MAX &&
     !optionsBad &&
     !capBad &&
     !deadlineBad &&
