@@ -126,6 +126,8 @@ export class FakeDebates {
     const now = this.host.now().getTime();
     const ago = (hours: number) => new Date(now - hours * 3_600_000).toISOString();
     const ana = { type: "person" as const, id: "usr_ana" };
+    // Kept as a value, so it fits both the stall shape with a pseudonym and the one without.
+    const stalled = { agentId: "agt_ledger", pseudonym: null, reason: "The model did not answer", round: 1 };
     this.debates = [
       this.make("workspace_birchwood", {
         id: "deb_paper",
@@ -172,7 +174,7 @@ export class FakeDebates {
         phase: null,
         round: 1,
         roundLimit: 3,
-        stallInfo: { agentId: "agt_ledger", reason: "The model did not answer", round: 1 },
+        stallInfo: stalled,
         updatedAt: ago(5),
       }),
       this.make("workspace_birchwood", {
@@ -440,7 +442,14 @@ export class FakeDebates {
       ...debate
     } = row;
     const blind = isBlind(row);
-    return { ...debate, anonymous: blind, pseudonyms: blind ? null : letters };
+    // The stall goes out with its pseudonym field (null when unknown), which newer contracts require.
+    const stall = row.stallInfo as
+      | (NonNullable<T.Debate["stallInfo"]> & { pseudonym?: string | null })
+      | null;
+    const stallInfo = (
+      stall === null ? null : { ...stall, pseudonym: stall.pseudonym ?? null }
+    ) as T.Debate["stallInfo"];
+    return { ...debate, stallInfo, anonymous: blind, pseudonyms: blind ? null : letters };
   }
 
   /**

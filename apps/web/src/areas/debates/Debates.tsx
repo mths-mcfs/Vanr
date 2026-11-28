@@ -20,6 +20,7 @@ import {
   needsMe,
   QUESTION_MAX,
   seatsOf,
+  stalledBy,
   takesPart,
   useDirectory,
   useMe,
@@ -163,6 +164,19 @@ function DebatesView({ workspaceId }: { workspaceId: string }) {
   );
 }
 
+/** Why a row is stuck, saying no more than the person may know about who stalled it. */
+function StuckText({ debate, directory }: { debate: Debate; directory: Directory }) {
+  const t = useMessages("debates");
+  if (debate.stallInfo === null) return null;
+  const who = stalledBy(debate.stallInfo, debate.anonymous);
+  if (who.kind === "agent")
+    return t("row.stuck", {
+      who: directory.name({ type: "agent", id: who.agentId }),
+      reason: debate.stallInfo.reason,
+    });
+  return who.kind === "letter" ? t("row.stuckLetter", { letter: who.letter }) : t("row.stuckBlind");
+}
+
 function DebateRow({
   workspaceId,
   debate,
@@ -195,14 +209,7 @@ function DebateRow({
           got stuck would give away its letter, so the row says only that someone is. */}
       {(stuck !== null || debate.goal.trim() !== debate.title.trim()) && (
         <p className="debate-row__goal" data-stuck={stuck !== null || undefined}>
-          {stuck === null
-            ? debate.goal
-            : debate.anonymous
-              ? t("row.stuckBlind")
-              : t("row.stuck", {
-                  who: directory.name({ type: "agent", id: stuck.agentId }),
-                  reason: stuck.reason,
-                })}
+          {stuck === null ? debate.goal : <StuckText debate={debate} directory={directory} />}
         </p>
       )}
       <p className="debate-row__when">{t("list.updated", { when: when(debate.updatedAt) })}</p>

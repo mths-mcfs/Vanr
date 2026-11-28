@@ -97,6 +97,23 @@ export function useSeesSpend(workspaceId: string): boolean {
   return can(useMe(workspaceId).role, "view_usage");
 }
 
+/** What the server says of the turn a stuck debate waits on. `pseudonym` is newer and may be absent. */
+type StallInfo = { agentId: string | null; reason: string; round: number; pseudonym?: string | null };
+
+/**
+ * Who a stuck debate waits on, as far as the person may know: never the agent while the debate is blind
+ * (its letter, if the server sends one, or no one in particular); once revealed, the agent, or its letter
+ * when the server names none.
+ */
+export function stalledBy(
+  info: StallInfo,
+  anonymous: boolean,
+): { kind: "agent"; agentId: string } | { kind: "letter"; letter: string } | { kind: "someone" } {
+  const letter = info.pseudonym ?? null;
+  if (!anonymous && info.agentId !== null) return { kind: "agent", agentId: info.agentId };
+  return letter !== null ? { kind: "letter", letter } : { kind: "someone" };
+}
+
 /** Characters as the server counts them: code points, so an emoji is one. */
 export const charCount = (text: string) => [...text].length;
 

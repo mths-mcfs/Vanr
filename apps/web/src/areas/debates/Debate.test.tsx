@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { chooseOption, newServer, renderApp } from "../../../test/app.tsx";
 import { fit, issueItem } from "./Outcome.tsx";
+import { stalledBy } from "./shared.tsx";
 
 const WORKSPACE = "workspace_birchwood";
 const PAGE = (id: string) => `/workspace/${WORKSPACE}/debates/${id}`;
@@ -482,6 +483,30 @@ describe("steps as the server takes them", () => {
     expect(issueItem({ title: " Order ", owner: " ", step: "Call them" })).toEqual({
       title: "Order",
       step: "Call them",
+    });
+  });
+});
+
+describe("who a stuck debate waits on", () => {
+  const info = { reason: "The model did not answer", round: 1 };
+  test("while blind: the letter the server sends, or no one in particular, never the agent", () => {
+    expect(stalledBy({ ...info, agentId: null, pseudonym: "B" }, true)).toEqual({
+      kind: "letter",
+      letter: "B",
+    });
+    expect(stalledBy({ ...info, agentId: null, pseudonym: null }, true)).toEqual({ kind: "someone" });
+    // An older server that still sends the id: the page never turns it into a name while blind.
+    expect(stalledBy({ ...info, agentId: "agt_ledger" }, true)).toEqual({ kind: "someone" });
+  });
+
+  test("once revealed: the agent, or its letter when the server names none", () => {
+    expect(stalledBy({ ...info, agentId: "agt_ledger", pseudonym: null }, false)).toEqual({
+      kind: "agent",
+      agentId: "agt_ledger",
+    });
+    expect(stalledBy({ ...info, agentId: null, pseudonym: "A" }, false)).toEqual({
+      kind: "letter",
+      letter: "A",
     });
   });
 });

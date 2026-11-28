@@ -21,6 +21,7 @@ import {
   type Directory,
   debateKeys,
   isFinished,
+  stalledBy,
   startedBy,
   useDebateOutcome,
   useDirectory,
@@ -278,13 +279,7 @@ function Notices({
           actions={steers ? <ResumeButton workspaceId={workspaceId} debateId={debate.id} /> : undefined}
         >
           {/* While blind, naming the agent that got stuck would give away its letter. */}
-          {debate.anonymous
-            ? t("page.stuckBlind", { round: debate.stallInfo.round })
-            : t("page.stuck", {
-                who: directory.name({ type: "agent", id: debate.stallInfo.agentId }),
-                round: debate.stallInfo.round,
-                reason: debate.stallInfo.reason,
-              })}
+          <StuckText debate={debate} directory={directory} />
         </Callout>
       )}
       {finished && debate.endReason !== null && (
@@ -292,6 +287,18 @@ function Notices({
       )}
     </div>
   );
+}
+
+function StuckText({ debate, directory }: { debate: DebateDetail; directory: Directory }) {
+  const t = useMessages("debates");
+  if (debate.stallInfo === null) return null;
+  const { round, reason } = debate.stallInfo;
+  const who = stalledBy(debate.stallInfo, debate.anonymous);
+  if (who.kind === "agent")
+    return t("page.stuck", { who: directory.name({ type: "agent", id: who.agentId }), round, reason });
+  return who.kind === "letter"
+    ? t("page.stuckLetter", { letter: who.letter, round })
+    : t("page.stuckBlind", { round });
 }
 
 function ResumeButton({ workspaceId, debateId }: { workspaceId: string; debateId: string }) {
