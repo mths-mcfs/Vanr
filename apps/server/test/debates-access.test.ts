@@ -267,6 +267,54 @@ describe("a leave retried after its seats weren't let go", () => {
     },
     SERVER_TEST_MS,
   );
+
+  test(
+    "lets them go when the person repeats their own leave, still a 404 to them",
+    async () => {
+      const { workspaceId, base, ana, beto } = await team();
+      const lia = await seedAgent(server, workspaceId, ana, `lia${n}`);
+      const board = await seedChannel(server, workspaceId, {
+        name: `self${n}`,
+        visibility: "private",
+        members: [ana, beto],
+      });
+      const made = await call(ana, "POST", base, {
+        title: "Self",
+        goal: "g",
+        agentIds: [lia.id],
+        rounds: 0,
+        channelId: board,
+        speakers: [
+          { type: "person", id: ana.user.id },
+          { type: "person", id: beto.user.id },
+          { type: "agent", id: lia.id },
+        ],
+      });
+      const id = made.body.id;
+      expect((await call(ana, "POST", `${base}/${id}/posts`, { body: "Yes", answer: "yes" })).status).toBe(
+        201,
+      );
+      const seen = async () => (await call(ana, "GET", `${base}/${id}`)).body;
+      await waitFor(async () => (await seen()).phase === "human_turn");
+      // Beto's leave was written but its seats weren't let go; he repeats it himself.
+      await server.deps.db
+        .delete(schema.channelMemberships)
+        .where(
+          and(
+            eq(schema.channelMemberships.channelId, board),
+            eq(schema.channelMemberships.memberId, beto.user.id),
+          ),
+        );
+      const again = await call(
+        beto,
+        "DELETE",
+        `${ws(workspaceId)}/channels/${board}/members/people/${beto.user.id}`,
+      );
+      expect(again.status).toBe(404);
+      await waitFor(async () => (await seen()).status === "done");
+    },
+    SERVER_TEST_MS,
+  );
 });
 
 describe("someone removed from the workspace", () => {

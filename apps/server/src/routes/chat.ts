@@ -32,7 +32,7 @@ import type { AppEnv, Ctx } from "../context";
 import { isUniqueViolation } from "../db-errors";
 import { releaseSeats } from "../debates";
 import { fileFor } from "../drive";
-import { badRequest, conflict, forbidden, notFound, param, readJson, readQuery } from "../http";
+import { badRequest, conflict, forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
 import { log } from "../logger";
 import {
   byClientId,
@@ -511,10 +511,21 @@ export function registerChat(app: Hono<AppEnv>) {
   const removeMember = async (c: Ctx, type: "person" | "agent", id: string) => {
     const me = requireMember(c);
     const { db, hub, now } = c.get("deps");
+    const channelId = param(c, "channelId");
     const { channel } = await readableChannel(db, {
       workspaceId: me.workspaceId,
       userId: me.userId,
-      channelId: param(c, "channelId"),
+      channelId,
+    }).catch(async (err: unknown) => {
+      // Leaving again a private channel one already left (a retry after the seats weren't let go): it is a 404 as
+      // for anyone outside it, and the rounds of its debates that still wait on them go on.
+      if (err instanceof HttpError && err.status === 404 && type === "person" && id === me.userId)
+        await releaseSeats(c.get("deps"), {
+          workspaceId: me.workspaceId,
+          userId: id,
+          channelIds: [channelId],
+        });
+      throw err;
     });
     if (channel.kind === "dm") throw forbidden("Direct messages have fixed members");
     const self = type === "person" && id === me.userId;
