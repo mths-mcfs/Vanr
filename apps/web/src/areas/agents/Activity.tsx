@@ -17,7 +17,7 @@ import {
   Textarea,
 } from "@vanr/ui";
 import { BookPlus } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useRef, useState } from "react";
 import { useErrorMessage } from "../../app/screens.tsx";
 import { useLocale, useMessages } from "../../i18n/react.tsx";
 import {
@@ -99,15 +99,27 @@ function SaveAsSkill({
     invalidates: () => [{ method: "listAgentSkills" as const, args: { workspaceId, agentId: agent.id } }],
   });
 
+  // Each opening of the dialog is one attempt; an answer that arrives for an earlier one is dropped.
+  const attempt = useRef(0);
   const start = () => {
+    attempt.current += 1;
+    const mine = attempt.current;
     setOpen(true);
     setDraft(null);
     setSavedId(null);
     setShare(false);
-    drafting.mutate({ workspaceId, runId: run.id }, { onSuccess: setDraft });
+    drafting.mutate(
+      { workspaceId, runId: run.id },
+      {
+        onSuccess: (next) => {
+          if (attempt.current === mine) setDraft(next);
+        },
+      },
+    );
   };
   const save = () => {
     if (draft === null) return;
+    const mine = attempt.current;
     create.mutate(
       {
         workspaceId,
@@ -121,8 +133,8 @@ function SaveAsSkill({
       },
       {
         onSuccess: (skill) => {
-          setSavedId(skill.id);
           outcome.done(t("saveSkill.saved", { name: skill.name }));
+          if (attempt.current === mine) setSavedId(skill.id);
         },
       },
     );

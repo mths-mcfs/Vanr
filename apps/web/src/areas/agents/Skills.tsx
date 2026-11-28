@@ -225,10 +225,10 @@ function SkillRow({
                 }
               />
             )}
-            <Button variant="secondary" size="sm" onClick={onEdit}>
+            <Button variant="secondary" size="sm" disabled={reimport.isPending} onClick={onEdit}>
               {t("skill.edit")}
             </Button>
-            <Button variant="ghost" size="sm" onClick={() => setDeleting(true)}>
+            <Button variant="ghost" size="sm" disabled={reimport.isPending} onClick={() => setDeleting(true)}>
               {t("skill.delete")}
             </Button>
             <ConfirmDialog
@@ -286,7 +286,11 @@ function SkillDialog({
     body = (
       <PartError title={t("skill.loadFailed")} error={detail.error} onRetry={() => void detail.refetch()} />
     );
-  else body = <SkillForm workspaceId={workspaceId} skill={detail.data} onDone={onClose} />;
+  // A newer version (saved or imported again meanwhile) starts the form over from it.
+  else
+    body = (
+      <SkillForm key={detail.data.version} workspaceId={workspaceId} skill={detail.data} onDone={onClose} />
+    );
   return (
     <Dialog
       open
