@@ -216,6 +216,8 @@ describe("chat access", () => {
         const posted = await postedOf(socket, top.id);
         expect(posted).toMatchObject({ id: top.id, body: "", author: agent });
         expect(posted).toMatchObject({ meta: { retracted: { actorUserId: insider.user.id } } });
+        // It opened a thread: the thread's own event tells the open thread lists to read its opening text again.
+        expect((await socket.event("thread.info_changed")).event).toMatchObject({ threadId: top.id });
         const quoted = await postedOf(socket, quote.body.id);
         expect(quoted).toMatchObject({ meta: { replyTo: { messageId: top.id, excerpt: "" } } });
         await socket.event("notification.shown");

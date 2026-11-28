@@ -33,6 +33,7 @@ import { cancelQueued } from "./outbox";
 import { publishMemory } from "./routes/memories";
 import { canSeeRoutine } from "./routines";
 import { reindex, unindex } from "./search-index";
+import { publishThread } from "./threads";
 import { canReadPage } from "./wiki-access";
 
 const {
@@ -546,7 +547,8 @@ export type Undoer = {
 
 /**
  * The message again, as it is now, and the messages of its channel that quote it: a retracted post's excerpt goes
- * from their quote too, and a redone one comes back.
+ * from their quote too, and a redone one comes back. A thread root also tells its thread changed: a top-level root
+ * goes out with no `threadId`, and the thread lists that show its opening text read it again on that event.
  */
 async function republishMessage(deps: AppDeps, messageId: string) {
   const [row] = await deps.db.select().from(messages).where(eq(messages.id, messageId));
@@ -562,6 +564,7 @@ async function republishMessage(deps: AppDeps, messageId: string) {
     );
   for (const message of await hydrate(deps.db, [row, ...quoting]))
     deps.hub.toChannel(row.channelId, { type: "message.posted", message });
+  await publishThread(deps, row.id);
 }
 
 /**
