@@ -640,4 +640,65 @@
   .reach__level {
     color: var(--vr-fg-muted);
   }
+
+  /* The agent's mailboxes, databases and repositories, one form each. */
+  .source-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-3);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .source {
+    padding: var(--vr-space-4);
+    border: var(--vr-border) solid var(--vr-line);
+    border-radius: var(--vr-radius-2);
+  }
+
+  .source__head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--vr-space-3);
+  }
+
+  .source__who {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .source__grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+    gap: var(--vr-space-3) var(--vr-space-4);
+  }
+
+  .source__checks {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-2);
+  }
+
+  .source__fieldset {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-2);
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+
+  .source__tables,
+  .source__tags {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
+    gap: var(--vr-space-1) var(--vr-space-4);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
 }

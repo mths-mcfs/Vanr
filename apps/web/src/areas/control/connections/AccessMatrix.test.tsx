@@ -4,34 +4,12 @@
 import { describe, expect, test } from "bun:test";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { chooseOption, newServer, newTestRuntime, renderApp } from "../../../../test/app.tsx";
+import { blurOnDisable } from "../../../../test/focus.ts";
 
 const WS = "workspace_birchwood";
 const PATH = `/workspace/${WS}/settings/access`;
 const LINEAR = "con_github";
 const tab = (agentId: string) => `/workspace/${WS}/agents/${agentId}?tab=access`;
-
-/**
- * As a browser does and the test DOM doesn't: a control that becomes disabled while it has the focus
- * loses it to the page. Returns the function that stops it.
- */
-function blurOnDisable(): () => void {
-  const watch = new MutationObserver((changes) => {
-    for (const { target } of changes) {
-      if (
-        !(target instanceof HTMLElement) ||
-        target !== document.activeElement ||
-        !target.hasAttribute("disabled")
-      )
-        continue;
-      // The test DOM won't blur a disabled control: lift the attribute for the blur only.
-      target.removeAttribute("disabled");
-      target.blur();
-      target.setAttribute("disabled", "");
-    }
-  });
-  watch.observe(document.body, { attributes: true, attributeFilter: ["disabled"], subtree: true });
-  return () => watch.disconnect();
-}
 
 describe("the access matrix", () => {
   const grid = () => screen.findByRole("table", { name: "Agents and connections" });

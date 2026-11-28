@@ -5,6 +5,7 @@
 // Never part of the production build.
 import type * as T from "@vanr/contract";
 import { can } from "@vanr/contract";
+import { quoted, tableName } from "../src/areas/agents/table-name.ts";
 import { FAKE_CATALOG } from "./fake-agent-access.ts";
 import type { FakeAgentRow } from "./fake-agents.ts";
 import type { FilesHost, FilesReply } from "./fake-files.ts";
@@ -49,6 +50,65 @@ export type FakeInstallation = T.GitHubAppInstallation & {
 };
 
 const reply = (status: number, body: unknown): FilesReply => ({ status, body });
+
+/**
+ * The parts of a dotted SQL name as the server's nameParts (sql-guard.ts) reads it, or null: a part is bare
+ * (a letter or `_`, then letters, digits, `_` or `$`, folded to lower case) or quoted (`""` for a quote,
+ * case kept), and none is empty or longer than the 63 bytes Postgres keeps; no NUL and no lone surrogate.
+ */
+function nameParts(text: string): string[] | null {
+  if (
+    text.includes("\0") ||
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text)
+  )
+    return null;
+  const bytes = new TextEncoder();
+  const parts: string[] = [];
+  let i = 0;
+  for (;;) {
+    let part = "";
+    if (text[i] === '"') {
+      let j = i + 1;
+      for (;;) {
+        if (j >= text.length) return null;
+        if (text[j] === '"') {
+          if (text[j + 1] !== '"') break;
+          j++;
+        }
+        part += text[j];
+        j++;
+      }
+      i = j + 1;
+    } else {
+      const end = text.indexOf(".", i);
+      const raw = text.slice(i, end < 0 ? text.length : end);
+      if (!/^[A-Za-z_\u0080-\uffff][A-Za-z0-9_$\u0080-\uffff]*$/.test(raw)) return null;
+      part = raw.replace(/[A-Z]+/g, (m) => m.toLowerCase());
+      i += raw.length;
+    }
+    if (part === "" || bytes.encode(part).length > 63) return null;
+    parts.push(part);
+    if (i === text.length) return parts;
+    if (text[i] !== ".") return null;
+    i++;
+  }
+}
+
+/**
+ * A table (`table` or `schema.table`) or a hidden column (`table.column` or `schema.table.column`) in the one
+ * text the server keeps (databases.ts sqlName): up to 300 characters, trimmed, `public` when the schema is
+ * left out, each part quoted only when SQL needs it. Null when the server refuses it.
+ */
+function sqlKey(text: unknown, what: "table" | "column"): string | null {
+  if (typeof text !== "string" || text.length > 300) return null;
+  const parts = nameParts(text.trim());
+  const fewest = what === "table" ? 1 : 2;
+  if (parts === null || parts.length < fewest || parts.length > fewest + 1) return null;
+  const column = what === "column" ? parts.pop() : undefined;
+  const [schema, name] = parts.length === 1 ? ["public", parts[0]] : parts;
+  if (schema === undefined || name === undefined) return null;
+  return `${tableName({ schema, name })}${column === undefined ? "" : `.${quoted(column)}`}`;
+}
 const fail = (status: number, code: string, message: string) => reply(status, { error: { code, message } });
 const text = (value: unknown) => (typeof value === "string" ? value : undefined);
 const ACCESS = new Set<T.ToolAccess>(["read", "write", "approval", "off"]);
@@ -128,6 +188,12 @@ export class FakeConnections {
   mail: FakeMailAccount[] = [];
   /** Each agent's raw scopes. */
   grants = new Map<string, T.ScopeGrant[]>();
+  /** Each agent's mailboxes, databases and GitHub repositories. */
+  mailboxes = new Map<string, T.AgentMailbox[]>();
+  agentDatabases = new Map<string, T.AgentDatabase[]>();
+  repositories = new Map<string, string[]>();
+  /** The tables a database lists, by connection id. */
+  tables = new Map<string, T.DatabaseTable[]>();
   databases: FakeDatabase[] = [];
   installations: FakeInstallation[] = [];
   /** Whether this server has a GitHub App set up. */
@@ -151,6 +217,10 @@ export class FakeConnections {
     this.keyed = new Set();
     this.mail = [];
     this.grants = new Map();
+    this.mailboxes = new Map();
+    this.agentDatabases = new Map();
+    this.repositories = new Map();
+    this.tables = new Map();
     this.databases = [];
     this.installations = [];
     this.githubInstallable = true;
@@ -278,17 +348,181 @@ export class FakeConnections {
       manage = false,
     ) =>
       within((scope, params) => {
-        // As on the server: the permission first, then the agent.
-        if (manage && !can(scope.role, "manage_agents")) return fail(403, "forbidden", "Forbidden");
         const agent = this.host
           .agents()
           .find((each) => each.workspaceId === scope.workspaceId && each.id === text(params.agentId));
+        // As on the server: a write to an archived agent is refused before the route runs
+        // (registerArchivedAgentGuard), then the permission, then the agent.
+        if (manage && agent !== undefined && agent.archivedAt !== null)
+          return fail(409, "agent.archived", "The agent is archived");
+        if (manage && !can(scope.role, "manage_agents")) return fail(403, "forbidden", "Forbidden");
         if (agent === undefined) return fail(404, "not_found", "Agent not found");
-        if (manage && agent.archivedAt !== null) return fail(409, "agent.archived", "The agent is archived");
         return handler(scope, agent, params);
       });
 
+    const ADDRESS_OR_DOMAIN = /^(?:[^\s@,;<>"]+@|@)[^\s@,;<>"]+\.[^\s@,;<>"]+$/;
+    const addresses = (value: unknown) =>
+      value === undefined ||
+      (Array.isArray(value) &&
+        value.length <= 200 &&
+        value.every((each) => typeof each === "string" && ADDRESS_OR_DOMAIN.test(each)));
+
     return {
+      getAgentMail: withAgent((_scope, agent) =>
+        reply(200, { mailboxes: this.mailboxes.get(agent.id) ?? [] }),
+      ),
+      replaceAgentMail: withAgent((scope, agent, params) => {
+        const account = mailOf(scope, params.mailId);
+        if (account === undefined) return fail(404, "not_found", "Mail account not found");
+        const level = text(params.level) as T.MailLevel | undefined;
+        if (level !== "none" && level !== "read" && level !== "read_write")
+          return fail(400, "validation", "Invalid body");
+        const asked = (
+          typeof params.policy === "object" && params.policy !== null ? params.policy : {}
+        ) as Partial<T.MailPolicy>;
+        if (!addresses(asked.senderAllowlist) || !addresses(asked.recipientAllowlist)) {
+          return fail(400, "validation", "Invalid body");
+        }
+        const own = this.mailboxes.get(agent.id) ?? [];
+        const current = own.find((each) => each.accountId === account.id);
+        const merged: T.MailPolicy = {
+          folders: [],
+          senderAllowlist: [],
+          lookbackDays: null,
+          recipientAllowlist: [],
+          sendsPerDay: 25,
+          autoSend: false,
+          senderAddress: null,
+          ...current?.policy,
+          ...asked,
+        };
+        const box: T.AgentMailbox = {
+          accountId: account.id,
+          level,
+          // As on the server: left out, the saved choice stays.
+          deletable:
+            level === "read_write"
+              ? typeof params.deletable === "boolean"
+                ? params.deletable
+                : (current?.deletable ?? false)
+              : false,
+          policy: { ...merged, autoSend: merged.autoSend && merged.recipientAllowlist.length > 0 },
+        };
+        this.mailboxes.set(agent.id, [...own.filter((each) => each.accountId !== account.id), box]);
+        account.agents = [
+          ...account.agents.filter((each) => each.agentId !== agent.id),
+          { agentId: agent.id, level },
+        ];
+        return reply(200, box);
+      }, true),
+      listDatabaseTables: within((scope, params) => {
+        if (!can(scope.role, "manage_agents")) return fail(403, "forbidden", "Forbidden");
+        const connection = databaseOf(scope, params.databaseId);
+        if (connection === undefined) return fail(404, "not_found", "Database not found");
+        return reply(200, { tables: this.tables.get(connection.id) ?? [] });
+      }),
+      listAgentDatabases: withAgent((_scope, agent) =>
+        reply(200, { databases: this.agentDatabases.get(agent.id) ?? [] }),
+      ),
+      replaceAgentDatabase: withAgent((scope, agent, params) => {
+        const connection = databaseOf(scope, params.databaseId);
+        if (connection === undefined) return fail(404, "not_found", "Database not found");
+        const level = text(params.level);
+        if (level !== "none" && level !== "read") return fail(400, "validation", "Invalid body");
+        const own = this.agentDatabases.get(agent.id) ?? [];
+        const current = own.find((each) => each.connectionId === connection.id);
+        const asked = (
+          typeof params.policy === "object" && params.policy !== null ? params.policy : {}
+        ) as Partial<T.DatabasePolicy>;
+        // As the server's databasePolicyInput: up to 500 tables and 1000 hidden columns, each read and kept
+        // as the server keeps it.
+        const keys = (value: unknown, what: "table" | "column", max: number) =>
+          value === undefined
+            ? undefined
+            : Array.isArray(value) && value.length <= max
+              ? value.map((each) => sqlKey(each, what))
+              : [null];
+        const tables = keys(asked.tables, "table", 500);
+        const masked = keys(asked.maskedColumns, "column", 1000);
+        const known = new Set(["tables", "maskedColumns", "queriesPerDay", "timeoutSeconds"]);
+        const { queriesPerDay, timeoutSeconds } = asked as Record<string, unknown>;
+        if (
+          tables?.includes(null) ||
+          masked?.includes(null) ||
+          // .strict(): no key the server doesn't know.
+          Object.keys(asked).some((key) => !known.has(key)) ||
+          (queriesPerDay !== undefined &&
+            queriesPerDay !== null &&
+            !(
+              Number.isInteger(queriesPerDay) &&
+              Number(queriesPerDay) >= 1 &&
+              Number(queriesPerDay) <= 100_000
+            )) ||
+          (timeoutSeconds !== undefined &&
+            timeoutSeconds !== 15 &&
+            timeoutSeconds !== 30 &&
+            timeoutSeconds !== 60)
+        )
+          return fail(400, "validation", "Invalid body");
+        if (tables !== undefined) asked.tables = tables as string[];
+        if (masked !== undefined) asked.maskedColumns = masked as string[];
+        // The first time, as the server: reading starts from every table there is and the suggested
+        // hidden columns; "none" stores an empty policy.
+        const first: T.DatabasePolicy =
+          level === "read"
+            ? {
+                // As the server names them (sql-guard.ts relationText).
+                tables: (this.tables.get(connection.id) ?? []).map(tableName),
+                maskedColumns: connection.hiddenSuggestion,
+                queriesPerDay: 200,
+                timeoutSeconds: 30,
+              }
+            : { tables: [], maskedColumns: [], queriesPerDay: 200, timeoutSeconds: 30 };
+        const link: T.AgentDatabase = {
+          connectionId: connection.id,
+          level,
+          policy: (() => {
+            // As the server: the saved policy (or the first one) with what was asked, each list once.
+            const merged = { ...(current?.policy ?? first), ...asked };
+            return {
+              ...merged,
+              tables: [...new Set(merged.tables)],
+              maskedColumns: [...new Set(merged.maskedColumns)],
+            };
+          })(),
+        };
+        this.agentDatabases.set(agent.id, [
+          ...own.filter((each) => each.connectionId !== connection.id),
+          link,
+        ]);
+        connection.agents = [
+          ...connection.agents.filter((each) => each.agentId !== agent.id),
+          { agentId: agent.id, level },
+        ];
+        return reply(200, link);
+      }, true),
+      listAgentRepositories: withAgent((_scope, agent) =>
+        reply(200, { repositories: this.repositories.get(agent.id) ?? [] }),
+      ),
+      setAgentRepositories: withAgent((_scope, agent, params) => {
+        // As the server: up to 200 entries, each trimmed, `owner/repo` or `owner/*` with parts of up to 100
+        // characters (github-app.ts isRepoPattern), each kept once.
+        const asked = Array.isArray(params.repositories)
+          ? params.repositories.map((each) => (typeof each === "string" ? each.trim() : null))
+          : null;
+        const pattern = /^[A-Za-z0-9_.-]{1,100}\/(?:[A-Za-z0-9_.-]{1,100}|\*)$/;
+        if (
+          asked === null ||
+          asked.length > 200 ||
+          !asked.every((each) => each !== null && pattern.test(each))
+        ) {
+          return fail(400, "validation", "Use owner/repo or owner/*");
+        }
+        const repositories = [...new Set(asked as string[])];
+        this.repositories.set(agent.id, repositories);
+        return reply(200, { repositories });
+      }, true),
+
       getAgentAccess: withAgent((scope, agent) =>
         reply(200, accessView(scope.workspaceId, this.grants.get(agent.id) ?? [])),
       ),

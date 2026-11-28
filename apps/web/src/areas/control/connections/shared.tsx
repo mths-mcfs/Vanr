@@ -8,7 +8,7 @@ import type { MethodName } from "@vanr/client";
 import { isApiError } from "@vanr/client";
 import { prefixKey, useVanrClient } from "@vanr/client/react";
 import { Button, ErrorState, Skeleton } from "@vanr/ui";
-import { type ReactNode, useCallback, useEffect, useRef } from "react";
+import { type FocusEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { useErrorMessage } from "../../../app/screens.tsx";
 import { useMessages } from "../../../i18n/react.tsx";
 import { href, type SettingsSection } from "../../../routes.ts";
@@ -109,6 +109,42 @@ export function useLatch(): (work: () => Promise<unknown>) => void {
         held.current = false;
       });
   }, []);
+}
+
+/**
+ * One change at a time, from the fresh read it starts with to its write. `busy` holds the whole way
+ * (the controls disable on it), a second start meanwhile is dropped, and at the end the control the
+ * person used gets the focus back: a browser drops the focus to the page from a control it disables.
+ * `onFocusCapture` goes on the element that holds the controls. The work handles its own failures.
+ */
+export function useOneChange() {
+  const latch = useLatch();
+  const [busy, setBusy] = useState(false);
+  // The last control focused inside the controls (not a menu they opened elsewhere on the page).
+  const lastFocused = useRef<HTMLElement | null>(null);
+  const giveBack = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (busy) return;
+    const control = giveBack.current;
+    giveBack.current = null;
+    // Only when the focus fell to the page: a person who moved on keeps the focus where they put it.
+    const fell = document.activeElement === null || document.activeElement === document.body;
+    if (fell && control?.isConnected === true && !control.hasAttribute("disabled")) control.focus();
+  }, [busy]);
+  const run = useCallback(
+    (work: () => Promise<unknown>) =>
+      latch(() => {
+        giveBack.current = lastFocused.current;
+        setBusy(true);
+        return work().finally(() => setBusy(false));
+      }),
+    [latch],
+  );
+  const onFocusCapture = useCallback((event: FocusEvent<HTMLElement>) => {
+    if (event.target instanceof HTMLElement && event.currentTarget.contains(event.target))
+      lastFocused.current = event.target;
+  }, []);
+  return { busy, run, onFocusCapture };
 }
 
 /** The thing is gone (404), or the person may no longer see it (403). */
