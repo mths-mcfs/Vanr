@@ -631,9 +631,13 @@ export function registerDebates(app: Hono<AppEnv>) {
     const { items } = await readJson(c, issuesBody);
     const origin = issueOrigin.safeParse(row.origin);
     const parentId = origin.success ? origin.data.issueId : null;
-    // The new issues stay where the debate is read: the parent issue's channel, or the debate's own.
-    const parent = parentId ? await issueById(deps.db, me.workspaceId, parentId).catch(() => null) : null;
-    const channelId = parent?.channelId ?? row.channelId ?? undefined;
+    // The new issues stay where the debate is read: the debate's own channel, or the parent issue's when the
+    // debate has none. An issue never lands somewhere more open than the debate it came from.
+    const parent =
+      parentId && !row.channelId
+        ? await issueById(deps.db, me.workspaceId, parentId).catch(() => null)
+        : null;
+    const channelId = row.channelId ?? parent?.channelId ?? undefined;
     const workspaceAgents = await deps.db
       .select({ id: agents.id, name: agents.name, handle: agents.handle })
       .from(agents)
