@@ -1,4 +1,8 @@
-// The debates area. Fill the route ids reserved for it in src/routes.ts; `areas/agents` is the example.
+// The debates area: the list of debates with their numbers, and starting one.
+import "../../styles/debates.css";
 import type { AreaModule } from "../../app/areas.ts";
+import { DebatesScreen } from "./Debates.tsx";
 
-export const screens: AreaModule<"debates">["screens"] = {};
+export const screens: AreaModule<"debates">["screens"] = {
+  debates: DebatesScreen,
+};
