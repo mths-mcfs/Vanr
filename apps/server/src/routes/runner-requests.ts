@@ -60,9 +60,13 @@ const {
  * The agent's browser policy is read and written under the agent's lock: two changes at once (the sites, the
  * level and private ranges) apply one after the other, each on the row as the other left it.
  */
+/** A browser policy write: one at a time per agent, and none once the agent is archived (read under its row lock). */
 const underAgentPolicyLock = <T>(deps: AppDeps, agentId: string, fn: (tx: Db) => Promise<T>) =>
   deps.db.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`browser-policy:${agentId}`}, 0))`);
+    const [agent] = await tx.select().from(agents).where(eq(agents.id, agentId)).for("share");
+    if (!agent) throw notFound("Agent not found");
+    requireActiveAgent(agent);
     return fn(tx);
   });
 
@@ -755,6 +759,7 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
       ? await deps.db.select().from(runners).where(eq(runners.id, agent.environmentId))
       : [];
     if (runner && !canUseRunner(me, runner)) throw forbidden("Only who paired this runner can use it");
+    // Only the interventions on the runner checked: one opened on another runner after a move isn't theirs to end.
     const open = await deps.db
       .select({ id: browserInterventions.id })
       .from(browserInterventions)
@@ -762,6 +767,7 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
         and(
           eq(browserInterventions.agentId, agent.id),
           inArray(browserInterventions.status, ["pending", "active"]),
+          runner ? eq(browserInterventions.runnerId, runner.id) : undefined,
         ),
       );
     for (const h of open)

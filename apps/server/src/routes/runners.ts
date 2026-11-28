@@ -466,8 +466,9 @@ export function registerRunners(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const agent = await agentInWorkspace(deps.db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, agent);
-    requireActiveAgent(agent);
     const { runnerId } = await readJson(c, z.object({ runnerId: z.string().max(64).nullable() }));
+    // Lending a runner is a write an archived agent refuses; clearing it stays open, as DELETE /environment.
+    if (runnerId) requireActiveAgent(agent);
     if (runnerId) {
       const runner = await runnerInWorkspace(deps.db, me.workspaceId, runnerId);
       if (!canUseRunner(me, runner)) throw forbidden("Only who paired this runner can lend it to agents");

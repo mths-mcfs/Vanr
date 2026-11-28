@@ -363,7 +363,35 @@ describe("an archived agent", () => {
         .from(schema.agentEnvironments)
         .where(eq(schema.agentEnvironments.agentId, t.lia.id));
       expect(env.filter((e) => e.status === "running")).toEqual([]);
+      // Clearing the runner stays open on the archived agent.
+      expect(
+        (await call(t.ana, "PUT", `${t.w}/agents/${t.lia.id}/environment/target`, { runnerId: null })).status,
+      ).toBe(200);
       online.delete(runner.id);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "the browser policy writes refuse when the archive lands after the first read: no policy is saved",
+    async () => {
+      const t = await team();
+      const base = `${t.w}/agents/${t.lia.id}`;
+      expect(
+        await archivedWhileSending(t, "PUT", `${base}/browser/policy`, { level: "free", sites: [] }),
+      ).toEqual([409, "agent.archived"]);
+      await server.deps.db
+        .update(schema.agents)
+        .set({ archivedAt: null })
+        .where(eq(schema.agents.id, t.lia.id));
+      expect(
+        await archivedWhileSending(t, "PUT", `${base}/browser`, { permittedDomains: ["example.com"] }),
+      ).toEqual([409, "agent.archived"]);
+      const saved = await server.deps.db
+        .select()
+        .from(schema.browserPolicies)
+        .where(eq(schema.browserPolicies.agentId, t.lia.id));
+      expect(saved).toEqual([]);
     },
     SERVER_TEST_MS,
   );
@@ -438,6 +466,40 @@ describe("an agent's browser on someone's runner", () => {
       expect((await call(t.ana, "POST", `${base}/browser/interventions/start`, {})).status).toBe(200);
       expect((await call(t.ana, "POST", `${base}/browser/stop`, {})).status).toBe(204);
       online.delete(runner.id);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "stopping ends only the interventions on the runner checked, not one opened on another runner",
+    async () => {
+      const t = await team();
+      const base = `${t.w}/agents/${t.lia.id}`;
+      // Lia works on Beto's runner; an intervention is still open on Ana's, which Beto can't use.
+      const betoBox = await pairedRunner(t, t.beto, `beto-box-${seq}`);
+      const anaBox = await pairedRunner(t, t.ana, `ana-box-${seq}`);
+      expect((await call(t.beto, "PUT", `${base}/environment/target`, { runnerId: betoBox.id })).status).toBe(
+        200,
+      );
+      const elsewhere = newId("bi");
+      await server.deps.db.insert(schema.browserInterventions).values({
+        id: elsewhere,
+        workspaceId: t.workspaceId,
+        agentId: t.lia.id,
+        runnerId: anaBox.id,
+        kind: "login",
+        instructions: "Sign in",
+        targetUserId: t.ana.user.id,
+        expiresAt: new Date(Date.now() + 15 * 60_000),
+      });
+      expect((await call(t.beto, "POST", `${base}/browser/stop`, {})).status).toBe(204);
+      const [row] = await server.deps.db
+        .select()
+        .from(schema.browserInterventions)
+        .where(eq(schema.browserInterventions.id, elsewhere));
+      expect(row?.status).toBe("pending");
+      online.delete(betoBox.id);
+      online.delete(anaBox.id);
     },
     SERVER_TEST_MS,
   );
