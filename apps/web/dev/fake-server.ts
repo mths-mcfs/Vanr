@@ -393,7 +393,11 @@ export class FakeServer {
       },
       channelExists: (channelId) => this.state.channels.some((candidate) => candidate.id === channelId),
     });
-    this.connections = new FakeConnections({ ...host, shared: () => this.agentAccess.shared });
+    this.connections = new FakeConnections({
+      ...host,
+      shared: () => this.agentAccess.shared,
+      agents: () => this.agents,
+    });
     this.runnerWork = new FakeRunners({
       ...host,
       agents: () => this.agents,

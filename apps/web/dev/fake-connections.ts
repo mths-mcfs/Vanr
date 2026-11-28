@@ -6,6 +6,7 @@
 import type * as T from "@vanr/contract";
 import { can } from "@vanr/contract";
 import { FAKE_CATALOG } from "./fake-agent-access.ts";
+import type { FakeAgentRow } from "./fake-agents.ts";
 import type { FilesHost, FilesReply } from "./fake-files.ts";
 
 type Scope = { workspaceId: string; user: T.User; role: T.Role };
@@ -13,6 +14,7 @@ type Shared = T.Connection & { workspaceId: string };
 type Host = FilesHost & {
   /** The workspace's shared connections, kept with the agents' own accounts. */
   shared: () => Shared[];
+  agents: () => FakeAgentRow[];
 };
 export type FakeMcpServer = T.CustomServer & { workspaceId: string; needsKey: boolean; oauth: boolean };
 export type FakeInstallation = T.GitHubAppInstallation & {
@@ -76,11 +78,28 @@ const MAIL_ACTIONS = new Set([
   "delete",
 ]);
 const DB_ACTIONS = new Set(["tables", "describe", "query"]);
+/** The built-in areas and whether each one has a "change" level, as the server lists them. */
+const BUILTIN_AREAS: [string, boolean][] = [
+  ["context", true],
+  ["drive", true],
+  ["issues", true],
+  ["calendar", true],
+  ["wiki", true],
+  ["skills", false],
+  ["schedule", true],
+  ["debate", true],
+  ["bases", true],
+];
+const BUILTIN_SCOPES = new Set(
+  BUILTIN_AREAS.flatMap(([area, write]) => [`${area}:read`, ...(write ? [`${area}:write`] : [])]),
+);
 const PROVIDERS = new Set<T.DatabaseProvider>(["neon", "other", "railway", "rds", "render", "supabase"]);
 
 export class FakeConnections {
   servers: FakeMcpServer[] = [];
   mail: FakeMailAccount[] = [];
+  /** Each agent's raw scopes. */
+  grants = new Map<string, T.ScopeGrant[]>();
   databases: FakeDatabase[] = [];
   installations: FakeInstallation[] = [];
   /** Whether this server has a GitHub App set up. */
@@ -94,6 +113,7 @@ export class FakeConnections {
   clear(): void {
     this.servers = [];
     this.mail = [];
+    this.grants = new Map();
     this.databases = [];
     this.installations = [];
     this.githubInstallable = true;
@@ -131,7 +151,107 @@ export class FakeConnections {
         ? [...new Set(value as string[])]
         : undefined;
 
+    type Live = { id: string; connector: string; custom: boolean; label: string };
+    const live = (workspaceId: string): Live[] => [
+      ...this.host
+        .shared()
+        .filter((each) => each.workspaceId === workspaceId && each.revokedAt === null)
+        .map((each) => ({ id: each.id, connector: each.connector, custom: false, label: each.label })),
+      ...this.servers
+        .filter((each) => each.workspaceId === workspaceId)
+        .map((each) => ({ id: each.id, connector: "custom", custom: true, label: each.label })),
+    ];
+    const scopesOf = (connection: Live) => {
+      const base = connection.custom ? `custom:${connection.id}` : connection.connector;
+      return { read: `${base}:read`, write: `${base}:write` };
+    };
+    const accessView = (workspaceId: string, grants: T.ScopeGrant[]): T.AgentAccess => {
+      const all = grants.some((g) => g.connectionId === "" && g.scope === "*");
+      const own = new Set(grants.filter((g) => g.connectionId === "").map((g) => g.scope));
+      return {
+        all,
+        connectors: live(workspaceId).map((connection) => {
+          const granted = grants.filter((g) => g.connectionId === connection.id).map((g) => g.scope);
+          const { read, write } = scopesOf(connection);
+          const state: T.AccessLevel =
+            all || granted.includes("connector:*") || (granted.includes(read) && granted.includes(write))
+              ? "write"
+              : granted.includes(read)
+                ? "read"
+                : granted.includes(write)
+                  ? "custom"
+                  : "none";
+          return {
+            connectionId: connection.id,
+            connector: connection.connector,
+            custom: connection.custom,
+            label: connection.label,
+            state,
+            scopes: granted.filter((scope) => scope !== "connector:*"),
+          };
+        }),
+        builtins: [...BUILTIN_SCOPES].map((scope) => ({ scope, enabled: all || own.has(scope) })),
+        tools: {
+          allow: [...own].filter((scope) => scope.startsWith("tool:")).map((scope) => scope.slice(5)),
+          deny: [...own].filter((scope) => scope.startsWith("deny:")).map((scope) => scope.slice(5)),
+        },
+      };
+    };
+    const valid = (workspaceId: string, grants: unknown): T.ScopeGrant[] | undefined => {
+      if (!Array.isArray(grants)) return undefined;
+      const byId = new Map(live(workspaceId).map((each) => [each.id, each]));
+      const ok = grants.every((g: T.ScopeGrant) => {
+        if (g.connectionId === "")
+          return g.scope === "*" || BUILTIN_SCOPES.has(g.scope) || /^(tool|deny):[\w.-]+$/.test(g.scope);
+        const connection = byId.get(g.connectionId);
+        if (connection === undefined) return false;
+        const { read, write } = scopesOf(connection);
+        return g.scope === "connector:*" || g.scope === read || g.scope === write;
+      });
+      return ok ? (grants as T.ScopeGrant[]) : undefined;
+    };
+    const withAgent = (
+      handler: (scope: Scope, agent: FakeAgentRow, params: Record<string, unknown>) => FilesReply,
+      manage = false,
+    ) =>
+      within((scope, params) => {
+        const agent = this.host
+          .agents()
+          .find((each) => each.workspaceId === scope.workspaceId && each.id === text(params.agentId));
+        if (agent === undefined) return fail(404, "not_found", "Agent not found");
+        if (manage && !can(scope.role, "manage_agents")) return fail(403, "forbidden", "Forbidden");
+        if (manage && agent.archivedAt !== null) return fail(409, "agent.archived", "The agent is archived");
+        return handler(scope, agent, params);
+      });
+
     return {
+      getAgentAccess: withAgent((scope, agent) =>
+        reply(200, accessView(scope.workspaceId, this.grants.get(agent.id) ?? [])),
+      ),
+      listAgentScopes: withAgent((_scope, agent) => reply(200, { scopes: this.grants.get(agent.id) ?? [] })),
+      setAgentScopes: withAgent((scope, agent, params) => {
+        const next = valid(scope.workspaceId, params.scopes);
+        if (next === undefined) return fail(400, "access.unknown_scope", "Unknown scope");
+        const unique = new Map(next.map((g) => [`${g.connectionId}|${g.scope}`, g]));
+        this.grants.set(agent.id, [...unique.values()]);
+        return reply(200, { scopes: this.grants.get(agent.id) });
+      }, true),
+      setAgentAccess: withAgent((scope, agent, params) => {
+        let next = [...(this.grants.get(agent.id) ?? [])];
+        if (typeof params.all === "boolean") {
+          next = next.filter((g) => !(g.connectionId === "" && g.scope === "*"));
+          if (params.all) next.push({ connectionId: "", scope: "*" });
+        }
+        if (typeof params.connectors === "object" && params.connectors !== null) {
+          for (const [connectionId, on] of Object.entries(params.connectors as Record<string, boolean>)) {
+            next = next.filter((g) => g.connectionId !== connectionId);
+            if (on) next.push({ connectionId, scope: "connector:*" });
+          }
+        }
+        this.grants.set(agent.id, next);
+        return reply(200, accessView(scope.workspaceId, next));
+      }, true),
+
       listMailProviders: within(() => reply(200, FAKE_MAIL_PROVIDERS)),
       listMailAccounts: within((scope) =>
         reply(200, {

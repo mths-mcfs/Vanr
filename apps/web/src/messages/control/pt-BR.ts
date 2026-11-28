@@ -572,4 +572,28 @@ export default {
   "error.database.fields_required": "Preencha host, banco, usuário e senha.",
   "error.database.auth": "O banco recusou esse usuário ou senha.",
   "error.database.unreachable": "Não deu para acessar o banco. Confira host, porta e criptografia.",
+
+  "grid.title": "Agentes e conexões",
+  "grid.lead":
+    "Até onde cada agente vai em cada conexão do workspace. Regras por canal, caixas de e-mail e bancos ficam na aba Acesso de cada agente.",
+  "grid.failed": "Não deu para carregar o acesso dos agentes",
+  "grid.rowFailed": "Não deu para carregar o acesso de {agent}",
+  "grid.loadingRow": "Carregando…",
+  "grid.noAgents": "Nenhum agente ainda",
+  "grid.noAgentsBody": "Crie um agente e decida aqui o que ele pode alcançar.",
+  "grid.noConnections": "Nenhuma conexão no workspace ainda",
+  "grid.noConnectionsBody":
+    "Conecte um serviço ou um servidor MCP em Conectores para os agentes terem o que alcançar.",
+  "grid.agent": "Agente",
+  "grid.everything": "Tudo",
+  "grid.everythingFor": "Tudo para {agent}",
+  "grid.levelFor": "O que {agent} pode fazer em {connection}",
+  "grid.level.none": "Nada",
+  "grid.level.read": "Ler",
+  "grid.level.write": "Ler e alterar",
+  "grid.level.custom": "Só alterar",
+  "error.access.unknown_scope": "Esta permissão não existe neste servidor. Recarregue e tente de novo.",
+  "error.access.unknown_connection":
+    "Essa conexão não existe mais. Recarregue para ver as que existem agora.",
+  "error.agent.archived": "Este agente está arquivado, então o acesso dele não muda.",
 } satisfies TranslationOf<typeof en>;
