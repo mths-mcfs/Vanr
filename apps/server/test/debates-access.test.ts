@@ -200,6 +200,40 @@ describe("a stall while the debate is anonymous", () => {
   );
 });
 
+describe("a stall of the lead's own turn", () => {
+  test(
+    "names it by its pseudonym too: only the synthesis keeps the lead's id",
+    async () => {
+      const { workspaceId, base, ana, beto } = await team();
+      // Rui first and no lead chosen: Rui leads, and also speaks in the rounds.
+      const rui = await seedAgent(server, workspaceId, ana, `rui${n}`);
+      const lia = await seedAgent(server, workspaceId, ana, `lia${n}`);
+      const made = await call(ana, "POST", base, {
+        title: "Lead",
+        goal: "g",
+        agentIds: [rui.id, lia.id],
+        rounds: 1,
+      });
+      const id = made.body.id;
+      await waitFor(async () => (await call(beto, "GET", `${base}/${id}`)).body.status === "stalled");
+      const [row] = await server.deps.db.select().from(schema.debates).where(eq(schema.debates.id, id));
+      const seen = (await call(beto, "GET", `${base}/${id}`)).body;
+      expect(seen.anonymous).toBe(true);
+      expect(seen.stallInfo).toMatchObject({ agentId: null, pseudonym: row?.pseudonyms[rui.id], round: 0 });
+      // A synthesis stall keeps the lead's id, never its letter.
+      await server.deps.db
+        .update(schema.debates)
+        .set({ stallInfo: { agentId: rui.id, round: 1, reason: "failed", synthesis: true } })
+        .where(eq(schema.debates.id, id));
+      expect((await call(beto, "GET", `${base}/${id}`)).body.stallInfo).toMatchObject({
+        agentId: rui.id,
+        pseudonym: null,
+      });
+    },
+    SERVER_TEST_MS,
+  );
+});
+
 describe("the estimate", () => {
   test("sends its amount only with view_usage, the number of calls to everyone", async () => {
     const { workspaceId, base, ana, beto } = await team();

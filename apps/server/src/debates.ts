@@ -137,15 +137,16 @@ const pendingPeople = (row: DebateRow) =>
     : [];
 
 /**
- * The stall as it goes out. While anonymous, an agent's turn names only its pseudonym: its id beside the posts
- * that did come in would tell whose pseudonym it is. The lead (public on the table) keeps its id, without one.
+ * The stall as it goes out. While anonymous, a stalled turn in a round names only its pseudonym: its id beside the
+ * posts that did come in would tell whose pseudonym it is, the lead's turns included. Only the synthesis keeps the
+ * lead's id (public on the table), without a pseudonym.
  */
 function stallOf(row: DebateRow): Debate["stallInfo"] {
   const stall = row.stallInfo;
   if (!stall) return null;
   const { agentId, round, reason } = stall;
   if (!isAnonymous(row)) return { agentId, pseudonym: row.pseudonyms[agentId] ?? null, round, reason };
-  if (agentId === leadOf(row)) return { agentId, pseudonym: null, round, reason };
+  if (stall.synthesis) return { agentId, pseudonym: null, round, reason };
   return { agentId: null, pseudonym: row.pseudonyms[agentId] ?? null, round, reason };
 }
 
@@ -1216,7 +1217,11 @@ async function synthesize(deps: AppDeps, row: DebateRow) {
       const agentId = lead.id;
       await changeDebate(deps, row.id, (fresh) =>
         fresh.status === "open" && fresh.phase === "concluding" && fresh.round === row.round
-          ? { status: "stalled", phase: null, stallInfo: { agentId, round: row.round, reason } }
+          ? {
+              status: "stalled",
+              phase: null,
+              stallInfo: { agentId, round: row.round, reason, synthesis: true },
+            }
           : null,
       );
       return;

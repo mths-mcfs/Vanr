@@ -417,7 +417,13 @@ export const debates = pgTable(
     leadAgentId: text("lead_agent_id"),
     /** Who still speaks in this round, in order. */
     pendingSpeakers: jsonb("pending_speakers").$type<Actor[]>().notNull().default([]),
-    stallInfo: jsonb("stall_info").$type<{ agentId: string; round: number; reason: string }>(),
+    /** `synthesis`: the lead stalled writing the synthesis (absent: an agent's turn in a round). */
+    stallInfo: jsonb("stall_info").$type<{
+      agentId: string;
+      round: number;
+      reason: string;
+      synthesis?: true;
+    }>(),
     channelId: text("channel_id"),
     origin: jsonb("origin").$type<Record<string, unknown>>(),
     synthesis: jsonb("synthesis").$type<Record<string, unknown>>(),
