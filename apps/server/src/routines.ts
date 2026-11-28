@@ -1114,6 +1114,9 @@ async function execute(
   const channel = await channelInWorkspace(db, row.workspaceId, channelId);
   if (!channel || channel.archivedAt)
     return fail("routines.run.channel_gone", "The channel no longer exists", "channel_gone");
+  // The run is where it posts, from now on: its target may have moved since the fire, and whoever sees the run in
+  // progress (`running`, the history) is whoever reads this channel.
+  await db.update(routineExecutions).set({ channelId: channel.id }).where(eq(routineExecutions.id, run.id));
   const [inChannel] = await db
     .select({ id: schema.channelMemberships.memberId })
     .from(schema.channelMemberships)

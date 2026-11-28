@@ -12,7 +12,7 @@ import { postMessage } from "../src/messages";
 import { registerFire, startRoutineRun } from "../src/routines";
 import { environmentToolsFor } from "../src/runners/agent-tools";
 import type { RunningServer } from "../src/server";
-import { pairFake } from "./fake-runner";
+import { pairFake, requests } from "./fake-runner";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
 import type { ProtocolRunner } from "./protocol-runner";
 import { call, ws } from "./route-calls";
@@ -553,7 +553,7 @@ describe("what reaches an archived agent another way", () => {
   );
 
   test(
-    "an archived agent's assignment starts no job, and nobody gives it a new one",
+    "archiving stops its assignment's running job, starts no other, and nobody gives it a new one",
     async () => {
       const t = await team();
       const fake = await pairFake(server, t.ana, t.workspaceId, { open });
@@ -575,7 +575,13 @@ describe("what reaches an archived agent another way", () => {
         .where(eq(assignments.id, row.id))
         .returning();
       if (!active) throw new Error("assignment not activated");
-      await t.archive();
+      // A job already running when the archive lands stops with it.
+      const job = await startAssignmentJob(server.deps, active, { extra: "" });
+      expect((await call(t.ana, "DELETE", `${t.w}/agents/${t.lia.id}`)).status).toBe(204);
+      // The runner is told to cancel it (the job ends when the runner reports back).
+      expect(requests(fake.runner, "job.cancel").map((r) => (r.args as { jobId: string }).jobId)).toEqual([
+        job.id,
+      ]);
       await expect(startAssignmentJob(server.deps, active, { extra: "" })).rejects.toMatchObject({
         code: "agent.archived",
       });

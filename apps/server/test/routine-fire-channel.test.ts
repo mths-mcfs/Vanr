@@ -127,6 +127,48 @@ describe("the channel a routine's run records", () => {
   );
 });
 
+describe("a run in progress", () => {
+  test(
+    "records the channel it posts in once it resolves it, not the one it fired for",
+    async () => {
+      const general = (
+        await server.deps.db
+          .select({ id: channels.id })
+          .from(channels)
+          .where(and(eq(channels.workspaceId, workspaceId), eq(channels.name, "general")))
+      )[0]?.id;
+      if (!general) throw new Error("no #general");
+      const kai = await newAgent("Kai");
+      await server.deps.db
+        .insert(schema.channelMemberships)
+        .values({ channelId: priv, memberType: "agent", memberId: kai });
+      const r = await newRoutine({ agentId: kai, target: { kind: "channel", channelId: general } });
+      const reg = await registerFire(server.deps, r.id, { trigger: "webhook", key: newId("k") });
+      if (reg.duplicate) throw new Error("duplicate fire");
+      expect(reg.run.channelId).toBe(general);
+      // The target moved to #secret before the run started.
+      await server.deps.db
+        .update(routines)
+        .set({ target: { kind: "channel", channelId: priv } })
+        .where(eq(routines.id, r.id));
+      const rt = server.deps.runtime;
+      const runFor = rt.runFor;
+      let during: string | null | undefined;
+      rt.runFor = async (input) => {
+        during = (await rowsOf(r.id)).find((x) => x.id === reg.run.id)?.channelId;
+        return runFor.call(rt, input);
+      };
+      try {
+        await startRoutineRun(server.deps, reg.run);
+      } finally {
+        rt.runFor = runFor;
+      }
+      expect(during).toBe(priv);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
 describe("a routine's running flag", () => {
   test(
     "doesn't show a run in progress in a channel the person can't read",

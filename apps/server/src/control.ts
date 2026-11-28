@@ -26,6 +26,7 @@ import {
   storeWhere,
   writeInstructions,
 } from "./agent-memory";
+import { cancelJobs } from "./assignments/engine";
 import { BASE_UNDOERS } from "./bases/undo";
 import { canReadChannel } from "./channels";
 import { CONTENT_UNDOERS } from "./content-undo";
@@ -487,8 +488,18 @@ export async function archiveAgent(deps: AppDeps, workspaceId: string, agentId: 
   });
   for (const run of deps.runtime.activeRuns({ workspaceId }))
     if (run.agentId === agentId) deps.runtime.cancel(run.runId, actorUserId);
-  for (const row of closed.canceled) await publishApproval(deps, row, "approval.resolved");
-  for (const row of closed.expired) await publishQuestion(deps, row, "question.closed");
+  // Its assignments' jobs on the runner stop too. The cancel waits for a job start in progress on the same
+  // assignment (`withAssignmentJobs`), and a start after it reads the archive: no job runs past the archive.
+  const owned = await deps.db
+    .select()
+    .from(schema.assignments)
+    .where(and(eq(schema.assignments.agentId, agentId), eq(schema.assignments.workspaceId, workspaceId)));
+  for (const row of owned) await cancelJobs(deps, row);
+  // The closures are committed: each notice goes out on its own, and one that fails doesn't hold the rest.
+  const publish = (what: Promise<unknown>) =>
+    what.catch((err) => log.error("agent.archive_publish_failed", { agentId, err }));
+  for (const row of closed.canceled) await publish(publishApproval(deps, row, "approval.resolved"));
+  for (const row of closed.expired) await publish(publishQuestion(deps, row, "question.closed"));
 }
 
 /** Rewrites the card's `meta.question` and tells the channel (the question changed state). */

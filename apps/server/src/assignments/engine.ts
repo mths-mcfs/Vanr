@@ -320,6 +320,10 @@ async function startAssignmentJobNow(
   row: AssignmentRow,
   input: AssignmentJobInput,
 ): Promise<JobRow> {
+  // Every job of an assignment starts here, under the assignment's job lock that the archive's cancel also takes:
+  // an archived agent's runs nothing on the runner.
+  const agent = await agentOf(deps.db, row);
+  if (agent.archivedAt) throw new HttpError(409, "agent.archived", "This agent was archived");
   if (row.executor === "agent")
     throw new HttpError(409, "assignment.no_job", "This assignment runs in the conversation");
   if (input.id) {
@@ -334,9 +338,6 @@ async function startAssignmentJobNow(
     throw new HttpError(409, "assignment.personal_plan", "That runner's plan is personal to who paired it");
   if ((await runningJobsOf(deps.db, row.id)).length > 0)
     throw new HttpError(409, "assignment.job_running", "A job is already running for this assignment");
-  const agent = await agentOf(deps.db, row);
-  // Every job of an assignment starts here: an archived agent's runs nothing on the runner.
-  if (agent.archivedAt) throw new HttpError(409, "agent.archived", "This agent was archived");
   const [last] = await deps.db
     .select()
     .from(runnerJobs)
