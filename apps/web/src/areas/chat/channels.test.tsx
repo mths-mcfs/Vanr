@@ -100,7 +100,8 @@ describe("a channel's people", () => {
     const print = server.state.channels.find((channel) => channel.id === "ch_print");
     if (print !== undefined) print.memberIds = ["usr_ana", "usr_iris"];
     const app = await open("/channel/ch_print", "usr_iris", server);
-    await app.user.click(await screen.findByRole("button", { name: "2 in the channel" }));
+    // Two people and the workspace's three agents.
+    await app.user.click(await screen.findByRole("button", { name: "5 in the channel" }));
     const dialog = await screen.findByRole("dialog", { name: "People in #print-queue" });
     expect(within(dialog).queryByRole("button", { name: /^Remove / }) === null).toBe(true);
     await app.user.type(within(dialog).getByRole("searchbox", { name: "Add someone" }), "tom");
@@ -110,7 +111,7 @@ describe("a channel's people", () => {
     app.unmount();
 
     const owner_ = await open("/channel/ch_print", "usr_ana", server);
-    await owner_.user.click(await screen.findByRole("button", { name: "3 in the channel" }));
+    await owner_.user.click(await screen.findByRole("button", { name: "6 in the channel" }));
     const owner = await screen.findByRole("dialog", { name: "People in #print-queue" });
     expect(
       await within(owner).findByRole("button", { name: "Remove Tomás Eriksen from the channel" }),
@@ -201,7 +202,7 @@ describe("leaving a private channel", () => {
     server.state.messages.push({ ...message("msg_secret", "Raise it 4%"), channelId: "ch_board" });
     const app = await open("/channel/ch_board", "usr_iris", server);
     expect(await screen.findByText("Raise it 4%")).toBeDefined();
-    await app.user.click(screen.getByRole("button", { name: "2 in the channel" }));
+    await app.user.click(screen.getByRole("button", { name: "5 in the channel" }));
     const dialog = await screen.findByRole("dialog", { name: "People in #board-room" });
     // The channel list can't be read again: only the leave itself can clear what was cached.
     server.force("listChannels", { kind: "offline" }, 20);
@@ -279,6 +280,19 @@ describe("what CodeRabbit found on the channels round", () => {
     await app.user.clear(field);
     await app.user.type(field, "@scout check it");
     expect(screen.queryByText("Scout will answer") === null).toBe(true);
+  });
+
+  test("a channel's people list its agents too, and removing one keeps the rest", async () => {
+    const server = newServer();
+    const app = await open("/channel/ch_print", "usr_ana", server);
+    await app.user.click(await screen.findByRole("button", { name: /in the channel/ }));
+    const dialog = await screen.findByRole("dialog", { name: "People in #print-queue" });
+    const list = await within(dialog).findByRole("list", { name: "In this channel" });
+    expect(await within(list).findByText("Scout")).toBeDefined();
+    expect(within(list).getByText("Ledger")).toBeDefined();
+    await app.user.click(within(dialog).getByRole("button", { name: "Remove Scout from the channel" }));
+    await waitFor(() => expect(within(list).queryByText("Scout") === null).toBe(true));
+    expect(within(list).getByText("Ledger")).toBeDefined();
   });
 
   test("an agent taken out of a channel no longer answers there", async () => {

@@ -38,17 +38,23 @@ export class FakeChat {
 
   /** A thread's record, made from its first message as the server makes it. */
   /** A channel's agents, kept from its first change on; until then every active agent, as seeded. */
-  private roster(workspaceId: string, channelId: string): Set<string> {
-    const kept = this.agentMembers.get(channelId);
-    if (kept !== undefined) return kept;
-    const seeded = new Set(
-      this.host
-        .agents(workspaceId)
-        .filter((agent) => agent.archivedAt === null)
-        .map((agent) => agent.id),
+  private agentsIn(workspaceId: string, channelId: string): ReadonlySet<string> {
+    return (
+      this.agentMembers.get(channelId) ??
+      new Set(
+        this.host
+          .agents(workspaceId)
+          .filter((agent) => agent.archivedAt === null)
+          .map((agent) => agent.id),
+      )
     );
-    this.agentMembers.set(channelId, seeded);
-    return seeded;
+  }
+
+  /** The same agents, kept from now on so a change can be made to them. */
+  private roster(workspaceId: string, channelId: string): Set<string> {
+    const kept = new Set(this.agentsIn(workspaceId, channelId));
+    this.agentMembers.set(channelId, kept);
+    return kept;
   }
 
   thread(rootId: string, by: string, fields: Partial<T.ThreadInfo> = {}): T.ThreadInfo {
@@ -263,7 +269,7 @@ export class FakeChat {
       listChannelMembers: within((scope, params) => {
         const room = this.room(scope, params.channelId);
         if (room === undefined) return notFound();
-        const agents = [...(this.agentMembers.get(room.id) ?? [])].map((id) => ({ id, type: "agent" }));
+        const agents = [...this.agentsIn(scope.workspaceId, room.id)].map((id) => ({ id, type: "agent" }));
         return reply(200, { members: [...room.memberIds.map((id) => ({ id, type: "person" })), ...agents] });
       }),
       createChannelMember: within((scope, params) => {
@@ -344,11 +350,10 @@ export class FakeChat {
           .people(scope.workspaceId)
           .filter((person) => room.memberIds.includes(person.userId))
           .map((person) => ({ id: person.userId, type: "person", name: person.name, handle: person.handle }));
-        // A channel whose agents were changed lists those; one never changed has every agent, as seeded.
-        const roster = this.agentMembers.get(room.id);
+        const roster = this.agentsIn(scope.workspaceId, room.id);
         const agents = this.host
           .agents(scope.workspaceId)
-          .filter((agent) => agent.archivedAt === null && (roster === undefined || roster.has(agent.id)))
+          .filter((agent) => agent.archivedAt === null && roster.has(agent.id))
           .map((agent) => ({
             id: agent.id,
             type: "agent",
