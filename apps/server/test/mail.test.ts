@@ -89,6 +89,33 @@ const routineRow = async (id: string) =>
 
 describe("routine by email", () => {
   test(
+    "an archived agent's routine reads its mailbox no more and records no fire",
+    async () => {
+      const { workspaceId, ana, lia, connect, debateTarget } = await team();
+      const account = await connect();
+      await setAgentMailbox(server.deps, workspaceId, lia.id, account, { level: "read" });
+      const routine = (
+        await call(ana, "POST", `${ws(workspaceId)}/routines`, {
+          active: true,
+          agentId: lia.id,
+          prompt: "Summarize the order",
+          target: debateTarget,
+          trigger: { kind: "email" as const, accountId: account.id, folder: "INBOX" },
+        })
+      ).body;
+      await poll();
+      await server.deps.db
+        .update(schema.agents)
+        .set({ archivedAt: new Date() })
+        .where(eq(schema.agents.id, lia.id));
+      mail.deliver("INBOX", incoming("joao@client.test", "Order 79", "Three bolts"));
+      await poll();
+      expect(await executions(routine.id)).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "the first check marks the position; then it runs once per message that passes the filter",
     async () => {
       const { workspaceId, ana, lia, connect, debateTarget } = await team();

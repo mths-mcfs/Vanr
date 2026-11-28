@@ -1051,6 +1051,16 @@ async function execute(
             : fail("routines.run.model", result.error, "model");
     if (!result.text)
       return { status: "silent", summary: null, summaryKey: "routines.run.silent", runId: result.runId };
+    // An archive that landed while the model wrote: the file doesn't go in the archived agent's name.
+    const [still] = await db
+      .select({ archivedAt: agents.archivedAt })
+      .from(agents)
+      .where(eq(agents.id, agent.id));
+    if (!still || still.archivedAt)
+      return {
+        ...fail("routines.run.agent_gone", "The agent was archived", "agent_gone"),
+        runId: result.runId,
+      };
     const { row: file } = await createFile(deps, {
       workspaceId: row.workspaceId,
       title: `${row.name} · ${stamp}`,

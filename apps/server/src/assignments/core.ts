@@ -110,7 +110,7 @@ async function usageFor(
   me: Pick<WorkspaceMember, "role">,
 ): Promise<AssignmentUsage> {
   const usage = await assignmentUsage(deps, row);
-  return seesSpend(me) ? usage : { ...usage, dollars: null };
+  return seesSpend(me) ? usage : { ...usage, dollars: null, jobTokens: null };
 }
 
 /** Who may act (the owner or who decides); everyone else gets 403. */

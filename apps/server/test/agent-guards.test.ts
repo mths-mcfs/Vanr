@@ -8,6 +8,7 @@ import { newId } from "@vanr/engine/ids";
 import { eq } from "drizzle-orm";
 import { createAssignment } from "../src/assignments/engine";
 import { assignmentEvent, SYSTEM } from "../src/assignments/events";
+import { act } from "../src/assignments/motor";
 import { queueMemoryReview } from "../src/memory-reviews";
 import { postMessage } from "../src/messages";
 import { recheckLiveViews } from "../src/runners/browser-live";
@@ -931,7 +932,7 @@ describe("spend outside the usage page", () => {
   );
 
   test(
-    "D6: an assignment's dollars are null without view_usage; its minutes and steps stay",
+    "D6: an assignment's dollars and job tokens are null without view_usage; its minutes and steps stay",
     async () => {
       const t = await team();
       const row = await createAssignment(server.deps, {
@@ -948,7 +949,7 @@ describe("spend outside the usage page", () => {
       });
       const usage = async (who: Person) =>
         (await call(who, "GET", `${t.w}/assignments/${row.id}`)).body.usage;
-      expect(await usage(t.beto)).toMatchObject({ dollars: null, minutes: 0, steps: 0 });
+      expect(await usage(t.beto)).toMatchObject({ dollars: null, jobTokens: null, minutes: 0, steps: 0 });
       expect(await usage(t.carla)).toMatchObject({ dollars: 0, minutes: 0, steps: 0 });
     },
     SERVER_TEST_MS,
@@ -1035,7 +1036,11 @@ describe("spend outside the usage page", () => {
         const live = (await socket.event("assignment.trail_event")).event as unknown as {
           event: { data: unknown };
         };
-        expect(live.event.data).toEqual({ which: "dollars", limit: 10, usage: { ...usage, dollars: null } });
+        expect(live.event.data).toEqual({
+          which: "dollars",
+          limit: 10,
+          usage: { ...usage, dollars: null, jobTokens: null },
+        });
       } finally {
         socket.close();
       }
@@ -1043,8 +1048,45 @@ describe("spend outside the usage page", () => {
         (await call(who, "GET", `${t.w}/assignments/${row.id}/events`)).body.events.find(
           (e: { kind: string }) => e.kind === "ceiling_warning",
         )?.data.usage;
-      expect(await warning(t.beto)).toEqual({ ...usage, dollars: null });
+      expect(await warning(t.beto)).toEqual({ ...usage, dollars: null, jobTokens: null });
       expect(await warning(t.carla)).toEqual(usage);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "D11: the 80% notice of a dollars cap reaches the assignment's owner only with view_usage",
+    async () => {
+      const t = await team();
+      const notices = async (owner: Person) => {
+        const row = await createAssignment(server.deps, {
+          workspaceId: t.workspaceId,
+          agentId: t.lia.id,
+          agentHandle: t.lia.handle,
+          channelId: t.general,
+          ownerId: owner.user.id,
+          title: "Fix the flaky test",
+          goal: "The suite passes ten times in a row",
+          executor: "agent",
+          runnerId: null,
+          commandPolicy: "never",
+        });
+        await server.deps.db
+          .update(schema.assignments)
+          .set({ status: "active", limits: { dollars: 10, minutes: 10, steps: null } })
+          .where(eq(schema.assignments.id, row.id));
+        for (const which of ["dollars", "minutes"] as const)
+          await act(server.deps, row.id, { type: "warn", which });
+        // Both warnings fold into the assignment's one notice: its count says how many reached the owner.
+        const [notice] = await server.deps.db
+          .select({ count: schema.notifications.count, latest: schema.notifications.latest })
+          .from(schema.notifications)
+          .where(eq(schema.notifications.groupKey, `assignment:${row.id}:assignment_stopped`));
+        return [notice?.count ?? 0, notice?.latest.text];
+      };
+      // Beto lacks view_usage: he hears of the minutes cap, not of the dollars one.
+      expect(await notices(t.beto)).toEqual([1, "80% of the minutes limit used"]);
+      expect(await notices(t.carla)).toEqual([2, "80% of the minutes limit used"]);
     },
     SERVER_TEST_MS,
   );

@@ -18,7 +18,14 @@ import {
 import { type Db, schema } from "@vanr/engine/db";
 import { contentSha256 } from "@vanr/engine/memory";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
-import { changeMemory, createMemory, itemAtPath, storeWhere, writeInstructions } from "./agent-memory";
+import {
+  changeMemory,
+  createMemory,
+  itemAtPath,
+  lockActiveAgent,
+  storeWhere,
+  writeInstructions,
+} from "./agent-memory";
 import { BASE_UNDOERS } from "./bases/undo";
 import { canReadChannel } from "./channels";
 import { CONTENT_UNDOERS } from "./content-undo";
@@ -471,6 +478,11 @@ export async function archiveAgent(deps: AppDeps, workspaceId: string, agentId: 
       .set({ status: "expired" })
       .where(and(eq(questions.agentId, agentId), eq(questions.status, "open")))
       .returning();
+    // Its reminders don't go out as it any more (the sweep skips one scheduled while this commits).
+    await tx
+      .update(reminders)
+      .set({ status: "canceled" })
+      .where(and(eq(reminders.agentId, agentId), eq(reminders.status, "scheduled")));
     return { canceled, expired };
   });
   for (const run of deps.runtime.activeRuns({ workspaceId }))
@@ -1035,6 +1047,8 @@ export async function applyUndo(
       after = await undoer.undo(scoped, locked, me.userId);
     } else {
       if (!locked.revertedAt) throw conflict("action.not_undone", "Not undone");
+      // Redoing is the agent's action again, in its name: an archived agent's is refused under its row lock.
+      await lockActiveAgent(tx, locked.agentId);
       after = await undoer.redo(scoped, locked, me.userId);
     }
     const [next] = await tx

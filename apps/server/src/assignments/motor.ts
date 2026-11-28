@@ -18,6 +18,7 @@ import type { AssignmentLimitKind, AssignmentWaitReason } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { and, eq, gt, inArray, isNotNull, isNull, lt, max, ne, sql } from "drizzle-orm";
+import { seesSpend } from "../agents";
 import { channelInWorkspace } from "../channels";
 import type { AppDeps } from "../context";
 import { launchDurable } from "../durable";
@@ -54,6 +55,7 @@ const {
   assignmentPlanItems,
   runnerJobs,
   messages,
+  members,
   effectKeys,
 } = schema;
 
@@ -437,6 +439,14 @@ async function setWait(deps: AppDeps, row: AssignmentRow, reason: AssignmentWait
 }
 
 /** Stops the assignment (a cap, the agent's budget, a personal plan): pauses, stops what runs and tells. */
+async function ownerSeesSpend(deps: AppDeps, row: AssignmentRow): Promise<boolean> {
+  const [owner] = await deps.db
+    .select({ role: members.role })
+    .from(members)
+    .where(and(eq(members.workspaceId, row.workspaceId), eq(members.userId, row.ownerId)));
+  return !!owner && seesSpend(owner);
+}
+
 async function pauseFor(
   deps: AppDeps,
   row: AssignmentRow,
@@ -494,7 +504,9 @@ export async function act(deps: AppDeps, assignmentId: string, a: EngineAction):
         key: key(warnKey(a.which, limit)),
         data: { which: a.which, limit, usage: await assignmentUsage(deps, row) },
       });
-      if (ev) await notifyOwner(deps, row, "assignment_stopped", `80% of the ${a.which} limit used`, null);
+      // How much of a dollars cap went is spend: an owner without view_usage isn't told, as for the agent's 80%.
+      if (ev && (a.which !== "dollars" || (await ownerSeesSpend(deps, row))))
+        await notifyOwner(deps, row, "assignment_stopped", `80% of the ${a.which} limit used`, null);
       return null;
     }
 

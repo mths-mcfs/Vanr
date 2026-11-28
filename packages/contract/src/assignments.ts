@@ -233,8 +233,8 @@ export interface AssignmentLimits {
 export interface AssignmentUsage {
   /** USD spent by the harness through the API (ledger); null without view_usage. */
   dollars: number | null;
-  /** Tokens reported by Claude Code/Codex (the pairing person's plan: no USD). */
-  jobTokens: number;
+  /** Tokens reported by Claude Code/Codex (the pairing person's plan: no USD); null without view_usage. */
+  jobTokens: number | null;
   /** Job minutes on the environment. */
   minutes: number;
   /** Agent turns and jobs the engine sent. */

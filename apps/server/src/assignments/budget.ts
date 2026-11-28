@@ -53,7 +53,7 @@ export async function assignmentOfRun(
 }
 
 /** The usage as measured: the dollars are always there (the API nulls them for whoever lacks view_usage). */
-export type MeasuredUsage = AssignmentUsage & { dollars: number };
+export type MeasuredUsage = AssignmentUsage & { dollars: number; jobTokens: number };
 
 /** Usage so far: USD in the ledger, minutes of the jobs on the runner and steps the engine sent. */
 export async function assignmentUsage(

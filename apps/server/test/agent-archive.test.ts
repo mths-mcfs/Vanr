@@ -3,11 +3,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
-import { eq } from "drizzle-orm";
+import { and, eq, gt } from "drizzle-orm";
 import { createMemory } from "../src/agent-memory";
 import { createAssignment, startAssignmentJob } from "../src/assignments/engine";
-import { DECISION_TTL_MS, trailEntry } from "../src/control";
+import { archiveAgent, DECISION_TTL_MS, trailEntry } from "../src/control";
+import { applyConsolidation } from "../src/memory-consolidation";
 import { postMessage } from "../src/messages";
+import { registerFire, startRoutineRun } from "../src/routines";
 import { environmentToolsFor } from "../src/runners/agent-tools";
 import type { RunningServer } from "../src/server";
 import { pairFake } from "./fake-runner";
@@ -307,6 +309,232 @@ describe("archiving", () => {
   );
 });
 
+/** What the agent did after `at`: the runs it started, how they ended, and what it said. */
+async function afterArchive(agentId: string, at: Date) {
+  const { db } = server.deps;
+  const late = await db
+    .select({ status: runs.status })
+    .from(runs)
+    .where(and(eq(runs.agentId, agentId), gt(runs.createdAt, at)));
+  const said = await db
+    .select({ body: messages.body })
+    .from(messages)
+    .where(and(eq(messages.authorId, agentId), gt(messages.createdAt, at)));
+  return { late: late.map((r) => r.status), said: said.map((m) => m.body) };
+}
+
+const archivedAtOf = async (id: string) => {
+  const [row] = await server.deps.db.select({ at: agents.archivedAt }).from(agents).where(eq(agents.id, id));
+  if (!row?.at) throw new Error("not archived");
+  return row.at;
+};
+
+async function settleAgent(workspaceId: string, agentId: string) {
+  for (let i = 0; i < 100; i++) {
+    if (!server.deps.runtime.activeRuns({ workspaceId }).some((r) => r.agentId === agentId)) return;
+    await Bun.sleep(50);
+  }
+}
+
+describe("a run that starts after the archive", () => {
+  const say = async (t: Team, body: string) => {
+    const channel = await channelRow(server, t.general);
+    const { message } = await postMessage(server.deps, {
+      workspaceId: t.workspaceId,
+      channel,
+      author: { type: "person", id: t.beto.user.id },
+      body,
+      clientId: newId("c"),
+    });
+    const [row] = await server.deps.db.select().from(messages).where(eq(messages.id, message.id));
+    if (!row) throw new Error("no message");
+    return { channel, message, row };
+  };
+
+  test(
+    "the message waiting for the next run ends canceled with it, and the agent says nothing",
+    async () => {
+      const t = await team();
+      const first = await say(t, "[[slow:3000]] the report");
+      const started = await server.deps.runtime.runFor({
+        agent: t.lia,
+        channel: first.channel,
+        trigger: first.row,
+      });
+      if (!started.ok) throw new Error(started.code);
+      await Bun.sleep(200);
+      // A message that came while the run was closing waits for the next run (`live.after`).
+      const second = await say(t, "and the summary too");
+      const live = (server.runtime as unknown as { live: Map<string, { after: unknown[] }> }).live.get(
+        started.runId,
+      );
+      live?.after.push(second.row);
+      expect((await call(t.ana, "DELETE", `${t.w}/agents/${t.lia.id}`)).status).toBe(204);
+      const at = await archivedAtOf(t.lia.id);
+      await started.done;
+      await Bun.sleep(300);
+      await settleAgent(t.workspaceId, t.lia.id);
+      const out = await afterArchive(t.lia.id, at);
+      expect(out.late.every((s) => s === "canceled")).toBe(true);
+      expect(out.said).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a mention routed just before the archive starts a run that ends canceled, and the agent says nothing",
+    async () => {
+      const t = await team();
+      const rt = server.runtime as unknown as { budgetCheck: (...args: unknown[]) => Promise<unknown> };
+      const saved = rt.budgetCheck;
+      let hit = false;
+      // The archive lands between the routing (the agent still active) and the run's start.
+      rt.budgetCheck = async (...args: unknown[]) => {
+        if (!hit) {
+          hit = true;
+          await archiveAgent(server.deps, t.workspaceId, t.lia.id, t.ana.user.id);
+        }
+        return saved.apply(rt, args);
+      };
+      try {
+        const posted = await say(t, `@${t.lia.handle} the report`);
+        await server.deps.runtime.onPersonMessage({
+          workspaceId: t.workspaceId,
+          channel: posted.channel,
+          message: posted.message,
+        });
+      } finally {
+        rt.budgetCheck = saved;
+      }
+      expect(hit).toBe(true);
+      const at = await archivedAtOf(t.lia.id);
+      await Bun.sleep(300);
+      await settleAgent(t.workspaceId, t.lia.id);
+      const out = await afterArchive(t.lia.id, at);
+      expect(out.late).toEqual(["canceled"]);
+      expect(out.said).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "its reminders are canceled, one scheduled meanwhile doesn't go out, and redoing one is refused",
+    async () => {
+      const t = await team();
+      const reminder = async (minutes: number) => {
+        const id = newId("rem");
+        await server.deps.db.insert(reminders).values({
+          id,
+          workspaceId: t.workspaceId,
+          agentId: t.lia.id,
+          channelId: t.general,
+          threadId: null,
+          text: `Standup in ${minutes}`,
+          at: new Date(Date.now() + minutes * 60_000),
+          createdByType: "agent",
+          createdById: t.lia.id,
+        });
+        return id;
+      };
+      const statusOfReminder = async (id: string) =>
+        (await server.deps.db.select().from(reminders).where(eq(reminders.id, id)))[0]?.status;
+      // One the agent scheduled with a receipt, undone before the archive.
+      const run = await toolRun(server, { workspaceId: t.workspaceId, agent: t.lia, channelId: t.general });
+      const at = new Date(Date.now() + 3_600_000).toISOString();
+      expect((await run.call("schedule_reminder", { text: "Ping the team", at })).isError).toBe(false);
+      const action = await run.action("reminder_created");
+      expect((await call(t.ana, "POST", `${t.w}/actions/${action}/undo`)).status).toBe(200);
+      const pending = await reminder(5);
+      expect((await call(t.ana, "DELETE", `${t.w}/agents/${t.lia.id}`)).status).toBe(204);
+      expect(await statusOfReminder(pending)).toBe("canceled");
+      const redo = await call(t.ana, "POST", `${t.w}/actions/${action}/redo`);
+      expect([redo.status, redo.body?.error?.code]).toEqual([409, "agent.archived"]);
+      // One a tool scheduled while the archive committed: the sweep doesn't post it.
+      const late = await reminder(1);
+      await server.deps.db
+        .update(reminders)
+        .set({ at: new Date(Date.now() - 1000) })
+        .where(eq(reminders.id, late));
+      const archivedAt = await archivedAtOf(t.lia.id);
+      await server.runtime.tick();
+      expect(await statusOfReminder(late)).toBe("canceled");
+      expect((await afterArchive(t.lia.id, archivedAt)).said).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a routine that writes a file writes none when the archive lands before or while the model writes",
+    async () => {
+      const t = await team();
+      const fire = async () => {
+        const [routine] = await server.deps.db
+          .insert(schema.routines)
+          .values({
+            id: newId("rtn"),
+            workspaceId: t.workspaceId,
+            name: "Digest",
+            prompt: "Sum up the day",
+            agentId: t.lia.id,
+            target: { kind: "file" },
+            trigger: { kind: "webhook" },
+            createdBy: t.beto.user.id,
+          })
+          .returning();
+        if (!routine) throw new Error("no routine");
+        const reg = await registerFire(server.deps, routine.id, { trigger: "webhook", key: newId("k") });
+        if (reg.duplicate) throw new Error("duplicate fire");
+        return startRoutineRun(server.deps, reg.run);
+      };
+      const files = () =>
+        server.deps.db.select().from(schema.files).where(eq(schema.files.workspaceId, t.workspaceId));
+      const rt = server.deps.runtime;
+      const complete = rt.complete;
+      try {
+        // While the model writes: the answer comes back after the archive.
+        rt.complete = async (input) => {
+          const out = await complete.call(rt, input);
+          await t.archive();
+          return out;
+        };
+        expect(await fire()).toMatchObject({ status: "failed", reason: "agent_gone" });
+        // Before: the model isn't called at all.
+        rt.complete = complete;
+        let called = false;
+        const real = (server.runtime as unknown as { reserveCall: (...a: unknown[]) => Promise<unknown> })
+          .reserveCall;
+        (server.runtime as unknown as { reserveCall: (...a: unknown[]) => Promise<unknown> }).reserveCall = (
+          ...a
+        ) => {
+          called = true;
+          return real.apply(server.runtime, a);
+        };
+        try {
+          expect(
+            (
+              await complete.call(rt, {
+                agent: t.lia,
+                initiatedBy: t.beto.user.id,
+                source: "routine",
+                what: "x",
+                system: "s",
+                prompt: "p",
+              } as never)
+            ).ok,
+          ).toBe(false);
+        } finally {
+          (server.runtime as unknown as { reserveCall: unknown }).reserveCall = real;
+        }
+        expect(called).toBe(false);
+      } finally {
+        rt.complete = complete;
+      }
+      expect(await files()).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
 describe("what reaches an archived agent another way", () => {
   test(
     "undoing what it wrote is refused, and its memory stays as it was",
@@ -357,6 +585,32 @@ describe("what reaches an archived agent another way", () => {
         channelId: t.general,
       });
       expect(res.status).toBe(404);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("a memory consolidation", () => {
+  test(
+    "applying one for an archived agent is refused under its lock and the proposal stays ready",
+    async () => {
+      const t = await team();
+      const id = newId("mcon");
+      await server.deps.db
+        .insert(schema.memoryConsolidations)
+        .values({ id, workspaceId: t.workspaceId, agentId: t.lia.id, status: "ready" });
+      await t.archive();
+      const [agent] = await server.deps.db.select().from(agents).where(eq(agents.id, t.lia.id));
+      if (!agent) throw new Error("agent gone");
+      const me = { workspaceId: t.workspaceId, userId: t.ana.user.id, role: "owner" as const, handle: "ana" };
+      await expect(applyConsolidation(server.deps, me, agent, id)).rejects.toMatchObject({
+        code: "agent.archived",
+      });
+      const [row] = await server.deps.db
+        .select({ status: schema.memoryConsolidations.status })
+        .from(schema.memoryConsolidations)
+        .where(eq(schema.memoryConsolidations.id, id));
+      expect(row?.status).toBe("ready");
     },
     SERVER_TEST_MS,
   );
