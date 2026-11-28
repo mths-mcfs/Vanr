@@ -89,12 +89,9 @@ export class FakeConnections {
         const key = text(params.apiKey)?.trim() ?? "";
         if (key.length < 8) return fail(400, "validation", "Invalid body");
         if (key === "rejected-key") return fail(400, "connector.invalid_key", "The key was rejected");
-        const shared = this.host.shared();
-        const old = shared.findIndex(
-          (each) => each.workspaceId === scope.workspaceId && each.connector === def.id,
-        );
+        // Like the server, every connect is a new connection, even for a service already connected.
         const connection: Shared = {
-          id: old >= 0 ? (shared[old]?.id ?? this.host.id("con")) : this.host.id("con"),
+          id: this.host.id("con"),
           workspaceId: scope.workspaceId,
           connector: def.id,
           label: def.label,
@@ -104,8 +101,7 @@ export class FakeConnections {
           status: "active",
           scopeRequest: null,
         };
-        if (old >= 0) shared.splice(old, 1, connection);
-        else shared.push(connection);
+        this.host.shared().push(connection);
         const { workspaceId: _w, ...rest } = connection;
         return reply(200, rest);
       }, true),
