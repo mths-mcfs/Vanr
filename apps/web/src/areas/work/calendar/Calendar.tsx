@@ -13,7 +13,7 @@ import { useLocale, useMessages } from "../../../i18n/react.tsx";
 import { useClock } from "../../../platform/clock.tsx";
 import { type Actors, useActors, useOutcome } from "../issues/shared.tsx";
 import { PartError, PartLoading } from "../parts.tsx";
-import { addDays, dayKey, daysBetween, startOfWeek, weekDays } from "../time.ts";
+import { addDays, dayKey, startOfWeek, weekDays } from "../time.ts";
 import { EventDialog } from "./EventDialog.tsx";
 import { NewEventDialog } from "./NewEvent.tsx";
 
@@ -34,15 +34,27 @@ type Entry =
 export function entriesByDay(range: CalendarRange, days: Date[]): Map<string, Entry[]> {
   const out = new Map(days.map((day) => [dayKey(day), [] as Entry[]]));
   const put = (day: string, entry: Entry) => out.get(day)?.push(entry);
+  const keys = days.map(dayKey);
   for (const event of range.events) {
     const key = `event:${event.id}:${event.start}`;
     if (event.allDay && event.startDate !== null) {
-      for (const day of daysBetween(event.startDate, event.endDate ?? event.startDate)) {
-        put(day, { kind: "event", key, at: 0, allDay: true, event });
+      // Only the shown days are walked, however long the event: a year-long one still shows this week.
+      const last = event.endDate ?? event.startDate;
+      for (const day of keys) {
+        if (day >= event.startDate && day <= last)
+          put(day, { kind: "event", key, at: 0, allDay: true, event });
       }
     } else {
-      const at = new Date(event.start);
-      put(dayKey(at), { kind: "event", key, at: at.getTime(), allDay: false, event });
+      // A timed event shows on every shown day it overlaps; its end is exclusive.
+      const start = Date.parse(event.start);
+      const end = Date.parse(event.end);
+      for (const day of days) {
+        const from = day.getTime();
+        const to = addDays(day, 1).getTime();
+        if (start < to && end > from) {
+          put(dayKey(day), { kind: "event", key, at: Math.max(start, from), allDay: false, event });
+        }
+      }
     }
   }
   for (const run of range.routines) {
