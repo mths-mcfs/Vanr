@@ -104,6 +104,31 @@ describe("the week", () => {
     await app.user.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByRole("region", { name: /^Thursday/ })).toBeDefined();
   });
+  test("a whole-day weekly series shows on its day in the next week too", async () => {
+    const server = newServer();
+    server.work.events.push(
+      server.work.event("workspace_birchwood", {
+        id: "evt_fair",
+        title: "Trade fair",
+        start: "2026-11-10T00:00:00.000Z",
+        end: "2026-11-11T00:00:00.000Z",
+        allDay: true,
+        startDate: "2026-11-10",
+        endDate: "2026-11-10",
+        rule: { freq: "weekly", weekdays: ["TU"], timezone: "UTC" },
+        createdBy: { type: "person", id: "usr_ana" },
+      }),
+    );
+    const app = await renderApp({ path: CALENDAR, signedInAs: "usr_ana", server });
+    expect(
+      await within(await screen.findByRole("region", { name: /^Tuesday/ })).findByRole("button", {
+        name: /Trade fair/,
+      }),
+    ).toBeDefined();
+    await app.user.click(screen.getByRole("button", { name: "Next week" }));
+    expect(await screen.findByText("Nov 16 – Nov 22, 2026")).toBeDefined();
+    expect(await within(day(/^Tuesday/)).findByRole("button", { name: /Trade fair/ })).toBeDefined();
+  });
 });
 
 describe("what a day holds", () => {

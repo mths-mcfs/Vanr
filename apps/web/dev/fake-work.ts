@@ -238,6 +238,21 @@ export class FakeWork {
         ...rest,
         start: start.toISOString(),
         end: new Date(start.getTime() + length).toISOString(),
+        // Each occurrence of a whole-day series carries its own days, shifted with it.
+        ...(event.allDay &&
+          event.startDate !== null && {
+            startDate: new Date(
+              Date.parse(`${event.startDate}T00:00:00Z`) + (start.getTime() - Date.parse(event.start)),
+            )
+              .toISOString()
+              .slice(0, 10),
+            endDate: new Date(
+              Date.parse(`${event.endDate ?? event.startDate}T00:00:00Z`) +
+                (start.getTime() - Date.parse(event.start)),
+            )
+              .toISOString()
+              .slice(0, 10),
+          }),
         seriesId: event.rule === null ? null : event.id,
         instanceStart: event.rule === null ? null : start.toISOString(),
       };
@@ -627,7 +642,7 @@ export class FakeWork {
         }
         // A 12-hour time only with am or pm; otherwise the hour is taken as written (0 to 23).
         const raw = Number(match[1]);
-        if (match[3] === undefined ? raw > 23 : raw < 1 || raw > 12) {
+        if ((match[3] === undefined ? raw > 23 : raw < 1 || raw > 12) || Number(match[2] ?? "0") > 59) {
           return reply(200, {
             ok: false,
             trigger: null,
