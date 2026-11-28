@@ -209,7 +209,8 @@ describe("adding an agent", () => {
     await app.user.type(await screen.findByLabelText("Name"), "Retry Me");
     await next(app);
     await next(app);
-    const alert = await screen.findByRole("alert");
+    // The sidebar's channel list fails too and says so in its own alert: this one is the form's.
+    const alert = await within(screen.getByRole("main")).findByRole("alert");
     expect(alert.textContent).toContain("The channels could not be loaded");
     expect(screen.getByRole("button", { name: "Next" }).hasAttribute("disabled")).toBe(true);
     await app.user.click(within(alert).getByRole("button", { name: "Retry" }));
