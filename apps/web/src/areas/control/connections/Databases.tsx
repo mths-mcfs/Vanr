@@ -23,7 +23,7 @@ import {
   SelectItem,
 } from "@vanr/ui";
 import { Plus } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { useErrorMessage } from "../../../app/screens.tsx";
 import { useMessages } from "../../../i18n/react.tsx";
 import { useOutcome } from "../shared.tsx";
@@ -73,7 +73,13 @@ export function Databases({ workspaceId }: { workspaceId: string }) {
   });
   useForgetReadOnLoss(workspaceId, READS, list.error);
   // Something gone, or no longer the person's to see, closes its dialog; a passing failure keeps it.
-  const open = isLost(list.error) ? undefined : list.data?.find((each) => each.id === editing);
+  const lost = isLost(list.error);
+  // A database that is gone, or no longer the person's to see, drops its dialog for good: a later
+  // failure of another kind never opens it again on what was read before.
+  useEffect(() => {
+    if (lost) setEditing(null);
+  }, [lost]);
+  const open = lost ? undefined : list.data?.find((each) => each.id === editing);
 
   let body: ReactNode;
   if (list.isPending) body = <PartLoading />;
@@ -213,6 +219,14 @@ export function Databases({ workspaceId }: { workspaceId: string }) {
   );
 }
 
+/** The sslmode a connection string asks for, when it names one of the three. */
+export function sslmodeIn(text: string): Tls | undefined {
+  const query = text.trim().split("?")[1];
+  if (query === undefined) return undefined;
+  const mode = new URLSearchParams(query.split("#")[0]).get("sslmode");
+  return TLS.find((each) => each === mode);
+}
+
 type Fields = { host: string; port: string; database: string; username: string };
 const NO_FIELDS: Fields = { host: "", port: "5432", database: "", username: "" };
 
@@ -254,7 +268,9 @@ function AddDatabase({
         password !== "";
   const input = (): DatabaseConnectInput => ({
     provider,
-    sslmode: tls,
+    // An sslmode written in the string wins, `require` included: the server only reads `disable` and
+    // `verify-full` from the string, so the choice sent along says the same.
+    sslmode: (by === "url" ? sslmodeIn(url) : undefined) ?? tls,
     ...(name.trim() !== "" && { label: name.trim() }),
     ...(by === "url"
       ? { url: url.trim(), ...(password !== "" && { password }) }
@@ -491,6 +507,9 @@ function EditDatabase({
   });
   const renewing = connection.status === "reauth_required";
   const ready = name.trim() !== "" && (!renewing || password !== "");
+  const actionsChanged = DB_ACTIONS.some(
+    (action) => off.has(action) !== connection.disabledActions.includes(action),
+  );
   const toggle = (action: DbAction, allowed: boolean) => {
     const next = new Set(off);
     if (allowed) next.delete(action);
@@ -524,7 +543,10 @@ function EditDatabase({
                   databaseId: connection.id,
                   body: {
                     ...(name.trim() !== connection.label && { label: name.trim() }),
-                    disabledActions: DB_ACTIONS.filter((action) => off.has(action)),
+                    // Only what changed goes: an untouched list never undoes someone else's change.
+                    ...(actionsChanged && {
+                      disabledActions: DB_ACTIONS.filter((action) => off.has(action)),
+                    }),
                     ...(password !== "" && { password }),
                   },
                 })

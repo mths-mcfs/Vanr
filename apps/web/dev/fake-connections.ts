@@ -268,7 +268,8 @@ export class FakeConnections {
         }),
       ),
       createMailAccountImap: within((scope, params) => {
-        const address = text(params.address)?.trim() ?? "";
+        // The server keeps addresses in lower case: the same mailbox typed another way is the same one.
+        const address = text(params.address)?.trim().toLowerCase() ?? "";
         const preset = text(params.preset) ?? "";
         if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(address)) {
           return fail(400, "mail.invalid_address", "Use a full e-mail address");
@@ -352,21 +353,21 @@ export class FakeConnections {
         let port = typeof params.port === "number" ? params.port : 5432;
         const url = text(params.url)?.trim();
         if (url !== undefined && url !== "") {
-          let parsed: URL;
           try {
-            parsed = new URL(url);
+            const parsed = new URL(url);
+            if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
+              return fail(400, "database.invalid_url", "Use a postgres:// URL");
+            }
+            host = parsed.hostname;
+            port = parsed.port === "" ? 5432 : Number(parsed.port);
+            database = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
+            username = decodeURIComponent(parsed.username);
+            password = password ?? decodeURIComponent(parsed.password);
+            sslmode = parsed.searchParams.get("sslmode") ?? sslmode;
           } catch {
+            // Not a URL at all, or an escape that does not decode.
             return fail(400, "database.invalid_url", "That is not a valid connection URL");
           }
-          if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
-            return fail(400, "database.invalid_url", "Use a postgres:// URL");
-          }
-          host = parsed.hostname;
-          port = parsed.port === "" ? 5432 : Number(parsed.port);
-          database = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
-          username = decodeURIComponent(parsed.username);
-          password = password ?? decodeURIComponent(parsed.password);
-          sslmode = parsed.searchParams.get("sslmode") ?? sslmode;
         }
         if (!host || !database || !username || password === undefined) {
           return fail(400, "database.fields_required", "Enter host, database, user and password");

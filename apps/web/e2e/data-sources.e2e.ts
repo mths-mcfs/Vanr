@@ -5,12 +5,14 @@
 import { expect, test } from "./fixtures.ts";
 import { type PostgresDouble, startPostgresDouble } from "./postgres-double.ts";
 
-let pg: PostgresDouble;
+let pg: PostgresDouble | undefined;
 test.beforeEach(async () => {
   pg = await startPostgresDouble();
 });
 test.afterEach(async () => {
-  await pg.stop();
+  // A double that never started has nothing to stop.
+  await pg?.stop();
+  pg = undefined;
 });
 
 test("an owner connects a database source and it holds after a reload", async ({
@@ -21,6 +23,8 @@ test("an owner connects a database source and it holds after a reload", async ({
   apiAs,
 }) => {
   const owner = await seedUser({ workspace: "Data Sources Journey" });
+  if (pg === undefined) throw new Error("the Postgres double did not start");
+  const double = pg;
   await signIn(owner);
   await page.goto(`/workspace/${owner.workspace.id}/settings/data-sources`);
   const databases = page.getByRole("region", { name: t("control", "db.title") });
@@ -31,8 +35,8 @@ test("an owner connects a database source and it holds after a reload", async ({
   const form = page.getByRole("form", { name: t("control", "db.addTitle") });
   await form.getByLabel(t("control", "db.name"), { exact: true }).fill("Shop customers");
   await form.getByRole("radio", { name: new RegExp(t("control", "db.byFields")) }).check();
-  await form.getByRole("textbox", { name: t("control", "db.host"), exact: true }).fill(pg.host);
-  await form.getByLabel(t("control", "db.port"), { exact: true }).fill(String(pg.port));
+  await form.getByRole("textbox", { name: t("control", "db.host"), exact: true }).fill(double.host);
+  await form.getByLabel(t("control", "db.port"), { exact: true }).fill(String(double.port));
   await form.getByLabel(t("control", "db.database"), { exact: true }).fill("postgres");
   await form.getByLabel(t("control", "db.username"), { exact: true }).fill("postgres");
   await form.getByLabel(t("control", "db.password"), { exact: true }).fill("double-password");
@@ -61,5 +65,5 @@ test("an owner connects a database source and it holds after a reload", async ({
   const text = await answer.text();
   expect(text.includes("double-password")).toBe(false);
   const body = JSON.parse(text) as { connections: { label: string; host: string; port?: number }[] };
-  expect(body.connections.map((each) => [each.label, each.host])).toEqual([["Shop customers", pg.host]]);
+  expect(body.connections.map((each) => [each.label, each.host])).toEqual([["Shop customers", double.host]]);
 });
