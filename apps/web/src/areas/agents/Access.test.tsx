@@ -55,6 +55,16 @@ describe("the agent's own accounts", () => {
     ]);
   });
 
+  test("a key typed for one service is not kept for another", async () => {
+    const app = await renderApp({ path: tab("agt_tally"), signedInAs: "usr_jonas" });
+    const form = await screen.findByRole("form", { name: "Connect an account" });
+    await chooseOption(app, within(form).getByRole("combobox", { name: "Service" }), "Stripe");
+    await app.user.type(within(form).getByLabelText("Key"), "stripe-secret-key");
+    await chooseOption(app, within(form).getByRole("combobox", { name: "Service" }), "Linear");
+    expect((within(form).getByLabelText("Key") as HTMLInputElement).value).toBe("");
+    expect(within(form).getByRole("button", { name: "Sign in on the service" })).toBeDefined();
+  });
+
   test("disconnecting every account asks first", async () => {
     const app = await renderApp({ path: tab("agt_scout"), signedInAs: "usr_ana" });
     await app.user.click(await screen.findByRole("button", { name: "Disconnect all accounts" }));

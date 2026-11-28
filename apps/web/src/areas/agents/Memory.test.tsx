@@ -72,6 +72,19 @@ describe("the agent's memory", () => {
     expect(await screen.findByRole("tab", { name: "Archived (2)" })).toBeDefined();
   });
 
+  test("editing starts from the note as it is now, not from a discarded draft", async () => {
+    const app = await renderApp({ path: `${BASE}?tab=memory`, signedInAs: "usr_ana" });
+    const list = await screen.findByRole("list", { name: /^Facts and decisions/ });
+    const paper = within(list).getAllByRole("listitem")[0] as HTMLElement;
+    await app.user.click(within(paper).getByRole("button", { name: "Edit" }));
+    await app.user.type(screen.getByLabelText("Text"), " Draft to drop.");
+    await app.user.click(screen.getByRole("button", { name: "Cancel" }));
+    await app.user.click(within(paper).getByRole("button", { name: "Edit" }));
+    expect((screen.getByLabelText("Text") as HTMLTextAreaElement).value).toBe(
+      "The shop orders paper on Mondays.",
+    );
+  });
+
   test("a memory that fails to load can be tried again", async () => {
     const server = newServer();
     server.force("listAgentMemories", { kind: "error", status: 503, code: "unavailable" }, 4);

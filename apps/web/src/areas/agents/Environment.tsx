@@ -403,14 +403,13 @@ function PolicyForm({
     (can(rights.role, "configure") ||
       runners.some((runner) => runner.id === runnerId && runner.pairedByUserId === rights.userId));
   const rangeList = ranges.split(/\s+/).filter((each) => each !== "");
+  const rangesChanged = rangeList.join(" ") !== saved.privateRanges.join(" ");
   const rangeCheck = checkRanges(rangeList);
   const rangesWrong = !rangeCheck.ok || rangeList.length > PRIVATE_RANGES_MAX;
   const site = normalizeSite(typed);
   const tooMany = sites.length > SITES_MAX;
   const dirty =
-    level !== saved.level ||
-    JSON.stringify(sites) !== JSON.stringify(saved.sites) ||
-    rangeList.join(" ") !== saved.privateRanges.join(" ");
+    level !== saved.level || JSON.stringify(sites) !== JSON.stringify(saved.sites) || rangesChanged;
   const sensitive = site === undefined ? null : sensitiveCategory(site.replace(/^\*\./, ""));
 
   return (
@@ -524,7 +523,11 @@ function PolicyForm({
             loading={save.isPending}
             onClick={() =>
               save.mutate(
-                { ...args, body: { level, sites, ...(mayRanges && { privateRanges: rangeList }) } },
+                {
+                  ...args,
+                  // The ranges go only when the person changed them: they open the network of the runner they are saved on.
+                  body: { level, sites, ...(mayRanges && rangesChanged && { privateRanges: rangeList }) },
+                },
                 { onSuccess: () => outcome.done(t("browser.saved")), onError: outcome.failed },
               )
             }

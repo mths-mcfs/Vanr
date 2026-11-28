@@ -153,7 +153,11 @@ function Accounts({ agent, workspaceId, rights, connections }: Props & { connect
                     value={service}
                     disabled={busy}
                     placeholder={t("access.pickService")}
-                    onValueChange={setService}
+                    onValueChange={(next) => {
+                      // A key typed for one service never goes to another.
+                      setService(next);
+                      setKey("");
+                    }}
                   >
                     {offered.map((each) => (
                       <SelectItem key={each.id} value={each.id}>

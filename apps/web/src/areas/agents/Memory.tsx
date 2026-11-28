@@ -237,7 +237,16 @@ function Note({
         </Button>
         {editable && !editing && (
           <>
-            <Button variant="ghost" size="sm" disabled={busy} onClick={() => setEditing(true)}>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={busy}
+              onClick={() => {
+                // The draft starts from the note as it is now, not as it was when the list first loaded.
+                setText(memory.text);
+                setEditing(true);
+              }}
+            >
               {t("memory.editAction")}
             </Button>
             <Button

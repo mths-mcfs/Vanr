@@ -78,6 +78,27 @@ describe("the agent's environment", () => {
     expect(app.server.runnerWork.browser.get("agt_scout")?.level).toBe("strict");
   });
 
+  test("saving the level alone leaves the private ranges where they were", async () => {
+    const server = newServer();
+    server.runnerWork.browser.set("agt_scout", {
+      level: "balanced",
+      sites: [],
+      permittedDomains: [],
+      privateRanges: ["10.0.0.0/8"],
+      privateRangesRunnerId: "rnr_shed",
+    });
+    const app = await renderApp({ path: tab("agt_scout"), signedInAs: "usr_ana", server });
+    await screen.findByText(/These ranges belong to Shed box/);
+    await app.user.click(screen.getByRole("radio", { name: /^Free/ }));
+    await app.user.click(screen.getByRole("button", { name: "Save browser policy" }));
+    expect(await screen.findByText("Browser policy saved")).toBeDefined();
+    const saved = server.runnerWork.browser.get("agt_scout");
+    expect(saved?.level).toBe("free");
+    expect(saved?.privateRangesRunnerId).toBe("rnr_shed");
+    const sent = server.calls.filter((call) => call.method === "setAgentBrowserPolicy").at(-1)?.params ?? {};
+    expect("privateRanges" in sent).toBe(false);
+  });
+
   test("a sensitive site is called out", async () => {
     const app = await renderApp({ path: tab("agt_scout"), signedInAs: "usr_ana" });
     await screen.findByText("No sites on the list.");
