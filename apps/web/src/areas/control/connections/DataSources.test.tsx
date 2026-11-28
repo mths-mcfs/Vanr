@@ -240,7 +240,7 @@ describe("databases", () => {
     const shop = row(list, "shop @ db.shop.example");
     expect(within(shop).getByText("Supabase: reader at db.shop.example, database shop")).toBeDefined();
     expect(
-      within(shop).getByText('Columns that look private: public.customers."email". Hide them on each agent.'),
+      within(shop).getByText('Columns that look private: public.customers."card_number". Hide them on each agent.'),
     ).toBeDefined();
     expect(keptNowhere(app, "s3cret")).toBe(true);
   });

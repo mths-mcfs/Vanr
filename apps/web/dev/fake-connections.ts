@@ -261,7 +261,7 @@ export class FakeConnections {
           sslmode,
           status: "active",
           canWrite: false,
-          hiddenSuggestion: ['public.customers."email"'],
+          hiddenSuggestion: ['public.customers."card_number"'],
           disabledActions: [],
           agents: [],
         };
