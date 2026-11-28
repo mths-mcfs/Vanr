@@ -40,7 +40,8 @@ test("as skills, em português", async () => {
 });
 
 test("o dinheiro do mês no formato do português", async () => {
-  await renderApp({ path: `${BASE}/agents/agt_scout`, signedInAs: "usr_iris", languages });
+  // Spend only comes to whoever may view usage: an admin here.
+  await renderApp({ path: `${BASE}/agents/agt_scout`, signedInAs: "usr_jonas", languages });
   await screen.findByRole("heading", { level: 1, name: "Scout" });
   const month = screen.getByRole("region", { name: "Este mês" });
   expect(month.textContent?.replace(/\s/g, " ")).toContain("US$ 5,00");

@@ -136,21 +136,36 @@ function Overview({ agent, workspaceId }: { agent: AgentDetail; workspaceId: str
   const owner = members.data?.find((member) => member.userId === agent.ownerUserId)?.name;
   return (
     <div className="agent-grid">
-      <Section title={t("overview.month")}>
-        <dl className="agent-facts">
-          <dt>{t("overview.runs")}</dt>
-          <dd>{agent.monthRuns}</dd>
-          <dt>{t("overview.spent")}</dt>
-          <dd>{money.format(agent.costThisMonthUsd)}</dd>
-          <dt>{t("overview.budget")}</dt>
-          <dd>
-            {t("overview.budgetUse", {
-              percent: Math.round(agent.budgetSpentPct),
-              budget: money.format(agent.budgetPerMonthUsd),
-            })}
-          </dd>
-        </dl>
-      </Section>
+      {/* The month's spend comes only to whoever may view usage: for the others the server sends nulls. */}
+      {(agent.monthRuns !== null || agent.costThisMonthUsd !== null || agent.budgetSpentPct !== null) && (
+        <Section title={t("overview.month")}>
+          <dl className="agent-facts">
+            {agent.monthRuns !== null && (
+              <>
+                <dt>{t("overview.runs")}</dt>
+                <dd>{agent.monthRuns}</dd>
+              </>
+            )}
+            {agent.costThisMonthUsd !== null && (
+              <>
+                <dt>{t("overview.spent")}</dt>
+                <dd>{money.format(agent.costThisMonthUsd)}</dd>
+              </>
+            )}
+            {agent.budgetSpentPct !== null && agent.budgetPerMonthUsd !== null && (
+              <>
+                <dt>{t("overview.budget")}</dt>
+                <dd>
+                  {t("overview.budgetUse", {
+                    percent: Math.round(agent.budgetSpentPct),
+                    budget: money.format(agent.budgetPerMonthUsd),
+                  })}
+                </dd>
+              </>
+            )}
+          </dl>
+        </Section>
+      )}
       <Section title={t("overview.where")}>
         {agent.channels.length === 0 ? (
           <p className="page__muted">{t("overview.noChannels")}</p>
