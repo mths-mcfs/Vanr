@@ -108,6 +108,7 @@ export default {
   "access.you": "{name} (you)",
   "access.pickChannel": "Pick a channel",
   "access.save": "Save",
+  "access.channelsFailed": "The channels could not be checked, so none can be picked yet.",
   "access.stillSyncing": "Some changes are still syncing. Try again in a moment, so none is lost.",
   "access.failed": "Who reads it could not be changed",
   "access.restricted": "Restricted",

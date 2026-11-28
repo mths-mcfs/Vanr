@@ -51,9 +51,11 @@ export function AccessDialog({
   const members = useApiQuery("listMembers", { workspaceId });
   const agents = useApiQuery("listAgents", { workspaceId });
   const channels = useApiQuery("listChannels", { workspaceId });
-  // The channels list has this person's direct messages too: a page can't be given to one of those.
+  // The channels list has this person's direct messages too: a page can't be given to one of those, so
+  // no channel is offered until they are known.
   const dms = useApiQuery("getDms", { workspaceId });
   const direct = new Set((dms.data ?? []).map((dm) => dm.channelId));
+  const dmsKnown = dms.data !== undefined;
   const current = page.access;
   const [kind, setKind] = useState<Kind>(current === null ? "workspace" : current.kind);
   const [people, setPeople] = useState<string[]>(
@@ -71,6 +73,11 @@ export function AccessDialog({
     onBusy(busy);
     return () => onBusy(false);
   }, [busy, onBusy]);
+  // An earlier refusal or wait says nothing about what is picked now.
+  const fresh = () => {
+    save.reset();
+    setUnsent(false);
+  };
   const toggle = (list: string[], id: string, on: boolean) =>
     on ? [...new Set([...list, id])] : list.filter((each) => each !== id);
 
@@ -83,7 +90,7 @@ export function AccessDialog({
             userIds: [...new Set([...people, ...(userId === undefined ? [] : [userId])])],
             agentIds: bots,
           }
-        : channelId === ""
+        : channelId === "" || !dmsKnown || direct.has(channelId)
           ? undefined
           : { kind: "channel", channelId };
 
@@ -105,7 +112,7 @@ export function AccessDialog({
               onClick={() => {
                 if (access === undefined) return;
                 setWaiting(true);
-                setUnsent(false);
+                fresh();
                 void beforeSave().then((ready) => {
                   setWaiting(false);
                   if (ready) save.mutate({ workspaceId, pageId: page.slug, body: { access } });
@@ -123,9 +130,10 @@ export function AccessDialog({
             aria-label={t("access.who")}
             value={kind}
             disabled={busy}
-            onValueChange={(value) =>
-              setKind(value === "private" ? "private" : value === "channel" ? "channel" : "workspace")
-            }
+            onValueChange={(value) => {
+              fresh();
+              setKind(value === "private" ? "private" : value === "channel" ? "channel" : "workspace");
+            }}
           >
             <Radio value="workspace" label={t("access.workspace")} />
             <Radio value="private" label={t("access.private")} hint={t("access.privateHint")} />
@@ -140,7 +148,10 @@ export function AccessDialog({
                   label={member.userId === userId ? t("access.you", { name: member.name }) : member.name}
                   checked={member.userId === userId || people.includes(member.userId)}
                   disabled={busy || member.userId === userId}
-                  onCheckedChange={(on) => setPeople((list) => toggle(list, member.userId, on === true))}
+                  onCheckedChange={(on) => {
+                    fresh();
+                    setPeople((list) => toggle(list, member.userId, on === true));
+                  }}
                 />
               ))}
               {(agents.data ?? []).length > 0 && <legend>{t("access.agents")}</legend>}
@@ -150,7 +161,10 @@ export function AccessDialog({
                   label={agent.name}
                   checked={bots.includes(agent.id)}
                   disabled={busy}
-                  onCheckedChange={(on) => setBots((list) => toggle(list, agent.id, on === true))}
+                  onCheckedChange={(on) => {
+                    fresh();
+                    setBots((list) => toggle(list, agent.id, on === true));
+                  }}
                 />
               ))}
             </fieldset>
@@ -160,8 +174,11 @@ export function AccessDialog({
               aria-label={t("access.pickChannel")}
               placeholder={t("access.pickChannel")}
               value={channelId}
-              disabled={busy}
-              onValueChange={setChannelId}
+              disabled={busy || !dmsKnown}
+              onValueChange={(value) => {
+                fresh();
+                setChannelId(value);
+              }}
             >
               {(channels.data ?? [])
                 .filter((channel) => !direct.has(channel.id))
@@ -171,6 +188,19 @@ export function AccessDialog({
                   </SelectItem>
                 ))}
             </Select>
+          )}
+          {kind === "channel" && dms.isError && (
+            <Callout
+              tone="warning"
+              role="alert"
+              actions={
+                <Button size="sm" variant="ghost" onClick={() => void dms.refetch()}>
+                  {common("action.retry")}
+                </Button>
+              }
+            >
+              {t("access.channelsFailed")}
+            </Callout>
           )}
           {unsent && (
             <Callout tone="warning" role="alert">

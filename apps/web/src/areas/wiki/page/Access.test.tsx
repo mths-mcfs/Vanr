@@ -202,5 +202,66 @@ describe("losing a page", () => {
     await app.user.click(within(dialog).getByRole("button", { name: "Salvar" }));
     const alert = await within(dialog).findByRole("alert");
     expect(alert.textContent?.includes("Only who created the page") === true).toBe(false);
+    expect(alert.textContent?.includes("Só quem criou a página ou um admin pode mudar quem a lê.")).toBe(
+      true,
+    );
+  });
+
+  test("no channel is offered until the direct messages are known, and none of those is", async () => {
+    const server = newServer();
+    server.dms.set("workspace_birchwood", [
+      { channelId: "ch_print", unread: 0, with: { id: "usr_jonas", name: "Jonas Lind", type: "person" } },
+    ]);
+    const held = server.hold("getDms");
+    const app = await renderApp({ path: `${WIKI}/ink-suppliers`, signedInAs: "usr_ana", server });
+    await screen.findByRole("textbox", { name: "Page title" });
+    await app.user.click(screen.getByRole("button", { name: "Page actions" }));
+    await app.user.click(await screen.findByRole("menuitem", { name: "Who reads it…" }));
+    const dialog = await screen.findByRole("dialog", { name: "Who reads Ink suppliers" });
+    await app.user.click(within(dialog).getByRole("radio", { name: "Whoever reads a channel" }));
+    const picker = within(dialog).getByRole("combobox", { name: "Pick a channel" });
+    expect(picker.hasAttribute("disabled")).toBe(true);
+    held.release();
+    await waitFor(() => expect(picker.hasAttribute("disabled")).toBe(false));
+    await app.user.click(picker);
+    const options = (await screen.findAllByRole("option")).map((option) => option.textContent);
+    expect(options.includes("#print-queue") || !options.includes("#general")).toBe(false);
+  });
+
+  test("a refusal goes once who reads it is picked again", async () => {
+    const server = newServer();
+    server.force("setWikiPageAccess", { kind: "error", status: 500, code: "internal" }, 1);
+    const app = await renderApp({ path: `${WIKI}/ink-suppliers`, signedInAs: "usr_ana", server });
+    await screen.findByRole("textbox", { name: "Page title" });
+    await app.user.click(screen.getByRole("button", { name: "Page actions" }));
+    await app.user.click(await screen.findByRole("menuitem", { name: "Who reads it…" }));
+    const dialog = await screen.findByRole("dialog", { name: "Who reads Ink suppliers" });
+    await app.user.click(within(dialog).getByRole("radio", { name: /Only some people and agents/ }));
+    await app.user.click(within(dialog).getByRole("button", { name: "Save" }));
+    expect(await within(dialog).findByRole("alert")).toBeDefined();
+    await app.user.click(within(dialog).getByRole("checkbox", { name: "Jonas Lind" }));
+    expect(within(dialog).queryByRole("alert") === null).toBe(true);
+  });
+
+  test("a member can't decide a proposal on a locked page, even past the screen", async () => {
+    const server = newServer();
+    const checklist = server.wiki.pages[0];
+    if (checklist === undefined) throw new Error("no checklist");
+    checklist.locked = true;
+    const versions = checklist.versions.length;
+    const app = await renderApp({ path: WIKI, signedInAs: "usr_iris", server });
+    await screen.findByRole("navigation", { name: "Pages by folder" });
+    const decided = await app.runtime.api.client.api
+      .decideWikiAnnotation({
+        workspaceId: "workspace_birchwood",
+        annotationId: "ann_proposal",
+        body: { decisions: [{ hunkId: "h1", accept: true }] },
+      })
+      .then(
+        () => "saved",
+        (error: { status?: number }) => error.status,
+      );
+    expect(decided).toBe(403);
+    expect(checklist.versions.length).toBe(versions);
   });
 });

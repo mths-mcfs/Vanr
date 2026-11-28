@@ -112,6 +112,7 @@ export default {
   "access.you": "{name} (você)",
   "access.pickChannel": "Escolha um canal",
   "access.save": "Salvar",
+  "access.channelsFailed": "Não foi possível conferir os canais, então nenhum pode ser escolhido ainda.",
   "access.stillSyncing":
     "Ainda há alterações sincronizando. Tente de novo em instantes, para nenhuma se perder.",
   "access.failed": "Não foi possível mudar quem lê",

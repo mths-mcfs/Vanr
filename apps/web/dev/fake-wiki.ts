@@ -678,6 +678,8 @@ export class FakeWiki {
         );
         const proposal = page?.proposals?.find((each) => each.id === params.annotationId);
         if (page === undefined || proposal === undefined) return notFound();
+        // Deciding writes the page: the same rule as any other write of it.
+        if (page.locked && !admin(scope)) return fail(403, "wiki.page_locked", "This page is locked");
         const decisions = (params.decisions as { hunkId: string; accept: boolean }[]) ?? [];
         let body = page.versions.at(-1)?.body ?? "";
         for (const decision of decisions) {

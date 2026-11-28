@@ -257,6 +257,8 @@ export class FakeServer {
   /** The client's fake: users, workspaces, members, channels and messages live in its state. */
   inner: ClientFake;
   signupOpen = true;
+  /** Each workspace's direct messages, by workspace id; their channels may be in its channel list too. */
+  dms = new Map<string, T.DirectMessage[]>();
   agents: FakeAgent[] = [];
   runs: FakeRun[] = [];
   invitations: FakeInvitation[] = [];
@@ -1193,6 +1195,11 @@ export class FakeServer {
       return reply(200, { ok: true });
     },
 
+    getDms: (params, session) => {
+      const scope = this.scope(params, session);
+      if ("status" in scope) return scope;
+      return reply(200, { dms: this.dms.get(scope.workspaceId) ?? [] });
+    },
     getInvitation: (params, session) => {
       const body = Bodies.invitation.safeParse(params);
       if (!body.success) return invalid();
