@@ -39,4 +39,24 @@ describe("the debates, in Portuguese", () => {
     await app.user.type(dialog.getByRole("textbox", { name: "Teto de gasto (%)" }), "0,05");
     expect(dialog.getByText("Use um número de 0,1 a 100.")).toBeDefined();
   });
+
+  test("a debate's page: letters while blind, the turn, and the verdict once it ends", async () => {
+    const app = await renderApp({ path: `${LIST}/deb_paper`, signedInAs: "usr_ana", languages: PT });
+    const grid = within(await screen.findByRole("table"));
+    expect(grid.getByRole("rowheader", { name: "Participante A" })).toBeDefined();
+    expect(grid.getByText("Northpaper: 2 de 3")).toBeDefined();
+    expect(screen.getByText("1 resposta está lacrada até todos desta rodada responderem.")).toBeDefined();
+    const turn = within(screen.getByRole("region", { name: "É a sua vez" }));
+    expect(turn.getByRole("button", { name: "Pular minha vez" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Concluir agora" })).toBeDefined();
+    app.unmount();
+
+    await renderApp({ path: `${LIST}/deb_logo`, signedInAs: "usr_ana", languages: PT });
+    const synthesis = within(await screen.findByRole("region", { name: "Síntese" }));
+    expect(synthesis.getByText("Use the round mark on the sign.")).toBeDefined();
+    expect(synthesis.getByRole("button", { name: "Transformar 2 passos em tarefas" })).toBeDefined();
+    expect(screen.getByText(/^Aceito por Ana Beatriz Souza/)).toBeDefined();
+    expect(screen.getByText("Gasto até agora: US$ 0,0123")).toBeDefined();
+    expect(screen.getByText("Parou porque todos concordaram.")).toBeDefined();
+  });
 });
