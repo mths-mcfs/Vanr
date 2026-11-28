@@ -620,9 +620,9 @@ export default {
   "use.noBudget": "O workspace não tem orçamento este mês.",
   "use.withIndex": "{total} ao todo, com {index} do índice de busca, que este servidor paga.",
   "use.whereFrom": {
-    one: "O orçamento do workspace é o orçamento mensal do seu {count} agente ativo. Ele cobre todo o gasto com modelos, menos o índice de busca: as execuções do agente, respostas da busca, verificações da wiki e rascunhos de agente. Quando acaba, essas chamadas param até o próximo mês.",
+    one: "O orçamento do workspace é o orçamento mensal do seu {count} agente ativo. Ele cobre todo o gasto com modelos, menos o índice de busca: as execuções do agente, respostas da busca, verificações da wiki e rascunhos de agente. Quando acaba, respostas da busca, verificações da wiki e rascunhos de agente param até o próximo mês; cada agente segue no seu próprio orçamento.",
     other:
-      "O orçamento do workspace é a soma dos orçamentos mensais dos seus {count} agentes ativos. Ele cobre todo o gasto com modelos, menos o índice de busca: as execuções dos agentes, respostas da busca, verificações da wiki e rascunhos de agente. Quando acaba, essas chamadas param até o próximo mês.",
+      "O orçamento do workspace é a soma dos orçamentos mensais dos seus {count} agentes ativos. Ele cobre todo o gasto com modelos, menos o índice de busca: as execuções dos agentes, respostas da busca, verificações da wiki e rascunhos de agente. Quando acaba, respostas da busca, verificações da wiki e rascunhos de agente param até o próximo mês; cada agente segue no seu próprio orçamento.",
   },
   "use.whereFromNoAgents":
     "Sem agentes ativos, o orçamento do workspace é o orçamento padrão de um agente. Ele cobre todo o gasto com modelos, menos o índice de busca: respostas da busca, verificações da wiki e rascunhos de agente. Quando acaba, essas chamadas param até o próximo mês.",
@@ -660,5 +660,5 @@ export default {
   "use.defaultInvalid": "Um valor de 0 a {max}, como {example}.",
   "use.defaultReadOnly": "Só quem configura o workspace muda isto.",
   "use.defaultSave": "Salvar padrão",
-  "use.defaultSaved": "Agentes novos agora recebem {budget} por mês.",
+  "use.defaultSaved": "Agentes sem orçamento próprio agora recebem {budget} por mês.",
 } satisfies TranslationOf<typeof en>;

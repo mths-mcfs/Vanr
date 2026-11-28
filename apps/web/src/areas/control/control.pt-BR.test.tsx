@@ -139,5 +139,7 @@ test("the usage section, in Portuguese", async () => {
   await app.user.clear(field);
   await app.user.type(field, "12,50");
   await app.user.click(within(form).getByRole("button", { name: "Salvar padrão" }));
-  expect(await screen.findByText("Agentes novos agora recebem US$ 12,50 por mês.")).toBeDefined();
+  expect(
+    await screen.findByText("Agentes sem orçamento próprio agora recebem US$ 12,50 por mês."),
+  ).toBeDefined();
 });

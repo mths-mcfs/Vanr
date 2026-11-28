@@ -613,9 +613,9 @@ export default {
   "use.noBudget": "The workspace has no budget this month.",
   "use.withIndex": "{total} in all, with {index} for the search index, which this server pays.",
   "use.whereFrom": {
-    one: "The workspace's budget is the monthly budget of its {count} active agent. It covers all of its model spend except the search index: the agent's runs, search answers, wiki checks and agent drafts. Once it is spent, those calls stop until next month.",
+    one: "The workspace's budget is the monthly budget of its {count} active agent. It covers all of its model spend except the search index: the agent's runs, search answers, wiki checks and agent drafts. Once it is spent, search answers, wiki checks and agent drafts stop until next month; each agent keeps to its own budget.",
     other:
-      "The workspace's budget is the sum of the monthly budgets of its {count} active agents. It covers all of its model spend except the search index: the agents' runs, search answers, wiki checks and agent drafts. Once it is spent, those calls stop until next month.",
+      "The workspace's budget is the sum of the monthly budgets of its {count} active agents. It covers all of its model spend except the search index: the agents' runs, search answers, wiki checks and agent drafts. Once it is spent, search answers, wiki checks and agent drafts stop until next month; each agent keeps to its own budget.",
   },
   "use.whereFromNoAgents":
     "With no active agents, the workspace's budget is one agent's default budget. It covers all of its model spend except the search index: search answers, wiki checks and agent drafts. Once it is spent, those calls stop until next month.",
@@ -653,5 +653,5 @@ export default {
   "use.defaultInvalid": "An amount from 0 to {max}, such as {example}.",
   "use.defaultReadOnly": "Only someone who configures the workspace changes this.",
   "use.defaultSave": "Save default",
-  "use.defaultSaved": "New agents now get {budget} a month.",
+  "use.defaultSaved": "Agents with no budget of their own now get {budget} a month.",
 } as const satisfies Catalog;

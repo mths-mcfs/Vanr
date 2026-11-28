@@ -132,7 +132,9 @@ describe("the default agent budget", () => {
     await app.user.clear(field);
     await app.user.type(field, "12.50");
     await app.user.click(within(await form()).getByRole("button", { name: "Save default" }));
-    expect(await screen.findByText("New agents now get $12.50 a month.")).toBeDefined();
+    expect(
+      await screen.findByText("Agents with no budget of their own now get $12.50 a month."),
+    ).toBeDefined();
     expect(
       app.server.calls.find((call) => call.method === "updateSettings")?.params.agentBudgetDefaultUsd,
     ).toBe(12.5);
