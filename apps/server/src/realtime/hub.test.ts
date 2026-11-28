@@ -113,17 +113,26 @@ describe("realtime hub", () => {
     expect(fabi.frames).toEqual([]);
   });
 
-  test("losing access: from one channel stops its events; from the workspace closes the sockets with 4003", async () => {
+  test("losing access: from one channel stops its events and says so; from the workspace closes the sockets with 4003", async () => {
     const gabi = await connect("w5", "gabi");
+    const gabiOtherTab = await connect("w5", "gabi");
     hub.subscribe(gabi.socket, "c5");
     hub.subscribe(gabi.socket, "c6");
     hub.dropUser("w5", "gabi", "c5");
     hub.toChannel("c5", event("message.posted"));
     hub.toChannel("c6", event("message.posted"));
     await settle();
-    expect(gabi.frames).toEqual([{ type: "event", channelId: "c6", event: event("message.posted") }]);
+    expect(gabi.frames).toEqual([
+      { type: "unsubscribed", channelId: "c5" },
+      { type: "event", channelId: "c6", event: event("message.posted") },
+    ]);
+    // A tab that didn't follow the channel has nothing to drop.
+    expect(gabiOtherTab.frames).toEqual([]);
+    gabi.frames.length = 0;
     hub.dropUser("w5", "gabi");
     expect(await gabi.closed).toBe(4003);
+    expect(gabi.frames).toEqual([{ type: "unsubscribed", channelId: "c6" }]);
+    expect(await gabiOtherTab.closed).toBe(4003);
   });
 
   test("a listener sees every publication with its target until it unsubscribes", async () => {

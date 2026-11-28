@@ -1,8 +1,11 @@
 // The web's part of real time: one connection per open workspace, channel subscriptions counted,
 // and the refetch of the few calls the client's own table does not tie to an event.
 import { describe, expect, test } from "bun:test";
+import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { act, render, screen, waitFor } from "@testing-library/react";
-import { useApiQuery } from "@vanr/client/react";
+import type { VanrClient } from "@vanr/client";
+import { queryKey, useApiQuery, useVanrClient } from "@vanr/client/react";
+import type { ThreadInfo } from "@vanr/contract";
 import { type ReactNode, StrictMode } from "react";
 import { newTestRuntime } from "../../test/app.tsx";
 import { AppProviders } from "../app/context.tsx";
@@ -106,5 +109,52 @@ describe("refetching on an event", () => {
     const before = app.server.calls.filter((call) => call.method === "getOverview").length;
     await act(async () => app.server.emit(WORKSPACE, { type: "run.status_changed", agentId: "agt_scout" }));
     expect(app.server.calls.filter((call) => call.method === "getOverview")).toHaveLength(before);
+  });
+});
+
+describe("losing a channel", () => {
+  const caches: { queryClient?: QueryClient; client?: VanrClient } = {};
+  function Caches() {
+    caches.queryClient = useQueryClient();
+    caches.client = useVanrClient();
+    return null;
+  }
+  const thread = (id: string, channelId: string, from = channelId) =>
+    ({ id, channelId, context: { channelId: from } }) as unknown as ThreadInfo;
+
+  test("drops the channel's threads, one moved out of it too, and leaves the others", async () => {
+    const app = await mount(
+      <>
+        <Caches />
+        <Follower channelId="ch_vault" />
+      </>,
+    );
+    await waitFor(() => expect(app.server.openSockets()[0]?.channels).toEqual(["ch_vault"]));
+    const { queryClient, client } = caches;
+    if (queryClient === undefined || client === undefined) throw new Error("no caches");
+    const key = (method: "getThread" | "getThreadAssignment", threadId: string) =>
+      queryKey(client, method, { workspaceId: WORKSPACE, threadId });
+    const channelThreads = queryKey(client, "listChannelThreads", {
+      workspaceId: WORKSPACE,
+      channelId: "ch_vault",
+    });
+    queryClient.setQueryData(key("getThread", "thr_in"), thread("thr_in", "ch_vault"));
+    queryClient.setQueryData(key("getThreadAssignment", "thr_in"), { assignment: null });
+    queryClient.setQueryData(key("getThread", "thr_moved"), thread("thr_moved", "ch_general", "ch_vault"));
+    queryClient.setQueryData(key("getThread", "thr_other"), thread("thr_other", "ch_general"));
+    queryClient.setQueryData(channelThreads, { threads: [], nextCursor: null });
+    const lists = queryKey(client, "listThreads", { workspaceId: WORKSPACE });
+    queryClient.setQueryData(lists, { threads: [thread("thr_in", "ch_vault")], nextCursor: null });
+
+    await act(async () => app.server.dropFromChannel("usr_ana", "ch_vault"));
+
+    await waitFor(() =>
+      expect(queryClient.getQueryData(key("getThread", "thr_in")) === undefined).toBe(true),
+    );
+    expect(queryClient.getQueryData(key("getThreadAssignment", "thr_in")) === undefined).toBe(true);
+    expect(queryClient.getQueryData(key("getThread", "thr_moved")) === undefined).toBe(true);
+    expect(queryClient.getQueryData(channelThreads) === undefined).toBe(true);
+    expect(queryClient.getQueryData(lists) === undefined).toBe(true);
+    expect(queryClient.getQueryData(key("getThread", "thr_other")) === undefined).toBe(false);
   });
 });

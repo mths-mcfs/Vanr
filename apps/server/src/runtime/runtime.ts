@@ -45,7 +45,7 @@ import { type AgentRow, agentBudgetScope, agentNames, monthKey, workspaceBudgetD
 import { assignmentOfRun } from "../assignments/budget";
 import { publishAssignment } from "../assignments/core";
 import { assignmentPrompt, assignmentRouting } from "../assignments/tools";
-import { type ChannelRow, channelBudgetScope, channelSpendScope } from "../channels";
+import { type ChannelRow, canReadChannel, channelBudgetScope, channelSpendScope } from "../channels";
 import type { AppDeps, CompleteInput, CompleteResult, RuntimePort } from "../context";
 import {
   DECISION_TTL_MS,
@@ -63,10 +63,11 @@ import { resumeStorageMigrations } from "../integrations/storage";
 import { toolsFor } from "../integrations/tools";
 import { settleIssueWork } from "../issues";
 import { log } from "../logger";
-import { type MessageRow, postMessage } from "../messages";
+import { type MessageRow, postMessage, shownBody } from "../messages";
 import { closeNotifications, notificationTick } from "../notifications";
 import { deliverDue } from "../outbox";
 import { drainQueues, dueRoutines } from "../routines";
+import { mayStopRun } from "../run-access";
 import {
   canUsePlan,
   EXECUTOR_NAME,
@@ -336,6 +337,12 @@ const capsOf = (live: Pick<Live, "limits" | "assignment">): BudgetScope[] => [
 
 export const requesterOf = (row: Pick<MessageRow, "authorKind" | "authorId" | "meta">) =>
   row.meta.routine ? null : personOf(row);
+
+/** What `mayStopRun` reads of a live run. */
+const stopInfo = (live: Pick<Live, "trigger" | "agent">) => ({
+  initiatedBy: requesterOf(live.trigger),
+  ownerUserId: live.agent.ownerUserId,
+});
 /**
  * The budget is the API's. An agent that thinks on a runner (a plan, no cost here) isn't stopped before the
  * run; if the run falls back to the model through the API, the run itself checks the budget before calling.
@@ -666,10 +673,10 @@ export class AgentRuntime implements RuntimePort {
     return l ? { workspaceId: l.workspaceId, channelId: l.channel.id } : null;
   }
 
-  /** Who may stop: whoever triggered it, the agent's owner (the route decides the rest). */
-  liveInfo(runId: string): { triggerAuthorId: string; ownerUserId: string } | null {
+  /** What `mayStopRun` reads of a live run (the route adds the person's role). */
+  liveInfo(runId: string): { initiatedBy: string | null; ownerUserId: string } | null {
     const l = this.live.get(runId);
-    return l ? { triggerAuthorId: l.trigger.authorId, ownerUserId: l.agent.ownerUserId } : null;
+    return l ? stopInfo(l) : null;
   }
 
   // ---- control ----
@@ -1151,20 +1158,37 @@ export class AgentRuntime implements RuntimePort {
    * Whether the live run puts this message off to the next run instead of taking it: the run is ending, it runs
    * on the plan of whoever paired (not even someone else's "stop" touches it), it is pinned to another person,
    * or the agent has a runner the message's author may not use (the run's tools act with its starter's access).
+   * A "stop" from whoever may stop the run (`stopsRun`) is taken past the last two: it ends the run, it doesn't
+   * talk to it.
    */
-  private async defers(live: Live, row: MessageRow): Promise<boolean> {
+  private async defers(live: Live, row: MessageRow, stop?: boolean): Promise<boolean> {
     const who = personOf(row);
-    // The one await first, so the checks below read the run as it is now.
+    // The awaits first, so the checks below read the run as it is now.
+    const stops = stop ?? (await this.stopsRun(live, row));
     const barred =
       who !== null &&
       live.runner !== null &&
       who !== requesterOf(live.trigger) &&
-      !isStopRequest(row.body) &&
+      !stops &&
       !(await this.mayUseRunner(live.workspaceId, who, live.runner));
     if (ending(live)) return true;
     if (live.plan && !canUsePlan(who, live.plan)) return true;
-    if (who !== null && who !== live.person.id && live.person.pinned) return true;
+    if (!stops && who !== null && who !== live.person.id && live.person.pinned) return true;
     return barred;
+  }
+
+  /**
+   * A lone "stop" stops the run only from someone who may stop it (`mayStopRun`, as the Stop button). From anyone
+   * else, or from an agent, it is an ordinary message.
+   */
+  private async stopsRun(live: Live, row: MessageRow): Promise<boolean> {
+    const who = personOf(row);
+    if (who === null || !isStopRequest(row.body)) return false;
+    const [member] = await this.deps.db
+      .select({ role: members.role })
+      .from(members)
+      .where(and(eq(members.workspaceId, live.workspaceId), eq(members.userId, who)));
+    return !!member && mayStopRun({ userId: who, role: member.role }, stopInfo(live));
   }
 
   private mayUseRunner(workspaceId: string, userId: string, runner: RunnerRow): Promise<boolean> {
@@ -1178,8 +1202,8 @@ export class AgentRuntime implements RuntimePort {
    */
   private async steer(live: Live, row: MessageRow, keep = true): Promise<string | null> {
     const { db } = this.deps;
-    const stop = isStopRequest(row.body);
-    if (!(await this.defers(live, row))) {
+    const stop = await this.stopsRun(live, row);
+    if (!(await this.defers(live, row, stop))) {
       await db
         .insert(messageDispatches)
         .values({ messageId: row.id, agentId: live.agent.id, state: "claimed", runId: live.runId })
@@ -2175,11 +2199,12 @@ export class AgentRuntime implements RuntimePort {
       this.noteUntrusted(live, r);
       if (r.authorKind === "agent" && r.authorId === live.agent.id) {
         if (out.length === 0) continue; // the first turn has to be the asker's
-        out.push({ role: "assistant", content: [{ type: "text", text: r.body || "(no text)" }] });
+        // A retracted post was taken back: the agent doesn't read it again either.
+        out.push({ role: "assistant", content: [{ type: "text", text: shownBody(r) || "(no text)" }] });
       } else {
         out.push({
           role: "user",
-          content: [{ type: "text", text: `${names.get(r.authorId) ?? "?"}: ${r.body}` }],
+          content: [{ type: "text", text: `${names.get(r.authorId) ?? "?"}: ${shownBody(r)}` }],
         });
       }
     }
@@ -2679,10 +2704,13 @@ export class AgentRuntime implements RuntimePort {
       .from(members)
       .where(and(eq(members.workspaceId, row.workspaceId), inArray(members.role, ["owner", "admin"])));
     const to = new Set([...admins.map((a) => a.userId), ...(requesterId ? [requesterId] : [])]);
-    const recipients: { userId: string; sees: boolean }[] = [];
+    // The channel's name follows the channel: an admin outside a private channel hears that one ran out, not which.
+    const recipients: { userId: string; sees: boolean; reads: boolean }[] = [];
     for (const userId of to) {
       const sees = await this.seesUsage(row.workspaceId, userId);
-      if (sees || level === "exhausted") recipients.push({ userId, sees });
+      if (!sees && level !== "exhausted") continue;
+      const reads = await canReadChannel(db, { workspaceId: row.workspaceId, userId, channelId });
+      recipients.push({ userId, sees, reads });
     }
     // Whoever writes the notice first tells: two checks at the same time don't send two.
     const claimed = await db
@@ -2696,11 +2724,11 @@ export class AgentRuntime implements RuntimePort {
       )
       .returning({ id: channels.id });
     if (claimed.length === 0) return;
-    for (const { userId, sees } of recipients)
+    for (const { userId, sees, reads } of recipients)
       hub.toUser(row.workspaceId, userId, {
         type: "channel.budget",
         channelId,
-        channelName: row.name,
+        channelName: reads ? row.name : null,
         level,
         spentUsd: sees ? spent : null,
         budgetUsd: sees ? scope.limitUsd : null,
