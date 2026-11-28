@@ -83,6 +83,7 @@ describe("an issue's page", () => {
     for (const number of ["99", "abc", "0", "3"]) {
       const view = await renderApp({ path: issuePage(number), signedInAs: "usr_iris", server });
       expect(await screen.findByText("This issue isn't here")).toBeDefined();
+      expect(screen.getByRole("heading", { level: 1, name: "Issue" })).toBeDefined();
       expect(screen.getByRole("link", { name: "All issues" })).toBeDefined();
       view.unmount();
     }

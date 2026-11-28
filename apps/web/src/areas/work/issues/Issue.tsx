@@ -40,8 +40,10 @@ export function IssueScreen() {
 
 function Missing({ workspaceId }: { workspaceId: string }) {
   const t = useMessages("work");
+  const shell = useMessages("shell");
   return (
     <div className="page">
+      <h1 className="page__title">{shell("route.issue")}</h1>
       <EmptyState
         className="page__narrow"
         title={t("issue.missing.title")}
@@ -64,7 +66,10 @@ function IssueView({ workspaceId, issueSeq }: { workspaceId: string; issueSeq: s
     { workspaceId, issueSeq },
     { enabled: valid, refetchInterval: ISSUES_REFRESH_MS },
   );
-  useDocumentTitle(issue.data === undefined ? undefined : `#${issue.data.number} ${issue.data.title}`);
+  const shell = useMessages("shell");
+  useDocumentTitle(
+    issue.data === undefined ? shell("route.issue") : `#${issue.data.number} ${issue.data.title}`,
+  );
   if (!valid) return <Missing workspaceId={workspaceId} />;
   if (issue.isPending) return <ScreenLoading />;
   if (issue.isError && issue.data === undefined) {
