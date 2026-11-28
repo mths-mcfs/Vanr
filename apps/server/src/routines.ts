@@ -379,6 +379,8 @@ export const PENDING_STALE_MS = 2 * 60_000;
 export interface RoutineContext {
   text: string;
   untrusted?: string;
+  /** The channel the text comes from: checked again when the run starts, since the target may have changed. */
+  channelId?: string;
 }
 
 /**
@@ -917,6 +919,13 @@ async function execute(
   if (planOwner !== null && planOwner !== row.createdBy)
     return fail("routines.run.personal_plan", `${agent.name} ${PERSONAL_PLAN_TEXT}`, "personal_plan");
   const target = targetOf(row);
+  // A run waiting (queued, retrying) when its routine was pointed elsewhere doesn't carry a private channel's text there.
+  if (context?.channelId && !(await contextReaches(db, row, context.channelId)))
+    return fail(
+      "routines.run.private_context",
+      "The routine now answers where the event's channel can't be read",
+      "private_context",
+    );
   const prompt = context
     ? `${row.prompt}${CONTEXT_SEPARATOR}${context.text.slice(0, ROUTINE_CONTEXT_CHARS)}`
     : row.prompt;
@@ -1269,12 +1278,12 @@ export async function fireRoutineEvent(
         sql`${routines.trigger}->>'kind' = 'event' and ${routines.trigger}->>'event' = ${input.event}`,
       ),
     );
-  const rows = await keptInChannel(deps.db, candidates, input.workspaceId, input.channelId ?? null);
+  const rows = await keptInChannel(deps.db, candidates, input.channelId ?? null);
   for (const row of rows) {
     const reg = await registerFire(deps, row.id, {
       trigger: "event",
       key: `event:${input.event}:${input.eventId}`,
-      context: { text: input.context },
+      context: { text: input.context, ...(input.channelId ? { channelId: input.channelId } : {}) },
     });
     if (!reg.duplicate) deps.runtime.track(startRoutineRun(deps, reg.run), "routine.event");
   }
@@ -1285,23 +1294,21 @@ export async function fireRoutineEvent(
  * channel's or a DM's reaches only a routine whose creator reads that channel and that answers back in it or in
  * the creator's own DM with the agent, so its text never lands where someone outside the channel reads it.
  */
-async function keptInChannel(
-  db: Db,
-  rows: RoutineRow[],
-  workspaceId: string,
-  channelId: string | null,
-): Promise<RoutineRow[]> {
+async function keptInChannel(db: Db, rows: RoutineRow[], channelId: string | null): Promise<RoutineRow[]> {
   if (channelId === null) return rows;
-  const channel = await channelInWorkspace(db, workspaceId, channelId);
-  if (channel?.kind === "channel" && channel.visibility === "public") return rows;
   const kept: RoutineRow[] = [];
-  for (const row of rows) {
-    const target = targetOf(row);
-    const ownDm = target.kind === "dm" || target.kind === "conversation";
-    if (!ownDm && !(target.kind === "channel" && target.channelId === channelId)) continue;
-    if (await canReadChannel(db, { workspaceId, userId: row.createdBy, channelId })) kept.push(row);
-  }
+  for (const row of rows) if (await contextReaches(db, row, channelId)) kept.push(row);
   return kept;
+}
+
+/** Whether text from `channelId` may reach this routine, by the rule of `keptInChannel`. */
+async function contextReaches(db: Db, row: RoutineRow, channelId: string): Promise<boolean> {
+  const channel = await channelInWorkspace(db, row.workspaceId, channelId);
+  if (channel?.kind === "channel" && channel.visibility === "public") return true;
+  const target = targetOf(row);
+  const ownDm = target.kind === "dm" || target.kind === "conversation";
+  if (!ownDm && !(target.kind === "channel" && target.channelId === channelId)) return false;
+  return canReadChannel(db, { workspaceId: row.workspaceId, userId: row.createdBy, channelId });
 }
 
 /** Who sees it: whoever created it; and everyone who reads the target channel or sees the workspace's Drive and debates. */

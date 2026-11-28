@@ -567,6 +567,24 @@ export async function backfillSearch(deps: Pick<AppDeps, "db" | "search">, batch
     }
     n += ids.length;
   }
+  // Issues of a channel indexed when every issue was the whole workspace's: built again with their channel's scope.
+  const widened = sql`select ${issues.id} as id from ${issues}
+    where ${issues.channelId} is not null and exists (
+      select 1 from ${searchChunks} c
+      where c.source_kind = 'issue' and c.source_id = ${issues.id} and c.scope_kind = 'workspace')
+    limit ${batch}`;
+  const rebuilt = new Set<string>();
+  for (;;) {
+    const ids = rowsOf(await deps.db.execute(widened))
+      .map((r) => String(r.id))
+      .filter((id) => !rebuilt.has(id));
+    if (!ids.length) break;
+    for (const id of ids) {
+      rebuilt.add(id);
+      await reindex(deps, { kind: "issue", id });
+    }
+    n += ids.length;
+  }
   return n;
 }
 
