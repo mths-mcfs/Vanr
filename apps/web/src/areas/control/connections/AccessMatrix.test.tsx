@@ -89,6 +89,38 @@ describe("the access matrix", () => {
     expect(server.connections.grants.get("agt_tally")?.some((g) => g.scope === "*")).toBe(true);
   });
 
+  test("turning everything off builds on the access as it is now", async () => {
+    const server = newServer();
+    server.connections.grants.set("agt_tally", [{ connectionId: "", scope: "*" }]);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const all = await within(rowOf(await grid(), "Tally")).findByRole("switch", {
+      name: "Everything for Tally",
+    });
+    // Someone else denies a tool after this screen loaded.
+    server.connections.grants.get("agt_tally")?.push({ connectionId: "", scope: "deny:delete_file" });
+    await app.user.click(all);
+    await act(async () => {});
+    expect(server.connections.grants.get("agt_tally")?.some((g) => g.scope === "deny:delete_file")).toBe(
+      true,
+    );
+  });
+
+  test("a row whose answer lost a connection leaves that column without a control", async () => {
+    const server = newServer();
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    await within(rowOf(await grid(), "Ledger")).findByRole("switch", { name: "Everything for Ledger" });
+    server.agentAccess.shared.length = 0;
+    await act(async () => {
+      await app.runtime.queryClient.refetchQueries({
+        predicate: (query) => JSON.stringify(query.queryKey).includes("agt_ledger"),
+      });
+    });
+    const ledger = rowOf(await grid(), "Ledger");
+    expect(await within(ledger).findByText("Removed")).toBeDefined();
+    expect(within(ledger).queryByRole("combobox") === null).toBe(true);
+    expect(within(await grid()).getByRole("columnheader", { name: "Team Linear" })).toBeDefined();
+  });
+
   test("two quick changes of one agent write once", async () => {
     const app = await renderApp({ path: PATH, signedInAs: "usr_jonas" });
     const all = await within(rowOf(await grid(), "Ledger")).findByRole("switch", {

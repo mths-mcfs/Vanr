@@ -38,12 +38,16 @@ export function useAccessChange(workspaceId: string, agentId: string, onDone?: (
     setLevel: (connection: AgentAccess["connectors"][number], level: ConnLevel) =>
       rewrite((current) => withLevel(current, connection, level)),
     setBuiltin: (scope: string, on: boolean) => rewrite((current) => withBuiltin(current, scope, on)),
-    setEverything: (access: AgentAccess, on: boolean) =>
+    setEverything: (on: boolean) =>
       on
         ? latch(() => everything.mutateAsync({ ...args, body: { all: true } }).then(() => onDone?.(), failed))
-        : latch(() =>
-            scopes
-              .mutateAsync({ ...args, body: { scopes: everythingSpelledOut(access) } })
+        : // Spelled out from the access as it is now, not as the screen last saw it.
+          latch(() =>
+            client
+              .call("getAgentAccess", args)
+              .then((access) =>
+                scopes.mutateAsync({ ...args, body: { scopes: everythingSpelledOut(access) } }),
+              )
               .then(() => onDone?.(), failed),
           ),
   };

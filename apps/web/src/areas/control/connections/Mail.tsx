@@ -19,7 +19,7 @@ import {
   SelectItem,
 } from "@vanr/ui";
 import { Plus } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { useErrorMessage } from "../../../app/screens.tsx";
 import { useMessages } from "../../../i18n/react.tsx";
 import { useOutcome } from "../shared.tsx";
@@ -34,6 +34,7 @@ import {
   useForgetOnLoss,
   useForgetReadOnLoss,
   useLatch,
+  useReturnFocus,
 } from "./shared.tsx";
 
 // The server's limits (routes/integrations.ts, imapInput; integrations/mail.ts, mailUpdateInput).
@@ -60,6 +61,7 @@ export function MailAccounts({ workspaceId }: { workspaceId: string }) {
   const t = useMessages("control");
   const outcome = useOutcome();
   const latch = useLatch();
+  const focus = useReturnFocus();
   const forget = useForgetOnLoss(workspaceId, READS);
   const accounts = useApiQuery("listMailAccounts", { workspaceId });
   const [adding, setAdding] = useState(false);
@@ -105,7 +107,10 @@ export function MailAccounts({ workspaceId }: { workspaceId: string }) {
                   size="sm"
                   variant={account.status === "reauth_required" ? "primary" : "secondary"}
                   aria-label={t("box.editNamed", { address: account.address })}
-                  onClick={() => setEditing(account.id)}
+                  onClick={() => {
+                    focus.remember();
+                    setEditing(account.id);
+                  }}
                 >
                   {t(account.status === "reauth_required" ? "box.renew" : "wire.edit")}
                 </Button>
@@ -113,7 +118,10 @@ export function MailAccounts({ workspaceId }: { workspaceId: string }) {
                   size="sm"
                   variant="ghost"
                   aria-label={t("box.disconnectNamed", { address: account.address })}
-                  onClick={() => setRemoving(account)}
+                  onClick={() => {
+                    focus.remember();
+                    setRemoving(account);
+                  }}
                 >
                   {t("svc.disconnect")}
                 </Button>
@@ -129,22 +137,37 @@ export function MailAccounts({ workspaceId }: { workspaceId: string }) {
       title={t("box.title")}
       lead={t("box.lead")}
       action={
-        <Button icon={<Icon icon={Plus} />} onClick={() => setAdding(true)}>
+        <Button
+          icon={<Icon icon={Plus} />}
+          onClick={() => {
+            focus.remember();
+            setAdding(true);
+          }}
+        >
           {t("box.add")}
         </Button>
       }
     >
       {body}
-      {adding && <AddMailbox key={workspaceId} workspaceId={workspaceId} onClose={() => setAdding(false)} />}
+      {adding && (
+        <AddMailbox
+          key={workspaceId}
+          workspaceId={workspaceId}
+          onClose={() => setAdding(false)}
+          onCloseAutoFocus={focus.onCloseAutoFocus}
+        />
+      )}
       {open !== undefined && (
         <EditMailbox
           key={`${workspaceId}/${open.id}`}
           workspaceId={workspaceId}
           account={open}
           onClose={() => setEditing(null)}
+          onCloseAutoFocus={focus.onCloseAutoFocus}
         />
       )}
       <ConfirmDialog
+        returnFocus={focus.back}
         open={removing !== null}
         onOpenChange={(next) => {
           if (!next && !remove.isPending) setRemoving(null);
@@ -181,10 +204,20 @@ type Servers = { imapHost: string; imapPort: string; smtpHost: string; smtpPort:
 const NO_SERVERS: Servers = { imapHost: "", imapPort: "993", smtpHost: "", smtpPort: "587" };
 
 /** Connects a mailbox. The password lives only in this dialog and leaves with the one call. */
-function AddMailbox({ workspaceId, onClose }: { workspaceId: string; onClose: () => void }) {
+function AddMailbox({
+  workspaceId,
+  onClose,
+  onCloseAutoFocus,
+}: {
+  workspaceId: string;
+  onClose: () => void;
+  onCloseAutoFocus: (event: Event) => void;
+}) {
   const t = useMessages("control");
   const common = useMessages("common");
   const providers = useApiQuery("listMailProviders", { workspaceId });
+  // While a connection is on its way the dialog stays: Escape, the overlay and the close button too.
+  const [busy, setBusy] = useState(false);
   let body: ReactNode;
   if (providers.isPending) body = <PartLoading />;
   else if (providers.isError)
@@ -195,15 +228,19 @@ function AddMailbox({ workspaceId, onClose }: { workspaceId: string; onClose: ()
         onRetry={() => void providers.refetch()}
       />
     );
-  else body = <MailboxForm workspaceId={workspaceId} providers={providers.data} onClose={onClose} />;
+  else
+    body = (
+      <MailboxForm workspaceId={workspaceId} providers={providers.data} onClose={onClose} onBusy={setBusy} />
+    );
   return (
     <Dialog
       open
       onOpenChange={(next) => {
-        if (!next) onClose();
+        if (!next && !busy) onClose();
       }}
     >
       <DialogContent
+        onCloseAutoFocus={onCloseAutoFocus}
         size="md"
         closeLabel={common("action.close")}
         title={t("box.addTitle")}
@@ -219,10 +256,12 @@ function MailboxForm({
   workspaceId,
   providers,
   onClose,
+  onBusy,
 }: {
   workspaceId: string;
   providers: MailProviders;
   onClose: () => void;
+  onBusy: (busy: boolean) => void;
 }) {
   const t = useMessages("control");
   const common = useMessages("common");
@@ -249,6 +288,16 @@ function MailboxForm({
       smtpPort !== null);
   const ready = address.trim().length >= 3 && password !== "" && serversReady;
   const busy = connect.isPending || hosted.isPending;
+  useEffect(() => onBusy(busy), [busy, onBusy]);
+  const forget = useForgetOnLoss(workspaceId, READS);
+  // Access lost while the dialog was open closes it and says why; any other failure keeps what was typed.
+  const lost = (error: unknown) => {
+    forget(error);
+    if (isLost(error)) {
+      outcome.failed(error);
+      onClose();
+    }
+  };
   const failure = connect.error ?? hosted.error;
   const portError = (text: string) =>
     text.trim() !== "" && portOf(text) === null ? t("wire.portInvalid") : undefined;
@@ -268,7 +317,7 @@ function MailboxForm({
                   latch(() =>
                     hosted
                       .mutateAsync({ workspaceId, body: { provider } })
-                      .then((answer) => leaveFor(answer.redirectUrl)),
+                      .then((answer) => leaveFor(answer.redirectUrl), lost),
                   )
                 }
               >
@@ -308,7 +357,7 @@ function MailboxForm({
                 connect.reset();
                 outcome.done(t("box.connected", { address: answer.address }));
                 onClose();
-              }),
+              }, lost),
           );
         }}
       >
@@ -404,7 +453,7 @@ function MailboxForm({
             </div>
           </>
         )}
-        {failure !== null && (
+        {failure !== null && !isLost(failure) && (
           <Callout tone="danger" role="alert">
             {describe(failure)}
           </Callout>
@@ -435,10 +484,12 @@ function EditMailbox({
   workspaceId,
   account,
   onClose,
+  onCloseAutoFocus,
 }: {
   workspaceId: string;
   account: MailAccount;
   onClose: () => void;
+  onCloseAutoFocus: (event: Event) => void;
 }) {
   const t = useMessages("control");
   const common = useMessages("common");
@@ -469,6 +520,7 @@ function EditMailbox({
       }}
     >
       <DialogContent
+        onCloseAutoFocus={onCloseAutoFocus}
         size="lg"
         closeLabel={common("action.close")}
         title={account.address}

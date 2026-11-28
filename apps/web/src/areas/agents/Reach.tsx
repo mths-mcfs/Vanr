@@ -64,7 +64,7 @@ function ReachForm({
         disabled={locked}
         label={t("reach.everything")}
         hint={t(access.all ? "reach.everythingOn" : "reach.everythingOff")}
-        onCheckedChange={(on) => change.setEverything(access, on)}
+        onCheckedChange={(on) => change.setEverything(on)}
       />
       <fieldset className="reach__group" disabled={access.all}>
         <legend className="page__heading">{t("reach.areas")}</legend>

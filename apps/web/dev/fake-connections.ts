@@ -131,6 +131,15 @@ export class FakeConnections {
     this.oauthServers = new Set();
   }
 
+  private dropGrants(connectionId: string): void {
+    for (const [agentId, grants] of this.grants) {
+      this.grants.set(
+        agentId,
+        grants.filter((grant) => grant.connectionId !== connectionId),
+      );
+    }
+  }
+
   operations(): Record<string, (params: Record<string, unknown>, session: string | undefined) => FilesReply> {
     const within =
       (handler: (scope: Scope, params: Record<string, unknown>) => FilesReply, configure = false) =>
@@ -425,15 +434,14 @@ export class FakeConnections {
         const confirm =
           params.confirmActions === undefined ? [] : actions(params.confirmActions, MAIL_ACTIONS);
         if (disabled === undefined || confirm === undefined) return fail(400, "validation", "Invalid body");
+        // A refused password changes nothing, as on the server.
+        if (params.password === "wrong-password") {
+          return fail(400, "mail.auth", "The mail server rejected the password");
+        }
         if (text(params.label) !== undefined) account.label = text(params.label)?.trim() ?? account.label;
         if (params.disabledActions !== undefined) account.disabledActions = disabled;
         if (params.confirmActions !== undefined) account.confirmActions = confirm;
-        if (text(params.password) !== undefined) {
-          if (params.password === "wrong-password") {
-            return fail(400, "mail.auth", "The mail server rejected the password");
-          }
-          account.status = "active";
-        }
+        if (text(params.password) !== undefined) account.status = "active";
         return reply(200, { account: mailView(account) });
       }, true),
       deleteMailAccount: within((scope, params) => {
@@ -574,7 +582,9 @@ export class FakeConnections {
           (each) => each.workspaceId === scope.workspaceId && each.id === text(params.connectorId),
         );
         if (at < 0) return fail(404, "not_found", "Connection not found");
-        shared.splice(at, 1);
+        const [gone] = shared.splice(at, 1);
+        // As on the server, the agents' grants on a removed connection go with it.
+        if (gone !== undefined) this.dropGrants(gone.id);
         return reply(204, null);
       }, true),
 
@@ -647,6 +657,7 @@ export class FakeConnections {
         const server = serverOf(scope, params.customId);
         if (server === undefined) return fail(404, "not_found", "Server not found");
         this.servers = this.servers.filter((each) => each !== server);
+        this.dropGrants(server.id);
         return reply(204, null);
       }, true),
 

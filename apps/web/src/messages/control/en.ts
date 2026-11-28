@@ -276,6 +276,7 @@ export default {
   "wire.keep": "Keep it",
 
   "back.connected": "{service} is connected.",
+  "back.unknown": "A sign-in came back. The list below shows what is connected now.",
   "back.serverConnected": "The server is connected. Choose what its tools may do.",
   "back.failed.state": "That sign-in expired before it came back. Start it again.",
   "back.failed.gone": "The connection was removed while the sign-in was open.",
@@ -301,6 +302,7 @@ export default {
   "svc.reauth": "Sign-in refused",
   "svc.reauthBody":
     "The service stopped accepting this sign-in. Connect it again, give agents access to the new connection, then disconnect this one.",
+  "svc.toAccess": "Open the agents' access",
   "svc.moreAsked": "A tool ({tool}) needs one more permission: {scope}.",
   "svc.grantMore": "Grant it",
   "svc.later": "Not yet available",
@@ -310,6 +312,7 @@ export default {
   "svc.disconnect": "Disconnect",
   "svc.disconnectNamed": "Disconnect {service}",
   "svc.disconnectOne": "Disconnect {service} ({account})",
+  "svc.since": "Connected {date}",
   "svc.disconnectTitle": "Disconnect {service}?",
   "svc.disconnectBody":
     "Agents lose this service at once, and its saved sign-in is deleted. You can connect it again later.",
@@ -393,7 +396,8 @@ export default {
   "gh.remove": "Remove",
   "gh.removeNamed": "Remove the install on {account}",
   "gh.removeTitle": "Remove the install on {account}?",
-  "gh.removeBody": "Agents stop reaching its repositories. The app is also uninstalled on GitHub.",
+  "gh.removeBody":
+    "Agents stop reaching its repositories, and Vanr asks GitHub to uninstall the app there too.",
   "gh.removed": "The install on {account} is removed.",
 
   "error.connector.unknown": "This service is not on this server.",
@@ -568,7 +572,8 @@ export default {
 
   "grid.title": "Agents and connections",
   "grid.lead":
-    "How far each agent reaches into each workspace connection. Channel rules, mailboxes and databases are set on each agent's Access tab.",
+    "How far each agent reaches into each workspace connection. Its channel rules are on the agent's own Access tab.",
+  "grid.gone": "Removed",
   "grid.failed": "The access of the agents could not be loaded",
   "grid.rowFailed": "The access of {agent} could not be loaded",
   "grid.loadingRow": "Loading…",
