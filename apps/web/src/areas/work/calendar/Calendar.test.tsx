@@ -60,6 +60,25 @@ describe("the week", () => {
     expect(await screen.findByText("“Proof sign-off” is on the calendar")).toBeDefined();
   });
 
+  test("a whole-day event made three hours behind UTC stays on its one day", async () => {
+    process.env.TZ = "America/Sao_Paulo";
+    try {
+      const app = await renderApp({ path: CALENDAR, signedInAs: "usr_ana" });
+      await app.user.click(await screen.findByRole("button", { name: /^Add an event on Tuesday/ }));
+      const dialog = within(await screen.findByRole("dialog", { name: "New event" }));
+      await app.user.type(dialog.getByRole("textbox", { name: "Title" }), "Stock count");
+      await app.user.click(dialog.getByRole("checkbox", { name: "All day" }));
+      await app.user.click(dialog.getByRole("button", { name: "Create event" }));
+      expect(await screen.findByText("“Stock count” added")).toBeDefined();
+      const made = app.server.work.events.find((event) => event.title === "Stock count");
+      expect([made?.startDate, made?.endDate]).toEqual(["2026-11-10", "2026-11-10"]);
+      expect(await within(day(/^Tuesday/)).findByRole("button", { name: /Stock count/ })).toBeDefined();
+      expect(within(day(/^Wednesday/)).queryByRole("button", { name: /Stock count/ }) === null).toBe(true);
+    } finally {
+      process.env.TZ = "UTC";
+    }
+  });
+
   test("another week, and back to this one", async () => {
     const app = await renderApp({ path: CALENDAR, signedInAs: "usr_ana" });
     await screen.findByRole("region", { name: /^Thursday/ });
