@@ -17,7 +17,7 @@ import { MAX_UPDATE, RIGHT_TTL_MS } from "../src/wiki-collab";
 import { wikiMarkdown, YFRAGMENT } from "../src/wiki-md";
 import { holdNextIndexWrite, SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
 import { memberOf, type Person, seedWorkspace } from "./seed";
-import { apiError, wikiApi } from "./wiki-api";
+import { type ApiError, apiError, wikiApi } from "./wiki-api";
 import {
   authMessage,
   connect,
@@ -750,11 +750,19 @@ describe("an operation changes the shared document only after its transaction au
       await gate;
       return original(...args);
     }) as typeof original;
-    const discarding = apiError(beto.api.wiki.deleteWikiPageDraft(workspaceId, page.slug));
-    await started;
-    await ana.api.wiki.lockWikiPage(workspaceId, page.slug, true);
-    release();
-    const err = await discarding;
+    let err: ApiError;
+    try {
+      // Both requests are awaited together and the gate opens whatever the lock answers: a lock request
+      // that fails ends the test with its own error instead of leaving the discard parked on the gate,
+      // where it holds the page's queue and makes the file's server.stop() wait out its hook timeout.
+      [err] = await Promise.all([
+        apiError(beto.api.wiki.deleteWikiPageDraft(workspaceId, page.slug)),
+        started.then(() => ana.api.wiki.lockWikiPage(workspaceId, page.slug, true)).finally(release),
+      ]);
+    } finally {
+      db.transaction = original;
+      release();
+    }
     expect([err.status, err.code]).toEqual([403, "wiki.page_locked"]);
     await server.deps.wikiLive.settled();
     expect(await a.md()).toContain("One, accepted in the draft.");
