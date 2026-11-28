@@ -98,10 +98,17 @@ export function UsageSection() {
   );
 }
 
+/** The share spent, in whole percent; a budget not quite spent never reads as 100%. */
+const shareOf = (spent: number, budget: number) => {
+  const percent = Math.round((spent / budget) * 100);
+  return spent < budget ? Math.min(percent, 99) : percent;
+};
+
 /** A share of a budget, as a bar that reads by its tone too: calm, near the end, or past it. */
 function Meter({ spent, budget, label }: { spent: number; budget: number; label: string }) {
-  const percent = budget > 0 ? Math.round((spent / budget) * 100) : spent > 0 ? 100 : 0;
-  const tone = percent >= 100 ? "over" : percent >= 80 ? "near" : "calm";
+  // The tone compares the amounts themselves: 19.92 of 20 is near the end, not past it.
+  const tone = spent >= budget && spent > 0 ? "over" : spent >= budget * 0.8 && spent > 0 ? "near" : "calm";
+  const percent = budget > 0 ? shareOf(spent, budget) : spent > 0 ? 100 : 0;
   return (
     <meter
       className="spend-meter"
@@ -140,7 +147,7 @@ function Report({
     .filter((each) => each.kind === UNBUDGETED)
     .reduce((sum, each) => sum + each.costUsd, 0);
   const counted = report.spendUsd - unbudgeted;
-  const percent = budget !== null && budget > 0 ? Math.round((counted / budget) * 100) : null;
+  const percent = budget !== null && budget > 0 ? shareOf(counted, budget) : null;
   const kinds = report.perKind.map((each) => ({
     ...each,
     label: t(`use.kind.${KINDS.find((kind) => kind === each.kind) ?? "other"}`),
@@ -157,7 +164,7 @@ function Report({
         <p className="page__muted">
           {percent === null
             ? t("use.noBudget")
-            : percent >= 100
+            : budget !== null && counted >= budget
               ? t("use.spentAll")
               : t("use.percent", { percent })}
         </p>

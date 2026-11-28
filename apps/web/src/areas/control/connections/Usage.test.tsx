@@ -87,6 +87,21 @@ describe("usage", () => {
     expect(ledger?.textContent).toContain("of $5.00, its own");
   });
 
+  test("a budget not quite spent is near its end, not past it", async () => {
+    const server = newServer();
+    server.agentBudgets.set("agt_ledger", 5);
+    server.usage.push({ workspaceId: WS, agentId: "agt_ledger", kind: "model", calls: 2, costUsd: 44.9 });
+    await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const part = await month();
+    expect(await within(part).findByText("99% of the budget is spent.")).toBeDefined();
+    expect(within(part).queryByText(/The budget is spent/) === null).toBe(true);
+    expect(
+      within(part)
+        .getByRole("meter", { name: "Share of the workspace's budget spent" })
+        .getAttribute("data-tone"),
+    ).toBe("near");
+  });
+
   test("an amount under a cent is not shown as nothing", async () => {
     const server = newServer();
     server.usage.push({ workspaceId: WS, agentId: null, kind: "wiki", calls: 1, costUsd: 0.004 });
