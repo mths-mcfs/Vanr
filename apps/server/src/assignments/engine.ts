@@ -37,6 +37,7 @@ import { planOf, touchItem, writePlan } from "./plan";
 import { addJobProofs } from "./proofs";
 
 const {
+  agents,
   assignments,
   assignmentWork,
   assignmentCommands,
@@ -895,6 +896,12 @@ export async function runAgentJob(
   let job: JobRow;
   try {
     job = await withAssignmentJobs(row.id, async () => {
+      // Read under the job lock the archive's cancel also takes: an archived agent starts no job.
+      const [current] = await ctx.deps.db
+        .select({ archivedAt: agents.archivedAt })
+        .from(agents)
+        .where(eq(agents.id, ctx.agent.id));
+      if (!current || current.archivedAt) throw new ToolInputError("Not done: this agent was archived.");
       await openForJob(ctx.deps, row.id);
       if ((await runningJobsOf(ctx.deps.db, row.id)).length > 0)
         throw new HttpError(409, "assignment.job_running", "A job is already running for this assignment");

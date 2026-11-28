@@ -1,12 +1,14 @@
-// Every place in the server that writes an agent's own state (its row, its memory and instructions, its environment,
-// its grants, its standing rules, its accounts), found by what it writes, not by the route it sits under. Each one says
-// how an archived agent is kept from it. A new write anywhere (a helper, a route in any family) fails this test until
-// it is placed here, so the router test's families aren't the only net.
+// The writes to an agent's own state (its row, its memory and instructions, its environment, its grants, its standing
+// rules, its accounts) in the server and the packages, found by what they write, not by the route they sit under:
+// Drizzle's update/insert/delete on those tables (on one line or several) and raw SQL on them. Each one says how an
+// archived agent is kept from it, so a new one (a helper, a route in any family) fails until it is placed here. It
+// doesn't see a table renamed into another variable or passed to a helper as a parameter; none exists today.
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
 const SRC = join(import.meta.dir, "../src");
+const REPO = join(import.meta.dir, "../../..");
 const TABLES = [
   "agents",
   "memories",
@@ -17,7 +19,15 @@ const TABLES = [
   "approvalRules",
   "connections",
 ];
-const WRITE = new RegExp(`\\.(update|insert|delete)\\(\\s*(?:schema\\.)?(${TABLES.join("|")})\\s*\\)`, "g");
+/** The same tables by their SQL names, for a write in raw SQL. */
+const SQL_TABLES = TABLES.map((t) => t.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`));
+/** A Drizzle write, its arguments on one line or several. */
+const WRITE = new RegExp(
+  `\\.(update|insert|delete)\\(\\s*(?:schema\\.)?(${TABLES.join("|")})\\s*,?\\s*\\)`,
+  "g",
+);
+/** A write in raw SQL (`sql\`update agents ...\``), with or without quotes around the table. */
+const RAW = new RegExp(`\\b(insert\\s+into|update|delete\\s+from)\\s+"?(${SQL_TABLES.join("|")})"?\\s`, "gi");
 /**
  * What a write sits in: a top-level function or const, a class method, and inside a `register*` function a route
  * (method and path) or a helper arrow next to the routes (`const setStatus = async (`).
@@ -35,6 +45,15 @@ const IN_REGISTER: { re: RegExp; name: (m: RegExpExecArray) => string }[] = [
   { re: /^ {2}const (\w+) = (?:async )?\(\s*$/, name: (m) => m[1] ?? "" },
 ];
 
+/** Comments go blank (same length, newlines kept): a comment that mentions a write isn't one. */
+const blankComments = (text: string) =>
+  text.replace(/\/\*[\s\S]*?\*\/|(?<![:"'`])\/\/[^\n]*/g, (c) => c.replace(/[^\n]/g, " "));
+
+/**
+ * What it scans: every `.ts` under apps/server/src and packages/(name)/src but tests. What it finds: Drizzle's
+ * `.update|insert|delete(table)` on those tables, whatever the line breaks, and raw SQL `insert into|update|delete
+ * from table`. What it doesn't see: a table renamed into another variable, or passed to a helper as a parameter.
+ */
 function writesInSource(): string[] {
   const files: string[] = [];
   const walk = (dir: string) => {
@@ -46,11 +65,19 @@ function writesInSource(): string[] {
     }
   };
   walk(SRC);
+  for (const pkg of readdirSync(join(REPO, "packages"))) {
+    const src = join(REPO, "packages", pkg, "src");
+    if (statSync(src, { throwIfNoEntry: false })?.isDirectory()) walk(src);
+  }
   const found = new Set<string>();
   for (const file of files) {
+    const text = blankComments(readFileSync(file, "utf8"));
+    const lines = text.split("\n");
+    // The owner of each line, by the last function, const, method or route above it.
+    const owners: string[] = [];
     let top = "(module)";
     let owner = top;
-    for (const line of readFileSync(file, "utf8").split("\n")) {
+    for (const line of lines) {
       const ownerIn = (list: typeof TOP) => {
         for (const { re, name } of list) {
           const m = re.exec(line);
@@ -61,8 +88,16 @@ function writesInSource(): string[] {
       const t = ownerIn(TOP);
       if (t) top = owner = t;
       else if (top.startsWith("register")) owner = ownerIn(IN_REGISTER) ?? owner;
-      for (const m of line.matchAll(WRITE)) found.add(`${relative(SRC, file)} ${owner}: ${m[1]}(${m[2]})`);
+      owners.push(owner);
     }
+    const where = file.startsWith(SRC) ? relative(SRC, file) : relative(REPO, file);
+    const lineOf = (at: number) => text.slice(0, at).split("\n").length - 1;
+    for (const m of text.matchAll(WRITE))
+      found.add(`${where} ${owners[lineOf(m.index ?? 0)]}: ${m[1]}(${m[2]})`);
+    for (const m of text.matchAll(RAW))
+      found.add(
+        `${where} ${owners[lineOf(m.index ?? 0)]}: sql ${(m[1] ?? "").split(/\s/)[0]?.toLowerCase()}(${m[2]})`,
+      );
   }
   return [...found].sort();
 }

@@ -89,6 +89,12 @@ async function pollOne(deps: AppDeps, row: RoutineRow): Promise<number> {
   if (!box || box.level === "none") return 0;
   const { policy } = box;
   if (policy.folders.length > 0 && !policy.folders.includes(trigger.folder)) return 0;
+  // Read again right before the mailbox opens: an agent archived while earlier routines of this check were polled.
+  const [agent] = await deps.db
+    .select({ archivedAt: agents.archivedAt })
+    .from(agents)
+    .where(eq(agents.id, row.agentId));
+  if (!agent || agent.archivedAt) return 0;
 
   const found = await withImap(deps, account, async (imap) => {
     const { uidValidity } = await imap.open(trigger.folder, true);

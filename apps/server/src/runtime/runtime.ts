@@ -1509,11 +1509,7 @@ export class AgentRuntime implements RuntimePort {
       // Every run, however it started (a mention, the run after this one, a routine, an assignment's turn), comes
       // here once it is in `live`. `archiveAgent` commits `archivedAt` before it stops the live runs: either its
       // loop sees this run or this read sees the archive. An archived agent calls no model and says nothing.
-      const [current] = await db
-        .select({ archivedAt: agents.archivedAt })
-        .from(agents)
-        .where(eq(agents.id, live.agent.id));
-      if (!current || current.archivedAt) {
+      if (!(await this.agentActive(live.agent.id))) {
         archived = true;
         throw new RunCanceled();
       }
@@ -2038,19 +2034,24 @@ export class AgentRuntime implements RuntimePort {
         !(err instanceof TimeLimit) && (err instanceof RunCanceled || live.controller.signal.aborted);
       // A run that fails or is stopped mid-turn didn't hear its inbox: the next run takes it. A person's stop
       // cancels it with the run instead (it stays in `handles`, handled as canceled).
+      // A cancel that came from the archive (mid-stream too) is the archive's: read it once more.
+      if (canceled && !archived) archived = !(await this.agentActive(live.agent.id));
       if (!(canceled && (live.canceledBy !== null || archived))) deferUnheard(live);
-      // No next run for an archived agent: what waited for one is canceled with this run.
+      // No next run for an archived agent: what waited for one is canceled with this run, its issue work too.
       if (archived) {
-        await this.markHandled(
-          live,
-          live.after.splice(0).map((m) => m.id),
-          "canceled",
-        );
+        const waiting = live.after.splice(0).map((m) => m.id);
+        await this.markHandled(live, waiting, "canceled");
+        await settleIssueWork(db, live.workspaceId, waiting, {
+          state: "idle",
+          reason: null,
+          runId: live.runId,
+        });
       }
       clearInterval(beat);
       if (deadline) clearTimeout(deadline);
       if (canceled) {
-        if (partial.trim()) await post(partial.trim(), { canceled: true }).catch(() => null);
+        // An archived agent says nothing more, not even what it had half written.
+        if (partial.trim() && !archived) await post(partial.trim(), { canceled: true }).catch(() => null);
         await this.finish(live, { status: "canceled", handled: "canceled", messageId: null });
         return;
       }
@@ -2775,6 +2776,15 @@ export class AgentRuntime implements RuntimePort {
         spentUsd: sees ? spent : null,
         budgetUsd: sees ? scope.limitUsd : null,
       });
+  }
+
+  /** Whether the agent is still there and not archived (read now, not from the run's copy). */
+  private async agentActive(agentId: string): Promise<boolean> {
+    const [row] = await this.deps.db
+      .select({ archivedAt: agents.archivedAt })
+      .from(agents)
+      .where(eq(agents.id, agentId));
+    return !!row && row.archivedAt === null;
   }
 
   private async seesUsage(workspaceId: string, userId: string): Promise<boolean> {

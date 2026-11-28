@@ -494,7 +494,11 @@ export async function archiveAgent(deps: AppDeps, workspaceId: string, agentId: 
     .select()
     .from(schema.assignments)
     .where(and(eq(schema.assignments.agentId, agentId), eq(schema.assignments.workspaceId, workspaceId)));
-  for (const row of owned) await cancelJobs(deps, row);
+  // One assignment's failure doesn't hold the others or the notices; archiving again retries what's left.
+  for (const row of owned)
+    await cancelJobs(deps, row).catch((err) =>
+      log.error("agent.archive_cancel_jobs_failed", { agentId, assignmentId: row.id, err }),
+    );
   // The closures are committed: each notice goes out on its own, and one that fails doesn't hold the rest.
   const publish = (what: Promise<unknown>) =>
     what.catch((err) => log.error("agent.archive_publish_failed", { agentId, err }));

@@ -6,6 +6,7 @@ import { newId } from "@vanr/engine/ids";
 import { and, eq, gt } from "drizzle-orm";
 import { createMemory } from "../src/agent-memory";
 import { createAssignment, startAssignmentJob } from "../src/assignments/engine";
+import { assignmentToolsFor } from "../src/assignments/tools";
 import { archiveAgent, DECISION_TTL_MS, trailEntry } from "../src/control";
 import { applyConsolidation } from "../src/memory-consolidation";
 import { postMessage } from "../src/messages";
@@ -355,16 +356,28 @@ describe("a run that starts after the archive", () => {
     "the message waiting for the next run ends canceled with it, and the agent says nothing",
     async () => {
       const t = await team();
-      const first = await say(t, "[[slow:3000]] the report");
+      const first = await say(t, "[[slow:400]] the report is long and keeps going for a while longer");
       const started = await server.deps.runtime.runFor({
         agent: t.lia,
         channel: first.channel,
         trigger: first.row,
       });
       if (!started.ok) throw new Error(started.code);
-      await Bun.sleep(200);
-      // A message that came while the run was closing waits for the next run (`live.after`).
+      // Long enough for a few words of the reply to stream in.
+      await Bun.sleep(1000);
+      // A message that came while the run was closing waits for the next run (`live.after`). It asks for an
+      // issue's work ("Ask an agent"), so the issue shows as working until that message is settled.
       const second = await say(t, "and the summary too");
+      const issue = await call(t.beto, "POST", `${t.w}/issues`, { title: "Quarterly report" });
+      expect(issue.status).toBe(201);
+      await server.deps.db
+        .update(messages)
+        .set({ meta: { workedIssue: { issueId: issue.body.id } } })
+        .where(eq(messages.id, second.row.id));
+      await server.deps.db
+        .update(schema.issues)
+        .set({ work: { state: "working", reason: null, runId: null, messageId: second.row.id } })
+        .where(eq(schema.issues.id, issue.body.id));
       const live = (server.runtime as unknown as { live: Map<string, { after: unknown[] }> }).live.get(
         started.runId,
       );
@@ -376,7 +389,17 @@ describe("a run that starts after the archive", () => {
       await settleAgent(t.workspaceId, t.lia.id);
       const out = await afterArchive(t.lia.id, at);
       expect(out.late.every((s) => s === "canceled")).toBe(true);
+      // Nothing it half wrote before the archive goes out either.
+      const [run] = await server.deps.db.select().from(runs).where(eq(runs.id, started.runId));
+      expect(run?.status).toBe("canceled");
+      const fromRun = await server.deps.db.select().from(messages).where(eq(messages.runId, started.runId));
+      expect(fromRun).toEqual([]);
       expect(out.said).toEqual([]);
+      const [after] = await server.deps.db
+        .select({ work: schema.issues.work })
+        .from(schema.issues)
+        .where(eq(schema.issues.id, issue.body.id));
+      expect((after?.work as { state?: string } | null)?.state).toBe("idle");
     },
     SERVER_TEST_MS,
   );
@@ -591,6 +614,104 @@ describe("what reaches an archived agent another way", () => {
         channelId: t.general,
       });
       expect(res.status).toBe(404);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("an archived agent's jobs", () => {
+  /** An active assignment of Lia's on a fake runner Ana paired, with the given executor. */
+  async function assignmentOn(t: Team, executor: "agent" | "claude_code") {
+    const fake = await pairFake(server, t.ana, t.workspaceId, { open });
+    await server.deps.db.update(agents).set({ environmentId: fake.runnerId }).where(eq(agents.id, t.lia.id));
+    const row = await createAssignment(server.deps, {
+      workspaceId: t.workspaceId,
+      agentId: t.lia.id,
+      agentHandle: t.lia.handle,
+      channelId: t.general,
+      ownerId: t.ana.user.id,
+      title: "Fix the flaky test",
+      goal: "The suite passes ten times in a row",
+      executor,
+      runnerId: fake.runnerId,
+      commandPolicy: "never",
+    });
+    const [active] = await server.deps.db
+      .update(assignments)
+      .set({ status: "active", startedAt: server.deps.now() })
+      .where(eq(assignments.id, row.id))
+      .returning();
+    if (!active) throw new Error("assignment not activated");
+    return { fake, row: active };
+  }
+
+  test(
+    "start_job past the tool gate starts nothing once the archive landed",
+    async () => {
+      const t = await team();
+      const { fake, row } = await assignmentOn(t, "agent");
+      const [agent] = await server.deps.db.select().from(agents).where(eq(agents.id, t.lia.id));
+      if (!agent) throw new Error("agent gone");
+      const tools = [
+        ...(await assignmentToolsFor(server.deps, agent, row.threadId)),
+        ...(await environmentToolsFor({ deps: server.deps, agent })),
+      ];
+      const i = tools.findIndex((x) => x.name === "start_job");
+      const real = tools[i];
+      if (!real) throw new Error("no start_job");
+      // runTool's check passed; the archive commits and finishes its cancels before the tool's body runs.
+      tools[i] = {
+        ...real,
+        async run(ctx, input, planned) {
+          await archiveAgent(server.deps, t.workspaceId, t.lia.id, t.ana.user.id);
+          return real.run(ctx, input, planned);
+        },
+      };
+      const run = await toolRun(server, {
+        workspaceId: t.workspaceId,
+        agent,
+        channelId: t.general,
+        asker: t.ana,
+        tools,
+      });
+      const out = await run.call("start_job", { title: "Fix", prompt: "Fix it" }, { threadId: row.threadId });
+      expect([out.isError, out.content]).toEqual([true, "Not done: this agent was archived."]);
+      expect(requests(fake.runner, "job.start")).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "one assignment whose cancel fails doesn't keep the archive from cancelling the others",
+    async () => {
+      const t = await team();
+      const one = await assignmentOn(t, "claude_code");
+      const two = await assignmentOn(t, "claude_code");
+      const first = await startAssignmentJob(server.deps, one.row, { extra: "" });
+      const second = await startAssignmentJob(server.deps, two.row, { extra: "" });
+      const { runners } = server.deps;
+      const callRunner = runners.call;
+      let failed = false;
+      // The first cancel throws before it reaches the runner (not a runner error the cancel absorbs).
+      runners.call = ((...args: Parameters<typeof callRunner>) => {
+        if (args[1] === "job.cancel" && !failed) {
+          failed = true;
+          throw new Error("database gone for a moment");
+        }
+        return callRunner.apply(runners, args);
+      }) as typeof callRunner;
+      try {
+        expect((await call(t.ana, "DELETE", `${t.w}/agents/${t.lia.id}`)).status).toBe(204);
+      } finally {
+        runners.call = callRunner;
+      }
+      expect(failed).toBe(true);
+      const canceled = [
+        ...requests(one.fake.runner, "job.cancel"),
+        ...requests(two.fake.runner, "job.cancel"),
+      ].map((r) => (r.args as { jobId: string }).jobId);
+      expect(canceled.length).toBe(1);
+      expect([first.id, second.id]).toContain(canceled[0] ?? "");
     },
     SERVER_TEST_MS,
   );

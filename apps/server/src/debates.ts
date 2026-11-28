@@ -1028,6 +1028,12 @@ async function agentTurn(deps: AppDeps, row: DebateRow, agentId: string): Promis
   if (got === "held") return false;
   const result =
     "done" in got ? recordedTurn(got.done) : await callTurn(deps, row, agent, posts, key, got.token);
+  // An archive that landed while the agent thought: its turn isn't posted in its name, and it leaves the round.
+  if (!(await liveAgents(db, [agentId])).length) {
+    await forget(db, key);
+    await leaveRound(deps, row, who);
+    return true;
+  }
   if (!result.ok && result.code !== "budget") {
     // The round changed while the agent thought (canceled, removed, concluded): the failure no longer counts.
     const reason = result.error.slice(0, 300);

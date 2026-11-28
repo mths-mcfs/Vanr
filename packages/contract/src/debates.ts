@@ -160,8 +160,8 @@ export interface DebateMetrics {
   changedDebates: number;
   days: number;
   endReasons: Partial<Record<DebateEndReason, number>>;
-  /** Mean cost per concluded debate (USD). */
-  meanCostUsd: number;
+  /** Mean cost per concluded debate (USD); null without view_usage. */
+  meanCostUsd: number | null;
   reverted30: number;
   settled: number;
   /** Few position changes across many debates: cut down to round 0 + synthesis. */
