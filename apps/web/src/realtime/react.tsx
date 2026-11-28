@@ -23,6 +23,7 @@ import {
   useVanrClient,
   VanrProvider,
 } from "@vanr/client/react";
+import type { ThreadInfo } from "@vanr/contract";
 import { type ReactNode, useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import { useRuntime } from "../app/context.tsx";
 
@@ -44,7 +45,11 @@ export function WorkspaceRealtime({ workspaceId, children }: { workspaceId: stri
         for (const listener of lostListeners.get(created) ?? []) listener(channelId);
         // What was cached about it goes, open or not; an open conversation reads again and is told.
         forgetChannelQueries(queryClient, client, workspaceId, channelId);
-        for (const method of ["listChannels", "getDms", "listThreads"] as const)
+        // The workspace's thread lists start over; the channel's list and direct messages read again.
+        void queryClient.resetQueries({
+          queryKey: prefixKey(client, { method: "listThreads", args: { workspaceId } }),
+        });
+        for (const method of ["listChannels", "getDms"] as const)
           void queryClient.invalidateQueries({
             queryKey: prefixKey(client, { method, args: { workspaceId } }),
           });
@@ -102,6 +107,7 @@ const lostListeners = new WeakMap<RealtimeClient, Set<(channelId: string) => voi
 /** The per-channel queries that hold what a channel says, dropped when the person loses it. */
 const CHANNEL_QUERIES = [
   "listChannelMessages",
+  "listChannelThreads",
   "getChannelDirectory",
   "listChannelActiveRuns",
   "listChannelMembers",
@@ -120,6 +126,20 @@ export function forgetChannelQueries(
 ): void {
   for (const method of CHANNEL_QUERIES)
     queryClient.removeQueries({ queryKey: prefixKey(client, { method, args: { workspaceId, channelId } }) });
+  // Its threads (one moved out of it too) are keyed by thread: they go by what they say they belong to,
+  // with their assignments.
+  const lostThreads = queryClient
+    .getQueriesData<ThreadInfo>({
+      queryKey: prefixKey(client, { method: "getThread", args: { workspaceId } }),
+    })
+    .flatMap(([, thread]) =>
+      thread !== undefined && (thread.channelId === channelId || thread.context.channelId === channelId)
+        ? [thread.id]
+        : [],
+    );
+  for (const threadId of lostThreads)
+    for (const method of ["getThread", "getThreadAssignment"] as const)
+      queryClient.removeQueries({ queryKey: prefixKey(client, { method, args: { workspaceId, threadId } }) });
   // A list of threads keeps its other rows; the lost channel's leave it at once, before any refetch.
   queryClient.setQueriesData<unknown>(
     { queryKey: prefixKey(client, { method: "listThreads", args: { workspaceId } }) },

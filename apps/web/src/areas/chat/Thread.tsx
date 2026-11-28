@@ -278,9 +278,6 @@ function ThreadPage({ workspaceId, threadId }: { workspaceId: string; threadId: 
     info.data !== undefined &&
     channels.data !== undefined &&
     !channels.data.some((c) => c.id === info.data.channelId);
-  // Refused or lost stays gone for this thread: forgetting the cache must not bring a loading state back.
-  const goneFor = useRef<string | null>(null);
-  if (refused || lostHere) goneFor.current = threadId;
   // A channel left out of the list stays gone while each new list still leaves it out, even once the
   // forgotten copy of the thread can't be read again. A list that has it back (the person was added
   // again) lets the thread load.
@@ -290,13 +287,21 @@ function ThreadPage({ workspaceId, threadId }: { workspaceId: string; threadId: 
     unlistedIn.current !== null &&
     channels.data !== undefined &&
     !channels.data.some((c) => c.id === unlistedIn.current);
-  const missing = goneFor.current === threadId || stillUnlisted;
+  // A refusal answered while the channel was out of the list holds only until the list has it back,
+  // and the thread is read again then (below). Any other refusal, or a loss, stays gone for this
+  // thread: forgetting the cache must not bring a loading state back.
+  const excusedAt = useRef<number | null>(null);
+  if (refused && stillUnlisted) excusedAt.current = info.errorUpdatedAt;
+  const excused = refused && excusedAt.current === info.errorUpdatedAt;
+  const goneFor = useRef<string | null>(null);
+  if ((refused && !excused) || lostHere) goneFor.current = threadId;
+  const missing = goneFor.current === threadId || stillUnlisted || excused;
   // The channel whose cache the gone page clears, fixed once: the forgotten thread read again must not
   // remount the clearing, which would forget it again, and loop.
   const forgotten = useRef<string | undefined>(undefined);
   if (missing) forgotten.current ??= unlistedIn.current ?? info.data?.channelId;
-  // A list that has the channel back reads the thread again, once, if its last read failed while gone;
-  // a read that fails again stays on the error with its retry.
+  // A list that has the channel back reads the thread again, once, if its last read failed or was
+  // refused while gone; a read that fails again stays on the error with its retry.
   const listedAgain = unlistedIn.current !== null && !stillUnlisted;
   const readOnce = useRef(false);
   if (!listedAgain) readOnce.current = false;

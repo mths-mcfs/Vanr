@@ -1014,7 +1014,7 @@ describe("what the screen sees", () => {
       const url = webhookUrl(server.deps, routine);
       expect(url).toBe(`${server.deps.config.publicUrl}/api/v1/hooks/routines/hook_public`);
       expect(url).not.toContain("secret");
-      const [view] = await toRoutines(server.deps, [routine]);
+      const [view] = await toRoutines(server.deps, { workspaceId, userId: ana.user.id }, [routine]);
       expect(view).toMatchObject({ webhookUrl: url, webhookHasSecret: true });
       expect(JSON.stringify(view)).not.toContain("sealed-secret-value");
       expect(
@@ -1031,15 +1031,19 @@ describe("what the screen sees", () => {
     "a saved trigger or target that doesn't pass its schema is rejected, not trusted",
     async () => {
       const bad = await newRoutine({ trigger: { kind: "schedule", rule: { freq: "secondly" } } });
-      await expect(toRoutines(server.deps, [bad])).rejects.toThrow("invalid trigger");
+      await expect(toRoutines(server.deps, { workspaceId, userId: ana.user.id }, [bad])).rejects.toThrow(
+        "invalid trigger",
+      );
       const target = await newRoutine({ target: { kind: "spreadsheet" } });
-      await expect(toRoutines(server.deps, [target])).rejects.toThrow("invalid target");
+      await expect(toRoutines(server.deps, { workspaceId, userId: ana.user.id }, [target])).rejects.toThrow(
+        "invalid target",
+      );
     },
     SERVER_TEST_MS,
   );
 
   test(
-    "who sees a routine: its creator, an admin, and whoever reads its channel or sees the Drive and the debates",
+    "who sees a routine: its creator, and whoever reads its channel or sees the Drive and the debates; an admin is no exception",
     async () => {
       const privateCh = await seedChannel(server, workspaceId, {
         name: "secret",
@@ -1052,8 +1056,16 @@ describe("what the screen sees", () => {
       const asAdmin = { ...asBob, role: "admin" as const };
       const asAna = { workspaceId, userId: ana.user.id, role: "member" as const, handle: "ana" };
       expect(await canSeeRoutine(server.deps, asBob, inChannel)).toBe(false);
-      expect(await canSeeRoutine(server.deps, asAdmin, inChannel)).toBe(true);
+      // An admin who isn't in the private channel doesn't read its routine's runs.
+      expect(await canSeeRoutine(server.deps, asAdmin, inChannel)).toBe(false);
       expect(await canSeeRoutine(server.deps, asAna, inChannel)).toBe(true);
+      // One that answers in the creator's DM with the agent is the creator's alone.
+      for (const kind of ["dm", "conversation"] as const) {
+        const inDm = await newRoutine({ target: { kind } });
+        expect(await canSeeRoutine(server.deps, asAna, inDm)).toBe(true);
+        expect(await canSeeRoutine(server.deps, asAdmin, inDm)).toBe(false);
+        expect(await canSeeRoutine(server.deps, { ...asAdmin, role: "owner" as const }, inDm)).toBe(false);
+      }
       expect(await canSeeRoutine(server.deps, asBob, file)).toBe(true);
       expect(await canSeeRoutine(server.deps, asBob, await newRoutine())).toBe(true);
     },

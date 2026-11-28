@@ -29,9 +29,9 @@ test.describe("the issues board", () => {
     await page.goto(`/workspace/${owner.workspace.id}/issues`);
 
     // An empty board says what belongs there; the new issue's list lines become its criteria.
-    await expect(page.getByText(t("work", "issues.empty.title"))).toBeVisible();
+    await expect(page.getByText(t("work", "tracker.empty.title"))).toBeVisible();
     await page
-      .getByRole("button", { name: t("work", "issues.new") })
+      .getByRole("button", { name: t("work", "tracker.new") })
       .first()
       .click();
     const dialog = page.getByRole("dialog", { name: t("work", "new.title") });

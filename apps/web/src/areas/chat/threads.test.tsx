@@ -652,6 +652,75 @@ describe("a thread's page against a list it can't trust", () => {
     expect(screen.getByRole("button", { name: "Retry" })).toBeDefined();
   }, 15_000);
 
+  const wait = (ms: number) => act(async () => new Promise((resolve) => setTimeout(resolve, ms)));
+  const relistOf = (app: Awaited<ReturnType<typeof open>>) => () =>
+    act(async () => {
+      void app.runtime.queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[2] === "listChannels",
+      });
+    });
+  const members = (server: FakeServer, ids: string[]) => {
+    const board = server.state.channels.find((channel) => channel.id === "ch_board");
+    if (board !== undefined) board.memberIds = ids;
+  };
+
+  test("refused while out of the list, the thread opens once the list has its channel back", async () => {
+    const server = newServer();
+    seedBoard(server);
+    const app = await open("/threads/msg_broot", "usr_iris", server);
+    expect(await screen.findByText("Agreed, quietly")).toBeDefined();
+    const relist = relistOf(app);
+    // Out: the list leaves the channel out, and the thread read again is refused.
+    members(server, ["usr_ana"]);
+    await relist();
+    expect(await screen.findByRole("heading", { name: "There's no thread here" })).toBeDefined();
+    await waitFor(() => expect(count(server, "getThread")).toBeGreaterThan(1));
+    await wait(50);
+    members(server, ["usr_ana", "usr_iris"]);
+    await relist();
+    expect(await screen.findByText("Agreed, quietly")).toBeDefined();
+  });
+
+  test("refused while its channel is listed, the page stays gone", async () => {
+    const server = newServer();
+    seedBoard(server);
+    const app = await open("/threads/msg_broot", "usr_iris", server);
+    expect(await screen.findByText("Agreed, quietly")).toBeDefined();
+    server.force("getThread", { kind: "error", status: 403, code: "forbidden" }, 100);
+    await act(async () => {
+      void app.runtime.queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[2] === "getThread",
+      });
+    });
+    expect(await screen.findByRole("heading", { name: "There's no thread here" })).toBeDefined();
+    server.unforce("getThread");
+    await relistOf(app)();
+    await wait(200);
+    expect(screen.getByRole("heading", { name: "There's no thread here" })).toBeDefined();
+    expect(screen.queryAllByText(/Secret pricing|Agreed/).length).toBe(0);
+  });
+
+  test("a second return to the list reads the thread again too", async () => {
+    const server = newServer();
+    seedBoard(server);
+    const app = await open("/threads/msg_broot", "usr_iris", server);
+    expect(await screen.findByText("Agreed, quietly")).toBeDefined();
+    const relist = relistOf(app);
+    for (const round of [1, 2]) {
+      // Out, with every read of the thread failing; then back, with the thread readable again.
+      server.force("getThread", { kind: "error", status: 500, code: "internal" }, 100_000);
+      members(server, ["usr_ana"]);
+      await relist();
+      expect(await screen.findByRole("heading", { name: "There's no thread here" })).toBeDefined();
+      await wait(300);
+      server.unforce("getThread");
+      members(server, ["usr_ana", "usr_iris"]);
+      await relist();
+      expect(await screen.findByText("Agreed, quietly")).toBeDefined();
+      expect([round, screen.queryByText("This thread didn't load") === null]).toEqual([round, true]);
+    }
+  }, 15_000);
+
   test("replies loaded past the record's count are counted", async () => {
     const server = newServer();
     server.state.messages.push(message({ id: "msg_root", body: "Kiln log", replyCount: 3 }));

@@ -16,7 +16,14 @@ import type { Hono } from "hono";
 import { z } from "zod";
 import { agentInWorkspace, agentNames } from "../agents";
 import { assignmentPostMeta } from "../assignments/tools";
-import { type ChannelRow, canReadChannel, openDm, readableChannel, writableChannel } from "../channels";
+import {
+  type ChannelRow,
+  canReadChannel,
+  isChannelMember,
+  openDm,
+  readableChannel,
+  writableChannel,
+} from "../channels";
 import type { AppEnv, Ctx } from "../context";
 import { isUniqueViolation } from "../db-errors";
 import { fileFor } from "../drive";
@@ -204,6 +211,18 @@ async function readableMessage(c: Ctx, messageId: string, missing = "Message not
     !(await canReadChannel(db, { workspaceId: me.workspaceId, userId: me.userId, channelId: row.channelId }))
   )
     throw notFound(missing);
+  return row;
+}
+
+/**
+ * A message the person may react to: they read it and are in its channel, as the screen asks (a public channel
+ * they haven't joined shows its messages without reactions). Adding and taking a reaction ask the same.
+ */
+async function reactableMessage(c: Ctx, messageId: string) {
+  const me = requireMember(c);
+  const row = await readableMessage(c, messageId);
+  if (!(await isChannelMember(c.get("deps").db, row.channelId, { type: "person", id: me.userId })))
+    throw forbidden("Join the channel to react");
   return row;
 }
 
@@ -563,7 +582,7 @@ export function registerChat(app: Hono<AppEnv>) {
 
   app.post(`${WORKSPACE}/messages/:messageId/reactions`, async (c) => {
     const me = requireMember(c);
-    const row = await readableMessage(c, param(c, "messageId"));
+    const row = await reactableMessage(c, param(c, "messageId"));
     const input = await readJson(c, z.object({ reaction }));
     const { db } = c.get("deps");
     const added = await db
@@ -582,7 +601,7 @@ export function registerChat(app: Hono<AppEnv>) {
 
   app.delete(`${WORKSPACE}/messages/:messageId/reactions`, async (c) => {
     const me = requireMember(c);
-    const row = await readableMessage(c, param(c, "messageId"));
+    const row = await reactableMessage(c, param(c, "messageId"));
     const q = readQuery(c, z.object({ reaction }));
     const { db } = c.get("deps");
     await db
