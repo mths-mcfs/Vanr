@@ -1,15 +1,16 @@
-// Who seats which agent at a debate, what a stalled turn tells while the debate is anonymous, and the estimate's
-// amount, on the real server (PGlite). Rui's model call fails with a message that names him.
+// Who seats which agent at a debate, who reads a private channel's debate, what a stalled turn tells while the
+// debate is anonymous, and the estimate's amount, on the real server (PGlite). Rui's model call fails with a message
+// that names him; Gate's turns wait for the test.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
 import { fakeProvider } from "@vanr/engine/models/fake";
 import type { ModelRequest } from "@vanr/engine/models/types";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { textProvider } from "../src/debate-benchmark";
 import type { RunningServer } from "../src/server";
 import { SERVER_TEST_MS, signedIn, startTestServer, waitFor } from "./harness";
 import { call, seedAgent, ws } from "./route-calls";
-import { memberOf, type Person, seedWorkspace } from "./seed";
+import { memberOf, type Person, seedChannel, seedWorkspace } from "./seed";
 
 const lastText = (req: ModelRequest) =>
   req.messages
@@ -20,10 +21,13 @@ const position = (answer: string) =>
   `I argue for ${answer}.\n${JSON.stringify({ answer, confidence: 0.6, reason: "", evidence: [] })}`;
 
 let server: RunningServer;
+/** Gate's turns wait here until the test lets them go. */
+let gate: Promise<void> = Promise.resolve();
 beforeAll(async () => {
   const scripted = textProvider(async (req) => {
     const agent = /^You are (\S+)/.exec(req.system)?.[1] ?? "?";
     if (agent.startsWith("Rui")) throw new Error(`${agent} could not reach the model`);
+    if (agent.startsWith("Gate")) await gate;
     return position(agent.toLowerCase());
   });
   const fake = fakeProvider();
@@ -70,6 +74,89 @@ describe("seating an agent at a debate", () => {
       expect((await debate(ana, [solo.id])).status).toBe(201);
       expect((await debate(dora, [solo.id])).status).toBe(201);
       await server.deps.runtime.settle();
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("a debate in a private channel", () => {
+  test(
+    "is read only by the channel's members: whoever took part and left loses it, its events and its turns",
+    async () => {
+      const { workspaceId, base, ana, beto } = await team();
+      const caio = await memberOf(server, workspaceId, "Caio", email("caio"));
+      const lia = await seedAgent(server, workspaceId, ana, `gate${n}`);
+      const board = await seedChannel(server, workspaceId, {
+        name: `board${n}`,
+        visibility: "private",
+        members: [ana, beto],
+      });
+      // Calling someone who can't read the channel to the table is refused.
+      const outsider = await call(ana, "POST", base, {
+        title: "Outsider",
+        goal: "g",
+        agentIds: [lia.id],
+        channelId: board,
+        userIds: [caio.user.id],
+      });
+      expect(outsider.status).toBe(400);
+      let release = () => {};
+      gate = new Promise((r) => {
+        release = r;
+      });
+      const opened = await call(ana, "POST", base, {
+        title: "Sell?",
+        goal: "Decide",
+        agentIds: [lia.id],
+        rounds: 1,
+        channelId: board,
+        speakers: [
+          { type: "person", id: ana.user.id },
+          { type: "person", id: beto.user.id },
+          { type: "agent", id: lia.id },
+        ],
+      });
+      expect(opened.status).toBe(201);
+      const id = opened.body.id;
+      expect((await call(beto, "POST", `${base}/${id}/posts`, { body: "No", answer: "no" })).status).toBe(
+        201,
+      );
+      expect((await call(ana, "POST", `${base}/${id}/posts`, { body: "Yes", answer: "yes" })).status).toBe(
+        201,
+      );
+      expect(
+        (await call(ana, "PUT", `${base}/${id}/participants`, { peopleToAdd: [caio.user.id] })).status,
+      ).toBe(400);
+      // Beto leaves the channel while the round waits on the agent.
+      await server.deps.db
+        .delete(schema.channelMemberships)
+        .where(
+          and(
+            eq(schema.channelMemberships.channelId, board),
+            eq(schema.channelMemberships.memberId, beto.user.id),
+          ),
+        );
+      const sent: { userId: string; type: string }[] = [];
+      const toUser = server.deps.hub.toUser.bind(server.deps.hub);
+      server.deps.hub.toUser = (workspace, userId, event, ...rest) => {
+        sent.push({ userId, type: event.type });
+        return toUser(workspace, userId, event, ...rest);
+      };
+      try {
+        release();
+        await waitFor(async () => (await call(ana, "GET", `${base}/${id}`)).body.round === 1);
+        await call(ana, "POST", `${base}/${id}/posts`, { body: "A comment" });
+        await server.deps.runtime.settle();
+      } finally {
+        server.deps.hub.toUser = toUser;
+      }
+      expect(sent.some((e) => e.userId === ana.user.id && e.type === "debate.turn_requested")).toBe(true);
+      expect(sent.filter((e) => e.userId === beto.user.id)).toEqual([]);
+      // The detail, the list, posting and commenting all answer as if the debate weren't there.
+      expect((await call(beto, "GET", `${base}/${id}`)).status).toBe(404);
+      expect((await call(beto, "GET", base)).body.debates.map((d: { id: string }) => d.id)).not.toContain(id);
+      expect((await call(beto, "POST", `${base}/${id}/posts`, { body: "Still here?" })).status).toBe(404);
+      expect((await call(ana, "GET", `${base}/${id}`)).status).toBe(200);
     },
     SERVER_TEST_MS,
   );

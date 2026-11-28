@@ -242,18 +242,8 @@ export async function debateById(db: Db, workspaceId: string, id: string): Promi
 
 // ---- who sees the debate ----
 // A debate without a channel or in a public channel belongs to the workspace. A debate in a private channel (or
-// a DM) shows only to whoever reads the channel and to whoever takes part (asked, leads, opened it or was called
-// to the table): for everyone else it is as if it didn't exist (404, out of the list, the search and the events).
-
-const participants = (row: DebateRow) =>
-  new Set(
-    [
-      row.requesterUserId,
-      row.leadUserId,
-      row.createdBy.type === "person" ? row.createdBy.id : null,
-      ...row.userIds,
-    ].filter((x): x is string => !!x),
-  );
+// a DM) shows only to whoever reads the channel, taking part or not: whoever left the channel loses it like the
+// channel's other content (404, out of the list, the search, the events and the notices).
 
 /** SQL filter of the list and the search: the debates the person sees (the same rule as `canSeeDebate`). */
 export function visibleDebates(viewer: { workspaceId: string; userId: string }): SQL {
@@ -261,14 +251,7 @@ export function visibleDebates(viewer: { workspaceId: string; userId: string }):
   return (
     and(
       eq(debates.workspaceId, viewer.workspaceId),
-      or(
-        isNull(debates.channelId),
-        sql`${debates.channelId} in ${readable}`,
-        eq(debates.requesterUserId, viewer.userId),
-        eq(debates.leadUserId, viewer.userId),
-        sql`${debates.userIds} @> ${JSON.stringify([viewer.userId])}::jsonb`,
-        sql`(${debates.createdBy}->>'type' = 'person' and ${debates.createdBy}->>'id' = ${viewer.userId})`,
-      ),
+      or(isNull(debates.channelId), sql`${debates.channelId} in ${readable}`),
     ) ?? sql`false`
   );
 }
@@ -282,7 +265,7 @@ export function revealedDebateIds(db: Db, viewer: { workspaceId: string; userId:
 }
 
 export async function canSeeDebate(db: Db, row: DebateRow, userId: string): Promise<boolean> {
-  if (!row.channelId || participants(row).has(userId)) return true;
+  if (!row.channelId) return true;
   return canReadChannel(db, { workspaceId: row.workspaceId, userId, channelId: row.channelId });
 }
 
@@ -309,7 +292,7 @@ export async function visibleDebateById(
   return row;
 }
 
-/** Who the debate's events go to: the whole workspace, or (private channel) whoever reads the channel and takes part. */
+/** Who the debate's events go to: the whole workspace, or (private channel) whoever reads the channel. */
 async function audience(db: Db, row: DebateRow): Promise<"workspace" | string[]> {
   if (!row.channelId) return "workspace";
   const channel = await channelInWorkspace(db, row.workspaceId, row.channelId);
@@ -320,7 +303,7 @@ async function audience(db: Db, row: DebateRow): Promise<"workspace" | string[]>
         .from(channelMemberships)
         .where(and(eq(channelMemberships.channelId, channel.id), eq(channelMemberships.memberType, "person")))
     : [];
-  return [...new Set([...members.map((m) => m.id), ...participants(row)])];
+  return members.map((m) => m.id);
 }
 
 async function publish(deps: AppDeps, row: DebateRow, event: Parameters<AppDeps["hub"]["toWorkspace"]>[1]) {
@@ -697,9 +680,10 @@ function stakeholders(row: DebateRow): string[] {
   return [...new Set([row.requesterUserId, row.leadUserId].filter((x): x is string => !!x))];
 }
 
-/** A round began: every person at the table gets the turn (all at once). */
+/** A round began: every person at the table gets the turn (all at once), if they still see the debate. */
 async function callPeople(deps: AppDeps, row: DebateRow) {
   for (const id of pendingPeople(row)) {
+    if (!(await canSeeDebate(deps.db, row, id))) continue;
     await notify(deps, {
       workspaceId: row.workspaceId,
       userId: id,
@@ -1313,6 +1297,7 @@ async function synthesize(deps: AppDeps, row: DebateRow) {
   }
   await closeNotifications(deps, row.workspaceId, turnKey(row.id));
   for (const userId of stakeholders(row)) {
+    if (!(await canSeeDebate(db, done, userId))) continue;
     await notify(deps, {
       workspaceId: row.workspaceId,
       userId,

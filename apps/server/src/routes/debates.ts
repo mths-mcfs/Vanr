@@ -36,7 +36,7 @@ import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
 import { requirePlacesAgent, seesSpend } from "../agents";
-import { isPublicChannel, readableChannel } from "../channels";
+import { canReadChannel, isPublicChannel, readableChannel } from "../channels";
 import type { AppDeps, AppEnv, Ctx, WorkspaceMember } from "../context";
 import {
   answerRound,
@@ -61,7 +61,7 @@ import {
   visibleDebates,
 } from "../debates";
 import { debateEstimate, speakerAgents } from "../estimates";
-import { conflict, forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
+import { badRequest, conflict, forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
 import { createIssue, issueById, issueSeenBy } from "../issues";
 import { type MessageRow, messageInWorkspace } from "../messages";
 import { closeNotifications } from "../notifications";
@@ -94,13 +94,18 @@ async function checkAgents(
   await requirePlanOwners(deps.db, rows, initiatedBy);
 }
 
-async function checkPeople(deps: AppDeps, workspaceId: string, userIds: string[]) {
+/** The people called to the table: the workspace's, and able to read the debate's channel when it has one. */
+async function checkPeople(deps: AppDeps, workspaceId: string, userIds: string[], channelId: string | null) {
   if (userIds.length === 0) return;
   const rows = await deps.db
     .select({ id: members.userId })
     .from(members)
     .where(and(eq(members.workspaceId, workspaceId), inArray(members.userId, userIds)));
   if (rows.length !== new Set(userIds).size) throw notFound("Member not found");
+  if (!channelId) return;
+  for (const userId of new Set(userIds))
+    if (!(await canReadChannel(deps.db, { workspaceId, userId, channelId })))
+      throw badRequest("That person can't read this debate's channel", { field: "userIds" });
 }
 
 /** Who runs the debate: whoever opened or asked for it, whoever leads it, or an admin. */
@@ -400,10 +405,6 @@ export function registerDebates(app: Hono<AppEnv>) {
       [...input.agentIds, ...speakers.filter((s) => s.type === "agent").map((s) => s.id)],
       me.userId,
     );
-    await checkPeople(deps, me.workspaceId, [
-      ...(input.userIds ?? []),
-      ...speakers.filter((s) => s.type === "person").map((s) => s.id),
-    ]);
     if (input.channelId)
       await readableChannel(deps.db, {
         workspaceId: me.workspaceId,
@@ -420,6 +421,13 @@ export function registerDebates(app: Hono<AppEnv>) {
         : null;
     if (issueChannel && input.channelId && input.channelId !== issueChannel)
       throw new HttpError(400, "debate.issue_channel", "Debate this issue in the channel it belongs to");
+    const channelId = issueChannel ?? input.channelId ?? null;
+    await checkPeople(
+      deps,
+      me.workspaceId,
+      [...(input.userIds ?? []), ...speakers.filter((s) => s.type === "person").map((s) => s.id)],
+      channelId,
+    );
     const row = await openDebate(deps, {
       workspaceId: me.workspaceId,
       title: input.title,
@@ -434,7 +442,7 @@ export function registerDebates(app: Hono<AppEnv>) {
       spendCapPercent: input.spendCapPercent,
       createdBy: person(me),
       requesterUserId: me.userId,
-      channelId: issueChannel ?? input.channelId ?? null,
+      channelId,
       origin: sourceIssue
         ? { kind: "issue", issueId: sourceIssue.id, issueSeq: sourceIssue.number }
         : { kind: "manual" },
@@ -581,7 +589,7 @@ export function registerDebates(app: Hono<AppEnv>) {
     const agentsToAdd = input.agentsToAdd ?? [];
     const speakersToAdd = input.addSpeakerUserIds ?? [];
     await checkAgents(deps, me, agentsToAdd, row.requesterUserId);
-    await checkPeople(deps, me.workspaceId, [...(input.peopleToAdd ?? []), ...speakersToAdd]);
+    await checkPeople(deps, me.workspaceId, [...(input.peopleToAdd ?? []), ...speakersToAdd], row.channelId);
     const removeAgents = new Set(input.agentsToRemove ?? []);
     const removeUsers = new Set(input.peopleToRemove ?? []);
     const unseat = new Set([...(input.removeSpeakerUserIds ?? []), ...removeUsers]);

@@ -417,18 +417,8 @@ async function build(tx: Tx, ref: { kind: IndexedKind; id: string }): Promise<Ch
       const synthesis = row.synthesis ? JSON.stringify(row.synthesis) : "";
       const text = [row.goal, synthesis, ...posts.map((p) => p.body)].filter(Boolean).join("\n\n");
       // The same rule as the debate's visibility: without a channel, the workspace; with a channel, whoever
-      // reads it and whoever takes part (asks, leads, opened it, was called; the agents at the table).
-      const also = unique([
-        ...[
-          row.requesterUserId,
-          row.leadUserId,
-          row.createdBy.type === "person" ? row.createdBy.id : null,
-          ...row.userIds,
-        ]
-          .filter((x): x is string => !!x)
-          .map((id) => `user:${id}`),
-        ...row.agentIds.map((id) => `agent:${id}`),
-      ]);
+      // reads it (a person at the table who left the channel no longer does), and the agents at the table.
+      const also = unique(row.agentIds.map((id) => `agent:${id}`));
       return chunksOf(
         {
           workspaceId: row.workspaceId,
