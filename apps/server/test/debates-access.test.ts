@@ -219,6 +219,56 @@ describe("a seat someone can no longer read", () => {
   );
 });
 
+describe("a leave retried after its seats weren't let go", () => {
+  test(
+    "lets them go: the round goes on, though the person was already out (404)",
+    async () => {
+      const { workspaceId, base, ana, beto } = await team();
+      const lia = await seedAgent(server, workspaceId, ana, `lia${n}`);
+      const board = await seedChannel(server, workspaceId, {
+        name: `retry${n}`,
+        visibility: "private",
+        members: [ana, beto],
+      });
+      const made = await call(ana, "POST", base, {
+        title: "Retry",
+        goal: "g",
+        agentIds: [lia.id],
+        rounds: 0,
+        channelId: board,
+        speakers: [
+          { type: "person", id: ana.user.id },
+          { type: "person", id: beto.user.id },
+          { type: "agent", id: lia.id },
+        ],
+      });
+      const id = made.body.id;
+      expect((await call(ana, "POST", `${base}/${id}/posts`, { body: "Yes", answer: "yes" })).status).toBe(
+        201,
+      );
+      const seen = async () => (await call(ana, "GET", `${base}/${id}`)).body;
+      await waitFor(async () => (await seen()).phase === "human_turn");
+      // The leave was written but its seats weren't let go (the process fell in between).
+      await server.deps.db
+        .delete(schema.channelMemberships)
+        .where(
+          and(
+            eq(schema.channelMemberships.channelId, board),
+            eq(schema.channelMemberships.memberId, beto.user.id),
+          ),
+        );
+      const again = await call(
+        ana,
+        "DELETE",
+        `${ws(workspaceId)}/channels/${board}/members/people/${beto.user.id}`,
+      );
+      expect(again.status).toBe(404);
+      await waitFor(async () => (await seen()).status === "done");
+    },
+    SERVER_TEST_MS,
+  );
+});
+
 describe("someone removed from the workspace", () => {
   test(
     "gets nothing more of the debate: no event on a socket still open, no turn of the next round",
@@ -268,7 +318,7 @@ describe("someone removed from the workspace", () => {
 
 describe("a stall while the debate is anonymous", () => {
   test(
-    "names the stalled turn by its pseudonym, never by the agent's id or name, until the reveal",
+    "names neither the stalled agent nor its letter (nor its name in the reason) until the reveal",
     async () => {
       const { workspaceId, base, ana, beto } = await team();
       const lia = await seedAgent(server, workspaceId, ana, `lia${n}`);
@@ -286,8 +336,10 @@ describe("a stall while the debate is anonymous", () => {
       expect(row?.stallInfo?.agentId).toBe(rui.id);
       const pseudonym = row?.pseudonyms[rui.id];
       const seen = (await call(beto, "GET", `${base}/${id}`)).body;
-      expect(seen.stallInfo).toMatchObject({ agentId: null, pseudonym, round: 0 });
-      expect(seen.stallInfo.reason).toContain(`Participant ${pseudonym}`);
+      // Its letter beside the agents still thinking (engagedAgentIds) would tell whose it is: neither shows.
+      expect(seen.stallInfo).toMatchObject({ agentId: null, pseudonym: null, round: 0 });
+      expect(seen.stallInfo.reason).toContain("A participant");
+      expect(JSON.stringify(seen.stallInfo).includes(`Participant ${pseudonym}`)).toBe(false);
       expect(JSON.stringify(seen).includes(rui.name)).toBe(false);
       expect(JSON.stringify(seen.stallInfo).includes(rui.id)).toBe(false);
       // Revealed (closed), the stall names the agent.
@@ -306,7 +358,7 @@ describe("a stall while the debate is anonymous", () => {
 
 describe("a stall of the lead's own turn", () => {
   test(
-    "names it by its pseudonym too: only the synthesis keeps the lead's id",
+    "names neither its id nor its letter either: only the synthesis keeps the lead's id",
     async () => {
       const { workspaceId, base, ana, beto } = await team();
       // Rui first and no lead chosen: Rui leads, and also speaks in the rounds.
@@ -323,7 +375,8 @@ describe("a stall of the lead's own turn", () => {
       const [row] = await server.deps.db.select().from(schema.debates).where(eq(schema.debates.id, id));
       const seen = (await call(beto, "GET", `${base}/${id}`)).body;
       expect(seen.anonymous).toBe(true);
-      expect(seen.stallInfo).toMatchObject({ agentId: null, pseudonym: row?.pseudonyms[rui.id], round: 0 });
+      expect(seen.stallInfo).toMatchObject({ agentId: null, pseudonym: null, round: 0 });
+      expect(row?.stallInfo?.agentId).toBe(rui.id);
     },
     SERVER_TEST_MS,
   );

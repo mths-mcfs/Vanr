@@ -604,11 +604,14 @@ export async function waitingFor(
   row: AssignmentRow,
 ) {
   if (isClosed(row)) return false;
-  // A request to take part waits on whoever lets people in (`managesAssignment`), taking part or not.
+  // A request to take part waits on whoever lets people in (`managesAssignment`), taking part or not; nothing else
+  // waits on whoever doesn't act on it, so their counts aren't read at all.
   const manages = managesAssignment(me, row);
+  const acts = canActRole(await roleOf(db, me, row));
+  if (!manages && !acts) return false;
   const p = await pendingCounts(db, row.id, manages);
   if (p.joinRequests > 0) return true;
-  if (!canActRole(await roleOf(db, me, row))) return false;
+  if (!acts) return false;
   // Stopped at the cap: only the owner raises the cap.
   if (row.status === "paused" && row.ceiling && row.ownerId === me.userId) return true;
   if (p.decisions + p.reviews + p.commands + p.submissions > 0) return true;

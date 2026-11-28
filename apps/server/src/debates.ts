@@ -137,9 +137,10 @@ const pendingPeople = (row: DebateRow) =>
     : [];
 
 /**
- * The stall as it goes out. While anonymous, a stalled turn in a round names only its pseudonym: its id beside the
- * posts that did come in would tell whose pseudonym it is, the lead's turns included. Only the synthesis keeps the
- * lead's id (public on the table), without a pseudonym.
+ * The stall as it goes out. While anonymous, a stalled turn in a round names neither the agent nor its pseudonym:
+ * the id beside the posts that did come in, or the letter beside the agents still thinking (`engagedAgentIds`), would
+ * tell whose letter it is. Only the synthesis keeps the lead's id (public on the table), without a letter. At the
+ * reveal both show.
  */
 function stallOf(row: DebateRow): Debate["stallInfo"] {
   const stall = row.stallInfo;
@@ -147,7 +148,7 @@ function stallOf(row: DebateRow): Debate["stallInfo"] {
   const { agentId, round, reason } = stall;
   if (!isAnonymous(row)) return { agentId, pseudonym: row.pseudonyms[agentId] ?? null, round, reason };
   if (stall.synthesis) return { agentId, pseudonym: null, round, reason };
-  return { agentId: null, pseudonym: row.pseudonyms[agentId] ?? null, round, reason };
+  return { agentId: null, pseudonym: null, round, reason };
 }
 
 export function toDebate(row: DebateRow): Debate {
@@ -683,9 +684,9 @@ function stakeholders(row: DebateRow): string[] {
 
 /** A round began: every person at the table gets the turn (all at once), if they still read the debate. */
 async function callPeople(deps: AppDeps, row: DebateRow) {
-  const outside = new Set(await pendingOutside(deps.db, row));
   for (const id of pendingPeople(row)) {
-    if (outside.has(id)) continue;
+    // Checked for each one right before their notice: a leave while the others are notified counts too.
+    if (!(await readers(deps.db, row, [id])).has(id)) continue;
     await notify(deps, {
       workspaceId: row.workspaceId,
       userId: id,
@@ -1107,9 +1108,9 @@ async function agentTurn(deps: AppDeps, row: DebateRow, agentId: string): Promis
   }
   if (!result.ok && result.code !== "budget") {
     // The round changed while the agent thought (canceled, removed, concluded): the failure no longer counts.
-    // The error may name the agent ("Lia thinks with the personal plan..."): the stall shows it by its pseudonym.
+    // The error may name the agent ("Lia thinks with the personal plan..."): the stall names nobody.
     const named = agent.name.trim() ? agent.name : null;
-    const label = `Participant ${row.pseudonyms[agent.id] ?? "?"}`;
+    const label = "A participant";
     const reason = (named ? result.error.replaceAll(named, label) : result.error).slice(0, 300);
     await changeDebate(deps, row.id, (fresh) =>
       inQueue(fresh, row.round, who)
@@ -1360,9 +1361,9 @@ async function synthesize(deps: AppDeps, row: DebateRow) {
     await reindex(deps, { kind: "debate", id: done.id });
   }
   await closeNotifications(deps, row.workspaceId, turnKey(row.id));
-  const reading = await readers(db, done, stakeholders(row));
   for (const userId of stakeholders(row)) {
-    if (!reading.has(userId)) continue;
+    // Checked for each one right before their notice: a leave while the others are notified counts too.
+    if (!(await readers(db, done, [userId])).has(userId)) continue;
     await notify(deps, {
       workspaceId: row.workspaceId,
       userId,

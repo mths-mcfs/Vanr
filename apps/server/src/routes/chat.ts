@@ -522,16 +522,18 @@ export function registerChat(app: Hono<AppEnv>) {
     if (type === "person" && (await defaultChannelId(db, me.workspaceId)) === channel.id) {
       throw conflict("channel.general", "Everyone stays in #general");
     }
-    if (!(await removeChannelMember(db, { channelId: channel.id, member: { type, id }, at: now() })))
-      throw notFound("Member not found");
-    if (type === "person" && channel.visibility === "private") hub.dropUser(me.workspaceId, id, channel.id);
-    // A debate of the channel whose round waited on them goes on without them.
+    const removed = await removeChannelMember(db, { channelId: channel.id, member: { type, id }, at: now() });
+    if (removed && type === "person" && channel.visibility === "private")
+      hub.dropUser(me.workspaceId, id, channel.id);
+    // A debate of the channel whose round waited on them goes on without them. Also when they were already out (a
+    // retry after this failed): it touches only the rounds still waiting on someone who can't read the debate.
     if (type === "person")
       await releaseSeats(c.get("deps"), {
         workspaceId: me.workspaceId,
         userId: id,
         channelIds: [channel.id],
       });
+    if (!removed) throw notFound("Member not found");
     return c.body(null, 204);
   };
   app.delete(`${WORKSPACE}/channels/:channelId/members/people/:personId`, (c) =>
