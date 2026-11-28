@@ -5,7 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { prefixKey, useApiMutation, useApiQuery, useVanrClient } from "@vanr/client/react";
 import type { Channel, Message } from "@vanr/contract";
 import { AgentSigil, Avatar, Button, EmptyState, ErrorState, Icon, Spinner } from "@vanr/ui";
-import { Hash, Lock, MessagesSquare, WifiOff } from "lucide-react";
+import { Hash, Lock, MessagesSquare, Pin, Settings2, Users, WifiOff } from "lucide-react";
 import { Fragment, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { z } from "zod";
 import { useGo, useRouteParams, useSearch } from "../../app/navigation.tsx";
@@ -14,6 +14,7 @@ import { useLocale, useLookup, useMessages } from "../../i18n/react.tsx";
 import { useClock } from "../../platform/clock.tsx";
 import { useChannelSubscription, useRealtimeStatus } from "../../realtime/react.tsx";
 import { useDirectory } from "../control/cards.ts";
+import { MembersDialog, PinsDialog, SettingsDialog, useMemberCount, usePinToggle } from "./ChannelPanels.tsx";
 import { Composer } from "./Composer.tsx";
 import { ConversationProvider, useConversation } from "./context.tsx";
 import {
@@ -137,6 +138,7 @@ function Header({ target }: { target: Kind }) {
           <span className="vr-visually-hidden">{priv ? t("room.private") : t("room.public")}</span>
         </h1>
         {channel.topic !== "" && <p className="chat__topic">{channel.topic}</p>}
+        <ChannelTools channel={channel} />
       </header>
     );
   }
@@ -145,7 +147,7 @@ function Header({ target }: { target: Kind }) {
     return (
       <header className="chat__head">
         <h1 className="chat__title">
-          <Avatar name={name} size="sm" />
+          <Avatar name={name} size="sm" aria-hidden="true" />
           <span>{name}</span>
         </h1>
       </header>
@@ -258,6 +260,7 @@ function History({
   };
 
   const onQuote = useCallback((message: Message) => setQuoting(message), []);
+  const pin = usePinToggle();
   const onRetry = history.retry;
 
   const placeholder =
@@ -327,6 +330,7 @@ function History({
                     onQuote={onQuote}
                     onRetry={onRetry}
                     onOpenThread={onOpenThread}
+                    {...(target.kind === "channel" && member && { pin })}
                   />
                 </Fragment>
               );
@@ -407,6 +411,36 @@ function ConversationView({
         )}
       </div>
     </ConversationProvider>
+  );
+}
+
+/** The channel's people, pins and settings, from its header. */
+function ChannelTools({ channel }: { channel: Channel }) {
+  const t = useMessages("chat");
+  const { member } = useConversation();
+  const count = useMemberCount();
+  const [open, setOpen] = useState<"members" | "pins" | "settings" | null>(null);
+  const close = () => setOpen(null);
+  return (
+    <div className="chat__tools">
+      <Button size="sm" variant="ghost" onClick={() => setOpen("members")}>
+        <Icon icon={Users} size="sm" />
+        {count === undefined ? t("people.button") : t("people.buttonCount", { count })}
+      </Button>
+      <Button size="sm" variant="ghost" onClick={() => setOpen("pins")}>
+        <Icon icon={Pin} size="sm" />
+        {t("pins.button")}
+      </Button>
+      {member && (
+        <Button size="sm" variant="ghost" onClick={() => setOpen("settings")}>
+          <Icon icon={Settings2} size="sm" />
+          {t("setup.button")}
+        </Button>
+      )}
+      {open === "members" && <MembersDialog channel={channel} onClose={close} />}
+      {open === "pins" && <PinsDialog onClose={close} />}
+      {open === "settings" && <SettingsDialog channel={channel} onClose={close} />}
+    </div>
   );
 }
 
@@ -529,7 +563,7 @@ function DirectScreen({ target }: { target: Extract<Kind, { kind: "person" | "ag
   if (opened.isPending)
     return (
       <div className="page" aria-busy="true">
-        <Spinner label={t("dm.opening")} />
+        <Spinner label={t("dm.starting")} />
       </div>
     );
   if (opened.isError)

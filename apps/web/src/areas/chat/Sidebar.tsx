@@ -3,11 +3,12 @@
 // count. A conversation with something unread stands out and says how much.
 import { useApiQuery } from "@vanr/client/react";
 import { AgentSigil, Avatar, Icon, Skeleton } from "@vanr/ui";
-import { ChevronDown, Hash, Lock } from "lucide-react";
+import { ChevronDown, Compass, Hash, Lock, Plus } from "lucide-react";
 import { type ReactNode, useId, useState } from "react";
 import { AppLink, useRouteParams } from "../../app/navigation.tsx";
 import { useMessages } from "../../i18n/react.tsx";
 import { useSession } from "../../session/react.tsx";
+import { BrowseChannelsDialog, NewChannelDialog, NewMessageDialog } from "./Channels.tsx";
 
 const shown = (count: number) => (count > 99 ? "99+" : String(count));
 
@@ -15,8 +16,11 @@ function Group({
   title,
   label,
   count,
+  actions,
   children,
 }: {
+  /** Buttons beside the heading: make or find something of the group. */
+  actions?: ReactNode;
   title: string;
   /** What the fold button says to a screen reader; it holds the visible title. */
   label: string;
@@ -29,18 +33,21 @@ function Group({
   const body = useId();
   return (
     <div className="chat-side__group">
-      <button
-        type="button"
-        className="chat-side__fold"
-        aria-expanded={open}
-        aria-controls={body}
-        onClick={() => setOpen((value) => !value)}
-      >
-        <Icon icon={ChevronDown} size="sm" className="chat-side__chevron" />
-        <span aria-hidden="true">{title}</span>
-        <span className="vr-visually-hidden">{label}</span>
-        {!open && count > 0 && <Unread count={count} label={t("side.unread", { count })} />}
-      </button>
+      <div className="chat-side__head">
+        <button
+          type="button"
+          className="chat-side__fold"
+          aria-expanded={open}
+          aria-controls={body}
+          onClick={() => setOpen((value) => !value)}
+        >
+          <Icon icon={ChevronDown} size="sm" className="chat-side__chevron" />
+          <span aria-hidden="true">{title}</span>
+          <span className="vr-visually-hidden">{label}</span>
+          {!open && count > 0 && <Unread count={count} label={t("side.unread", { count })} />}
+        </button>
+        {actions !== undefined && <span className="chat-side__actions">{actions}</span>}
+      </div>
       {open && (
         <div id={body} className="chat-side__items">
           {children}
@@ -87,6 +94,7 @@ export function ChannelList() {
   const { workspaceId } = useRouteParams("home");
   const { me } = useSession();
   const scope = { workspaceId };
+  const [dialog, setDialog] = useState<"create" | "browse" | "dm" | null>(null);
   const channels = useApiQuery("listChannels", scope);
   const dms = useApiQuery("getDms", scope);
   const agents = useApiQuery("listAgents", scope);
@@ -107,12 +115,36 @@ export function ChannelList() {
   const runs = useApiQuery("listActiveRuns", scope);
   const atWork = new Set((runs.data ?? []).map((run) => run.agentId));
 
+  const close = () => setDialog(null);
   return (
     <div className="chat-side">
+      {dialog === "create" && <NewChannelDialog workspaceId={workspaceId} onClose={close} />}
+      {dialog === "browse" && <BrowseChannelsDialog workspaceId={workspaceId} onClose={close} />}
+      {dialog === "dm" && <NewMessageDialog workspaceId={workspaceId} onClose={close} />}
       <Group
         title={t("side.channels")}
         label={t("side.channelsGroup")}
         count={visible.reduce((sum, channel) => sum + channel.unreadCount, 0)}
+        actions={
+          <>
+            <button
+              type="button"
+              className="chat-icon-button"
+              aria-label={t("make.open")}
+              onClick={() => setDialog("create")}
+            >
+              <Icon icon={Plus} size="sm" />
+            </button>
+            <button
+              type="button"
+              className="chat-icon-button"
+              aria-label={t("find.openList")}
+              onClick={() => setDialog("browse")}
+            >
+              <Icon icon={Compass} size="sm" />
+            </button>
+          </>
+        }
       >
         {channels.isPending ? (
           <Loading />
@@ -189,6 +221,16 @@ export function ChannelList() {
         title={t("side.people")}
         label={t("side.peopleGroup")}
         count={people.reduce((sum, dm) => sum + dm.unread, 0)}
+        actions={
+          <button
+            type="button"
+            className="chat-icon-button"
+            aria-label={t("dmNew.open")}
+            onClick={() => setDialog("dm")}
+          >
+            <Icon icon={Plus} size="sm" />
+          </button>
+        }
       >
         {dms.isPending ? (
           <Loading />

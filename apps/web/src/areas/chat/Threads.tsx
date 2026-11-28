@@ -62,7 +62,7 @@ function Row({ thread }: { thread: ThreadInfo }) {
         <time dateTime={thread.lastTouchedAt}>{ago(thread.lastTouchedAt)}</time>
         {thread.state !== "open" && <Chip>{t(`thread.state.${thread.state}`)}</Chip>}
         {thread.working && <Chip>{t("threads.working")}</Chip>}
-        {thread.actionNeeded && <Chip>{t("threads.needsYou")}</Chip>}
+        {thread.actionNeeded && <Chip>{t("threads.waitsOnYou")}</Chip>}
         {thread.assignment !== null && <Chip>{t("threads.assignment")}</Chip>}
       </span>
       {last !== null && (
@@ -133,8 +133,8 @@ export function ThreadsScreen() {
       <div className="chat-threads__tools">
         <Input
           type="search"
-          aria-label={t("threads.search")}
-          placeholder={t("threads.searchHint")}
+          aria-label={t("threads.find")}
+          placeholder={t("threads.findHint")}
           value={typed}
           onChange={(event) => setTyped(event.target.value)}
         />
@@ -146,7 +146,7 @@ export function ThreadsScreen() {
               onCheckedChange={(value) => setNeedsMe(value === true)}
             />
             <Checkbox
-              label={t("threads.mine")}
+              label={t("threads.own")}
               checked={mine}
               onCheckedChange={(value) => setMine(value === true)}
             />
@@ -170,19 +170,19 @@ export function ThreadsScreen() {
         />
       ) : (
         <>
-          <ul className="chat-threads__list" aria-label={t("threads.list")}>
+          <ul className="chat-threads__list" aria-label={t("threads.rows")}>
             {threads.map((thread) => (
               <Row key={thread.id} thread={thread} />
             ))}
           </ul>
           {pages.hasNextPage && (
             <Button loading={pages.isFetchingNextPage} onClick={() => void pages.fetchNextPage()}>
-              {t("threads.more")}
+              {t("threads.next")}
             </Button>
           )}
           {moreFailed !== null && (
             <p className="chat-note chat-note--danger" role="alert">
-              {t("threads.moreFailed", { error: describe(moreFailed) })}
+              {t("threads.nextFailed", { error: describe(moreFailed) })}
             </p>
           )}
         </>

@@ -966,6 +966,100 @@
     line-height: var(--vr-text-sm-lh);
   }
 
+  /* ---------- Channels: making, finding, people, settings, pins ---------- */
+
+  .chat-side__head {
+    display: flex;
+    align-items: center;
+    gap: var(--vr-space-1);
+  }
+
+  .chat-side__head > .chat-side__fold {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .chat-side__actions {
+    display: flex;
+    gap: var(--vr-border);
+  }
+
+  .chat__tools {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--vr-space-1);
+    margin-inline-start: auto;
+  }
+
+  .chat-form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-4);
+  }
+
+  .chat-pick {
+    display: flex;
+    flex-direction: column;
+    max-height: 22rem;
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    list-style: none;
+  }
+
+  .chat-pick__row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--vr-space-1) var(--vr-space-3);
+    padding: var(--vr-space-2) 0;
+    border-bottom: var(--vr-border) solid var(--vr-line);
+  }
+
+  .chat-pick__row--stack {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .chat-pick__name {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--vr-space-2);
+    min-width: 0;
+    font-weight: var(--vr-weight-medium);
+  }
+
+  .chat-pick__topic {
+    flex-basis: 100%;
+    color: var(--vr-fg-muted);
+    font-size: var(--vr-text-sm);
+    line-height: var(--vr-text-sm-lh);
+  }
+
+  .chat-pick__person {
+    display: flex;
+    flex: 1;
+    align-items: center;
+    gap: var(--vr-space-2);
+    padding: var(--vr-space-1);
+    border: 0;
+    border-radius: var(--vr-radius-1);
+    background: none;
+    color: var(--vr-fg);
+    text-align: start;
+    cursor: pointer;
+  }
+
+  .chat-pick__person:hover {
+    background-color: var(--vr-bg-hover);
+  }
+
+  .chat-pick__person:focus-visible {
+    outline: var(--vr-ring) solid var(--vr-focus);
+    outline-offset: var(--vr-border);
+  }
+
   @media (max-width: 40rem) {
     .chat__head,
     .chat__scroll,

@@ -29,6 +29,10 @@ export class FakeChat {
   threads: T.ThreadInfo[] = [];
   /** Corrections sent to agents' answers, newest last. */
   feedback: { messageId: string; body: string }[] = [];
+  /** The agents of each channel, by channel id. */
+  agentMembers = new Map<string, Set<string>>();
+  /** Each channel's pins, newest first. */
+  pins: T.MessagePin[] = [];
 
   /** A thread's record, made from its first message as the server makes it. */
   thread(rootId: string, by: string, fields: Partial<T.ThreadInfo> = {}): T.ThreadInfo {
@@ -237,6 +241,72 @@ export class FakeChat {
         if (state === undefined) return fail(400, "invalid_request", "Unknown action");
         info.state = state;
         return reply(200, shown(scope, info));
+      }),
+      listChannelMembers: within((scope, params) => {
+        const room = this.room(scope, params.channelId);
+        if (room === undefined) return notFound();
+        const agents = [...(this.agentMembers.get(room.id) ?? [])].map((id) => ({ id, type: "agent" }));
+        return reply(200, { members: [...room.memberIds.map((id) => ({ id, type: "person" })), ...agents] });
+      }),
+      createChannelMember: within((scope, params) => {
+        const room = this.room(scope, params.channelId);
+        if (room === undefined) return notFound();
+        if (!room.memberIds.includes(scope.user.id))
+          return fail(403, "forbidden", "Join the channel to add people");
+        if (typeof params.agentId === "string") {
+          const set = this.agentMembers.get(room.id) ?? new Set<string>();
+          set.add(params.agentId);
+          this.agentMembers.set(room.id, set);
+        } else if (typeof params.userId === "string" && !room.memberIds.includes(params.userId))
+          room.memberIds.push(params.userId);
+        return reply(204, null);
+      }),
+      deleteChannelMemberPerson: within((scope, params) => {
+        const room = this.room(scope, params.channelId);
+        if (room === undefined) return notFound();
+        const self = params.personId === scope.user.id;
+        if (!self && !manages(scope.role)) return fail(403, "forbidden", "Forbidden");
+        const general = this.host.channels().find((each) => each.id === room.id)?.isGeneral ?? false;
+        if (general) return fail(409, "channel.general", "Everyone stays in #general");
+        room.memberIds = room.memberIds.filter((id) => id !== params.personId);
+        return reply(204, null);
+      }),
+      deleteChannelMemberAgent: within((scope, params) => {
+        const room = this.room(scope, params.channelId);
+        if (room === undefined) return notFound();
+        if (!manages(scope.role)) return fail(403, "forbidden", "Forbidden");
+        this.agentMembers.get(room.id)?.delete(String(params.agentId));
+        return reply(204, null);
+      }),
+      listChannelPinnedMessages: within((scope, params) => {
+        const room = this.room(scope, params.channelId);
+        if (room === undefined) return notFound();
+        return reply(200, { pins: this.pins.filter((pin) => pin.channelId === room.id) });
+      }),
+      updateChannelPinnedMessage: within((scope, params) => {
+        const room = this.room(scope, params.channelId);
+        const message = this.host.messages().find((each) => each.id === params.messageId);
+        if (room === undefined || message === undefined || message.channelId !== room.id)
+          return fail(404, "not_found", "Message not found");
+        const existing = this.pins.find((pin) => pin.messageId === message.id);
+        if (existing !== undefined) return reply(200, existing);
+        const pin: T.MessagePin = {
+          channelId: room.id,
+          message,
+          messageId: message.id,
+          pinnedAt: this.host.now().toISOString(),
+          pinnedBy: scope.user.id,
+        };
+        this.pins.unshift(pin);
+        return reply(200, pin);
+      }),
+      deleteChannelPinnedMessage: within((scope, params) => {
+        if (this.room(scope, params.channelId) === undefined) return notFound();
+        const before = this.pins.length;
+        this.pins = this.pins.filter(
+          (pin) => !(pin.channelId === params.channelId && pin.messageId === params.messageId),
+        );
+        return before === this.pins.length ? fail(404, "not_found", "Pin not found") : reply(204, null);
       }),
       createMessageFeedback: within((scope, params) => {
         const target = this.host.messages().find((m) => m.id === params.messageId);

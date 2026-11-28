@@ -20,7 +20,15 @@ import {
   Textarea,
   Tooltip,
 } from "@vanr/ui";
-import { FileText, GraduationCap, MessageSquareReply, Quote, SmilePlus, TriangleAlert } from "lucide-react";
+import {
+  FileText,
+  GraduationCap,
+  MessageSquareReply,
+  Pin,
+  Quote,
+  SmilePlus,
+  TriangleAlert,
+} from "lucide-react";
 import { memo, useState } from "react";
 import { AppLink } from "../../app/navigation.tsx";
 import { useErrorMessage } from "../../app/screens.tsx";
@@ -268,10 +276,12 @@ function Actions({
   message,
   onQuote,
   onOpenThread,
+  pin,
 }: {
   message: Message;
   onQuote: (message: Message) => void;
   onOpenThread: ((rootId: string) => void) | undefined;
+  pin: MessageItemProps["pin"];
 }) {
   const t = useMessages("chat");
   const describe = useErrorMessage("chat");
@@ -325,6 +335,17 @@ function Actions({
           onClick={() => onOpenThread(message.id)}
         >
           <Icon icon={MessageSquareReply} size="sm" />
+        </button>
+      )}
+      {pin !== undefined && (
+        <button
+          type="button"
+          className="chat-icon-button"
+          aria-pressed={pin.isPinned(message.id)}
+          aria-label={t("tools.pin")}
+          onClick={() => pin.toggle(message.id)}
+        >
+          <Icon icon={Pin} size="sm" />
         </button>
       )}
       {message.author.type === "agent" && (
@@ -421,9 +442,11 @@ export type MessageItemProps = {
   onRetry: (message: Message) => void;
   /** Opens the thread of a message; left out inside a thread. */
   onOpenThread?: (rootId: string) => void;
+  /** Pins and unpins, for a member of a channel. */
+  pin?: { isPinned: (messageId: string) => boolean; toggle: (messageId: string) => void };
 };
 
-function MessageItemView({ message, continued, onQuote, onRetry, onOpenThread }: MessageItemProps) {
+function MessageItemView({ message, continued, onQuote, onRetry, onOpenThread, pin }: MessageItemProps) {
   const t = useMessages("chat");
   const lookup = useLookup("chat");
   const { locale } = useLocale();
@@ -520,7 +543,7 @@ function MessageItemView({ message, continued, onQuote, onRetry, onOpenThread }:
         )}
       </div>
       {message.local === undefined && retracted === undefined && (
-        <Actions message={message} onQuote={onQuote} onOpenThread={onOpenThread} />
+        <Actions message={message} onQuote={onQuote} onOpenThread={onOpenThread} pin={pin} />
       )}
     </article>
   );
