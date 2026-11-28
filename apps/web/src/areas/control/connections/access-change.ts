@@ -8,10 +8,9 @@ import { useQueryClient } from "@tanstack/react-query";
 import { isApiError } from "@vanr/client";
 import { prefixKey, useApiMutation, useVanrClient } from "@vanr/client/react";
 import type { AgentAccess, ScopeGrant } from "@vanr/contract";
-import { type FocusEvent, useEffect, useRef, useState } from "react";
 import { useOutcome } from "../shared.tsx";
 import { type ConnLevel, everythingSpelledOut, withBuiltin, withLevel } from "./levels.ts";
-import { useForgetOnLoss, useLatch } from "./shared.tsx";
+import { useForgetOnLoss, useOneChange } from "./shared.tsx";
 
 const READS = ["getAgentAccess", "listAgentScopes"] as const;
 /** What a stale column or agent shows in: the matrix, the agent's page and its access. */
@@ -27,11 +26,7 @@ export function useAccessChange(workspaceId: string, agentId: string, onDone?: (
   const client = useVanrClient();
   const queryClient = useQueryClient();
   const outcome = useOutcome();
-  const latch = useLatch();
-  const [busy, setBusy] = useState(false);
-  // The last control focused inside the agent's controls (not a menu it opened elsewhere on the page).
-  const lastFocused = useRef<HTMLElement | null>(null);
-  const giveBack = useRef<HTMLElement | null>(null);
+  const change = useOneChange();
   const forget = useForgetOnLoss(workspaceId, READS);
   const args = { workspaceId, agentId };
   const invalidates = () => [
@@ -55,13 +50,7 @@ export function useAccessChange(workspaceId: string, agentId: string, onDone?: (
   };
   /** Runs one change: the fresh read, then the write it decides on, or nothing when nothing is left to do. */
   const run = (work: () => Promise<"written" | "unchanged">) =>
-    latch(() => {
-      giveBack.current = lastFocused.current;
-      setBusy(true);
-      return work()
-        .then((done) => (done === "written" ? onDone?.() : reload()), failed)
-        .finally(() => setBusy(false));
-    });
+    change.run(() => work().then((done) => (done === "written" ? onDone?.() : reload()), failed));
   const rewrite = (next: (current: ScopeGrant[]) => ScopeGrant[]) =>
     run(() =>
       client
@@ -69,22 +58,10 @@ export function useAccessChange(workspaceId: string, agentId: string, onDone?: (
         .then((current) => scopes.mutateAsync({ ...args, body: { scopes: next(current) } }))
         .then(() => "written" as const),
     );
-  const pending = busy || scopes.isPending || everything.isPending;
-  useEffect(() => {
-    if (pending) return;
-    const control = giveBack.current;
-    giveBack.current = null;
-    // Only when the focus fell to the page: a person who moved on keeps the focus where they put it.
-    const fell = document.activeElement === null || document.activeElement === document.body;
-    if (fell && control?.isConnected === true && !control.hasAttribute("disabled")) control.focus();
-  }, [pending]);
   return {
-    pending,
+    pending: change.busy,
     /** For the element that holds this agent's controls: notes which one the person is using. */
-    onFocusCapture: (event: FocusEvent<HTMLElement>) => {
-      if (event.target instanceof HTMLElement && event.currentTarget.contains(event.target))
-        lastFocused.current = event.target;
-    },
+    onFocusCapture: change.onFocusCapture,
     setLevel: (connection: AgentAccess["connectors"][number], level: ConnLevel) =>
       rewrite((current) => withLevel(current, connection, level)),
     setBuiltin: (scope: string, on: boolean) => rewrite((current) => withBuiltin(current, scope, on)),

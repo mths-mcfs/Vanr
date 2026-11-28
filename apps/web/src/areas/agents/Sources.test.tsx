@@ -1,9 +1,11 @@
 // An agent's mailboxes, databases and repositories, on its Access tab, against the fake server. Scout is
 // Ana's agent in Birchwood; Jonas manages agents there, Íris is a member.
 import { describe, expect, test } from "bun:test";
-import { act, screen, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
+import type * as T from "@vanr/contract";
 import type { FakeDatabase, FakeMailAccount } from "../../../dev/fake-connections.ts";
 import { chooseOption, newServer, renderApp } from "../../../test/app.tsx";
+import { blurOnDisable } from "../../../test/focus.ts";
 
 const WS = "workspace_birchwood";
 const PATH = `/workspace/${WS}/agents/agt_scout?tab=access`;
@@ -38,6 +40,27 @@ const shop = (patch: Partial<FakeDatabase> = {}): FakeDatabase => ({
   agents: [],
   ...patch,
 });
+const readOnly = (patch: Partial<T.MailPolicy> = {}): T.AgentMailbox => ({
+  accountId: "mail_orders",
+  level: "read",
+  deletable: false,
+  policy: {
+    folders: ["Inbox"],
+    senderAllowlist: ["@shop.example"],
+    lookbackDays: 30,
+    recipientAllowlist: [],
+    sendsPerDay: 25,
+    autoSend: false,
+    senderAddress: null,
+    ...patch,
+  },
+});
+/** Loads again what the screen shows of the agent's sources, as a refresh would. */
+const refresh = async (app: Awaited<ReturnType<typeof renderApp>>) => {
+  await act(async () => {
+    await app.runtime.queryClient.refetchQueries({ type: "active" });
+  });
+};
 const seeded = () => {
   const server = newServer();
   server.connections.mail.push(orders());
@@ -155,6 +178,101 @@ describe("mailboxes", () => {
     ]);
   });
 
+  test("a save sends what the person changed and keeps what someone else saved meanwhile", async () => {
+    const server = seeded();
+    server.connections.mailboxes.set("agt_scout", [readOnly()]);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "orders@birchwood.example" });
+    const folders = within(form).getByLabelText(/^Only these folders/);
+    await app.user.clear(folders);
+    await app.user.type(folders, "Orders");
+    // Another admin narrows the senders after this form loaded.
+    server.connections.mailboxes.set("agt_scout", [readOnly({ senderAllowlist: ["boss@shop.example"] })]);
+    await app.user.click(within(form).getByRole("button", { name: "Save mailbox access" }));
+    expect(await screen.findByText("Access to orders@birchwood.example is saved.")).toBeDefined();
+    const box = server.connections.mailboxes.get("agt_scout")?.[0];
+    expect([box?.level, box?.policy.folders, box?.policy.senderAllowlist]).toEqual([
+      "read",
+      ["Orders"],
+      ["boss@shop.example"],
+    ]);
+    expect((within(form).getByLabelText(/^Only mail from/) as HTMLTextAreaElement).value).toBe(
+      "boss@shop.example",
+    );
+  });
+
+  test("a refresh while typing keeps what was typed and shows the rest as saved now", async () => {
+    const server = seeded();
+    server.connections.mailboxes.set("agt_scout", [readOnly()]);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "orders@birchwood.example" });
+    const days = within(form).getByLabelText(/^Days back/);
+    await app.user.clear(days);
+    await app.user.type(days, "7");
+    server.connections.mailboxes.set("agt_scout", [readOnly({ senderAllowlist: ["boss@shop.example"] })]);
+    await refresh(app);
+    await waitFor(() =>
+      expect((within(form).getByLabelText(/^Only mail from/) as HTMLTextAreaElement).value).toBe(
+        "boss@shop.example",
+      ),
+    );
+    expect((within(form).getByLabelText(/^Days back/) as HTMLInputElement).value).toBe("7");
+  });
+
+  test("leaving the delete choice alone keeps it as saved", async () => {
+    const server = seeded();
+    server.connections.mailboxes.set("agt_scout", [
+      { ...readOnly({ recipientAllowlist: ["billing@shop.example"] }), level: "read_write", deletable: true },
+    ]);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "orders@birchwood.example" });
+    const sends = within(form).getByLabelText(/^Messages a day/);
+    await app.user.clear(sends);
+    await app.user.type(sends, "5");
+    await app.user.click(within(form).getByRole("button", { name: "Save mailbox access" }));
+    expect(await screen.findByText("Access to orders@birchwood.example is saved.")).toBeDefined();
+    const box = server.connections.mailboxes.get("agt_scout")?.[0];
+    expect([box?.policy.sendsPerDay, box?.deletable]).toEqual([5, true]);
+  });
+
+  test("a mailbox removed meanwhile is refused, and leaves the list", async () => {
+    const server = seeded();
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "orders@birchwood.example" });
+    server.connections.mail.length = 0;
+    await chooseOption(
+      app,
+      within(form).getByRole("combobox", { name: "What this agent may do with orders@birchwood.example" }),
+      "Read",
+    );
+    await app.user.click(within(form).getByRole("button", { name: "Save mailbox access" }));
+    expect(await within(await part()).findByText("The workspace has no mailboxes")).toBeDefined();
+  });
+
+  test("while a save is on its way the form waits, and the button keeps the focus", async () => {
+    const stop = blurOnDisable();
+    try {
+      const server = seeded();
+      server.connections.mailboxes.set("agt_scout", [readOnly()]);
+      const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+      const form = await within(await part()).findByRole("form", { name: "orders@birchwood.example" });
+      const days = within(form).getByLabelText(/^Days back/);
+      await app.user.clear(days);
+      await app.user.type(days, "7");
+      const held = server.hold("getAgentMail");
+      const button = within(form).getByRole("button", { name: "Save mailbox access" });
+      await app.user.click(button);
+      expect(form.getAttribute("aria-busy")).toBe("true");
+      expect(days.hasAttribute("disabled")).toBe(true);
+      held.release();
+      expect(await screen.findByText("Access to orders@birchwood.example is saved.")).toBeDefined();
+      await waitFor(() => expect(document.activeElement === button).toBe(true));
+      expect(server.calls.filter((call) => call.method === "replaceAgentMail").length).toBe(1);
+    } finally {
+      stop();
+    }
+  });
+
   test("without mailboxes it says where they are connected", async () => {
     await renderApp({ path: PATH, signedInAs: "usr_jonas" });
     expect(await within(await part()).findByText("The workspace has no mailboxes")).toBeDefined();
@@ -189,6 +307,54 @@ describe("databases", () => {
       link?.policy.maskedColumns,
       link?.policy.queriesPerDay,
     ]).toEqual(["read", ["public.customers", 'sales."Leads"'], ["public.customers.card_number"], null]);
+  });
+
+  test("ticked tables go over the tables saved now, not over the ones the form loaded with", async () => {
+    const server = seeded();
+    const link = (tables: string[]): T.AgentDatabase => ({
+      connectionId: "dbc_shop",
+      level: "read",
+      policy: { tables, maskedColumns: [], queriesPerDay: 200, timeoutSeconds: 30 },
+    });
+    server.connections.agentDatabases.set("agt_scout", [link(["public.customers", "public.orders"])]);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "Shop" });
+    const tables = await within(form).findByRole("list", { name: "Tables" });
+    await app.user.click(within(tables).getByRole("checkbox", { name: "public.orders" }));
+    // Another admin adds the leads after this form loaded.
+    server.connections.agentDatabases.set("agt_scout", [
+      link(["public.customers", "public.orders", 'sales."Leads"']),
+    ]);
+    await app.user.click(within(form).getByRole("button", { name: "Save database access" }));
+    expect(await screen.findByText("Access to Shop is saved.")).toBeDefined();
+    expect(server.connections.agentDatabases.get("agt_scout")?.[0]?.policy.tables).toEqual([
+      "public.customers",
+      'sales."Leads"',
+    ]);
+  });
+
+  test("a table named like an SQL word shows as saved", async () => {
+    const server = seeded();
+    server.connections.tables.set("dbc_shop", [
+      { schema: "public", name: "order" },
+      { schema: "public", name: "customers" },
+    ]);
+    server.connections.agentDatabases.set("agt_scout", [
+      {
+        connectionId: "dbc_shop",
+        level: "read",
+        policy: { tables: ['public."order"'], maskedColumns: [], queriesPerDay: 200, timeoutSeconds: 30 },
+      },
+    ]);
+    await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "Shop" });
+    const tables = await within(form).findByRole("list", { name: "Tables" });
+    expect(
+      within(tables).getByRole("checkbox", { name: 'public."order"' }).getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(
+      within(tables).getByRole("checkbox", { name: "public.customers" }).getAttribute("aria-checked"),
+    ).toBe("false");
   });
 
   test("a member reads the chosen tables without asking the database for its list", async () => {
@@ -277,6 +443,51 @@ describe("GitHub repositories", () => {
     );
     const site = within(await part()).getByRole("checkbox", { name: /birchwood-labs\/site/ });
     expect(site.hasAttribute("disabled")).toBe(true);
+  });
+
+  test("ticks go over the repositories saved now", async () => {
+    const server = seeded();
+    server.connections.installations.push({
+      id: "ins_birch",
+      workspaceId: WS,
+      accountUsername: "birchwood-labs",
+      repoScope: "selected",
+      suspended: false,
+      repositories: [
+        { fullName: "birchwood-labs/print-shop", private: true },
+        { fullName: "birchwood-labs/site", private: false },
+      ],
+    });
+    server.connections.repositories.set("agt_scout", ["birchwood-labs/print-shop"]);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "GitHub repositories" });
+    await app.user.click(within(form).getByRole("checkbox", { name: /birchwood-labs\/site/ }));
+    // Another admin takes print-shop away after this form loaded.
+    server.connections.repositories.set("agt_scout", []);
+    await app.user.click(within(form).getByRole("button", { name: "Save repositories" }));
+    expect(await screen.findByText("The repositories are saved.")).toBeDefined();
+    expect(server.connections.repositories.get("agt_scout")).toEqual(["birchwood-labs/site"]);
+  });
+
+  test("an agent archived meanwhile is refused, and its repositories turn read-only", async () => {
+    const server = seeded();
+    server.connections.repositories.set("agt_scout", ["old-org/archive"]);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "GitHub repositories" });
+    const scout = server.agents.find((agent) => agent.id === "agt_scout");
+    if (scout === undefined) throw new Error("no Scout");
+    scout.archivedAt = new Date().toISOString();
+    await app.user.click(within(form).getByRole("checkbox", { name: "old-org/archive" }));
+    await app.user.click(within(form).getByRole("button", { name: "Save repositories" }));
+    expect(await within(form).findByRole("alert")).toBeDefined();
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole("region", { name: "GitHub repositories" })).queryByRole("button", {
+          name: "Save repositories",
+        }) === null,
+      ).toBe(true),
+    );
+    expect(server.connections.repositories.get("agt_scout")).toEqual(["old-org/archive"]);
   });
 
   test("more repositories than the server keeps are refused, not cut", async () => {
