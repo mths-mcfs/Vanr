@@ -135,6 +135,26 @@ describe("mailboxes", () => {
     );
   });
 
+  test("a folder name with a comma stays one folder", async () => {
+    const server = seeded();
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "orders@birchwood.example" });
+    await chooseOption(
+      app,
+      within(form).getByRole("combobox", { name: "What this agent may do with orders@birchwood.example" }),
+      "Read",
+    );
+    await app.user.type(within(form).getByLabelText(/^Only these folders/), "Clients, Brazil\nInbox");
+    await app.user.type(within(form).getByLabelText(/^Only mail from/), "a@shop.example, @birch.example");
+    await app.user.click(within(form).getByRole("button", { name: "Save mailbox access" }));
+    expect(await screen.findByText("Access to orders@birchwood.example is saved.")).toBeDefined();
+    const policy = server.connections.mailboxes.get("agt_scout")?.[0]?.policy;
+    expect([policy?.folders, policy?.senderAllowlist]).toEqual([
+      ["Clients, Brazil", "Inbox"],
+      ["a@shop.example", "@birch.example"],
+    ]);
+  });
+
   test("without mailboxes it says where they are connected", async () => {
     await renderApp({ path: PATH, signedInAs: "usr_jonas" });
     expect(await within(await part()).findByText("The workspace has no mailboxes")).toBeDefined();
@@ -257,6 +277,28 @@ describe("GitHub repositories", () => {
     );
     const site = within(await part()).getByRole("checkbox", { name: /birchwood-labs\/site/ });
     expect(site.hasAttribute("disabled")).toBe(true);
+  });
+
+  test("more repositories than the server keeps are refused, not cut", async () => {
+    const server = seeded();
+    server.connections.installations.push({
+      id: "ins_big",
+      workspaceId: WS,
+      accountUsername: "big-org",
+      repoScope: "all",
+      suspended: false,
+      repositories: Array.from({ length: 201 }, (_, i) => ({ fullName: `big-org/r${i}`, private: false })),
+    });
+    server.connections.repositories.set(
+      "agt_scout",
+      Array.from({ length: 201 }, (_, i) => `big-org/r${i}`),
+    );
+    await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "GitHub repositories" });
+    expect(within(form).getByRole("alert").textContent).toContain("At most 200 entries; 201 are chosen.");
+    expect(within(form).getByRole("button", { name: "Save repositories" }).hasAttribute("disabled")).toBe(
+      true,
+    );
   });
 
   test("without GitHub it says where to install it", async () => {

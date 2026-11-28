@@ -44,11 +44,11 @@ const TIMEOUTS = [15, 30, 60] as const;
 const ADDRESS = /^[^\s@,;<>"]+@[^\s@,;<>"]+\.[^\s@,;<>"]+$/;
 const DOMAIN = /^@[^\s@,;<>"]+\.[^\s@,;<>"]+$/;
 
-/** A list typed one per line or separated by commas, trimmed, without blanks or repeats. */
-export const listOf = (text: string) => [
+/** A list typed one per line (and, for addresses, separated by commas), trimmed, without blanks or repeats. */
+export const listOf = (text: string, commas = false) => [
   ...new Set(
     text
-      .split(/[\n,]+/)
+      .split(commas ? /[\n,]+/ : /\n+/)
       .map((each) => each.trim())
       .filter((each) => each !== ""),
   ),
@@ -159,9 +159,9 @@ function MailboxForm({
   });
   const reading = level !== "none";
   const writing = level === "read_write";
-  const senderList = listOf(senders);
+  const senderList = listOf(senders, true);
   const folderList = listOf(folders);
-  const recipientList = listOf(recipients);
+  const recipientList = listOf(recipients, true);
   const lookbackDays = countOf(lookback, POLICY.lookback, null);
   const sendsPerDay = countOf(sends, POLICY.sends, undefined);
   const problems = {
@@ -634,6 +634,7 @@ function RepositoryForm({
     setChosen(next);
   };
   const locked = !edit || save.isPending;
+  const tooMany = chosen.size > POLICY.repositories;
   const box = (entry: string, label: ReactNode, under?: string) => (
     <li key={entry}>
       <Checkbox
@@ -650,13 +651,13 @@ function RepositoryForm({
       aria-label={t("repo.title")}
       onSubmit={(event) => {
         event.preventDefault();
-        if (!edit) return;
+        if (!edit || tooMany) return;
         latch(() =>
           save
             .mutateAsync({
               workspaceId,
               agentId,
-              body: { repositories: [...chosen].slice(0, POLICY.repositories) },
+              body: { repositories: [...chosen] },
             })
             .then(() => outcome.done(t("repo.saved"))),
         );
@@ -686,6 +687,11 @@ function RepositoryForm({
           <ul className="source__tables">{elsewhere.map((entry) => box(entry, <code>{entry}</code>))}</ul>
         </fieldset>
       )}
+      {tooMany && (
+        <Callout tone="danger" role="alert">
+          {t("repo.tooMany", { max: POLICY.repositories, count: chosen.size })}
+        </Callout>
+      )}
       {save.isError && (
         <Callout tone="danger" role="alert">
           {describe(save.error)}
@@ -693,7 +699,7 @@ function RepositoryForm({
       )}
       {edit && (
         <div className="section-form__actions">
-          <Button type="submit" size="sm" variant="primary" loading={save.isPending}>
+          <Button type="submit" size="sm" variant="primary" disabled={tooMany} loading={save.isPending}>
             {t("repo.save")}
           </Button>
         </div>

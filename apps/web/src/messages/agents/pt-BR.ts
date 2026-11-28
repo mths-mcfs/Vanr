@@ -767,6 +767,8 @@ export default {
   "repo.everyOf": "Todos os repositórios de {owner}",
   "repo.private": "(privado)",
   "repo.elsewhere": "Salvos, mas o GitHub não lista mais",
+  "repo.tooMany":
+    "No máximo {max} itens; {count} estão escolhidos. Escolha a conta inteira em vez dos repositórios um por um.",
   "repo.save": "Salvar repositórios",
   "repo.saved": "Os repositórios foram salvos.",
 } as const satisfies TranslationOf<typeof en>;

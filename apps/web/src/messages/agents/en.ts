@@ -778,6 +778,8 @@ export default {
   "repo.everyOf": "Every repository of {owner}",
   "repo.private": "(private)",
   "repo.elsewhere": "Saved, no longer listed by GitHub",
+  "repo.tooMany":
+    "At most {max} entries; {count} are chosen. Choose a whole account instead of its repositories one by one.",
   "repo.save": "Save repositories",
   "repo.saved": "The repositories are saved.",
 } as const satisfies Catalog;
