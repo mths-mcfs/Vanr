@@ -34,7 +34,8 @@ describe("the agent's memory", () => {
     const paper = rows.find((row) => row.textContent?.includes("paper on Mondays"));
     const other = rows.find((row) => row.textContent?.includes("Late orders go to Jonas."));
     expect(paper?.querySelector(".memory-note__meta")?.textContent).toContain("#general");
-    expect(other?.querySelector(".memory-note__meta")?.textContent?.includes("#general")).toBe(false);
+    // No channel at all: the server names one with its #, and withheld means none shows.
+    expect(other?.querySelector(".memory-note__meta")?.textContent?.includes("#")).toBe(false);
   });
 
   test("a member reads the notes and their history, without the controls", async () => {
