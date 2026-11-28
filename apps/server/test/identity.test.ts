@@ -266,7 +266,7 @@ describe("the agent's own account", () => {
         expect(await status(call(t.ana, "DELETE", `${t.w}/agents/${t.lia.id}`))).toBe(204);
       };
       await comeBack(t.ana, started.consentUrl);
-      expect(duringToken).toBe(null);
+      expect(duringToken === null).toBe(true);
       const own = await server.deps.db.select().from(connections).where(eq(connections.agentId, t.lia.id));
       expect(own.filter((c) => c.status === "active")).toEqual([]);
     },
