@@ -243,6 +243,23 @@ describe("an assignment's states, as each person sees them", () => {
     expect(row.queryByText(/wait on you/) === null).toBe(true);
   });
 
+  test("a request to take part waits on an admin who decides: they may let people in", async () => {
+    const server = newServer();
+    const paper = server.assignments.assignments.find((row) => row.id === "asg_paper");
+    if (paper !== undefined)
+      paper.pending = {
+        ...paper.pending,
+        decisions: 0,
+        submissions: 0,
+        commands: 0,
+        reviews: 0,
+        joinRequests: 1,
+      };
+    await renderApp({ path: LIST, signedInAs: "usr_jonas", server });
+    const row = within(await screen.findByRole("article", { name: "Restock the paper room" }));
+    expect(row.getByText(/waits on you/)).toBeDefined();
+  });
+
   test("on the assignment's page, too, only what this person may answer waits on them", async () => {
     const server = newServer();
     const paper = server.assignments.assignments.find((row) => row.id === "asg_paper");
