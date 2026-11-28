@@ -74,7 +74,9 @@ test("an owner adds an MCP server, reviews what each tool may do, and the decisi
     .click();
   await page.getByRole("option", { name: t("control", "mcp.access.off") }).click();
   await review.getByRole("button", { name: t("control", "mcp.save") }).click();
-  await expect(page.getByText(t("control", "mcp.saved", { name: "Ledger tools" }))).toBeVisible();
+  await expect(
+    page.getByText(t("control", "mcp.saved", { name: "Ledger tools" }), { exact: true }),
+  ).toBeVisible();
   await expect(review).toHaveCount(0);
 
   await page.reload();
