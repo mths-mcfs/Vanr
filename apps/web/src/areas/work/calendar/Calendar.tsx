@@ -2,6 +2,7 @@
 // things first and then by the hour. The agents' proposals wait above the week for an answer. The
 // calendar is read on opening, on every saved or removed event, and every minute; a new event starts
 // at 10:00 on the day picked (today from the header).
+import { isApiError } from "@vanr/client";
 import { useApiMutation, useApiQuery } from "@vanr/client/react";
 import type { CalendarEvent, CalendarRange } from "@vanr/contract";
 import { Button } from "@vanr/ui";
@@ -146,7 +147,12 @@ function CalendarView({ workspaceId }: { workspaceId: string }) {
     const nothing = [...byDay.values()].every((list) => list.length === 0);
     body = (
       <>
-        <Proposals workspaceId={workspaceId} range={range.data} actors={actors} />
+        <Proposals
+          workspaceId={workspaceId}
+          range={range.data}
+          actors={actors}
+          onStale={() => void range.refetch()}
+        />
         {nothing && <p className="work-cal__empty">{t("week.empty")}</p>}
         <div className="work-week">
           {days.map((day) => {
@@ -260,10 +266,13 @@ function Proposals({
   workspaceId,
   range,
   actors,
+  onStale,
 }: {
   workspaceId: string;
   range: CalendarRange;
   actors: Actors;
+  /** A proposal answered elsewhere (409) leaves the list: the week loads again. */
+  onStale: () => void;
 }) {
   const t = useMessages("work");
   const { locale } = useLocale();
@@ -285,13 +294,19 @@ function Proposals({
   const confirm = useApiMutation("confirmCalendarProposal", {
     invalidates: refresh,
     onSuccess: (_result, args) => outcome.done(t("week.confirmed", { title: titleOf(args.proposalId) })),
-    onError: (error) => outcome.failed(error),
+    onError: (error) => {
+      outcome.failed(error);
+      if (isApiError(error) && error.status === 409) onStale();
+    },
     onSettled: (_result, _error, args) => mark(args.proposalId, false),
   });
   const dismiss = useApiMutation("dismissCalendarProposal", {
     invalidates: refresh,
     onSuccess: () => outcome.done(t("week.dismissed")),
-    onError: (error) => outcome.failed(error),
+    onError: (error) => {
+      outcome.failed(error);
+      if (isApiError(error) && error.status === 409) onStale();
+    },
     onSettled: (_result, _error, args) => mark(args.proposalId, false),
   });
   const answer = (proposal: { id: string; title: string }, how: typeof confirm | typeof dismiss) => {

@@ -20,6 +20,7 @@ import { useEffect, useState } from "react";
 import { useErrorMessage } from "../../../app/screens.tsx";
 import { useLocale, useMessages } from "../../../i18n/react.tsx";
 import { type Actors, useOutcome } from "../issues/shared.tsx";
+import { readLimit } from "../limits.ts";
 import { browserTimezone } from "../time.ts";
 import { ROUTINE_EVENTS, useTriggerText } from "./words.ts";
 
@@ -54,19 +55,6 @@ const NUMBERS = [
 ] as const;
 type NumberKey = (typeof NUMBERS)[number]["key"];
 
-/** A limit as typed: a number inside its bounds (a whole one unless it is money), or undefined. */
-export function readLimit(
-  text: string,
-  limit: { min: number; max: number; step: number | "any" },
-): number | undefined {
-  // Digits with one decimal mark, either "." or ",": not "0x10", "1e3" or a thousands separator.
-  const typed = text.trim();
-  if (!/^\d+([.,]\d+)?$/.test(typed)) return undefined;
-  const value = Number(typed.replace(",", "."));
-  if (value < limit.min || value > limit.max) return undefined;
-  if (limit.step === 1 && !Number.isInteger(value)) return undefined;
-  return value;
-}
 const NUMBER_LABEL = {
   maxCostUsd: "recur.form.maxCost",
   maxSteps: "recur.form.maxSteps",
@@ -390,6 +378,7 @@ export function NewRoutineDialog({
                 <Field
                   key={each.key}
                   label={t(NUMBER_LABEL[each.key])}
+                  {...(each.step !== 1 && { hint: t("recur.form.amountHint") })}
                   {...(limits[each.key] === undefined && {
                     error: t("recur.form.limitRange", { min: each.min, max: each.max }),
                   })}

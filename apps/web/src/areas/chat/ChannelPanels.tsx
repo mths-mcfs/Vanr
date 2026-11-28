@@ -23,7 +23,7 @@ import { useMessages } from "../../i18n/react.tsx";
 import { forgetChannelQueries } from "../../realtime/react.tsx";
 import { ROUTES } from "../../routes.ts";
 import { useOutcome } from "../control/shared.tsx";
-import { readLimit } from "../work/routines/NewRoutine.tsx";
+import { readLimit } from "../work/limits.ts";
 import { NAME_MAX, TOPIC_MAX } from "./Channels.tsx";
 import { useConversation } from "./context.tsx";
 import { useAuthorName } from "./Message.tsx";
