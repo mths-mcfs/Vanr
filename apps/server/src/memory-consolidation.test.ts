@@ -292,6 +292,7 @@ describe("applying", () => {
         workspaceId,
         agentId: agent.id,
         personId: null,
+        channelId: null,
       });
       expect(prompt.split("\n").find((line) => line.includes(`[${result.id}]`))).toContain(
         "from an untrusted source",

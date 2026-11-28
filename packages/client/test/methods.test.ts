@@ -65,7 +65,7 @@ describe("route table", () => {
         wrong.push(`${row.name}: ${ep.verb} ${ep.path} != ${row.verb} ${row.path}`);
     }
     expect(wrong).toEqual([]);
-    expect(rows.length).toBe(407);
+    expect(rows.length).toBe(409);
   });
 
   test("the client has nothing the table (or the exceptions) doesn't list", () => {

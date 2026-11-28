@@ -11,6 +11,7 @@ import {
   virtualPath,
 } from "@vanr/engine/memory";
 import { and, count, desc, eq, inArray, isNotNull, isNull, max, or, type SQL, sql } from "drizzle-orm";
+import { readableChannelsSql } from "./channels";
 import { isUniqueViolation } from "./db-errors";
 import { conflict, HttpError, notFound } from "./http";
 
@@ -157,16 +158,33 @@ export async function writeInstructions(
 
 // ---- memory ----
 
-/** One of the three stores. */
+/**
+ * One of the three stores. An agent's store read from a run (`seenFrom`, the run's channel) leaves out the lessons
+ * confined to another channel; without `seenFrom` it is the whole store (its room, its history).
+ */
 export type Store =
-  | { scope: "agent"; workspaceId: string; agentId: string }
+  | { scope: "agent"; workspaceId: string; agentId: string; seenFrom?: string | null }
   | { scope: "person"; workspaceId: string; userId: string }
   | { scope: "workspace"; workspaceId: string };
+
+/** The memories a run in `channelId` uses: the unconfined ones and those confined to that very channel. */
+export const usableIn = (channelId: string | null): SQL =>
+  (channelId
+    ? or(isNull(memories.channelId), eq(memories.channelId, channelId))
+    : isNull(memories.channelId)) as SQL;
+
+/** The memories a person sees: the unconfined ones and those confined to a channel they read. */
+export const visibleTo = (viewer: { workspaceId: string; userId: string }): SQL =>
+  or(isNull(memories.channelId), sql`${memories.channelId} in ${readableChannelsSql(viewer)}`) as SQL;
 
 export function storeWhere(store: Store): SQL {
   switch (store.scope) {
     case "agent":
-      return and(eq(memories.scope, "agent"), eq(memories.agentId, store.agentId)) as SQL;
+      return and(
+        eq(memories.scope, "agent"),
+        eq(memories.agentId, store.agentId),
+        "seenFrom" in store ? usableIn(store.seenFrom ?? null) : undefined,
+      ) as SQL;
     case "person":
       return and(
         eq(memories.scope, "person"),
@@ -452,10 +470,10 @@ const FILES_IN_PROMPT = 50;
  */
 async function memoryFilesFor(
   db: Db,
-  run: { workspaceId: string; agentId: string; personId: string | null },
+  run: { workspaceId: string; agentId: string; personId: string | null; channelId: string | null },
 ): Promise<string[]> {
   const stores: Store[] = [
-    { scope: "agent", workspaceId: run.workspaceId, agentId: run.agentId },
+    { scope: "agent", workspaceId: run.workspaceId, agentId: run.agentId, seenFrom: run.channelId },
     ...(run.personId
       ? [{ scope: "person", workspaceId: run.workspaceId, userId: run.personId } as const]
       : []),
@@ -493,20 +511,25 @@ const MEMORY_LIMIT = 30;
 /**
  * The memory part of the prompt: the short notes in the agent's store (up to 30, pinned and most used
  * first; the ones from an untrusted source marked) and the list of files in the stores the run sees.
- * The body of the files comes on demand through the memory tool.
+ * The body of the files comes on demand through the memory tool. A lesson confined to another channel than
+ * the run's stays out.
  */
 export async function memoryPrompt(
   db: Db,
   at: Date,
-  run: { workspaceId: string; agentId: string; personId: string | null },
+  run: { workspaceId: string; agentId: string; personId: string | null; channelId: string | null },
 ): Promise<string> {
   const mems = await db
     .select()
     .from(memories)
     .where(
       and(
-        eq(memories.agentId, run.agentId),
-        eq(memories.scope, "agent"),
+        storeWhere({
+          scope: "agent",
+          workspaceId: run.workspaceId,
+          agentId: run.agentId,
+          seenFrom: run.channelId,
+        }),
         eq(memories.archived, false),
         isNull(memories.path),
       ),

@@ -98,6 +98,31 @@ async function withConnector(sql: GuardedConnector, fn: () => Promise<void>) {
 
 describe("databases", () => {
   test(
+    "a connection string's sslmode=require wins over the body's sslmode, even with plain text allowed",
+    async () => {
+      const { ana, url } = await team();
+      const modes: string[] = [];
+      const recording: GuardedConnector = async (t) => {
+        modes.push(t.sslmode);
+        return pgliteGuardedConnector(pg)(t);
+      };
+      await withConnector(recording, () =>
+        withNetRule({ allowPrivateNetworks: true, allowPlaintext: true }, async () => {
+          const res = await call(ana, "POST", url("/databases"), {
+            provider: "other",
+            url: "postgres://reader:s3cret@127.0.0.1:6543/shop?sslmode=require",
+            sslmode: "disable",
+          });
+          expect(res.status).toBe(201);
+        }),
+      );
+      expect(modes.length).toBeGreaterThan(0);
+      expect(new Set(modes)).toEqual(new Set(["require"]));
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "connect, suggestions, tables, update and disconnect",
     async () => {
       const { ana, beto, url } = await team();

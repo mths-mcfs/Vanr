@@ -315,6 +315,7 @@ export default {
   "svc.disconnect": "Desconectar",
   "svc.disconnectNamed": "Desconectar {service}",
   "svc.disconnectOne": "Desconectar {service} ({account})",
+  "svc.nth": "{name}, {n}",
   "svc.since": "Conectado em {date}",
   "svc.disconnectTitle": "Desconectar {service}?",
   "svc.disconnectBody":
@@ -563,6 +564,12 @@ export default {
     "Os agentes perdem este banco na hora, e a senha salva é apagada. Nada muda dentro do banco.",
   "db.disconnected": "{name} foi desconectado.",
 
+  "db.tlsRefused":
+    "Este servidor só conecta a bancos por uma conexão criptografada (TLS). Escolha Criptografado.",
+  "error.mail.tls_required":
+    "Este servidor só conecta a servidores de e-mail por uma conexão criptografada (TLS). Use as portas criptografadas, como 993 e 465.",
+  "error.mail.blocked_host": "Esse servidor de e-mail está numa rede privada, e este servidor não permite.",
+  "error.mail.composio_failed": "Não deu para começar o login com o provedor. Tente daqui a pouco.",
   "error.mail.invalid_address": "Use um endereço de e-mail completo.",
   "error.mail.unknown_preset": "Escolha um provedor da lista.",
   "error.mail.servers_required": "Digite o servidor de entrada e o de saída.",
@@ -597,8 +604,7 @@ export default {
   "grid.level.write": "Ler e alterar",
   "grid.level.custom": "Só alterar",
   "error.access.unknown_scope": "Esta permissão não existe neste servidor. Recarregue e tente de novo.",
-  "error.access.unknown_connection":
-    "Essa conexão não existe mais. Recarregue para ver as que existem agora.",
+  "error.access.unknown_connection": "Essa conexão não existe mais: alguém a removeu nesse meio-tempo.",
   "error.agent.archived": "Este agente está arquivado, então o acesso dele não muda.",
 
   "use.title": "Este mês",

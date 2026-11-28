@@ -129,7 +129,7 @@ class ServerSearchIndex extends PgSearchIndex {
   }
 }
 
-/** The server's index. Embeddings go into the ledger as `search`, paid by the platform. */
+/** The server's index. Embeddings go into the ledger as `embedding`, paid by the platform, outside the month's budget. */
 export function createSearchIndex(
   deps: Pick<AppDeps, "db" | "config" | "ledger" | "now">,
   fetchImpl?: typeof fetch,
@@ -145,7 +145,7 @@ export function createSearchIndex(
           agentId: null,
           userId: null,
           runId: null,
-          source: "search",
+          source: "embedding",
           model: e.model,
           usage: { inputTokens: e.tokens, cachedTokens: 0, cacheWriteTokens: 0, outputTokens: 0 },
           at: deps.now(),
@@ -417,18 +417,8 @@ async function build(tx: Tx, ref: { kind: IndexedKind; id: string }): Promise<Ch
       const synthesis = row.synthesis ? JSON.stringify(row.synthesis) : "";
       const text = [row.goal, synthesis, ...posts.map((p) => p.body)].filter(Boolean).join("\n\n");
       // The same rule as the debate's visibility: without a channel, the workspace; with a channel, whoever
-      // reads it and whoever takes part (asks, leads, opened it, was called; the agents at the table).
-      const also = unique([
-        ...[
-          row.requesterUserId,
-          row.leadUserId,
-          row.createdBy.type === "person" ? row.createdBy.id : null,
-          ...row.userIds,
-        ]
-          .filter((x): x is string => !!x)
-          .map((id) => `user:${id}`),
-        ...row.agentIds.map((id) => `agent:${id}`),
-      ]);
+      // reads it (a person at the table who left the channel no longer does), and the agents at the table.
+      const also = unique(row.agentIds.map((id) => `agent:${id}`));
       return chunksOf(
         {
           workspaceId: row.workspaceId,

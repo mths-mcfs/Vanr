@@ -5,24 +5,42 @@
 // tables it may query, the columns it never sees and a daily query limit. Everyone in the workspace reads
 // these; whoever manages agents changes them. The mailboxes and databases themselves are connected in
 // the workspace settings.
-import { isApiError } from "@vanr/client";
-import { useApiMutation, useApiQuery } from "@vanr/client/react";
+//
+// Each form keeps only what the person changed, over what the server has now: a refresh while they type
+// shows the others' changes in the fields they left alone and keeps theirs. A save reads the agent's
+// setting fresh and sends the changed fields only (the server keeps the rest), so it never puts back what
+// someone else saved meanwhile.
+import { useQueryClient } from "@tanstack/react-query";
+import { isApiError, type MethodName } from "@vanr/client";
+import { prefixKey, useApiMutation, useApiQuery, useVanrClient } from "@vanr/client/react";
 import type {
   AgentDatabase,
   AgentDetail,
   AgentMailbox,
   DatabaseConnection,
-  DatabaseTable,
   MailAccount,
   MailLevel,
 } from "@vanr/contract";
-import { Button, Callout, Checkbox, EmptyState, Field, Input, Select, SelectItem, Textarea } from "@vanr/ui";
-import { type ReactNode, useState } from "react";
+import {
+  Button,
+  Callout,
+  Checkbox,
+  EmptyState,
+  Field,
+  Input,
+  Radio,
+  RadioGroup,
+  Select,
+  SelectItem,
+  Textarea,
+} from "@vanr/ui";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { useErrorMessage } from "../../app/screens.tsx";
 import { useMessages } from "../../i18n/react.tsx";
-import { useLatch } from "../control/connections/shared.tsx";
+import { useForgetOnLoss, useOneChange } from "../control/connections/shared.tsx";
 import { readLimit } from "../work/limits.ts";
 import { type AgentRights, PartError, PartLoading, Section, useOutcome } from "./shared.tsx";
+import { tableName } from "./table-name.ts";
 
 type Props = { agent: AgentDetail; workspaceId: string; rights: AgentRights };
 
@@ -58,10 +76,6 @@ export const listOf = (text: string, commas = false) => [
 export const badAddress = (list: readonly string[]) =>
   list.find((each) => each.length > POLICY.addressChars || !(ADDRESS.test(each) || DOMAIN.test(each)));
 
-/** A table as the server names it: each part quoted only when SQL needs it. */
-const quoted = (name: string) => (/^[a-z_][a-z0-9_]*$/.test(name) ? name : `"${name.replace(/"/g, '""')}"`);
-export const tableName = (table: DatabaseTable) => `${quoted(table.schema)}.${quoted(table.name)}`;
-
 /** A whole number typed in a field, inside its bounds; the empty text is `empty`. */
 function countOf<E>(
   text: string,
@@ -69,6 +83,88 @@ function countOf<E>(
   empty: E,
 ): number | E | undefined {
   return text.trim() === "" ? empty : readLimit(text, bounds, ".");
+}
+
+/**
+ * The fields of a form as the person sees them: what they changed (their picks) over what the server has
+ * now. A pick set back to the server's value is no change any more.
+ */
+function usePicks<F extends Record<string, unknown>>(server: F) {
+  const [picks, setPicks] = useState<Partial<F>>({});
+  const shown: F = { ...server, ...picks };
+  const pick = <K extends keyof F>(key: K, value: F[K]) =>
+    setPicks((before) => {
+      const next = { ...before };
+      if (Object.is(value, server[key])) delete next[key];
+      else next[key] = value;
+      return next;
+    });
+  /** Keeps a value as the person's own even if it equals what the screen shows as saved now. */
+  const keep = <K extends keyof F>(key: K, value: F[K]) =>
+    setPicks((before) => ({ ...before, [key]: value }));
+  return { shown, picks, pick, keep, clear: () => setPicks({}) };
+}
+
+/** A set as the person sees it: the server's entries with the ones they ticked or unticked. */
+function useToggles(server: readonly string[]) {
+  const [toggles, setToggles] = useState<ReadonlyMap<string, boolean>>(new Map());
+  const over = (base: readonly string[]) => {
+    const next = new Set(base);
+    for (const [entry, on] of toggles) {
+      if (on) next.add(entry);
+      else next.delete(entry);
+    }
+    return next;
+  };
+  const toggle = (entry: string, on: boolean) =>
+    setToggles((before) => {
+      const next = new Map(before);
+      if (server.includes(entry) === on) next.delete(entry);
+      else next.set(entry, on);
+      return next;
+    });
+  /** Keeps these entries ticked as the person's own, whatever the saved list becomes. */
+  const keep = (entries: Iterable<string>) => setToggles(new Map([...entries].map((entry) => [entry, true])));
+  return {
+    shown: over(server),
+    over,
+    changed: toggles.size > 0,
+    toggle,
+    keep,
+    clear: () => setToggles(new Map()),
+  };
+}
+
+/**
+ * How one of these saves fails: the error shows on the form; a mailbox, database or agent that is gone
+ * (404, or 403 when it is no longer the person's) drops what the screen kept, and an archived agent loads
+ * the agent and these reads again, so the form stops offering what can't be saved.
+ */
+function useSaveFailure(workspaceId: string, reads: readonly MethodName[]) {
+  const client = useVanrClient();
+  const queryClient = useQueryClient();
+  const forget = useForgetOnLoss(workspaceId, reads);
+  const [error, setError] = useState<unknown>(null);
+  return {
+    error,
+    clear: () => setError(null),
+    /** Loads these reads again. */
+    reload: () =>
+      Promise.all(
+        reads.map((method) =>
+          queryClient.invalidateQueries({ queryKey: prefixKey(client, { method, args: { workspaceId } }) }),
+        ),
+      ),
+    failed: (failure: unknown) => {
+      setError(failure);
+      forget(failure);
+      if (isApiError(failure) && failure.status === 409 && failure.code === "agent.archived")
+        for (const method of ["getAgent", "listAgents", ...reads] as const)
+          void queryClient.invalidateQueries({
+            queryKey: prefixKey(client, { method, args: { workspaceId } }),
+          });
+    },
+  };
 }
 
 export function Sources(props: Props) {
@@ -90,6 +186,8 @@ export function Sources(props: Props) {
 
 /* ---------- mailboxes ---------- */
 
+const MAIL_READS = ["getAgentMail", "listMailAccounts"] as const;
+
 function Mailboxes({ agent, workspaceId, rights }: Props) {
   const t = useMessages("agents");
   const accounts = useApiQuery("listMailAccounts", { workspaceId });
@@ -103,27 +201,36 @@ function Mailboxes({ agent, workspaceId, rights }: Props) {
         onRetry={() => void Promise.all([accounts.refetch(), boxes.refetch()])}
       />
     );
+  // A mailbox whose sign-in hasn't come back yet isn't offered.
   const usable = accounts.data.filter((account) => account.status !== "pending");
   if (usable.length === 0) return <EmptyState title={t("mbx.none")} description={t("mbx.noneBody")} />;
   return (
     <ul className="source-list" aria-label={t("mbx.title")}>
-      {usable.map((account) => {
-        const box = boxes.data.find((each) => each.accountId === account.id);
-        return (
-          <MailboxForm
-            // A save that changes what the server keeps starts the form over from its answer.
-            key={`${workspaceId}/${account.id}/${JSON.stringify(box ?? null)}`}
-            workspaceId={workspaceId}
-            agentId={agent.id}
-            account={account}
-            box={box}
-            edit={rights.editAll}
-          />
-        );
-      })}
+      {usable.map((account) => (
+        <MailboxForm
+          key={`${workspaceId}/${agent.id}/${account.id}`}
+          workspaceId={workspaceId}
+          agentId={agent.id}
+          account={account}
+          box={boxes.data.find((each) => each.accountId === account.id)}
+          edit={rights.editAll}
+        />
+      ))}
     </ul>
   );
 }
+
+/** A mailbox's settings as its form shows them. */
+const mailFields = (box: AgentMailbox | undefined) => ({
+  level: box?.level ?? ("none" as MailLevel),
+  senders: (box?.policy.senderAllowlist ?? []).join("\n"),
+  folders: (box?.policy.folders ?? []).join("\n"),
+  lookback: box?.policy.lookbackDays == null ? "" : String(box.policy.lookbackDays),
+  recipients: (box?.policy.recipientAllowlist ?? []).join("\n"),
+  sends: String(box?.policy.sendsPerDay ?? 25),
+  autoSend: box?.policy.autoSend ?? false,
+  deletable: box?.deletable ?? false,
+});
 
 function MailboxForm({
   workspaceId,
@@ -141,16 +248,11 @@ function MailboxForm({
   const t = useMessages("agents");
   const describe = useErrorMessage("agents");
   const outcome = useOutcome();
-  const latch = useLatch();
-  const policy = box?.policy;
-  const [level, setLevel] = useState<MailLevel>(box?.level ?? "none");
-  const [senders, setSenders] = useState((policy?.senderAllowlist ?? []).join("\n"));
-  const [folders, setFolders] = useState((policy?.folders ?? []).join("\n"));
-  const [lookback, setLookback] = useState(policy?.lookbackDays == null ? "" : String(policy.lookbackDays));
-  const [recipients, setRecipients] = useState((policy?.recipientAllowlist ?? []).join("\n"));
-  const [sends, setSends] = useState(String(policy?.sendsPerDay ?? 25));
-  const [autoSend, setAutoSend] = useState(policy?.autoSend ?? false);
-  const [deletable, setDeletable] = useState(box?.deletable ?? false);
+  const client = useVanrClient();
+  const change = useOneChange();
+  const failure = useSaveFailure(workspaceId, MAIL_READS);
+  const form = usePicks(mailFields(box));
+  const { level, senders, folders, lookback, recipients, sends, autoSend, deletable } = form.shown;
   const save = useApiMutation("replaceAgentMail", {
     invalidates: () => [
       { method: "getAgentMail" as const, args: { workspaceId, agentId } },
@@ -190,7 +292,42 @@ function MailboxForm({
   const invalid = Object.values(problems).some((each) => each !== undefined);
   // The server turns "send without asking" off when no recipient is allowed (mail-rules.ts).
   const noRecipients = recipientList.length === 0;
-  const locked = !edit || save.isPending;
+  const locked = !edit || change.busy;
+  const { picks } = form;
+  const submit = () =>
+    change.run(async () => {
+      failure.clear();
+      try {
+        const fresh = (await client.call("getAgentMail", { workspaceId, agentId })).find(
+          (each) => each.accountId === account.id,
+        );
+        const saving = picks.level ?? fresh?.level ?? "none";
+        const reads = saving !== "none";
+        const writes = saving === "read_write";
+        const policy = {
+          ...(reads && picks.senders !== undefined && { senderAllowlist: senderList }),
+          ...(reads && picks.folders !== undefined && { folders: folderList }),
+          ...(reads && picks.lookback !== undefined && { lookbackDays: lookbackDays ?? null }),
+          ...(writes && picks.recipients !== undefined && { recipientAllowlist: recipientList }),
+          ...(writes && picks.sends !== undefined && { sendsPerDay: sendsPerDay ?? 0 }),
+          ...(writes && picks.autoSend !== undefined && { autoSend: autoSend && !noRecipients }),
+        };
+        await save.mutateAsync({
+          workspaceId,
+          agentId,
+          mailId: account.id,
+          body: {
+            level: saving,
+            ...(writes && picks.deletable !== undefined && { deletable }),
+            ...(Object.keys(policy).length > 0 && { policy }),
+          },
+        });
+        form.clear();
+        outcome.done(t("mbx.saved", { address: account.address }));
+      } catch (error) {
+        failure.failed(error);
+      }
+    });
   return (
     <li className="source">
       <form
@@ -198,34 +335,11 @@ function MailboxForm({
         aria-label={
           account.label === account.address ? account.address : `${account.label} (${account.address})`
         }
+        aria-busy={change.busy}
+        onFocusCapture={change.onFocusCapture}
         onSubmit={(event) => {
           event.preventDefault();
-          if (!edit || invalid) return;
-          latch(() =>
-            save
-              .mutateAsync({
-                workspaceId,
-                agentId,
-                mailId: account.id,
-                body: {
-                  level,
-                  ...(writing && { deletable }),
-                  ...(reading && {
-                    policy: {
-                      senderAllowlist: senderList,
-                      folders: folderList,
-                      lookbackDays: lookbackDays ?? null,
-                      ...(writing && {
-                        recipientAllowlist: recipientList,
-                        sendsPerDay: sendsPerDay ?? 0,
-                        autoSend: autoSend && !noRecipients,
-                      }),
-                    },
-                  }),
-                },
-              })
-              .then(() => outcome.done(t("mbx.saved", { address: account.address }))),
-          );
+          if (edit && !invalid) submit();
         }}
       >
         <div className="source__head">
@@ -238,7 +352,7 @@ function MailboxForm({
             value={level}
             disabled={locked}
             aria-label={t("mbx.levelFor", { address: account.address })}
-            onValueChange={(next) => setLevel(MAIL_LEVELS.find((each) => each === next) ?? "none")}
+            onValueChange={(next) => form.pick("level", MAIL_LEVELS.find((each) => each === next) ?? "none")}
           >
             {MAIL_LEVELS.map((each) => (
               <SelectItem key={each} value={each}>
@@ -254,7 +368,7 @@ function MailboxForm({
                 rows={2}
                 value={senders}
                 disabled={locked}
-                onChange={(e) => setSenders(e.target.value)}
+                onChange={(e) => form.pick("senders", e.target.value)}
               />
             </Field>
             <Field label={t("mbx.folders")} hint={t("mbx.foldersHint")} error={problems.folders}>
@@ -262,7 +376,7 @@ function MailboxForm({
                 rows={2}
                 value={folders}
                 disabled={locked}
-                onChange={(e) => setFolders(e.target.value)}
+                onChange={(e) => form.pick("folders", e.target.value)}
               />
             </Field>
             <Field label={t("mbx.lookback")} hint={t("mbx.lookbackHint")} error={problems.lookback}>
@@ -270,7 +384,7 @@ function MailboxForm({
                 inputMode="numeric"
                 value={lookback}
                 disabled={locked}
-                onChange={(e) => setLookback(e.target.value)}
+                onChange={(e) => form.pick("lookback", e.target.value)}
               />
             </Field>
             {writing && (
@@ -280,7 +394,7 @@ function MailboxForm({
                     rows={2}
                     value={recipients}
                     disabled={locked}
-                    onChange={(e) => setRecipients(e.target.value)}
+                    onChange={(e) => form.pick("recipients", e.target.value)}
                   />
                 </Field>
                 <Field label={t("mbx.sends")} hint={t("mbx.sendsHint")} error={problems.sends}>
@@ -288,7 +402,7 @@ function MailboxForm({
                     inputMode="numeric"
                     value={sends}
                     disabled={locked}
-                    onChange={(e) => setSends(e.target.value)}
+                    onChange={(e) => form.pick("sends", e.target.value)}
                   />
                 </Field>
               </>
@@ -302,25 +416,25 @@ function MailboxForm({
               disabled={locked || noRecipients}
               label={t("mbx.autoSend")}
               hint={noRecipients ? t("mbx.autoSendNeedsList") : t("mbx.autoSendHint")}
-              onCheckedChange={(on) => setAutoSend(on === true)}
+              onCheckedChange={(on) => form.pick("autoSend", on === true)}
             />
             <Checkbox
               checked={deletable}
               disabled={locked}
               label={t("mbx.deletable")}
               hint={t("mbx.deletableHint")}
-              onCheckedChange={(on) => setDeletable(on === true)}
+              onCheckedChange={(on) => form.pick("deletable", on === true)}
             />
           </div>
         )}
-        {save.isError && (
+        {failure.error !== null && (
           <Callout tone="danger" role="alert">
-            {describe(save.error)}
+            {describe(failure.error)}
           </Callout>
         )}
         {edit && (
           <div className="section-form__actions">
-            <Button type="submit" size="sm" variant="primary" disabled={invalid} loading={save.isPending}>
+            <Button type="submit" size="sm" variant="primary" disabled={invalid} loading={change.busy}>
               {t("mbx.save")}
             </Button>
           </div>
@@ -331,6 +445,8 @@ function MailboxForm({
 }
 
 /* ---------- databases ---------- */
+
+const DATABASE_READS = ["listAgentDatabases", "listDatabases"] as const;
 
 function Databases({ agent, workspaceId, rights }: Props) {
   const t = useMessages("agents");
@@ -349,22 +465,47 @@ function Databases({ agent, workspaceId, rights }: Props) {
     return <EmptyState title={t("dbx.none")} description={t("dbx.noneBody")} />;
   return (
     <ul className="source-list" aria-label={t("dbx.title")}>
-      {connections.data.map((connection) => {
-        const link = links.data.find((each) => each.connectionId === connection.id);
-        return (
-          <DatabaseForm
-            key={`${workspaceId}/${connection.id}/${JSON.stringify(link ?? null)}`}
-            workspaceId={workspaceId}
-            agentId={agent.id}
-            connection={connection}
-            link={link}
-            edit={rights.editAll}
-          />
-        );
-      })}
+      {connections.data.map((connection) => (
+        <DatabaseForm
+          key={`${workspaceId}/${agent.id}/${connection.id}`}
+          workspaceId={workspaceId}
+          agentId={agent.id}
+          connection={connection}
+          link={links.data.find((each) => each.connectionId === connection.id)}
+          edit={rights.editAll}
+        />
+      ))}
     </ul>
   );
 }
+
+/**
+ * A link with no policy of its own: never saved, or saved at "none" before it ever read (the server keeps
+ * that one empty). Its form shows the server's first-time defaults, and raising it sends them in full.
+ */
+const unset = (link: AgentDatabase | undefined) =>
+  link === undefined ||
+  (link.level === "none" &&
+    link.policy.tables.length === 0 &&
+    link.policy.maskedColumns.length === 0 &&
+    link.policy.queriesPerDay === 200 &&
+    link.policy.timeoutSeconds === 30);
+
+/** A database link's settings as its form shows them (for an unset one, the server's first-time defaults). */
+const databaseFields = (saved: AgentDatabase | undefined, connection: DatabaseConnection) => {
+  const link = unset(saved) ? undefined : saved;
+  return {
+    reads: (saved?.level ?? "none") === "read",
+    hidden: (link?.policy.maskedColumns ?? connection.hiddenSuggestion).join("\n"),
+    queries:
+      link === undefined
+        ? "200"
+        : link.policy.queriesPerDay === null
+          ? ""
+          : String(link.policy.queriesPerDay),
+    timeout: (link?.policy.timeoutSeconds ?? 30) as (typeof TIMEOUTS)[number],
+  };
+};
 
 function DatabaseForm({
   workspaceId,
@@ -382,18 +523,12 @@ function DatabaseForm({
   const t = useMessages("agents");
   const describe = useErrorMessage("agents");
   const outcome = useOutcome();
-  const latch = useLatch();
-  const [reads, setReads] = useState((link?.level ?? "none") === "read");
-  const [tables, setTables] = useState<ReadonlySet<string> | null>(
-    link === undefined ? null : new Set(link.policy.tables),
-  );
-  const [hidden, setHidden] = useState(
-    (link?.policy.maskedColumns ?? connection.hiddenSuggestion).join("\n"),
-  );
-  const [queries, setQueries] = useState(
-    link === undefined ? "200" : link.policy.queriesPerDay === null ? "" : String(link.policy.queriesPerDay),
-  );
-  const [timeout, setTimeoutSeconds] = useState<(typeof TIMEOUTS)[number]>(link?.policy.timeoutSeconds ?? 30);
+  const client = useVanrClient();
+  const change = useOneChange();
+  const failure = useSaveFailure(workspaceId, DATABASE_READS);
+  const [changedMeanwhile, setChangedMeanwhile] = useState(false);
+  const form = usePicks(databaseFields(link, connection));
+  const { reads, hidden, queries, timeout } = form.shown;
   // The list of tables reads the customer's database, so it is only asked of someone who may change this.
   const listed = useApiQuery(
     "listDatabaseTables",
@@ -414,16 +549,13 @@ function DatabaseForm({
     queries: reads && queriesPerDay === undefined ? t("dbx.badQueries", POLICY.queries) : undefined,
   };
   const invalid = Object.values(problems).some((each) => each !== undefined);
-  const locked = !edit || save.isPending;
+  const locked = !edit || change.busy;
   const allTables = listed.data?.map(tableName) ?? [];
   // Before the first save, every table there is now is checked: the server's own default.
-  const chosen = tables ?? new Set(allTables);
-  const toggle = (name: string, on: boolean) => {
-    const next = new Set(chosen);
-    if (on) next.add(name);
-    else next.delete(name);
-    setTables(next);
-  };
+  const tables = useToggles(unset(link) ? allTables : (link?.policy.tables ?? []));
+  // Saved tables the list no longer has (dropped, or past what the database lists) stay visible.
+  const unlisted = unset(link) ? [] : (link?.policy.tables ?? []).filter((name) => !allTables.includes(name));
+  const chosen = tables.shown;
   const refusedPassword = isApiError(listed.error) && listed.error.rawCode === "database.auth";
   let tablePicker: ReactNode;
   if (!edit) {
@@ -446,52 +578,92 @@ function DatabaseForm({
     tablePicker = (
       <PartError title={t("dbx.tablesFailed")} error={listed.error} onRetry={() => void listed.refetch()} />
     );
-  else if (allTables.length === 0) tablePicker = <p className="page__muted">{t("dbx.noTablesThere")}</p>;
+  else if (allTables.length === 0 && unlisted.length === 0)
+    tablePicker = <p className="page__muted">{t("dbx.noTablesThere")}</p>;
   else
     tablePicker = (
       <ul className="source__tables" aria-label={t("dbx.tables")}>
-        {allTables.map((name) => (
+        {[...allTables, ...unlisted].map((name) => (
           <li key={name}>
             <Checkbox
               checked={chosen.has(name)}
               disabled={locked}
-              label={<code>{name}</code>}
-              onCheckedChange={(on) => toggle(name, on === true)}
+              label={
+                <>
+                  <code>{name}</code>
+                  {!allTables.includes(name) && <span className="page__muted"> {t("dbx.notListed")}</span>}
+                </>
+              }
+              onCheckedChange={(on) => tables.toggle(name, on === true)}
             />
           </li>
         ))}
       </ul>
     );
-  const tablesReady = !edit || !reads || listed.isSuccess;
+  // The list is needed for a first save (the server takes every table there is) or for ticked tables;
+  // a saved link whose tables stay as they are saves without it, even while the database is down.
+  const tablesReady = !edit || !reads || listed.isSuccess || (!unset(link) && !tables.changed);
+  const { picks } = form;
+  const submit = () =>
+    change.run(async () => {
+      failure.clear();
+      setChangedMeanwhile(false);
+      try {
+        const fresh = (await client.call("listAgentDatabases", { workspaceId, agentId })).find(
+          (each) => each.connectionId === connection.id,
+        );
+        const reading = picks.reads ?? fresh?.level === "read";
+        // A link with no policy yet gets the whole form; the server would otherwise keep an empty one.
+        // The form was built for a link with a setup of its own, or without one. If that changed meanwhile,
+        // what the person sees is not what a save would keep: nothing is sent, and the form loads again.
+        if (reading && unset(link) !== unset(fresh)) {
+          setChangedMeanwhile(true);
+          await failure.reload();
+          return;
+        }
+        const whole = unset(fresh);
+        const policy = whole
+          ? {
+              maskedColumns: columns,
+              queriesPerDay: queriesPerDay ?? null,
+              timeoutSeconds: timeout,
+              ...(listed.isSuccess && { tables: [...tables.over(allTables)] }),
+            }
+          : {
+              ...(picks.hidden !== undefined && { maskedColumns: columns }),
+              ...(picks.queries !== undefined && { queriesPerDay: queriesPerDay ?? null }),
+              ...(picks.timeout !== undefined && { timeoutSeconds: timeout }),
+              // Over the tables saved now (or, the first time, every table there is); only once the list is
+              // known, and only when the person ticked some: otherwise the saved ones stay.
+              ...(listed.isSuccess &&
+                tables.changed && { tables: [...tables.over(fresh?.policy.tables ?? [])] }),
+            };
+        await save.mutateAsync({
+          workspaceId,
+          agentId,
+          databaseId: connection.id,
+          body: {
+            level: reading ? "read" : "none",
+            ...(reading && Object.keys(policy).length > 0 && { policy }),
+          },
+        });
+        form.clear();
+        tables.clear();
+        outcome.done(t("dbx.saved", { name: connection.label }));
+      } catch (error) {
+        failure.failed(error);
+      }
+    });
   return (
     <li className="source">
       <form
         className="section-form"
         aria-label={connection.label}
+        aria-busy={change.busy}
+        onFocusCapture={change.onFocusCapture}
         onSubmit={(event) => {
           event.preventDefault();
-          if (!edit || invalid) return;
-          latch(() =>
-            save
-              .mutateAsync({
-                workspaceId,
-                agentId,
-                databaseId: connection.id,
-                body: {
-                  level: reads ? "read" : "none",
-                  ...(reads && {
-                    policy: {
-                      maskedColumns: columns,
-                      queriesPerDay: queriesPerDay ?? null,
-                      timeoutSeconds: timeout,
-                      // The tables go only once the list is known; otherwise the saved ones stay.
-                      ...(listed.isSuccess && { tables: [...chosen] }),
-                    },
-                  }),
-                },
-              })
-              .then(() => outcome.done(t("dbx.saved", { name: connection.label }))),
-          );
+          if (edit && !invalid) submit();
         }}
       >
         <div className="source__head">
@@ -504,7 +676,7 @@ function DatabaseForm({
             disabled={locked}
             label={t("dbx.reads")}
             aria-label={t("dbx.readsFor", { name: connection.label })}
-            onCheckedChange={(on) => setReads(on === true)}
+            onCheckedChange={(on) => form.pick("reads", on === true)}
           />
         </div>
         {reads && (
@@ -519,7 +691,7 @@ function DatabaseForm({
                   rows={3}
                   value={hidden}
                   disabled={locked}
-                  onChange={(e) => setHidden(e.target.value)}
+                  onChange={(e) => form.pick("hidden", e.target.value)}
                 />
               </Field>
               <Field label={t("dbx.queries")} hint={t("dbx.queriesHint")} error={problems.queries}>
@@ -527,7 +699,7 @@ function DatabaseForm({
                   inputMode="numeric"
                   value={queries}
                   disabled={locked}
-                  onChange={(e) => setQueries(e.target.value)}
+                  onChange={(e) => form.pick("queries", e.target.value)}
                 />
               </Field>
               <Field label={t("dbx.timeout")}>
@@ -536,7 +708,7 @@ function DatabaseForm({
                   value={String(timeout)}
                   disabled={locked}
                   onValueChange={(next) =>
-                    setTimeoutSeconds(TIMEOUTS.find((each) => String(each) === next) ?? 30)
+                    form.pick("timeout", TIMEOUTS.find((each) => String(each) === next) ?? 30)
                   }
                 >
                   {TIMEOUTS.map((each) => (
@@ -549,9 +721,19 @@ function DatabaseForm({
             </div>
           </>
         )}
-        {save.isError && (
+        {reads && edit && link !== undefined && unset(link) && (
+          <Callout tone="info" role="status">
+            {t("dbx.suggested")}
+          </Callout>
+        )}
+        {changedMeanwhile && (
+          <Callout tone="warning" role="status">
+            {t("dbx.changedMeanwhile")}
+          </Callout>
+        )}
+        {failure.error !== null && (
           <Callout tone="danger" role="alert">
-            {describe(save.error)}
+            {describe(failure.error)}
           </Callout>
         )}
         {edit && (
@@ -561,7 +743,7 @@ function DatabaseForm({
               size="sm"
               variant="primary"
               disabled={invalid || !tablesReady}
-              loading={save.isPending}
+              loading={change.busy}
             >
               {t("dbx.save")}
             </Button>
@@ -573,6 +755,8 @@ function DatabaseForm({
 }
 
 /* ---------- GitHub repositories ---------- */
+
+const REPOSITORY_READS = ["listAgentRepositories"] as const;
 
 function Repositories({ agent, workspaceId, rights }: Props) {
   const t = useMessages("agents");
@@ -591,7 +775,7 @@ function Repositories({ agent, workspaceId, rights }: Props) {
     return <EmptyState title={t("repo.none")} description={t("repo.noneBody")} />;
   return (
     <RepositoryForm
-      key={`${workspaceId}/${saved.data.join(",")}`}
+      key={`${workspaceId}/${agent.id}`}
       workspaceId={workspaceId}
       agentId={agent.id}
       saved={saved.data}
@@ -600,6 +784,10 @@ function Repositories({ agent, workspaceId, rights }: Props) {
     />
   );
 }
+
+type RepoScope = "all" | "some";
+/** How the server reads an agent's list (github-app.ts repoRefusal): empty is no limit at all. */
+const scopeOf = (list: readonly string[]): RepoScope => (list.length === 0 ? "all" : "some");
 
 function RepositoryForm({
   workspaceId,
@@ -617,52 +805,143 @@ function RepositoryForm({
   const t = useMessages("agents");
   const describe = useErrorMessage("agents");
   const outcome = useOutcome();
-  const latch = useLatch();
-  const [chosen, setChosen] = useState<ReadonlySet<string>>(() => new Set(saved));
+  const client = useVanrClient();
+  const change = useOneChange();
+  const failure = useSaveFailure(workspaceId, REPOSITORY_READS);
+  // An empty list reaches every repository, so it is a choice of its own ("no limit"), never what is left
+  // after unticking: the web never turns a narrowing into a widening.
+  const savedScope = scopeOf(saved);
+  const form = usePicks({ scope: savedScope });
+  const scope = form.shown.scope;
+  const picked = useToggles(savedScope === "some" ? saved : []);
+  const chosen = picked.shown;
+  const [notice, setNotice] = useState<"keepOne" | "becameAll" | "becameSome" | null>(null);
   const save = useApiMutation("setAgentRepositories", {
     invalidates: () => [{ method: "listAgentRepositories" as const, args: { workspaceId, agentId } }],
   });
   const known = new Set(
     accounts.flatMap((account) => [`${account.login}/*`, ...account.repositories.map((r) => r.fullName)]),
   );
-  // Saved entries GitHub no longer lists stay visible, so a save never drops them unseen.
-  const elsewhere = saved.filter((entry) => !known.has(entry));
+  // Entries GitHub no longer lists (saved, or kept from the person's ticks) stay visible, so a save never
+  // sends or drops them unseen.
+  const elsewhere = [...new Set([...saved, ...(scope === "some" ? chosen : [])])].filter(
+    (entry) => !known.has(entry),
+  );
+  const locked = !edit || change.busy;
+  const limited = scope === "some";
+  // "No limit" set by someone else while the person has ticks on screen: their ticks stay, as their own
+  // choice, with a word on what changed; nothing reaches every repository without them choosing it.
+  const pending = picked.changed || form.picks.scope !== undefined;
+  const before = useRef({ savedScope, limited, pending, chosen });
+  useEffect(() => {
+    const was = before.current;
+    if (was.savedScope === "some" && savedScope === "all" && was.limited && was.pending) {
+      form.keep("scope", "some");
+      picked.keep(was.chosen);
+      setNotice("becameAll");
+    }
+  });
+  useEffect(() => {
+    before.current = { savedScope, limited, pending, chosen };
+  });
+  const tooMany = limited && chosen.size > POLICY.repositories;
+  const empty = limited && chosen.size === 0;
   const toggle = (entry: string, on: boolean) => {
-    const next = new Set(chosen);
-    if (on) next.add(entry);
-    else next.delete(entry);
-    setChosen(next);
+    // Unticking the last one would save an empty list, which reaches everything.
+    if (!on && chosen.size === 1 && chosen.has(entry)) {
+      setNotice("keepOne");
+      return;
+    }
+    setNotice(null);
+    picked.toggle(entry, on);
   };
-  const locked = !edit || save.isPending;
-  const tooMany = chosen.size > POLICY.repositories;
   const box = (entry: string, label: ReactNode, under?: string) => (
     <li key={entry}>
       <Checkbox
-        checked={chosen.has(entry) || (under !== undefined && chosen.has(under))}
-        disabled={locked || (under !== undefined && chosen.has(under))}
+        checked={!limited || chosen.has(entry) || (under !== undefined && chosen.has(under))}
+        disabled={locked || !limited || (under !== undefined && chosen.has(under))}
         label={label}
         onCheckedChange={(on) => toggle(entry, on === true)}
       />
     </li>
   );
+  const submit = () =>
+    change.run(async () => {
+      failure.clear();
+      try {
+        const fresh = await client.call("listAgentRepositories", { workspaceId, agentId });
+        let repositories: string[] = [];
+        if (!limited && form.picks.scope !== "all" && scopeOf(fresh) === "some") {
+          // The form showed no limit only because that was saved; someone has limited it since. Taking
+          // their limit away needs the person to choose "no limit" themselves.
+          setNotice("becameSome");
+          await failure.reload();
+          return;
+        }
+        if (!limited && form.picks.scope === undefined) {
+          // Nothing changed and no limit is what is saved: nothing is written, so a limit someone saves
+          // between this read and a write can't be undone by it.
+          outcome.done(t("repo.saved"));
+          return;
+        }
+        if (limited) {
+          // Someone set "no limit" meanwhile: the person's ticks stay on screen as their own choice, and
+          // nothing is sent until they save again or pick "no limit" too.
+          if (savedScope === "some" && scopeOf(fresh) === "all") {
+            form.keep("scope", "some");
+            picked.keep(chosen);
+            setNotice("becameAll");
+            await failure.reload();
+            return;
+          }
+          // Narrowing from no limit while someone else set a limit: their limit joins the person's ticks on
+          // screen, and nothing is sent until the person has seen both and saves again.
+          if (savedScope === "all" && scopeOf(fresh) === "some") {
+            setNotice("becameSome");
+            await failure.reload();
+            return;
+          }
+          // The person's ticks over the repositories saved now, not over the ones this screen loaded with.
+          repositories = [...picked.over(scopeOf(fresh) === "some" ? fresh : [])];
+          if (repositories.length === 0) {
+            setNotice("keepOne");
+            await failure.reload();
+            return;
+          }
+        }
+        // More than the server keeps is its refusal to give, not a cut made here.
+        await save.mutateAsync({ workspaceId, agentId, body: { repositories } });
+        form.clear();
+        picked.clear();
+        setNotice(null);
+        outcome.done(t("repo.saved"));
+      } catch (error) {
+        failure.failed(error);
+      }
+    });
   return (
     <form
       className="section-form"
       aria-label={t("repo.title")}
+      aria-busy={change.busy}
+      onFocusCapture={change.onFocusCapture}
       onSubmit={(event) => {
         event.preventDefault();
-        if (!edit || tooMany) return;
-        latch(() =>
-          save
-            .mutateAsync({
-              workspaceId,
-              agentId,
-              body: { repositories: [...chosen] },
-            })
-            .then(() => outcome.done(t("repo.saved"))),
-        );
+        if (edit && !tooMany && !empty) submit();
       }}
     >
+      <RadioGroup
+        aria-label={t("repo.scope")}
+        value={scope}
+        disabled={locked}
+        onValueChange={(next) => {
+          setNotice(null);
+          form.pick("scope", next === "all" ? "all" : "some");
+        }}
+      >
+        <Radio value="all" label={t("repo.scopeAll")} hint={t("repo.scopeAllHint")} />
+        <Radio value="some" label={t("repo.scopeSome")} />
+      </RadioGroup>
       {accounts.map((account) => (
         <fieldset key={account.login} className="source__fieldset">
           <legend>{account.login}</legend>
@@ -687,19 +966,30 @@ function RepositoryForm({
           <ul className="source__tables">{elsewhere.map((entry) => box(entry, <code>{entry}</code>))}</ul>
         </fieldset>
       )}
+      {(notice !== null || empty) && (
+        <Callout tone={notice === "becameAll" || notice === "becameSome" ? "warning" : "info"} role="status">
+          {t(
+            notice === "becameAll"
+              ? "repo.becameAll"
+              : notice === "becameSome"
+                ? "repo.becameSome"
+                : "repo.keepOne",
+          )}
+        </Callout>
+      )}
       {tooMany && (
         <Callout tone="danger" role="alert">
           {t("repo.tooMany", { max: POLICY.repositories, count: chosen.size })}
         </Callout>
       )}
-      {save.isError && (
+      {failure.error !== null && (
         <Callout tone="danger" role="alert">
-          {describe(save.error)}
+          {describe(failure.error)}
         </Callout>
       )}
       {edit && (
         <div className="section-form__actions">
-          <Button type="submit" size="sm" variant="primary" disabled={tooMany} loading={save.isPending}>
+          <Button type="submit" size="sm" variant="primary" disabled={tooMany || empty} loading={change.busy}>
             {t("repo.save")}
           </Button>
         </div>

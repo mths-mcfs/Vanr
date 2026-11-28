@@ -17,21 +17,17 @@ export const isClosedAssignment = (assignment: Pick<Assignment, "status">) =>
 
 /**
  * How much of an assignment is open, and how much of it waits on this person, counted from its pending
- * items as the server's "waiting on you" counts them: nothing for who may not act; never a provisional
- * decision; requests to take part only for the owner, who answers them. The server's list also puts an
- * assignment there for a pause on the cost ceiling or a stuck step, which have no count here, so such a
- * row says nothing waits while the "Waiting on you" tab lists it.
+ * items as the server's "waiting on you" counts them: requests to take part for who manages it (the owner or an
+ * admin, who answers them, taking part or not); everything else only for who may act; never a provisional
+ * decision. The server's list also puts an assignment there for a pause on the cost ceiling or a stuck step, which
+ * have no count here, so such a row says nothing waits while the "Waiting on you" tab lists it.
  */
-export function pendingOf(assignment: Pick<Assignment, "pending" | "actionable" | "role">) {
+export function pendingOf(assignment: Pick<Assignment, "pending" | "actionable" | "manageable">) {
   const p = assignment.pending;
   const open = Object.values(p).reduce((sum, count) => sum + count, 0);
-  const waiting = assignment.actionable
-    ? p.decisions +
-      p.reviews +
-      p.commands +
-      p.submissions +
-      (assignment.role === "owner" ? p.joinRequests : 0)
-    : 0;
+  const waiting =
+    (assignment.actionable ? p.decisions + p.reviews + p.commands + p.submissions : 0) +
+    (assignment.manageable ? p.joinRequests : 0);
   return { open, waiting };
 }
 

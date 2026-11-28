@@ -117,7 +117,7 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("a workspace's last owner on Post
         (side, hooks) => {
           const db = instrumented(server.deps.db, hooks);
           const me = side === "A" ? ana : bia;
-          return result(side, removeMember(db, { workspaceId, actorId: me, target: me }));
+          return result(side, removeMember(db, { workspaceId, actorId: me, target: me, at: new Date() }));
         },
         { match: "count(" },
       );

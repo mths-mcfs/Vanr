@@ -3,6 +3,7 @@ import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { handleFrom, uniqueHandle } from "@vanr/engine/text";
 import { and, count, eq, inArray, ne } from "drizzle-orm";
+import { archiveOrphans, lockPrivateChannels } from "./channels";
 import { isUniqueViolation } from "./db-errors";
 import { conflict, forbidden, HttpError, notFound } from "./http";
 
@@ -212,8 +213,11 @@ export async function changeRole(
  * Remove: manage_members removes others; anyone can leave. An owner leaves only if another owner stays. The
  * person also leaves the workspace's channels.
  */
-export async function removeMember(db: Db, input: { workspaceId: string; actorId: string; target: string }) {
-  const { workspaceId, actorId, target } = input;
+export async function removeMember(
+  db: Db,
+  input: { workspaceId: string; actorId: string; target: string; at: Date },
+) {
+  const { workspaceId, actorId, target, at } = input;
   const self = target === actorId;
   await db.transaction(async (tx) => {
     const { actor, current } = await lockedRoles(tx, workspaceId, actorId, target);
@@ -227,14 +231,17 @@ export async function removeMember(db: Db, input: { workspaceId: string; actorId
       .select({ id: channels.id })
       .from(channels)
       .where(eq(channels.workspaceId, workspaceId));
-    await tx
-      .delete(channelMemberships)
-      .where(
-        and(
-          eq(channelMemberships.memberType, "person"),
-          eq(channelMemberships.memberId, target),
-          inArray(channelMemberships.channelId, workspaceChannels),
-        ),
-      );
+    const mine = and(
+      eq(channelMemberships.memberType, "person"),
+      eq(channelMemberships.memberId, target),
+      inArray(channelMemberships.channelId, workspaceChannels),
+    );
+    // A private channel they were the last one in is archived with their leave.
+    const ids = (
+      await tx.select({ id: channelMemberships.channelId }).from(channelMemberships).where(mine)
+    ).map((r) => r.id);
+    await lockPrivateChannels(tx, ids);
+    await tx.delete(channelMemberships).where(mine);
+    await archiveOrphans(tx, ids, at);
   });
 }

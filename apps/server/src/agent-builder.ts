@@ -8,10 +8,9 @@ import { type AgentDraft, type BuilderResult, can } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { DEFAULT_MODEL, MODELS } from "@vanr/engine/models/catalog";
-import { PRICES } from "@vanr/engine/models/prices";
 import { emptyUsage, type Usage } from "@vanr/engine/models/types";
 import { HANDLE_RE } from "@vanr/engine/text";
-import { estimateUsd } from "@vanr/engine/usage";
+import { utf8Bytes } from "@vanr/engine/usage";
 import { asc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { jsonFrom } from "./agent-lab";
@@ -20,6 +19,7 @@ import type { AppDeps, WorkspaceMember } from "./context";
 import { proposalsView, proposalTrail, publishProposal } from "./control";
 import { forbidden, HttpError } from "./http";
 import { takenHandles } from "./members";
+import { onWorkspaceBudget } from "./workspace-spend";
 
 const { skills, proposals } = schema;
 
@@ -182,8 +182,8 @@ function parsed(text: string, testModel: boolean, description: string, current: 
 }
 
 /**
- * A new agent: there is no agent to pay yet. It calls through the workspace's credential (or the platform's)
- * and records in the ledger without an agent; the cap is the per-person hourly limit.
+ * A new agent: there is no agent to pay yet. It calls through the workspace's credential (or the platform's) on
+ * the workspace's month budget, and records in the ledger without an agent; the per-person hourly limit stays.
  */
 export async function draftNewAgent(
   deps: AppDeps,
@@ -197,50 +197,44 @@ export async function draftNewAgent(
     throw new HttpError(503, "agent_draft.no_model", "No model is available for this workspace");
   const workspaceSkills = await workspaceSkillsOf(deps, me.workspaceId);
   const system = builderSystem(workspaceSkills, null);
-  const bytes = new TextEncoder().encode(system + description).length;
-  const held = await deps.ledger.reserve({
-    workspaceId: me.workspaceId,
-    scopes: [],
-    estimateUsd: estimateUsd(PRICES, {
-      model: BUILDER_MODEL,
-      promptBytes: bytes,
-      maxTokens: BUILDER_MAX_TOKENS,
-      at,
-    }),
-    at,
-  });
-  if (!held.ok) throw new HttpError(402, "agent_draft.budget", "Out of budget");
-  let text = "";
-  let usage: Usage = emptyUsage();
+  const viaTest = (await deps.testModelFor(me.workspaceId))({ credentialId: null, harnessKind: "model" });
+  // On the workspace's month budget: out of it, 402 workspace.budget before the call.
+  let text: string;
   try {
-    for await (const ev of provider.stream({
-      model: BUILDER_MODEL,
-      system,
-      messages: [{ role: "user", content: [{ type: "text", text: description }] }],
-      tools: [],
-      maxTokens: BUILDER_MAX_TOKENS,
-      signal: AbortSignal.timeout(BUILDER_TIMEOUT_MS),
-    })) {
-      if (ev.type === "turn") {
-        usage = ev.usage;
-        text = ev.content.flatMap((c) => (c.type === "text" ? [c.text] : [])).join("");
-      }
-    }
+    text = await onWorkspaceBudget(
+      deps,
+      {
+        workspaceId: me.workspaceId,
+        userId: me.userId,
+        source: "other",
+        model: BUILDER_MODEL,
+        promptBytes: utf8Bytes(system) + utf8Bytes(description),
+        maxTokens: BUILDER_MAX_TOKENS,
+        test: viaTest,
+      },
+      async () => {
+        let value = "";
+        let usage: Usage = emptyUsage();
+        for await (const ev of provider.stream({
+          model: BUILDER_MODEL,
+          system,
+          messages: [{ role: "user", content: [{ type: "text", text: description }] }],
+          tools: [],
+          maxTokens: BUILDER_MAX_TOKENS,
+          signal: AbortSignal.timeout(BUILDER_TIMEOUT_MS),
+        })) {
+          if (ev.type === "turn") {
+            usage = ev.usage;
+            value = ev.content.flatMap((c) => (c.type === "text" ? [c.text] : [])).join("");
+          }
+        }
+        return { value, usage };
+      },
+    );
   } catch (err) {
-    await deps.ledger.release(held.reservation);
+    if (err instanceof HttpError) throw err;
     throw new HttpError(502, "agent_draft.failed", err instanceof Error ? err.message : String(err));
   }
-  await deps.ledger.settle(held.reservation, {
-    workspaceId: me.workspaceId,
-    agentId: null,
-    userId: me.userId,
-    runId: null,
-    source: "other",
-    model: BUILDER_MODEL,
-    usage,
-    at: deps.now(),
-  });
-  const viaTest = (await deps.testModelFor(me.workspaceId))({ credentialId: null, harnessKind: "model" });
   const { raw, testModel } = parsed(text, viaTest, description, null);
   return toDraft(raw, {
     workspaceSkills,

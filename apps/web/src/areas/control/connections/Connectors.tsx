@@ -124,7 +124,8 @@ function ComeBack({
         onServerBack(server.id);
       }
     } else if (connected !== undefined) {
-      const service = catalog.data?.connectors.find((each) => each.id === connected)?.label;
+      // Only a service this server offers can have just been connected.
+      const service = catalog.data?.connectors.find((each) => each.id === connected && each.available)?.label;
       toast.push(
         service === undefined
           ? { tone: "info", title: t("back.unknown") }
@@ -220,7 +221,12 @@ function Services({ workspaceId }: { workspaceId: string }) {
           return own.map((connection) => {
             // Two connections of one service with the same name are told apart by when they were made.
             const since = t("svc.since", { date: when.format(new Date(connection.createdAt)) });
-            const who = connection.accountDisplayName ?? (own.length > 1 ? since : connection.label);
+            const base =
+              connection.accountDisplayName ??
+              (own.length > 1 && connection.label === def.label ? since : connection.label);
+            // With more than one connection of the service, each name ends with its place in the list:
+            // two names can't end with the same place, so no two buttons share a name.
+            const who = own.length > 1 ? t("svc.nth", { name: base, n: own.indexOf(connection) + 1 }) : base;
             return (
               <li key={connection.id} className="wire-row" data-state={connection.status}>
                 <div className="wire-row__who">

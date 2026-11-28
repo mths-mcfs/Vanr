@@ -8,7 +8,7 @@ import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { contentSha256, MEMORY_ITEM_MAX_BYTES, MEMORY_STORE_MAX_ITEMS } from "@vanr/engine/memory";
 import { and, eq, sql } from "drizzle-orm";
-import { createMemory } from "../src/agent-memory";
+import { createMemory, memoryPrompt, storeEntries } from "../src/agent-memory";
 import { channelInWorkspace } from "../src/channels";
 import { queueMemoryReview } from "../src/memory-reviews";
 import { postMessage } from "../src/messages";
@@ -393,6 +393,171 @@ describe("feedback on an answer", () => {
     });
     return message;
   }
+
+  test(
+    "a lesson from a private channel stays there: shown to its readers and used in its runs only",
+    async () => {
+      const t = await team();
+      const secret = await seedChannel(server, t.workspaceId, {
+        name: `secret${n}`,
+        visibility: "private",
+        members: [t.ana],
+      });
+      await server.deps.db
+        .insert(schema.channelMemberships)
+        .values({ channelId: secret, memberType: "agent", memberId: t.lia });
+      const inSecret = await answer(t, secret);
+      await ok(
+        call(t.ana, t.workspaceId, "POST", `/messages/${inSecret.id}/feedback`, { body: "Say 30 days" }),
+        201,
+      );
+      const inGeneral = await answer(t, t.general);
+      await ok(
+        call(t.caio, t.workspaceId, "POST", `/messages/${inGeneral.id}/feedback`, { body: "Be brief" }),
+        201,
+      );
+      const lessons = await server.deps.db
+        .select()
+        .from(schema.memories)
+        .where(and(eq(schema.memories.agentId, t.lia), eq(schema.memories.source, "feedback")));
+      const secretLesson = lessons.find((m) => m.text === "Say 30 days");
+      const openLesson = lessons.find((m) => m.text === "Be brief");
+      expect([secretLesson?.channelId, openLesson?.channelId]).toEqual([secret, null]);
+      // Shown: Ana reads the channel and sees both; Beto doesn't, so only the open one, and the other is a 404.
+      const texts = async (who: Person) =>
+        (
+          await ok<{ memories: Memory[] }>(call(who, t.workspaceId, "GET", `/agents/${t.lia}/memories`))
+        ).memories
+          .map((m) => m.text)
+          .sort();
+      expect(await texts(t.ana)).toEqual(["Be brief", "Say 30 days"]);
+      expect(await texts(t.beto)).toEqual(["Be brief"]);
+      const versions = (who: Person) =>
+        call(who, t.workspaceId, "GET", `/memories/${secretLesson?.id}/versions`);
+      expect([(await versions(t.beto)).status, (await versions(t.ana)).status]).toEqual([404, 200]);
+      // Used: the agent's prompt in #general leaves it out; in the private channel it is there.
+      const prompt = (channelId: string) =>
+        memoryPrompt(server.deps.db, clock, {
+          workspaceId: t.workspaceId,
+          agentId: t.lia,
+          personId: null,
+          channelId,
+        });
+      expect(await prompt(t.general)).not.toContain("Say 30 days");
+      expect(await prompt(t.general)).toContain("Be brief");
+      expect(await prompt(secret)).toContain("Say 30 days");
+      // Nor does the memory tool's store reach it from another channel.
+      const store = (seenFrom: string) =>
+        ({ scope: "agent", workspaceId: t.workspaceId, agentId: t.lia, seenFrom }) as const;
+      const listed = async (seenFrom: string) =>
+        (await storeEntries(server.deps.db, store(seenFrom))).some((e) => e.id === secretLesson?.id);
+      expect([await listed(t.general), await listed(secret)]).toEqual([false, true]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  /** A run of Lia's in a private channel only Ana reads, with Lia in it; its feedback lesson is confined there. */
+  async function confinedLesson(t: Team) {
+    const secret = await seedChannel(server, t.workspaceId, {
+      name: `vault${n}`,
+      visibility: "private",
+      members: [t.ana],
+    });
+    await server.deps.db
+      .insert(schema.channelMemberships)
+      .values({ channelId: secret, memberType: "agent", memberId: t.lia });
+    const reply = await answer(t, secret);
+    await ok(
+      call(t.ana, t.workspaceId, "POST", `/messages/${reply.id}/feedback`, { body: "Acme pays in 30 days" }),
+      201,
+    );
+    const [lesson] = await server.deps.db
+      .select()
+      .from(schema.memories)
+      .where(and(eq(schema.memories.agentId, t.lia), eq(schema.memories.source, "feedback")));
+    if (!lesson) throw new Error("no lesson");
+    const runId = newId("run");
+    await server.deps.db.insert(schema.runs).values({
+      id: runId,
+      workspaceId: t.workspaceId,
+      agentId: t.lia,
+      status: "done",
+      model: "claude-haiku-5-5",
+      channelId: secret,
+    });
+    /** What `remember` queues from that run after it read outside content, replacing the lesson. */
+    const queue = () =>
+      queueMemoryReview(server.deps, {
+        workspaceId: t.workspaceId,
+        agentId: t.lia,
+        runId,
+        scope: "agent",
+        ownerUserId: null,
+        op: "create",
+        memoryId: null,
+        path: null,
+        newPath: null,
+        text: "Acme pays in 30 days, by pix",
+        kind: "lesson",
+        about: null,
+        replaces: lesson.id,
+        reasons: [{ flag: "A", source: "web_fetch acme.example" }],
+        origin: { at: clock.toISOString(), by: null, channel: `#vault${n}`, name: null, runId },
+        tool: "remember",
+        baseSha256: null,
+      });
+    return { secret, lesson, queue };
+  }
+
+  test(
+    "approving a review that replaces a confined lesson keeps the replacement confined",
+    async () => {
+      const t = await team();
+      const { secret, queue } = await confinedLesson(t);
+      const review = await queue();
+      await ok(call(t.ana, t.workspaceId, "POST", `/memory-reviews/${review.id}/approve`));
+      const [created] = await server.deps.db
+        .select()
+        .from(schema.memories)
+        .where(
+          and(eq(schema.memories.agentId, t.lia), eq(schema.memories.text, "Acme pays in 30 days, by pix")),
+        );
+      expect(created?.channelId).toBe(secret);
+      const seen = await ok<{ memories: Memory[] }>(
+        call(t.beto, t.workspaceId, "GET", `/agents/${t.lia}/memories`),
+      );
+      expect(seen.memories.some((m) => m.text.startsWith("Acme pays"))).toBe(false);
+      const prompt = await memoryPrompt(server.deps.db, clock, {
+        workspaceId: t.workspaceId,
+        agentId: t.lia,
+        personId: null,
+        channelId: t.general,
+      });
+      expect(prompt).not.toContain("Acme pays");
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a review queued from a private channel is listed and decided only by deciders who read that channel",
+    async () => {
+      const t = await team();
+      const dora = await memberOf(server, t.workspaceId, "Dora", email("dora"), "admin");
+      const { queue } = await confinedLesson(t);
+      const review = await queue();
+      const listed = async (who: Person) =>
+        (
+          await ok<{ reviews: MemoryReview[] }>(call(who, t.workspaceId, "GET", "/memory-reviews"))
+        ).reviews.map((r) => r.id);
+      // Dora manages agents but isn't in the channel: the review isn't hers to see, its text included.
+      expect(await listed(dora)).toEqual([]);
+      expect((await call(dora, t.workspaceId, "POST", `/memory-reviews/${review.id}/approve`)).status).toBe(
+        404,
+      );
+      expect(await listed(t.ana)).toEqual([review.id]);
+    },
+    SERVER_TEST_MS,
+  );
 
   test.each(["insert", "thread update"] as const)(
     "feedback keeps its lesson exactly when the message was persisted despite a failing %s",

@@ -153,6 +153,7 @@ const AGENT_FAMILIES = new Set([
 const OTHER_FAMILIES: Record<string, string> = {
   "": "the workspace's own settings",
   "approval-rules": "revokes a rule, which only takes away",
+  "archived-channels": "the owner brings back a channel; its agents' posts are checked as in any channel",
   bases: "people's bases",
   calendar: "people's calendars",
   channels: "channels and posts; a post reaches only active agents (routing skips an archived one)",
@@ -775,7 +776,7 @@ describe("the agent's integrations", () => {
 
 describe("a memory review's origin", () => {
   test(
-    "C1: names its channel only to whoever reads it, in the list and the decision, never cached",
+    "C1: a review from a private channel goes only to deciders who read it, with its channel's name, never cached",
     async () => {
       const t = await team();
       const payroll = await seedChannel(server, t.workspaceId, {
@@ -814,13 +815,18 @@ describe("a memory review's origin", () => {
       const listed = async (who: Person) => {
         const res = await who.browser.fetch(`${t.w}/memory-reviews?agentId=${t.lia.id}`);
         expect(res.headers.get("cache-control")).toBe("no-store");
-        const body = (await res.json()) as { reviews: { origin: { channel: string | null } }[] };
+        const text = await res.text();
+        // The channel's name never reaches whoever doesn't read it.
+        if (who !== t.ana) expect(text.includes(`#payroll${seq}`)).toBe(false);
+        const body = JSON.parse(text) as { reviews: { origin: { channel: string | null } }[] };
         return body.reviews.map((r) => r.origin.channel);
       };
       expect(await listed(t.ana)).toEqual([`#payroll${seq}`]);
-      expect(await listed(t.beto)).toEqual([null]);
+      // Beto owns Lia but isn't in #payroll: what its run there wants to remember isn't his to see or decide.
+      expect(await listed(t.beto)).toEqual([]);
       const rejected = await call(t.beto, "POST", `${t.w}/memory-reviews/${review.id}/reject`, {});
-      expect(rejected.body.origin.channel).toBe(null);
+      expect(rejected.status).toBe(404);
+      expect(JSON.stringify(rejected.body).includes(`#payroll${seq}`)).toBe(false);
     },
     SERVER_TEST_MS,
   );

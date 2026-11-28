@@ -57,7 +57,7 @@ export function OwnServers({
   const t = useMessages("control");
   const outcome = useOutcome();
   const latch = useLatch();
-  const focus = useReturnFocus();
+  const focus = useReturnFocus(t("mcp.title"));
   const forget = useForgetOnLoss(workspaceId, READS);
   const servers = useApiQuery("getConnectorCustom", { workspaceId });
   const [adding, setAdding] = useState(false);

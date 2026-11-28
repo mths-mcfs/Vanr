@@ -44,7 +44,11 @@ export interface Debate {
   speakers: DebateSpeaker[];
   spendCapPercent: number | null;
   spendCapUsd: number | null;
-  stallInfo: { agentId: string; reason: string; round: number } | null;
+  /**
+   * Which turn stalled. While the debate is anonymous the agent shows only by its pseudonym (`agentId` null); the
+   * lead's synthesis keeps its id, which the table already shows, and no pseudonym.
+   */
+  stallInfo: { agentId: string | null; pseudonym: string | null; reason: string; round: number } | null;
   status: DebateStatus;
   title: string;
   updatedAt: string;
@@ -180,11 +184,12 @@ export interface DebateSuggestion {
 
 /**
  * Cost of opening a debate: `upToUsd` is the cap, the sum of what each call can reserve (every agent turn
- * and the synthesis, with the conversation at its maximum size). The real cost never exceeds it.
+ * and the synthesis, with the conversation at its maximum size). The real cost never exceeds it. Null for
+ * whoever can't `view_usage`.
  */
 export interface DebateEstimate {
   calls: number;
-  upToUsd: number;
+  upToUsd: number | null;
 }
 
 /** Body of opening a debate. `rounds`: challenge rounds after round 0 (0 = a vote). */

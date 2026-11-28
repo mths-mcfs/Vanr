@@ -747,6 +747,11 @@ export default {
     "O banco recusou a senha salva. Renove em Configurações, em Fontes de dados, para escolher as tabelas.",
   "dbx.noTables": "Nenhuma tabela escolhida.",
   "dbx.noTablesThere": "O banco não tem tabelas que este usuário consiga ver.",
+  "dbx.notListed": "(salva, fora da lista atual)",
+  "dbx.suggested":
+    "Este agente não tem configuração própria para este banco, então a sugerida já vem preenchida: todas as tabelas, as colunas ocultas sugeridas e 200 consultas por dia. Ao salvar, ela fica valendo.",
+  "dbx.changedMeanwhile":
+    "Nesse meio-tempo, alguém mudou a configuração deste banco para o agente. Nada foi salvo: confira o formulário e salve de novo.",
   "dbx.hidden": "Colunas escondidas",
   "dbx.hiddenHint": "tabela.coluna ou schema.tabela.coluna, uma por linha. Voltam vazias em toda resposta.",
   "dbx.queries": "Consultas por dia",
@@ -771,4 +776,14 @@ export default {
     "No máximo {max} itens; {count} estão escolhidos. Escolha a conta inteira em vez dos repositórios um por um.",
   "repo.save": "Salvar repositórios",
   "repo.saved": "Os repositórios foram salvos.",
+  "repo.scope": "Quais repositórios",
+  "repo.scopeAll": "Sem limite: todo repositório que a conexão do GitHub alcança",
+  "repo.scopeAllHint": "Repositórios que entrarem no GitHub depois também contam.",
+  "repo.scopeSome": "Só os marcados abaixo",
+  "repo.keepOne":
+    "Deixe pelo menos um repositório marcado. Para tirar o GitHub deste agente, ponha o GitHub em Nada em O que alcança.",
+  "repo.becameAll":
+    "Nesse meio-tempo, alguém liberou todos os repositórios para este agente. Suas marcações continuam abaixo: salve para limitar a elas, ou escolha Sem limite.",
+  "repo.becameSome":
+    "Nesse meio-tempo, alguém limitou este agente aos repositórios marcados abaixo. Nada foi salvo: confira a lista, ou escolha Sem limite e salve de novo.",
 } as const satisfies TranslationOf<typeof en>;

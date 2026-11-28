@@ -231,6 +231,8 @@ async function controlsInstallation(
       method: "POST",
       headers: { accept: "application/json", "content-type": "application/json", "user-agent": PRODUCT.slug },
       body: JSON.stringify({ client_id: client.clientId, client_secret: client.clientSecret, code }),
+      // The body holds the client secret and a 307 or 308 would resend it: a redirect is a failed exchange.
+      redirect: "manual",
       signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) return false;
