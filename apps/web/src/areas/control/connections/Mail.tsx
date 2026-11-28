@@ -508,33 +508,20 @@ function EditMailbox({
   const outcome = useOutcome();
   const latch = useLatch();
   const forget = useForgetOnLoss(workspaceId, READS);
-  // What the dialog opened with: a reload of the list meanwhile (someone else's change) is not this
-  // person's edit, so only a difference from these goes to the server.
-  const [opened] = useState(() => ({
-    label: account.label,
-    rules: Object.fromEntries(MAIL_ACTIONS.map((action) => [action, ruleOf(account, action)])) as Record<
-      MailAction,
-      Rule
-    >,
-  }));
+  // The name as the dialog opened with it: someone else's rename meanwhile is not this person's edit.
+  const [openedLabel] = useState(account.label);
   const [name, setName] = useState(account.label);
   const [password, setPassword] = useState("");
-  const [rules, setRules] = useState<Record<MailAction, Rule>>(
-    () =>
-      Object.fromEntries(MAIL_ACTIONS.map((action) => [action, ruleOf(account, action)])) as Record<
-        MailAction,
-        Rule
-      >,
-  );
+  // Only the rules this person picked. Every other one shows, and is saved, as the server has it now,
+  // so a rule someone else changed while the dialog is open is both what is seen and what is kept.
+  const [picked, setPicked] = useState<Partial<Record<MailAction, Rule>>>({});
   const save = useApiMutation("updateMailAccount", {
     ...SECRET,
     invalidates: () => [{ method: "listMailAccounts" as const, args: { workspaceId } }],
   });
   const renewing = account.status === "reauth_required" && account.via === "imap";
-  // A rule the person changed takes their choice; every other one stays as the server has it now.
-  const touched = (action: MailAction) => rules[action] !== opened.rules[action];
-  const rulesChanged = MAIL_ACTIONS.some(touched);
-  const ruleNow = (action: MailAction) => (touched(action) ? rules[action] : ruleOf(account, action));
+  const ruleNow = (action: MailAction) => picked[action] ?? ruleOf(account, action);
+  const rulesChanged = MAIL_ACTIONS.some((action) => ruleNow(action) !== ruleOf(account, action));
   const ready = name.trim() !== "" && (!renewing || password !== "");
   return (
     <Dialog
@@ -562,7 +549,7 @@ function EditMailbox({
                   workspaceId,
                   accountId: account.id,
                   body: {
-                    ...(name.trim() !== opened.label && { label: name.trim() }),
+                    ...(name.trim() !== openedLabel && { label: name.trim() }),
                     // Only what changed goes: untouched rules never undo someone else's change.
                     ...(rulesChanged && {
                       disabledActions: MAIL_ACTIONS.filter((action) => ruleNow(action) === "off"),
@@ -627,12 +614,12 @@ function EditMailbox({
                   <span>{t(`box.action.${action}`)}</span>
                   <Select
                     size="sm"
-                    value={rules[action]}
+                    value={ruleNow(action)}
                     disabled={save.isPending}
                     aria-label={t("box.ruleFor", { action: t(`box.action.${action}`) })}
                     onValueChange={(next) => {
                       const rule = RULES.find((each) => each === next);
-                      if (rule !== undefined) setRules({ ...rules, [action]: rule });
+                      if (rule !== undefined) setPicked({ ...picked, [action]: rule });
                     }}
                   >
                     {RULES.map((rule) => (

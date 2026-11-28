@@ -1,7 +1,7 @@
 // The Data sources section of the settings, against the fake server: Birchwood's mailboxes and
 // databases. Jonas is an admin there, Íris a member.
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { act, fireEvent, screen, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import type { FakeDatabase, FakeMailAccount } from "../../../../dev/fake-connections.ts";
 import { type App, chooseOption, newServer, renderApp } from "../../../../test/app.tsx";
 
@@ -355,6 +355,33 @@ describe("mailboxes", () => {
     ]);
   });
 
+  test("a mailbox rule another admin changed while the dialog is open shows, and can be changed back", async () => {
+    const server = newServer();
+    server.connections.mail.push(mailbox());
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const list = await within(await boxes()).findByRole("list", { name: "Mailboxes" });
+    await app.user.click(
+      within(row(list, "Orders")).getByRole("button", { name: "Edit orders@birchwood.example" }),
+    );
+    const form = await screen.findByRole("form", { name: "Edit orders@birchwood.example" });
+    const account = server.connections.mail[0];
+    if (account === undefined) throw new Error("no mailbox");
+    account.confirmActions = ["send"];
+    await act(async () => {
+      await app.runtime.queryClient.refetchQueries();
+    });
+    await waitFor(() =>
+      expect(within(form).getByRole("combobox", { name: "Rule for: Send a new message" }).textContent).toBe(
+        "A person approves first",
+      ),
+    );
+    const send = within(form).getByRole("combobox", { name: "Rule for: Send a new message" });
+    await chooseOption(app, send, "Allowed");
+    await app.user.click(within(form).getByRole("button", { name: "Save mailbox" }));
+    expect(await screen.findByText("orders@birchwood.example is saved.")).toBeDefined();
+    expect(server.connections.mail[0]?.confirmActions).toEqual([]);
+  });
+
   test("a refusal from the mail server's network rule says what it is about", async () => {
     const server = newServer();
     server.connections.plaintextAllowed = false;
@@ -573,6 +600,32 @@ describe("databases", () => {
     await app.user.click(within(form).getByRole("button", { name: "Save database" }));
     expect(await screen.findByText("Shop is saved.")).toBeDefined();
     expect([...(server.connections.databases[0]?.disabledActions ?? [])].sort()).toEqual(["query", "tables"]);
+  });
+
+  test("a change another admin made while the dialog is open shows, and can be changed back", async () => {
+    const server = newServer();
+    server.connections.databases.push(database());
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const list = await within(await block()).findByRole("list", { name: "Databases" });
+    await app.user.click(within(row(list, "Shop")).getByRole("button", { name: "Edit Shop" }));
+    const form = await screen.findByRole("form", { name: "Edit Shop" });
+    const query = within(form).getByRole("checkbox", { name: "Run read-only queries" });
+    expect(query.getAttribute("aria-checked")).toBe("true");
+    const shop = server.connections.databases[0];
+    if (shop === undefined) throw new Error("no database");
+    shop.disabledActions = ["query"];
+    await act(async () => {
+      await app.runtime.queryClient.refetchQueries();
+    });
+    await waitFor(() =>
+      expect(
+        within(form).getByRole("checkbox", { name: "Run read-only queries" }).getAttribute("aria-checked"),
+      ).toBe("false"),
+    );
+    await app.user.click(within(form).getByRole("checkbox", { name: "Run read-only queries" }));
+    await app.user.click(within(form).getByRole("button", { name: "Save database" }));
+    expect(await screen.findByText("Shop is saved.")).toBeDefined();
+    expect(server.connections.databases[0]?.disabledActions).toEqual([]);
   });
 
   test("an unencrypted connection the server refuses is explained for a database", async () => {

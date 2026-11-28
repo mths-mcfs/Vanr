@@ -510,30 +510,24 @@ function EditDatabase({
   const outcome = useOutcome();
   const latch = useLatch();
   const forget = useForgetOnLoss(workspaceId, READS);
-  // What the dialog opened with: a reload of the list meanwhile (someone else's change) is not this
-  // person's edit, so only a difference from these goes to the server.
-  const [opened] = useState(() => ({ label: connection.label, off: new Set(connection.disabledActions) }));
+  // The name as the dialog opened with it: someone else's rename meanwhile is not this person's edit.
+  const [openedLabel] = useState(connection.label);
   const [name, setName] = useState(connection.label);
   const [password, setPassword] = useState("");
-  const [off, setOff] = useState<ReadonlySet<string>>(() => new Set(connection.disabledActions));
+  // Only the actions this person toggled. Every other one shows, and is saved, as the server has it now.
+  const [picked, setPicked] = useState<Partial<Record<DbAction, boolean>>>({});
   const save = useApiMutation("updateDatabase", {
     ...SECRET,
     invalidates: () => [{ method: "listDatabases" as const, args: { workspaceId } }],
   });
   const renewing = connection.status === "reauth_required";
   const ready = name.trim() !== "" && (!renewing || password !== "");
-  // An action the person toggled takes their choice; every other one stays as the server has it now.
-  const touched = (action: DbAction) => off.has(action) !== opened.off.has(action);
-  const actionsChanged = DB_ACTIONS.some(touched);
-  const nextOff = DB_ACTIONS.filter((action) =>
-    touched(action) ? off.has(action) : connection.disabledActions.includes(action),
+  const isOff = (action: DbAction) => picked[action] ?? connection.disabledActions.includes(action);
+  const nextOff = DB_ACTIONS.filter(isOff);
+  const actionsChanged = DB_ACTIONS.some(
+    (action) => isOff(action) !== connection.disabledActions.includes(action),
   );
-  const toggle = (action: DbAction, allowed: boolean) => {
-    const next = new Set(off);
-    if (allowed) next.delete(action);
-    else next.add(action);
-    setOff(next);
-  };
+  const toggle = (action: DbAction, allowed: boolean) => setPicked({ ...picked, [action]: !allowed });
   return (
     <Dialog
       open
@@ -560,7 +554,7 @@ function EditDatabase({
                   workspaceId,
                   databaseId: connection.id,
                   body: {
-                    ...(name.trim() !== opened.label && { label: name.trim() }),
+                    ...(name.trim() !== openedLabel && { label: name.trim() }),
                     // Only what changed goes: an untouched list never undoes someone else's change.
                     ...(actionsChanged && { disabledActions: nextOff }),
                     ...(password !== "" && { password }),
@@ -616,7 +610,7 @@ function EditDatabase({
             {DB_ACTIONS.map((action) => (
               <Checkbox
                 key={action}
-                checked={!off.has(action)}
+                checked={!isOff(action)}
                 disabled={save.isPending}
                 onCheckedChange={(checked) => toggle(action, checked === true)}
                 label={t(`db.action.${action}`)}
