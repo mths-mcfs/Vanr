@@ -16,7 +16,7 @@ import type { BudgetScope } from "@vanr/engine/usage";
 import { and, count, eq, gte, inArray, isNull, notInArray, or, sql, sum } from "drizzle-orm";
 import { readableChannelsSql } from "./channels";
 import type { WorkspaceMember } from "./context";
-import { badRequest, forbidden, notFound } from "./http";
+import { badRequest, conflict, forbidden, notFound } from "./http";
 import { type Talker, withPlanOwner } from "./runners/plans";
 import { canTalkTo } from "./runtime/route";
 
@@ -109,6 +109,11 @@ export async function agentInWorkspace(db: Db, workspaceId: string, agentId: str
     .where(and(eq(agents.workspaceId, workspaceId), eq(agents.id, agentId)));
   if (!row) throw notFound("Agent not found");
   return row;
+}
+
+/** An archived agent is read-only: every write to it answers 409 agent.archived. */
+export function requireActiveAgent(agent: AgentRow) {
+  if (agent.archivedAt) throw conflict("agent.archived", "This agent was archived");
 }
 
 /** Who edits an agent: who manages agents or the agent's owner. */

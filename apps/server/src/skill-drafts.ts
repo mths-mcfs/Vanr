@@ -6,9 +6,9 @@ import { type Db, schema } from "@vanr/engine/db";
 import { asc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { jsonFrom } from "./agent-lab";
-import { agentInWorkspace } from "./agents";
+import { agentInWorkspace, requireActiveAgent } from "./agents";
 import type { AppDeps, WorkspaceMember } from "./context";
-import { conflict, HttpError } from "./http";
+import { HttpError } from "./http";
 import { readableRun } from "./run-access";
 
 const { runEvents, channels } = schema;
@@ -101,7 +101,7 @@ export async function draftSkillFromRun(
   if (run.status !== "done") throw new HttpError(409, "skill_draft.run_not_done", "The run has not finished");
   const agent = await agentInWorkspace(deps.db, me.workspaceId, run.agentId);
   // The draft is written by the run's agent and spends from it: an archived agent doesn't answer anymore.
-  if (agent.archivedAt) throw conflict("agent.archived", "This agent was archived");
+  requireActiveAgent(agent);
   // Whether the run did anything comes from its events, never from the request's text.
   const { text, tools, steps } = await transcript(deps.db, run.id, run.what);
   if (steps === 0)

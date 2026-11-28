@@ -164,7 +164,7 @@ describe("an agent working in a private channel", () => {
 
 describe("an archived agent", () => {
   test(
-    "refuses the harness, skills, channels and identity writes, and changes nothing",
+    "refuses the harness, skills, channels, identity, repositories, scopes and access writes, and changes nothing",
     async () => {
       const t = await team();
       const base = `${t.w}/agents/${t.lia.id}`;
@@ -183,6 +183,9 @@ describe("an archived agent", () => {
         call(t.ana, "PUT", `${base}/channels`, { channels: [{ channelId: ops, autoAnswer: true }] }),
         call(t.ana, "POST", `${base}/identity/connections`, {}),
         call(t.ana, "PUT", `${base}/identity/channels`, { channels: [] }),
+        call(t.ana, "PUT", `${base}/repositories`, { repositories: ["acme/app"] }),
+        call(t.ana, "PUT", `${base}/scopes`, { scopes: [] }),
+        call(t.ana, "PUT", `${base}/access`, {}),
         // The owner without manage_agents gets the same answer.
         call(t.beto, "PUT", `${base}/runtime`, { harness: "model", fallback: false }),
       ];
@@ -192,6 +195,7 @@ describe("an archived agent", () => {
       const after = (await call(t.ana, "GET", base)).body;
       expect(after.model).toBe("claude-haiku-5-5");
       expect(after.channels.map((ch: { id: string }) => ch.id)).toEqual([t.general]);
+      expect((await call(t.ana, "GET", `${base}/repositories`)).body.repositories).toEqual([]);
       const skills = (await call(t.ana, "GET", `${base}/skills`)).body.skills;
       expect(skills.find((s: { id: string }) => s.id === skill.body.id)?.enabled).toBe(false);
     },

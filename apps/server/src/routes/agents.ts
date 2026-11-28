@@ -37,6 +37,7 @@ import {
   agentInWorkspace,
   channelViewer,
   monthStart,
+  requireActiveAgent,
   requireAgentEditor,
   requireCredential,
   toAgent,
@@ -411,7 +412,7 @@ export function registerAgents(app: Hono<AppEnv>) {
     const { db, now } = deps;
     const row = await agentInWorkspace(db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, row);
-    if (row.archivedAt) throw conflict("agent.archived", "This agent was archived");
+    requireActiveAgent(row);
     const input = await readJson(c, updateInput);
     // Whoever manages agents changes everything. The owner without that role only touches the appearance and
     // who may talk to the agent: name, instructions, model, key and budget stay with the workspace.
@@ -490,7 +491,7 @@ export function registerAgents(app: Hono<AppEnv>) {
     const { db } = c.get("deps");
     const row = await agentInWorkspace(db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, row);
-    if (row.archivedAt) throw conflict("agent.archived", "This agent was archived");
+    requireActiveAgent(row);
     const input = await readJson(
       c,
       z.object({
@@ -568,7 +569,7 @@ export function registerAgents(app: Hono<AppEnv>) {
     const { db, now } = deps;
     const row = await agentInWorkspace(db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, row);
-    if (row.archivedAt) throw conflict("agent.archived", "This agent was archived");
+    requireActiveAgent(row);
     const input = await readJson(
       c,
       z
@@ -859,7 +860,7 @@ export function registerAgents(app: Hono<AppEnv>) {
     const me = requirePermission(c, "manage_agents");
     const { db, now } = c.get("deps");
     const row = await agentInWorkspace(db, me.workspaceId, param(c, "agentId"));
-    if (row.archivedAt) throw conflict("agent.archived", "This agent was archived");
+    requireActiveAgent(row);
     const input = await readJson(c, z.object({ reason: z.string().trim().max(500).optional() }).strict());
     const [v] = await db
       .select()
@@ -994,7 +995,7 @@ export function registerAgents(app: Hono<AppEnv>) {
     const { db } = c.get("deps");
     const row = await agentInWorkspace(db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, row);
-    if (row.archivedAt) throw conflict("agent.archived", "This agent was archived");
+    requireActiveAgent(row);
     const input = await readJson(
       c,
       z.object({
