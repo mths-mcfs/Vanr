@@ -181,7 +181,7 @@ describe("a seat someone can no longer read", () => {
           title: "Seat",
           goal: "g",
           agentIds: [lia.id],
-          rounds: 0,
+          rounds: channelId ? 1 : 0,
           ...(channelId ? { channelId } : {}),
           speakers: [
             { type: "person", id: ana.user.id },
@@ -204,8 +204,16 @@ describe("a seat someone can no longer read", () => {
         (await call(beto, "DELETE", `${w}/channels/${board}/members/people/${beto.user.id}`)).status,
       ).toBe(204);
       expect((await call(caio, "DELETE", `${w}/members/${caio.user.id}`)).status).toBe(204);
-      await waitFor(async () => (await phase(inBoard)).status === "done");
       await waitFor(async () => (await phase(anywhere)).status === "done");
+      // The next round seats everyone again, but waits only on who still reads it: Ana alone.
+      await waitFor(
+        async () => (await phase(inBoard)).round === 1 && (await phase(inBoard)).phase === "human_turn",
+      );
+      expect((await phase(inBoard)).waitingUserIds).toEqual([ana.user.id]);
+      expect(
+        (await call(ana, "POST", `${base}/${inBoard}/posts`, { body: "Still yes", answer: "yes" })).status,
+      ).toBe(201);
+      await waitFor(async () => (await phase(inBoard)).status === "done");
     },
     SERVER_TEST_MS,
   );
