@@ -493,9 +493,10 @@ describe("a receipt for an agent that was held back", () => {
       }),
     );
     await open("/channel/ch_general", "usr_ana", server);
-    expect(await screen.findByText("Scout isn't in this conversation. Add it to the channel to bring it in.")).toBeDefined();
+    expect(
+      await screen.findByText("Scout isn't in this conversation. Add it to the channel to bring it in."),
+    ).toBeDefined();
     expect(screen.getByText("Ledger was held back")).toBeDefined();
     expect(screen.queryByText(/not_in_channel|something_new/) === null).toBe(true);
   });
 });
-
