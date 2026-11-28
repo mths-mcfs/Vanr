@@ -44,8 +44,13 @@ const STEPS = ["role", "identity", "instructions", "channels", "options", "revie
 type Step = (typeof STEPS)[number];
 
 export function NewAgentScreen() {
-  const t = useMessages("agents");
   const { workspaceId } = useRouteParams("agentNew");
+  // Another workspace starts over: its channels, people and handles are not this one's.
+  return <NewAgent key={workspaceId} workspaceId={workspaceId} />;
+}
+
+function NewAgent({ workspaceId }: { workspaceId: string }) {
+  const t = useMessages("agents");
   const rights = useAgentRights(workspaceId);
   const [created, setCreated] = useState<Agent | null>(null);
   useDocumentTitle(t("new.title"));
@@ -449,9 +454,11 @@ function Created({ agent, workspaceId }: { agent: Agent; workspaceId: string }) 
           <Button variant="secondary" onClick={() => void go("agent", { workspaceId, agentId: agent.id })}>
             {t("card.profile")}
           </Button>
-          <Button variant="primary" onClick={() => void go("dmAgent", { workspaceId, agentId: agent.id })}>
-            {t("card.message", { name: agent.name })}
-          </Button>
+          {agent.reachable && (
+            <Button variant="primary" onClick={() => void go("dmAgent", { workspaceId, agentId: agent.id })}>
+              {t("card.message", { name: agent.name })}
+            </Button>
+          )}
         </div>
       </Surface>
     </div>

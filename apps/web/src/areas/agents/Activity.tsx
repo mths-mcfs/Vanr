@@ -222,7 +222,9 @@ function SaveAsSkill({
             <Button variant="primary" disabled={!ready} loading={create.isPending} onClick={save}>
               {t("saveSkill.save")}
             </Button>
-          ) : !canEnable ? undefined : (
+          ) : !canEnable ? (
+            <p className="page__muted">{t("saveSkill.archived", { name: agent.name })}</p>
+          ) : (
             <Button
               variant="primary"
               loading={enable.isPending}

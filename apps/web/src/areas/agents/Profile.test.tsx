@@ -220,6 +220,9 @@ describe("activity and saving a run as a skill", () => {
     await app.user.click(within(dialog).getByRole("button", { name: "Save the skill" }));
     expect(await screen.findByText("Summarized the print queue was added to the skills")).toBeDefined();
     expect(within(dialog).queryByRole("button", { name: "Turn it on for Scout" }) === null).toBe(true);
+    expect(
+      within(dialog).getByText("Scout is archived, so the skill was not turned on for it."),
+    ).toBeDefined();
   });
 
   test("a member sees the runs without the button", async () => {
@@ -249,6 +252,21 @@ describe("the agent's settings", () => {
     const sent = server.calls.filter((call) => call.method === "updateAgent").at(-1)?.params ?? {};
     expect(Object.keys(sent).sort()).toEqual(["agentId", "appearance", "audience", "workspaceId"]);
     expect(screen.queryByRole("button", { name: "Archive Tally" }) === null).toBe(true);
+  });
+
+  test("Enter in a read-only settings form sends nothing", async () => {
+    const app = await renderApp({ path: path("agt_scout", "settings"), signedInAs: "usr_iris" });
+    await app.user.type(await screen.findByLabelText("Name"), "{Enter}");
+    expect(app.server.calls.some((call) => call.method === "updateAgent")).toBe(false);
+  });
+
+  test("an archived agent's settings send nothing, even for an admin", async () => {
+    const server = newServer();
+    const scout = server.agents.find((agent) => agent.id === "agt_scout");
+    if (scout !== undefined) scout.archivedAt = "2026-11-10T09:00:00.000Z";
+    const app = await renderApp({ path: path("agt_scout", "settings"), signedInAs: "usr_jonas", server });
+    await app.user.type(await screen.findByLabelText("Name"), "{Enter}");
+    expect(server.calls.some((call) => call.method === "updateAgent")).toBe(false);
   });
 
   test("an admin archives an agent after confirming", async () => {

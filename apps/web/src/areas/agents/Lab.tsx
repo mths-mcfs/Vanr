@@ -30,6 +30,12 @@ type Props = { agent: AgentDetail; workspaceId: string; rights: AgentRights };
 
 export function Lab({ agent, workspaceId, rights }: Props) {
   const t = useMessages("agents");
+  // The server keeps the lab of an archived agent closed, reading included.
+  if (agent.archivedAt !== null) {
+    return (
+      <EmptyState className="page__narrow" title={t("lab.archived")} description={t("lab.archivedBody")} />
+    );
+  }
   if (!rights.editor) {
     return <EmptyState className="page__narrow" title={t("lab.denied")} description={t("lab.deniedBody")} />;
   }
@@ -186,6 +192,8 @@ function Evaluate({ agent, workspaceId, rights }: Props) {
       refetchInterval: (query) => (query.state.data?.status === "running" ? EVAL_POLL_MS : false),
     },
   );
+  const cases = useApiQuery("listAgentTestCases", args);
+  const noCases = cases.data?.length === 0;
   const start = useApiMutation("createAgentEval", {
     invalidates: () => [{ method: "listAgentEvals" as const, args }],
   });
@@ -210,7 +218,7 @@ function Evaluate({ agent, workspaceId, rights }: Props) {
               variant="primary"
               icon={<Play size={16} />}
               loading={start.isPending}
-              disabled={running}
+              disabled={running || noCases}
               onClick={() =>
                 start.mutate(
                   { ...args, body: { instructions: text } },
@@ -220,6 +228,7 @@ function Evaluate({ agent, workspaceId, rights }: Props) {
             >
               {t("lab.run")}
             </Button>
+            {noCases && <p className="page__muted">{t("lab.needCase")}</p>}
           </div>
         </>
       ) : (

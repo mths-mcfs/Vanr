@@ -38,3 +38,11 @@ test("as skills, em português", async () => {
   expect(screen.getByRole("button", { name: "Adicionar uma skill" })).toBeDefined();
   expect(screen.getByRole("button", { name: "Baixar Release notes como SKILL.md" })).toBeDefined();
 });
+
+test("o dinheiro do mês no formato do português", async () => {
+  await renderApp({ path: `${BASE}/agents/agt_scout`, signedInAs: "usr_iris", languages });
+  await screen.findByRole("heading", { level: 1, name: "Scout" });
+  const month = screen.getByRole("region", { name: "Este mês" });
+  expect(month.textContent?.replace(/\s/g, " ")).toContain("US$ 5,00");
+  expect(month.textContent?.replace(/\s/g, " ")).toContain("10% de US$ 50,00");
+});

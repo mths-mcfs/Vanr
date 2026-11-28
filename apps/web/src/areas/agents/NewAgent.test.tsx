@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { screen, waitFor, within } from "@testing-library/react";
-import { type App, newServer, renderApp } from "../../../test/app.tsx";
+import { act, screen, waitFor, within } from "@testing-library/react";
+import { type App, chooseOption, newServer, renderApp } from "../../../test/app.tsx";
 
 /** The agent the server keeps under a handle; a missing one fails the test. */
 const byHandle = (app: App, handle: string) => {
@@ -149,6 +149,36 @@ describe("adding an agent", () => {
     expect(screen.getByRole("button", { name: "Next" }).hasAttribute("disabled")).toBe(true);
     await app.user.click(screen.getByRole("checkbox", { name: "Íris Valença" }));
     expect(screen.getByRole("button", { name: "Next" }).hasAttribute("disabled")).toBe(false);
+  });
+
+  test("another workspace starts the wizard over", async () => {
+    // Jonas manages agents in both workspaces.
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas" });
+    await form("Role");
+    await next(app);
+    await app.user.type(await screen.findByLabelText("Name"), "Carried Over");
+    await act(() => app.runtime.router.navigate({ to: "/workspace/workspace_nightshift/agents/new" }));
+    await form("Role");
+    await next(app);
+    expect(((await screen.findByLabelText("Name")) as HTMLInputElement).value).toBe("");
+  });
+
+  test("an agent the creator may not talk to offers no conversation once created", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
+    await form("Role");
+    await next(app);
+    await app.user.type(await screen.findByLabelText("Name"), "Jonas Only");
+    for (const step of ["Instructions", "Channels", "Model and access"]) {
+      await next(app);
+      await form(step);
+    }
+    await chooseOption(app, screen.getByRole("combobox", { name: "Owner" }), "Jonas Lind");
+    await app.user.click(screen.getByRole("radio", { name: "Only its owner" }));
+    await next(app);
+    await app.user.click(await screen.findByRole("button", { name: "Create the agent" }));
+    await screen.findByRole("heading", { name: "Jonas Only is ready" });
+    expect(screen.getByRole("button", { name: "Open profile" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Message Jonas Only" }) === null).toBe(true);
   });
 
   test("a member is told who adds agents", async () => {
