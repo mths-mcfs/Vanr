@@ -101,3 +101,16 @@ test("the data sources section, in Portuguese", async () => {
   expect(within(row).getByText("Supabase: leitor em db.birchwood.example, banco loja")).toBeDefined();
   expect(within(row).getByText("Nenhum agente")).toBeDefined();
 });
+
+test("the access matrix, in Portuguese", async () => {
+  await renderApp({
+    path: "/workspace/workspace_birchwood/settings/access",
+    signedInAs: "usr_jonas",
+    languages,
+  });
+  const grid = await screen.findByRole("table", { name: "Agentes e conexões" });
+  expect(within(grid).getByRole("columnheader", { name: "Tudo" })).toBeDefined();
+  const level = await within(grid).findByRole("combobox", { name: "O que Scout pode fazer em Team Linear" });
+  expect(level.textContent).toBe("Nada");
+  expect(within(grid).getByRole("switch", { name: "Tudo para Scout" })).toBeDefined();
+});

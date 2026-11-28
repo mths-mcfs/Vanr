@@ -865,7 +865,16 @@ describe("an own server's address quoted back by the server", () => {
       const refresh = () => call(t.ana, "POST", `${t.w}/connectors/custom/${plus.server.id}/refresh`);
       const raw = await quoted((url) => `bad key ${url.search.slice("?key=".length)}`, refresh);
       const form = await quoted((url) => `bad key ${url.searchParams.get("key")}`, refresh);
-      expect([errorOf(raw), errorOf(form)]).toEqual(["bad key [redacted]", "bad key [redacted]"]);
+      // The query read and written again by the server: `+` for the space, the rest percent-encoded.
+      const again = await quoted(
+        (url) => `bad key ${new URLSearchParams(url.searchParams).toString().slice("key=".length)}`,
+        refresh,
+      );
+      expect([errorOf(raw), errorOf(form), errorOf(again)]).toEqual([
+        "bad key [redacted]",
+        "bad key [redacted]",
+        "bad key [redacted]",
+      ]);
     },
     SERVER_TEST_MS,
   );

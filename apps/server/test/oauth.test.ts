@@ -70,6 +70,15 @@ describe("outside text", () => {
     expect(out).toContain("[redacted]");
   });
 
+  test("a secret with a space is also taken out form-encoded, as a re-serialized query string carries it", () => {
+    const secret = "abc def/ghi==";
+    const form = new URLSearchParams({ key: secret }).toString().slice("key=".length);
+    expect(form).toBe("abc+def%2Fghi%3D%3D");
+    expect(outsideText(`bad key ${form} and ${form.toLowerCase()}`, [secret])).toBe(
+      "bad key [redacted] and [redacted]",
+    );
+  });
+
   test("the text keeps OUTSIDE_TEXT_MAX characters at most", () => {
     expect(outsideText("x".repeat(OUTSIDE_TEXT_MAX), [])).toBe("x".repeat(OUTSIDE_TEXT_MAX));
     const cut = outsideText("x".repeat(OUTSIDE_TEXT_MAX + 1), []);

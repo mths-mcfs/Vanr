@@ -69,8 +69,8 @@ export class FakeAgentAccess {
   accounts = new Map<string, T.Connection[]>();
   /** The own accounts connected with a key (no sign-in to widen). */
   keyed = new Set<string>();
-  /** The workspace's shared connections. */
-  shared: (T.Connection & { workspaceId: string })[] = [];
+  /** The workspace's shared connections; `pending`: an OAuth that hasn't come back, which access doesn't count. */
+  shared: (T.Connection & { workspaceId: string; pending?: boolean })[] = [];
   rules: Rule[] = [];
 
   constructor(private readonly host: Host) {}

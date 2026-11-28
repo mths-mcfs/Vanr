@@ -206,6 +206,24 @@ describe("the fake's rule for more connector scope, as the server's", () => {
     expect(ask(server, JONAS.userId, shared.id)).toEqual([200, null]);
   });
 
+  test("an agent's own account made with a key has no sign-in to widen either", () => {
+    const { server, scout } = seeded();
+    const connect = server.agentAccess.operations().createAgentIdentityConnection;
+    if (connect === undefined) throw new Error("the fake has createAgentIdentityConnection");
+    // Scout's seeded Linear account signed in; Stripe connects with a key.
+    const made = connect(
+      { workspaceId: WORKSPACE, agentId: scout.id, connector: "stripe", apiKey: "12345678" },
+      server.sessionFor(scout.ownerUserId),
+    ) as { status: number; body: { status: string; connection: { id: string } } };
+    expect([made.status, made.body.status]).toEqual([200, "connected"]);
+    const keyed = server.agentAccess.accounts
+      .get(scout.id)
+      ?.find((each) => each.id === made.body.connection.id);
+    if (keyed === undefined) throw new Error("the key connected");
+    keyed.scopeRequest = { scope: "charges:write", tool: "Refund" };
+    expect(ask(server, scout.ownerUserId, keyed.id)).toEqual([400, "connector.no_scope_request"]);
+  });
+
   test("a connection made with a key has no sign-in to widen", () => {
     const { server } = seeded();
     const create = server.connections.operations().createConnector;

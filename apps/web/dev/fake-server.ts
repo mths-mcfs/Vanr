@@ -407,6 +407,7 @@ export class FakeServer {
               }))
             : [];
         }),
+      agents: () => this.agents,
     });
     this.runnerWork = new FakeRunners({
       ...host,

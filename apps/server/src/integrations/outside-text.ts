@@ -7,16 +7,23 @@
 export const OUTSIDE_TEXT_MAX = 300;
 const REDACTED = "[redacted]";
 
-/** The forms a secret travels in: as is, base64, base64url and percent-encoded (both hex cases). */
+/**
+ * The forms a secret travels in: as is, base64, base64url, percent-encoded (both hex cases) and form-encoded
+ * (a space as `+`, as a query string re-serialized by `URLSearchParams` carries it).
+ */
 function forms(secret: string): string[] {
   const encoded = encodeURIComponent(secret);
+  const form = encoded.replace(/%20/g, "+");
+  const lower = (text: string) => text.replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase());
   return [
     secret,
     Buffer.from(secret).toString("base64"),
     Buffer.from(secret).toString("base64").replace(/=+$/, ""),
     Buffer.from(secret).toString("base64url"),
     encoded,
-    encoded.replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()),
+    lower(encoded),
+    form,
+    lower(form),
   ];
 }
 

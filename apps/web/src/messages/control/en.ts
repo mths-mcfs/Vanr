@@ -302,6 +302,7 @@ export default {
   "svc.reauth": "Sign-in refused",
   "svc.reauthBody":
     "The service stopped accepting this sign-in. Connect it again, give agents access to the new connection, then disconnect this one.",
+  "svc.toAccess": "Open the agents' access",
   "svc.moreAsked": "A tool ({tool}) needs one more permission: {scope}.",
   "svc.grantMore": "Grant it",
   "svc.later": "Not yet available",
@@ -578,4 +579,28 @@ export default {
   "error.database.fields_required": "Fill in the host, database, user and password.",
   "error.database.auth": "The database refused that user or password.",
   "error.database.unreachable": "The database could not be reached. Check the host, port and encryption.",
+
+  "grid.title": "Agents and connections",
+  "grid.lead":
+    "How far each agent reaches into each workspace connection. Its channel rules are on the agent's own Access tab.",
+  "grid.gone": "Removed",
+  "grid.failed": "The access of the agents could not be loaded",
+  "grid.rowFailed": "The access of {agent} could not be loaded",
+  "grid.loadingRow": "Loading…",
+  "grid.noAgents": "No agents yet",
+  "grid.noAgentsBody": "Create an agent, then decide here what it may reach.",
+  "grid.noConnections": "No workspace connections yet",
+  "grid.noConnectionsBody":
+    "Connect a service or an MCP server in Connectors to give agents something to reach.",
+  "grid.agent": "Agent",
+  "grid.everything": "Everything",
+  "grid.everythingFor": "Everything for {agent}",
+  "grid.levelFor": "What {agent} may do in {connection}",
+  "grid.level.none": "Nothing",
+  "grid.level.read": "Read",
+  "grid.level.write": "Read and change",
+  "grid.level.custom": "Change only",
+  "error.access.unknown_scope": "That permission is not one this server knows. Reload and try again.",
+  "error.access.unknown_connection": "That connection is gone: someone removed it meanwhile.",
+  "error.agent.archived": "This agent is archived, so its access can't change.",
 } as const satisfies Catalog;
