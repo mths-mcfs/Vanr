@@ -103,6 +103,12 @@ export function agentChannelsSql(agentId: string): SQL {
 
 const isOpen = (c: ChannelRow) => c.kind === "channel" && c.visibility === "public";
 
+/** A public channel of the workspace: whoever is in the workspace reads it. */
+export async function isPublicChannel(db: Db, workspaceId: string, channelId: string): Promise<boolean> {
+  const channel = await channelInWorkspace(db, workspaceId, channelId);
+  return channel !== null && isOpen(channel);
+}
+
 export async function canReadChannel(
   db: Db,
   input: { workspaceId: string; userId: string; channelId: string },

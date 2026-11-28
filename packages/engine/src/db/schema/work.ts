@@ -191,7 +191,7 @@ export const routineExecutions = pgTable(
     /** This failure already has a retry scheduled (it does not count toward "N failures in a row"). */
     retried: boolean("retried").notNull().default(false),
     /** Fire context (text and outside origin), so the retry runs with the same payload. */
-    payload: jsonb("payload").$type<{ text: string; untrusted?: string }>(),
+    payload: jsonb("payload").$type<{ text: string; untrusted?: string; channelId?: string }>(),
     summary: text("summary"),
     summaryKey: text("summary_key"),
     summaryVars: jsonb("summary_vars").$type<Record<string, string | number>>(),

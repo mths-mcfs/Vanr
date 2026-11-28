@@ -23,7 +23,7 @@ import {
   versionOf,
 } from "./drive";
 import { forbidden, HttpError, notFound } from "./http";
-import { columnsOf, type IssueChange, updateIssue } from "./issues";
+import { columnsOf, type IssueChange, seesIssue, updateIssue } from "./issues";
 import { anchorOf, nextRunFor, triggerOf } from "./routines";
 import { unindex } from "./search-index";
 import { refreshPage, savePage } from "./wiki";
@@ -203,10 +203,11 @@ async function copyPageVersion(
 // ---- Issues ----
 
 /**
- * The issue's row, locked until the undo commits. A change that moves the issue takes the board's lock first,
- * the same advisory lock and the same order as `updateIssue` (issues.ts): the board, then the issue.
+ * The issue's row, locked until the undo commits, if the person still sees it (an issue of a channel they no
+ * longer read answers as a missing one). A change that moves the issue takes the board's lock first, the same
+ * advisory lock and the same order as `updateIssue` (issues.ts): the board, then the issue.
  */
-async function lockedIssue(deps: AppDeps, row: ActionRow, movesColumn: boolean) {
+async function lockedIssue(deps: AppDeps, row: ActionRow, actorUserId: string, movesColumn: boolean) {
   if (movesColumn)
     await deps.db.execute(sql`select pg_advisory_xact_lock(hashtext(${`issue-board:${row.workspaceId}`}))`);
   const [issue] = await deps.db
@@ -215,6 +216,7 @@ async function lockedIssue(deps: AppDeps, row: ActionRow, movesColumn: boolean) 
     .where(and(eq(issues.id, row.target.id), eq(issues.workspaceId, row.workspaceId)))
     .for("no key update");
   if (!issue) throw gone("The issue no longer exists");
+  if (!(await seesIssue(deps.db, issue, actorUserId))) throw notFound("Issue not found");
   return issue;
 }
 
@@ -401,7 +403,7 @@ export const CONTENT_UNDOERS: Record<
   issue_opened: {
     // An issue doesn't vanish (its number stays): undo cancels it, redo puts it back in its first column.
     async undo(deps, row, actorUserId) {
-      const issue = await lockedIssue(deps, row, true);
+      const issue = await lockedIssue(deps, row, actorUserId, true);
       const { columnId } = z.object({ columnId: z.string() }).parse(row.params);
       if (issue.columnId !== columnId) throw changed("Someone moved the issue");
       const canceled = (await columnsOf(deps.db, issue.workspaceId)).find((c) => c.stage === "canceled");
@@ -409,7 +411,7 @@ export const CONTENT_UNDOERS: Record<
       await updateIssue(deps, issue, { columnId: canceled.id }, person(actorUserId));
     },
     async redo(deps, row, actorUserId) {
-      const issue = await lockedIssue(deps, row, true);
+      const issue = await lockedIssue(deps, row, actorUserId, true);
       const { columnId } = z.object({ columnId: z.string() }).parse(row.params);
       const cols = await columnsOf(deps.db, issue.workspaceId);
       if (cols.find((c) => c.id === issue.columnId)?.stage !== "canceled")
@@ -423,20 +425,21 @@ export const CONTENT_UNDOERS: Record<
     async undo(deps, row, actorUserId) {
       const { previous, change } = issueParams.parse(row.params);
       const keys = keysOf(change);
-      const issue = await lockedIssue(deps, row, keys.includes("columnId"));
+      const issue = await lockedIssue(deps, row, actorUserId, keys.includes("columnId"));
       if (!matches(issue, change, keys)) throw changed("Someone changed the issue");
       await updateIssue(deps, issue, pick(previous, keys), person(actorUserId));
     },
     async redo(deps, row, actorUserId) {
       const { previous, change } = issueParams.parse(row.params);
       const keys = keysOf(change);
-      const issue = await lockedIssue(deps, row, keys.includes("columnId"));
+      const issue = await lockedIssue(deps, row, actorUserId, keys.includes("columnId"));
       if (!matches(issue, previous, keys)) throw changed("Someone changed the issue");
       await updateIssue(deps, issue, pick(change, keys), person(actorUserId));
     },
   },
   issue_commented: {
-    async undo(deps, row) {
+    async undo(deps, row, actorUserId) {
+      await lockedIssue(deps, row, actorUserId, false);
       const { activityId } = z.object({ activityId: z.string() }).parse(row.params);
       const [act] = await deps.db
         .delete(issueTimeline)
@@ -447,11 +450,11 @@ export const CONTENT_UNDOERS: Record<
         comment: { text: act.text, author: act.author, createdAt: act.createdAt.toISOString() },
       });
     },
-    async redo(deps, row) {
+    async redo(deps, row, actorUserId) {
       const { activityId } = z.object({ activityId: z.string() }).parse(row.params);
       const saved = savedComment.safeParse(row.params.comment);
       if (!saved.success) throw changed("Nothing to redo");
-      await lockedIssue(deps, row, false);
+      await lockedIssue(deps, row, actorUserId, false);
       await deps.db.insert(issueTimeline).values({
         id: activityId,
         issueId: row.target.id,

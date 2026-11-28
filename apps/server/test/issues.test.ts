@@ -4,15 +4,19 @@
 // open rejected; an agent assignee and "ask an agent" rejected at their entry while the runtime isn't there; and
 // the routines subscribed to `issue.created` fired once per issue a person opens.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { Issue, IssueActivity, IssueColumn } from "@vanr/contract";
+import type { Issue, IssueActivity, IssueColumn, RoutineTarget } from "@vanr/contract";
 import { schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { channelInWorkspace } from "../src/channels";
+import { CONTENT_UNDOERS } from "../src/content-undo";
 import { createFile } from "../src/drive";
+import { HttpError } from "../src/http";
 import { columnsOf, createIssue } from "../src/issues";
 import { postMessage } from "../src/messages";
 import { BOARD_POSITION_MAX, COMMENT_FILES_MAX, ISSUE_LIST_LIMIT } from "../src/routes/issues";
+import { registerFire, startRoutineRun } from "../src/routines";
+import { backfillSearch } from "../src/search-index";
 import type { RunningServer } from "../src/server";
 import {
   Browser,
@@ -24,7 +28,7 @@ import {
   TestSocket,
   waitFor,
 } from "./harness";
-import { memberOf, type Person, seedChannel, seedWorkspace } from "./seed";
+import { memberOf, type Person, seedChannel, seedDm, seedWorkspace } from "./seed";
 
 let server: RunningServer;
 beforeAll(async () => {
@@ -992,6 +996,455 @@ describe("routines on issue.created", () => {
       const keys = (await routine.fires()).map((f) => f.key).sort();
       expect(keys).toEqual([`event:issue.created:${a.id}`, `event:issue.created:${b.id}`].sort());
       await routine.stop();
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("issues of a private channel", () => {
+  /** Ana's issue in a private channel only she is in, and an issue of no channel beside it. */
+  async function hidden() {
+    const t = await team();
+    const secret = await seedChannel(server, t.workspaceId, {
+      name: `secret${++n}`,
+      visibility: "private",
+      members: [t.ana],
+    });
+    const issue = await ok<Issue>(
+      call(t.ana, t.workspaceId, "POST", "/issues", {
+        title: "Quiet merger",
+        description: "Codename lighthouse",
+        criteria: ["Sign"],
+        dueDate: "2026-12-02",
+        channelId: secret,
+      }),
+      201,
+    );
+    const open = await ok<Issue>(
+      call(t.ana, t.workspaceId, "POST", "/issues", { title: "Open plan", dueDate: "2026-12-03" }),
+      201,
+    );
+    return { ...t, secret, issue, open };
+  }
+
+  test(
+    "whoever isn't in the channel gets a missing issue's 404 on every issue route, and the list leaves it out",
+    async () => {
+      const { workspaceId, ana, beto, issue, open } = await hidden();
+      const missing = (await call(beto, workspaceId, "GET", "/issues/seq/999")).json;
+      const agent = await seedAgent(workspaceId, ana, `helper${++n}`);
+      const routes: [string, string, unknown?][] = [
+        ["GET", `/issues/seq/${issue.number}`],
+        ["PATCH", `/issues/${issue.id}`, { title: "Leaked" }],
+        ["PUT", `/issues/${issue.id}/criteria/${issue.criteria[0]?.id}`, { done: true }],
+        ["GET", `/issues/${issue.id}/activity`],
+        ["POST", `/issues/${issue.id}/comments`, { text: "hi" }],
+        ["POST", `/issues/${issue.id}/ask-agent`, { agentId: agent }],
+      ];
+      for (const [method, path, data] of routes) {
+        const res = await call(beto, workspaceId, method, path, data);
+        expect([path, res.status, res.json]).toEqual([path, 404, missing]);
+      }
+      const titles = async (who: Person, q?: string) =>
+        (
+          await ok<{ issues: Issue[] }>(
+            call(who, workspaceId, "GET", q ? `/issues?q=${encodeURIComponent(q)}` : "/issues"),
+          )
+        ).issues
+          .map((i) => i.title)
+          .sort();
+      expect(await titles(beto)).toEqual([open.title]);
+      expect(await titles(beto, "lighthouse")).toEqual([]);
+      expect(await titles(ana)).toEqual([open.title, issue.title].sort());
+      // Nothing Beto sent reached it, and Ana still reads and changes it.
+      const still = await ok<Issue>(call(ana, workspaceId, "GET", `/issues/seq/${issue.number}`));
+      expect([still.title, still.criteria[0]?.done]).toEqual(["Quiet merger", false]);
+      const activity = await ok<{ activity: IssueActivity[] }>(
+        call(ana, workspaceId, "GET", `/issues/${issue.id}/activity`),
+      );
+      expect(activity.activity.filter((a) => a.kind === "comment")).toEqual([]);
+      await ok<Issue>(call(ana, workspaceId, "PATCH", `/issues/${issue.id}`, { priority: "high" }));
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a DM's issue is seen by the DM's two people only; a public channel's by everyone",
+    async () => {
+      const { workspaceId, general, ana, beto } = await team();
+      const caio = await memberOf(server, workspaceId, "Caio", email("caio"));
+      const dm = await seedDm(server, workspaceId, ana, caio);
+      const author = { type: "agent" as const, id: await seedAgent(workspaceId, ana, `scribe${++n}`) };
+      const inDm = await createIssue(server.deps, {
+        workspaceId,
+        title: "Between us",
+        channelId: dm,
+        author,
+      });
+      const inGeneral = await createIssue(server.deps, {
+        workspaceId,
+        title: "For all",
+        channelId: general,
+        author,
+      });
+      const status = async (who: Person, number: number) =>
+        (await call(who, workspaceId, "GET", `/issues/seq/${number}`)).status;
+      expect(await status(caio, inDm.number)).toBe(200);
+      expect(await status(ana, inDm.number)).toBe(200);
+      expect(await status(beto, inDm.number)).toBe(404);
+      expect(await status(beto, inGeneral.number)).toBe(200);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a sub-issue of a private channel doesn't show on a workspace issue for whoever isn't in the channel",
+    async () => {
+      const { workspaceId, ana, beto, secret, open } = await hidden();
+      const child = await createIssue(server.deps, {
+        workspaceId,
+        title: "Secret step",
+        parentId: open.id,
+        channelId: secret,
+        author: { type: "person", id: ana.user.id },
+      });
+      const subs = async (who: Person) =>
+        (await ok<Issue>(call(who, workspaceId, "GET", `/issues/seq/${open.number}`))).subIssues.map(
+          (s) => s.id,
+        );
+      expect(await subs(beto)).toEqual([]);
+      expect(await subs(ana)).toEqual([child.id]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "the calendar's due dates and the search leave it out for whoever isn't in the channel",
+    async () => {
+      const { workspaceId, ana, beto, issue, open } = await hidden();
+      const due = async (who: Person) =>
+        (
+          await ok<{ dueItems: { issueId: string }[] }>(
+            call(
+              who,
+              workspaceId,
+              "GET",
+              "/calendar?from=2026-12-01T00:00:00.000Z&to=2026-12-08T00:00:00.000Z",
+            ),
+          )
+        ).dueItems
+          .map((d) => d.issueId)
+          .sort();
+      expect(await due(beto)).toEqual([open.id]);
+      expect(await due(ana)).toEqual([issue.id, open.id].sort());
+      await settle(server);
+      const hits = async (who: Person) =>
+        (
+          await ok<{ hits: { sourceId: string }[] }>(
+            call(who, workspaceId, "GET", "/search?q=lighthouse&kinds=issue"),
+          )
+        ).hits.map((h) => h.sourceId);
+      expect(await hits(beto)).toEqual([]);
+      expect((await hits(ana)).length).toBeGreaterThan(0);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "notices about it reach only people who read the channel",
+    async () => {
+      const { workspaceId, ana, beto, issue, open } = await hidden();
+      const assignBeto = { assignee: { type: "person", id: beto.user.id } };
+      await ok<Issue>(call(ana, workspaceId, "PATCH", `/issues/${issue.id}`, assignBeto));
+      await ok<IssueActivity>(
+        call(ana, workspaceId, "POST", `/issues/${issue.id}/comments`, { text: "Psst" }),
+        201,
+      );
+      const cols = (await ok<{ columns: IssueColumn[] }>(call(ana, workspaceId, "GET", "/issue-columns")))
+        .columns;
+      const done = cols.find((c) => c.stage === "done")?.id ?? "";
+      await ok<Issue>(call(ana, workspaceId, "PATCH", `/issues/${issue.id}`, { columnId: done }));
+      await settle(server);
+      expect(await notices(beto, workspaceId)).toEqual([]);
+      // The same changes on an issue of no channel do reach him.
+      await ok<Issue>(call(ana, workspaceId, "PATCH", `/issues/${open.id}`, assignBeto));
+      await settle(server);
+      expect((await notices(beto, workspaceId)).map((x) => x.kind)).toEqual(["issue_ownership"]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "issue.created reaches only a routine whose creator reads the channel and that answers in it or in a DM",
+    async () => {
+      const { workspaceId, ana, beto } = await team();
+      const secret = await seedChannel(server, workspaceId, {
+        name: `secret${++n}`,
+        visibility: "private",
+        members: [ana],
+      });
+      const agentId = await seedAgent(workspaceId, ana, `watcher${++n}`);
+      const routine = async (createdBy: Person, target: RoutineTarget) => {
+        const id = newId("rtn");
+        await server.deps.db.insert(schema.routines).values({
+          id,
+          workspaceId,
+          name: "Triage",
+          prompt: "Triage the new issue",
+          agentId,
+          target,
+          trigger: { kind: "event", event: "issue.created" },
+          createdBy: createdBy.user.id,
+        });
+        return id;
+      };
+      const intoSecret = await routine(ana, { kind: "channel", channelId: secret });
+      const intoDm = await routine(ana, { kind: "dm" });
+      const intoDebate = await routine(ana, { kind: "debate", agentIds: [agentId], roundLimit: 1 });
+      const outsider = await routine(beto, { kind: "channel", channelId: secret });
+      await ok<Issue>(
+        call(ana, workspaceId, "POST", "/issues", { title: "Quiet merger", channelId: secret }),
+        201,
+      );
+      await settle(server);
+      const all = [intoSecret, intoDm, intoDebate, outsider];
+      const fired = await server.deps.db
+        .select({ id: schema.routineExecutions.routineId })
+        .from(schema.routineExecutions)
+        .where(inArray(schema.routineExecutions.routineId, all));
+      const ids = new Set(fired.map((f) => f.id));
+      expect(all.map((id) => ids.has(id))).toEqual([true, true, false, false]);
+      await server.deps.db
+        .update(schema.routines)
+        .set({ active: false })
+        .where(eq(schema.routines.workspaceId, workspaceId));
+    },
+    SERVER_TEST_MS,
+  );
+  test(
+    "a run still waiting when its routine is pointed at a public channel doesn't carry the private text there",
+    async () => {
+      const { workspaceId, general, ana } = await team();
+      const secret = await seedChannel(server, workspaceId, {
+        name: `secret${++n}`,
+        visibility: "private",
+        members: [ana],
+      });
+      const agentId = await seedAgent(workspaceId, ana, `relay${++n}`);
+      const id = newId("rtn");
+      await server.deps.db.insert(schema.routines).values({
+        id,
+        workspaceId,
+        name: "Relay",
+        prompt: "Pass it on",
+        agentId,
+        target: { kind: "channel", channelId: secret },
+        trigger: { kind: "event", event: "issue.created" },
+        createdBy: ana.user.id,
+      });
+      // Registered while it answered in the private channel, run after it was pointed at #general.
+      const reg = await registerFire(server.deps, id, {
+        trigger: "event",
+        key: `event:issue.created:held${n}`,
+        context: { text: "Issue #9: Quiet merger", channelId: secret },
+      });
+      if (reg.duplicate) throw new Error("duplicate");
+      await server.deps.db
+        .update(schema.routines)
+        .set({ target: { kind: "channel", channelId: general } })
+        .where(eq(schema.routines.id, id));
+      const run = await startRoutineRun(server.deps, reg.run);
+      await settle(server);
+      expect([run.status, run.reason]).toEqual(["failed", "private_context"]);
+      const posted = await server.deps.db
+        .select({ body: schema.messages.body })
+        .from(schema.messages)
+        .where(eq(schema.messages.channelId, general));
+      expect(posted.some((m) => m.body.includes("Quiet merger"))).toBe(false);
+    },
+    SERVER_TEST_MS,
+  );
+  test(
+    "an issue indexed for the whole workspace before is indexed again with its channel's scope at boot",
+    async () => {
+      const { workspaceId, ana, beto, issue } = await hidden();
+      await settle(server);
+      // What the index held before issues followed their channel.
+      await server.deps.db
+        .update(schema.searchChunks)
+        .set({ scopeKind: "workspace", channelId: null })
+        .where(and(eq(schema.searchChunks.sourceKind, "issue"), eq(schema.searchChunks.sourceId, issue.id)));
+      const hits = async (who: Person) =>
+        (
+          await ok<{ hits: { sourceId: string }[] }>(
+            call(who, workspaceId, "GET", "/search?q=lighthouse&kinds=issue"),
+          )
+        ).hits.map((h) => h.sourceId);
+      // The search answers an issue by its number.
+      expect(await hits(beto)).toEqual([String(issue.number)]);
+      await backfillSearch(server.deps);
+      await settle(server);
+      expect(await hits(beto)).toEqual([]);
+      expect(await hits(ana)).toEqual([String(issue.number)]);
+    },
+    SERVER_TEST_MS,
+  );
+  test(
+    "a debate opened from it stays in its channel, and its detail names the issue only to who reads the channel",
+    async () => {
+      const { workspaceId, ana, beto, secret, issue } = await hidden();
+      const lia = await seedAgent(workspaceId, ana, `lia${++n}`);
+      const open = (body: Record<string, unknown>) =>
+        call(ana, workspaceId, "POST", "/debates", {
+          title: "Go or not",
+          goal: "Decide",
+          agentIds: [lia],
+          rounds: 1,
+          sourceIssueId: issue.id,
+          ...body,
+        });
+      const inherited = await ok<{ id: string; channelId: string | null }>(open({}), 201);
+      expect(inherited.channelId).toBe(secret);
+      const { general } = await ok<{ channels: { id: string; isGeneral: boolean }[] }>(
+        call(ana, workspaceId, "GET", "/channels"),
+      ).then((r) => ({ general: r.channels.find((c) => c.isGeneral)?.id ?? "" }));
+      const wider = await open({ channelId: general });
+      expect([wider.status, wider.json.error.code]).toEqual([400, "debate.issue_channel"]);
+      // Beto takes part in a debate of the channel without being in it: the issue's title stays hidden from him.
+      const shared = await ok<{ id: string }>(open({ channelId: secret, userIds: [beto.user.id] }), 201);
+      await settle(server);
+      const issuesOf = async (who: Person) =>
+        (
+          await ok<{ issues: { id: string }[] }>(call(who, workspaceId, "GET", `/debates/${shared.id}`))
+        ).issues.map((i) => i.id);
+      expect(await issuesOf(beto)).toEqual([]);
+      expect(await issuesOf(ana)).toEqual([issue.id]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "issues a debate of the channel turns out keep the channel",
+    async () => {
+      const { workspaceId, ana, beto, issue, secret } = await hidden();
+      const lia = await seedAgent(workspaceId, ana, `lia${++n}`);
+      const debate = await ok<{ id: string }>(
+        call(ana, workspaceId, "POST", "/debates", {
+          title: "Steps",
+          goal: "Plan",
+          agentIds: [lia],
+          rounds: 1,
+          sourceIssueId: issue.id,
+        }),
+        201,
+      );
+      await settle(server);
+      const made = await ok<{ numbers: number[] }>(
+        call(ana, workspaceId, "POST", `/debates/${debate.id}/issues`, {
+          items: [{ title: "Sign the NDA" }],
+        }),
+        201,
+      );
+      const number = made.numbers[0];
+      expect((await call(beto, workspaceId, "GET", `/issues/seq/${number}`)).status).toBe(404);
+      const own = await ok<Issue>(call(ana, workspaceId, "GET", `/issues/seq/${number}`));
+      expect(own.channelId).toBe(secret);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "undoing an agent's action on it answers as a missing action to whoever doesn't read the channel",
+    async () => {
+      const { workspaceId, ana, beto } = await team();
+      await server.deps.db
+        .update(schema.members)
+        .set({ role: "admin" })
+        .where(and(eq(schema.members.workspaceId, workspaceId), eq(schema.members.userId, beto.user.id)));
+      const secret = await seedChannel(server, workspaceId, {
+        name: `secret${++n}`,
+        visibility: "private",
+        members: [ana],
+      });
+      const lia = await seedAgent(workspaceId, ana, `lia${++n}`);
+      const issue = await createIssue(server.deps, {
+        workspaceId,
+        title: "Board buyout terms",
+        channelId: secret,
+        author: { type: "agent", id: lia },
+      });
+      const id = newId("act");
+      const at = server.deps.now();
+      await server.deps.db.insert(schema.reversibleActions).values({
+        id,
+        workspaceId,
+        agentId: lia,
+        runId: null,
+        messageId: null,
+        requesterUserId: ana.user.id,
+        kind: "issue_opened",
+        target: { type: "issue", id: issue.id, number: issue.number, title: issue.title },
+        params: { columnId: issue.columnId },
+        createdAt: at,
+        revertibleUntil: new Date(at.getTime() + 60_000),
+      });
+      const undone = await call(beto, workspaceId, "POST", `/actions/${id}/undo`);
+      expect([
+        undone.status,
+        undone.json.error.message,
+        JSON.stringify(undone.json).includes("buyout"),
+      ]).toEqual([404, "Action not found", false]);
+      // The undoer itself checks the locked row again, for access lost after the action's own check.
+      const [row] = await server.deps.db
+        .select()
+        .from(schema.reversibleActions)
+        .where(eq(schema.reversibleActions.id, id));
+      if (row === undefined) throw new Error("no action");
+      const refused = await CONTENT_UNDOERS.issue_opened?.undo(server.deps, row, beto.user.id).then(
+        () => null,
+        (err: unknown) => err,
+      );
+      expect(refused instanceof HttpError && refused.status === 404).toBe(true);
+      const still = await ok<Issue>(call(ana, workspaceId, "GET", `/issues/seq/${issue.number}`));
+      expect(still.status).toBe("todo");
+    },
+    SERVER_TEST_MS,
+  );
+  test(
+    "a debate of a private channel opened from a public issue keeps the issues it turns out in its own channel",
+    async () => {
+      const { workspaceId, general, ana, beto } = await team();
+      const secret = await seedChannel(server, workspaceId, {
+        name: `secret${++n}`,
+        visibility: "private",
+        members: [ana],
+      });
+      const lia = await seedAgent(workspaceId, ana, `lia${++n}`);
+      const open = await ok<Issue>(
+        call(ana, workspaceId, "POST", "/issues", { title: "Open plan", channelId: general }),
+        201,
+      );
+      const debate = await ok<{ id: string }>(
+        call(ana, workspaceId, "POST", "/debates", {
+          title: "Steps",
+          goal: "Plan",
+          agentIds: [lia],
+          rounds: 1,
+          channelId: secret,
+          sourceIssueId: open.id,
+        }),
+        201,
+      );
+      await settle(server);
+      const made = await ok<{ numbers: number[] }>(
+        call(ana, workspaceId, "POST", `/debates/${debate.id}/issues`, { items: [{ title: "Quiet step" }] }),
+        201,
+      );
+      const number = made.numbers[0];
+      expect((await call(beto, workspaceId, "GET", `/issues/seq/${number}`)).status).toBe(404);
+      expect((await ok<Issue>(call(ana, workspaceId, "GET", `/issues/seq/${number}`))).channelId).toBe(
+        secret,
+      );
     },
     SERVER_TEST_MS,
   );
