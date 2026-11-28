@@ -24,6 +24,7 @@ import { canReadChannel } from "./channels";
 import { CONTENT_UNDOERS } from "./content-undo";
 import type { AppDeps, WorkspaceMember } from "./context";
 import { conflict, HttpError, notFound } from "./http";
+import { seesIssue } from "./issues";
 import { log } from "./logger";
 import { reviewsFor } from "./memory-reviews";
 import { hydrateOne } from "./messages";
@@ -45,7 +46,7 @@ const {
   memories,
   reminders,
 } = schema;
-const { files, knowledgePages, messages, outbox, routines, users } = schema;
+const { files, issues, knowledgePages, messages, outbox, routines, users } = schema;
 
 export type ApprovalRow = typeof approvals.$inferSelect;
 export type ProposalRow = typeof proposals.$inferSelect;
@@ -848,8 +849,8 @@ export async function canUndo(db: Db, me: WorkspaceMember, row: ActionRow): Prom
 
 /**
  * The person still sees what the action touched: the conversation its receipt is in and the target itself (the
- * channel of a message, a queued post, a reminder or a file, a routine, and a wiki page by its own access). Issues
- * and bases are seen by the whole workspace today. Checked under the action's lock, so access lost since the
+ * channel of a message, a queued post, a reminder or a file, a routine, an issue by its channel (`seesIssue`), and a
+ * wiki page by its own access). Bases are seen by the whole workspace. Checked under the action's lock, so access lost since the
  * action counts; without it the action answers as one that doesn't exist, as "undo all" does. Write rights stay
  * with each undoer (a file someone can't see, a locked page), and the wiki undoers check the read again on
  * the page's locked row.
@@ -888,6 +889,12 @@ async function assertSees(deps: AppDeps, me: WorkspaceMember, row: ActionRow): P
       .from(table)
       .where(and(eq(table.id, id), eq(table.workspaceId, row.workspaceId)));
     if (scoped?.channelId && !(await reads(scoped.channelId))) throw hidden();
+  } else if (type === "issue") {
+    const [issue] = await db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.id, id), eq(issues.workspaceId, row.workspaceId)));
+    if (issue && !(await seesIssue(db, issue, me.userId))) throw hidden();
   } else if (type === "routine") {
     const [routine] = await db
       .select()
