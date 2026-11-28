@@ -7,7 +7,7 @@ import { canActRole, isClosed, roleOf, waitingFor } from "./assignments/core";
 import { planOf } from "./assignments/plan";
 import { MAX_ROUNDS, MAX_TURNS } from "./assignments/state";
 import type { AppDeps } from "./context";
-import { excerpt } from "./messages";
+import { excerpt, shownBody } from "./messages";
 
 const {
   threads,
@@ -107,6 +107,7 @@ export async function threadInfos(db: Db, viewer: Viewer, rows: ThreadRow[]): Pr
       authorKind: messages.authorKind,
       authorId: messages.authorId,
       body: messages.body,
+      meta: messages.meta,
       createdAt: messages.createdAt,
     })
     .from(messages)
@@ -168,7 +169,7 @@ export async function threadInfos(db: Db, viewer: Viewer, rows: ThreadRow[]): Pr
       id: row.id,
       state: row.state,
       title: row.title,
-      openingText: excerpt(root?.body ?? ""),
+      openingText: root ? excerpt(shownBody(root)) : "",
       channelId: row.channelId,
       channelName: chan?.name ?? "",
       venue: chan?.kind ?? "channel",
@@ -177,7 +178,7 @@ export async function threadInfos(db: Db, viewer: Viewer, rows: ThreadRow[]): Pr
       lastMessage: last
         ? {
             author: { type: last.authorKind, id: last.authorId },
-            excerpt: excerpt(last.body),
+            excerpt: excerpt(shownBody(last)),
             createdAt: last.createdAt.toISOString(),
           }
         : null,

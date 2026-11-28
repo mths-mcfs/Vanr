@@ -27,8 +27,8 @@ import { conflict, HttpError, notFound } from "./http";
 import { seesIssue } from "./issues";
 import { log } from "./logger";
 import { reviewsFor } from "./memory-reviews";
-import { hydrateOne } from "./messages";
-import { closeNotifications, notify } from "./notifications";
+import { hydrate } from "./messages";
+import { closeNotifications, notify, publishNotifications } from "./notifications";
 import { cancelQueued } from "./outbox";
 import { publishMemory } from "./routes/memories";
 import { canSeeRoutine } from "./routines";
@@ -46,7 +46,8 @@ const {
   memories,
   reminders,
 } = schema;
-const { files, issues, knowledgePages, messages, outbox, routines, users } = schema;
+const { files, issues, knowledgePages, messages, notifications, outbox, routineExecutions, routines, users } =
+  schema;
 
 export type ApprovalRow = typeof approvals.$inferSelect;
 export type ProposalRow = typeof proposals.$inferSelect;
@@ -503,10 +504,45 @@ export type Undoer = {
   redo(deps: AppDeps, row: ActionRow, actorUserId: string): Promise<void | AfterCommit>;
 };
 
+/**
+ * The message again, as it is now, and the messages of its channel that quote it: a retracted post's excerpt goes
+ * from their quote too, and a redone one comes back.
+ */
 async function republishMessage(deps: AppDeps, messageId: string) {
   const [row] = await deps.db.select().from(messages).where(eq(messages.id, messageId));
   if (!row) return;
-  deps.hub.toChannel(row.channelId, { type: "message.posted", message: await hydrateOne(deps.db, row) });
+  const quoting = await deps.db
+    .select()
+    .from(messages)
+    .where(
+      and(
+        eq(messages.channelId, row.channelId),
+        sql`${messages.meta} -> 'replyTo' ->> 'messageId' = ${messageId}`,
+      ),
+    );
+  for (const message of await hydrate(deps.db, [row, ...quoting]))
+    deps.hub.toChannel(row.channelId, { type: "message.posted", message });
+}
+
+/**
+ * Where a retracted post's text was copied, it goes in the retraction's commit: the excerpt of its notices and the
+ * summary of the routine run it answered. A redo doesn't bring them back. Returns the notices to send again.
+ */
+async function forgetRetractedText(deps: AppDeps, msg: { id: string; workspaceId: string }) {
+  await deps.db
+    .update(routineExecutions)
+    .set({ summary: null })
+    .where(eq(routineExecutions.messageId, msg.id));
+  return deps.db
+    .update(notifications)
+    .set({ latest: sql`${notifications.latest} - 'text' - 'quote'` })
+    .where(
+      and(
+        eq(notifications.workspaceId, msg.workspaceId),
+        sql`${notifications.source} ->> 'messageId' = ${msg.id}`,
+      ),
+    )
+    .returning();
 }
 
 /** The agent's posted message, locked until the undo commits. */
@@ -605,7 +641,11 @@ const UNDOERS: Partial<Record<AgentActionKind, Undoer>> = {
       // Retracting and leaving the search in the same commit: there is no moment with the retracted text findable.
       await deps.db.update(messages).set({ meta }).where(eq(messages.id, msg.id));
       await unindex(deps.db, deps, { kind: "message", id: msg.id });
-      return (after) => republishMessage(after, msg.id);
+      const notices = await forgetRetractedText(deps, msg);
+      return async (after) => {
+        await republishMessage(after, msg.id);
+        await publishNotifications(after, notices);
+      };
     },
     async redo(deps, row) {
       if (row.target.type === "outbox") throw notSent();
@@ -894,7 +934,7 @@ async function assertSees(deps: AppDeps, me: WorkspaceMember, row: ActionRow): P
       .select()
       .from(issues)
       .where(and(eq(issues.id, id), eq(issues.workspaceId, row.workspaceId)));
-    if (issue && !(await seesIssue(db, issue, me.userId))) throw hidden();
+    if (issue && !(await seesIssue(db, issue, me))) throw hidden();
   } else if (type === "routine") {
     const [routine] = await db
       .select()

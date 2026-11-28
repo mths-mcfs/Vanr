@@ -149,8 +149,8 @@ export interface RuntimePort {
   activeRuns(filter: { workspaceId: string; channelId?: string }): ActiveRun[];
   /** Where a live run is. Caller: the assignment engine. */
   liveRun(runId: string): { workspaceId: string; channelId: string } | null;
-  /** Who may stop a live run: whoever started it and the agent's owner. Caller: routes/agents. */
-  liveInfo(runId: string): { triggerAuthorId: string; ownerUserId: string } | null;
+  /** What `mayStopRun` reads of a live run: its initiator and the agent's owner. Caller: routes/agents. */
+  liveInfo(runId: string): { initiatedBy: string | null; ownerUserId: string } | null;
   /** Stops the run; false when it had already ended. Callers: assignments/engine, the assignment engine and routes/agents. */
   cancel(runId: string, actorUserId: string | null, fence?: RunFence): boolean;
   /** Forgets the fences of finished work: the key itself, or every key under `prefix`. Caller: the assignment engine. */

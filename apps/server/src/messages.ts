@@ -81,18 +81,39 @@ const noReceipts = (): MessageReceipts => ({ viewedBy: [], claimedBy: [], handle
  */
 const metaOf = (row: MessageRow): MessageMeta => row.meta as MessageMeta;
 
+/** A post undone after it went out (`message_posted`): it keeps its place, id and author, and nothing it said. */
+export const isRetracted = (row: Pick<MessageRow, "meta">): boolean =>
+  (row.meta as MessageMeta).retracted !== undefined;
+
+/** What anyone may read of a message's text: nothing once it is retracted. */
+export const shownBody = (row: Pick<MessageRow, "body" | "meta">): string =>
+  isRetracted(row) ? "" : row.body;
+
+/**
+ * The meta a retracted post keeps: who retracted it and where it sits (a thread root stays one). Its files, its
+ * cards and its quote of another message go, for everyone.
+ */
+function retractedMeta(meta: MessageMeta): MessageMeta {
+  const kept: MessageMeta = { retracted: meta.retracted };
+  if (meta.isThreadRoot !== undefined) kept.isThreadRoot = meta.isThreadRoot;
+  if (meta.spawnsThread !== undefined) kept.spawnsThread = meta.spawnsThread;
+  return kept;
+}
+
+/** Every message the API sends goes through here: a retracted one leaves without its text, files or cards. */
 export function toMessage(row: MessageRow, extras: MessageExtras = {}): Message {
+  const retracted = isRetracted(row);
   return {
     id: row.id,
     channelId: row.channelId,
     threadId: row.threadId,
     author: { type: row.authorKind, id: row.authorId },
-    body: row.body,
+    body: shownBody(row),
     createdAt: row.createdAt.toISOString(),
     editedAt: row.editedAt?.toISOString() ?? null,
-    meta: metaOf(row),
+    meta: retracted ? retractedMeta(metaOf(row)) : metaOf(row),
     reactions: extras.reactions ?? [],
-    memories: extras.memories ?? [],
+    memories: retracted ? [] : (extras.memories ?? []),
     runId: row.runId,
     agentMentionIds: row.agentMentionIds,
     receipts: extras.receipts ?? noReceipts(),
@@ -239,23 +260,38 @@ async function goneFiles(db: Db, rows: MessageRow[]): Promise<Set<string>> {
   return ids;
 }
 
+/** Of the messages these rows quote, the ones retracted since: their excerpt no longer shows. */
+async function retractedQuotes(db: Db, rows: MessageRow[]): Promise<Set<string>> {
+  const quoted = [...new Set(rows.flatMap((r) => metaOf(r).replyTo?.messageId ?? []))];
+  if (quoted.length === 0) return new Set();
+  const found = await db
+    .select({ id: messages.id })
+    .from(messages)
+    .where(and(inArray(messages.id, quoted), sql`${messages.meta} -> 'retracted' is not null`));
+  return new Set(found.map((r) => r.id));
+}
+
 /** Messages in the API format, with reactions, memories and receipts. */
 export async function hydrate(db: Db, rows: MessageRow[]): Promise<Message[]> {
   const ids = rows.map((r) => r.id);
-  const [reactions, mems, receipts, actions, gone] = await Promise.all([
+  const [reactions, mems, receipts, actions, gone, unquoted] = await Promise.all([
     reactionsFor(db, ids),
     memoriesFor(db, ids),
     receiptsFor(db, ids),
     actionsFor(db, ids),
     goneFiles(db, rows),
+    retractedQuotes(db, rows),
   ]);
   return rows.map((r) => {
-    const message = toMessage(r, {
+    let message = toMessage(r, {
       reactions: reactions.get(r.id),
       memories: mems.get(r.id),
       receipts: receipts.get(r.id),
       actions: actions.get(r.id),
     });
+    const quote = message.meta.replyTo;
+    if (quote && unquoted.has(quote.messageId))
+      message = { ...message, meta: { ...message.meta, replyTo: { ...quote, excerpt: "" } } };
     const refs = message.meta.files;
     if (!refs?.some((a) => gone.has(a.id))) return message;
     return {
@@ -544,7 +580,7 @@ async function replyRef(
     threadId: target.threadId,
     author,
     authorName: await actorName(db, workspaceId, author),
-    excerpt: excerpt(target.body),
+    excerpt: excerpt(shownBody(target)),
   };
 }
 

@@ -31,7 +31,14 @@ import {
   visibleFilesSql,
 } from "../drive";
 import { HttpError } from "../http";
-import { columnsOf, createIssue, issueByNumber, notifyComment, updateIssue } from "../issues";
+import {
+  columnsOf,
+  createIssue,
+  issueNumberSeenBy,
+  notifyComment,
+  updateIssue,
+  visibleIssuesSql,
+} from "../issues";
 import { log } from "../logger";
 import { anchorOf, canSeeRoutine, nextRunFor, type RoutineRow, targetOf } from "../routines";
 import { createPage, MAX_BODY, pageBySlug, recordRead, savePage } from "../wiki";
@@ -500,6 +507,9 @@ const linkToWiki = defineStored({
 
 // ---- Issues ----
 
+// The agent reads and changes an issue only as far as both it and the person it acts for see it (`wikiViewer`):
+// one of a channel either doesn't read answers like a missing number.
+
 const listIssues = defineStored({
   name: "list_issues",
   description: "List the workspace's issues (tasks), optionally searching by text, or open one by number.",
@@ -509,7 +519,7 @@ const listIssues = defineStored({
     const { db } = ctx.deps;
     const cols = new Map((await columnsOf(db, ctx.workspaceId)).map((c) => [c.id, c.stage]));
     if (input.number) {
-      const i = await domain(issueByNumber(db, ctx.workspaceId, input.number));
+      const i = await domain(issueNumberSeenBy(db, wikiViewer(ctx), input.number));
       const crit = i.criteria.map((c) => `- [${c.done ? "x" : " "}] ${c.text}`).join("\n");
       return `#${i.number} ${i.title} · ${cols.get(i.columnId)} · priority ${i.priority}\n\n${i.description}\n${crit}`.trim();
     }
@@ -520,6 +530,7 @@ const listIssues = defineStored({
       .where(
         and(
           eq(issues.workspaceId, ctx.workspaceId),
+          visibleIssuesSql(wikiViewer(ctx)),
           like ? or(ilike(issues.title, like), ilike(issues.description, like)) : undefined,
         ),
       )
@@ -584,7 +595,7 @@ const updateIssueTool = defineStored({
   }),
   async run(ctx, input) {
     const { db } = ctx.deps;
-    const row = await domain(issueByNumber(db, ctx.workspaceId, input.number));
+    const row = await domain(issueNumberSeenBy(db, wikiViewer(ctx), input.number));
     const cols = await columnsOf(db, ctx.workspaceId);
     const current = cols.find((c) => c.id === row.columnId);
     const column =
@@ -623,7 +634,7 @@ const commentIssue = defineStored({
   input: z.object({ number: z.number().int().min(1), text: z.string().trim().min(1).max(20_000) }),
   async run(ctx, input) {
     const { db } = ctx.deps;
-    const row = await domain(issueByNumber(db, ctx.workspaceId, input.number));
+    const row = await domain(issueNumberSeenBy(db, wikiViewer(ctx), input.number));
     // The comment and its receipt commit together; the notification goes after, and its failure doesn't undo them.
     const act = await db.transaction(async (tx) => {
       const [saved] = await tx
@@ -853,8 +864,8 @@ async function inRunAudience(ctx: ToolContext, row: RoutineRow): Promise<boolean
 
 /**
  * The agent's routines this run may show or change: the ones its conversation's audience may know about and,
- * when a person asked, only those they see too. A workspace admin sees every routine on the routines screen
- * (`canSeeRoutine`); from a run, the conversation's audience still holds.
+ * when a person asked, only those they see too (`canSeeRoutine`); from a run, the conversation's audience still
+ * holds.
  */
 async function seenRoutines(ctx: ToolContext, rows: RoutineRow[]): Promise<RoutineRow[]> {
   const me = ctx.trigger ? await asRequester(ctx) : null;

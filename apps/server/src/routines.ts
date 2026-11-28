@@ -13,15 +13,14 @@ import type {
   RoutineTarget,
   RoutineTrigger,
 } from "@vanr/contract";
-import { can } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import { newId } from "@vanr/engine/ids";
 import { occurrences, validateRule } from "@vanr/engine/recurrence";
 import { PRODUCT } from "@vanr/product";
-import { and, asc, desc, eq, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, lte, or, type SQL, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { AgentRow } from "./agents";
-import { canReadChannel, channelInWorkspace, openDm } from "./channels";
+import { canReadChannel, channelInWorkspace, openDm, readableChannelsSql } from "./channels";
 import type { AppDeps, WorkspaceMember } from "./context";
 import { openDebate } from "./debates";
 import { createFile } from "./drive";
@@ -211,7 +210,25 @@ export function webhookUrl(deps: AppDeps, row: RoutineRow): string | null {
     : null;
 }
 
-async function recentFires(db: Db, ids: string[]): Promise<Map<string, ExecutionRow[]>> {
+/**
+ * The runs of a routine the person may see, beyond seeing the routine: each run follows the channel it was fired
+ * for or answered in, which can differ from the routine's target now (the target moved from a private channel). A
+ * run of a channel they don't read doesn't show at all, not its reply, its channel or when and how it went. A run
+ * with no channel (a file's or a debate's) follows the routine's own visibility: the callers only reach here once
+ * `canSeeRoutine` let the person in.
+ */
+export function visibleRunsSql(
+  viewer: { workspaceId: string; userId: string },
+  column: SQL | typeof routineExecutions.channelId = routineExecutions.channelId,
+): SQL {
+  return sql`(${column} is null or ${column} in ${readableChannelsSql(viewer)})`;
+}
+
+async function recentFires(
+  db: Db,
+  viewer: { workspaceId: string; userId: string },
+  ids: string[],
+): Promise<Map<string, ExecutionRow[]>> {
   const out = new Map<string, ExecutionRow[]>();
   if (ids.length === 0) return out;
   const rows = await db
@@ -220,7 +237,8 @@ async function recentFires(db: Db, ids: string[]): Promise<Map<string, Execution
     .where(
       and(
         inArray(routineExecutions.routineId, ids),
-        sql`${routineExecutions.id} in (select id from routine_executions r2 where r2.routine_id = ${routineExecutions.routineId} order by r2.at desc limit ${RECENT})`,
+        sql`${routineExecutions.id} in (select id from routine_executions r2 where r2.routine_id = ${routineExecutions.routineId}
+          and ${visibleRunsSql(viewer, sql.raw("r2.channel_id"))} order by r2.at desc limit ${RECENT})`,
       ),
     )
     .orderBy(desc(routineExecutions.at));
@@ -256,9 +274,15 @@ async function withMailStatus(db: Db, rows: RoutineRow[]): Promise<Map<string, R
   return out;
 }
 
-export async function toRoutines(deps: AppDeps, rows: RoutineRow[]): Promise<Routine[]> {
+/** The routines as the person sees them: their recent runs only as far as `visibleRunsSql` lets. */
+export async function toRoutines(
+  deps: AppDeps,
+  viewer: { workspaceId: string; userId: string },
+  rows: RoutineRow[],
+): Promise<Routine[]> {
   const byRoutine = await recentFires(
     deps.db,
+    viewer,
     rows.map((r) => r.id),
   );
   const triggers = await withMailStatus(deps.db, rows);
@@ -286,8 +310,12 @@ export async function toRoutines(deps: AppDeps, rows: RoutineRow[]): Promise<Rou
   });
 }
 
-export async function toRoutine(deps: AppDeps, row: RoutineRow): Promise<Routine> {
-  const [r] = await toRoutines(deps, [row]);
+export async function toRoutine(
+  deps: AppDeps,
+  viewer: { workspaceId: string; userId: string },
+  row: RoutineRow,
+): Promise<Routine> {
+  const [r] = await toRoutines(deps, viewer, [row]);
   if (!r) throw new Error("toRoutines returned nothing");
   return r;
 }
@@ -420,7 +448,9 @@ export async function registerFire(
   fire: Fire,
 ): Promise<{ run: ExecutionRow; duplicate: false } | { run: ExecutionRow | null; duplicate: true }> {
   const { db } = deps;
-  const run = await insertFire(db, deps.now(), routineId, fire);
+  const [routine] = await db.select().from(routines).where(eq(routines.id, routineId));
+  const channelId = routine ? await fireChannel(db, routine) : null;
+  const run = await insertFire(db, deps.now(), routineId, fire, channelId);
   if (run) return { run, duplicate: false };
   const [existing] = await db
     .select()
@@ -436,12 +466,30 @@ export async function registerFire(
   return { run: existing ?? null, duplicate: true };
 }
 
+/**
+ * The channel a fire answers in, as the routine's target says now: the run keeps it from the start, so a run that
+ * ends early, or a skipped one, stays with that channel's readers after the target moves (`visibleRunsSql`). A DM
+ * routine's run is in its creator's DM with the agent; a file or a debate has none.
+ */
+async function fireChannel(db: Db, row: RoutineRow): Promise<string | null> {
+  const target = targetOf(row);
+  if (target.kind === "channel") return target.channelId;
+  if (target.kind === "dm" || target.kind === "conversation")
+    return openDm(db, {
+      workspaceId: row.workspaceId,
+      userId: row.createdBy,
+      other: { type: "agent", id: row.agentId },
+    });
+  return null;
+}
+
 /** The `pending` row of a fire, or null when one with the same time or key exists (in the caller's transaction). */
 async function insertFire(
   db: Db | Tx,
   at: Date,
   routineId: string,
   fire: Fire,
+  channelId: string | null,
 ): Promise<ExecutionRow | null> {
   const payload = fire.context
     ? { ...fire.context, text: fire.context.text.slice(0, ROUTINE_CONTEXT_CHARS) }
@@ -458,6 +506,7 @@ async function insertFire(
       dedupeKey: fire.key ?? null,
       payload,
       summaryVars: fire.params ?? null,
+      channelId,
     })
     .onConflictDoNothing()
     .returning();
@@ -687,7 +736,8 @@ async function finishRun(
       summary: outcome.summary,
       summaryKey: outcome.summaryKey,
       summaryVars: { ...(run.summaryVars ?? {}), ...(outcome.summaryVars ?? {}) },
-      channelId: outcome.channelId ?? null,
+      // Where it answered; a run that ended before posting keeps the channel it was fired for.
+      channelId: outcome.channelId ?? run.channelId,
       threadId: outcome.threadId ?? null,
       messageId: outcome.messageId ?? null,
       runId: outcome.runId ?? null,
@@ -743,6 +793,7 @@ async function afterRun(
         attempt,
         retryOf: root,
         payload: run.payload,
+        channelId: run.channelId,
       })
       .onConflictDoNothing();
     await updateRun(deps, run.id, { retried: true });
@@ -1192,6 +1243,7 @@ export async function dueRoutines(deps: AppDeps): Promise<number> {
     const lateMs = at.getTime() - latest.getTime();
     const late = lateMs > policy.missedWindowMin * 60_000;
     const skipLatest = late && (policy.missed === "skip" || lateMs > CATCH_UP_MAX_MS);
+    const channelId = await fireChannel(db, row);
     const fire = await db.transaction(async (tx) => {
       const [claimed] = await tx
         .update(routines)
@@ -1222,6 +1274,7 @@ export async function dueRoutines(deps: AppDeps): Promise<number> {
             summaryKey: "routines.run.missed",
             summaryVars: vars,
             finishedAt: at,
+            channelId,
           })
           .onConflictDoNothing();
       if (rule && previous) {
@@ -1242,11 +1295,17 @@ export async function dueRoutines(deps: AppDeps): Promise<number> {
         await missed(latest, { count: 1 }, 1);
         return null;
       }
-      return insertFire(tx, at, row.id, {
-        trigger: kind,
-        scheduledFor: latest,
-        ...(late ? { params: { lateMin: Math.round(lateMs / 60_000) } } : {}),
-      });
+      return insertFire(
+        tx,
+        at,
+        row.id,
+        {
+          trigger: kind,
+          scheduledFor: latest,
+          ...(late ? { params: { lateMin: Math.round(lateMs / 60_000) } } : {}),
+        },
+        channelId,
+      );
     });
     if (!fire) continue;
     // A fall from here on leaves the fire `pending`: the queue's sweep runs it after PENDING_STALE_MS.
@@ -1311,9 +1370,13 @@ async function contextReaches(db: Db, row: RoutineRow, channelId: string): Promi
   return canReadChannel(db, { workspaceId: row.workspaceId, userId: row.createdBy, channelId });
 }
 
-/** Who sees it: whoever created it; and everyone who reads the target channel or sees the workspace's Drive and debates. */
+/**
+ * Who sees it and its runs: whoever created it; and everyone who reads the target channel or sees the workspace's
+ * Drive and debates. A routine that answers in its creator's DM with the agent (`dm`, `conversation`) is the
+ * creator's alone. Configuring the workspace doesn't open another person's DM or a private channel one doesn't read.
+ */
 export async function canSeeRoutine(deps: AppDeps, me: WorkspaceMember, row: RoutineRow): Promise<boolean> {
-  if (row.createdBy === me.userId || can(me.role, "configure")) return true;
+  if (row.createdBy === me.userId) return true;
   const target = targetOf(row);
   if (target.kind === "channel")
     return canReadChannel(deps.db, {

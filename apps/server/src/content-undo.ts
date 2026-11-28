@@ -216,7 +216,8 @@ async function lockedIssue(deps: AppDeps, row: ActionRow, actorUserId: string, m
     .where(and(eq(issues.id, row.target.id), eq(issues.workspaceId, row.workspaceId)))
     .for("no key update");
   if (!issue) throw gone("The issue no longer exists");
-  if (!(await seesIssue(deps.db, issue, actorUserId))) throw notFound("Issue not found");
+  if (!(await seesIssue(deps.db, issue, { workspaceId: row.workspaceId, userId: actorUserId })))
+    throw notFound("Issue not found");
   return issue;
 }
 
