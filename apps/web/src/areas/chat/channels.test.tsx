@@ -1,7 +1,7 @@
 // Channels against the fake server: making one, finding and joining one, starting a direct message,
 // the people of a channel, its settings and its pins. Each control shows only to who the server lets.
 import { describe, expect, test } from "bun:test";
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import type { Message } from "@vanr/contract";
 import { newServer, renderApp, TEST_NOW } from "../../../test/app.tsx";
 
@@ -218,5 +218,58 @@ describe("leaving a private channel", () => {
       })
       .filter((query) => query.state.data !== undefined);
     expect(left.length).toBe(0);
+  });
+});
+
+describe("what CodeRabbit found on the channels round", () => {
+  test("saving the settings sends only what the person changed, not a topic someone else changed meanwhile", async () => {
+    const server = newServer();
+    const app = await open("/channel/ch_print", "usr_iris", server);
+    await app.user.click(await screen.findByRole("button", { name: "Settings" }));
+    const dialog = await screen.findByRole("dialog", { name: "Settings for #print-queue" });
+    // Someone else changes the topic while the dialog is open, and the list comes in again.
+    const print = server.state.channels.find((channel) => channel.id === "ch_print");
+    if (print !== undefined) print.topic = "Plates only";
+    await act(async () => {
+      await app.runtime.queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[2] === "listChannels",
+      });
+    });
+    const name = within(dialog).getByRole("textbox", { name: "Name" });
+    await app.user.clear(name);
+    await app.user.type(name, "print-room");
+    await app.user.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(server.calls.some((call) => call.method === "updateChannel")).toBe(true));
+    const body = server.calls.find((call) => call.method === "updateChannel")?.params;
+    expect(body?.name).toBe("print-room");
+    expect(body !== undefined && "topic" in body).toBe(false);
+    await waitFor(() => expect(print?.topic).toBe("Plates only"));
+  });
+
+  test("browsing channels when the direct messages can't be read says so, and retries", async () => {
+    const server = newServer();
+    server.force("getDms", { kind: "offline" }, 100);
+    const app = await open("/channel/ch_general", "usr_ana", server);
+    const sidebar = await screen.findByRole("complementary");
+    await app.user.click(await within(sidebar).findByRole("button", { name: "Browse channels" }));
+    const dialog = await screen.findByRole("dialog", { name: "Browse channels" });
+    expect(await within(dialog).findByRole("alert")).toBeDefined();
+    expect(within(dialog).queryByRole("list", { name: "Channels" }) === null).toBe(true);
+    server.unforce("getDms");
+    await app.user.click(within(dialog).getByRole("button", { name: "Retry" }));
+    expect(await within(dialog).findByRole("button", { name: "Open #general" })).toBeDefined();
+  });
+
+  test("an agent taken out of a channel no longer answers there", async () => {
+    const server = newServer();
+    // The channel's agents were changed: only Ledger is in #general now.
+    server.chat.agentMembers.set("ch_general", new Set(["agt_ledger"]));
+    const app = await open("/channel/ch_general", "usr_ana", server);
+    const field = await screen.findByRole("textbox", { name: "Write in #general" });
+    await app.user.type(field, "@ledger check it");
+    expect(await screen.findByText("Ledger will answer")).toBeDefined();
+    await app.user.clear(field);
+    await app.user.type(field, "@scout check it");
+    expect(screen.queryByText("Scout will answer") === null).toBe(true);
   });
 });

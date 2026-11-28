@@ -259,10 +259,17 @@ export function SettingsDialog({ channel, onClose }: { channel: Channel; onClose
   const outcome = useOutcome();
   const { workspaceId, me } = useConversation();
   const configures = can(me.role, "configure");
-  const [name, setName] = useState(channel.name);
-  const [topic, setTopic] = useState(channel.topic);
+  // What the channel said when the dialog opened: only the fields the person changed from it are sent,
+  // so a change someone else made meanwhile isn't written back over.
+  const [opened] = useState(() => ({
+    name: channel.name,
+    topic: channel.topic,
+    budgetPerMonthUsd: channel.budgetPerMonthUsd,
+  }));
+  const [name, setName] = useState(opened.name);
+  const [topic, setTopic] = useState(opened.topic);
   const [budget, setBudget] = useState(
-    channel.budgetPerMonthUsd === null ? "" : String(channel.budgetPerMonthUsd),
+    opened.budgetPerMonthUsd === null ? "" : String(opened.budgetPerMonthUsd),
   );
   const save = useApiMutation("updateChannel", {
     invalidates: () => [{ method: "listChannels", args: { workspaceId } }],
@@ -280,9 +287,9 @@ export function SettingsDialog({ channel, onClose }: { channel: Channel; onClose
         workspaceId,
         channelId: channel.id,
         body: {
-          ...(!channel.isGeneral && name !== channel.name && { name }),
-          ...(topic !== channel.topic && { topic }),
-          ...(configures && budgetValue !== channel.budgetPerMonthUsd && { budgetPerMonthUsd: budgetValue }),
+          ...(!channel.isGeneral && name !== opened.name && { name }),
+          ...(topic !== opened.topic && { topic }),
+          ...(configures && budgetValue !== opened.budgetPerMonthUsd && { budgetPerMonthUsd: budgetValue }),
         },
       },
       {

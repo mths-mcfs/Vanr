@@ -158,6 +158,9 @@ export function BrowseChannelsDialog({ workspaceId, onClose }: { workspaceId: st
           <Waiting />
         ) : channels.isError ? (
           <Failed error={channels.error} onRetry={() => void channels.refetch()} />
+        ) : dms.data === undefined && dms.isError ? (
+          // Without the direct messages, the list can't tell them from channels: nothing is listed.
+          <Failed error={dms.error} onRetry={() => void dms.refetch()} />
         ) : rooms.length === 0 ? (
           <p className="chat-note">{t("find.empty")}</p>
         ) : (

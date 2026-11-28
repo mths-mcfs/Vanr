@@ -331,9 +331,11 @@ export class FakeChat {
           .people(scope.workspaceId)
           .filter((person) => room.memberIds.includes(person.userId))
           .map((person) => ({ id: person.userId, type: "person", name: person.name, handle: person.handle }));
+        // A channel whose agents were changed lists those; one never changed has every agent, as seeded.
+        const roster = this.agentMembers.get(room.id);
         const agents = this.host
           .agents(scope.workspaceId)
-          .filter((agent) => agent.archivedAt === null)
+          .filter((agent) => agent.archivedAt === null && (roster === undefined || roster.has(agent.id)))
           .map((agent) => ({
             id: agent.id,
             type: "agent",
