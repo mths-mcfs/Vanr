@@ -2,7 +2,7 @@
 // the channel it lives in, who does the work and how commands on the runner are approved. It opens on
 // its own page, not started: the agent drafts a plan and the owner starts it.
 import { useApiMutation, useApiQuery } from "@vanr/client/react";
-import type { AssignmentExecutor, Channel, CommandPolicy } from "@vanr/contract";
+import type { AssignmentExecutor, CommandPolicy } from "@vanr/contract";
 import { Button, Callout, Dialog, DialogContent, Field, Input, Select, SelectItem, Textarea } from "@vanr/ui";
 import { useState } from "react";
 import { useGo } from "../../../app/navigation.tsx";
@@ -17,12 +17,10 @@ const POLICIES = ["when_safe", "always", "never"] as const satisfies readonly Co
 export function NewAssignmentDialog({
   workspaceId,
   actors,
-  channels,
   onClose,
 }: {
   workspaceId: string;
   actors: Actors;
-  channels: Channel[];
   onClose: () => void;
 }) {
   const t = useMessages("work");
@@ -32,13 +30,16 @@ export function NewAssignmentDialog({
   const go = useGo();
   const eligible = useApiQuery("listAssignmentEligibleAgents", { workspaceId });
   const qualified = (eligible.data ?? []).filter((agent) => agent.qualifies);
-  const writable = channels.filter((channel) => channel.isMember);
+  // The channels come with the agents: the form waits for both, and a failed load is retried here.
+  const channels = useApiQuery("listChannels", { workspaceId });
+  const writable = (channels.data ?? []).filter((channel) => channel.isMember);
   const [goal, setGoal] = useState("");
   const [title, setTitle] = useState("");
   const [chosenAgent, setAgentId] = useState("");
-  const [channelId, setChannelId] = useState(
-    writable.find((channel) => channel.isGeneral)?.id ?? writable[0]?.id ?? "",
-  );
+  const [chosenChannel, setChannelId] = useState("");
+  const channelId = writable.some((channel) => channel.id === chosenChannel)
+    ? chosenChannel
+    : (writable.find((channel) => channel.isGeneral)?.id ?? writable[0]?.id ?? "");
   const [chosenExecutor, setExecutor] = useState<AssignmentExecutor | "">("");
   const [policy, setPolicy] = useState<CommandPolicy>("when_safe");
   const agentId = chosenAgent === "" ? (qualified[0]?.agentId ?? "") : chosenAgent;
@@ -97,13 +98,19 @@ export function NewAssignmentDialog({
           </>
         }
       >
-        {eligible.isPending ? (
+        {eligible.isPending || channels.isPending ? (
           <PartLoading />
         ) : eligible.isError && eligible.data === undefined ? (
           <PartError
             title={t("asg.form.agentsFailed")}
             error={eligible.error}
             onRetry={() => void eligible.refetch()}
+          />
+        ) : channels.isError && channels.data === undefined ? (
+          <PartError
+            title={t("asg.form.channelsFailed")}
+            error={channels.error}
+            onRetry={() => void channels.refetch()}
           />
         ) : qualified.length === 0 ? (
           <p className="work-note">{t("asg.form.noAgent")}</p>

@@ -186,6 +186,34 @@ describe("an assignment's page", () => {
   });
 });
 
+describe("asking to take part", () => {
+  test("asking again after a no reopens the one request, and letting someone in twice adds them once", async () => {
+    const server = newServer();
+    const as = (userId: string) => server.fetch({ session: server.sessionFor(userId) });
+    const base = "http://localhost/api/v1/workspaces/workspace_birchwood/assignments/asg_paper/join-requests";
+    const post = (userId: string, path = "", body: unknown = {}) =>
+      as(userId)(`${base}${path}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    expect((await post("usr_iris")).status).toBe(201);
+    expect((await post("usr_ana", "/usr_iris/decline")).status).toBe(200);
+    expect((await post("usr_iris")).status).toBe(201);
+    const listed = (await (await as("usr_ana")(base, { method: "GET" })).json()) as {
+      requests: { userId: string; status: string }[];
+    };
+    expect(listed.requests.filter((each) => each.userId === "usr_iris").map((each) => each.status)).toEqual([
+      "pending",
+    ]);
+    expect((await post("usr_ana", "/usr_iris/accept", { role: "comment" })).status).toBe(200);
+    expect((await post("usr_ana", "/usr_iris/accept", { role: "comment" })).status).toBe(409);
+    const paper = server.assignments.assignments.find((row) => row.id === "asg_paper");
+    expect(paper?.people.filter((person) => person.userId === "usr_iris").length).toBe(1);
+    expect((await post("usr_iris")).status).toBe(409);
+  });
+});
+
 describe("an assignment's states, as each person sees them", () => {
   test("someone who can't act sees open items, not things waiting on them", async () => {
     await renderApp({ path: LIST, signedInAs: "usr_iris" });
@@ -206,6 +234,26 @@ describe("an assignment's states, as each person sees them", () => {
     expect(dialog.queryByText(/No agent can take an assignment yet/) === null).toBe(true);
     await app.user.click(dialog.getByRole("button", { name: "Retry" }));
     expect(await dialog.findByRole("textbox", { name: "Goal" })).toBeDefined();
+  });
+
+  test("channels that couldn't be loaded say so in the form, with a retry, and the form starts in #general", async () => {
+    const server = newServer();
+    // The page asks for the channels too: they stay down until the retry.
+    server.force("listChannels", { kind: "error", status: 503, code: "unavailable" }, 100);
+    const app = await renderApp({ path: LIST, signedInAs: "usr_ana", server });
+    await app.user.click(await screen.findByRole("button", { name: "New assignment" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "New assignment" }));
+    expect(
+      await dialog.findByText(
+        "The channels an assignment can live in could not be loaded",
+        {},
+        { timeout: 8000 },
+      ),
+    ).toBeDefined();
+    server.unforce("listChannels");
+    await app.user.click(dialog.getByRole("button", { name: "Retry" }));
+    expect(await dialog.findByRole("textbox", { name: "Goal" })).toBeDefined();
+    expect(dialog.getByRole("combobox", { name: "Channel" }).textContent).toContain("#general");
   });
 
   test("requests to take part that couldn't be loaded say so, with a retry", async () => {

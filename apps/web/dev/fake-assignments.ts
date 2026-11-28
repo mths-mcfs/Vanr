@@ -499,24 +499,38 @@ export class FakeAssignments {
         return reply(204, null);
       }),
       listAssignmentJoinRequests: withOne((_scope, row) => reply(200, { requests: row.requests }), "manage"),
+      // One request per person, as on the server: asking again after a no opens the same one again.
       createAssignmentJoinRequest: withOne((scope, row) => {
-        const request: T.AssignmentJoinRequest = {
+        if (this.roleOf(scope, row) !== "view")
+          return fail(409, "assignment.already_participant", "You already take part in this assignment");
+        const fresh: T.AssignmentJoinRequest = {
           createdAt: this.host.now().toISOString(),
           name: scope.user.name,
           role: null,
           status: "pending",
           userId: scope.user.id,
         };
-        row.requests.push(request);
+        const at = row.requests.findIndex((each) => each.userId === scope.user.id);
+        if (at === -1) row.requests.push(fresh);
+        else row.requests[at] = fresh;
         row.pending.joinRequests = row.requests.filter((each) => each.status === "pending").length;
-        return reply(200, request);
+        return reply(201, fresh);
       }),
+      // Only an open request is answered; a person let in twice is still one participant.
       runActionOnAssignmentJoinRequest: withOne((_scope, row, params) => {
-        const request = row.requests.find((each) => each.userId === params.joinRequestId);
-        if (request === undefined) return fail(404, "not_found", "Request not found");
+        const request = row.requests.find(
+          (each) => each.userId === params.joinRequestId && each.status === "pending",
+        );
+        if (request === undefined)
+          return fail(409, "assignment.join_closed", "There is no open request from this person");
         request.status = params.action === "accept" ? "accepted" : "declined";
-        if (request.status === "accepted")
-          row.people.push({ userId: request.userId, role: params.role === "decide" ? "decide" : "comment" });
+        if (request.status === "accepted") {
+          const role = params.role === "decide" ? "decide" : "comment";
+          request.role = role;
+          const person = row.people.find((each) => each.userId === request.userId);
+          if (person === undefined) row.people.push({ userId: request.userId, role });
+          else person.role = role;
+        }
         row.pending.joinRequests = row.requests.filter((each) => each.status === "pending").length;
         return reply(200, request);
       }, "manage"),

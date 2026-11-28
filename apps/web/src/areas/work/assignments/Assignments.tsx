@@ -125,12 +125,7 @@ function AssignmentsView({ workspaceId }: { workspaceId: string }) {
         </>
       )}
       {creating && (
-        <NewAssignmentDialog
-          workspaceId={workspaceId}
-          actors={actors}
-          channels={channels.data ?? []}
-          onClose={() => setCreating(false)}
-        />
+        <NewAssignmentDialog workspaceId={workspaceId} actors={actors} onClose={() => setCreating(false)} />
       )}
     </div>
   );

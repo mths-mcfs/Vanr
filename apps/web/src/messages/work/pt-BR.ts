@@ -535,6 +535,7 @@ export default {
   "asg.settings.dropRule": "Deixar de permitir",
   "asg.open": { one: "{count} item em aberto", other: "{count} itens em aberto" },
   "asg.form.agentsFailed": "Não deu para carregar os agentes que podem receber uma atribuição",
+  "asg.form.channelsFailed": "Não deu para carregar os canais onde uma atribuição pode ficar",
   "asg.people.requestsFailed": "Não deu para carregar os pedidos para participar",
   "recur.form.limitRange": "Um número de {min} a {max}.",
   "week.field.everyone": "Sem convidados, todos do espaço de trabalho veem o evento.",
