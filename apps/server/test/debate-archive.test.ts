@@ -2,11 +2,13 @@
 // and the agent leaves the round. Each debate call is scripted; everything else goes to the fake model.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { schema } from "@vanr/engine/db";
+import { newId } from "@vanr/engine/ids";
 import { fakeProvider } from "@vanr/engine/models/fake";
 import type { ModelRequest } from "@vanr/engine/models/types";
 import { eq } from "drizzle-orm";
 import { archiveAgent } from "../src/control";
 import { textProvider } from "../src/debate-benchmark";
+import { answerRound } from "../src/debates";
 import type { RunningServer } from "../src/server";
 import { SERVER_TEST_MS, signedIn, startTestServer } from "./harness";
 import { call, seedAgent, ws } from "./route-calls";
@@ -23,9 +25,16 @@ const position = (answer: string) =>
 let server: RunningServer;
 /** Runs inside Lia's first debate call, before the model answers. */
 let duringLia: (() => Promise<void>) | null = null;
+/** Runs inside Lia's synthesis call (she leads: the first agent). */
+let duringLiaSynth: (() => Promise<void>) | null = null;
 beforeAll(async () => {
   const scripted = textProvider(async (req) => {
-    const agent = /^You are (\S+)/.exec(req.system)?.[1] ?? "?";
+    const agent = (/^You are (\S+)/.exec(req.system)?.[1] ?? "?").replace(/[,.]$/, "");
+    if (agent === "Lia" && duringLiaSynth && /^Write the synthesis/.test(lastText(req))) {
+      const run = duringLiaSynth;
+      duringLiaSynth = null;
+      await run();
+    }
     if (agent === "Lia" && duringLia) {
       const run = duringLia;
       duringLia = null;
@@ -81,6 +90,92 @@ describe("a debate turn in flight when its agent is archived", () => {
       expect(
         posts.some((p) => (p.author as { id?: string } | null)?.id === rui.id && p.kind === "turn"),
       ).toBe(true);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("an archived agent in a debate", () => {
+  test(
+    "its turn isn't saved when the archive lands after the turn's own check, and it leaves the round",
+    async () => {
+      const ana = await signedIn(server, "Ana", "ana3@debate-archive.test");
+      const { workspaceId } = await seedWorkspace(server, ana, "Queue");
+      const lia = await seedAgent(server, workspaceId, ana, "lia", []);
+      const id = newId("dbt");
+      const who = { type: "agent" as const, id: lia.id };
+      const [row] = await server.deps.db
+        .insert(schema.debates)
+        .values({
+          id,
+          workspaceId,
+          title: "Queue",
+          goal: "Decide",
+          createdBy: { type: "person", id: ana.user.id },
+          agentIds: [lia.id],
+          round: 0,
+          phase: "debating",
+          pendingSpeakers: [who],
+        })
+        .returning();
+      if (!row) throw new Error("no debate");
+      await server.deps.db
+        .update(schema.agents)
+        .set({ archivedAt: new Date() })
+        .where(eq(schema.agents.id, lia.id));
+      expect(await answerRound(server.deps, row, who, { kind: "turn", body: "My turn" })).toBe(null);
+      const posts = await server.deps.db
+        .select()
+        .from(schema.debatePosts)
+        .where(eq(schema.debatePosts.debateId, id));
+      expect(posts).toEqual([]);
+      const [after] = await server.deps.db.select().from(schema.debates).where(eq(schema.debates.id, id));
+      expect(after?.pendingSpeakers).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a lead archived while it writes the synthesis doesn't sign it: the debate closes on the votes",
+    async () => {
+      const ana = await signedIn(server, "Ana", "ana4@debate-archive.test");
+      const { workspaceId, general } = await seedWorkspace(server, ana, "Synthesis");
+      const lia = await seedAgent(server, workspaceId, ana, "lia", [general]);
+      const rui = await seedAgent(server, workspaceId, ana, "rui", [general]);
+      let archived = false;
+      duringLiaSynth = async () => {
+        await archiveAgent(server.deps, workspaceId, lia.id, ana.user.id);
+        archived = true;
+      };
+      const res = await call(ana, "POST", `${ws(workspaceId)}/debates`, {
+        title: "Archive mid-synthesis",
+        goal: "Decide",
+        agentIds: [lia.id, rui.id],
+        rounds: 0,
+        speakers: [
+          { type: "agent", id: lia.id },
+          { type: "agent", id: rui.id },
+        ],
+      });
+      expect(res.status).toBe(201);
+      for (let i = 0; i < 80 && !archived; i++) {
+        await server.deps.runtime.settle();
+        await Bun.sleep(50);
+      }
+      await Bun.sleep(300);
+      await server.deps.runtime.settle();
+      expect(archived).toBe(true);
+      const posts = await server.deps.db
+        .select({ author: schema.debatePosts.author, kind: schema.debatePosts.kind })
+        .from(schema.debatePosts)
+        .where(eq(schema.debatePosts.debateId, res.body.id));
+      const synthesis = posts.filter((p) => p.kind === "synthesis");
+      expect(synthesis.map((p) => (p.author as { id?: string } | null)?.id)).toEqual([rui.id]);
+      const notices = await server.deps.db
+        .select({ actors: schema.notifications.actors })
+        .from(schema.notifications)
+        .where(eq(schema.notifications.groupKey, `debate_synthesis:${res.body.id}`));
+      expect(JSON.stringify(notices)).not.toContain(lia.id);
     },
     SERVER_TEST_MS,
   );

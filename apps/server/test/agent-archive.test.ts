@@ -337,6 +337,91 @@ async function settleAgent(workspaceId: string, agentId: string) {
   }
 }
 
+describe("a run cut short", () => {
+  /** Lia mid-reply: a long answer streams a word at a time. */
+  async function midStream(t: Team, limits?: { timeoutMs: number }) {
+    const channel = await channelRow(server, t.general);
+    const { message } = await postMessage(server.deps, {
+      workspaceId: t.workspaceId,
+      channel,
+      author: { type: "person", id: t.beto.user.id },
+      body: "[[slow:150]] tell me a long story about bread and butter and jam and toast and tea",
+      clientId: newId("c"),
+    });
+    const [trigger] = await server.deps.db.select().from(messages).where(eq(messages.id, message.id));
+    if (!trigger) throw new Error("no trigger");
+    const started = await server.deps.runtime.runFor({
+      agent: t.lia,
+      channel,
+      trigger,
+      ...(limits ? { limits: { scopes: [], maxTurns: 10, ...limits } } : {}),
+    });
+    if (!started.ok) throw new Error(started.code);
+    return started;
+  }
+  const said = (runId: string) =>
+    server.deps.db
+      .select({ body: messages.body, meta: messages.meta })
+      .from(messages)
+      .where(eq(messages.runId, runId));
+
+  test(
+    "a person's Stop still posts what the agent had written, marked canceled",
+    async () => {
+      const t = await team();
+      const started = await midStream(t);
+      await Bun.sleep(700);
+      expect((await call(t.beto, "POST", `${t.w}/runs/${started.runId}/cancel`)).status).toBe(204);
+      await started.done;
+      const out = await said(started.runId);
+      expect(out.length).toBe(1);
+      expect((out[0]?.meta as { canceled?: boolean } | undefined)?.canceled).toBe(true);
+      expect(out[0]?.body.length).toBeGreaterThan(0);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a failed read of the archive while it stops doesn't keep the run from ending",
+    async () => {
+      const t = await team();
+      const started = await midStream(t);
+      await Bun.sleep(400);
+      const rt = server.runtime as unknown as { agentActive: (id: string) => Promise<boolean> };
+      const real = rt.agentActive;
+      rt.agentActive = async () => {
+        throw new Error("database gone for a moment");
+      };
+      try {
+        expect((await call(t.beto, "POST", `${t.w}/runs/${started.runId}/cancel`)).status).toBe(204);
+        await started.done;
+      } finally {
+        rt.agentActive = real;
+      }
+      const [run] = await server.deps.db.select().from(runs).where(eq(runs.id, started.runId));
+      expect(run?.status).toBe("canceled");
+      expect(server.deps.runtime.liveRun(started.runId)).toBe(null);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a time cap that runs out after the agent was archived says nothing, not even that time ran out",
+    async () => {
+      const t = await team();
+      const started = await midStream(t, { timeoutMs: 600 });
+      // Archived without the route's cancel: the time cap ends the run, and finds the agent archived.
+      await Bun.sleep(200);
+      await t.archive();
+      await started.done;
+      const [run] = await server.deps.db.select().from(runs).where(eq(runs.id, started.runId));
+      expect(run?.status).toBe("canceled");
+      expect(await said(started.runId)).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
 describe("a run that starts after the archive", () => {
   const say = async (t: Team, body: string) => {
     const channel = await channelRow(server, t.general);

@@ -26,8 +26,15 @@ const WRITE = new RegExp(
   `\\.(update|insert|delete)\\(\\s*(?:schema\\.)?(${TABLES.join("|")})\\s*,?\\s*\\)`,
   "g",
 );
-/** A write in raw SQL (`sql\`update agents ...\``), with or without quotes around the table. */
-const RAW = new RegExp(`\\b(insert\\s+into|update|delete\\s+from)\\s+"?(${SQL_TABLES.join("|")})"?\\s`, "gi");
+/**
+ * A write in raw SQL: `insert into | update | delete from` on one of the tables, named in the text (bare, quoted or
+ * with a schema, as `public.agents`) or interpolated as Drizzle's table (`${agents}`, `${schema.agents}`), followed by
+ * a space, `(`, `;` or the end of the template.
+ */
+const RAW = new RegExp(
+  `\\b(insert\\s+into|update|delete\\s+from)\\s+(?:\\$\\{\\s*(?:schema\\.)?(${TABLES.join("|")})\\s*\\}|(?:"?\\w+"?\\.)?"?(${SQL_TABLES.join("|")})"?)(?=[\\s(;\`]|$)`,
+  "gi",
+);
 /**
  * What a write sits in: a top-level function or const, a class method, and inside a `register*` function a route
  * (method and path) or a helper arrow next to the routes (`const setStatus = async (`).
@@ -45,14 +52,70 @@ const IN_REGISTER: { re: RegExp; name: (m: RegExpExecArray) => string }[] = [
   { re: /^ {2}const (\w+) = (?:async )?\(\s*$/, name: (m) => m[1] ?? "" },
 ];
 
-/** Comments go blank (same length, newlines kept): a comment that mentions a write isn't one. */
-const blankComments = (text: string) =>
-  text.replace(/\/\*[\s\S]*?\*\/|(?<![:"'`])\/\/[^\n]*/g, (c) => c.replace(/[^\n]/g, " "));
+/**
+ * Comments go blank (same length, newlines kept), read the way the language reads them: `//` and `/*` inside a
+ * string or a template's text aren't comments, and what a template interpolates (`${...}`) is code again.
+ */
+function blankComments(text: string): string {
+  const out = text.split("");
+  const blank = (from: number, to: number) => {
+    for (let k = from; k < to; k++) if (out[k] !== "\n") out[k] = " ";
+  };
+  // What encloses the cursor: code (with its open braces), a template's text.
+  const stack: ("code" | "template")[] = ["code"];
+  const braces: number[] = [0];
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    const next = text[i + 1];
+    if (stack.at(-1) === "template") {
+      if (c === "\\") i += 2;
+      else if (c === "`") {
+        stack.pop();
+        i++;
+      } else if (c === "$" && next === "{") {
+        stack.push("code");
+        braces.push(0);
+        i += 2;
+      } else i++;
+      continue;
+    }
+    if (c === "/" && next === "/") {
+      const end = text.indexOf("\n", i);
+      const stop = end === -1 ? text.length : end;
+      blank(i, stop);
+      i = stop;
+    } else if (c === "/" && next === "*") {
+      const end = text.indexOf("*/", i + 2);
+      const stop = end === -1 ? text.length : end + 2;
+      blank(i, stop);
+      i = stop;
+    } else if (c === '"' || c === "'") {
+      i++;
+      while (i < text.length && text[i] !== c && text[i] !== "\n") i += text[i] === "\\" ? 2 : 1;
+      i++;
+    } else if (c === "`") {
+      stack.push("template");
+      i++;
+    } else if (c === "\\") i += 2;
+    else if (c === "{") {
+      braces[braces.length - 1] = (braces.at(-1) ?? 0) + 1;
+      i++;
+    } else if (c === "}") {
+      if ((braces.at(-1) ?? 0) === 0 && stack.length > 1) {
+        stack.pop();
+        braces.pop();
+      } else braces[braces.length - 1] = (braces.at(-1) ?? 0) - 1;
+      i++;
+    } else i++;
+  }
+  return out.join("");
+}
 
 /**
- * What it scans: every `.ts` under apps/server/src and packages/(name)/src but tests. What it finds: Drizzle's
- * `.update|insert|delete(table)` on those tables, whatever the line breaks, and raw SQL `insert into|update|delete
- * from table`. What it doesn't see: a table renamed into another variable, or passed to a helper as a parameter.
+ * What it scans: every `.ts` under apps/server/src and packages/(name)/src but tests, comments left out. What it
+ * finds: Drizzle's `.update|insert|delete(table)` on those tables, whatever the line breaks, and raw SQL on them
+ * (`RAW`). What it doesn't see: a table renamed into another variable, or passed to a helper as a parameter.
  */
 function writesInSource(): string[] {
   const files: string[] = [];
@@ -94,10 +157,12 @@ function writesInSource(): string[] {
     const lineOf = (at: number) => text.slice(0, at).split("\n").length - 1;
     for (const m of text.matchAll(WRITE))
       found.add(`${where} ${owners[lineOf(m.index ?? 0)]}: ${m[1]}(${m[2]})`);
-    for (const m of text.matchAll(RAW))
+    for (const m of text.matchAll(RAW)) {
+      const table = m[2] ?? TABLES[SQL_TABLES.indexOf((m[3] ?? "").toLowerCase())] ?? m[3];
       found.add(
-        `${where} ${owners[lineOf(m.index ?? 0)]}: sql ${(m[1] ?? "").split(/\s/)[0]?.toLowerCase()}(${m[2]})`,
+        `${where} ${owners[lineOf(m.index ?? 0)]}: sql ${(m[1] ?? "").split(/\s/)[0]?.toLowerCase()}(${table})`,
       );
+    }
   }
   return [...found].sort();
 }

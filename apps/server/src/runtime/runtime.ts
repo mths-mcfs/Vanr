@@ -2032,11 +2032,15 @@ export class AgentRuntime implements RuntimePort {
       const err = reason instanceof TimeLimit ? reason : caught;
       const canceled =
         !(err instanceof TimeLimit) && (err instanceof RunCanceled || live.controller.signal.aborted);
+      clearInterval(beat);
+      if (deadline) clearTimeout(deadline);
+      // A cancel or a time cap that came while the agent was archived is the archive's: read it once more. A read
+      // that fails leaves the run to end as it would have.
+      if ((canceled || err instanceof TimeLimit) && !archived)
+        archived = !(await this.agentActive(live.agent.id).catch(() => true));
       // A run that fails or is stopped mid-turn didn't hear its inbox: the next run takes it. A person's stop
-      // cancels it with the run instead (it stays in `handles`, handled as canceled).
-      // A cancel that came from the archive (mid-stream too) is the archive's: read it once more.
-      if (canceled && !archived) archived = !(await this.agentActive(live.agent.id));
-      if (!(canceled && (live.canceledBy !== null || archived))) deferUnheard(live);
+      // cancels it with the run instead (it stays in `handles`, handled as canceled), and so does the archive.
+      if (!archived && !(canceled && live.canceledBy !== null)) deferUnheard(live);
       // No next run for an archived agent: what waited for one is canceled with this run, its issue work too.
       if (archived) {
         const waiting = live.after.splice(0).map((m) => m.id);
@@ -2047,10 +2051,8 @@ export class AgentRuntime implements RuntimePort {
           runId: live.runId,
         });
       }
-      clearInterval(beat);
-      if (deadline) clearTimeout(deadline);
-      if (canceled) {
-        // An archived agent says nothing more, not even what it had half written.
+      if (canceled || archived) {
+        // An archived agent says nothing more, not even what it had half written or that it ran out of time.
         if (partial.trim() && !archived) await post(partial.trim(), { canceled: true }).catch(() => null);
         await this.finish(live, { status: "canceled", handled: "canceled", messageId: null });
         return;
