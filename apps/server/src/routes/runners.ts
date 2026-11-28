@@ -401,13 +401,21 @@ export function registerRunners(app: Hono<AppEnv>) {
     agentId: string,
     status: "running" | "stopped" | "none",
   ) => {
-    await deps.db
-      .insert(agentEnvironments)
-      .values({ agentId, workspaceId, status, lastUsedAt: deps.now() })
-      .onConflictDoUpdate({
-        target: agentEnvironments.agentId,
-        set: { status, updatedAt: deps.now(), ...(status === "running" ? { lastUsedAt: deps.now() } : {}) },
-      });
+    await deps.db.transaction(async (tx) => {
+      // Starting is a write an archived agent refuses, read under its row lock; stopping and clearing stay open.
+      if (status === "running") {
+        const [agent] = await tx.select().from(agents).where(eq(agents.id, agentId)).for("share");
+        if (!agent) throw notFound("Agent not found");
+        requireActiveAgent(agent);
+      }
+      await tx
+        .insert(agentEnvironments)
+        .values({ agentId, workspaceId, status, lastUsedAt: deps.now() })
+        .onConflictDoUpdate({
+          target: agentEnvironments.agentId,
+          set: { status, updatedAt: deps.now(), ...(status === "running" ? { lastUsedAt: deps.now() } : {}) },
+        });
+    });
     await emitEnvironment(deps, workspaceId, agentId);
     return environmentOf(deps, agentId);
   };

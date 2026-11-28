@@ -850,7 +850,8 @@ describe("intervention regressions", () => {
     async () => {
       const t = await team();
       const shared = await agent(t, t.ana.user.id, "race");
-      const runner = await online(await pairOverHttp(t, t.ana), { browser: true });
+      // Beto pairs the runner: taking over its browser needs to be allowed to use it.
+      const runner = await online(await pairOverHttp(t, t.beto), { browser: true });
       await lend(shared.id, runner.runnerId);
       const hold = stepHolder(server);
       try {

@@ -556,6 +556,10 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
     // Someone else took over first: the same code as who tries through the runner, not "finished".
     if (row.status === "active") throw inControl();
     if (row.status !== "pending") throw closed();
+    // Taking a request is driving the browser, as /start: only whoever may use the intervention's runner.
+    const [runner] = await deps.db.select().from(runners).where(eq(runners.id, row.runnerId));
+    if (!runner || runner.removedAt) throw conflict("browser.no_environment", "This agent has no runner");
+    if (!canUseRunner(me, runner)) throw forbidden("Only who paired this runner can use it");
     if (!deps.runners.isOnline(row.runnerId)) throw conflict("runner.offline", "The runner is offline");
     const next = await moveIntervention(
       deps,
@@ -759,17 +763,20 @@ export function registerRunnerRequests(app: Hono<AppEnv>) {
       ? await deps.db.select().from(runners).where(eq(runners.id, agent.environmentId))
       : [];
     if (runner && !canUseRunner(me, runner)) throw forbidden("Only who paired this runner can use it");
-    // Only the interventions on the runner checked: one opened on another runner after a move isn't theirs to end.
-    const open = await deps.db
-      .select({ id: browserInterventions.id })
-      .from(browserInterventions)
-      .where(
-        and(
-          eq(browserInterventions.agentId, agent.id),
-          inArray(browserInterventions.status, ["pending", "active"]),
-          runner ? eq(browserInterventions.runnerId, runner.id) : undefined,
-        ),
-      );
+    // Only the interventions on a runner the person may use: one opened on another runner (after a move, or with
+    // no runner when this read) isn't theirs to end.
+    const open = (
+      await deps.db
+        .select({ id: browserInterventions.id, runner: runners })
+        .from(browserInterventions)
+        .innerJoin(runners, eq(runners.id, browserInterventions.runnerId))
+        .where(
+          and(
+            eq(browserInterventions.agentId, agent.id),
+            inArray(browserInterventions.status, ["pending", "active"]),
+          ),
+        )
+    ).filter((h) => canUseRunner(me, h.runner));
     for (const h of open)
       await moveIntervention(deps, h.id, ["pending", "active"], {
         status: "canceled",

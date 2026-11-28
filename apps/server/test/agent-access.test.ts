@@ -505,6 +505,62 @@ describe("an agent's browser on someone's runner", () => {
   );
 });
 
+describe("a browser request addressed to someone who can't use the runner", () => {
+  test(
+    "they can't take it: taking a request is driving the browser",
+    async () => {
+      const t = await team();
+      const anaBox = await pairedRunner(t, t.ana, `ana-box-${seq}`);
+      const id = newId("bi");
+      await server.deps.db.insert(schema.browserInterventions).values({
+        id,
+        workspaceId: t.workspaceId,
+        agentId: t.lia.id,
+        runnerId: anaBox.id,
+        kind: "login",
+        instructions: "Sign in",
+        targetUserId: t.beto.user.id,
+        expiresAt: new Date(Date.now() + 15 * 60_000),
+      });
+      expect((await call(t.beto, "POST", `${t.w}/browser-interventions/${id}/control`)).status).toBe(403);
+      const [row] = await server.deps.db
+        .select()
+        .from(schema.browserInterventions)
+        .where(eq(schema.browserInterventions.id, id));
+      expect(row?.status).toBe("pending");
+      online.delete(anaBox.id);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "stopping an agent with no runner leaves an intervention on a runner they can't use open",
+    async () => {
+      const t = await team();
+      const anaBox = await pairedRunner(t, t.ana, `ana-box-${seq}`);
+      const id = newId("bi");
+      await server.deps.db.insert(schema.browserInterventions).values({
+        id,
+        workspaceId: t.workspaceId,
+        agentId: t.lia.id,
+        runnerId: anaBox.id,
+        kind: "login",
+        instructions: "Sign in",
+        targetUserId: t.ana.user.id,
+        expiresAt: new Date(Date.now() + 15 * 60_000),
+      });
+      expect((await call(t.beto, "POST", `${t.w}/agents/${t.lia.id}/browser/stop`, {})).status).toBe(204);
+      const [row] = await server.deps.db
+        .select()
+        .from(schema.browserInterventions)
+        .where(eq(schema.browserInterventions.id, id));
+      expect(row?.status).toBe("pending");
+      online.delete(anaBox.id);
+    },
+    SERVER_TEST_MS,
+  );
+});
+
 describe("a memory's origin", () => {
   test(
     "names its channel only to whoever reads it, from feedback and from a run",

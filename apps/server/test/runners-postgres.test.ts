@@ -403,10 +403,16 @@ describe.skipIf(!TEST_POSTGRES_URL)(onPostgres("forced: runner locks on Postgres
         permittedDomains: [],
         readDomains: ["a.example.com", "b.example.com"],
       });
-      await forcedPair(admin, "browser-policy", "select", (side, hooks) =>
-        call(withDb(hooks), ana.user, "PUT", `/agents/${agentId}/browser`, {
-          permittedDomains: [side === "A" ? "a.example.com" : "b.example.com"],
-        }),
+      // The hold is the policy's read: the transaction reads the agent's row (the archive check) before it.
+      await forcedPair(
+        admin,
+        "browser-policy",
+        "select",
+        (side, hooks) =>
+          call(withDb(hooks), ana.user, "PUT", `/agents/${agentId}/browser`, {
+            permittedDomains: [side === "A" ? "a.example.com" : "b.example.com"],
+          }),
+        { match: 'from "browser_policies"' },
       );
       const [policy] = await server.deps.db
         .select()
