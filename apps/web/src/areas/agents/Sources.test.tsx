@@ -1047,6 +1047,34 @@ describe("the fake server's source rules, as the server's", () => {
     ).toBe("400 validation");
   });
 
+  test("table and column names are kept as the server keeps them", async () => {
+    const { server, client } = admin();
+    expect(
+      await statusOf(
+        database(client, {
+          level: "read",
+          policy: {
+            tables: [" orders ", "Sales.Leads", '"Sales"."Leads"'],
+            maskedColumns: ["Customers.SSN"],
+          },
+        }),
+      ),
+    ).toBe("ok");
+    const policy = server.connections.agentDatabases.get("agt_scout")?.[0]?.policy;
+    expect([policy?.tables, policy?.maskedColumns]).toEqual([
+      ["public.orders", "sales.leads", '"Sales"."Leads"'],
+      ["public.customers.ssn"],
+    ]);
+    expect(
+      await statusOf(
+        database(client, { level: "read", policy: { tables: [`${" ".repeat(290)}orders.x1`] } }),
+      ),
+    ).toBe("ok");
+    expect(
+      await statusOf(database(client, { level: "read", policy: { tables: [`${" ".repeat(295)}orders`] } })),
+    ).toBe("400 validation");
+  });
+
   test("a first save at none keeps an empty policy", async () => {
     const { server, client } = admin();
     expect(await statusOf(database(client, { level: "none" }))).toBe("ok");

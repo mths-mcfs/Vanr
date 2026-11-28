@@ -169,7 +169,7 @@ const KEYWORDS = new Set([
   "xmltable",
 ]);
 /** A table as the server names it (sql-guard.ts relationText): each part quoted only when SQL needs it. */
-const quoted = (name: string) =>
+export const quoted = (name: string) =>
   /^[a-z_][a-z0-9_]*$/.test(name) && !KEYWORDS.has(name) ? name : `"${name.replace(/"/g, '""')}"`;
 export const tableName = (table: Pick<DatabaseTable, "schema" | "name">) =>
   `${quoted(table.schema)}.${quoted(table.name)}`;

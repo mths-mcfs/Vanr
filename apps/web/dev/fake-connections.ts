@@ -5,7 +5,7 @@
 // Never part of the production build.
 import type * as T from "@vanr/contract";
 import { can } from "@vanr/contract";
-import { tableName } from "../src/areas/agents/table-name.ts";
+import { quoted, tableName } from "../src/areas/agents/table-name.ts";
 import { FAKE_CATALOG } from "./fake-agent-access.ts";
 import type { FakeAgentRow } from "./fake-agents.ts";
 import type { FilesHost, FilesReply } from "./fake-files.ts";
@@ -31,25 +31,25 @@ export type FakeInstallation = T.GitHubAppInstallation & {
 const reply = (status: number, body: unknown): FilesReply => ({ status, body });
 
 /**
- * Whether a dotted SQL name has between `min` and `max` parts, as the server's nameParts (sql-guard.ts) reads
- * it: a part is bare (a letter or `_`, then letters, digits, `_` or `$`) or quoted (`""` for a quote), and no
- * part is empty or longer than the 63 bytes Postgres keeps; no NUL and no lone surrogate.
+ * The parts of a dotted SQL name as the server's nameParts (sql-guard.ts) reads it, or null: a part is bare
+ * (a letter or `_`, then letters, digits, `_` or `$`, folded to lower case) or quoted (`""` for a quote,
+ * case kept), and none is empty or longer than the 63 bytes Postgres keeps; no NUL and no lone surrogate.
  */
-function partsOf(text: string, min: number, max: number): boolean {
+function nameParts(text: string): string[] | null {
   if (
     text.includes("\0") ||
     /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text)
   )
-    return false;
+    return null;
   const bytes = new TextEncoder();
-  let count = 0;
+  const parts: string[] = [];
   let i = 0;
   for (;;) {
     let part = "";
     if (text[i] === '"') {
       let j = i + 1;
       for (;;) {
-        if (j >= text.length) return false;
+        if (j >= text.length) return null;
         if (text[j] === '"') {
           if (text[j + 1] !== '"') break;
           j++;
@@ -60,16 +60,33 @@ function partsOf(text: string, min: number, max: number): boolean {
       i = j + 1;
     } else {
       const end = text.indexOf(".", i);
-      part = text.slice(i, end < 0 ? text.length : end);
-      if (!/^[A-Za-z_\u0080-\uffff][A-Za-z0-9_$\u0080-\uffff]*$/.test(part)) return false;
-      i += part.length;
+      const raw = text.slice(i, end < 0 ? text.length : end);
+      if (!/^[A-Za-z_\u0080-\uffff][A-Za-z0-9_$\u0080-\uffff]*$/.test(raw)) return null;
+      part = raw.replace(/[A-Z]+/g, (m) => m.toLowerCase());
+      i += raw.length;
     }
-    if (part === "" || bytes.encode(part).length > 63) return false;
-    count++;
-    if (i === text.length) return count >= min && count <= max;
-    if (text[i] !== ".") return false;
+    if (part === "" || bytes.encode(part).length > 63) return null;
+    parts.push(part);
+    if (i === text.length) return parts;
+    if (text[i] !== ".") return null;
     i++;
   }
+}
+
+/**
+ * A table (`table` or `schema.table`) or a hidden column (`table.column` or `schema.table.column`) in the one
+ * text the server keeps (databases.ts sqlName): up to 300 characters, trimmed, `public` when the schema is
+ * left out, each part quoted only when SQL needs it. Null when the server refuses it.
+ */
+function sqlKey(text: unknown, what: "table" | "column"): string | null {
+  if (typeof text !== "string" || text.length > 300) return null;
+  const parts = nameParts(text.trim());
+  const fewest = what === "table" ? 1 : 2;
+  if (parts === null || parts.length < fewest || parts.length > fewest + 1) return null;
+  const column = what === "column" ? parts.pop() : undefined;
+  const [schema, name] = parts.length === 1 ? ["public", parts[0]] : parts;
+  if (schema === undefined || name === undefined) return null;
+  return `${tableName({ schema, name })}${column === undefined ? "" : `.${quoted(column)}`}`;
 }
 const fail = (status: number, code: string, message: string) => reply(status, { error: { code, message } });
 const text = (value: unknown) => (typeof value === "string" ? value : undefined);
@@ -385,21 +402,19 @@ export class FakeConnections {
         const asked = (
           typeof params.policy === "object" && params.policy !== null ? params.policy : {}
         ) as Partial<T.DatabasePolicy>;
-        // As the server's databasePolicyInput: up to 500 tables named `table` or `schema.table`, and a
-        // hidden column is `table.column` or `schema.table.column`, up to 1000 of them.
-        const column = (text: string) => partsOf(text, 2, 3);
-        const relation = (text: string) => partsOf(text, 1, 2);
-        if (
-          (asked.tables !== undefined &&
-            (!Array.isArray(asked.tables) ||
-              asked.tables.length > 500 ||
-              !asked.tables.every((each) => typeof each === "string" && relation(each)))) ||
-          (asked.maskedColumns !== undefined &&
-            (!Array.isArray(asked.maskedColumns) ||
-              asked.maskedColumns.length > 1000 ||
-              !asked.maskedColumns.every((each) => typeof each === "string" && column(each))))
-        )
-          return fail(400, "validation", "Invalid body");
+        // As the server's databasePolicyInput: up to 500 tables and 1000 hidden columns, each read and kept
+        // as the server keeps it.
+        const keys = (value: unknown, what: "table" | "column", max: number) =>
+          value === undefined
+            ? undefined
+            : Array.isArray(value) && value.length <= max
+              ? value.map((each) => sqlKey(each, what))
+              : [null];
+        const tables = keys(asked.tables, "table", 500);
+        const masked = keys(asked.maskedColumns, "column", 1000);
+        if (tables?.includes(null) || masked?.includes(null)) return fail(400, "validation", "Invalid body");
+        if (tables !== undefined) asked.tables = tables as string[];
+        if (masked !== undefined) asked.maskedColumns = masked as string[];
         // The first time, as the server: reading starts from every table there is and the suggested
         // hidden columns; "none" stores an empty policy.
         const first: T.DatabasePolicy =
