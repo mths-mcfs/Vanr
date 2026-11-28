@@ -532,4 +532,7 @@ export default {
   "asg.settings.failed": "Não deu para carregar as regras de comando",
   "asg.settings.rules": "Comandos sempre permitidos",
   "asg.settings.dropRule": "Deixar de permitir",
+  "asg.open": { one: "{count} item em aberto", other: "{count} itens em aberto" },
+  "asg.form.agentsFailed": "Não deu para carregar os agentes que podem receber uma atribuição",
+  "asg.people.requestsFailed": "Não deu para carregar os pedidos para participar",
 } satisfies TranslationOf<typeof en>;

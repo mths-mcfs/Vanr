@@ -531,4 +531,7 @@ export default {
   "asg.settings.failed": "The command rules could not be loaded",
   "asg.settings.rules": "Commands always allowed",
   "asg.settings.dropRule": "Stop allowing",
+  "asg.open": { one: "{count} open item", other: "{count} open items" },
+  "asg.form.agentsFailed": "The agents that can take an assignment could not be loaded",
+  "asg.people.requestsFailed": "The requests to take part could not be loaded",
 } as const satisfies Catalog;

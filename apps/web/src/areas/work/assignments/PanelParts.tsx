@@ -224,10 +224,14 @@ export function Trail({ workspaceId, assignment, actors }: Part & { actors: Acto
           </li>
         ))}
       </ol>
-      {first > 1 && (
-        <Button size="sm" variant="ghost" loading={page.isFetching} onClick={() => setBefore(first)}>
-          {t("asg.trail.older")}
-        </Button>
+      {page.isError && page.data === undefined ? (
+        <PartError title={t("asg.trail.failed")} error={page.error} onRetry={() => void page.refetch()} />
+      ) : (
+        first > 1 && (
+          <Button size="sm" variant="ghost" loading={page.isFetching} onClick={() => setBefore(first)}>
+            {t("asg.trail.older")}
+          </Button>
+        )
       )}
     </div>
   );
@@ -312,6 +316,7 @@ export function People({ workspaceId, assignment }: Part) {
     );
   }
   const pending = (requests.data ?? []).filter((request) => request.status === "pending");
+  const requestsFailed = assignment.manageable && requests.isError && requests.data === undefined;
   return (
     <div className="work-section">
       <p>{t("asg.people.owner", { name: people.data.owner.name })}</p>
@@ -358,6 +363,13 @@ export function People({ workspaceId, assignment }: Part) {
             {t("asg.people.ask")}
           </Button>
         ))}
+      {requestsFailed && (
+        <PartError
+          title={t("asg.people.requestsFailed")}
+          error={requests.error}
+          onRetry={() => void requests.refetch()}
+        />
+      )}
       {pending.length > 0 && (
         <>
           <h3 className="work-subhead">{t("asg.people.requests")}</h3>

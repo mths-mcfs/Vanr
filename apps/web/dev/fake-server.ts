@@ -408,10 +408,12 @@ export class FakeServer {
     this.assignments = new FakeAssignments({
       ...host,
       agents: (workspaceId) => this.agents.filter((candidate) => candidate.workspaceId === workspaceId),
-      readsChannel: (userId, channelId) => {
+      readsChannel: (userId, channelId, workspaceId) => {
         const channel = this.state.channels.find((candidate) => candidate.id === channelId);
         return (
-          channel !== undefined && (channel.visibility === "public" || channel.memberIds.includes(userId))
+          channel !== undefined &&
+          channel.workspaceId === workspaceId &&
+          (channel.visibility === "public" || channel.memberIds.includes(userId))
         );
       },
       nameOf: (userId) => this.state.users.find((user) => user.id === userId)?.name ?? userId,

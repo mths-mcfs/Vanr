@@ -185,3 +185,55 @@ describe("an assignment's page", () => {
     expect(await panel.findByText("Only the owner changes how this assignment runs.")).toBeDefined();
   });
 });
+
+describe("an assignment's states, as each person sees them", () => {
+  test("someone who can't act sees open items, not things waiting on them", async () => {
+    await renderApp({ path: LIST, signedInAs: "usr_iris" });
+    const paper = within(await screen.findByRole("article", { name: "Restock the paper room" }));
+    expect(paper.getByText("3 open items")).toBeDefined();
+    expect(paper.queryByText(/wait on you/) === null).toBe(true);
+  });
+
+  test("agents that couldn't be loaded say so, with a retry, instead of saying none can", async () => {
+    const server = newServer();
+    server.force("listAssignmentEligibleAgents", { kind: "error", status: 503, code: "unavailable" }, 4);
+    const app = await renderApp({ path: LIST, signedInAs: "usr_ana", server });
+    await app.user.click(await screen.findByRole("button", { name: "New assignment" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "New assignment" }));
+    expect(
+      await dialog.findByText("The agents that can take an assignment could not be loaded"),
+    ).toBeDefined();
+    expect(dialog.queryByText(/No agent can take an assignment yet/) === null).toBe(true);
+    await app.user.click(dialog.getByRole("button", { name: "Retry" }));
+    expect(await dialog.findByRole("textbox", { name: "Goal" })).toBeDefined();
+  });
+
+  test("requests to take part that couldn't be loaded say so, with a retry", async () => {
+    const server = newServer();
+    server.force("listAssignmentJoinRequests", { kind: "error", status: 503, code: "unavailable" }, 4);
+    const app = await renderApp({ path: PAGE("asg_paper"), signedInAs: "usr_ana", server });
+    const panel = within(await screen.findByRole("region", { name: "Assignment" }));
+    await app.user.click(panel.getByRole("tab", { name: "People" }));
+    expect(await panel.findByText("The requests to take part could not be loaded")).toBeDefined();
+  });
+
+  test("a command rule stopped stays gone when the settings open again", async () => {
+    const app = await renderApp({ path: PAGE("asg_paper"), signedInAs: "usr_ana" });
+    const panel = within(await screen.findByRole("region", { name: "Assignment" }));
+    await app.user.click(panel.getByRole("tab", { name: "Settings" }));
+    await app.user.click(await panel.findByRole("button", { name: "Stop allowing" }));
+    await waitFor(() => expect(panel.queryByText("lpstat *") === null).toBe(true));
+    expect(app.server.assignments.assignments[0]?.rules).toEqual([]);
+  });
+
+  test("accepting the result closes the assignment and stops its jobs", async () => {
+    const app = await renderApp({ path: PAGE("asg_paper"), signedInAs: "usr_ana" });
+    const panel = within(await screen.findByRole("region", { name: "Assignment" }));
+    await app.user.click(panel.getByRole("tab", { name: "Waiting on you" }));
+    const result = within(await panel.findByRole("article", { name: "Result to accept" }));
+    await app.user.click(result.getByRole("button", { name: "Accept" }));
+    await waitFor(() => expect(panel.getByText("Done")).toBeDefined());
+    const row = app.server.assignments.assignments[0];
+    expect([row?.runningJobs, row?.closedAt !== null]).toEqual([0, true]);
+  });
+});

@@ -9,7 +9,7 @@ import { useGo } from "../../../app/navigation.tsx";
 import { useErrorMessage } from "../../../app/screens.tsx";
 import { useMessages } from "../../../i18n/react.tsx";
 import { type Actors, useOutcome } from "../issues/shared.tsx";
-import { PartLoading } from "../parts.tsx";
+import { PartError, PartLoading } from "../parts.tsx";
 import { ASSIGNMENT_TITLE_MAX, GOAL_MAX } from "./shared.tsx";
 
 const POLICIES = ["when_safe", "always", "never"] as const satisfies readonly CommandPolicy[];
@@ -99,6 +99,12 @@ export function NewAssignmentDialog({
       >
         {eligible.isPending ? (
           <PartLoading />
+        ) : eligible.isError && eligible.data === undefined ? (
+          <PartError
+            title={t("asg.form.agentsFailed")}
+            error={eligible.error}
+            onRetry={() => void eligible.refetch()}
+          />
         ) : qualified.length === 0 ? (
           <p className="work-note">{t("asg.form.noAgent")}</p>
         ) : (

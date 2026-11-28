@@ -9,7 +9,8 @@ import type { FilesHost, FilesReply } from "./fake-files.ts";
 type Scope = { workspaceId: string; user: T.User; role: T.Role };
 type Host = FilesHost & {
   agents: (workspaceId: string) => T.Agent[];
-  readsChannel: (userId: string, channelId: string) => boolean;
+  /** Whether the person reads the channel, which must be one of this workspace. */
+  readsChannel: (userId: string, channelId: string, workspaceId: string) => boolean;
   nameOf: (userId: string) => string;
 };
 type Stored = Omit<T.Assignment, "role" | "actionable" | "manageable"> & {
@@ -20,6 +21,7 @@ type Stored = Omit<T.Assignment, "role" | "actionable" | "manageable"> & {
   submissions: T.AssignmentSubmission[];
   reviews: T.AssignmentReview[];
   commands: T.AssignmentCommand[];
+  rules: T.AssignmentCommandRule[];
   events: T.AssignmentEvent[];
   seen: Map<string, number>;
 };
@@ -66,6 +68,7 @@ export class FakeAssignments {
       ],
     };
     paper.people = [{ userId: "usr_jonas", role: "decide" }];
+    paper.rules = [{ id: "rule_1", by: "usr_ana", createdAt: at, rule: "lpstat *" }];
     paper.decisions = [
       {
         id: "dec_supplier",
@@ -201,6 +204,7 @@ export class FakeAssignments {
       submissions: [],
       reviews: [],
       commands: [],
+      rules: [],
       events: [],
       seen: new Map(),
       ...fields,
@@ -221,6 +225,7 @@ export class FakeAssignments {
       submissions: _s,
       reviews: _r,
       commands: _c,
+      rules: _rules,
       events,
       seen,
       ...rest
@@ -267,7 +272,7 @@ export class FakeAssignments {
           (each) =>
             each.id === params.assignmentId &&
             each.workspaceId === scope.workspaceId &&
-            this.host.readsChannel(scope.user.id, each.channelId),
+            this.host.readsChannel(scope.user.id, each.channelId, scope.workspaceId),
         );
         if (row === undefined) return missing();
         const shown = this.view(scope, row);
@@ -284,7 +289,8 @@ export class FakeAssignments {
       listAssignments: within((scope, params) => {
         const visible = this.assignments.filter(
           (row) =>
-            row.workspaceId === scope.workspaceId && this.host.readsChannel(scope.user.id, row.channelId),
+            row.workspaceId === scope.workspaceId &&
+            this.host.readsChannel(scope.user.id, row.channelId, scope.workspaceId),
         );
         const q = text(params.q)?.toLowerCase() ?? "";
         const waitsOn = (row: Stored) =>
@@ -324,7 +330,7 @@ export class FakeAssignments {
         const goal = text(params.goal)?.trim() ?? "";
         if (goal === "") return fail(400, "invalid_request", "A goal is needed");
         const channelId = text(params.channelId) ?? "";
-        if (!this.host.readsChannel(scope.user.id, channelId))
+        if (!this.host.readsChannel(scope.user.id, channelId, scope.workspaceId))
           return fail(404, "not_found", "Channel not found");
         const row = this.make(scope.workspaceId, {
           id: this.host.id("asg"),
@@ -436,8 +442,11 @@ export class FakeAssignments {
         const submission = row.submissions.find((each) => each.id === params.submissionId);
         if (submission === undefined) return fail(404, "not_found", "Submission not found");
         submission.status = "accepted";
+        // Accepting the result closes the assignment, as closing it does.
         row.status = "done";
         row.outcome = "done";
+        row.closedAt = this.host.now().toISOString();
+        row.runningJobs = 0;
         row.pending.submissions = 0;
         this.log(row, scope, "closed");
         return answer(scope, row);
@@ -499,6 +508,7 @@ export class FakeAssignments {
           userId: scope.user.id,
         };
         row.requests.push(request);
+        row.pending.joinRequests = row.requests.filter((each) => each.status === "pending").length;
         return reply(200, request);
       }),
       runActionOnAssignmentJoinRequest: withOne((_scope, row, params) => {
@@ -507,16 +517,14 @@ export class FakeAssignments {
         request.status = params.action === "accept" ? "accepted" : "declined";
         if (request.status === "accepted")
           row.people.push({ userId: request.userId, role: params.role === "decide" ? "decide" : "comment" });
+        row.pending.joinRequests = row.requests.filter((each) => each.status === "pending").length;
         return reply(200, request);
       }, "manage"),
       getAssignmentSettings: withOne(
         (_scope, row) =>
           reply(200, {
             agentBaseline: { adjustable: true, commandPolicy: "when_safe" },
-            rules:
-              row.id === "asg_paper"
-                ? [{ id: "rule_1", by: "usr_ana", createdAt: row.createdAt, rule: "lpstat *" }]
-                : [],
+            rules: row.rules,
             stats: { asked: 1, auto: 0, blocked: 0 },
           }),
         "manage",
@@ -532,7 +540,10 @@ export class FakeAssignments {
         if ("dueAt" in params) row.dueAt = (params.dueAt as string | null) ?? null;
         return answer(scope, row);
       }, "manage"),
-      deleteAssignmentCommandRule: withOne(() => reply(200, { rules: [] }), "manage"),
+      deleteAssignmentCommandRule: withOne((_scope, row, params) => {
+        row.rules = row.rules.filter((rule) => rule.id !== params.commandRuleId);
+        return reply(200, { rules: row.rules });
+      }, "manage"),
       listAssignmentFiles: withOne(() =>
         reply(200, {
           files: [

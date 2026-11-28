@@ -172,9 +172,13 @@ function AssignmentRow({
           <span>{t("asg.progress", { done: assignment.plan.done, count: assignment.plan.total })}</span>
         )}
         {assignment.runningJobs > 0 && <span>{t("asg.jobs", { count: assignment.runningJobs })}</span>}
-        {waiting > 0 && (
-          <strong className="work-assignment__waiting">{t("asg.waiting", { count: waiting })}</strong>
-        )}
+        {/* Only someone who may act is waited on; anyone else just sees how much is open. */}
+        {waiting > 0 &&
+          (assignment.actionable ? (
+            <strong className="work-assignment__waiting">{t("asg.waiting", { count: waiting })}</strong>
+          ) : (
+            <span>{t("asg.open", { count: waiting })}</span>
+          ))}
       </p>
     </article>
   );
