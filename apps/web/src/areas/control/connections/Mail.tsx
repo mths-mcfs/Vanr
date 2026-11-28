@@ -72,7 +72,12 @@ export function MailAccounts({ workspaceId }: { workspaceId: string }) {
   });
   useForgetReadOnLoss(workspaceId, READS, accounts.error);
   // Something gone, or no longer the person's to see, closes its dialog; a passing failure keeps it.
-  const open = isLost(accounts.error) ? undefined : accounts.data?.find((each) => each.id === editing);
+  const lost = isLost(accounts.error);
+  // A mailbox that is gone, or no longer the person's to see, drops its dialog for good.
+  useEffect(() => {
+    if (lost) setEditing(null);
+  }, [lost]);
+  const open = lost ? undefined : accounts.data?.find((each) => each.id === editing);
 
   let body: ReactNode;
   if (accounts.isPending) body = <PartLoading />;
@@ -220,7 +225,8 @@ function AddMailbox({
   const [busy, setBusy] = useState(false);
   let body: ReactNode;
   if (providers.isPending) body = <PartLoading />;
-  else if (providers.isError)
+  // A failed reload keeps the form that is already there (and a connection on its way in it).
+  else if (providers.isError && providers.data === undefined)
     body = (
       <PartError
         title={t("box.providersFailed")}
@@ -228,7 +234,7 @@ function AddMailbox({
         onRetry={() => void providers.refetch()}
       />
     );
-  else
+  else if (providers.data !== undefined)
     body = (
       <MailboxForm workspaceId={workspaceId} providers={providers.data} onClose={onClose} onBusy={setBusy} />
     );
@@ -289,6 +295,8 @@ function MailboxForm({
   const ready = address.trim().length >= 3 && password !== "" && serversReady;
   const busy = connect.isPending || hosted.isPending;
   useEffect(() => onBusy(busy), [busy, onBusy]);
+  // A form that goes away mid-connection never leaves the dialog unable to close.
+  useEffect(() => () => onBusy(false), [onBusy]);
   const forget = useForgetOnLoss(workspaceId, READS);
   // Access lost while the dialog was open closes it and says why; any other failure keeps what was typed.
   const lost = (error: unknown) => {
@@ -313,13 +321,15 @@ function MailboxForm({
                 key={provider}
                 disabled={busy}
                 loading={hosted.isPending && hosted.variables?.body.provider === provider}
-                onClick={() =>
+                onClick={() => {
+                  // Each attempt shows its own failure, not the one before it.
+                  connect.reset();
                   latch(() =>
                     hosted
                       .mutateAsync({ workspaceId, body: { provider } })
                       .then((answer) => leaveFor(answer.redirectUrl), lost),
-                  )
-                }
+                  );
+                }}
               >
                 {t("box.hosted", { provider: HOSTED[provider] })}
               </Button>
@@ -333,6 +343,7 @@ function MailboxForm({
         onSubmit={(event) => {
           event.preventDefault();
           if (!ready) return;
+          hosted.reset();
           latch(() =>
             connect
               .mutateAsync({
@@ -511,6 +522,7 @@ function EditMailbox({
     invalidates: () => [{ method: "listMailAccounts" as const, args: { workspaceId } }],
   });
   const renewing = account.status === "reauth_required" && account.via === "imap";
+  const rulesChanged = MAIL_ACTIONS.some((action) => rules[action] !== ruleOf(account, action));
   const ready = name.trim() !== "" && (!renewing || password !== "");
   return (
     <Dialog
@@ -539,8 +551,11 @@ function EditMailbox({
                   accountId: account.id,
                   body: {
                     label: name.trim(),
-                    disabledActions: MAIL_ACTIONS.filter((action) => rules[action] === "off"),
-                    confirmActions: MAIL_ACTIONS.filter((action) => rules[action] === "ask"),
+                    // Only what changed goes: untouched rules never undo someone else's change.
+                    ...(rulesChanged && {
+                      disabledActions: MAIL_ACTIONS.filter((action) => rules[action] === "off"),
+                      confirmActions: MAIL_ACTIONS.filter((action) => rules[action] === "ask"),
+                    }),
                     ...(password !== "" && { password }),
                   },
                 })
