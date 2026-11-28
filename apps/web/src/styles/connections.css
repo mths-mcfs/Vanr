@@ -1,0 +1,193 @@
+/*
+ * The workspace's connections, in the settings: services, own MCP servers, GitHub, and later the data
+ * sources, the agents' access and the usage. Loaded with the control area's chunk. Tokens only, as in
+ * app.css (styles.test.ts reads this file).
+ *
+ * One mark of its own: the wire. Every connection row starts with a short vertical rule whose tone says
+ * whether it carries anything: live, waiting for a person (a sign-in again, tools to review), stopped,
+ * or not plugged in at all. A column of services then reads by what works before a word of it is read.
+ * The state is also written in a chip beside it, so it never depends on color alone.
+ */
+@layer vanr.app {
+  .wire-block {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-3);
+    max-width: 48rem;
+  }
+
+  .wire-block + .wire-block {
+    margin-block-start: var(--vr-space-6);
+  }
+
+  .wire-block__head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: var(--vr-space-3);
+  }
+
+  .wire-block__title {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-1);
+    max-width: 36rem;
+  }
+
+  .wire-list {
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+    padding: 0;
+    border-top: var(--vr-border) solid var(--vr-line);
+    list-style: none;
+  }
+
+  .wire-row {
+    --wire-tone: var(--vr-line-control);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: var(--vr-space-3);
+    padding-block: var(--vr-space-3);
+    padding-inline: var(--vr-space-4) var(--vr-space-1);
+    border-bottom: var(--vr-border) solid var(--vr-line);
+    background-image: linear-gradient(var(--wire-tone), var(--wire-tone));
+    background-repeat: no-repeat;
+    background-position: left var(--vr-space-3);
+    background-size: 3px calc(100% - var(--vr-space-6));
+  }
+
+  .wire-row[data-state="active"] {
+    --wire-tone: var(--vr-success-fg);
+  }
+
+  .wire-row[data-state="reauth_required"] {
+    --wire-tone: var(--vr-warning-fg);
+  }
+
+  .wire-row[data-state="suspended"] {
+    --wire-tone: var(--vr-danger-fg);
+  }
+
+  .wire-row__who {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .wire-row__name {
+    font-weight: var(--vr-weight-medium);
+  }
+
+  .wire-row__what {
+    font-size: var(--vr-text-sm);
+    line-height: var(--vr-text-sm-lh);
+    color: var(--vr-fg-muted);
+  }
+
+  .wire-row[data-state="later"] .wire-row__name,
+  .wire-row[data-state="later"] .wire-row__what {
+    color: var(--vr-fg-subtle);
+  }
+
+  .wire-row__note {
+    font-size: var(--vr-text-sm);
+    line-height: var(--vr-text-sm-lh);
+    color: var(--vr-warning-fg);
+  }
+
+  .wire-row__address {
+    overflow: hidden;
+    font-family: var(--vr-font-mono);
+    font-size: var(--vr-text-sm);
+    color: var(--vr-fg-subtle);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .wire-row__chips,
+  .wire-row__actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--vr-space-2);
+  }
+
+  .wire-chip--live {
+    color: var(--vr-success-fg);
+    background: var(--vr-success-wash);
+  }
+
+  .wire-chip--attention {
+    color: var(--vr-warning-fg);
+    background: var(--vr-warning-wash);
+  }
+
+  .wire-chip--stopped {
+    color: var(--vr-danger-fg);
+    background: var(--vr-danger-wash);
+  }
+
+  /* The ways to connect a service, one above the other in its dialog. */
+  .wire-way + .wire-way {
+    padding-block-start: var(--vr-space-4);
+    border-top: var(--vr-border) solid var(--vr-line);
+  }
+
+  /* A server's tools under review: what each one is, then its name for people and what agents may do. */
+  .tool-review {
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+    padding: 0;
+    border-top: var(--vr-border) solid var(--vr-line);
+    list-style: none;
+  }
+
+  .tool-review__row {
+    display: grid;
+    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) 11rem;
+    align-items: start;
+    gap: var(--vr-space-3);
+    padding-block: var(--vr-space-3);
+    border-bottom: var(--vr-border) solid var(--vr-line);
+  }
+
+  .tool-review__what {
+    display: flex;
+    flex-direction: column;
+    gap: var(--vr-space-1);
+    min-width: 0;
+  }
+
+  .tool-review__name {
+    font-family: var(--vr-font-mono);
+    font-size: var(--vr-text-sm);
+    overflow-wrap: anywhere;
+  }
+
+  .tool-review__hint {
+    font-size: var(--vr-text-xs);
+    line-height: var(--vr-text-xs-lh);
+    color: var(--vr-info-fg);
+  }
+
+  @media (max-width: 40rem) {
+    .wire-row {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .wire-row__chips,
+    .wire-row__actions {
+      justify-content: flex-start;
+    }
+
+    .tool-review__row {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+}
