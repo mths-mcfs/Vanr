@@ -46,7 +46,7 @@ import {
 } from "../agents";
 import { readableChannel } from "../channels";
 import { type AppDeps, type AppEnv, requireUser, type WorkspaceMember } from "../context";
-import { waitingForMe } from "../control";
+import { archiveAgent, waitingForMe } from "../control";
 import { isUniqueViolation } from "../db-errors";
 import { importInstructions, parseGithubUrl } from "../github";
 import { badRequest, conflict, forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
@@ -470,12 +470,10 @@ export function registerAgents(app: Hono<AppEnv>) {
     );
   });
 
-  // Archive: the agent leaves the lists and stops answering; its @ stays reserved.
+  // Archive: the agent leaves the lists, its runs stop and what they wait on closes; its @ stays reserved.
   app.delete(`${WORKSPACE}/agents/:agentId`, async (c) => {
     const me = requirePermission(c, "manage_agents");
-    const { db, now } = c.get("deps");
-    const row = await agentInWorkspace(db, me.workspaceId, param(c, "agentId"));
-    if (!row.archivedAt) await db.update(agents).set({ archivedAt: now() }).where(eq(agents.id, row.id));
+    await archiveAgent(c.get("deps"), me.workspaceId, param(c, "agentId"), me.userId);
     return c.body(null, 204);
   });
 

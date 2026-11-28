@@ -438,6 +438,46 @@ export function toQuestion(row: QuestionRow): AgentQuestion {
   };
 }
 
+/**
+ * Archives the agent, the one way to do it. One transaction, with the agent's row locked FOR UPDATE, sets
+ * `archivedAt` and closes what its runs wait on: pending approvals become `canceled` and open questions `expired`.
+ * A decision that locked the row first (`lockActiveAgent`) lands before the archive; one that comes after finds the
+ * approval closed. Then the agent's live runs stop, and their tools refuse anyway (`runTool`). Archiving again
+ * closes whatever is still open.
+ */
+export async function archiveAgent(deps: AppDeps, workspaceId: string, agentId: string, actorUserId: string) {
+  const at = deps.now();
+  const closed = await deps.db.transaction(async (tx) => {
+    const [row] = await tx
+      .select({ archivedAt: agents.archivedAt })
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.workspaceId, workspaceId)))
+      .for("update");
+    if (!row) throw notFound("Agent not found");
+    if (!row.archivedAt) await tx.update(agents).set({ archivedAt: at }).where(eq(agents.id, agentId));
+    const entry = trailEntry(at, "canceled", "The agent was archived");
+    const canceled = await tx
+      .update(approvals)
+      .set({
+        status: "canceled",
+        decidedAt: at,
+        trail: sql`${approvals.trail} || ${JSON.stringify([entry])}::jsonb`,
+      })
+      .where(and(eq(approvals.agentId, agentId), eq(approvals.status, "pending")))
+      .returning();
+    const expired = await tx
+      .update(questions)
+      .set({ status: "expired" })
+      .where(and(eq(questions.agentId, agentId), eq(questions.status, "open")))
+      .returning();
+    return { canceled, expired };
+  });
+  for (const run of deps.runtime.activeRuns({ workspaceId }))
+    if (run.agentId === agentId) deps.runtime.cancel(run.runId, actorUserId);
+  for (const row of closed.canceled) await publishApproval(deps, row, "approval.resolved");
+  for (const row of closed.expired) await publishQuestion(deps, row, "question.closed");
+}
+
 /** Rewrites the card's `meta.question` and tells the channel (the question changed state). */
 export async function publishQuestion(
   deps: AppDeps,

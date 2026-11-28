@@ -41,6 +41,7 @@ import { and, eq, inArray, isNull } from "drizzle-orm";
 import { z } from "zod";
 import { type Author, changeMemory, createMemory, type MemoryRow, type Store } from "../agent-memory";
 import type { AgentRow } from "../agents";
+import { HttpError } from "../http";
 import { agentCanPost, type ChannelRow } from "../channels";
 import type { AppDeps } from "../context";
 import { proposalTrail, publishProposal } from "../control";
@@ -1142,6 +1143,13 @@ export async function runTool(
   } else {
     await ctx.recordDecision({ tool: tool.name, decision, approvalId: null, credential: plan.credential });
   }
+  // An archived agent does nothing more. The archive stops its live runs (`archiveAgent`); a call already past the
+  // gate is refused here, and the writes to its own state recheck under its row lock (`lockActiveAgent`).
+  if (await isArchived(ctx)) {
+    const text = "Not done: this agent was archived.";
+    if (approvalId) await ctx.settleApproval(approvalId, { ok: false, text });
+    return { content: text, isError: true };
+  }
   const once = await claimEffect(ctx, tool.name, plan, input);
   if (once && "result" in once) {
     if (approvalId)
@@ -1161,9 +1169,14 @@ export async function runTool(
             ...(out.searchResults?.length ? { searchResults: out.searchResults } : {}),
           };
     if (typeof out !== "string") for (const r of out.reads ?? []) ctx.risk.raise(r);
-  } catch (err) {
+  } catch (caught) {
     ctx.risk.record(call);
     for (const r of plan.reads) ctx.risk.raise(r);
+    // An archive that landed while the call ran: its write was refused under the agent's lock, nothing changed.
+    const err =
+      caught instanceof HttpError && caught.code === "agent.archived"
+        ? new ToolInputError("Not done: this agent was archived.")
+        : caught;
     if (!(err instanceof ToolInputError)) {
       // It may have gone out (it failed midway): the key stays, and the retry doesn't repeat the effect blindly.
       if (once) await settleEffect(ctx, once.key, "failed", null);
@@ -1184,6 +1197,14 @@ export async function runTool(
   res = { ...res, content: cut(res.content) };
   if (approvalId) await ctx.settleApproval(approvalId, { ok: !res.isError, text: res.content });
   return res;
+}
+
+async function isArchived(ctx: ToolContext): Promise<boolean> {
+  const [row] = await ctx.deps.db
+    .select({ archivedAt: agents.archivedAt })
+    .from(agents)
+    .where(eq(agents.id, ctx.agent.id));
+  return !row || row.archivedAt !== null;
 }
 
 /** The effect leaves Vanr (sends, publishes, deletes outside): what the retry must not repeat. */

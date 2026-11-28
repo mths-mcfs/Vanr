@@ -1007,7 +1007,7 @@ export class AgentRuntime implements RuntimePort {
     admit?: () => Promise<boolean>;
   }): Promise<
     | { ok: true; runId: string; done: Promise<void> }
-    | { ok: false; code: "budget" | "personal_plan" | "busy" | "fenced" }
+    | { ok: false; code: "budget" | "personal_plan" | "busy" | "fenced" | "archived" }
   > {
     const { agent, channel, trigger } = input;
     // The run's thread is the trigger's, and the tools are picked by thread: the trigger must be of this channel.
@@ -1021,6 +1021,12 @@ export class AgentRuntime implements RuntimePort {
       if (stale()) return { ok: false, code: "fenced" };
       this.fences.set(fence.key, fence.token);
     }
+    // An archived agent starts nothing: an assignment's turn or a routine read the agent before the archive.
+    const [current] = await this.deps.db
+      .select({ archivedAt: agents.archivedAt })
+      .from(agents)
+      .where(eq(agents.id, agent.id));
+    if (!current || current.archivedAt) return { ok: false, code: "archived" };
     // Without routing, the personal plan's lock is here: only whoever paired triggers the agent (not even into a live run).
     const planOwner = (await withPlanOwner(this.deps.db, agent)).planOwnerUserId;
     if (planOwner !== null && planOwner !== personOf(trigger)) return { ok: false, code: "personal_plan" };

@@ -20,7 +20,7 @@ import { PRODUCT } from "@vanr/product";
 import { and, asc, desc, eq, inArray, isNull, lt, lte, or, type SQL, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { AgentRow } from "./agents";
-import { canReadChannel, channelInWorkspace, openDm, readableChannelsSql } from "./channels";
+import { canReadChannel, channelInWorkspace, existingDm, openDm, readableChannelsSql } from "./channels";
 import type { AppDeps, WorkspaceMember } from "./context";
 import { openDebate } from "./debates";
 import { createFile } from "./drive";
@@ -474,12 +474,19 @@ export async function registerFire(
 async function fireChannel(db: Db, row: RoutineRow): Promise<string | null> {
   const target = targetOf(row);
   if (target.kind === "channel") return target.channelId;
-  if (target.kind === "dm" || target.kind === "conversation")
-    return openDm(db, {
+  if (target.kind === "dm" || target.kind === "conversation") {
+    const dm = {
       workspaceId: row.workspaceId,
       userId: row.createdBy,
-      other: { type: "agent", id: row.agentId },
-    });
+      other: { type: "agent" as const, id: row.agentId },
+    };
+    // An archived agent's fire fails (`agent_gone`): it keeps a DM that exists and doesn't open a new one.
+    const [agent] = await db
+      .select({ archivedAt: agents.archivedAt })
+      .from(agents)
+      .where(eq(agents.id, row.agentId));
+    return !agent || agent.archivedAt ? existingDm(db, dm) : openDm(db, dm);
+  }
   return null;
 }
 
@@ -1116,6 +1123,8 @@ async function execute(
     replyMeta: { fromRoutine: routineRef },
     limits,
   });
+  if (!started.ok && started.code === "archived")
+    return { ...fail("routines.run.agent_gone", "The agent was archived", "agent_gone"), ...session };
   if (!started.ok && started.code === "personal_plan")
     return {
       ...fail("routines.run.personal_plan", `${agent.name} ${PERSONAL_PLAN_TEXT}`, "personal_plan"),

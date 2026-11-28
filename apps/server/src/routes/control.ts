@@ -20,7 +20,7 @@ import { newId } from "@vanr/engine/ids";
 import { and, desc, eq, gte, ne, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
-import { createMemory } from "../agent-memory";
+import { createMemory, lockActiveAgent } from "../agent-memory";
 import { canReadChannel, readableChannel, readableChannelsSql } from "../channels";
 import type { AppEnv, WorkspaceMember } from "../context";
 import {
@@ -266,25 +266,30 @@ export function registerControl(app: Hono<AppEnv>) {
                 ...(remembers ? [rememberedEntry(at, name, row.ruleLabel ?? "")] : []),
               ]
             : [trailEntry(at, "rejected", `Rejected by ${name}`, { name, reason: reason ?? "" })];
-        const next = await recordDecision(db, row, {
-          status: decision,
-          deciderUserId: me.userId,
-          at,
-          reason: reason ?? null,
-          entries,
-        });
-        if (!next) throw alreadyResolved();
-        if (remembers && next.ruleKey && next.ruleLabel)
-          await rememberRule(db, {
-            workspaceId: me.workspaceId,
-            agentId: next.agentId,
-            tool: next.tool,
-            key: next.ruleKey,
-            label: next.ruleLabel,
-            approvalId: next.id,
-            actorUserId: me.userId,
+        const next = await db.transaction(async (tx) => {
+          // Approving runs the agent's action: an archived agent's is refused, under its row lock (`archiveAgent`).
+          if (decision === "approved") await lockActiveAgent(tx, row.agentId);
+          const next = await recordDecision(tx, row, {
+            status: decision,
+            deciderUserId: me.userId,
             at,
+            reason: reason ?? null,
+            entries,
           });
+          if (!next) throw alreadyResolved();
+          if (remembers && next.ruleKey && next.ruleLabel)
+            await rememberRule(tx, {
+              workspaceId: me.workspaceId,
+              agentId: next.agentId,
+              tool: next.tool,
+              key: next.ruleKey,
+              label: next.ruleLabel,
+              approvalId: next.id,
+              actorUserId: me.userId,
+              at,
+            });
+          return next;
+        });
         // The run gets the decision first: the event is a side effect and must not keep it waiting.
         runtime.resolveApproval(row.id, {
           id: row.id,
@@ -330,39 +335,43 @@ export function registerControl(app: Hono<AppEnv>) {
       trailEntry(at, "approved", `Approved by ${name}`, { name }),
       ...(body.remember && rule ? [rememberedEntry(at, name, rule.label)] : []),
     ];
-    const next = await recordDecision(db, row, {
-      status: "approved",
-      deciderUserId: me.userId,
-      at,
-      reason: body.reason ?? null,
-      entries,
-      edit: {
-        seenHash: body.payloadHash,
-        set: {
-          originalInput: row.edited ? row.originalInput : row.input,
-          input: revised.input,
-          preview: revised.preview,
-          detail: revised.preview.body ?? "",
-          payloadHash: revised.payloadHash,
-          effect: revised.effect,
-          ruleKey: rule?.key ?? null,
-          ruleLabel: rule?.label ?? null,
-          edited: true,
-        },
-      },
-    });
-    if (!next) throw alreadyResolved();
-    if (body.remember && rule)
-      await rememberRule(db, {
-        workspaceId: me.workspaceId,
-        agentId: next.agentId,
-        tool: next.tool,
-        key: rule.key,
-        label: rule.label,
-        approvalId: next.id,
-        actorUserId: me.userId,
+    const next = await db.transaction(async (tx) => {
+      await lockActiveAgent(tx, row.agentId);
+      const next = await recordDecision(tx, row, {
+        status: "approved",
+        deciderUserId: me.userId,
         at,
+        reason: body.reason ?? null,
+        entries,
+        edit: {
+          seenHash: body.payloadHash,
+          set: {
+            originalInput: row.edited ? row.originalInput : row.input,
+            input: revised.input,
+            preview: revised.preview,
+            detail: revised.preview.body ?? "",
+            payloadHash: revised.payloadHash,
+            effect: revised.effect,
+            ruleKey: rule?.key ?? null,
+            ruleLabel: rule?.label ?? null,
+            edited: true,
+          },
+        },
       });
+      if (!next) throw alreadyResolved();
+      if (body.remember && rule)
+        await rememberRule(tx, {
+          workspaceId: me.workspaceId,
+          agentId: next.agentId,
+          tool: next.tool,
+          key: rule.key,
+          label: rule.label,
+          approvalId: next.id,
+          actorUserId: me.userId,
+          at,
+        });
+      return next;
+    });
     runtime.resolveApproval(row.id, {
       id: row.id,
       decision: "approved",

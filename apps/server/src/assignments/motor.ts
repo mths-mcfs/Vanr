@@ -940,7 +940,9 @@ async function dispatch(
       { waitReason: "paused" },
       res.code === "budget"
         ? `I stopped: ${agent.name} is out of budget this month.`
-        : `I stopped: ${agent.name} thinks with the personal plan of who paired its runner and only works for that person.`,
+        : res.code === "archived"
+          ? `I stopped: ${agent.name} was archived.`
+          : `I stopped: ${agent.name} thinks with the personal plan of who paired its runner and only works for that person.`,
       { why: res.code },
     );
     return null;
