@@ -7,10 +7,11 @@ import { newId } from "@vanr/engine/ids";
 import { and, desc, eq } from "drizzle-orm";
 import { type Author, changeMemory, createMemory, type MemoryRow } from "./agent-memory";
 import { agentInWorkspace, requireActiveAgent } from "./agents";
+import { canReadChannel } from "./channels";
 import type { AppDeps, WorkspaceMember } from "./context";
 import { conflict, forbidden, HttpError, notFound } from "./http";
 
-const { memoryReviews } = schema;
+const { memoryReviews, memories, runs } = schema;
 export type MemoryReviewRow = typeof memoryReviews.$inferSelect;
 export type NewMemoryReview = Omit<
   typeof memoryReviews.$inferInsert,
@@ -26,16 +27,31 @@ export async function queueMemoryReview(deps: AppDeps, values: NewMemoryReview):
   return row;
 }
 
+/** The channel of the run that queued the review (a delegation's run counts the channel it was asked from). */
+async function reviewChannel(db: Db, row: MemoryReviewRow): Promise<string | null> {
+  const runId = row.runId ?? row.origin.runId ?? null;
+  if (!runId) return null;
+  const [run] = await db
+    .select({ channelId: runs.channelId, sourceChannelId: runs.sourceChannelId })
+    .from(runs)
+    .where(eq(runs.id, runId));
+  return run?.channelId ?? run?.sourceChannelId ?? null;
+}
+
 /**
- * Who decides: in the agent's store, who edits the agent (an admin or the owner); in the person's store, only the
- * person (it is the memory about them, which only they see).
+ * Who decides: in the agent's store, who edits the agent (an admin or the owner) and reads the channel the run
+ * wrote from (what a private channel's run wants to remember stays with that channel's readers, as its lessons
+ * do); in the person's store, only the person (it is the memory about them, which only they see).
  */
 export async function canDecideReview(db: Db, me: WorkspaceMember, row: MemoryReviewRow): Promise<boolean> {
   if (row.workspaceId !== me.workspaceId) return false;
   if (row.scope === "person") return row.ownerUserId === me.userId;
-  if (can(me.role, "manage_agents")) return true;
-  const agent = await agentInWorkspace(db, me.workspaceId, row.agentId);
-  return agent.ownerUserId === me.userId;
+  if (!can(me.role, "manage_agents")) {
+    const agent = await agentInWorkspace(db, me.workspaceId, row.agentId);
+    if (agent.ownerUserId !== me.userId) return false;
+  }
+  const channelId = await reviewChannel(db, row);
+  return !channelId || canReadChannel(db, { workspaceId: me.workspaceId, userId: me.userId, channelId });
 }
 
 /** The pending reviews this person decides (of one agent or of all). */
@@ -64,8 +80,14 @@ async function reviewFor(db: Db, me: WorkspaceMember, id: string): Promise<Memor
     .where(and(eq(memoryReviews.id, id), eq(memoryReviews.workspaceId, me.workspaceId)));
   if (!row) throw notFound("Review not found");
   if (!(await canDecideReview(db, me, row))) {
-    // A person-store review doesn't even show for anyone else.
+    // A person-store review doesn't even show for anyone else, nor one from a channel the person doesn't read.
     if (row.scope === "person") throw notFound("Review not found");
+    const channelId = await reviewChannel(db, row);
+    if (
+      channelId &&
+      !(await canReadChannel(db, { workspaceId: me.workspaceId, userId: me.userId, channelId }))
+    )
+      throw notFound("Review not found");
     throw forbidden();
   }
   if (row.status !== "pending") throw conflict("memory_review.decided", "Already decided");
@@ -101,6 +123,13 @@ async function apply(deps: AppDeps, row: MemoryReviewRow, me: WorkspaceMember): 
   const expectedPath = { expectedPath: row.path };
   switch (row.op) {
     case "create": {
+      // What replaces a lesson confined to its channel stays confined with it.
+      const [replaced] = row.replaces
+        ? await deps.db
+            .select({ channelId: memories.channelId })
+            .from(memories)
+            .where(eq(memories.id, row.replaces))
+        : [];
       const created = await createMemory(
         deps.db,
         at,
@@ -118,6 +147,7 @@ async function apply(deps: AppDeps, row: MemoryReviewRow, me: WorkspaceMember): 
           originMessageId: null,
           untrustedSource: true,
           verified: true,
+          channelId: replaced?.channelId ?? null,
           replaces: row.replaces,
         },
         meta,
