@@ -33,6 +33,7 @@ import {
   PartLoading,
   SECRET,
   useForgetOnLoss,
+  useForgetReadOnLoss,
   useLatch,
 } from "./shared.tsx";
 
@@ -62,7 +63,10 @@ export function OwnServers({
   const invalidates = () => [{ method: "getConnectorCustom" as const, args: { workspaceId } }];
   const refresh = useApiMutation("refreshConnectorCustom", { invalidates });
   const remove = useApiMutation("deleteConnectorCustom", { invalidates });
-  const open = servers.data?.find((each) => each.id === reviewing);
+  useForgetReadOnLoss(workspaceId, READS, servers.error);
+  // A server that is gone, or no longer the person's to see, closes its review. A passing failure keeps
+  // the review and its drafts open; saving then says how it went.
+  const open = isLost(servers.error) ? undefined : servers.data?.find((each) => each.id === reviewing);
 
   let body: ReactNode;
   if (servers.isPending) body = <PartLoading />;
@@ -155,8 +159,9 @@ export function OwnServers({
       )}
       {open !== undefined && (
         <ReviewTools
-          // The server's tools as they are now: a refresh or another workspace starts the review over.
-          key={`${workspaceId}/${open.id}`}
+          // The server's tools as they are now: a refresh that changes them, or another workspace, starts
+          // the review over; the same tools keep what was typed.
+          key={`${workspaceId}/${open.id}/${open.tools.map((tool) => tool.name).join(",")}`}
           workspaceId={workspaceId}
           server={open}
           onClose={() => onReview(null)}
@@ -274,7 +279,11 @@ function AddServer({
               autoComplete="off"
               placeholder="https://"
               disabled={add.isPending}
-              onChange={(event) => setAddress(event.target.value)}
+              onChange={(event) => {
+                setAddress(event.target.value);
+                // Another server may not want a key; its own answer says so if it does.
+                setAskedForKey(false);
+              }}
             />
           </Field>
           <Field label={t("mcp.name")} hint={t("mcp.nameHint")}>

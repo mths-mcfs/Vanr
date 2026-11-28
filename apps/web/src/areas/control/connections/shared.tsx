@@ -8,7 +8,7 @@ import type { MethodName } from "@vanr/client";
 import { isApiError } from "@vanr/client";
 import { prefixKey, useVanrClient } from "@vanr/client/react";
 import { Button, ErrorState, Skeleton } from "@vanr/ui";
-import { type ReactNode, useCallback, useRef } from "react";
+import { type ReactNode, useCallback, useEffect, useRef } from "react";
 import { useErrorMessage } from "../../../app/screens.tsx";
 import { useMessages } from "../../../i18n/react.tsx";
 import { href, type SettingsSection } from "../../../routes.ts";
@@ -122,4 +122,24 @@ export function useForgetOnLoss(workspaceId: string, methods: readonly MethodNam
     },
     [client, queryClient, workspaceId, methods],
   );
+}
+
+/**
+ * A read that answers 404 or 403: whatever else the screen kept of these reads, and is not showing now,
+ * is removed. The read itself shows its error and no stale data; nothing is fetched again by itself, so
+ * a refusal can't turn into a loop.
+ */
+export function useForgetReadOnLoss(workspaceId: string, methods: readonly MethodName[], error: unknown) {
+  const client = useVanrClient();
+  const queryClient = useQueryClient();
+  const lost = isLost(error);
+  useEffect(() => {
+    if (!lost) return;
+    for (const method of methods) {
+      queryClient.removeQueries({
+        queryKey: prefixKey(client, { method, args: { workspaceId } }),
+        type: "inactive",
+      });
+    }
+  }, [lost, client, queryClient, workspaceId, methods]);
 }

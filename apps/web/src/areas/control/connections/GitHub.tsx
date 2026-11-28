@@ -8,7 +8,16 @@ import { ExternalLink } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { useMessages } from "../../../i18n/react.tsx";
 import { useOutcome } from "../shared.tsx";
-import { Block, comeBackTo, leaveFor, PartError, PartLoading, useForgetOnLoss, useLatch } from "./shared.tsx";
+import {
+  Block,
+  comeBackTo,
+  leaveFor,
+  PartError,
+  PartLoading,
+  useForgetOnLoss,
+  useForgetReadOnLoss,
+  useLatch,
+} from "./shared.tsx";
 
 const READS = ["getGithubApp", "listGithubRepositories"] as const;
 
@@ -29,9 +38,12 @@ export function GitHubApp({ workspaceId }: { workspaceId: string }) {
       { method: "listGithubRepositories" as const, args: { workspaceId } },
     ],
   });
-  // A suspended account lists nothing; an account missing from the answer is not known yet.
+  useForgetReadOnLoss(workspaceId, READS, app.error ?? repositories.error);
+  // A suspended account lists nothing; an account missing from the answer is not known yet. Counts from
+  // before a failed read are not shown as if they were current.
+  const counts = repositories.isError ? undefined : repositories.data;
   const shared = (login: string) =>
-    repositories.data?.accounts.find((account) => account.login === login)?.repositories.length;
+    counts?.accounts.find((account) => account.login === login)?.repositories.length;
 
   let body: ReactNode;
   if (app.isPending) body = <PartLoading />;

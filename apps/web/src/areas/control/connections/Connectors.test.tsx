@@ -142,19 +142,43 @@ describe("services", () => {
     expect(await toast("That GitHub account already belongs to another workspace.")).toBeDefined();
   });
 
-  test("a connection the service stopped accepting asks to be renewed", async () => {
+  test("a connection the service stopped accepting is connected again as a new one", async () => {
     const server = newServer();
     server.agentAccess.shared.push(connection("stripe", { status: "reauth_required" }));
     const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
     const stripe = row(await services(), "Stripe");
     expect(stripe.getAttribute("data-state")).toBe("reauth_required");
-    expect(within(stripe).getByText("Sign in again")).toBeDefined();
-    await app.user.click(within(stripe).getByRole("button", { name: "Renew" }));
-    expect(await screen.findByRole("dialog", { name: "Renew Stripe" })).toBeDefined();
+    expect(within(stripe).getByText("Sign-in refused")).toBeDefined();
+    expect(within(stripe).getByText(/give agents access to the new connection/)).toBeDefined();
+    await app.user.click(within(stripe).getByRole("button", { name: "Connect again" }));
+    expect(await screen.findByRole("dialog", { name: "Connect Stripe again" })).toBeDefined();
+  });
+
+  test("each connection of a service gets its own row and controls", async () => {
+    const server = newServer();
+    server.agentAccess.shared.length = 0;
+    server.agentAccess.shared.push(
+      connection("linear", { id: "con_old", status: "reauth_required", accountDisplayName: "old@birch" }),
+      connection("linear", { id: "con_new", accountDisplayName: "ops@birch" }),
+    );
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const list = await services();
+    const linear = within(list)
+      .getAllByRole("listitem")
+      .filter((item) => item.textContent?.includes("Linear"));
+    expect(linear.map((item) => item.getAttribute("data-state"))).toEqual(["reauth_required", "active"]);
+    // With a working connection beside it, the refused one only offers to be disconnected.
+    expect(within(list).queryByRole("button", { name: "Connect again" }) === null).toBe(true);
+    await app.user.click(within(list).getByRole("button", { name: "Disconnect Linear (old@birch)" }));
+    const confirm = await screen.findByRole("alertdialog", { name: "Disconnect Linear?" });
+    await app.user.click(within(confirm).getByRole("button", { name: "Disconnect" }));
+    expect(await toast("Linear is disconnected.")).toBeDefined();
+    expect(server.agentAccess.shared.map((each) => each.id)).toEqual(["con_new"]);
   });
 
   test("a tool that needs one more permission can be granted from its row", async () => {
     const server = newServer();
+    server.agentAccess.shared.length = 0;
     server.agentAccess.shared.push(
       connection("linear", { scopeRequest: { scope: "write:issues", tool: "create_issue" } }),
     );
@@ -267,6 +291,48 @@ describe("own MCP servers", () => {
     expect(await screen.findByRole("dialog", { name: /^Tools of locked\.example/ })).toBeDefined();
   });
 
+  test("changing the address after a key was asked for lets the new one be tried without a key", async () => {
+    const server = newServer();
+    server.connections.keyServers.add("https://locked.example/mcp");
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    await app.user.click(within(await servers()).getByRole("button", { name: "Add a server" }));
+    const add = await screen.findByRole("dialog", { name: "Add an MCP server" });
+    const address = within(add).getByLabelText("Address");
+    await app.user.type(address, "https://locked.example/mcp");
+    await app.user.click(within(add).getByRole("button", { name: "Add server" }));
+    expect(await within(add).findByText(/This server wants a key/)).toBeDefined();
+    await app.user.clear(address);
+    await app.user.type(address, "https://open.example/mcp");
+    expect(within(add).queryByText(/This server wants a key/) === null).toBe(true);
+    await app.user.click(within(add).getByRole("button", { name: "Add server" }));
+    expect(await screen.findByRole("dialog", { name: /^Tools of open\.example/ })).toBeDefined();
+  });
+
+  test("a review closes when its server turns out to be gone", async () => {
+    const server = newServer();
+    server.connections.servers.push({
+      id: "con_billing",
+      workspaceId: WS,
+      label: "Billing",
+      serverUrl: "https://billing.example/mcp",
+      createdAt: "2026-11-01T10:00:00.000Z",
+      vettedAt: null,
+      tools: [],
+      needsKey: false,
+      oauth: false,
+    });
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const listed = await within(await servers()).findByRole("list", { name: "Your MCP servers" });
+    await app.user.click(within(row(listed, "Billing")).getByRole("button", { name: "Review tools" }));
+    expect(await screen.findByRole("dialog", { name: "Tools of Billing" })).toBeDefined();
+    server.force("getConnectorCustom", { kind: "error", status: 404, code: "not_found" }, 4);
+    await act(async () => {
+      await app.runtime.queryClient.refetchQueries();
+    });
+    expect(await within(await servers()).findByText("Your MCP servers could not be loaded")).toBeDefined();
+    expect(screen.queryByRole("dialog", { name: "Tools of Billing" }) === null).toBe(true);
+  });
+
   test("a server that wants a sign-in leaves for it", async () => {
     const server = newServer();
     server.connections.oauthServers.add("https://sso.example/mcp");
@@ -351,6 +417,29 @@ describe("GitHub", () => {
     const block = await github();
     expect(await within(block).findByText("GitHub is not set up on this server")).toBeDefined();
     expect(within(block).queryByRole("button", { name: "Install on GitHub" }) === null).toBe(true);
+  });
+
+  test("repository counts from before a refused read are not shown as current", async () => {
+    const server = newServer();
+    server.connections.installations.push({
+      id: "ins_birch",
+      workspaceId: WS,
+      accountUsername: "birchwood-labs",
+      repoScope: "all",
+      suspended: false,
+      repositories: [{ fullName: "birchwood-labs/site", private: false }],
+    });
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const list = await within(await github()).findByRole("list", { name: "GitHub" });
+    expect(await within(row(list, "birchwood-labs")).findByText("1 repository")).toBeDefined();
+    server.force("listGithubRepositories", { kind: "error", status: 403, code: "forbidden" }, 4);
+    await act(async () => {
+      await app.runtime.queryClient.refetchQueries();
+    });
+    expect(
+      await within(await github()).findByText("The repository counts could not be loaded."),
+    ).toBeDefined();
+    expect(within(row(list, "birchwood-labs")).queryByText("1 repository") === null).toBe(true);
   });
 
   test("installing leaves for GitHub and asks to come back here", async () => {

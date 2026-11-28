@@ -155,89 +155,107 @@ function Services({ workspaceId }: { workspaceId: string }) {
   else if (catalog.data.connectors.length === 0)
     body = <EmptyState title={t("svc.none")} description={t("svc.noneBody")} />;
   else {
-    const byService = new Map(connections.data.map((each) => [each.connector, each]));
+    // The server lets a workspace connect a service more than once (a sign-in that stopped working is
+    // not renewed in place, a new one is made): every connection gets its own row and its own controls.
+    const byService = new Map<string, Connection[]>();
+    for (const each of connections.data)
+      byService.set(each.connector, [...(byService.get(each.connector) ?? []), each]);
     body = (
       <ul className="wire-list" aria-label={t("svc.title")}>
-        {catalog.data.connectors.map((def) => {
-          const connection = byService.get(def.id);
-          const state = connection === undefined ? (def.available ? "open" : "later") : connection.status;
-          return (
-            <li key={def.id} className="wire-row" data-state={state}>
-              <div className="wire-row__who">
-                <span className="wire-row__name">{def.label}</span>
-                <span className="wire-row__what">{def.description}</span>
-                {connection?.accountDisplayName != null && (
-                  <span className="wire-row__what">
-                    {t("svc.account", { account: connection.accountDisplayName })}
-                  </span>
-                )}
-                {connection?.status === "reauth_required" && (
-                  <span className="wire-row__note">{t("svc.reauthBody")}</span>
-                )}
-                {connection?.scopeRequest != null && (
-                  <span className="wire-row__note">
-                    {t("svc.moreAsked", {
-                      scope: connection.scopeRequest.scope,
-                      tool: connection.scopeRequest.tool,
-                    })}
-                  </span>
-                )}
-              </div>
-              <ServiceState def={def} connection={connection} />
-              <div className="wire-row__actions">
-                {connection === undefined ? (
-                  def.available &&
-                  def.authMethods.length > 0 && (
+        {catalog.data.connectors.flatMap((def) => {
+          const own = byService.get(def.id) ?? [];
+          const connectable = def.available && def.authMethods.length > 0;
+          if (own.length === 0)
+            return [
+              <li key={def.id} className="wire-row" data-state={def.available ? "open" : "later"}>
+                <div className="wire-row__who">
+                  <span className="wire-row__name">{def.label}</span>
+                  <span className="wire-row__what">{def.description}</span>
+                </div>
+                <ServiceState def={def} connection={undefined} />
+                <div className="wire-row__actions">
+                  {connectable && (
                     <Button size="sm" onClick={() => setAsking({ def, again: false })}>
                       {t("svc.connect")}
                     </Button>
-                  )
-                ) : (
-                  <>
-                    {connection.scopeRequest != null && (
-                      <Button
-                        size="sm"
-                        variant="primary"
-                        loading={widen.isPending}
-                        onClick={() =>
-                          latch(() =>
-                            widen
-                              .mutateAsync({
-                                workspaceId,
-                                connectorId: connection.id,
-                                body: { nextPath: comeBackTo(workspaceId, "connectors") },
-                              })
-                              .then(
-                                (answer) => leaveFor(answer.consentUrl),
-                                (error: unknown) => {
-                                  forget(error);
-                                  outcome.failed(error);
-                                },
-                              ),
-                          )
-                        }
-                      >
-                        {t("svc.grantMore")}
-                      </Button>
-                    )}
-                    {connection.status === "reauth_required" && def.authMethods.length > 0 && (
-                      <Button size="sm" variant="primary" onClick={() => setAsking({ def, again: true })}>
-                        {t("svc.reconnect")}
-                      </Button>
-                    )}
+                  )}
+                </div>
+              </li>,
+            ];
+          const working = own.some((each) => each.status === "active");
+          return own.map((connection) => {
+            const who = connection.accountDisplayName ?? connection.label;
+            return (
+              <li key={connection.id} className="wire-row" data-state={connection.status}>
+                <div className="wire-row__who">
+                  <span className="wire-row__name">{def.label}</span>
+                  <span className="wire-row__what">
+                    {connection.accountDisplayName != null
+                      ? t("svc.account", { account: connection.accountDisplayName })
+                      : def.description}
+                  </span>
+                  {connection.status === "reauth_required" && (
+                    <span className="wire-row__note">{t("svc.reauthBody")}</span>
+                  )}
+                  {connection.scopeRequest != null && (
+                    <span className="wire-row__note">
+                      {t("svc.moreAsked", {
+                        scope: connection.scopeRequest.scope,
+                        tool: connection.scopeRequest.tool,
+                      })}
+                    </span>
+                  )}
+                </div>
+                <ServiceState def={def} connection={connection} />
+                <div className="wire-row__actions">
+                  {connection.scopeRequest != null && (
                     <Button
                       size="sm"
-                      variant="ghost"
-                      aria-label={t("svc.disconnectNamed", { service: def.label })}
-                      onClick={() => setRemoving({ connection, service: def.label })}
+                      variant="primary"
+                      loading={widen.isPending && widen.variables?.connectorId === connection.id}
+                      disabled={widen.isPending}
+                      onClick={() =>
+                        latch(() =>
+                          widen
+                            .mutateAsync({
+                              workspaceId,
+                              connectorId: connection.id,
+                              body: { nextPath: comeBackTo(workspaceId, "connectors") },
+                            })
+                            .then(
+                              (answer) => leaveFor(answer.consentUrl),
+                              (error: unknown) => {
+                                forget(error);
+                                outcome.failed(error);
+                              },
+                            ),
+                        )
+                      }
                     >
-                      {t("svc.disconnect")}
+                      {t("svc.grantMore")}
                     </Button>
-                  </>
-                )}
-              </div>
-            </li>
-          );
+                  )}
+                  {connection.status === "reauth_required" && !working && connectable && (
+                    <Button size="sm" variant="primary" onClick={() => setAsking({ def, again: true })}>
+                      {t("svc.reconnect")}
+                    </Button>
+                  )}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    aria-label={
+                      own.length > 1
+                        ? t("svc.disconnectOne", { service: def.label, account: who })
+                        : t("svc.disconnectNamed", { service: def.label })
+                    }
+                    onClick={() => setRemoving({ connection, service: def.label })}
+                  >
+                    {t("svc.disconnect")}
+                  </Button>
+                </div>
+              </li>
+            );
+          });
         })}
       </ul>
     );
