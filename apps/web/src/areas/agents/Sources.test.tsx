@@ -392,6 +392,48 @@ describe("databases", () => {
     expect(await within(form).findByRole("list", { name: "Tables" })).toBeDefined();
   });
 
+  test("a saved link whose tables stay as they are saves while the database is down", async () => {
+    const server = seeded();
+    server.connections.databases[0] = shop({ status: "reauth_required" });
+    server.connections.agentDatabases.set("agt_scout", [
+      {
+        connectionId: "dbc_shop",
+        level: "read",
+        policy: { tables: ["public.customers"], maskedColumns: [], queriesPerDay: 200, timeoutSeconds: 30 },
+      },
+    ]);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "Shop" });
+    const queries = within(form).getByLabelText(/^Queries a day/);
+    await app.user.clear(queries);
+    await app.user.type(queries, "50");
+    await app.user.click(within(form).getByRole("button", { name: "Save database access" }));
+    expect(await screen.findByText("Access to Shop is saved.")).toBeDefined();
+    const policy = server.connections.agentDatabases.get("agt_scout")?.[0]?.policy;
+    expect([policy?.queriesPerDay, policy?.tables]).toEqual([50, ["public.customers"]]);
+  });
+
+  test("ticked tables hold the save when the list fails to load again", async () => {
+    const server = seeded();
+    server.connections.agentDatabases.set("agt_scout", [
+      {
+        connectionId: "dbc_shop",
+        level: "read",
+        policy: { tables: ["public.customers"], maskedColumns: [], queriesPerDay: 200, timeoutSeconds: 30 },
+      },
+    ]);
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const form = await within(await part()).findByRole("form", { name: "Shop" });
+    const tables = await within(form).findByRole("list", { name: "Tables" });
+    await app.user.click(within(tables).getByRole("checkbox", { name: "public.orders" }));
+    server.force("listDatabaseTables", { kind: "error", status: 400, code: "database.unreachable" }, 4);
+    await refresh(app);
+    expect(await within(form).findByText("The database's tables could not be listed")).toBeDefined();
+    expect(within(form).getByRole("button", { name: "Save database access" }).hasAttribute("disabled")).toBe(
+      true,
+    );
+  });
+
   test("a database whose password was refused asks for it to be renewed first", async () => {
     const server = seeded();
     server.connections.databases[0] = shop({ status: "reauth_required" });

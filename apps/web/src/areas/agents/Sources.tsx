@@ -541,7 +541,9 @@ function DatabaseForm({
         ))}
       </ul>
     );
-  const tablesReady = !edit || !reads || listed.isSuccess;
+  // The list is needed for a first save (the server takes every table there is) or for ticked tables;
+  // a saved link whose tables stay as they are saves without it, even while the database is down.
+  const tablesReady = !edit || !reads || listed.isSuccess || (link !== undefined && !tables.changed);
   const { picks } = form;
   const submit = () =>
     change.run(async () => {
