@@ -208,9 +208,12 @@ test.describe("chat", () => {
     });
     await field.fill(`@${agent.handle} can you check this?`);
     await field.press("Enter");
-    await expect(page.getByText(t("chat", "blocked.not_in_channel", { agent: "Quill" }))).toBeVisible({
-      timeout: 30_000,
-    });
+    // Told twice, both in the person's words: in the notice above the composer, and on the message.
+    const absent = t("chat", "blocked.not_in_channel", { agent: "Quill" });
+    await expect(page.getByRole("status").filter({ hasText: absent })).toBeVisible({ timeout: 30_000 });
+    await expect(
+      page.getByRole("log", { name: t("chat", "history.label"), exact: true }).getByText(absent),
+    ).toBeVisible({ timeout: 30_000 });
     await expect(page.getByText("not_in_channel")).toHaveCount(0);
   });
 });
