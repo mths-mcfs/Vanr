@@ -53,9 +53,14 @@ export function filterSkills(skills: readonly Skill[], query: string): Skill[] {
 type Editing = { kind: "new" } | { kind: "edit"; id: string };
 
 export function SkillsScreen() {
+  const { workspaceId } = useRouteParams("skills");
+  // Another workspace starts over: nothing opened in one stays open in the next.
+  return <Catalog key={workspaceId} workspaceId={workspaceId} />;
+}
+
+function Catalog({ workspaceId }: { workspaceId: string }) {
   const t = useMessages("agents");
   const shell = useMessages("shell");
-  const { workspaceId } = useRouteParams("skills");
   const rights = useAgentRights(workspaceId);
   const skills = useApiQuery("listSkills", { workspaceId });
   const [all, setAll] = useState(false);
@@ -129,7 +134,7 @@ export function SkillsScreen() {
           )}
         </>
       )}
-      {editing !== null && (
+      {rights.manage && editing !== null && (
         <SkillDialog editing={editing} workspaceId={workspaceId} onClose={() => setEditing(null)} />
       )}
     </div>

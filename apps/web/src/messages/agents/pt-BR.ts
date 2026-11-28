@@ -153,9 +153,8 @@ export default {
   "overview.month": "Este mês",
   "overview.runs": "Execuções",
   "overview.spent": "Gasto",
-  "overview.usd": "US$ {value}",
   "overview.budget": "Orçamento",
-  "overview.budgetUse": "{percent}% de US$ {budget}",
+  "overview.budgetUse": "{percent}% de {budget}",
   "overview.where": "Canais em que está",
   "overview.noChannels": "Ainda não está em nenhum canal.",
   "overview.privateChannel": "Um canal privado",
@@ -214,6 +213,9 @@ export default {
 
   "lab.denied": "O laboratório é do responsável pelo agente e dos admins",
   "lab.deniedBody": "Peça a eles para testar uma mudança antes de ela valer.",
+  "lab.archived": "O laboratório fica fechado para um agente arquivado",
+  "lab.archivedBody": "Os casos de teste e as rodadas ficam como estavam. Nada roda de novo aqui.",
+  "lab.needCase": "Adicione um caso de teste para rodar.",
   "lab.cases": "Casos de teste",
   "lab.casesHelp": "Pedidos e o que cada resposta deve ou não deve dizer.",
   "lab.casesFailed": "Não foi possível carregar os casos de teste",
@@ -305,6 +307,7 @@ export default {
   "saveSkill.private": "Esta execução aconteceu em um canal privado ou em uma conversa direta.",
   "saveSkill.share": "Todos os membros do espaço de trabalho podem ler a skill feita a partir dela",
   "saveSkill.save": "Salvar a skill",
+  "saveSkill.archived": "{name} está arquivado, então a skill não foi ligada para ele.",
   "saveSkill.saved": "{name} entrou nas skills",
   "saveSkill.enable": "Ligar para {name}",
 

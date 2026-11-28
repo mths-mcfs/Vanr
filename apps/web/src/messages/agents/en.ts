@@ -154,9 +154,8 @@ export default {
   "overview.month": "This month",
   "overview.runs": "Runs",
   "overview.spent": "Spent",
-  "overview.usd": "US$ {value}",
   "overview.budget": "Budget",
-  "overview.budgetUse": "{percent}% of US$ {budget}",
+  "overview.budgetUse": "{percent}% of {budget}",
   "overview.where": "Channels it is in",
   "overview.noChannels": "It is not in any channel yet.",
   "overview.privateChannel": "A private channel",
@@ -217,6 +216,9 @@ export default {
   // The lab.
   "lab.denied": "The lab is for the agent's owner and admins",
   "lab.deniedBody": "Ask them to test a change before it goes live.",
+  "lab.archived": "The lab is closed for an archived agent",
+  "lab.archivedBody": "Its test cases and runs stay as they were. Nothing here runs again.",
+  "lab.needCase": "Add a test case to run.",
   "lab.cases": "Test cases",
   "lab.casesHelp": "Prompts and what each answer must or must not say.",
   "lab.casesFailed": "The test cases could not be loaded",
@@ -310,6 +312,7 @@ export default {
   "saveSkill.private": "This run happened in a private channel or a direct message.",
   "saveSkill.share": "All workspace members may read the skill made from it",
   "saveSkill.save": "Save the skill",
+  "saveSkill.archived": "{name} is archived, so the skill was not turned on for it.",
   "saveSkill.saved": "{name} was added to the skills",
   "saveSkill.enable": "Turn it on for {name}",
 

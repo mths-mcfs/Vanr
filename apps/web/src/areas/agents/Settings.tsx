@@ -51,7 +51,8 @@ function Form({ agent, workspaceId, rights }: Props) {
         aria-label={t("settings.title")}
         onSubmit={(event) => {
           event.preventDefault();
-          if (!valid) return;
+          // A read-only form (another person's agent, an archived one) sends nothing, Enter included.
+          if (!valid || !rights.editLook) return;
           save.mutate(
             {
               workspaceId,

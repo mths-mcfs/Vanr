@@ -8,7 +8,7 @@ import { Send } from "lucide-react";
 import { z } from "zod";
 import { AppLink, useGo, useRouteParams, useSearch } from "../../app/navigation.tsx";
 import { ScreenLoading, useDocumentTitle } from "../../app/screens.tsx";
-import { useMessages } from "../../i18n/react.tsx";
+import { useLocale, useMessages } from "../../i18n/react.tsx";
 import { Access } from "./Access.tsx";
 import { Activity } from "./Activity.tsx";
 import { AgentSkills } from "./AgentSkills.tsx";
@@ -153,6 +153,8 @@ function HarnessLabel({ agent }: { agent: AgentDetail }) {
 
 function Overview({ agent, workspaceId }: { agent: AgentDetail; workspaceId: string }) {
   const t = useMessages("agents");
+  const { locale } = useLocale();
+  const money = new Intl.NumberFormat(locale, { style: "currency", currency: "USD" });
   const channels = useApiQuery("listChannels", { workspaceId });
   const members = useApiQuery("listMembers", { workspaceId });
   const inbox = useApiQuery("getAgentInbox", { workspaceId, agentId: agent.id, query: { limit: 10 } });
@@ -165,12 +167,12 @@ function Overview({ agent, workspaceId }: { agent: AgentDetail; workspaceId: str
           <dt>{t("overview.runs")}</dt>
           <dd>{agent.monthRuns}</dd>
           <dt>{t("overview.spent")}</dt>
-          <dd>{t("overview.usd", { value: agent.costThisMonthUsd.toFixed(2) })}</dd>
+          <dd>{money.format(agent.costThisMonthUsd)}</dd>
           <dt>{t("overview.budget")}</dt>
           <dd>
             {t("overview.budgetUse", {
               percent: Math.round(agent.budgetSpentPct),
-              budget: agent.budgetPerMonthUsd.toFixed(2),
+              budget: money.format(agent.budgetPerMonthUsd),
             })}
           </dd>
         </dl>

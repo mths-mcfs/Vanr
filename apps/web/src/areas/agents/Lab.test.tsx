@@ -74,6 +74,8 @@ describe("the lab", () => {
     server.force("createAgentEval", { kind: "error", status: 409, code: "agent_eval.running" });
     const app = await renderApp({ path: lab("agt_scout"), signedInAs: "usr_jonas", server });
     await screen.findByText("No test cases yet. Add one below.");
+    await addCase(app, "Say hi", "hi");
+    await screen.findByText("1 of 50 cases");
     await app.user.click(screen.getByRole("button", { name: "Run the cases" }));
     expect(await screen.findByText("A test run is already going for this agent.")).toBeDefined();
   });
@@ -88,6 +90,24 @@ describe("the lab", () => {
     await screen.findByText("1 of 50 cases");
     expect(screen.getByText(/Only admins try new instructions/)).toBeDefined();
     expect(screen.queryByRole("button", { name: "Run the cases" }) === null).toBe(true);
+  });
+
+  test("without a case there is nothing to run", async () => {
+    await renderApp({ path: lab("agt_scout"), signedInAs: "usr_jonas" });
+    await screen.findByText("No test cases yet. Add one below.");
+    expect(screen.getByRole("button", { name: "Run the cases" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByText("Add a test case to run.")).toBeDefined();
+  });
+
+  test("an archived agent's lab is closed, and nothing is asked of the server", async () => {
+    const server = newServer();
+    const scout = server.agents.find((agent) => agent.id === "agt_scout");
+    if (scout !== undefined) scout.archivedAt = "2026-11-10T09:00:00.000Z";
+    await renderApp({ path: lab("agt_scout"), signedInAs: "usr_jonas", server });
+    expect(await screen.findByText("The lab is closed for an archived agent")).toBeDefined();
+    expect(screen.queryByRole("alert") === null).toBe(true);
+    const asked = server.calls.map((call) => call.method);
+    expect(asked.includes("listAgentTestCases") || asked.includes("listAgentEvals")).toBe(false);
   });
 
   test("anyone else is told whose the lab is", async () => {

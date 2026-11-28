@@ -411,7 +411,11 @@ export class FakeAgents {
           busy: false,
           createdAt: this.host.now().toISOString(),
           harness: { environment: null, kind: "model", model: text(params.model) ?? "claude-haiku-5-5" },
-          reachable: true,
+          // Whether the creator may talk to it, as the server answers.
+          reachable:
+            (audience?.mode ?? "everyone") === "everyone" ||
+            (text(params.ownerUserId) ?? scope.user.id) === scope.user.id ||
+            (audience?.userIds ?? []).includes(scope.user.id),
           testModel: false,
         };
         this.host.agents().push(agent);
@@ -669,7 +673,7 @@ export class FakeAgents {
         return reply(204, null);
       }),
 
-      listAgentTestCases: asEditor((_scope, agent) => reply(200, { cases: this.extra(agent).cases })),
+      listAgentTestCases: asLiveEditor((_scope, agent) => reply(200, { cases: this.extra(agent).cases })),
       createAgentTestCase: asLiveEditor((_scope, agent, params) => {
         const input = text(params.input)?.trim() ?? "";
         if (input === "") return fail(400, "invalid_request", "Invalid body");
@@ -722,12 +726,12 @@ export class FakeAgents {
         this.evals.unshift(row);
         return reply(201, this.shownEval(row));
       }),
-      listAgentEvals: asEditor((_scope, agent) =>
+      listAgentEvals: asLiveEditor((_scope, agent) =>
         reply(200, {
           evals: this.evals.filter((row) => row.agentId === agent.id).map((row) => this.shownEval(row)),
         }),
       ),
-      getAgentEval: asEditor((_scope, agent, params) => {
+      getAgentEval: asLiveEditor((_scope, agent, params) => {
         const row = this.evals.find(
           (candidate) => candidate.agentId === agent.id && candidate.id === text(params.evalId),
         );

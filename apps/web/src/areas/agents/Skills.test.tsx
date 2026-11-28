@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import { QUERY_RETRIES } from "@vanr/client/react";
 import { newServer, renderApp } from "../../../test/app.tsx";
 
@@ -109,6 +109,18 @@ describe("the workspace's skills", () => {
     await app.user.click(within(dialog).getByRole("button", { name: "Delete" }));
     expect(await screen.findByText("Release notes was deleted")).toBeDefined();
     await waitFor(() => expect(names()).toEqual(["Invoice check"]));
+  });
+
+  test("a dialog opened in one workspace does not follow the person to another", async () => {
+    // Ana manages agents in Birchwood but is only a member of Night Shift.
+    const app = await renderApp({ path: PATH, signedInAs: "usr_ana" });
+    await app.user.click(await screen.findByRole("button", { name: "Add a skill" }));
+    await screen.findByRole("dialog", { name: "New skill" });
+    await act(() => app.runtime.router.navigate({ to: "/workspace/workspace_nightshift/skills" }));
+    // Once the other workspace's catalog is on screen, the dialog is gone and cannot be offered.
+    expect(await screen.findByText("No skills yet")).toBeDefined();
+    expect(screen.queryByRole("dialog") === null).toBe(true);
+    expect(screen.queryByRole("button", { name: "Add a skill" }) === null).toBe(true);
   });
 
   test("failed: what could not be loaded, and a retry that works", async () => {
