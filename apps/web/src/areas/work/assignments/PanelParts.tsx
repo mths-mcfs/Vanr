@@ -461,7 +461,13 @@ const BOUNDS: Record<(typeof LIMITS)[number], Limit> = {
 };
 
 /** How the assignment runs: command approval on the runner, its limits and due date, and resuming jobs. */
-export function Settings({ workspaceId, assignment }: Part) {
+export function Settings(part: Part) {
+  // A change of language starts the fields again, so an amount is written with that language's mark.
+  const { locale } = useLocale();
+  return <SettingsForm key={locale} {...part} />;
+}
+
+function SettingsForm({ workspaceId, assignment }: Part) {
   const t = useMessages("work");
   const mark = decimalMark(useLocale().locale);
   const outcome = useOutcome();

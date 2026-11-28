@@ -165,6 +165,28 @@ describe("an assignment's page", () => {
     await waitFor(() => expect(review.getByText("Approved")).toBeDefined());
     expect(row?.reviews[0]?.note).toBe("Looks right");
   });
+  test("a change of language writes the saved spending limit with that language's mark", async () => {
+    const server = newServer();
+    const paper = server.assignments.assignments.find((each) => each.id === "asg_paper");
+    if (paper !== undefined) paper.limits = { ...paper.limits, dollars: 2.5 };
+    const app = await renderApp({ path: PAGE("asg_paper"), server, signedInAs: "usr_ana" });
+    const panel = within(await screen.findByRole("region", { name: "Assignment" }));
+    await app.user.click(panel.getByRole("tab", { name: "Settings" }));
+    await waitFor(async () =>
+      expect(
+        ((await panel.findByRole("textbox", { name: "Spending limit (USD)" })) as HTMLInputElement).value,
+      ).toBe("2.5"),
+    );
+    await app.user.click(await screen.findByRole("button", { name: "Ana Beatriz Souza, account menu" }));
+    await app.user.click(await screen.findByRole("menuitemradio", { name: "Português (Brasil)" }));
+    const translated = within(await screen.findByRole("region", { name: "Atribuição" }));
+    await waitFor(() =>
+      expect(
+        (translated.getByRole("textbox", { name: "Limite de gasto (USD)" }) as HTMLInputElement).value,
+      ).toBe("2,5"),
+    );
+  });
+
   test("the owner sets the limits and resumes jobs on their own", async () => {
     const app = await renderApp({ path: PAGE("asg_paper"), signedInAs: "usr_ana" });
     const panel = within(await screen.findByRole("region", { name: "Assignment" }));

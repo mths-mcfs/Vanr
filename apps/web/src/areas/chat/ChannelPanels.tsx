@@ -3,8 +3,8 @@
 // offered only to who it allows. Members and pins send no event, so both are read again each minute.
 import { useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "@tanstack/react-router";
-import { useApiMutation, useApiQuery, useVanrClient } from "@vanr/client/react";
-import { type Channel, can } from "@vanr/contract";
+import { prefixKey, queryKey, useApiMutation, useApiQuery, useVanrClient } from "@vanr/client/react";
+import { type Channel, can, type MessagePin } from "@vanr/contract";
 import {
   AgentSigil,
   Avatar,
@@ -93,37 +93,63 @@ export function MembersDialog({ channel, onClose }: { channel: Channel; onClose:
   const router = useRouter();
   const leftFrom = useRef<string | null>(null);
   const leave = useApiMutation("deleteChannelMemberPerson", {
-    invalidates: stale,
     onSuccess: () => {
+      // At once, before anything is read again: a read that hangs must not keep the channel around.
       outcome.done(t("people.left", { channel: channel.name }));
       if (channel.visibility === "private") forgetChannelQueries(queryClient, client, workspaceId, channelId);
       if (router.state.location.pathname === leftFrom.current)
         void router.navigate({ to: ROUTES.home.path, params: { workspaceId } });
+      for (const each of stale()) void queryClient.invalidateQueries({ queryKey: prefixKey(client, each) });
     },
   });
   const removeAgent = useApiMutation("deleteChannelMemberAgent", { invalidates: stale });
   const managesMembers = can(me.role, "manage_members");
+  // Rows with a change on the way, each until its own answer: a later change elsewhere frees none.
+  const [busy, setBusy] = useState<ReadonlySet<string>>(() => new Set());
+  const track = (
+    key: string,
+    change: Promise<unknown>,
+    failed: (error: unknown) => void = (error) => outcome.failed(error),
+  ) => {
+    setBusy((now) => new Set(now).add(key));
+    void change.catch(failed).finally(() =>
+      setBusy((now) => {
+        const next = new Set(now);
+        next.delete(key);
+        return next;
+      }),
+    );
+  };
   const inside = new Set((members.data ?? []).map((entry) => `${entry.type}:${entry.id}`));
   const q = query.trim().toLowerCase();
   const fits = (entry: { name: string; handle: string }) =>
     entry.name.toLowerCase().includes(q) || entry.handle.toLowerCase().includes(q);
-  // Who could be added: people and the agents this person can talk to, not already in.
-  const pool = [
-    ...(agents.data ?? [])
-      .filter((agent) => agent.archivedAt === null && agent.reachable && !inside.has(`agent:${agent.id}`))
-      .map((agent) => ({ type: "agent" as const, id: agent.id, name: agent.name, handle: agent.handle })),
-    ...(people.data ?? [])
-      .filter((person) => !inside.has(`person:${person.userId}`))
-      .map((person) => ({
-        type: "person" as const,
-        id: person.userId,
-        name: person.name,
-        handle: person.handle,
-      })),
-  ];
+  // Who could be added: people and the agents this person can talk to, not already in. Without the
+  // channel's own list there is no telling who is in, so nobody is offered.
+  const pool =
+    members.data === undefined
+      ? []
+      : [
+          ...(agents.data ?? [])
+            .filter(
+              (agent) => agent.archivedAt === null && agent.reachable && !inside.has(`agent:${agent.id}`),
+            )
+            .map((agent) => ({
+              type: "agent" as const,
+              id: agent.id,
+              name: agent.name,
+              handle: agent.handle,
+            })),
+          ...(people.data ?? [])
+            .filter((person) => !inside.has(`person:${person.userId}`))
+            .map((person) => ({
+              type: "person" as const,
+              id: person.userId,
+              name: person.name,
+              handle: person.handle,
+            })),
+        ];
   const candidates = q === "" ? [] : pool.filter(fits);
-  const targetOf = (body: { agentId: string } | { userId: string } | undefined) =>
-    body === undefined ? undefined : "agentId" in body ? body.agentId : body.userId;
   // Adding is for who is already in; a direct message keeps its people.
   const mayAdd = member;
   const name = (entry: { type: "agent" | "person"; id: string }) =>
@@ -161,22 +187,15 @@ export function MembersDialog({ channel, onClose }: { channel: Channel; onClose:
                       size="sm"
                       variant="ghost"
                       // One removal at a time per row: a second click would only find them gone.
-                      loading={
-                        entry.type === "agent"
-                          ? removeAgent.isPending && removeAgent.variables?.agentId === entry.id
-                          : removePerson.isPending && removePerson.variables?.personId === entry.id
-                      }
+                      loading={busy.has(`remove:${entry.type}:${entry.id}`)}
                       aria-label={t("people.removeNamed", { name: name(entry) })}
                       onClick={() =>
-                        entry.type === "agent"
-                          ? removeAgent.mutate(
-                              { ...args, agentId: entry.id },
-                              { onError: (error) => outcome.failed(error) },
-                            )
-                          : removePerson.mutate(
-                              { ...args, personId: entry.id },
-                              { onError: (error) => outcome.failed(error) },
-                            )
+                        track(
+                          `remove:${entry.type}:${entry.id}`,
+                          entry.type === "agent"
+                            ? removeAgent.mutateAsync({ ...args, agentId: entry.id })
+                            : removePerson.mutateAsync({ ...args, personId: entry.id }),
+                        )
                       }
                     >
                       {t("people.remove")}
@@ -232,20 +251,22 @@ export function MembersDialog({ channel, onClose }: { channel: Channel; onClose:
                     </span>
                     <Button
                       size="sm"
-                      loading={add.isPending && targetOf(add.variables?.body) === entry.id}
+                      loading={busy.has(`add:${entry.type}:${entry.id}`)}
                       aria-label={t("people.addNamed", { name: entry.name })}
                       onClick={() =>
-                        add.mutate(
-                          {
-                            ...args,
-                            body: entry.type === "agent" ? { agentId: entry.id } : { userId: entry.id },
-                          },
-                          {
-                            onSuccess: () => {
+                        track(
+                          `add:${entry.type}:${entry.id}`,
+                          add
+                            .mutateAsync({
+                              ...args,
+                              body: entry.type === "agent" ? { agentId: entry.id } : { userId: entry.id },
+                            })
+                            .then(() => {
                               outcome.done(t("people.added", { name: entry.name }));
                               setQuery("");
-                            },
-                          },
+                            }),
+                          // Said under the search, where it was asked.
+                          () => {},
                         )
                       }
                     >
@@ -287,16 +308,24 @@ export function SettingsDialog({ channel, onClose }: { channel: Channel; onClose
   }));
   const [name, setName] = useState(opened.name);
   const [topic, setTopic] = useState(opened.topic);
-  const [budget, setBudget] = useState(
+  const [budgetAsOpened] = useState(() =>
     opened.budgetPerMonthUsd === null ? "" : formatLimit(opened.budgetPerMonthUsd, mark),
   );
+  const [budget, setBudget] = useState(budgetAsOpened);
   const save = useApiMutation("updateChannel", {
     invalidates: () => [{ method: "listChannels", args: { workspaceId } }],
   });
   // An amount as the language writes it ("1.5" in English, "1,5" in Portuguese), or nothing for no
-  // limit of its own.
-  const budgetValue = budget.trim() === "" ? null : (readLimit(budget, BUDGET, mark) ?? Number.NaN);
-  const budgetBad = budgetValue !== null && Number.isNaN(budgetValue);
+  // limit of its own. A budget left as it was stays what it was, even one this field can't write (set
+  // elsewhere with more decimals), and it never stops saving the rest; nor does it for someone who
+  // can't change it.
+  const budgetValue =
+    budget === budgetAsOpened
+      ? opened.budgetPerMonthUsd
+      : budget.trim() === ""
+        ? null
+        : (readLimit(budget, BUDGET, mark) ?? Number.NaN);
+  const budgetBad = configures && budgetValue !== null && Number.isNaN(budgetValue);
   const nameBad = name.trim() === "" || name.length > NAME_MAX;
   const topicBad = topic.length > TOPIC_MAX;
   const ready = !budgetBad && !nameBad && !topicBad;
@@ -436,8 +465,12 @@ export function usePinToggle(applies: boolean) {
   const stale = () => [{ method: "listChannelPinnedMessages" as const, args }];
   const pin = useApiMutation("updateChannelPinnedMessage", { invalidates: stale });
   const unpin = useApiMutation("deleteChannelPinnedMessage", { invalidates: stale });
+  const queryClient = useQueryClient();
+  const client = useVanrClient();
   const pinned = new Set((pins.data ?? []).map((each) => each.messageId));
   return {
+    // Until the pins are known a toggle can't tell pinning from unpinning, so it waits.
+    ready: pins.data !== undefined,
     isPinned: (messageId: string) => pinned.has(messageId),
     toggle: (messageId: string) =>
       (pinned.has(messageId) ? unpin : pin).mutate(
@@ -447,6 +480,10 @@ export function usePinToggle(applies: boolean) {
           onError: (error) => {
             // Someone else unpinned it first: it is no longer pinned, which is what was asked.
             if (pinned.has(messageId) && error.status === 404) {
+              queryClient.setQueryData<MessagePin[]>(
+                queryKey(client, "listChannelPinnedMessages", args),
+                (now) => now?.filter((each) => each.messageId !== messageId),
+              );
               void pins.refetch();
               outcome.done(t("pins.removed"));
             } else outcome.failed(error);

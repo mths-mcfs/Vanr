@@ -343,6 +343,7 @@ function Actions({
           className="chat-icon-button"
           aria-pressed={pin.isPinned(message.id)}
           aria-label={t("tools.pin")}
+          disabled={!pin.ready}
           onClick={() => pin.toggle(message.id)}
         >
           <Icon icon={Pin} size="sm" />
@@ -443,7 +444,7 @@ export type MessageItemProps = {
   /** Opens the thread of a message; left out inside a thread. */
   onOpenThread?: (rootId: string) => void;
   /** Pins and unpins, for a member of a channel. */
-  pin?: { isPinned: (messageId: string) => boolean; toggle: (messageId: string) => void };
+  pin?: { ready: boolean; isPinned: (messageId: string) => boolean; toggle: (messageId: string) => void };
 };
 
 function MessageItemView({ message, continued, onQuote, onRetry, onOpenThread, pin }: MessageItemProps) {
