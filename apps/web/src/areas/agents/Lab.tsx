@@ -123,6 +123,7 @@ function Cases({ agent, workspaceId, rights }: Props) {
             <Textarea
               rows={2}
               value={input}
+              disabled={add.isPending}
               maxLength={CASE_INPUT_MAX}
               onChange={(event) => setInput(event.target.value)}
             />
@@ -137,10 +138,20 @@ function Cases({ agent, workspaceId, rights }: Props) {
                   : undefined
               }
             >
-              <Textarea rows={2} value={must} onChange={(event) => setMust(event.target.value)} />
+              <Textarea
+                rows={2}
+                value={must}
+                disabled={add.isPending}
+                onChange={(event) => setMust(event.target.value)}
+              />
             </Field>
             <Field label={t("lab.mustNotInclude")}>
-              <Textarea rows={2} value={mustNot} onChange={(event) => setMustNot(event.target.value)} />
+              <Textarea
+                rows={2}
+                value={mustNot}
+                disabled={add.isPending}
+                onChange={(event) => setMustNot(event.target.value)}
+              />
             </Field>
           </div>
           <div>

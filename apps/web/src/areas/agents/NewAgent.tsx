@@ -107,7 +107,9 @@ function Wizard({ workspaceId, onCreated }: { workspaceId: string; onCreated: (a
   const rooms = (channels.data ?? []).filter((channel) => channel.isMember);
   const general = rooms.find((channel) => channel.isGeneral);
   const chosen = channelIds ?? (general === undefined ? [] : [general.id]);
-  const modelId = model ?? models.data?.defaultModel ?? "";
+  // A model picked (or drafted) that the list does not offer gives way to the default.
+  const offered = models.data?.models.some((option) => option.id === model) === true;
+  const modelId = (offered ? model : null) ?? models.data?.defaultModel ?? "";
   const ownerId = owner ?? me?.user.id ?? "";
   const valid: Record<Step, boolean> = {
     role: true,
@@ -180,7 +182,7 @@ function Wizard({ workspaceId, onCreated }: { workspaceId: string; onCreated: (a
     setName(draft.name.slice(0, NAME_MAX));
     setTypedHandle(draft.handle);
     setInstructions(draft.instructions.slice(0, INSTRUCTIONS_MAX));
-    if (models.data?.models.some((option) => option.id === draft.model)) setModel(draft.model);
+    setModel(draft.model);
     setDraftSkills(draft.skillIds);
     setStep("identity");
   };

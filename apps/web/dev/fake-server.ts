@@ -322,6 +322,7 @@ export class FakeServer {
       ...host,
       agents: () => this.agents,
       people: (workspaceId) => this.state.members.filter((member) => member.workspaceId === workspaceId),
+      busy: (agentId) => this.runs.some((run) => run.agentId === agentId),
     });
     this.fileOperations = {
       ...this.files.operations(),

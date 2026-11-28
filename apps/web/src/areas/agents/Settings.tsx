@@ -17,7 +17,7 @@ export function Settings(props: Props) {
   return (
     <>
       <Form
-        key={`${agent.name}:${agent.role}:${agent.ownerUserId}:${JSON.stringify(agent.appearance)}`}
+        key={JSON.stringify([agent.name, agent.role, agent.ownerUserId, agent.appearance, agent.audience])}
         {...props}
       />
       {props.rights.manage && agent.archivedAt === null && <Archive {...props} />}
@@ -68,14 +68,14 @@ function Form({ agent, workspaceId, rights }: Props) {
           <Input
             value={name}
             maxLength={NAME_MAX}
-            readOnly={!rights.editAll}
+            readOnly={!rights.editAll || save.isPending}
             onChange={(event) => setName(event.target.value)}
           />
         </Field>
         <Field label={t("card.role")}>
           <Select
             value={role}
-            disabled={!rights.editAll}
+            disabled={!rights.editAll || save.isPending}
             onValueChange={(next) => setRole(ROLES.find((option) => option === next) ?? role)}
           >
             {ROLES.map((option) => (
@@ -94,7 +94,11 @@ function Form({ agent, workspaceId, rights }: Props) {
         ) : (
           <>
             <Field label={t("field.owner")}>
-              <Select value={owner} disabled={!rights.editAll || members.isPending} onValueChange={setOwner}>
+              <Select
+                value={owner}
+                disabled={!rights.editAll || members.isPending || save.isPending}
+                onValueChange={setOwner}
+              >
                 {(members.data ?? []).map((member) => (
                   <SelectItem key={member.userId} value={member.userId}>
                     {member.name}
@@ -106,11 +110,15 @@ function Form({ agent, workspaceId, rights }: Props) {
               value={audience}
               onChange={setAudience}
               people={members.data ?? []}
-              disabled={!rights.editLook}
+              disabled={!rights.editLook || save.isPending}
             />
           </>
         )}
-        <AppearanceFields value={appearance} onChange={setAppearance} disabled={!rights.editLook} />
+        <AppearanceFields
+          value={appearance}
+          onChange={setAppearance}
+          disabled={!rights.editLook || save.isPending}
+        />
         {rights.editLook && (
           <div className="section-form__actions">
             <Button type="submit" variant="primary" disabled={!valid} loading={save.isPending}>

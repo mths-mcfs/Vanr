@@ -15,6 +15,8 @@ type Host = FilesHost & {
   agents: () => FakeAgentRow[];
   /** The people of a workspace, for the team. */
   people: (workspaceId: string) => { userId: string; name: string; handle: string }[];
+  /** Whether the agent has a run going now (the server's active runs). */
+  busy: (agentId: string) => boolean;
 };
 type Extra = {
   channels: T.AgentChannel[];
@@ -23,13 +25,15 @@ type Extra = {
   skills: Map<string, boolean>;
   cases: T.AgentTestCase[];
 };
-type FakeEval = T.AgentEval & { reads: number; after: string; before: string };
+/** A test run keeps the cases it started with: one added meanwhile is not part of it. */
+type FakeEval = T.AgentEval & { reads: number; after: string; before: string; cases: T.AgentTestCase[] };
 type FakeSkill = T.SkillDetail & { workspaceId: string };
 
 const reply = (status: number, body: unknown): FilesReply => ({ status, body });
 const fail = (status: number, code: string, message: string) => reply(status, { error: { code, message } });
 const notFound = (what: string) => fail(404, "not_found", `${what} not found`);
 const forbidden = () => fail(403, "forbidden", "Forbidden");
+const archived = () => fail(409, "agent.archived", "This agent was archived");
 const text = (value: unknown) => (typeof value === "string" ? value : undefined);
 const words = (value: unknown) =>
   Array.isArray(value) ? value.filter((each): each is string => typeof each === "string") : [];
@@ -208,7 +212,7 @@ export class FakeAgents {
 
   private plain(agent: FakeAgentRow): T.Agent {
     const { workspaceId: _workspace, ...rest } = agent;
-    return rest;
+    return { ...rest, busy: this.host.busy(agent.id) };
   }
 
   private detail(agent: FakeAgentRow): T.AgentDetail {
@@ -292,7 +296,7 @@ export class FakeAgents {
   }
 
   private shownEval(row: FakeEval): T.AgentEval {
-    const { reads: _reads, after: _after, before: _before, ...rest } = row;
+    const { reads: _reads, after: _after, before: _before, cases: _cases, ...rest } = row;
     return rest;
   }
 
@@ -330,6 +334,13 @@ export class FakeAgents {
       withAgent((scope, agent, params) =>
         this.editor(scope, agent) ? handler(scope, agent, params) : forbidden(),
       );
+    // A write to an archived agent is refused, as the server does.
+    const asLiveEditor = (
+      handler: (scope: Scope, agent: FakeAgentRow, params: Record<string, unknown>) => FilesReply,
+    ) =>
+      asEditor((scope, agent, params) =>
+        agent.archivedAt === null ? handler(scope, agent, params) : archived(),
+      );
     const asManager = (handler: (scope: Scope, params: Record<string, unknown>) => FilesReply) =>
       within((scope, params) => (can(scope.role, "manage_agents") ? handler(scope, params) : forbidden()));
 
@@ -347,7 +358,7 @@ export class FakeAgents {
             handle: agent.handle,
             role: agent.role,
             ownerUserId: agent.ownerUserId,
-            busy: agent.busy,
+            busy: this.host.busy(agent.id),
             reachable: agent.reachable,
             appearance: agent.appearance,
             capabilities: [],
@@ -466,6 +477,7 @@ export class FakeAgents {
       restoreAgentInstructionVersion: asManager((scope, params) => {
         const agent = this.agentOf(scope, params);
         if (agent === undefined) return notFound("Agent");
+        if (agent.archivedAt !== null) return archived();
         const old = this.extra(agent).versions.find(
           (version) => version.id === text(params.instructionVersionId),
         );
@@ -478,7 +490,7 @@ export class FakeAgents {
 
       getAgentRuntime: withAgent((_scope, agent) => reply(200, this.harness(agent))),
 
-      setAgentRuntime: asEditor((scope, agent, params) => {
+      setAgentRuntime: asLiveEditor((scope, agent, params) => {
         const harness = text(params.harness) as T.HarnessKind | undefined;
         const model = text(params.model);
         const manager = can(scope.role, "manage_agents");
@@ -552,7 +564,7 @@ export class FakeAgents {
         }),
       ),
 
-      setAgentSkills: asEditor((scope, agent, params) => {
+      setAgentSkills: asLiveEditor((scope, agent, params) => {
         const asked = Array.isArray(params.skills)
           ? (params.skills as { id: string; enabled: boolean }[])
           : [];
@@ -658,7 +670,7 @@ export class FakeAgents {
       }),
 
       listAgentTestCases: asEditor((_scope, agent) => reply(200, { cases: this.extra(agent).cases })),
-      createAgentTestCase: asEditor((_scope, agent, params) => {
+      createAgentTestCase: asLiveEditor((_scope, agent, params) => {
         const input = text(params.input)?.trim() ?? "";
         if (input === "") return fail(400, "invalid_request", "Invalid body");
         const cases = this.extra(agent).cases;
@@ -677,12 +689,12 @@ export class FakeAgents {
         cases.push(item);
         return reply(201, item);
       }),
-      deleteAgentTestCase: asEditor((_scope, agent, params) => {
+      deleteAgentTestCase: asLiveEditor((_scope, agent, params) => {
         const extra = this.extra(agent);
         extra.cases = extra.cases.filter((item) => item.id !== text(params.testCaseId));
         return reply(204, null);
       }),
-      createAgentEval: asEditor((scope, agent, params) => {
+      createAgentEval: asLiveEditor((scope, agent, params) => {
         if (!can(scope.role, "manage_agents")) return forbidden();
         const cases = this.extra(agent).cases;
         if (cases.length === 0) return fail(409, "agent_eval.no_cases", "Add a test case first");
@@ -703,6 +715,7 @@ export class FakeAgents {
           summary: null,
           total: cases.length,
           reads: 0,
+          cases: [...cases],
           before: agent.instructions,
           after: text(params.instructions) ?? "",
         };
@@ -721,7 +734,7 @@ export class FakeAgents {
         if (row === undefined) return notFound("Test run");
         row.reads += 1;
         // Still running the first time it is read; done from the second read on.
-        if (row.status === "running" && row.reads > 1) this.finish(row, this.extra(agent).cases);
+        if (row.status === "running" && row.reads > 1) this.finish(row);
         return reply(200, this.shownEval(row));
       }),
 
@@ -744,8 +757,8 @@ export class FakeAgents {
   }
 
   /** Ends a running test run now, with its results. */
-  finish(row: FakeEval, cases: T.AgentTestCase[]): void {
-    const results = cases.map((item) => ({
+  finish(row: FakeEval): void {
+    const results = row.cases.map((item) => ({
       caseId: item.id,
       input: item.input,
       before: this.evaluate(item, row.before),

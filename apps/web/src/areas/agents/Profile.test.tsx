@@ -17,6 +17,8 @@ describe("an agent's profile", () => {
     const cover = screen.getByRole("heading", { level: 1 }).parentElement?.textContent ?? "";
     expect(cover).toContain("@scout");
     expect(cover).toContain("Assistant");
+    // Scout has a run going in the seed.
+    expect(cover).toContain("At work");
     await waitFor(() => expect(screen.getByText("Model · Claude Haiku 5.5")).toBeDefined());
     expect(document.title).toBe("Scout | Birchwood Labs | Vanr");
     await app.user.click(screen.getByRole("button", { name: "Message Scout" }));
@@ -206,6 +208,20 @@ describe("activity and saving a run as a skill", () => {
       within(dialog).getByRole("checkbox", { name: /Everyone in the workspace may read/ }),
     );
     expect(save.hasAttribute("disabled")).toBe(false);
+  });
+
+  test("an archived agent's run still becomes a skill, but the skill is not turned on for it", async () => {
+    const server = newServer();
+    const scout = server.agents.find((agent) => agent.id === "agt_scout");
+    if (scout !== undefined) scout.archivedAt = "2026-11-10T09:00:00.000Z";
+    const app = await renderApp({ path: path("agt_scout", "activity"), signedInAs: "usr_jonas", server });
+    const runs = await screen.findByRole("list", { name: "Activity" });
+    await app.user.click(within(runs).getAllByRole("button", { name: "Save as a skill" })[0] as HTMLElement);
+    const dialog = await screen.findByRole("dialog", { name: "Save this run as a skill" });
+    await within(dialog).findByLabelText("Name");
+    await app.user.click(within(dialog).getByRole("button", { name: "Save the skill" }));
+    expect(await screen.findByText("Summarized the print queue was added to the skills")).toBeDefined();
+    expect(within(dialog).queryByRole("button", { name: "Turn it on for Scout" }) === null).toBe(true);
   });
 
   test("a member sees the runs without the button", async () => {

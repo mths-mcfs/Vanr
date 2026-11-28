@@ -32,10 +32,15 @@ const delegationKey = (delegation: Team["delegations"][number]) =>
   `${delegation.requesterAgentId}:${delegation.delegateAgentId}:${delegation.at}`;
 
 export function TeamScreen() {
+  const { workspaceId } = useRouteParams("agents");
+  // Another workspace starts over: its delegations are not new, and no card stays open.
+  return <TeamView key={workspaceId} workspaceId={workspaceId} />;
+}
+
+function TeamView({ workspaceId }: { workspaceId: string }) {
   const t = useMessages("agents");
   const shell = useMessages("shell");
   const go = useGo();
-  const { workspaceId } = useRouteParams("agents");
   const rights = useAgentRights(workspaceId);
   const ago = useRelativeTime();
   const team = useApiQuery("getTeam", { workspaceId });

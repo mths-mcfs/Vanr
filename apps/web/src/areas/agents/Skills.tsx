@@ -153,7 +153,12 @@ function SkillRow({
   const [deleting, setDeleting] = useState(false);
   const [exporting, setExporting] = useState(false);
   const refetch = () => [{ method: "listSkills" as const, args: { workspaceId } }];
-  const reimport = useApiMutation("reimportSkill", { invalidates: refetch });
+  const reimport = useApiMutation("reimportSkill", {
+    invalidates: () => [
+      ...refetch(),
+      { method: "getSkill" as const, args: { workspaceId, skillId: skill.id } },
+    ],
+  });
   const remove = useApiMutation("deleteSkill", { invalidates: refetch });
   const download = async () => {
     setExporting(true);
@@ -383,7 +388,12 @@ function SkillForm({
   const [auto, setAuto] = useState(skill?.autoGrantNewAgents ?? false);
   const invalidates = () => [{ method: "listSkills" as const, args: { workspaceId } }];
   const create = useApiMutation("createSkill", { invalidates });
-  const update = useApiMutation("updateSkill", { invalidates });
+  const update = useApiMutation("updateSkill", {
+    invalidates: (args) => [
+      ...invalidates(),
+      { method: "getSkill" as const, args: { workspaceId, skillId: args.skillId } },
+    ],
+  });
   const failed = create.error ?? update.error;
   const nameWrong = name.trim() !== "" && !SKILL_NAME_RE.test(name.trim());
   const valid = name.trim() !== "" && !nameWrong && description.trim() !== "" && text.trim() !== "";

@@ -55,7 +55,7 @@ export function Activity({ agent, workspaceId, rights }: Props) {
             <span className="agent-runs__what">{run.what === "" ? t("activity.noTitle") : run.what}</span>
             <span className="page__muted">{when.format(new Date(run.createdAt))}</span>
             {rights.manage && run.status === "done" && (
-              <SaveAsSkill run={run} agent={agent} workspaceId={workspaceId} />
+              <SaveAsSkill run={run} agent={agent} workspaceId={workspaceId} canEnable={rights.editLook} />
             )}
           </li>
         ))}
@@ -68,7 +68,18 @@ export function Activity({ agent, workspaceId, rights }: Props) {
   );
 }
 
-function SaveAsSkill({ run, agent, workspaceId }: { run: Run; agent: AgentDetail; workspaceId: string }) {
+function SaveAsSkill({
+  run,
+  agent,
+  workspaceId,
+  canEnable,
+}: {
+  run: Run;
+  agent: AgentDetail;
+  workspaceId: string;
+  /** Turning the skill on is a change to the agent: not for an archived one. */
+  canEnable: boolean;
+}) {
   const t = useMessages("agents");
   const common = useMessages("common");
   const describe = useErrorMessage("agents");
@@ -145,7 +156,7 @@ function SaveAsSkill({ run, agent, workspaceId }: { run: Run; agent: AgentDetail
           <Input
             value={draft.name}
             maxLength={SKILL_NAME_MAX}
-            disabled={savedId !== null}
+            disabled={savedId !== null || create.isPending}
             onChange={(event) => setDraft({ ...draft, name: event.target.value })}
           />
         </Field>
@@ -154,7 +165,7 @@ function SaveAsSkill({ run, agent, workspaceId }: { run: Run; agent: AgentDetail
             rows={2}
             value={draft.description}
             maxLength={SKILL_DESCRIPTION_MAX}
-            disabled={savedId !== null}
+            disabled={savedId !== null || create.isPending}
             onChange={(event) => setDraft({ ...draft, description: event.target.value })}
           />
         </Field>
@@ -163,7 +174,7 @@ function SaveAsSkill({ run, agent, workspaceId }: { run: Run; agent: AgentDetail
             rows={10}
             mono
             value={draft.body}
-            disabled={savedId !== null}
+            disabled={savedId !== null || create.isPending}
             onChange={(event) => setDraft({ ...draft, body: event.target.value })}
           />
         </Field>
@@ -171,7 +182,7 @@ function SaveAsSkill({ run, agent, workspaceId }: { run: Run; agent: AgentDetail
           <Checkbox
             label={t("saveSkill.share")}
             checked={share}
-            disabled={savedId !== null}
+            disabled={savedId !== null || create.isPending}
             onCheckedChange={(on) => setShare(on === true)}
           />
         )}
@@ -199,7 +210,7 @@ function SaveAsSkill({ run, agent, workspaceId }: { run: Run; agent: AgentDetail
             <Button variant="primary" disabled={!ready} loading={create.isPending} onClick={save}>
               {t("saveSkill.save")}
             </Button>
-          ) : (
+          ) : !canEnable ? undefined : (
             <Button
               variant="primary"
               loading={enable.isPending}

@@ -23,8 +23,13 @@ const TabSearch = z.object({ tab: z.enum(TABS).optional() });
 const NO_TAB: z.infer<typeof TabSearch> = {};
 
 export function ProfileScreen() {
-  const t = useMessages("agents");
   const { workspaceId, agentId } = useRouteParams("agent");
+  // Another agent is another screen: nothing typed or picked for one carries over to the next.
+  return <Profile key={`${workspaceId}/${agentId}`} workspaceId={workspaceId} agentId={agentId} />;
+}
+
+function Profile({ workspaceId, agentId }: { workspaceId: string; agentId: string }) {
+  const t = useMessages("agents");
   const go = useGo();
   const tab: Tab = useSearch(TabSearch, NO_TAB).tab ?? "overview";
   // The client retries only what is worth retrying: an agent that does not exist is not.

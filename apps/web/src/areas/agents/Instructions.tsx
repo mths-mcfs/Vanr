@@ -54,7 +54,7 @@ function Editor({ agent, workspaceId, rights }: Props) {
         <Textarea
           rows={14}
           value={text}
-          readOnly={!rights.editAll}
+          readOnly={!rights.editAll || save.isPending}
           maxLength={INSTRUCTIONS_MAX}
           onChange={(event) => setText(event.target.value)}
         />
@@ -65,12 +65,13 @@ function Editor({ agent, workspaceId, rights }: Props) {
             <Input
               value={reason}
               maxLength={REASON_MAX}
+              readOnly={save.isPending}
               onChange={(event) => setReason(event.target.value)}
             />
           </Field>
           <div className="section-form__actions">
             <span className="page__muted">{t("instructions.unsaved")}</span>
-            <Button variant="ghost" onClick={() => setText(agent.instructions)}>
+            <Button variant="ghost" disabled={save.isPending} onClick={() => setText(agent.instructions)}>
               {t("instructions.discard")}
             </Button>
             <Button
