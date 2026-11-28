@@ -166,6 +166,90 @@ describe("the workspace's month budget", () => {
   );
 
   test(
+    "the overview counts an anonymous debate's run, and a run with its ledger rows once",
+    async () => {
+      const { ana, me, workspaceId } = await team(1);
+      const agent = await seedAgent(server, workspaceId, ana, `ov${n}`);
+      const scope = { kind: "workspace" as const, id: workspaceId, limitUsd: 1, period: "month" as const };
+      const debateId = `deb_anon${n}`;
+      await server.deps.db
+        .insert(schema.debates)
+        .values({
+          id: debateId,
+          workspaceId,
+          title: "A",
+          goal: "g",
+          createdBy: { type: "person", id: me.userId },
+        });
+      await server.deps.db.insert(schema.runs).values({
+        debateId,
+        id: `run_anon${n}`,
+        workspaceId,
+        agentId: agent.id,
+        status: "done",
+        model: "claude-haiku-5-5",
+        costUsd: 0.5,
+        createdAt: server.deps.now(),
+      });
+      const pct = async () => (await call(ana, "GET", `${ws(workspaceId)}/overview`)).body.budgetSpentPct;
+      expect(await pct()).toBeCloseTo(50, 0);
+      // A run settled through the ledger: its rows count, its own cost doesn't count again.
+      const runId = `run_led${n}`;
+      await server.deps.db.insert(schema.runs).values({
+        id: runId,
+        workspaceId,
+        agentId: agent.id,
+        status: "done",
+        model: "claude-haiku-5-5",
+        costUsd: 0,
+        createdAt: server.deps.now(),
+      });
+      const { costUsd } = await server.deps.ledger.record(
+        {
+          workspaceId,
+          agentId: agent.id,
+          userId: null,
+          runId,
+          source: "chat",
+          model: "claude-haiku-5-5",
+          usage: { inputTokens: 1_000_000, cachedTokens: 0, cacheWriteTokens: 0, outputTokens: 0 },
+          at: server.deps.now(),
+        },
+        [],
+      );
+      await server.deps.db.update(schema.runs).set({ costUsd }).where(eq(schema.runs.id, runId));
+      expect(costUsd).toBeGreaterThan(0);
+      expect(await server.deps.ledger.spent(scope, server.deps.now())).toBeCloseTo(0.5 + costUsd, 6);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "embeddings show in the usage report, outside the month's spend",
+    async () => {
+      const { ana, workspaceId } = await team(1);
+      await server.deps.ledger.record(
+        {
+          workspaceId,
+          agentId: null,
+          userId: null,
+          runId: null,
+          source: "embedding",
+          model: "voyage-4",
+          usage: { inputTokens: 10_000_000, cachedTokens: 0, cacheWriteTokens: 0, outputTokens: 0 },
+          at: server.deps.now(),
+        },
+        [],
+      );
+      const report = (await call(ana, "GET", `${ws(workspaceId)}/usage/report`)).body;
+      expect(report.perKind.map((k: { kind: string }) => k.kind)).toContain("embedding");
+      expect(report.spendUsd).toBeGreaterThan(0);
+      expect((await call(ana, "GET", `${ws(workspaceId)}/overview`)).body.budgetSpentPct).toBe(0);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "a wiki check asks pair by pair on it, and stops asking once it is spent",
     async () => {
       const { ana, workspaceId } = await team(20);

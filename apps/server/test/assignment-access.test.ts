@@ -90,7 +90,7 @@ describe("join requests", () => {
   );
 
   test(
-    "wait on the decider who is also an admin, and on nobody who can't let people in",
+    "wait on whoever lets people in (an admin who decides or only reads too), and on nobody else",
     async () => {
       const t = await team();
       await call(t.beto, "POST", `${t.path}/join-requests`);
@@ -99,6 +99,16 @@ describe("join requests", () => {
           .blockedOnYou;
       expect(await blocked(t.ana)).toBe(1);
       expect(await blocked(t.caio)).toBe(0);
+      // Dora, an admin who only reads it, lets people in: the request waits on her, in the list and in her threads.
+      expect(await blocked(t.dora)).toBe(1);
+      expect(await blocked(t.eva)).toBe(0);
+      const threadId = (await call(t.ana, "GET", t.path)).body.threadId;
+      const needed = async (who: Person) =>
+        (await call(who, "GET", `${ws(t.workspaceId)}/threads?actionNeeded=true`)).body.threads.map(
+          (x: { id: string }) => x.id,
+        );
+      expect(await needed(t.dora)).toContain(threadId);
+      expect(await needed(t.eva)).not.toContain(threadId);
       // Caio becomes an admin: he decides and may let people in, so the request now waits on him too.
       await server.deps.db
         .update(schema.members)

@@ -136,7 +136,7 @@ jobs:
       - run: bun test apps/server/test/concurrency-postgres.test.ts
         env:
           VANR_TEST_POSTGRES_URL: postgres://postgres@localhost:5432/vanr_test
-      # The same forced tests with the locks left out by the test's own double: both must fail on the outcome
+      # The same forced tests with the locks left out by the test's own double: each must fail on the outcome
       # the lock is for (LOCK_OUTCOME_MISMATCH), or they would pass without the locks too and prove nothing.
       # A failure for any other reason (the wait timed out, a connection closed, an error between tests)
       # proves nothing either, so this step fails then.
@@ -156,7 +156,7 @@ jobs:
               exit 1
             fi
           done
-          for label in invite notice; do
+          for label in invite notice channel; do
             if ! grep -qF "LOCK_OUTCOME_MISMATCH($label)" forced.log; then
               echo "::error::the forced $label test did not fail on its outcome without the lock"
               exit 1

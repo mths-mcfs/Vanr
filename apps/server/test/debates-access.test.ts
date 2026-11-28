@@ -8,7 +8,7 @@ import type { ModelRequest } from "@vanr/engine/models/types";
 import { and, eq } from "drizzle-orm";
 import { textProvider } from "../src/debate-benchmark";
 import type { RunningServer } from "../src/server";
-import { SERVER_TEST_MS, signedIn, startTestServer, waitFor } from "./harness";
+import { SERVER_TEST_MS, signedIn, startTestServer, TestSocket, waitFor } from "./harness";
 import { call, seedAgent, ws } from "./route-calls";
 import { memberOf, type Person, seedChannel, seedWorkspace } from "./seed";
 
@@ -214,6 +214,53 @@ describe("a seat someone can no longer read", () => {
         (await call(ana, "POST", `${base}/${inBoard}/posts`, { body: "Still yes", answer: "yes" })).status,
       ).toBe(201);
       await waitFor(async () => (await phase(inBoard)).status === "done");
+    },
+    SERVER_TEST_MS,
+  );
+});
+
+describe("someone removed from the workspace", () => {
+  test(
+    "gets nothing more of the debate: no event on a socket still open, no turn of the next round",
+    async () => {
+      const { workspaceId, base, ana } = await team();
+      const caio = await memberOf(server, workspaceId, "Caio", email("caio"));
+      const lia = await seedAgent(server, workspaceId, ana, `lia${n}`);
+      const made = await call(ana, "POST", base, {
+        title: "Gone",
+        goal: "g",
+        agentIds: [lia.id],
+        rounds: 1,
+        speakers: [
+          { type: "person", id: ana.user.id },
+          { type: "person", id: caio.user.id },
+          { type: "agent", id: lia.id },
+        ],
+      });
+      const id = made.body.id;
+      expect((await call(ana, "POST", `${base}/${id}/posts`, { body: "Yes", answer: "yes" })).status).toBe(
+        201,
+      );
+      const seen = async () => (await call(ana, "GET", `${base}/${id}`)).body;
+      await waitFor(async () => (await seen()).phase === "human_turn");
+      const socket = await TestSocket.open(caio.browser, workspaceId);
+      const before = socket.frames.length;
+      expect((await call(ana, "DELETE", `${ws(workspaceId)}/members/${caio.user.id}`)).status).toBe(204);
+      await socket.closed;
+      const after = socket.frames.slice(before).filter((f) => f.type === "event");
+      expect(
+        after.map((f) => (f.event as { type: string }).type).filter((t) => t.startsWith("debate.")),
+      ).toEqual([]);
+      // Round 1 seats the table again and calls who still reads it: Ana, never Caio.
+      await waitFor(async () => (await seen()).round === 1 && (await seen()).phase === "human_turn");
+      expect((await seen()).waitingUserIds).toEqual([ana.user.id]);
+      const turns = await server.deps.db
+        .select()
+        .from(schema.notifications)
+        .where(
+          and(eq(schema.notifications.userId, caio.user.id), eq(schema.notifications.kind, "debate_turn")),
+        );
+      expect(turns.map((t) => t.latest.round)).toEqual([0]);
     },
     SERVER_TEST_MS,
   );

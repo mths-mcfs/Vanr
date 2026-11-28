@@ -4,7 +4,7 @@ import { newId } from "@vanr/engine/ids";
 import type { BudgetScope } from "@vanr/engine/usage";
 import { and, asc, eq, inArray, isNull, notExists, type SQL, sql } from "drizzle-orm";
 import { isUniqueViolation } from "./db-errors";
-import { notFound } from "./http";
+import { conflict, forbidden, notFound } from "./http";
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
@@ -263,4 +263,54 @@ export async function archiveOrphans(tx: Tx, ids: readonly string[], at: Date): 
     )
     .returning({ id: channels.id });
   return archived.map((r) => r.id);
+}
+
+/**
+ * Adds a person or an agent to the channel, by someone in it. Checked under the channel's lock, which the last leave
+ * also takes: the add lands before the leave (and the channel isn't empty), or it finds the channel archived (409
+ * channel.archived) or the adder gone (403), never an archived channel with someone in it.
+ */
+export async function addChannelMember(
+  db: Db,
+  input: { channelId: string; adderId: string; member: { type: "person" | "agent"; id: string } },
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    await lockPrivateChannels(tx, [input.channelId]);
+    const [fresh] = await tx
+      .select({ archivedAt: channels.archivedAt })
+      .from(channels)
+      .where(eq(channels.id, input.channelId));
+    if (!fresh || fresh.archivedAt) throw conflict("channel.archived", "This channel was archived");
+    if (!(await isChannelMember(tx, input.channelId, { type: "person", id: input.adderId })))
+      throw forbidden("Join the channel to add people");
+    await tx
+      .insert(channelMemberships)
+      .values({ channelId: input.channelId, memberType: input.member.type, memberId: input.member.id })
+      .onConflictDoNothing();
+  });
+}
+
+/**
+ * Takes a person or an agent out of the channel; the last person out of a private channel archives it, in the same
+ * transaction. False when they weren't in it.
+ */
+export async function removeChannelMember(
+  db: Db,
+  input: { channelId: string; member: { type: "person" | "agent"; id: string }; at: Date },
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    await lockPrivateChannels(tx, [input.channelId]);
+    const gone = await tx
+      .delete(channelMemberships)
+      .where(
+        and(
+          eq(channelMemberships.channelId, input.channelId),
+          eq(channelMemberships.memberType, input.member.type),
+          eq(channelMemberships.memberId, input.member.id),
+        ),
+      )
+      .returning({ id: channelMemberships.memberId });
+    if (gone.length && input.member.type === "person") await archiveOrphans(tx, [input.channelId], input.at);
+    return gone.length > 0;
+  });
 }

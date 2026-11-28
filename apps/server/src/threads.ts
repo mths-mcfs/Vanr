@@ -3,7 +3,7 @@ import type { ActorRef, ThreadInfo } from "@vanr/contract";
 import { can, type Role } from "@vanr/contract";
 import { type Db, schema } from "@vanr/engine/db";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
-import { canActRole, isClosed, roleOf, waitingFor } from "./assignments/core";
+import { roleOf, waitingFor } from "./assignments/core";
 import { planOf } from "./assignments/plan";
 import { MAX_ROUNDS, MAX_TURNS } from "./assignments/state";
 import type { AppDeps } from "./context";
@@ -39,7 +39,8 @@ export const workingSql = () => sql`exists (
 
 /**
  * A thread waiting on the person: an approval they decide (they own the agent, or an admin when the owner
- * left), an agent question asked to them, or an open assignment they decide with something pending.
+ * left), an agent question asked to them, an open assignment's request to take part for whoever lets people in, or
+ * an open assignment they decide with something pending.
  */
 export const actionNeededSql = (viewer: Viewer) => sql`(
   exists (
@@ -54,12 +55,15 @@ export const actionNeededSql = (viewer: Viewer) => sql`(
   or exists (
     select 1 from ${assignments} mi
     where mi.thread_id = ${THREAD_ID} and mi.status in ('proposed','active','paused','wrapping_up')
+      and (mi.owner_id = ${viewer.userId} or ${sql.raw(can(viewer.role, "configure") ? "true" : "false")})
+      and exists (select 1 from ${assignmentJoinRequests} j where j.assignment_id = mi.id and j.status = 'pending'))
+  or exists (
+    select 1 from ${assignments} mi
+    where mi.thread_id = ${THREAD_ID} and mi.status in ('proposed','active','paused','wrapping_up')
       and (mi.owner_id = ${viewer.userId} or exists (
         select 1 from ${assignmentParticipants} mp
         where mp.assignment_id = mi.id and mp.user_id = ${viewer.userId} and mp.role = 'decide'))
       and ((mi.owner_id = ${viewer.userId} and mi.status = 'paused' and mi.ceiling is not null)
-        or ((mi.owner_id = ${viewer.userId} or ${sql.raw(can(viewer.role, "configure") ? "true" : "false")})
-          and exists (select 1 from ${assignmentJoinRequests} j where j.assignment_id = mi.id and j.status = 'pending'))
         or exists (select 1 from ${assignmentDecisions} d where d.assignment_id = mi.id and d.status = 'pending')
         or exists (select 1 from ${assignmentReviews} v where v.assignment_id = mi.id and v.status = 'pending')
         or exists (select 1 from ${assignmentCommands} c where c.assignment_id = mi.id and c.state = 'pending')
@@ -144,7 +148,7 @@ export async function threadInfos(db: Db, viewer: Viewer, rows: ThreadRow[]): Pr
       stepsDone: live.filter((i) => i.status === "done").length,
       stepsTotal: live.length,
       status: m.status,
-      blockedOnYou: !isClosed(m) && canActRole(role) && (await waitingFor(db, viewer, m)),
+      blockedOnYou: await waitingFor(db, viewer, m),
       role,
     });
   }

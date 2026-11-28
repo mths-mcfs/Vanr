@@ -232,17 +232,18 @@ export class FakeAssignments {
   }
 
   /**
-   * Whether something waits on the person, as the server's waitingFor: only for who may act; a pause on
-   * the cost ceiling only for the owner, requests to take part only for who manages it; never a provisional
-   * decision; and a step that is blocked on someone or stuck.
+   * Whether something waits on the person, as the server's waitingFor: requests to take part on who manages it,
+   * taking part or not; the rest only on who may act: a pause on the cost ceiling only on the owner, never a
+   * provisional decision, and a step that is blocked on someone or stuck.
    */
   private waitsOn(scope: Scope, row: Stored): boolean {
     if (row.status === "done" || row.status === "canceled") return false;
+    const p = this.pendingFor(scope, row);
+    if (p.joinRequests > 0) return true;
     const role = this.roleOf(scope, row);
     if (role !== "owner" && role !== "decide") return false;
     if (row.status === "paused" && row.ceiling !== null && role === "owner") return true;
-    const p = this.pendingFor(scope, row);
-    if (p.decisions + p.reviews + p.commands + p.submissions + p.joinRequests > 0) return true;
+    if (p.decisions + p.reviews + p.commands + p.submissions > 0) return true;
     return row.plan.items.some((item) => item.status === "blocked_on_you" || item.stallReason !== null);
   }
 

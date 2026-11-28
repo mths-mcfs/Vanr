@@ -18,14 +18,14 @@ import { z } from "zod";
 import { agentInWorkspace, agentNames, requirePlacesAgent, seesSpend } from "../agents";
 import { assignmentPostMeta } from "../assignments/tools";
 import {
-  archiveOrphans,
+  addChannelMember,
   type ChannelRow,
   canReadChannel,
   isChannelMember,
   joinChannel,
-  lockPrivateChannels,
   openDm,
   readableChannel,
+  removeChannelMember,
   writableChannel,
 } from "../channels";
 import type { AppEnv, Ctx } from "../context";
@@ -479,30 +479,18 @@ export function registerChat(app: Hono<AppEnv>) {
   app.post(`${WORKSPACE}/channels/:channelId/members`, async (c) => {
     const me = requireMember(c);
     const { db } = c.get("deps");
-    const { channel, isMember } = await readableChannel(db, {
+    const { channel } = await readableChannel(db, {
       workspaceId: me.workspaceId,
       userId: me.userId,
       channelId: param(c, "channelId"),
     });
     if (channel.kind === "dm") throw forbidden("Direct messages have fixed members");
-    if (!isMember) throw forbidden("Join the channel to add people");
     const target = await readJson(c, memberTarget);
-    // Checked again under the channel's lock, which the last leave also takes: an add either lands before it (and
-    // the channel isn't empty) or finds the channel archived, never an archived channel with someone in it.
     const add = (memberType: "person" | "agent", memberId: string) =>
-      db.transaction(async (tx) => {
-        await lockPrivateChannels(tx, [channel.id]);
-        const [fresh] = await tx
-          .select({ archivedAt: channels.archivedAt })
-          .from(channels)
-          .where(eq(channels.id, channel.id));
-        if (!fresh || fresh.archivedAt) throw conflict("channel.archived", "This channel was archived");
-        if (!(await isChannelMember(tx, channel.id, { type: "person", id: me.userId })))
-          throw forbidden("Join the channel to add people");
-        await tx
-          .insert(channelMemberships)
-          .values({ channelId: channel.id, memberType, memberId })
-          .onConflictDoNothing();
+      addChannelMember(db, {
+        channelId: channel.id,
+        adderId: me.userId,
+        member: { type: memberType, id: memberId },
       });
     if ("agentId" in target) {
       const agent = await agentInWorkspace(db, me.workspaceId, target.agentId);
@@ -534,23 +522,8 @@ export function registerChat(app: Hono<AppEnv>) {
     if (type === "person" && (await defaultChannelId(db, me.workspaceId)) === channel.id) {
       throw conflict("channel.general", "Everyone stays in #general");
     }
-    // The last person out of a private channel archives it, in the same transaction as the leave.
-    const removed = await db.transaction(async (tx) => {
-      await lockPrivateChannels(tx, [channel.id]);
-      const gone = await tx
-        .delete(channelMemberships)
-        .where(
-          and(
-            eq(channelMemberships.channelId, channel.id),
-            eq(channelMemberships.memberType, type),
-            eq(channelMemberships.memberId, id),
-          ),
-        )
-        .returning({ id: channelMemberships.memberId });
-      if (gone.length && type === "person") await archiveOrphans(tx, [channel.id], now());
-      return gone;
-    });
-    if (removed.length === 0) throw notFound("Member not found");
+    if (!(await removeChannelMember(db, { channelId: channel.id, member: { type, id }, at: now() })))
+      throw notFound("Member not found");
     if (type === "person" && channel.visibility === "private") hub.dropUser(me.workspaceId, id, channel.id);
     // A debate of the channel whose round waited on them goes on without them.
     if (type === "person")

@@ -1,8 +1,9 @@
-// Invitations and notices at the same time on a real Postgres. The server's pool runs transactions on several
-// connections, so what keeps one pending invitation per email is the invitee's lock (pg_advisory_xact_lock)
-// and what keeps the actors and the latest message of a notice is the group's row lock (FOR UPDATE).
+// Invitations, notices and a private channel's last leave at the same time on a real Postgres. The server's pool
+// runs transactions on several connections, so what keeps one pending invitation per email is the invitee's lock
+// (pg_advisory_xact_lock), what keeps the actors and the latest message of a notice is the group's row lock (FOR
+// UPDATE), and what keeps an archived channel empty is the channel's row lock, taken by the add and the leave.
 //
-// The two "forced" tests don't count on the scheduler: a double of the database, injected only here, holds the
+// The "forced" tests don't count on the scheduler: a double of the database, injected only here, holds the
 // first transaction at the point where the lock matters until the second one is seen waiting on that lock (in
 // pg_locks) or done; each transaction records its pg_backend_pid(), so two real connections took part.
 // With VANR_TEST_DROP_LOCKS=1 the same double leaves the lock out (no advisory lock, no FOR UPDATE): the CI
@@ -14,6 +15,7 @@ import { sha256Hex } from "@vanr/engine/ids";
 import { and, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
 import postgres from "postgres";
+import { addChannelMember, removeChannelMember } from "../src/channels";
 import type { AppDeps, AppEnv } from "../src/context";
 import { pgCode } from "../src/db-errors";
 import { errorBody, HttpError } from "../src/http";
@@ -303,6 +305,77 @@ describe.skipIf(!TEST_POSTGRES_URL)(
           "notice",
           { count: row?.count, actors: row?.actors.map((x) => x.id), latest: row?.latest.text },
           { count: 3, actors: [caio.user.id, ana.user.id, beto.user.id], latest: "from caio" },
+        );
+      });
+    }, 60_000);
+
+    test("forced: an add that races the last leave of a private channel waits on its lock, and finds it archived", async () => {
+      await withServer("chn", async (server, admin) => {
+        const ana = await signedIn(server, "Ana", "ana@leave.test");
+        const caio = await signedIn(server, "Caio", "caio@leave.test");
+        const { workspaceId } = await createWorkspace(server.deps.db, {
+          name: "Leave",
+          context: "",
+          user: ana.user,
+        });
+        await joinWorkspace(server.deps.db, {
+          workspaceId,
+          userId: caio.user.id,
+          name: "Caio",
+          role: "member",
+        });
+        const channelId = `ch_forced_${Date.now()}`;
+        await server.deps.db
+          .insert(schema.channels)
+          .values({
+            id: channelId,
+            workspaceId,
+            name: "vault",
+            visibility: "private",
+            createdBy: ana.user.id,
+          });
+        await server.deps.db
+          .insert(schema.channelMemberships)
+          .values({ channelId, memberType: "person", memberId: ana.user.id });
+        // A, Ana leaving, holds right after locking the channel. With the lock, B (Ana adding Caio, read as a member
+        // before her leave) waits on it and then finds the channel archived; without it, B adds Caio to a channel
+        // that A then leaves and, seeing him in, doesn't archive.
+        const run = await forcedPair(
+          admin,
+          "channel",
+          "select",
+          (side, hooks) => {
+            const db = instrumented(server.deps.db, hooks);
+            return side === "A"
+              ? removeChannelMember(db, {
+                  channelId,
+                  member: { type: "person", id: ana.user.id },
+                  at: new Date(),
+                }).then(() => "left")
+              : addChannelMember(db, {
+                  channelId,
+                  adderId: ana.user.id,
+                  member: { type: "person", id: caio.user.id },
+                }).then(
+                  () => "added",
+                  (err: unknown) => (err instanceof HttpError ? err.code : String(err)),
+                );
+          },
+          { match: "for update" },
+        );
+        expect(run.aPids[0]).not.toBe(run.bPids[0]);
+        const [channel] = await server.deps.db
+          .select()
+          .from(schema.channels)
+          .where(eq(schema.channels.id, channelId));
+        const people = await server.deps.db
+          .select({ id: schema.channelMemberships.memberId })
+          .from(schema.channelMemberships)
+          .where(eq(schema.channelMemberships.channelId, channelId));
+        outcome(
+          "channel",
+          { a: run.a, b: run.b, archived: channel?.archivedAt != null, people: people.map((p) => p.id) },
+          { a: "left", b: "channel.archived", archived: true, people: [] },
         );
       });
     }, 60_000);

@@ -186,10 +186,10 @@ export function registerWorkspaces(app: Hono<AppEnv>) {
     if (target !== me.userId && !can(me.role, "manage_members")) throw forbidden();
     const { db, now } = c.get("deps");
     await removeMember(db, { workspaceId: me.workspaceId, actorId: me.userId, target, at: now() });
+    // Whoever left the workspace loses their open connections to it, before anything else is sent.
+    c.get("deps").hub.dropUser(me.workspaceId, target);
     // The debates whose round waited on them go on without them.
     await releaseSeats(c.get("deps"), { workspaceId: me.workspaceId, userId: target });
-    // Whoever left the workspace loses their open connections to it.
-    c.get("deps").hub.dropUser(me.workspaceId, target);
     return c.body(null, 204);
   });
 

@@ -142,7 +142,7 @@ describe("who sees an assignment and what waits on them", () => {
     expect(await screen.findByRole("article", { name: "Vault job" })).toBeDefined();
   });
 
-  test("an admin who only reads the assignment isn't waited on for requests, but lists and answers them", async () => {
+  test("an admin who only reads the assignment is waited on for requests, and lists and answers them", async () => {
     const server = newServer();
     const paper = paperOf(server);
     paper.people = [];
@@ -165,8 +165,8 @@ describe("who sees an assignment and what waits on them", () => {
     ];
     const app = await renderApp({ path: LIST, signedInAs: "usr_jonas", server });
     const row = within(await screen.findByRole("article", { name: "Restock the paper room" }));
-    expect(row.getByText("1 open item")).toBeDefined();
-    expect(row.queryByText(/waits on you/) === null).toBe(true);
+    // They let people in (configure), as the server's waitingFor: the request waits on them.
+    expect(row.getByText("1 thing waits on you")).toBeDefined();
     await app.user.click(row.getByRole("link", { name: "Restock the paper room" }));
     const panel = within(await screen.findByRole("region", { name: "Assignment" }));
     await app.user.click(panel.getByRole("tab", { name: "People" }));

@@ -681,10 +681,11 @@ function stakeholders(row: DebateRow): string[] {
   return [...new Set([row.requesterUserId, row.leadUserId].filter((x): x is string => !!x))];
 }
 
-/** A round began: every person at the table gets the turn (all at once), if they still see the debate. */
+/** A round began: every person at the table gets the turn (all at once), if they still read the debate. */
 async function callPeople(deps: AppDeps, row: DebateRow) {
+  const outside = new Set(await pendingOutside(deps.db, row));
   for (const id of pendingPeople(row)) {
-    if (!(await canSeeDebate(deps.db, row, id))) continue;
+    if (outside.has(id)) continue;
     await notify(deps, {
       workspaceId: row.workspaceId,
       userId: id,
@@ -934,21 +935,23 @@ async function liveAgents(db: Db, ids: readonly string[]): Promise<AgentRow[]> {
     .where(and(inArray(agents.id, [...ids]), isNull(agents.archivedAt)));
 }
 
+/** Who among `people` still reads the debate: a member of the workspace who reads its channel (if it has one). */
+async function readers(db: Db, row: DebateRow, people: readonly string[]): Promise<Set<string>> {
+  if (!people.length) return new Set();
+  const inWorkspace = await db
+    .select({ id: schema.members.userId })
+    .from(schema.members)
+    .where(and(eq(schema.members.workspaceId, row.workspaceId), inArray(schema.members.userId, [...people])));
+  const out = new Set<string>();
+  for (const { id } of inWorkspace) if (await canSeeDebate(db, row, id)) out.add(id);
+  return out;
+}
+
 /** The people the round waits on who no longer read the debate: out of its private channel, or of the workspace. */
 async function pendingOutside(db: Db, row: DebateRow): Promise<string[]> {
   const people = row.pendingSpeakers.filter((s) => s.type === "person").map((s) => s.id);
-  if (!people.length) return [];
-  const inWorkspace = new Set(
-    (
-      await db
-        .select({ id: schema.members.userId })
-        .from(schema.members)
-        .where(and(eq(schema.members.workspaceId, row.workspaceId), inArray(schema.members.userId, people)))
-    ).map((m) => m.id),
-  );
-  const out: string[] = [];
-  for (const id of people) if (!inWorkspace.has(id) || !(await canSeeDebate(db, row, id))) out.push(id);
-  return out;
+  const reading = await readers(db, row, people);
+  return people.filter((id) => !reading.has(id));
 }
 
 /**
@@ -1357,8 +1360,9 @@ async function synthesize(deps: AppDeps, row: DebateRow) {
     await reindex(deps, { kind: "debate", id: done.id });
   }
   await closeNotifications(deps, row.workspaceId, turnKey(row.id));
+  const reading = await readers(db, done, stakeholders(row));
   for (const userId of stakeholders(row)) {
-    if (!(await canSeeDebate(db, done, userId))) continue;
+    if (!reading.has(userId)) continue;
     await notify(deps, {
       workspaceId: row.workspaceId,
       userId,

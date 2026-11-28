@@ -63,6 +63,21 @@ describe("adding an agent to a channel", () => {
   );
 });
 
+describe("adding to a channel one isn't in", () => {
+  test("is refused, in a public channel too", async () => {
+    const { w, beto, caio, dora } = await team();
+    const id = (await call(beto, "POST", `${w}/channels`, { name: `open-${n}`, visibility: "public" })).body
+      .id;
+    const added = await call(caio, "POST", `${w}/channels/${id}/members`, { userId: dora.user.id });
+    expect(added.status).toBe(403);
+    const people = await server.deps.db
+      .select()
+      .from(schema.channelMemberships)
+      .where(eq(schema.channelMemberships.channelId, id));
+    expect(people.map((p) => p.memberId)).toEqual([beto.user.id]);
+  });
+});
+
 describe("adding to an archived channel", () => {
   test("is refused, even by someone whose membership a leave raced past", async () => {
     const { w, beto, caio } = await team();

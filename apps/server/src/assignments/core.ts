@@ -594,18 +594,24 @@ export async function agentSays(
   return message;
 }
 
-/** Open assignments in which the person decides and something waits on them. */
+/**
+ * Whether something in the open assignment waits on the person: a request to take part, on whoever lets people in;
+ * anything else, on who decides.
+ */
 export async function waitingFor(
   db: Db,
   me: Pick<WorkspaceMember, "workspaceId" | "userId" | "role">,
   row: AssignmentRow,
 ) {
   if (isClosed(row)) return false;
+  // A request to take part waits on whoever lets people in (`managesAssignment`), taking part or not.
+  const manages = managesAssignment(me, row);
+  const p = await pendingCounts(db, row.id, manages);
+  if (p.joinRequests > 0) return true;
   if (!canActRole(await roleOf(db, me, row))) return false;
   // Stopped at the cap: only the owner raises the cap.
   if (row.status === "paused" && row.ceiling && row.ownerId === me.userId) return true;
-  const p = await pendingCounts(db, row.id, managesAssignment(me, row));
-  if (p.decisions + p.reviews + p.commands + p.submissions + p.joinRequests > 0) return true;
+  if (p.decisions + p.reviews + p.commands + p.submissions > 0) return true;
   // A stuck item (or one waiting on someone) waits on whoever can have it tried again.
   const items = await planOf({ db }, row.id);
   return items.some((i) => i.status === "blocked_on_you" || itemStuck(i) !== null);
