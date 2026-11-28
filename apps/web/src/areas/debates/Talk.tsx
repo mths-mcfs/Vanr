@@ -135,6 +135,8 @@ function Composer({ workspaceId, debate }: { workspaceId: string; debate: Debate
     const body = text.trim();
     if (body === "" || busy) return;
     setNotice(null);
+    const sentAnswer = answer;
+    const sentConfidence = confidence;
     post.fire(
       {
         workspaceId,
@@ -147,9 +149,10 @@ function Composer({ workspaceId, debate }: { workspaceId: string; debate: Debate
       },
       {
         onSuccess: () => {
-          setText("");
-          setAnswer("");
-          setConfidence(NO_CONFIDENCE);
+          // Only what was sent is cleared: anything typed while it was on its way stays.
+          setText((current) => (current.trim() === body ? "" : current));
+          setAnswer((current) => (current === sentAnswer ? "" : current));
+          setConfidence((current) => (current === sentConfidence ? NO_CONFIDENCE : current));
           outcome.done(myTurn ? t("turn.sent") : t("comment.sent"));
         },
         onError: fail,

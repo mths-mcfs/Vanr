@@ -215,8 +215,9 @@ export class FakeDebates {
           {
             round: 0,
             posts: ["pst_p1", "pst_p2", "pst_p3"],
+            // The server's round majority counts the people's positions too.
             majority: this.majority([
-              ["Northpaper", 1],
+              ["Northpaper", 2],
               ["Mill & Co", 1],
             ]),
           },

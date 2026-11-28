@@ -44,7 +44,7 @@ describe("the debates, in Portuguese", () => {
     const app = await renderApp({ path: `${LIST}/deb_paper`, signedInAs: "usr_ana", languages: PT });
     const grid = within(await screen.findByRole("table"));
     expect(grid.getByRole("rowheader", { name: "Participante A" })).toBeDefined();
-    expect(grid.getByText("Dividido, Northpaper 1, Mill & Co 1")).toBeDefined();
+    expect(grid.getByText("Northpaper: 2 de 3")).toBeDefined();
     expect(screen.getByText("1 resposta está lacrada até todos desta rodada responderem.")).toBeDefined();
     const turn = within(screen.getByRole("region", { name: "É a sua vez" }));
     expect(turn.getByRole("button", { name: "Pular minha vez" })).toBeDefined();

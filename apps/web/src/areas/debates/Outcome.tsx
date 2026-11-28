@@ -65,7 +65,10 @@ function Synthesis({ workspaceId, debate, steers }: Omit<Props, "directory">) {
   const majorityText = useMajorityText();
   const synthesis = debate.synthesis;
   const steps = (synthesis?.structured.items ?? []).map(issueItem).filter((step) => step.title !== "");
-  const made = new Set(debate.issues.map((issue) => issue.title));
+  // Steps made from this view count as made at once, before the debate reloads, and stay so if a later
+  // batch fails: a retry never sends them again.
+  const [madeHere, setMadeHere] = useState<readonly string[]>([]);
+  const made = new Set([...debate.issues.map((issue) => issue.title), ...madeHere]);
   const open = steps.map((step, index) => ({ step, index })).filter(({ step }) => !made.has(step.title));
   const [picked, setPicked] = useState<number[]>(() => open.map(({ index }) => index));
   if (synthesis === null) return null;
@@ -163,6 +166,7 @@ function Synthesis({ workspaceId, debate, steers }: Omit<Props, "directory">) {
           open={open}
           picked={picked}
           setPicked={setPicked}
+          onMade={(titles) => setMadeHere((list) => [...list, ...titles])}
         />
       )}
     </section>
@@ -175,12 +179,14 @@ function Steps({
   open,
   picked,
   setPicked,
+  onMade,
 }: {
   workspaceId: string;
   debateId: string;
   open: { step: DebateIssueItem; index: number }[];
   picked: number[];
   setPicked: (next: (list: number[]) => number[]) => void;
+  onMade: (titles: string[]) => void;
 }) {
   const t = useMessages("debates");
   const outcome = useDebateOutcome(workspaceId, debateId);
@@ -197,12 +203,10 @@ function Steps({
         let made = 0;
         try {
           for (let at = 0; at < chosen.length; at += ISSUES_PER_REQUEST) {
-            const result = await create.mutateAsync({
-              workspaceId,
-              debateId,
-              body: { items: chosen.slice(at, at + ISSUES_PER_REQUEST) },
-            });
+            const batch = chosen.slice(at, at + ISSUES_PER_REQUEST);
+            const result = await create.mutateAsync({ workspaceId, debateId, body: { items: batch } });
             made += result.issues.length;
+            onMade(batch.map((step) => step.title));
           }
           outcome.done(t("out.madeIssues", { count: made }));
         } catch (error) {

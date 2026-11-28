@@ -24,7 +24,7 @@ describe("an open debate", () => {
     // No agent's name is put on a position while the debate runs.
     expect(grid().queryByText("Scout") === null).toBe(true);
     expect(grid().queryByText("Ledger") === null).toBe(true);
-    expect(grid().getByText("Split, Northpaper 1, Mill & Co 1")).toBeDefined();
+    expect(grid().getByText("Northpaper: 2 of 3")).toBeDefined();
     expect(grid().getByText("80% sure")).toBeDefined();
     expect(screen.getByText(/agents speak under a letter/)).toBeDefined();
     expect(screen.getByText("1 answer is sealed until everyone in this round has answered.")).toBeDefined();
@@ -87,7 +87,7 @@ describe("an open debate", () => {
     const app = await renderApp({ path: PAGE("deb_paper"), signedInAs: "usr_jonas" });
     await app.user.click(await screen.findByRole("button", { name: "Conclude now" }));
     const synthesis = within(await screen.findByRole("region", { name: "Synthesis" }));
-    expect(synthesis.getByText("The table did not settle.")).toBeDefined();
+    expect(synthesis.getByText("The table settled on Northpaper.")).toBeDefined();
     expect(screen.getByText("It was concluded by hand.")).toBeDefined();
     // Closed, so revealed: the letters give way to names.
     expect(await screen.findByRole("rowheader", { name: /^Scout/ })).toBeDefined();
@@ -189,6 +189,47 @@ describe("an action starts once, however fast the clicks", () => {
     expect(app.server.debates.debates.find((row) => row.id === "deb_logo")?.issues.length).toBe(2);
   });
 
+  test("steps into issues: after a failed batch, a retry sends only what wasn't made", async () => {
+    const server = newServer();
+    const logo = server.debates.debates.find((row) => row.id === "deb_logo");
+    if (logo?.synthesis == null) throw new Error("the seed has no logo synthesis");
+    logo.synthesis.structured.items = Array.from({ length: 31 }, (_, n) => ({ title: `Step ${n + 1}` }));
+    // The second batch (the 31st step alone) fails once.
+    server.force(
+      "createDebateIssue",
+      { kind: "error", status: 503, code: "unavailable" },
+      1,
+      (params) => Array.isArray(params.items) && params.items.length === 1,
+    );
+    const app = await renderApp({ path: PAGE("deb_logo"), signedInAs: "usr_ana", server });
+    const synthesis = within(await screen.findByRole("region", { name: "Synthesis" }));
+    // The reload after the batches fails too, so the page can't learn from the server what was made.
+    server.force("getDebate", { kind: "error", status: 503, code: "unavailable" }, 50);
+    await app.user.click(synthesis.getByRole("button", { name: "Turn 31 steps into issues" }));
+    const retry = await synthesis.findByRole("button", { name: "Turn 1 step into an issue" });
+    await app.user.click(retry);
+    expect(await screen.findByText("1 issue created")).toBeDefined();
+    const sent = app.server.calls
+      .filter((call) => call.method === "createDebateIssue")
+      .map((call) => (call.params.items as { title: string }[]).map((item) => item.title));
+    expect(sent.map((items) => items.length)).toEqual([30, 1, 1]);
+    expect(sent[2]).toEqual(["Step 31"]);
+    expect(logo.issues.length).toBe(31);
+  });
+
+  test("a comment typed while the last one was sending stays", async () => {
+    const app = await renderApp({ path: PAGE("deb_paper"), signedInAs: "usr_iris" });
+    const box = within(await screen.findByRole("region", { name: "Add a comment" }));
+    const field = box.getByRole("textbox", { name: "Add a comment" }) as HTMLTextAreaElement;
+    await app.user.type(field, "First thought.");
+    const held = app.server.hold("createDebatePost");
+    await app.user.click(box.getByRole("button", { name: "Comment" }));
+    await app.user.type(field, " And another.");
+    held.release();
+    expect(await screen.findByText("Comment posted")).toBeDefined();
+    expect(field.value).toBe("First thought. And another.");
+  });
+
   test("steps into issues: each one is made once", async () => {
     const app = await renderApp({ path: PAGE("deb_logo"), signedInAs: "usr_ana" });
     const synthesis = within(await screen.findByRole("region", { name: "Synthesis" }));
@@ -200,6 +241,14 @@ describe("an action starts once, however fast the clicks", () => {
 });
 
 describe("a stuck debate", () => {
+  test("who opened it can also conclude it from there", async () => {
+    const app = await renderApp({ path: PAGE("deb_hours"), signedInAs: "usr_iris" });
+    const conclude = await screen.findByRole("button", { name: "Conclude now" });
+    expect(conclude.hasAttribute("disabled")).toBe(false);
+    await app.user.click(conclude);
+    expect(await screen.findByRole("region", { name: "Synthesis" })).toBeDefined();
+  });
+
   test("who opened it tries again; anyone else only reads why", async () => {
     const asOpener = await renderApp({ path: PAGE("deb_hours"), signedInAs: "usr_iris" });
     // Still blind: the page never says which agent got stuck, as that would give away its letter.

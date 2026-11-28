@@ -321,7 +321,7 @@ function Steering({ workspaceId, debate }: { workspaceId: string; debate: Debate
   return (
     <div className="debate-page__steer">
       <Button
-        disabled={debate.phase === "concluding" || debate.status !== "open"}
+        disabled={debate.phase === "concluding"}
         loading={conclude.isPending}
         onClick={() =>
           conclude.fire(args, {
