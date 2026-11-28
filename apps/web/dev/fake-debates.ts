@@ -67,15 +67,20 @@ export class FakeDebates {
 
   /** The majority of a round's positions (agents' turns and people's answers), as the server counts it. */
   roundMajority(row: StoredDebate, ids: readonly string[]): T.DebateMajority | null {
-    const counts = new Map<string, number>();
+    // Grouped by the answer's key, as the server does: "Yes" and "yes" are one answer, labelled as first seen.
+    const groups = new Map<string, { answer: string; count: number }>();
     for (const post of row.posts)
       if (
         ids.includes(post.id) &&
         post.claimData !== null &&
         (post.kind === "turn" || post.kind === "speaker")
-      )
-        counts.set(post.claimData.answer, (counts.get(post.claimData.answer) ?? 0) + 1);
-    return counts.size === 0 ? null : this.majority([...counts.entries()]);
+      ) {
+        const hit = groups.get(post.claimData.key) ?? { answer: post.claimData.answer, count: 0 };
+        groups.set(post.claimData.key, { answer: hit.answer, count: hit.count + 1 });
+      }
+    return groups.size === 0
+      ? null
+      : this.majority([...groups.values()].map((group): [string, number] => [group.answer, group.count]));
   }
 
   /** Closes the debate with a synthesis from the last round's majority, revealing who spoke. */

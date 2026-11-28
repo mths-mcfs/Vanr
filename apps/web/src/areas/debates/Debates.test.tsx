@@ -547,4 +547,41 @@ describe("the fake follows the server", () => {
     expect(logo.issues.length).toBe(before + 1);
     expect(logo.issues.at(-1)?.title).toBe("Book the sign maker");
   });
+
+  test("a round's majority groups answers by their key, as the server does", () => {
+    const paper = server.debates.debates.find((row) => row.id === "deb_paper");
+    if (paper === undefined) throw new Error("the seed has no paper debate");
+    paper.posts.push(
+      server.debates.post(
+        "pst_k1",
+        2,
+        { type: "person", id: "usr_ana" },
+        null,
+        "A",
+        server.debates.claim("Yes", null),
+      ),
+      server.debates.post(
+        "pst_k2",
+        2,
+        { type: "person", id: "usr_jonas" },
+        null,
+        "B",
+        server.debates.claim("yes", null),
+      ),
+      server.debates.post(
+        "pst_k3",
+        2,
+        { type: "agent", id: "agt_scout" },
+        "A",
+        "C",
+        server.debates.claim("No", null),
+      ),
+    );
+    const majority = server.debates.roundMajority(paper, ["pst_k1", "pst_k2", "pst_k3"]);
+    expect(majority?.winner).toBe("Yes");
+    expect(majority?.groups.map((group) => [group.answer, group.count])).toEqual([
+      ["Yes", 2],
+      ["No", 1],
+    ]);
+  });
 });
