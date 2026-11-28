@@ -144,7 +144,9 @@ function AssignmentRow({
 }) {
   const t = useMessages("work");
   const channel = channelName(assignment.channelId);
-  const waiting = Object.values(assignment.pending).reduce((sum, count) => sum + count, 0);
+  const open = Object.values(assignment.pending).reduce((sum, count) => sum + count, 0);
+  // Requests to take part wait only on who may let people in; the rest waits on whoever may act.
+  const waiting = open - (assignment.manageable ? 0 : assignment.pending.joinRequests);
   return (
     <article
       className={`work-assignment work-assignment--${assignment.status}`}
@@ -168,12 +170,11 @@ function AssignmentRow({
         )}
         {assignment.runningJobs > 0 && <span>{t("asg.jobs", { count: assignment.runningJobs })}</span>}
         {/* Only someone who may act is waited on; anyone else just sees how much is open. */}
-        {waiting > 0 &&
-          (assignment.actionable ? (
-            <strong className="work-assignment__waiting">{t("asg.waiting", { count: waiting })}</strong>
-          ) : (
-            <span>{t("asg.open", { count: waiting })}</span>
-          ))}
+        {assignment.actionable && waiting > 0 ? (
+          <strong className="work-assignment__waiting">{t("asg.waiting", { count: waiting })}</strong>
+        ) : (
+          open > 0 && <span>{t("asg.open", { count: open })}</span>
+        )}
       </p>
     </article>
   );

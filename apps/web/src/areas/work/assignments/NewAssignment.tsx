@@ -32,7 +32,11 @@ export function NewAssignmentDialog({
   const qualified = (eligible.data ?? []).filter((agent) => agent.qualifies);
   // The channels come with the agents: the form waits for both, and a failed load is retried here.
   const channels = useApiQuery("listChannels", { workspaceId });
-  const writable = (channels.data ?? []).filter((channel) => channel.isMember);
+  // Where the person may write, as the server takes it: any public channel (creating there joins
+  // it, and the form says so), a private one only as a member.
+  const writable = (channels.data ?? []).filter(
+    (channel) => channel.visibility === "public" || channel.isMember,
+  );
   const [goal, setGoal] = useState("");
   const [title, setTitle] = useState("");
   const [chosenAgent, setAgentId] = useState("");
@@ -40,6 +44,7 @@ export function NewAssignmentDialog({
   const channelId = writable.some((channel) => channel.id === chosenChannel)
     ? chosenChannel
     : (writable.find((channel) => channel.isGeneral)?.id ?? writable[0]?.id ?? "");
+  const joining = writable.find((channel) => channel.id === channelId && !channel.isMember);
   const [chosenExecutor, setExecutor] = useState<AssignmentExecutor | "">("");
   const [policy, setPolicy] = useState<CommandPolicy>("when_safe");
   const agentId = chosenAgent === "" ? (qualified[0]?.agentId ?? "") : chosenAgent;
@@ -149,7 +154,10 @@ export function NewAssignmentDialog({
                   ))}
                 </Select>
               </Field>
-              <Field label={t("asg.form.channel")}>
+              <Field
+                label={t("asg.form.channel")}
+                {...(joining !== undefined && { hint: t("asg.form.joins", { channel: joining.name }) })}
+              >
                 <Select value={channelId} onValueChange={setChannelId}>
                   {writable.map((channel) => (
                     <SelectItem key={channel.id} value={channel.id}>

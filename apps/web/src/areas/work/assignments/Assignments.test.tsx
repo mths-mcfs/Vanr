@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { screen, waitFor, within } from "@testing-library/react";
-import { newServer, renderApp } from "../../../../test/app.tsx";
+import { chooseOption, newServer, renderApp } from "../../../../test/app.tsx";
 
 const LIST = "/workspace/workspace_birchwood/assignments";
 const PAGE = (id: string) => `/workspace/workspace_birchwood/assignments/${id}`;
@@ -220,6 +220,46 @@ describe("an assignment's states, as each person sees them", () => {
     const paper = within(await screen.findByRole("article", { name: "Restock the paper room" }));
     expect(paper.getByText("3 open items")).toBeDefined();
     expect(paper.queryByText(/wait on you/) === null).toBe(true);
+  });
+
+  test("requests to take part wait only on who may let people in", async () => {
+    const server = newServer();
+    const paper = server.assignments.assignments.find((row) => row.id === "asg_paper");
+    if (paper !== undefined) {
+      paper.people.push({ userId: "usr_iris", role: "decide" });
+      paper.pending = { ...paper.pending, decisions: 0, submissions: 0, commands: 0, joinRequests: 2 };
+    }
+    await renderApp({ path: LIST, signedInAs: "usr_iris", server });
+    const row = within(await screen.findByRole("article", { name: "Restock the paper room" }));
+    expect(row.getByText("2 open items")).toBeDefined();
+    expect(row.queryByText(/wait on you/) === null).toBe(true);
+  });
+
+  test("a public channel the person isn't in can hold a new assignment, and the form says it adds them", async () => {
+    const server = newServer();
+    server.state.channels.push({
+      id: "ch_press",
+      workspaceId: "workspace_birchwood",
+      name: "press",
+      topic: "",
+      isGeneral: false,
+      visibility: "public",
+      budgetPerMonthUsd: null,
+      createdAt: "2026-11-02T09:00:00.000Z",
+      memberIds: [],
+    });
+    const app = await renderApp({ path: LIST, signedInAs: "usr_ana", server });
+    await app.user.click(await screen.findByRole("button", { name: "New assignment" }));
+    const dialog = within(await screen.findByRole("dialog", { name: "New assignment" }));
+    await app.user.type(await dialog.findByRole("textbox", { name: "Goal" }), "Count the press sheets.");
+    await chooseOption(app, dialog.getByRole("combobox", { name: "Channel" }), "#press");
+    expect(
+      dialog.getByText("You aren't in #press yet: creating the assignment there adds you to it."),
+    ).toBeDefined();
+    await app.user.click(dialog.getByRole("button", { name: "Create assignment" }));
+    await waitFor(() =>
+      expect(app.server.assignments.assignments.some((row) => row.channelId === "ch_press")).toBe(true),
+    );
   });
 
   test("agents that couldn't be loaded say so, with a retry, instead of saying none can", async () => {

@@ -537,6 +537,7 @@ export default {
   "asg.settings.dropRule": "Stop allowing",
   "asg.open": { one: "{count} open item", other: "{count} open items" },
   "asg.form.agentsFailed": "The agents that can take an assignment could not be loaded",
+  "asg.form.joins": "You aren't in #{channel} yet: creating the assignment there adds you to it.",
   "asg.form.channelsFailed": "The channels an assignment can live in could not be loaded",
   "asg.people.requestsFailed": "The requests to take part could not be loaded",
   "recur.form.limitRange": "A number from {min} to {max}.",
