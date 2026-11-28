@@ -28,6 +28,12 @@ const NEXT_STATE: Record<ThreadState, "close" | "reopen" | "unarchive"> = {
   archived: "unarchive",
 };
 
+const ACTION_TEXT = {
+  close: { label: "thread.shut", done: "thread.shutDone" },
+  reopen: { label: "thread.reopen", done: "thread.reopenDone" },
+  unarchive: { label: "thread.unarchive", done: "thread.unarchiveDone" },
+} as const;
+
 const EXCERPT = 80;
 /** Two replies of one author closer than this read as one, as in the channel. */
 const RUN_OF_MESSAGES_MS = 5 * 60_000;
@@ -58,7 +64,7 @@ function Controls({ rootId, info }: { rootId: string; info: ThreadInfo | undefin
         }
       >
         <Icon icon={following ? BellOff : Bell} size="sm" />
-        {following ? t("thread.following") : t("thread.follow")}
+        {following ? t("thread.tracking") : t("thread.track")}
       </Button>
       {info?.manageable === true && next !== undefined && (
         <Button
@@ -69,13 +75,13 @@ function Controls({ rootId, info }: { rootId: string; info: ThreadInfo | undefin
             act.mutate(
               { workspaceId, threadId: rootId, action: next },
               {
-                onSuccess: () => outcome.done(t(`thread.${next}Done`)),
+                onSuccess: () => outcome.done(t(ACTION_TEXT[next].done)),
                 onError: (error) => outcome.failed(error),
               },
             )
           }
         >
-          {t(`thread.${next}`)}
+          {t(ACTION_TEXT[next].label)}
         </Button>
       )}
     </div>

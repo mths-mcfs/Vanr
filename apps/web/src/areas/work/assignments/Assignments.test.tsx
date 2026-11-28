@@ -165,6 +165,28 @@ describe("an assignment's page", () => {
     await waitFor(() => expect(review.getByText("Approved")).toBeDefined());
     expect(row?.reviews[0]?.note).toBe("Looks right");
   });
+  test("a change of language writes the saved spending limit with that language's mark", async () => {
+    const server = newServer();
+    const paper = server.assignments.assignments.find((each) => each.id === "asg_paper");
+    if (paper !== undefined) paper.limits = { ...paper.limits, dollars: 2.5 };
+    const app = await renderApp({ path: PAGE("asg_paper"), server, signedInAs: "usr_ana" });
+    const panel = within(await screen.findByRole("region", { name: "Assignment" }));
+    await app.user.click(panel.getByRole("tab", { name: "Settings" }));
+    await waitFor(async () =>
+      expect(
+        ((await panel.findByRole("textbox", { name: "Spending limit (USD)" })) as HTMLInputElement).value,
+      ).toBe("2.5"),
+    );
+    await app.user.click(await screen.findByRole("button", { name: "Ana Beatriz Souza, account menu" }));
+    await app.user.click(await screen.findByRole("menuitemradio", { name: "Português (Brasil)" }));
+    const translated = within(await screen.findByRole("region", { name: "Atribuição" }));
+    await waitFor(() =>
+      expect(
+        (translated.getByRole("textbox", { name: "Limite de gasto (USD)" }) as HTMLInputElement).value,
+      ).toBe("2,5"),
+    );
+  });
+
   test("the owner sets the limits and resumes jobs on their own", async () => {
     const app = await renderApp({ path: PAGE("asg_paper"), signedInAs: "usr_ana" });
     const panel = within(await screen.findByRole("region", { name: "Assignment" }));
@@ -173,11 +195,16 @@ describe("an assignment's page", () => {
     await app.user.type(panel.getByRole("textbox", { name: "Step limit" }), "40");
     // A thousands separator is no amount: the field says so and nothing is saved.
     const dollars = panel.getByRole("textbox", { name: "Spending limit (USD)" });
-    await app.user.type(dollars, "1,000");
-    expect(panel.getByText(/^A number from 0 to 1/)).toBeDefined();
+    await app.user.type(dollars, "10,000");
+    expect(
+      panel.getByText(/^An amount from 0 to .*, written like 1\.50, with no thousands separator\.$/),
+    ).toBeDefined();
     expect((panel.getByRole("button", { name: "Save limits" }) as HTMLButtonElement).disabled).toBe(true);
     await app.user.clear(dollars);
-    await app.user.type(dollars, "1,50");
+    await app.user.type(dollars, "1,5");
+    expect((panel.getByRole("button", { name: "Save limits" }) as HTMLButtonElement).disabled).toBe(true);
+    await app.user.clear(dollars);
+    await app.user.type(dollars, "1.5");
     await app.user.click(panel.getByRole("button", { name: "Save limits" }));
     await waitFor(() => expect(app.server.assignments.assignments[0]?.limits.steps).toBe(40));
     expect(app.server.assignments.assignments[0]?.limits.dollars).toBe(1.5);

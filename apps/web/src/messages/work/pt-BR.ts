@@ -529,7 +529,7 @@ export default {
   "asg.settings.minutes": "Limite de tempo (minutos)",
   "asg.settings.noLimit": "Vazio para sem limite",
   "asg.settings.dollarsHint":
-    "Dólares, até duas casas decimais (1,50 ou 1.50), sem separador de milhar. Vazio para sem limite",
+    "Dólares, até duas casas decimais depois da vírgula (1,50), sem separador de milhar. Vazio para sem limite",
   "asg.settings.saveLimits": "Salvar limites",
   "asg.settings.resumeJobs": "Retomar sozinho os jobs interrompidos",
   "asg.settings.failed": "Não deu para carregar as regras de comando",
@@ -542,6 +542,8 @@ export default {
   "asg.form.channelsFailed": "Não deu para carregar os canais onde uma atribuição pode ficar",
   "asg.people.requestsFailed": "Não deu para carregar os pedidos para participar",
   "recur.form.limitRange": "Um número de {min} a {max}.",
-  "recur.form.amountHint": "Dólares, com até duas casas decimais: 1,50 ou 1.50. Sem separador de milhar.",
+  "recur.form.amountHint":
+    "Dólares, com até duas casas decimais depois da vírgula: 1,50. Sem separador de milhar.",
+  "recur.form.amountRange": "Um valor de {min} a {max}, escrito como 1,50, sem separador de milhar.",
   "week.field.everyone": "Sem convidados, todos do espaço de trabalho veem o evento.",
 } satisfies TranslationOf<typeof en>;

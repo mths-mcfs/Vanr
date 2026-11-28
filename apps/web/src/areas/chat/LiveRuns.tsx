@@ -44,7 +44,7 @@ function useStop(onEnded: () => void) {
           if (isApiError(error) && error.rawCode === "run.already_ended") {
             outcome.warn(t("run.alreadyEnded"));
             onEnded();
-          } else outcome.warn(t("run.stopFailed", { error: describe(error) }));
+          } else outcome.warn(t("run.haltFailed", { error: describe(error) }));
         },
       },
     );
@@ -102,13 +102,13 @@ function LiveRunView({
               onOpenChange={setConfirming}
               trigger={
                 <Button size="sm" variant="ghost" className="chat-live__stop" loading={stopping}>
-                  {t("run.stop")}
+                  {t("run.halt")}
                 </Button>
               }
-              title={t("run.stopTitle", { agent: name })}
-              description={t("run.stopText")}
-              confirmLabel={t("run.stopConfirm")}
-              cancelLabel={t("run.stopKeep")}
+              title={t("run.haltTitle", { agent: name })}
+              description={t("run.haltText")}
+              confirmLabel={t("run.haltConfirm")}
+              cancelLabel={t("run.haltKeep")}
               tone="danger"
               onConfirm={() => {
                 setConfirming(false);
@@ -119,7 +119,7 @@ function LiveRunView({
         </header>
         {run.consulting !== null && !ended && (
           <p className="chat-note" role="status">
-            {t("run.consulting", { agent: directory.agentName(run.consulting) })}
+            {t("run.asking", { agent: directory.agentName(run.consulting) })}
           </p>
         )}
         <StepList steps={run.steps} label={t("run.steps", { agent: name })} />
@@ -134,7 +134,7 @@ function LiveRunView({
         )}
         {quiet && (
           <p className="chat-note" role="status">
-            {t("run.quiet", { agent: name })}{" "}
+            {t("run.silent", { agent: name })}{" "}
             <button type="button" className="app-link-button" onClick={onCheck}>
               {t("run.check")}
             </button>

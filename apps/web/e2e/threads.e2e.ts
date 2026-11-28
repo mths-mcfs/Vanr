@@ -64,12 +64,12 @@ test.describe("threads", () => {
 
     // The list shows it; its page shows it whole, and whoever started it closes it there.
     await page.goto(`/workspace/${owner.workspace.id}/threads`);
-    const list = page.getByRole("list", { name: t("chat", "threads.list") });
+    const list = page.getByRole("list", { name: t("chat", "threads.rows") });
     await list.getByRole("link", { name: /Which thread count for the linen run/ }).click();
     await expect(page).toHaveURL(new RegExp(`/threads/${root.id}$`));
     const whole = page.getByRole("region", { name: t("chat", "thread.label") });
     await expect(whole.getByRole("article").filter({ hasText: /Got the request/ })).toBeVisible();
-    await whole.getByRole("button", { name: t("chat", "thread.close") }).click();
+    await whole.getByRole("button", { name: t("chat", "thread.shut") }).click();
     await expect(whole.getByText(t("chat", "thread.state.closed"))).toBeVisible();
     await page.goto(`/workspace/${owner.workspace.id}/threads`);
     await page.getByRole("tab", { name: t("chat", "threads.tab.closed") }).click();

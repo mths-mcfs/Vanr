@@ -64,7 +64,7 @@ function Row({ thread }: { thread: ThreadInfo }) {
         <time dateTime={thread.lastTouchedAt}>{ago(thread.lastTouchedAt)}</time>
         {thread.state !== "open" && <Chip>{t(`thread.state.${thread.state}`)}</Chip>}
         {thread.working && <Chip>{t("threads.working")}</Chip>}
-        {thread.actionNeeded && <Chip>{t("threads.needsYou")}</Chip>}
+        {thread.actionNeeded && <Chip>{t("threads.waitsOnYou")}</Chip>}
         {thread.assignment !== null && <Chip>{t("threads.assignment")}</Chip>}
       </span>
       {last !== null && (
@@ -136,8 +136,8 @@ export function ThreadsScreen() {
         <Input
           type="search"
           maxLength={SEARCH_MAX}
-          aria-label={t("threads.search")}
-          placeholder={t("threads.searchHint")}
+          aria-label={t("threads.find")}
+          placeholder={t("threads.findHint")}
           value={typed}
           onChange={(event) => setTyped(event.target.value)}
         />
@@ -149,7 +149,7 @@ export function ThreadsScreen() {
               onCheckedChange={(value) => setNeedsMe(value === true)}
             />
             <Checkbox
-              label={t("threads.mine")}
+              label={t("threads.own")}
               checked={mine}
               onCheckedChange={(value) => setMine(value === true)}
             />
@@ -175,7 +175,7 @@ export function ThreadsScreen() {
         <>
           {/* A first page emptied by a lost channel still leads to the pages after it. */}
           {threads.length > 0 && (
-            <ul className="chat-threads__list" aria-label={t("threads.list")}>
+            <ul className="chat-threads__list" aria-label={t("threads.rows")}>
               {threads.map((thread) => (
                 <Row key={thread.id} thread={thread} />
               ))}
@@ -183,12 +183,12 @@ export function ThreadsScreen() {
           )}
           {pages.hasNextPage && (
             <Button loading={pages.isFetchingNextPage} onClick={() => void pages.fetchNextPage()}>
-              {t("threads.more")}
+              {t("threads.next")}
             </Button>
           )}
           {moreFailed !== null && (
             <p className="chat-note chat-note--danger" role="alert">
-              {t("threads.moreFailed", { error: describe(moreFailed) })}
+              {t("threads.nextFailed", { error: describe(moreFailed) })}
             </p>
           )}
         </>
