@@ -250,16 +250,11 @@ export async function agentChannels(db: Db, agentId: string, viewer?: ChannelVie
 export async function toAgentDetail(
   db: Db,
   row: AgentRow,
-  input: { viewer: ChannelViewer; busy: boolean; testModel: boolean; now: Date },
+  input: { viewer: ChannelViewer; seesUsage: boolean; busy: boolean; testModel: boolean; now: Date },
 ): Promise<AgentDetail> {
-  const workspace = await workspaceBudgetDefaults(db, row.workspaceId);
-  const usage = (await monthUsage(db, [row.id], input.now)).get(row.id) ?? { runs: 0, tokens: 0, costUsd: 0 };
-  const budget = budgetOf(row, workspace.defaultBudget);
   return {
     ...toAgent(await withPlanOwner(db, row), input.viewer.userId, input.busy, input.testModel),
-    budgetSpentPct: budget > 0 ? Math.min(999, Math.round((usage.costUsd / budget) * 100)) : 100,
-    budgetPerMonthUsd: budget,
-    inheritedBudgetUsd: workspace.defaultBudget,
+    ...(input.seesUsage ? await spendOf(db, row, input.now) : NO_SPEND),
     budgetInherited: row.budgetPerMonthUsd === null,
     credentialId: row.credentialId,
     channels: await agentChannels(db, row.id, input.viewer),
@@ -280,6 +275,37 @@ export async function toAgentDetail(
           ),
         )
     ).length,
+  };
+}
+
+type Spend = Pick<
+  AgentDetail,
+  | "budgetSpentPct"
+  | "budgetPerMonthUsd"
+  | "inheritedBudgetUsd"
+  | "monthRuns"
+  | "monthTokens"
+  | "costThisMonthUsd"
+>;
+
+/** Spend and budget are shown under `view_usage`, as GET /usage: whoever doesn't have it gets nulls. */
+const NO_SPEND: Spend = {
+  budgetSpentPct: null,
+  budgetPerMonthUsd: null,
+  inheritedBudgetUsd: null,
+  monthRuns: null,
+  monthTokens: null,
+  costThisMonthUsd: null,
+};
+
+async function spendOf(db: Db, row: AgentRow, now: Date): Promise<Spend> {
+  const workspace = await workspaceBudgetDefaults(db, row.workspaceId);
+  const usage = (await monthUsage(db, [row.id], now)).get(row.id) ?? { runs: 0, tokens: 0, costUsd: 0 };
+  const budget = budgetOf(row, workspace.defaultBudget);
+  return {
+    budgetSpentPct: budget > 0 ? Math.min(999, Math.round((usage.costUsd / budget) * 100)) : 100,
+    budgetPerMonthUsd: budget,
+    inheritedBudgetUsd: workspace.defaultBudget,
     monthRuns: usage.runs,
     monthTokens: usage.tokens,
     costThisMonthUsd: usage.costUsd,

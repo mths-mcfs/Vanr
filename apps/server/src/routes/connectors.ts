@@ -18,7 +18,7 @@ import type { Hono } from "hono";
 import { z } from "zod";
 import { agentInWorkspace, channelViewer, requireAgentEditor } from "../agents";
 import { type AppDeps, type AppEnv, type Ctx, requireUser, type WorkspaceMember } from "../context";
-import { forbidden, notFound, param, readJson, unauthorized } from "../http";
+import { conflict, forbidden, notFound, param, readJson, unauthorized } from "../http";
 import {
   accessView,
   activeConnections,
@@ -339,10 +339,12 @@ export function registerConnectors(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const agent = await agentInWorkspace(deps.db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, agent);
+    if (agent.archivedAt) throw conflict("agent.archived", "This agent was archived");
     const input = await readJson(c, identityInput);
     return c.json(await connectIdentity(deps, withSession(c, me), agent, input));
   });
 
+  // Revoking stays open on an archived agent: it only takes access away, and the archive doesn't disconnect.
   app.post(`${WORKSPACE}/agents/:agentId/identity/revoke`, async (c) => {
     const me = requireMember(c);
     const deps = c.get("deps");
@@ -356,6 +358,7 @@ export function registerConnectors(app: Hono<AppEnv>) {
     const deps = c.get("deps");
     const agent = await agentInWorkspace(deps.db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, agent);
+    if (agent.archivedAt) throw conflict("agent.archived", "This agent was archived");
     const input = await readJson(c, channelRules);
     return c.json({ channels: await setChannelRules(deps, agent, input.channels, channelViewer(me)) });
   });

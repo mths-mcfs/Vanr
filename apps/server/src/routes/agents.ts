@@ -26,7 +26,7 @@ import {
 } from "@vanr/engine/models/catalog";
 import { keyPreview } from "@vanr/engine/seal";
 import { HANDLE_RE } from "@vanr/engine/text";
-import { and, asc, desc, eq, gte, inArray, isNull, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, notInArray, sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { z } from "zod";
 import { type InstructionVersionRow, initialInstructions, writeInstructions } from "../agent-memory";
@@ -42,17 +42,16 @@ import {
   toAgent,
   toAgentDetail,
 } from "../agents";
-import { readableChannel, readableChannelsSql } from "../channels";
-import { type AppEnv, requireUser, type WorkspaceMember } from "../context";
+import { readableChannel } from "../channels";
+import { type AppDeps, type AppEnv, requireUser, type WorkspaceMember } from "../context";
 import { waitingForMe } from "../control";
 import { isUniqueViolation } from "../db-errors";
-import { revealedDebateIds } from "../debates";
 import { importInstructions, parseGithubUrl } from "../github";
 import { badRequest, conflict, forbidden, HttpError, notFound, param, readJson, readQuery } from "../http";
 import { repoReadToken } from "../integrations/github-app";
 import { takenHandles } from "../members";
 import { platformKeyAvailable } from "../models";
-import { readableRun } from "../run-access";
+import { readableRun, readableRuns } from "../run-access";
 import { type Executor, executorModelOk, harnessView, withPlanOwner, withPlanOwners } from "../runners/plans";
 import { requireMember, requirePermission, WORKSPACE } from "../workspace-scope";
 import { toSkill } from "./skills";
@@ -213,18 +212,6 @@ function privateChannelsOutside(db: Db, userId: string, ids: string[]) {
 }
 
 /**
- * The workspace's runs the person may see: of a channel they read (or none), and a debate's turn only once the
- * debate they see revealed who said what (the output tokens per agent would tell whose each anonymous turn is).
- */
-function readableRuns(db: Db, me: WorkspaceMember) {
-  return and(
-    eq(runs.workspaceId, me.workspaceId),
-    or(isNull(runs.channelId), sql`${runs.channelId} in ${readableChannelsSql(me)}`),
-    or(isNull(runs.debateId), inArray(runs.debateId, revealedDebateIds(db, me))),
-  );
-}
-
-/**
  * The live runs the person may see, each with its `what`: the detail's rule (`readableRun`), so a live run of a
  * channel they don't read, of a delegation from such a channel or of a debate that hasn't revealed who spoke
  * neither shows nor says it exists. A live run without its row yet doesn't show either.
@@ -241,7 +228,6 @@ async function revealedRuns(
     .where(
       and(
         readableRuns(db, me),
-        or(isNull(runs.sourceChannelId), sql`${runs.sourceChannelId} in ${readableChannelsSql(me)}`),
         inArray(
           runs.id,
           active.map((a) => a.runId),
@@ -251,9 +237,12 @@ async function revealedRuns(
   return new Map(rows.map((r) => [r.id, r.what]));
 }
 
-/** A delegation asked from a channel the person doesn't read: the run shows, the question doesn't. */
-const questionHidden = (me: WorkspaceMember) =>
-  sql<boolean>`${runs.sourceChannelId} is not null and ${runs.sourceChannelId} not in ${readableChannelsSql(me)}`;
+/** The agents busy for this person: busy only on a live run they may see, so it doesn't tell a hidden one exists. */
+async function busyFor(deps: AppDeps, me: WorkspaceMember): Promise<Set<string>> {
+  const active = deps.runtime.activeRuns({ workspaceId: me.workspaceId });
+  const shown = await revealedRuns(deps.db, me, active);
+  return new Set(active.filter((a) => shown.has(a.runId)).map((a) => a.agentId));
+}
 
 export function toRun(row: typeof runs.$inferSelect): Run {
   return {
@@ -312,21 +301,22 @@ export function registerAgents(app: Hono<AppEnv>) {
 
   app.get(`${WORKSPACE}/agents`, async (c) => {
     const me = requireMember(c);
-    const { db, runtime } = c.get("deps");
+    const deps = c.get("deps");
+    const { db } = deps;
     const rows = await db
       .select()
       .from(agents)
       .where(and(eq(agents.workspaceId, me.workspaceId), isNull(agents.archivedAt)))
       .orderBy(asc(agents.name));
-    const busy = runtime.busyAgents();
+    const busy = await busyFor(deps, me);
     const talkers = await withPlanOwners(db, rows);
-    const testModel = await c.get("deps").testModelFor(me.workspaceId);
+    const testModel = await deps.testModelFor(me.workspaceId);
     return c.json({ agents: talkers.map((r) => toAgent(r, me.userId, busy.has(r.id), testModel(r))) });
   });
 
   app.post(`${WORKSPACE}/agents`, async (c) => {
     const me = requirePermission(c, "manage_agents");
-    const { db, runtime, now } = c.get("deps");
+    const { db, now } = c.get("deps");
     const input = await readJson(c, createInput);
     if ((await takenHandles(db, me.workspaceId)).has(input.handle)) {
       throw conflict("agent.handle_taken", "That @ is already in use", { handle: input.handle });
@@ -396,21 +386,20 @@ export function registerAgents(app: Hono<AppEnv>) {
     }
     if (!row) throw new Error("agent insert returned nothing");
     const testModel = await c.get("deps").testModelFor(me.workspaceId);
-    return c.json(
-      toAgent(await withPlanOwner(db, row), me.userId, runtime.isBusy(row.id), testModel(row)),
-      201,
-    );
+    return c.json(toAgent(await withPlanOwner(db, row), me.userId, false, testModel(row)), 201);
   });
 
   app.get(`${WORKSPACE}/agents/:agentId`, async (c) => {
     const me = requireMember(c);
-    const { db, runtime, now } = c.get("deps");
+    const deps = c.get("deps");
+    const { db, now } = deps;
     const row = await agentInWorkspace(db, me.workspaceId, param(c, "agentId"));
     return c.json(
       await toAgentDetail(db, row, {
         viewer: channelViewer(me),
-        busy: runtime.isBusy(row.id),
-        testModel: (await c.get("deps").testModelFor(me.workspaceId))(row),
+        seesUsage: can(me.role, "view_usage"),
+        busy: (await busyFor(deps, me)).has(row.id),
+        testModel: (await deps.testModelFor(me.workspaceId))(row),
         now: now(),
       }),
     );
@@ -418,7 +407,8 @@ export function registerAgents(app: Hono<AppEnv>) {
 
   app.patch(`${WORKSPACE}/agents/:agentId`, async (c) => {
     const me = requireMember(c);
-    const { db, runtime, now } = c.get("deps");
+    const deps = c.get("deps");
+    const { db, now } = deps;
     const row = await agentInWorkspace(db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, row);
     if (row.archivedAt) throw conflict("agent.archived", "This agent was archived");
@@ -467,9 +457,14 @@ export function registerAgents(app: Hono<AppEnv>) {
       .where(eq(agents.id, row.id))
       .returning();
     if (!updated) throw notFound("Agent not found");
-    const testModel = await c.get("deps").testModelFor(me.workspaceId);
+    const testModel = await deps.testModelFor(me.workspaceId);
     return c.json(
-      toAgent(await withPlanOwner(db, updated), me.userId, runtime.isBusy(updated.id), testModel(updated)),
+      toAgent(
+        await withPlanOwner(db, updated),
+        me.userId,
+        (await busyFor(deps, me)).has(updated.id),
+        testModel(updated),
+      ),
     );
   });
 
@@ -495,6 +490,7 @@ export function registerAgents(app: Hono<AppEnv>) {
     const { db } = c.get("deps");
     const row = await agentInWorkspace(db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, row);
+    if (row.archivedAt) throw conflict("agent.archived", "This agent was archived");
     const input = await readJson(
       c,
       z.object({
@@ -572,6 +568,7 @@ export function registerAgents(app: Hono<AppEnv>) {
     const { db, now } = deps;
     const row = await agentInWorkspace(db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, row);
+    if (row.archivedAt) throw conflict("agent.archived", "This agent was archived");
     const input = await readJson(
       c,
       z
@@ -755,12 +752,12 @@ export function registerAgents(app: Hono<AppEnv>) {
       }),
     );
     const rows = await db
-      .select({ run: runs, hidden: questionHidden(me) })
+      .select()
       .from(runs)
       .where(and(readableRuns(db, me), q.agentId ? eq(runs.agentId, q.agentId) : undefined))
       .orderBy(desc(runs.createdAt), desc(runs.id))
       .limit(q.limit);
-    return c.json({ runs: rows.map((r) => toRun(r.hidden ? { ...r.run, what: "" } : r.run)) });
+    return c.json({ runs: rows.map(toRun) });
   });
 
   app.get(`${WORKSPACE}/runs/:runId`, async (c) => {
@@ -895,7 +892,7 @@ export function registerAgents(app: Hono<AppEnv>) {
     // Stricter than the source: the person's own runs, under the same rule as GET /runs, so one of a private
     // channel they left doesn't show its question or its place.
     const mine = await db
-      .select({ run: runs, hidden: questionHidden(me) })
+      .select({ run: runs })
       .from(runs)
       .innerJoin(messages, eq(messages.id, runs.sourceMessageId))
       .where(
@@ -910,9 +907,9 @@ export function registerAgents(app: Hono<AppEnv>) {
       .limit(limit);
     const out: AgentInbox = {
       waiting: await waitingForMe(db, me, row.id, now()),
-      recent: mine.map(({ run, hidden }) => ({
+      recent: mine.map(({ run }) => ({
         runId: run.id,
-        what: hidden ? "" : run.what,
+        what: run.what,
         status: run.status,
         at: run.createdAt.toISOString(),
         channelId: run.channelId,
@@ -926,7 +923,8 @@ export function registerAgents(app: Hono<AppEnv>) {
 
   app.get(`${WORKSPACE}/team`, async (c) => {
     const me = requireMember(c);
-    const { db, runtime, now } = c.get("deps");
+    const deps = c.get("deps");
+    const { db, now } = deps;
     const agentRows = await db
       .select()
       .from(agents)
@@ -939,14 +937,22 @@ export function registerAgents(app: Hono<AppEnv>) {
       .where(eq(members.workspaceId, me.workspaceId))
       .orderBy(asc(users.name));
     const since = new Date(now().getTime() - 24 * 60 * 60 * 1000);
+    // A delegation shows under the rule of the run that asked it, so one asked from a channel the person doesn't
+    // read doesn't say it happened.
     const recent = await db
       .select()
       .from(delegations)
-      .where(and(eq(delegations.workspaceId, me.workspaceId), gte(delegations.createdAt, since)))
+      .where(
+        and(
+          eq(delegations.workspaceId, me.workspaceId),
+          gte(delegations.createdAt, since),
+          inArray(delegations.runId, db.select({ id: runs.id }).from(runs).where(readableRuns(db, me))),
+        ),
+      )
       .orderBy(desc(delegations.createdAt))
       .limit(100);
-    const busy = runtime.busyAgents();
-    const testModel = await c.get("deps").testModelFor(me.workspaceId);
+    const busy = await busyFor(deps, me);
+    const testModel = await deps.testModelFor(me.workspaceId);
     const team: Team = {
       agents: (await withPlanOwners(db, agentRows)).map((a) => {
         const agent = toAgent(a, me.userId, busy.has(a.id), testModel(a));
@@ -988,6 +994,7 @@ export function registerAgents(app: Hono<AppEnv>) {
     const { db } = c.get("deps");
     const row = await agentInWorkspace(db, me.workspaceId, param(c, "agentId"));
     requireAgentEditor(me, row);
+    if (row.archivedAt) throw conflict("agent.archived", "This agent was archived");
     const input = await readJson(
       c,
       z.object({
