@@ -132,6 +132,7 @@ const Bodies = {
     context: z.string().max(20_000).optional(),
     timezone: z.string().min(1).max(64).optional(),
     approvalReviewer: z.boolean().optional(),
+    agentBudgetDefaultUsd: z.number().min(0).max(100_000).optional(),
   }),
   me: z.object({
     name: z.string().trim().min(1).max(80).optional(),
@@ -298,6 +299,13 @@ export class FakeServer {
   readonly chat: FakeChat;
   readonly agentAccess: FakeAgentAccess;
   readonly connections: FakeConnections;
+  /**
+   * The month's model spend the usage report sums: an agent's runs (`agentId`), or a call made for no
+   * agent (`agentId: null`) of a kind such as "search", "wiki" or "embedding".
+   */
+  usage: { workspaceId: string; agentId: string | null; kind: string; calls: number; costUsd: number }[] = [];
+  /** An agent's own monthly budget; one left out takes the workspace's default. */
+  agentBudgets = new Map<string, number>();
   readonly runnerWork: FakeRunners;
   readonly work: FakeWork;
   readonly assignments: FakeAssignments;
@@ -536,6 +544,8 @@ export class FakeServer {
     this.agentWork.clear();
     this.agentAccess.clear();
     this.connections.clear();
+    this.usage = [];
+    this.agentBudgets = new Map();
     this.runnerWork.clear();
     this.work.clear();
     this.assignments.clear();
@@ -1581,6 +1591,52 @@ export class FakeServer {
       return reply(200, settings);
     },
 
+    getUsageReport: (params, session) => {
+      const scope = this.allowed(params, session, "view_usage");
+      if ("status" in scope) return scope;
+      const defaultBudget = this.settingsOf(scope.workspaceId)?.agentBudgetDefaultUsd ?? 20;
+      const lines = this.usage.filter((line) => line.workspaceId === scope.workspaceId);
+      const runs = lines.filter((line) => line.agentId !== null);
+      const unowned = new Map<string, { kind: string; calls: number; costUsd: number }>();
+      for (const line of lines.filter((each) => each.agentId === null)) {
+        const kind = unowned.get(line.kind) ?? { kind: line.kind, calls: 0, costUsd: 0 };
+        unowned.set(line.kind, {
+          kind: line.kind,
+          calls: kind.calls + line.calls,
+          costUsd: kind.costUsd + line.costUsd,
+        });
+      }
+      const runsUsd = runs.reduce((sum, line) => sum + line.costUsd, 0);
+      const runCalls = runs.reduce((sum, line) => sum + line.calls, 0);
+      const report: T.UsageReport = {
+        since: new Date(Date.UTC(this.now().getUTCFullYear(), this.now().getUTCMonth(), 1)).toISOString(),
+        spendUsd: runsUsd + [...unowned.values()].reduce((sum, kind) => sum + kind.costUsd, 0),
+        perKind: [
+          ...(runCalls > 0 ? [{ kind: "model", calls: runCalls, costUsd: runsUsd }] : []),
+          ...[...unowned.values()].sort((a, b) => a.kind.localeCompare(b.kind)),
+        ],
+        agents: this.agents
+          .filter((agent) => agent.workspaceId === scope.workspaceId && agent.archivedAt === null)
+          .sort((a, b) => a.name.localeCompare(b.name))
+          .map((agent) => {
+            const costUsd = runs
+              .filter((line) => line.agentId === agent.id)
+              .reduce((sum, line) => sum + line.costUsd, 0);
+            const own = this.agentBudgets.get(agent.id);
+            const budgetPerMonthUsd = own ?? defaultBudget;
+            return {
+              agentId: agent.id,
+              name: agent.name,
+              costUsd,
+              budgetPerMonthUsd,
+              budgetInherited: own === undefined,
+              budgetSpentPct:
+                budgetPerMonthUsd > 0 ? Math.round((costUsd / budgetPerMonthUsd) * 1000) / 10 : 0,
+            };
+          }),
+      };
+      return reply(200, report);
+    },
     getSettings: (params, session) => {
       const scope = this.scope(params, session);
       if ("status" in scope) return scope;

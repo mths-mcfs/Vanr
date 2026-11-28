@@ -1,7 +1,7 @@
 // The control center in Portuguese. Assertions on Portuguese text live in a `*.pt-BR.test.tsx` file.
 import { expect, test } from "bun:test";
 import { screen, within } from "@testing-library/react";
-import { renderApp } from "../../../test/app.tsx";
+import { newServer, renderApp } from "../../../test/app.tsx";
 
 const languages = ["pt-BR"];
 
@@ -113,4 +113,31 @@ test("the access matrix, in Portuguese", async () => {
   const level = await within(grid).findByRole("combobox", { name: "O que Scout pode fazer em Team Linear" });
   expect(level.textContent).toBe("Nada");
   expect(within(grid).getByRole("switch", { name: "Tudo para Scout" })).toBeDefined();
+});
+
+test("the usage section, in Portuguese", async () => {
+  const server = newServer();
+  server.usage.push(
+    { workspaceId: "workspace_birchwood", agentId: "agt_scout", kind: "model", calls: 1, costUsd: 12.5 },
+    { workspaceId: "workspace_birchwood", agentId: null, kind: "embedding", calls: 4, costUsd: 0.5 },
+  );
+  const app = await renderApp({
+    path: "/workspace/workspace_birchwood/settings/usage",
+    signedInAs: "usr_jonas",
+    server,
+    languages,
+  });
+  const part = await screen.findByRole("region", { name: "Este mês" });
+  expect(await within(part).findByText("de US$ 60,00")).toBeDefined();
+  expect(within(part).getByText("Não conta no orçamento.", { exact: false })).toBeDefined();
+  expect(within(part).getByText(/soma dos orçamentos mensais dos seus 3 agentes ativos/)).toBeDefined();
+  const form = screen.getByRole("form", { name: "Orçamento padrão de agente" });
+  const field = within(form).getByLabelText(/^Por agente, por mês/);
+  await app.user.clear(field);
+  await app.user.type(field, "12.50");
+  expect(within(form).getByText("Um valor de 0 a US$ 100.000,00, como 12,50.")).toBeDefined();
+  await app.user.clear(field);
+  await app.user.type(field, "12,50");
+  await app.user.click(within(form).getByRole("button", { name: "Salvar padrão" }));
+  expect(await screen.findByText("Agentes novos agora recebem US$ 12,50 por mês.")).toBeDefined();
 });
