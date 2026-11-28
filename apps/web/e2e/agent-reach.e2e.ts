@@ -1,7 +1,8 @@
 // An agent's access against the real server. The workspace has one connection, an MCP server of its own
-// (a double on a local port). An owner gives an agent read access to it in the settings' Access matrix,
-// follows the agent's name to its Access tab, sees the same level there, and turns every connection off
-// for the agent in #general. After a reload the rule and the level are both still there.
+// (a double on a local port). A new agent reaches everything: an owner turns that off in the settings'
+// Access matrix, which keeps the connection at read and change, narrows it to read, follows the agent's
+// name to its Access tab, sees the same level there, and turns every connection off for the agent in
+// #general. After a reload the rule and the level are both still there.
 import { expect, test } from "./fixtures.ts";
 import { type McpDouble, startMcpDouble } from "./mcp-double.ts";
 
@@ -50,7 +51,15 @@ test("an owner sets an agent's access to a connection and its channel access", a
   const level = grid.getByRole("combobox", {
     name: t("control", "grid.levelFor", { agent: "Invoice Clerk", connection: "Ledger tools" }),
   });
-  await expect(level).toHaveText(t("control", "grid.level.none"));
+  const everything = grid.getByRole("switch", {
+    name: t("control", "grid.everythingFor", { agent: "Invoice Clerk" }),
+  });
+  await expect(everything).toHaveAttribute("aria-checked", "true");
+  await expect(level).toBeDisabled();
+  await everything.click();
+  await expect(everything).toHaveAttribute("aria-checked", "false");
+  await expect(level).toBeEnabled();
+  await expect(level).toHaveText(t("control", "grid.level.write"));
   await level.click();
   await page.getByRole("option", { name: t("control", "grid.level.read"), exact: true }).click();
   await expect(level).toHaveText(t("control", "grid.level.read"));
@@ -59,7 +68,12 @@ test("an owner sets an agent's access to a connection and its channel access", a
   ).json()) as {
     scopes: { connectionId: string; scope: string }[];
   };
-  expect(scopes.scopes).toEqual([{ connectionId: serverId, scope: `custom:${serverId}:read` }]);
+  expect(scopes.scopes.some((grant) => grant.scope === "*")).toBe(false);
+  expect(scopes.scopes.filter((grant) => grant.connectionId === serverId)).toEqual([
+    { connectionId: serverId, scope: `custom:${serverId}:read` },
+  ]);
+  // Turning "everything" off kept the built-in areas as they were.
+  expect(scopes.scopes.some((grant) => grant.scope === "drive:write")).toBe(true);
 
   await grid.getByRole("link", { name: "Invoice Clerk" }).click();
   const reach = page.getByRole("region", { name: t("agents", "reach.title") });

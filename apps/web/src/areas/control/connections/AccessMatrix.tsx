@@ -65,7 +65,7 @@ export function AccessSection() {
                   key={`${workspaceId}/${agent.id}`}
                   workspaceId={workspaceId}
                   agent={agent}
-                  columns={connections.length}
+                  columns={connections}
                 />
               ))}
             </tbody>
@@ -81,7 +81,16 @@ export function AccessSection() {
   );
 }
 
-function AgentRow({ workspaceId, agent, columns }: { workspaceId: string; agent: Agent; columns: number }) {
+function AgentRow({
+  workspaceId,
+  agent,
+  columns,
+}: {
+  workspaceId: string;
+  agent: Agent;
+  /** The header's connections: each cell sits under its own column, whatever order this row's answer has. */
+  columns: AgentAccess["connectors"];
+}) {
   const t = useMessages("control");
   const access = useApiQuery("getAgentAccess", { workspaceId, agentId: agent.id });
   const change = useAccessChange(workspaceId, agent.id);
@@ -101,7 +110,7 @@ function AgentRow({ workspaceId, agent, columns }: { workspaceId: string; agent:
     return (
       <tr>
         {name}
-        <td colSpan={columns + 1}>
+        <td colSpan={columns.length + 1}>
           {access.isPending ? (
             <span className="page__muted">{t("grid.loadingRow")}</span>
           ) : (
@@ -123,34 +132,44 @@ function AgentRow({ workspaceId, agent, columns }: { workspaceId: string; agent:
           checked={current.all}
           disabled={change.pending}
           label={<span className="vr-visually-hidden">{t("grid.everythingFor", { agent: agent.name })}</span>}
-          onCheckedChange={(on) => change.setEverything(current, on)}
+          onCheckedChange={(on) => change.setEverything(on)}
         />
       </td>
-      {current.connectors.map((connection) => (
-        <td key={connection.connectionId} data-level={connection.state}>
-          <Select
-            size="sm"
-            value={connection.state}
-            disabled={current.all || change.pending}
-            aria-label={t("grid.levelFor", { agent: agent.name, connection: connection.label })}
-            onValueChange={(next) => {
-              const level = CONN_LEVELS.find((each) => each === next);
-              if (level !== undefined && level !== connection.state) change.setLevel(connection, level);
-            }}
-          >
-            {CONN_LEVELS.map((level) => (
-              <SelectItem key={level} value={level}>
-                {t(`grid.level.${level}`)}
-              </SelectItem>
-            ))}
-            {connection.state === "custom" && (
-              <SelectItem value="custom" disabled>
-                {t("grid.level.custom")}
-              </SelectItem>
-            )}
-          </Select>
-        </td>
-      ))}
+      {columns.map((column) => {
+        const connection = current.connectors.find((each) => each.connectionId === column.connectionId);
+        // A connection this row's answer no longer has (removed meanwhile) gets no control.
+        if (connection === undefined)
+          return (
+            <td key={column.connectionId} data-level="gone">
+              <span className="page__muted">{t("grid.gone")}</span>
+            </td>
+          );
+        return (
+          <td key={column.connectionId} data-level={connection.state}>
+            <Select
+              size="sm"
+              value={connection.state}
+              disabled={current.all || change.pending}
+              aria-label={t("grid.levelFor", { agent: agent.name, connection: column.label })}
+              onValueChange={(next) => {
+                const level = CONN_LEVELS.find((each) => each === next);
+                if (level !== undefined && level !== connection.state) change.setLevel(connection, level);
+              }}
+            >
+              {CONN_LEVELS.map((level) => (
+                <SelectItem key={level} value={level}>
+                  {t(`grid.level.${level}`)}
+                </SelectItem>
+              ))}
+              {connection.state === "custom" && (
+                <SelectItem value="custom" disabled>
+                  {t("grid.level.custom")}
+                </SelectItem>
+              )}
+            </Select>
+          </td>
+        );
+      })}
     </tr>
   );
 }

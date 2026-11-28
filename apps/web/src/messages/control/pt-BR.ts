@@ -575,7 +575,8 @@ export default {
 
   "grid.title": "Agentes e conexões",
   "grid.lead":
-    "Até onde cada agente vai em cada conexão do workspace. Regras por canal, caixas de e-mail e bancos ficam na aba Acesso de cada agente.",
+    "Até onde cada agente vai em cada conexão do workspace. As regras por canal ficam na aba Acesso de cada agente.",
+  "grid.gone": "Removida",
   "grid.failed": "Não deu para carregar o acesso dos agentes",
   "grid.rowFailed": "Não deu para carregar o acesso de {agent}",
   "grid.loadingRow": "Carregando…",

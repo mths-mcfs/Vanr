@@ -568,7 +568,8 @@ export default {
 
   "grid.title": "Agents and connections",
   "grid.lead":
-    "How far each agent reaches into each workspace connection. Channel rules, mailboxes and databases are set on each agent's Access tab.",
+    "How far each agent reaches into each workspace connection. Its channel rules are on the agent's own Access tab.",
+  "grid.gone": "Removed",
   "grid.failed": "The access of the agents could not be loaded",
   "grid.rowFailed": "The access of {agent} could not be loaded",
   "grid.loadingRow": "Loading…",
