@@ -281,13 +281,10 @@ describe("agents at work", () => {
     await within(working()).findByRole("img", { name: "Scout, at work" });
   });
 
-  test("the channel list is a place the chat area fills; until then it says so plainly", async () => {
+  test("the channel list is the chat area's: its conversations show in the Channels band", async () => {
     await open();
-    expect(
-      await within(screen.getByRole("region", { name: "Channels" })).findByText(
-        "The channel list is not part of this build yet.",
-      ),
-    ).toBeDefined();
+    const band = screen.getByRole("region", { name: "Channels" });
+    expect(await within(band).findByRole("link", { name: /general/ })).toBeDefined();
   });
 });
 
