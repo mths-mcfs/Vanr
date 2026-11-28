@@ -107,7 +107,7 @@ const handleOf = (entry: DirectoryMember) => entry.handle ?? entry.name.replace(
 export function answering(
   text: string,
   people: readonly DirectoryMember[],
-  dmAgentId: string | undefined,
+  fallback: readonly string[],
 ): string[] {
   const agents = people.filter((entry) => entry.type === "agent" && entry.handle !== null);
   const mentioned = agents.filter((entry) =>
@@ -117,7 +117,7 @@ export function answering(
     ).test(text),
   );
   if (mentioned.length > 0) return mentioned.map((entry) => entry.id);
-  return dmAgentId === undefined ? [] : [dmAgentId];
+  return [...fallback];
 }
 
 type Tool = {
@@ -149,20 +149,24 @@ export function Composer({
   onClearQuote,
   onSend,
   onTyping,
-  dmAgentId,
+  fallbackAnswerers = [],
+  draftId,
   placeholder,
 }: {
   quoting: Message | null;
   onClearQuote: () => void;
   onSend: (outgoing: Outgoing) => void;
   onTyping: () => void;
-  dmAgentId?: string;
+  /** Who answers when nobody is mentioned: the agent of a direct message, the agents of a thread. */
+  fallbackAnswerers?: readonly string[];
+  /** Where the unsent text is kept; one per conversation or thread. */
+  draftId: string;
   placeholder: string;
 }) {
   const t = useMessages("chat");
-  const { channelId, people, me, directory } = useConversation();
+  const { people, me, directory } = useConversation();
   const authorName = useAuthorName();
-  const [text, setText, discard] = useDraft(`chat:${channelId}`);
+  const [text, setText, discard] = useDraft(draftId);
   const field = useRef<HTMLTextAreaElement>(null);
   const [caret, setCaret] = useState(0);
   const [dismissed, setDismissed] = useState<number | null>(null);
@@ -268,7 +272,7 @@ export function Composer({
     }
   };
 
-  const answerers = answering(text, people, dmAgentId);
+  const answerers = answering(text, people, fallbackAnswerers);
 
   return (
     <div className="chat-composer">

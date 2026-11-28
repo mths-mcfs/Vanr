@@ -185,18 +185,22 @@ export function LiveRuns({
   now,
   onCheck,
   scope,
+  thread = null,
 }: {
   runs: readonly LiveRun[];
   now: number;
   onCheck: () => void;
   /** Where two quick Escapes stop a run: the conversation. */
   scope: RefObject<HTMLElement | null>;
+  /** The thread shown, or null for the conversation itself. */
+  thread?: string | null;
 }) {
   const t = useMessages("chat");
   const { directory, mayStop } = useConversation();
   const { stop, stopping } = useStop(onCheck);
-  const here = runs.filter((run) => run.threadId === null);
-  const elsewhere = runs.filter((run) => run.threadId !== null && run.endedAt === null);
+  const here = runs.filter((run) => run.threadId === thread);
+  const elsewhere =
+    thread === null ? runs.filter((run) => run.threadId !== null && run.endedAt === null) : [];
   useDoubleEscape(
     scope,
     () =>

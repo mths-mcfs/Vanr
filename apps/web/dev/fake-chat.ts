@@ -14,6 +14,7 @@ export type ChatHost = FilesHost & {
   people: (workspaceId: string) => { userId: string; name: string; handle: string }[];
   agents: (workspaceId: string) => T.Agent[];
   dms: (workspaceId: string) => T.DirectMessage[];
+  messages: () => T.Message[];
 };
 
 type StoredRun = { workspaceId: string; active: T.ActiveRun | null; run: T.Run; steps: T.RunStep[] };
@@ -24,6 +25,52 @@ const manages = (role: T.Role) => role === "owner" || role === "admin";
 
 export class FakeChat {
   runs: StoredRun[] = [];
+  /** Threads with a record: one was answered or followed. Ids are their first message's. */
+  threads: T.ThreadInfo[] = [];
+  /** Corrections sent to agents' answers, newest last. */
+  feedback: { messageId: string; body: string }[] = [];
+
+  /** A thread's record, made from its first message as the server makes it. */
+  thread(rootId: string, by: string, fields: Partial<T.ThreadInfo> = {}): T.ThreadInfo {
+    const existing = this.threads.find((each) => each.id === rootId);
+    if (existing !== undefined) return existing;
+    const root = this.host.messages().find((message) => message.id === rootId);
+    const room = this.host.channels().find((each) => each.id === root?.channelId);
+    const at = this.host.now().toISOString();
+    const info: T.ThreadInfo = {
+      id: rootId,
+      actionNeeded: false,
+      assignment: null,
+      channelId: root?.channelId ?? "",
+      channelName: room?.name ?? "",
+      context: {
+        channelId: root?.channelId ?? "",
+        count: 0,
+        lastMessageId: null,
+        moved: false,
+        omittedMessageIds: [],
+        rootMessageId: rootId,
+      },
+      createdBy: { type: "person", id: by },
+      firstReplyAt: null,
+      following: false,
+      lastMessage: null,
+      lastTouchedAt: at,
+      manageable: false,
+      opener: root?.author ?? { type: "person", id: by },
+      openingText: root?.body ?? "",
+      participants: [],
+      replyCount: this.host.messages().filter((message) => message.threadId === rootId).length,
+      resolvedSuggestion: false,
+      state: "open",
+      title: "",
+      venue: "channel",
+      working: false,
+      ...fields,
+    };
+    this.threads.push(info);
+    return info;
+  }
 
   constructor(private readonly host: ChatHost) {}
 
@@ -104,7 +151,98 @@ export class FakeChat {
         return "status" in scope ? scope : handler(scope, params);
       };
     const notFound = () => fail(404, "not_found", "Channel not found");
+    const readableThread = (scope: Scope, threadId: unknown) => {
+      const info = this.threads.find((each) => each.id === threadId);
+      return info === undefined || this.room(scope, info.channelId) === undefined ? undefined : info;
+    };
+    // Whoever started a thread, or whoever configures the workspace, manages it.
+    const shown = (scope: Scope, info: T.ThreadInfo): T.ThreadInfo => ({
+      ...info,
+      manageable:
+        (info.createdBy.type === "person" && info.createdBy.id === scope.user.id) || manages(scope.role),
+    });
     return {
+      listChannelMessages: within((scope, params) => {
+        const room = this.room(scope, params.channelId);
+        if (room === undefined) return notFound();
+        const threadId = typeof params.threadId === "string" ? params.threadId : null;
+        const limit = Math.min(Number(params.limit ?? 100) || 100, 200);
+        let list = this.host.messages().filter((m) => m.channelId === room.id && m.threadId === threadId);
+        if (typeof params.before === "string") {
+          const at = list.findIndex((m) => m.id === params.before);
+          if (at >= 0) list = list.slice(0, at);
+        }
+        list = list.slice(-limit);
+        // In a thread, its first message comes before the first page.
+        const root = threadId === null ? undefined : this.host.messages().find((m) => m.id === threadId);
+        if (root !== undefined && params.before === undefined) list = [root, ...list];
+        return reply(200, { messages: list });
+      }),
+      getThread: within((scope, params) => {
+        const info = readableThread(scope, params.threadId);
+        return info === undefined
+          ? fail(404, "not_found", "Thread not found")
+          : reply(200, shown(scope, info));
+      }),
+      listThreads: within((scope, params) => {
+        const tab = typeof params.tab === "string" ? params.tab : "all";
+        const q = typeof params.q === "string" ? params.q.toLowerCase() : "";
+        const list = this.threads.filter(
+          (info) =>
+            this.room(scope, info.channelId) !== undefined &&
+            (tab === "all"
+              ? info.state !== "archived"
+              : tab === "working"
+                ? info.working
+                : tab === "assignments"
+                  ? info.assignment !== null
+                  : info.state === tab) &&
+            (params.actionNeeded === undefined || info.actionNeeded) &&
+            (params.mine === undefined || info.createdBy.id === scope.user.id) &&
+            (q === "" || info.title.toLowerCase().includes(q) || info.openingText.toLowerCase().includes(q)),
+        );
+        const limit = Number(params.limit ?? 30) || 30;
+        const start = typeof params.cursor === "string" ? Number(params.cursor) : 0;
+        const page = list.slice(start, start + limit);
+        const next = start + limit < list.length ? String(start + limit) : null;
+        return reply(200, { threads: page.map((info) => shown(scope, info)), nextCursor: next });
+      }),
+      followThread: within((scope, params) => {
+        const root = this.host.messages().find((m) => m.id === params.threadId && m.threadId === null);
+        if (root === undefined || this.room(scope, root.channelId) === undefined)
+          return fail(404, "not_found", "Thread not found");
+        this.thread(root.id, scope.user.id).following = true;
+        return reply(200, { threadId: root.id, following: true });
+      }),
+      unfollowThread: within((scope, params) => {
+        const info = readableThread(scope, params.threadId);
+        if (info === undefined) return fail(404, "not_found", "Thread not found");
+        info.following = false;
+        return reply(200, { threadId: info.id, following: false });
+      }),
+      runActionOnThread: within((scope, params) => {
+        const info = readableThread(scope, params.threadId);
+        if (info === undefined) return fail(404, "not_found", "Thread not found");
+        if (!shown(scope, info).manageable)
+          return fail(403, "forbidden", "Only who started the thread or an admin can change it");
+        const next = { close: "closed", reopen: "open", unarchive: "open", archive: "archived" } as const;
+        const state = next[params.action as keyof typeof next];
+        if (state === undefined) return fail(400, "invalid_request", "Unknown action");
+        info.state = state;
+        return reply(200, shown(scope, info));
+      }),
+      createMessageFeedback: within((scope, params) => {
+        const target = this.host.messages().find((m) => m.id === params.messageId);
+        if (target === undefined || this.room(scope, target.channelId) === undefined)
+          return fail(404, "not_found", "Message not found");
+        if (target.author.type !== "agent")
+          return fail(400, "invalid_request", "Only agent replies take feedback");
+        const body = typeof params.body === "string" ? params.body.trim() : "";
+        if (body === "" || body.length > 4000)
+          return fail(400, "invalid_request", "Feedback must be 1 to 4000 characters");
+        this.feedback.push({ messageId: target.id, body });
+        return reply(200, target);
+      }),
       getChannelDirectory: within((scope, params) => {
         const room = this.room(scope, params.channelId);
         if (room === undefined) return notFound();

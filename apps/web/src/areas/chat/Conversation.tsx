@@ -7,7 +7,8 @@ import type { Channel, Message } from "@vanr/contract";
 import { AgentSigil, Avatar, Button, EmptyState, ErrorState, Icon, Spinner } from "@vanr/ui";
 import { Hash, Lock, MessagesSquare, WifiOff } from "lucide-react";
 import { Fragment, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { useRouteParams } from "../../app/navigation.tsx";
+import { z } from "zod";
+import { useGo, useRouteParams, useSearch } from "../../app/navigation.tsx";
 import { ScreenError, ScreenLoading, useDocumentTitle, useErrorMessage } from "../../app/screens.tsx";
 import { useLocale, useLookup, useMessages } from "../../i18n/react.tsx";
 import { useClock } from "../../platform/clock.tsx";
@@ -27,6 +28,10 @@ import {
 import { LiveRuns } from "./LiveRuns.tsx";
 import { LANDING_MS, type LiveRun, showing } from "./live.ts";
 import { MessageItem } from "./Message.tsx";
+import { ThreadPanel } from "./Thread.tsx";
+
+const ThreadAddress = z.object({ thread: z.string().min(1).max(64).optional() });
+const NO_THREAD: z.infer<typeof ThreadAddress> = {};
 
 /** Two messages of one author closer than this read as one. */
 const RUN_OF_MESSAGES_MS = 5 * 60_000;
@@ -166,11 +171,13 @@ function AgentHeader({ agentId }: { agentId: string }) {
 function History({
   target,
   member,
+  onOpenThread,
   onLost,
   children,
 }: {
   target: Kind;
   member: boolean;
+  onOpenThread: (rootId: string) => void;
   /** The person can no longer read the channel. */
   onLost: () => void;
   children?: ReactNode;
@@ -289,7 +296,13 @@ function History({
               return (
                 <Fragment key={message.id}>
                   {newDay && <DayLabel iso={message.createdAt} now={now} />}
-                  <MessageItem message={message} continued={continued} onQuote={onQuote} onRetry={onRetry} />
+                  <MessageItem
+                    message={message}
+                    continued={continued}
+                    onQuote={onQuote}
+                    onRetry={onRetry}
+                    onOpenThread={onOpenThread}
+                  />
                 </Fragment>
               );
             })}
@@ -312,7 +325,8 @@ function History({
           onSend={history.send}
           onTyping={signal}
           placeholder={placeholder}
-          {...(target.kind === "agent" && { dmAgentId: target.agentId })}
+          draftId={`chat:${channelId}`}
+          {...(target.kind === "agent" && { fallbackAnswerers: [target.agentId] })}
         />
       ) : (
         <JoinBar channel={target.channel} />
@@ -337,15 +351,34 @@ function ConversationView({
 }) {
   const { workspaceId } = useRouteParams("home");
   useChannelSubscription(channelId);
+  const { thread } = useSearch(ThreadAddress, NO_THREAD);
+  const go = useGo();
+  // The open thread lives in the address, so a link or a reload brings it back.
+  const showThread = useCallback(
+    (rootId: string | undefined) => {
+      const search = rootId === undefined ? {} : { thread: rootId };
+      if (target.kind === "channel") void go("channel", { workspaceId, channelId }, { search });
+      else if (target.kind === "person")
+        void go("dmPerson", { workspaceId, userId: target.userId }, { search });
+      else void go("dmAgent", { workspaceId, agentId: target.agentId }, { search });
+    },
+    [go, target, workspaceId, channelId],
+  );
+  const openThread = useCallback((rootId: string) => showThread(rootId), [showThread]);
   // Once the person lost the channel nothing of it stays on screen, its name included.
   const [lost, setLost] = useState(false);
   const onLost = useCallback(() => setLost(true), []);
   if (lost) return <Forgotten workspaceId={workspaceId} channelId={channelId} />;
   return (
     <ConversationProvider workspaceId={workspaceId} channelId={channelId} member={member}>
-      <div className="chat">
-        <Header target={target} />
-        <History target={target} member={member} onLost={onLost} />
+      <div className="chat" data-thread={thread !== undefined || undefined}>
+        <div className="chat__main">
+          <Header target={target} />
+          <History target={target} member={member} onOpenThread={openThread} onLost={onLost} />
+        </div>
+        {thread !== undefined && (
+          <ThreadPanel key={thread} rootId={thread} member={member} onClose={() => showThread(undefined)} />
+        )}
       </div>
     </ConversationProvider>
   );

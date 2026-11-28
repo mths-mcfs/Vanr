@@ -364,6 +364,7 @@ export class FakeServer {
       channels: () => this.state.channels,
       people: (workspaceId) => this.state.members.filter((member) => member.workspaceId === workspaceId),
       agents: (workspaceId) => this.agents.filter((candidate) => candidate.workspaceId === workspaceId),
+      messages: () => this.state.messages,
       dms: (workspaceId) => {
         let list = this.dms.get(workspaceId);
         if (list === undefined) {
@@ -731,6 +732,8 @@ export class FakeServer {
     this.notifications = [];
     this.dms.clear();
     this.chat.runs = [];
+    this.chat.threads = [];
+    this.chat.feedback = [];
     this.notificationSettings.clear();
     this.approvals.clear();
     this.accounts.clear();

@@ -58,10 +58,14 @@ const isLost = (error: unknown) => isApiError(error) && (error.status === 404 ||
  * When the channel answers 404 or 403 the person lost it: what was shown is dropped and `lost` says
  * so; `useForgetChannel` then clears the cache once the conversation is off screen.
  */
-export function useHistory(workspaceId: string, channelId: string, authorId: string) {
+export function useHistory(workspaceId: string, channelId: string, authorId: string, threadId?: string) {
   const client = useVanrClient();
   const queryClient = useQueryClient();
-  const args = { workspaceId, channelId, query: { limit: PAGE } };
+  const args = {
+    workspaceId,
+    channelId,
+    query: threadId === undefined ? { limit: PAGE } : { threadId, limit: PAGE },
+  };
   const latest = useApiQuery("listChannelMessages", args);
   const [known, setKnown] = useState<ReadonlyMap<string, Message>>(() => new Map());
   const [more, setMore] = useState(true);
@@ -91,7 +95,11 @@ export function useHistory(workspaceId: string, channelId: string, authorId: str
   // The events refetch only the latest page: these keep the older ones current too.
   useRealtimeEvent("message.posted", (event) => {
     const { message } = event.payload;
-    if (message.channelId === channelId && message.threadId === null) upsert([message]);
+    const here =
+      threadId === undefined
+        ? message.threadId === null
+        : message.threadId === threadId || message.id === threadId;
+    if (message.channelId === channelId && here) upsert([message]);
   });
   useRealtimeEvent("message.reactions_updated", (event) =>
     patch(event.payload.messageId, (message) => ({ ...message, reactions: event.payload.reactions })),
@@ -130,7 +138,7 @@ export function useHistory(workspaceId: string, channelId: string, authorId: str
       const page = await client.api.listChannelMessages({
         workspaceId,
         channelId,
-        query: { before: first.id, limit: PAGE },
+        query: { ...args.query, before: first.id },
       });
       upsert(page);
       setMore(page.length >= PAGE);
@@ -152,6 +160,7 @@ export function useHistory(workspaceId: string, channelId: string, authorId: str
         body: {
           body: message.body,
           clientId,
+          ...(threadId !== undefined && { threadId }),
           ...(message.meta.replyTo !== undefined && { replyTo: message.meta.replyTo.messageId }),
         },
       });
@@ -188,7 +197,7 @@ export function useHistory(workspaceId: string, channelId: string, authorId: str
       receipts: { claimedBy: [], handled: [], viewedBy: [] },
       replyCount: 0,
       runId: null,
-      threadId: null,
+      threadId: threadId ?? null,
       usage: null,
     };
     setLocal((current) => [...current, message]);
