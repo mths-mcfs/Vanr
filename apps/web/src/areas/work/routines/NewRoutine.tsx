@@ -56,9 +56,10 @@ type NumberKey = (typeof NUMBERS)[number]["key"];
 
 /** A limit as typed: a number inside its bounds (a whole one unless it is money), or undefined. */
 export function readLimit(text: string, limit: (typeof NUMBERS)[number]): number | undefined {
-  // Digits with one decimal mark, either "." or ",": not "0x10", "1e3" or a thousands separator.
+  // A count is digits only. An amount is dollars with up to two decimals after "." or ",", so
+  // "1,000" is no amount at all rather than one dollar; neither is "0x10" or "1e3".
   const typed = text.trim();
-  if (!/^\d+([.,]\d+)?$/.test(typed)) return undefined;
+  if (!(limit.step === 1 ? /^\d+$/ : /^\d+([.,]\d{1,2})?$/).test(typed)) return undefined;
   const value = Number(typed.replace(",", "."));
   if (value < limit.min || value > limit.max) return undefined;
   if (limit.step === 1 && !Number.isInteger(value)) return undefined;
@@ -387,6 +388,7 @@ export function NewRoutineDialog({
                 <Field
                   key={each.key}
                   label={t(NUMBER_LABEL[each.key])}
+                  {...(each.step !== 1 && { hint: t("recur.form.amountHint") })}
                   {...(limits[each.key] === undefined && {
                     error: t("recur.form.limitRange", { min: each.min, max: each.max }),
                   })}

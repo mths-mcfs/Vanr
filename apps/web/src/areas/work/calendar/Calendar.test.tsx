@@ -79,6 +79,17 @@ describe("the week", () => {
     }
   });
 
+  test("a proposal answered elsewhere leaves the list when this page tries to answer it", async () => {
+    const app = await renderApp({ path: CALENDAR, signedInAs: "usr_ana" });
+    const proposals = within(await screen.findByRole("region", { name: "Proposed by agents" }));
+    const proposal = app.server.work.proposals.find((each) => each.id === "prp_sync");
+    if (proposal !== undefined) proposal.status = "confirmed";
+    await app.user.click(proposals.getByRole("button", { name: "Add to calendar" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("region", { name: "Proposed by agents" }) === null).toBe(true),
+    );
+  });
+
   test("another week, and back to this one", async () => {
     const app = await renderApp({ path: CALENDAR, signedInAs: "usr_ana" });
     await screen.findByRole("region", { name: /^Thursday/ });

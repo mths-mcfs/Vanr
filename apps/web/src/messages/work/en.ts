@@ -540,5 +540,6 @@ export default {
   "asg.form.channelsFailed": "The channels an assignment can live in could not be loaded",
   "asg.people.requestsFailed": "The requests to take part could not be loaded",
   "recur.form.limitRange": "A number from {min} to {max}.",
+  "recur.form.amountHint": "Dollars, with up to two decimals: 1.50 or 1,50. No thousands separator.",
   "week.field.everyone": "With no one invited, everyone in the workspace sees it.",
 } as const satisfies Catalog;

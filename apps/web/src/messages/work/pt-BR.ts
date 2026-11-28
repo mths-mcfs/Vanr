@@ -538,5 +538,6 @@ export default {
   "asg.form.channelsFailed": "Não deu para carregar os canais onde uma atribuição pode ficar",
   "asg.people.requestsFailed": "Não deu para carregar os pedidos para participar",
   "recur.form.limitRange": "Um número de {min} a {max}.",
+  "recur.form.amountHint": "Dólares, com até duas casas decimais: 1,50 ou 1.50. Sem separador de milhar.",
   "week.field.everyone": "Sem convidados, todos do espaço de trabalho veem o evento.",
 } satisfies TranslationOf<typeof en>;

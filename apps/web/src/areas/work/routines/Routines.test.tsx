@@ -161,12 +161,23 @@ describe("the routines", () => {
     expect(readLimit("0x10", cost)).toBeUndefined();
     expect(readLimit("1e1", cost)).toBeUndefined();
     expect(readLimit("1.000.5", cost)).toBeUndefined();
+    // A thousands separator is no amount, not one dollar.
+    expect(readLimit("1,000", cost)).toBeUndefined();
+    expect(readLimit("1,50", cost)).toBe(1.5);
+    // A count is digits only.
+    const steps = { key: "maxSteps", min: 1, max: 50, step: 1 } as const;
+    expect(readLimit("12", steps)).toBe(12);
+    expect(readLimit("1,0", steps)).toBeUndefined();
+    expect(readLimit("12.0", steps)).toBeUndefined();
   });
 
   test("the limits keep what is typed until the routine is sent", async () => {
     const app = await renderApp({ path: ROUTINES, signedInAs: "usr_ana" });
     await app.user.click(await screen.findByRole("button", { name: "New routine" }));
     const dialog = within(await screen.findByRole("dialog", { name: "New routine" }));
+    expect(
+      dialog.getByText("Dollars, with up to two decimals: 1.50 or 1,50. No thousands separator."),
+    ).toBeDefined();
     await app.user.type(dialog.getByRole("textbox", { name: "Name" }), "Limits");
     await app.user.type(dialog.getByRole("textbox", { name: "Instruction" }), "Do it.");
     await app.user.click(dialog.getByRole("combobox", { name: "Runs" }));
