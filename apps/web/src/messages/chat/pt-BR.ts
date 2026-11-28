@@ -9,7 +9,7 @@ export default {
   "side.people": "Pessoas",
   "side.unread": { one: "{count} mensagem não lida", other: "{count} mensagens não lidas" },
   "side.noChannels": "Você ainda não está em nenhum canal.",
-  "side.noAgents": "Este workspace ainda não tem agentes.",
+  "side.noAgents": "Os agentes que vocês criarem aparecem aqui.",
   "side.noPeople": "As mensagens diretas com pessoas aparecem aqui.",
   "side.channelsFailed": "Os canais não carregaram.",
   "side.agentsFailed": "Os agentes não carregaram.",
