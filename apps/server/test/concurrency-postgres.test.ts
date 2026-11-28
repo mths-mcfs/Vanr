@@ -359,7 +359,8 @@ describe.skipIf(!TEST_POSTGRES_URL)(
                   (err: unknown) => (err instanceof HttpError ? err.code : String(err)),
                 );
           },
-          { match: "for update" },
+          // The lock's own select (what both sides read first); in the mutant mode it runs without FOR UPDATE.
+          { match: '"visibility"' },
         );
         expect(run.aPids[0]).not.toBe(run.bPids[0]);
         const [channel] = await server.deps.db
