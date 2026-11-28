@@ -55,7 +55,8 @@ const MAX_TIMEOUT_S = 3600;
 
 /**
  * Changing the binding and closing its requests commit together, before any new send can claim them. Lending a
- * runner checks the archive under the agent's lock (an archive that lands mid-request wins); clearing it doesn't.
+ * runner checks the archive under the agent's lock (an archive that lands mid-request wins) and turns the agent's
+ * environment on in the same step; clearing it does neither.
  */
 async function setAgentRunner(deps: AppDeps, agentId: string, runnerId: string | null) {
   const { previous, closed } = await deps.db.transaction(async (tx) => {
@@ -72,6 +73,14 @@ async function setAgentRunner(deps: AppDeps, agentId: string, runnerId: string |
       previous ?? "",
       previous && previous !== runnerId ? [agentId] : [],
     );
+    if (runnerId && agent)
+      await tx
+        .insert(agentEnvironments)
+        .values({ agentId, workspaceId: agent.workspaceId, status: "running", lastUsedAt: deps.now() })
+        .onConflictDoUpdate({
+          target: agentEnvironments.agentId,
+          set: { status: "running", updatedAt: deps.now() },
+        });
     return { previous, closed };
   });
   if (previous && previous !== runnerId) {
@@ -482,14 +491,6 @@ export function registerRunners(app: Hono<AppEnv>) {
       if (!canUseRunner(me, runner)) throw forbidden("Only who paired this runner can lend it to agents");
     }
     const previous = await setAgentRunner(deps, agent.id, runnerId);
-    if (runnerId)
-      await deps.db
-        .insert(agentEnvironments)
-        .values({ agentId: agent.id, workspaceId: me.workspaceId, status: "running", lastUsedAt: deps.now() })
-        .onConflictDoUpdate({
-          target: agentEnvironments.agentId,
-          set: { status: "running", updatedAt: deps.now() },
-        });
     const target = await targetOf(deps, runnerId);
     // The same shape as every `environment.updated`: the agent's page updates the card without fetching.
     await emitEnvironment(deps, me.workspaceId, agent.id);
