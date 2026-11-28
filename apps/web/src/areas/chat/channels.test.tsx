@@ -707,7 +707,10 @@ describe("what CodeRabbit found on round two", () => {
     await app.user.click(ledger);
     await app.user.click(tally);
     await act(async () => held.release());
-    expect(await within(dialog).findByRole("alert")).toBeDefined();
+    // Tally's add went through; Ledger's failure is still said.
+    await waitFor(() => expect(server.chat.agentMembers.get("ch_print")?.has("agt_tally")).toBe(true));
+    expect(server.chat.agentMembers.get("ch_print")?.has("agt_ledger")).toBe(false);
+    expect((await within(dialog).findByRole("alert")).textContent).toBe("That no longer exists.");
   });
 
   test("a budget the field can't write, left alone, neither blocks saving nor is sent", async () => {
