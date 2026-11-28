@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { chooseOption, newServer, renderApp } from "../../../../test/app.tsx";
 
 const issuePage = (number: string) => `/workspace/workspace_birchwood/issues/${number}`;
@@ -101,5 +101,55 @@ describe("an issue's page", () => {
     expect(
       await screen.findByRole("heading", { level: 1, name: "#1 Reprint the spring catalogue" }),
     ).toBeDefined();
+  });
+});
+
+describe("an issue's page, after it opened", () => {
+  test("the comment box waits while a comment goes out", async () => {
+    const server = newServer();
+    const held = server.hold("createIssueComment");
+    const app = await renderApp({ path: issuePage("1"), signedInAs: "usr_ana", server });
+    await app.user.type(await screen.findByRole("textbox", { name: "Comment" }), "First");
+    await app.user.click(screen.getByRole("button", { name: "Post comment" }));
+    expect(screen.getByRole("textbox", { name: "Comment" }).hasAttribute("disabled")).toBe(true);
+    await act(async () => held.release());
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "Comment" }).hasAttribute("disabled")).toBe(false),
+    );
+  });
+
+  test("the due date is saved once the field is left, not while it is typed", async () => {
+    const app = await renderApp({ path: issuePage("2"), signedInAs: "usr_ana" });
+    const due = (await screen.findByLabelText("Due")) as HTMLInputElement;
+    fireEvent.change(due, { target: { value: "2026-12-01" } });
+    // Long enough for a call sent on the change to reach the server.
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(app.server.calls.some((call) => call.method === "updateIssue")).toBe(false);
+    fireEvent.blur(due);
+    await waitFor(() =>
+      expect(app.server.work.issues.find((issue) => issue.number === 2)?.dueDate).toBe("2026-12-01"),
+    );
+  });
+
+  test("an issue that stops being readable on a later read shows as not here", async () => {
+    const app = await renderApp({ path: issuePage("3"), signedInAs: "usr_iris" });
+    await screen.findByRole("heading", { level: 1, name: "#3 Archive the old invoices" });
+    await act(async () => {
+      app.server.state.channels.push({
+        id: "ch_board",
+        workspaceId: "workspace_birchwood",
+        name: "board",
+        topic: "",
+        isGeneral: false,
+        visibility: "private",
+        budgetPerMonthUsd: null,
+        createdAt: "2026-11-02T09:00:00.000Z",
+        memberIds: ["usr_ana"],
+      });
+      const issue = app.server.work.issues.find((each) => each.number === 3);
+      if (issue !== undefined) issue.channelId = "ch_board";
+      await app.runtime.queryClient.invalidateQueries();
+    });
+    expect(await screen.findByText("This issue isn't here")).toBeDefined();
   });
 });

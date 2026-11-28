@@ -72,8 +72,10 @@ function IssueView({ workspaceId, issueSeq }: { workspaceId: string; issueSeq: s
   );
   if (!valid) return <Missing workspaceId={workspaceId} />;
   if (issue.isPending) return <ScreenLoading />;
+  // A 404 on a later read (the issue went, or its channel was left) wins over what was read before.
+  if (issue.isError && isApiError(issue.error) && issue.error.status === 404)
+    return <Missing workspaceId={workspaceId} />;
   if (issue.isError && issue.data === undefined) {
-    if (isApiError(issue.error) && issue.error.status === 404) return <Missing workspaceId={workspaceId} />;
     return (
       <ScreenError
         title={t("issue.failed")}
@@ -224,13 +226,7 @@ function IssuePage({ workspaceId, issue }: { workspaceId: string; issue: Issue }
               ))}
             </Select>
           </Field>
-          <Field label={t("issue.due")}>
-            <Input
-              type="date"
-              value={issue.dueDate ?? ""}
-              onChange={(event) => patch({ dueDate: event.target.value === "" ? null : event.target.value })}
-            />
-          </Field>
+          <DueDate key={issue.dueDate ?? ""} saved={issue.dueDate} onSave={(dueDate) => patch({ dueDate })} />
           <Work issue={issue} actors={actors} />
           {open && issue.assignee?.type !== "agent" && actors.reachable.length > 0 && (
             <AskAgent workspaceId={workspaceId} issue={issue} actors={actors} />
@@ -239,6 +235,25 @@ function IssuePage({ workspaceId, issue }: { workspaceId: string; issue: Issue }
         </aside>
       </div>
     </div>
+  );
+}
+
+/** The due date, saved when the field is left: a date typed part by part isn't saved half done. */
+function DueDate({ saved, onSave }: { saved: string | null; onSave: (date: string | null) => void }) {
+  const t = useMessages("work");
+  const [value, setValue] = useState(saved ?? "");
+  return (
+    <Field label={t("issue.due")}>
+      <Input
+        type="date"
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        onBlur={() => {
+          const next = value === "" ? null : value;
+          if (next !== saved) onSave(next);
+        }}
+      />
+    </Field>
   );
 }
 
@@ -454,6 +469,8 @@ function Activity({ workspaceId, issue, actors }: { workspaceId: string; issue: 
             value={text}
             maxLength={COMMENT_MAX}
             placeholder={t("issue.commentPlaceholder")}
+            // What is typed while it goes out would be emptied with what went out.
+            disabled={comment.isPending}
             onChange={(event) => setText(event.target.value)}
           />
         </Field>

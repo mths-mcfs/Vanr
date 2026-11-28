@@ -60,19 +60,25 @@ export function Board({
 
   const carried = carry === null ? undefined : issues.find((issue) => issue.id === carry.issueId);
   const rest = lanes(columns, issues, carried?.id);
+  // A refresh can take a card out of the column while one is carried: the slot never passes its end, so the
+  // place drawn and the place saved stay the same.
+  const slotOf = (held: Pick<Carry, "column" | "slot">) =>
+    Math.min(held.slot, rest[held.column]?.length ?? 0);
   // While carried, the card is drawn in the slot it would drop into.
   const drawn = rest.map((cards, index) =>
     carry !== null && carried !== undefined && carry.column === index
-      ? [...cards.slice(0, carry.slot), carried, ...cards.slice(carry.slot)]
+      ? [...cards.slice(0, slotOf(carry)), carried, ...cards.slice(slotOf(carry))]
       : cards,
   );
 
-  // A carried card changes column, so its button is a new element: focus follows it.
+  // A card that changes column is drawn anew, so its button is a new element: focus follows it after each
+  // keyboard step, whether it was carried, dropped or put back (a new object per step runs the effect again).
+  const [focusOn, setFocusOn] = useState<{ issueId: string } | null>(null);
   useEffect(() => {
-    if (carry === null) return;
-    const button = board.current?.querySelector<HTMLButtonElement>(`[data-grab="${carry.issueId}"]`);
+    if (focusOn === null) return;
+    const button = board.current?.querySelector<HTMLButtonElement>(`[data-grab="${focusOn.issueId}"]`);
     if (button !== null && button !== undefined && document.activeElement !== button) button.focus();
-  }, [carry]);
+  }, [focusOn]);
 
   /** What a step says: the card's column, and its place there counting itself. */
   const where = (issue: Issue, column: number, slot: number) => {
@@ -92,6 +98,7 @@ export function Board({
       if (key !== " " && key !== "Enter") return;
       event.preventDefault();
       setCarry({ issueId: issue.id, column, slot, from: { column, slot } });
+      setFocusOn({ issueId: issue.id });
       setSaid(t("board.picked", where(issue, column, slot)));
       return;
     }
@@ -101,25 +108,25 @@ export function Board({
       if (to < 0 || to >= columns.length) return;
       next = { column: to, slot: Math.min(carry.slot, rest[to]?.length ?? 0) };
     } else if (key === "ArrowUp" || key === "ArrowDown") {
-      const to = carry.slot + (key === "ArrowUp" ? -1 : 1);
+      const to = slotOf(carry) + (key === "ArrowUp" ? -1 : 1);
       if (to < 0 || to > (rest[carry.column]?.length ?? 0)) return;
       next = { column: carry.column, slot: to };
     } else if (key === " " || key === "Enter") {
       event.preventDefault();
+      const slot = slotOf(carry);
       setCarry(null);
-      setSaid(t("board.dropped", where(issue, carry.column, carry.slot)));
+      setFocusOn({ issueId: issue.id });
+      setSaid(t("board.dropped", where(issue, carry.column, slot)));
       const target = columns[carry.column];
-      const moved = carry.column !== carry.from.column || carry.slot !== carry.from.slot;
+      const moved = carry.column !== carry.from.column || slot !== carry.from.slot;
       if (target !== undefined && moved) {
-        onMove(issue, {
-          columnId: target.id,
-          boardPosition: positionAt(rest[carry.column] ?? [], carry.slot),
-        });
+        onMove(issue, { columnId: target.id, boardPosition: positionAt(rest[carry.column] ?? [], slot) });
       }
       return;
     } else if (key === "Escape") {
       event.preventDefault();
       setCarry(null);
+      setFocusOn({ issueId: issue.id });
       const home = columns[carry.from.column];
       setSaid(
         t("board.cancelled", { number: issue.number, column: home === undefined ? "" : columnName(home) }),
@@ -128,6 +135,7 @@ export function Board({
     } else return;
     event.preventDefault();
     setCarry({ ...carry, ...next });
+    setFocusOn({ issueId: issue.id });
     setSaid(t("board.moving", where(issue, next.column, next.slot)));
   };
 

@@ -179,3 +179,68 @@ describe("a new issue", () => {
     expect(within(dialog).getByRole("button", { name: "Create issue" }).hasAttribute("disabled")).toBe(true);
   });
 });
+
+describe("moving cards", () => {
+  test("a card dragged with the mouse lands in the column it is dropped on", async () => {
+    const app = await renderApp({ path: ISSUES, signedInAs: "usr_ana" });
+    const card = within(await screen.findByRole("region", { name: /^To do/ })).getByRole("listitem");
+    // The browser's drag data, as far as the board uses it.
+    let data = "";
+    const dataTransfer = {
+      setData: (_type: string, value: string) => {
+        data = value;
+      },
+      getData: () => data,
+      set effectAllowed(_value: string) {},
+    };
+    fireEvent.dragStart(card, { dataTransfer });
+    const target = lane(/^In review/);
+    fireEvent.dragOver(target, { dataTransfer });
+    fireEvent.drop(target, { dataTransfer });
+    expect(cardTitles(lane(/^In review/))).toEqual(["Reprint the spring catalogue"]);
+    await waitFor(() =>
+      expect(app.server.work.issues.find((issue) => issue.number === 1)?.columnId).toBe(
+        "col_workspace_birchwood_reviewing",
+      ),
+    );
+  });
+
+  test("two moves on their way at once: the refused one goes back with its toast, the other one stays", async () => {
+    const server = newServer();
+    const first = server.work.issues.find((issue) => issue.number === 1)?.id;
+    server.force(
+      "updateIssue",
+      { kind: "error", status: 503, code: "unavailable" },
+      1,
+      (params) => params.issueId === first,
+    );
+    const held = server.hold("updateIssue");
+    const app = await renderApp({ path: ISSUES, signedInAs: "usr_ana", server });
+    for (const [number, way] of [
+      [1, "ArrowRight"],
+      [3, "ArrowLeft"],
+    ] as const) {
+      fireEvent.keyDown(await screen.findByRole("button", { name: `Move #${number}` }), { key: " " });
+      fireEvent.keyDown(screen.getByRole("button", { name: `Move #${number}` }), { key: way });
+      fireEvent.keyDown(screen.getByRole("button", { name: `Move #${number}` }), { key: " " });
+    }
+    await act(async () => held.release());
+    expect(await screen.findByText("#1 could not be moved, so it went back")).toBeDefined();
+    await waitFor(() => expect(cardTitles(lane(/^To do/))).toEqual(["Reprint the spring catalogue"]));
+    await waitFor(() => expect(cardTitles(lane(/^In review/))).toEqual(["Archive the old invoices"]));
+    expect(app.server.work.issues.find((issue) => issue.number === 3)?.columnId).toBe(
+      "col_workspace_birchwood_reviewing",
+    );
+  });
+
+  test("a card put back with Escape keeps the focus on its move button", async () => {
+    await renderApp({ path: ISSUES, signedInAs: "usr_ana" });
+    fireEvent.keyDown(await screen.findByRole("button", { name: "Move #1" }), { key: " " });
+    fireEvent.keyDown(screen.getByRole("button", { name: "Move #1" }), { key: "ArrowRight" });
+    fireEvent.keyDown(screen.getByRole("button", { name: "Move #1" }), { key: "Escape" });
+    await waitFor(() =>
+      expect(document.activeElement === screen.getByRole("button", { name: "Move #1" })).toBe(true),
+    );
+    expect(cardTitles(lane(/^To do/))).toEqual(["Reprint the spring catalogue"]);
+  });
+});

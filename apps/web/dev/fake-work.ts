@@ -219,12 +219,17 @@ export class FakeWork {
         if (assignee?.type === "agent" && talks(scope, assignee.id) === undefined) {
           return fail(403, "forbidden", "You can't talk to this agent");
         }
+        const channelId = text(params.channelId) ?? null;
+        if (channelId !== null && !this.host.readsChannel(scope.user.id, channelId)) {
+          return fail(404, "not_found", "Channel not found");
+        }
         const criteria = Array.isArray(params.criteria) ? params.criteria.map(String) : [];
         const issue = this.add(scope.workspaceId, {
           title,
           description: text(params.description) ?? "",
           criteria: criteria.map((each) => ({ id: this.host.id("crit"), text: each, done: false })),
           columnId: column.id,
+          channelId,
           priority: (params.priority as T.IssuePriority | undefined) ?? "none",
           assignee,
           createdBy: me(scope),

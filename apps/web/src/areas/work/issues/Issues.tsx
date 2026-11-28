@@ -92,8 +92,27 @@ function IssuesView({ workspaceId }: { workspaceId: string }) {
     { refetchInterval: ISSUES_REFRESH_MS, placeholderData: (previous) => previous },
   );
   const columns = useApiQuery("listIssueColumns", { workspaceId });
+  // On the hook, not on each call: a second move before the first one answers would drop the first one's callbacks.
   const update = useApiMutation("updateIssue", {
     invalidates: () => [{ method: "listIssues", args: { workspaceId } }],
+    onSettled: (_issue, _error, variables) =>
+      setMoves((current) => {
+        const drawn = current.get(variables.issueId);
+        // A later move of the same card is still on its way: it keeps its own place.
+        if (
+          drawn?.columnId !== variables.body.columnId ||
+          drawn?.boardPosition !== variables.body.boardPosition
+        ) {
+          return current;
+        }
+        const next = new Map(current);
+        next.delete(variables.issueId);
+        return next;
+      }),
+    onError: (error, variables) => {
+      const number = issues.data?.find((each) => each.id === variables.issueId)?.number ?? 0;
+      outcome.failed(error, t("board.moveFailed", { number }));
+    },
   });
 
   const placed = useMemo(
@@ -128,19 +147,7 @@ function IssuesView({ workspaceId }: { workspaceId: string }) {
   const move = (issue: Issue, to: Move) => {
     if (to.columnId === issue.columnId && to.boardPosition === issue.boardPosition) return;
     setMoves((current) => new Map(current).set(issue.id, to));
-    const settle = () =>
-      setMoves((current) => {
-        const next = new Map(current);
-        next.delete(issue.id);
-        return next;
-      });
-    update.mutate(
-      { workspaceId, issueId: issue.id, body: to },
-      {
-        onSettled: settle,
-        onError: (error) => outcome.failed(error, t("board.moveFailed", { number: issue.number })),
-      },
-    );
+    update.mutate({ workspaceId, issueId: issue.id, body: to });
   };
 
   const add = (
