@@ -16,9 +16,11 @@ export const isClosedAssignment = (assignment: Pick<Assignment, "status">) =>
   assignment.status === "done" || assignment.status === "canceled";
 
 /**
- * How much of an assignment is open, and how much of it waits on this person, as the server's "waiting
- * on you": nothing for who may not act; never a provisional decision; requests to take part only for
- * the owner, who answers them.
+ * How much of an assignment is open, and how much of it waits on this person, counted from its pending
+ * items as the server's "waiting on you" counts them: nothing for who may not act; never a provisional
+ * decision; requests to take part only for the owner, who answers them. The server's list also puts an
+ * assignment there for a pause on the cost ceiling or a stuck step, which have no count here, so such a
+ * row says nothing waits while the "Waiting on you" tab lists it.
  */
 export function pendingOf(assignment: Pick<Assignment, "pending" | "actionable" | "role">) {
   const p = assignment.pending;

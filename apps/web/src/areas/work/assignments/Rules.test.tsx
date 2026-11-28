@@ -158,6 +158,22 @@ describe("who sees an assignment and what waits on them", () => {
     expect(app.server.calls.some((each) => each.method === "listAssignmentJoinRequests")).toBe(false);
   });
 
+  test("a provisional decision is open, but waits on no one", async () => {
+    const server = newServer();
+    paperOf(server).pending = {
+      commands: 0,
+      decisions: 0,
+      joinRequests: 0,
+      provisional: 2,
+      reviews: 0,
+      submissions: 0,
+    };
+    await renderApp({ path: LIST, signedInAs: "usr_ana", server });
+    const row = within(await screen.findByRole("article", { name: "Restock the paper room" }));
+    expect(row.getByText("2 open items")).toBeDefined();
+    expect(row.queryByText(/wait on you|waits on you/) === null).toBe(true);
+  });
+
   test("the waiting list follows the server: not a provisional decision, requests and a cost pause for the owner, a stuck step for whoever decides", async () => {
     const server = newServer();
     const paper = paperOf(server);
