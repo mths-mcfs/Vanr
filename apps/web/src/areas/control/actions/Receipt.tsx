@@ -44,12 +44,12 @@ export function ActionReceipt({
   const outcome = useOutcome();
   const now = useWindowTick(message.actions);
   const [busy, setBusy] = useState<string | null>(null);
-  const refetch = () => [
+  const staleMessages = () => [
     { method: "listChannelMessages" as const, args: { workspaceId, channelId: message.channelId } },
   ];
-  const undo = useApiMutation("undoAction", { invalidates: refetch });
-  const redo = useApiMutation("redoAction", { invalidates: refetch });
-  const undoAll = useApiMutation("undoMessageAction", { invalidates: refetch });
+  const undo = useApiMutation("undoAction", { invalidates: staleMessages });
+  const redo = useApiMutation("redoAction", { invalidates: staleMessages });
+  const undoAll = useApiMutation("undoMessageAction", { invalidates: staleMessages });
   const owner = message.author.type === "agent" ? directory.agentOwner(message.author.id) : undefined;
   const allowed = (action: AgentAction) => mayUndo(action, me, owner);
   const undoable = message.actions.filter(

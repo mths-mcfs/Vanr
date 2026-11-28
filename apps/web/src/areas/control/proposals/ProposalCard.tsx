@@ -61,9 +61,6 @@ export function ProposalCard({
   const redo = useApiMutation("redoAction", { invalidates: changed });
   const busy = accept.isPending || reject.isPending || undo.isPending || redo.isPending;
   const pending = proposal.status === "pending";
-  const failed = (error: unknown) => {
-    outcome.failed(error);
-  };
 
   const onAccept = () =>
     accept.mutate(
@@ -73,20 +70,20 @@ export function ProposalCard({
           setEditing(false);
           outcome.done(t("toast.accepted"));
         },
-        onError: failed,
+        onError: outcome.failed,
       },
     );
   const onReject = () =>
     reject.mutate(
       { workspaceId, proposalId: proposal.id },
-      { onSuccess: () => outcome.done(t("toast.proposalRejected")), onError: failed },
+      { onSuccess: () => outcome.done(t("toast.proposalRejected")), onError: outcome.failed },
     );
   const onToggle = () => {
     if (proposal.actionId === null) return;
     const args = { workspaceId, actionId: proposal.actionId };
     if (proposal.undone)
-      redo.mutate(args, { onSuccess: () => outcome.done(t("toast.redone")), onError: failed });
-    else undo.mutate(args, { onSuccess: () => outcome.done(t("toast.undone")), onError: failed });
+      redo.mutate(args, { onSuccess: () => outcome.done(t("toast.redone")), onError: outcome.failed });
+    else undo.mutate(args, { onSuccess: () => outcome.done(t("toast.undone")), onError: outcome.failed });
   };
 
   const status = t(`proposal.status.${proposal.status}`);

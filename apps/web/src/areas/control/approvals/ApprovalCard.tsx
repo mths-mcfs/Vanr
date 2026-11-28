@@ -167,9 +167,6 @@ export function ApprovalCard({
   const busy = approve.isPending || edit.isPending || reject.isPending;
   // "Remember" goes with the decision only while its box is on screen and ticked.
   const remembering = remember && approval.rememberLabel !== null;
-  const settle = {
-    onError: (error: unknown) => outcome.failed(error),
-  };
 
   const onApprove = () =>
     approve.mutate(
@@ -181,7 +178,10 @@ export function ApprovalCard({
           remember: remembering,
         },
       },
-      { ...settle, onSuccess: () => outcome.done(t(remembering ? "toast.remembered" : "toast.approved")) },
+      {
+        onError: outcome.failed,
+        onSuccess: () => outcome.done(t(remembering ? "toast.remembered" : "toast.approved")),
+      },
     );
   const onEdit = (input: Record<string, unknown>) =>
     edit.mutate(
@@ -191,7 +191,7 @@ export function ApprovalCard({
         body: { input, payloadHash: approval.payloadHash ?? "", remember: remembering },
       },
       {
-        ...settle,
+        onError: outcome.failed,
         onSuccess: () => {
           setDialog(null);
           outcome.done(t(remembering ? "toast.remembered" : "toast.approved"));
@@ -202,7 +202,7 @@ export function ApprovalCard({
     reject.mutate(
       { workspaceId, approvalId: approval.id, body: reason === undefined ? {} : { reason } },
       {
-        ...settle,
+        onError: outcome.failed,
         onSuccess: () => {
           setDialog(null);
           outcome.done(t("toast.rejected"));
