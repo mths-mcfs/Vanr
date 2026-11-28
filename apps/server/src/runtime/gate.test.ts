@@ -38,6 +38,9 @@ function fakeCtx(
   const reviews: ReviewRequest[] = [];
   const ctx = {
     risk: new RiskTracker(),
+    // The agent is active: `runTool` reads its row before a call runs.
+    agent: { id: "agent_gate" },
+    deps: { db: { select: () => ({ from: () => ({ where: async () => [{ archivedAt: null }] }) }) } },
     async requestApproval(req: ApprovalRequest) {
       asked.push(req);
       return decide(req);
