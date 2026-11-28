@@ -399,7 +399,13 @@ export class FakeServer {
       ownAccounts: () =>
         [...this.agentAccess.accounts].flatMap(([agentId, connections]) => {
           const agent = this.agents.find((candidate) => candidate.id === agentId);
-          return agent ? connections.map((connection) => ({ connection, agent })) : [];
+          return agent
+            ? connections.map((connection) => ({
+                connection,
+                agent,
+                keyed: this.agentAccess.keyed.has(connection.id),
+              }))
+            : [];
         }),
     });
     this.runnerWork = new FakeRunners({

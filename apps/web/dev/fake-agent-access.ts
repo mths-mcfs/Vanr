@@ -67,6 +67,8 @@ export class FakeAgentAccess {
   versions: T.MemoryVersion[] = [];
   /** The agents' own accounts, by agent id. */
   accounts = new Map<string, T.Connection[]>();
+  /** The own accounts connected with a key (no sign-in to widen). */
+  keyed = new Set<string>();
   /** The workspace's shared connections. */
   shared: (T.Connection & { workspaceId: string })[] = [];
   rules: Rule[] = [];
@@ -77,6 +79,7 @@ export class FakeAgentAccess {
     this.memories = [];
     this.versions = [];
     this.accounts = new Map();
+    this.keyed = new Set();
     this.shared = [];
     this.rules = [];
   }
@@ -303,6 +306,7 @@ export class FakeAgentAccess {
           scopeRequest: null,
         };
         this.accounts.set(agent.id, [...own, connection]);
+        this.keyed.add(connection.id);
         return reply(200, { status: "connected", connection });
       }, true),
       revokeAgentIdentity: withAgent((_scope, agent) => {

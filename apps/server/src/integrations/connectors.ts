@@ -119,15 +119,38 @@ function secretsOf(secret: ConnSecret | null): string[] {
   return [];
 }
 
+/** The shortest part of an address treated as a credential: a shorter one would blank common words in errors. */
+const ADDRESS_SECRET_MIN = 6;
+
+/** A percent-decoded form, or the text itself when it doesn't decode. */
+const decoded = (text: string) => {
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text;
+  }
+};
+
 /**
- * What an own server's address can carry as a credential, for redaction: its query string (`?key=…`) and each
- * value long enough to be a key, and a sign-in part (`user:pass@`).
+ * What an own server's address can carry as a credential, for redaction: its query string (`?key=…`), each value in
+ * it raw, percent-decoded and form-decoded (`+` read as a space), and a sign-in part (`user:pass@`).
  */
 function addressSecrets(url: string | null | undefined): string[] {
   if (!url || !URL.canParse(url)) return [];
   const address = new URL(url);
-  const values = [...address.searchParams.values()].filter((v) => v.length >= 6);
-  return [address.search.slice(1), ...values, address.username, address.password].filter((v) => v !== "");
+  const query = address.search.slice(1);
+  const raw = query.split("&").map((pair) => pair.slice(pair.indexOf("=") + 1));
+  const parts = [
+    query,
+    ...raw,
+    ...raw.map(decoded),
+    ...address.searchParams.values(),
+    address.username,
+    address.password,
+    decoded(address.username),
+    decoded(address.password),
+  ];
+  return [...new Set(parts.filter((part) => part.length >= ADDRESS_SECRET_MIN))];
 }
 
 /** The kept credential of a row (and what its address carries) for redaction, or none when it can't be opened. */
@@ -509,6 +532,9 @@ async function beginOAuth(
   reuse: { issuer: string; clientId: string; clientSecret: string | null } | null = null,
 ): Promise<string> {
   const url = row.serverUrl ?? "";
+  // The resource the sign-in is for (RFC 8707): the address without its query, fragment or sign-in part, which can
+  // carry a key. The consent link goes to the authorization server and to whoever asks for more scope later.
+  const resource = shownAddress(url).serverUrl;
   if (!challenge.resourceMetadata) {
     try {
       await probe(deps, url, { kind: "none" });
@@ -519,7 +545,7 @@ async function beginOAuth(
   }
   const server: AuthServer | null = await discoverAuthServer(
     deps.fetchExternal,
-    url,
+    resource,
     challenge.resourceMetadata,
     netPolicy(deps.config.integrations),
     challenge.scope,
@@ -550,7 +576,7 @@ async function beginOAuth(
     clientSecret: client.clientSecret,
     tokenEndpoint: server.token_endpoint,
     redirectUri,
-    resource: url,
+    resource,
     issuer: server.issuer,
     issParameterSupported: server.issParameterSupported,
     scope: server.scope,
@@ -568,7 +594,7 @@ async function beginOAuth(
     state,
     challenge: pkce,
     scope: server.scope,
-    resource: url,
+    resource,
   });
 }
 
@@ -803,13 +829,7 @@ export async function finishOAuth(
   } catch (err) {
     log.warn("connector.oauth_failed", {
       connectionId: row.id,
-      error: outsideText(err, [
-        s.clientSecret,
-        s.verifier,
-        query.code,
-        ...received,
-        ...addressSecrets(row.serverUrl),
-      ]),
+      error: outsideText(err, [s.clientSecret, s.verifier, query.code, ...received]),
     });
     await dropPending();
     // The agent got its own account on this service by another route meanwhile (one per service).

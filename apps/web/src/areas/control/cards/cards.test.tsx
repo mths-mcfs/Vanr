@@ -169,3 +169,54 @@ describe("the missing connector permission", () => {
     }
   });
 });
+
+describe("the fake's rule for more connector scope, as the server's", () => {
+  const ask = (server: ReturnType<typeof newServer>, userId: string, connectorId: string) => {
+    const operation = server.connections.operations().createConnectorScope;
+    if (operation === undefined) throw new Error("the fake has createConnectorScope");
+    const answer = operation(
+      { workspaceId: WORKSPACE, connectorId, nextPath: "/" },
+      server.sessionFor(userId),
+    ) as { status: number; body: { error?: { code: string } } };
+    return [answer.status, answer.body.error?.code ?? null];
+  };
+  const seeded = () => {
+    const server = newServer();
+    const scout = server.agents.find((each) => each.id === "agt_scout");
+    const own = server.agentAccess.accounts.get("agt_scout")?.[0];
+    const shared = server.agentAccess.shared[0];
+    if (scout === undefined || own === undefined || shared === undefined)
+      throw new Error("the seed has Scout's own Linear account and a shared one");
+    own.scopeRequest = { scope: "issues:write", tool: "Create an issue" };
+    shared.scopeRequest = { scope: "issues:write", tool: "Create an issue" };
+    return { server, scout, own, shared };
+  };
+
+  test("an agent's own account: only who edits the agent", () => {
+    const { server, scout, own } = seeded();
+    scout.ownerUserId = ANA.userId;
+    expect(ask(server, TOMAS.userId, own.id)).toEqual([403, "forbidden"]);
+    scout.ownerUserId = TOMAS.userId;
+    expect(ask(server, TOMAS.userId, own.id)).toEqual([200, null]);
+  });
+
+  test("a workspace account: only who configures", () => {
+    const { server, shared } = seeded();
+    expect(ask(server, TOMAS.userId, shared.id)).toEqual([403, "forbidden"]);
+    expect(ask(server, JONAS.userId, shared.id)).toEqual([200, null]);
+  });
+
+  test("a connection made with a key has no sign-in to widen", () => {
+    const { server } = seeded();
+    const create = server.connections.operations().createConnector;
+    if (create === undefined) throw new Error("the fake has createConnector");
+    const made = create(
+      { workspaceId: WORKSPACE, connector: "stripe", apiKey: "sk_123456789" },
+      server.sessionFor(JONAS.userId),
+    ) as { status: number; body: { id: string } };
+    const keyed = server.agentAccess.shared.find((each) => each.id === made.body.id);
+    if (keyed === undefined) throw new Error("the key connected");
+    keyed.scopeRequest = { scope: "charges:write", tool: "Refund" };
+    expect(ask(server, JONAS.userId, keyed.id)).toEqual([400, "connector.no_scope_request"]);
+  });
+});

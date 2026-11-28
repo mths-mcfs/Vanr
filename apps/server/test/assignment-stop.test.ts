@@ -86,25 +86,31 @@ async function stopsDuring(work: () => Promise<void>): Promise<[string, string |
   return stops;
 }
 
-describe("pausing an assignment", () => {
-  test(
-    "a decider who may not stop the run still pauses; the engine ends the run, in nobody's name",
-    async () => {
-      const { dora, carla, started, at } = await runningAssignment();
-      // Carla only reads the channel: she can't pause it, and the run goes on.
-      expect((await call(carla, "POST", `${at}/pause`)).status).toBe(403);
-      expect(server.deps.runtime.liveRun(started.runId) !== null).toBe(true);
-      const stops = await stopsDuring(async () => {
-        const paused = await call(dora, "POST", `${at}/pause`);
-        expect([paused.status, paused.body.status]).toEqual([200, "paused"]);
-        await waitFor(async () => server.deps.runtime.liveRun(started.runId) === null);
-      });
-      await started.done;
-      expect(stops.filter(([, actor]) => actor === dora.user.id)).toEqual([]);
-      expect(stops.some(([runId, actor]) => runId === started.runId && actor === null)).toBe(true);
-    },
-    SERVER_TEST_MS,
-  );
+describe("pausing, stopping or closing an assignment", () => {
+  for (const [action, body, status] of [
+    ["pause", undefined, "paused"],
+    ["stop", undefined, "paused"],
+    ["close", { outcome: "canceled" }, "canceled"],
+  ] as const) {
+    test(
+      `a decider who may not stop the run still uses ${action}; the engine ends the run, in nobody's name`,
+      async () => {
+        const { dora, carla, started, at } = await runningAssignment();
+        // Carla only reads the channel: she can't act on it, and the run goes on.
+        expect((await call(carla, "POST", `${at}/${action}`, body)).status).toBe(403);
+        expect(server.deps.runtime.liveRun(started.runId) !== null).toBe(true);
+        const stops = await stopsDuring(async () => {
+          const acted = await call(dora, "POST", `${at}/${action}`, body);
+          expect([acted.status, acted.body.status]).toEqual([200, status]);
+          await waitFor(async () => server.deps.runtime.liveRun(started.runId) === null);
+        });
+        await started.done;
+        expect(stops.filter(([, actor]) => actor === dora.user.id)).toEqual([]);
+        expect(stops.some(([runId, actor]) => runId === started.runId && actor === null)).toBe(true);
+      },
+      SERVER_TEST_MS,
+    );
+  }
 
   test(
     "who may also stop the run stops it at once, in their name",

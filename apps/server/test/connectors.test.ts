@@ -56,6 +56,56 @@ const echo = Bun.serve({
     });
   },
 });
+/**
+ * An MCP server whose failure quotes the address it was called at, by `quote`: on `initialize` with `quoteInit`,
+ * otherwise on `tools/list`. Without `quote` it answers normally.
+ */
+let quote: ((url: URL) => string) | null = null;
+let quoteInit = false;
+const quoting = Bun.serve({
+  port: 0,
+  async fetch(req) {
+    const body = (await req.json()) as { id?: number; method: string };
+    if (body.id === undefined) return new Response(null, { status: 202 });
+    const fail = (message: string) =>
+      Response.json({ jsonrpc: "2.0", id: body.id, error: { code: -32000, message } });
+    if (body.method === "initialize") {
+      if (quote && quoteInit) return fail(quote(new URL(req.url)));
+      return Response.json(
+        {
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            protocolVersion: "2025-06-18",
+            capabilities: { tools: {} },
+            serverInfo: { name: "quoting", version: "1" },
+          },
+        },
+        { headers: { "mcp-session-id": "s1" } },
+      );
+    }
+    if (body.method === "tools/list" && quote && !quoteInit) return fail(quote(new URL(req.url)));
+    return Response.json({
+      jsonrpc: "2.0",
+      id: body.id,
+      result: {
+        tools: [{ name: "ping", description: "Ping", inputSchema: { type: "object", properties: {} } }],
+      },
+    });
+  },
+});
+/** Runs `work` with the quoting server failing as `how` says. */
+async function quoted<T>(how: (url: URL) => string, work: () => Promise<T>, onInit = false): Promise<T> {
+  quote = how;
+  quoteInit = onInit;
+  try {
+    return await work();
+  } finally {
+    quote = null;
+    quoteInit = false;
+  }
+}
+
 const CATALOG_HOSTS = ["mcp.linear.app", "mcp.notion.com", "api.githubcopilot.com"];
 
 /** Each catalog origin answers from the fake MCP server, which speaks of itself by its own origin. */
@@ -85,6 +135,7 @@ afterAll(async () => {
   mcp.stop();
   keyOnly.stop();
   echo.stop(true);
+  quoting.stop(true);
 }, SERVER_TEST_MS);
 
 let n = 0;
@@ -755,6 +806,70 @@ test(
   },
   SERVER_TEST_MS,
 );
+
+describe("an own server's address quoted back by the server", () => {
+  const at = () => `http://localhost:${quoting.port}/mcp`;
+  const errorOf = (res: Called) => String(res.body?.error?.message ?? "");
+
+  test(
+    "another admin's refresh gets the server's words without the key in the address",
+    async () => {
+      const t = await team();
+      const KEY = "refresh-key-987654";
+      const started = await ok(
+        connectCustom(t, t.ana, { serverUrl: `${at()}?key=${KEY}`, label: "Quoting", nextPath: "/" }),
+      );
+      const carla = await memberOf(server, t.workspaceId, "Carla", email("carla"), "admin");
+      const res = await quoted(
+        (url) => `no tools at ${url.href}`,
+        () => call(carla, "POST", `${t.w}/connectors/custom/${started.server.id}/refresh`),
+      );
+      expect([res.status, errorOf(res)]).toEqual([400, `no tools at ${at()}?[redacted]`]);
+      expect(JSON.stringify(res.body)).not.toContain(KEY);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a connect that fails quoting the address answers without its key",
+    async () => {
+      const t = await team();
+      const KEY = "connect-key-24680";
+      const res = await quoted(
+        (url) => `no session at ${url.href}`,
+        () => connectCustom(t, t.ana, { serverUrl: `${at()}?key=${KEY}`, label: "Quoting", nextPath: "/" }),
+        true,
+      );
+      expect([res.status, errorOf(res)]).toEqual([400, `no session at ${at()}?[redacted]`]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
+    "a short query blanks nothing else, and a key with a + is redacted raw and decoded",
+    async () => {
+      const t = await team();
+      const short = await ok(
+        connectCustom(t, t.ana, { serverUrl: `${at()}?x`, label: "Short", nextPath: "/" }),
+      );
+      const words = await quoted(
+        (url) => `next index exhausted at ${url.href}`,
+        () => call(t.ana, "POST", `${t.w}/connectors/custom/${short.server.id}/refresh`),
+      );
+      expect(errorOf(words)).toBe(`next index exhausted at ${at()}?x`);
+
+      const RAW = "abc+def/ghi==";
+      const plus = await ok(
+        connectCustom(t, t.ana, { serverUrl: `${at()}?key=${RAW}`, label: "Plus", nextPath: "/" }),
+      );
+      const refresh = () => call(t.ana, "POST", `${t.w}/connectors/custom/${plus.server.id}/refresh`);
+      const raw = await quoted((url) => `bad key ${url.search.slice("?key=".length)}`, refresh);
+      const form = await quoted((url) => `bad key ${url.searchParams.get("key")}`, refresh);
+      expect([errorOf(raw), errorOf(form)]).toEqual(["bad key [redacted]", "bad key [redacted]"]);
+    },
+    SERVER_TEST_MS,
+  );
+});
 
 test(
   "redaction knows the credential a client sends, even when the kept one changed after it was read",

@@ -13,8 +13,12 @@ type Shared = T.Connection & { workspaceId: string };
 type Host = FilesHost & {
   /** The workspace's shared connections, kept with the agents' own accounts. */
   shared: () => Shared[];
-  /** The agents' own accounts, each with its agent. */
-  ownAccounts: () => { connection: T.Connection; agent: { workspaceId: string; ownerUserId: string } }[];
+  /** The agents' own accounts, each with its agent and whether it was connected with a key. */
+  ownAccounts: () => {
+    connection: T.Connection;
+    agent: { workspaceId: string; ownerUserId: string };
+    keyed: boolean;
+  }[];
 };
 /** `serverUrl` is the full saved address; members read it as the server shows it (`shown`). */
 export type FakeMcpServer = Omit<T.CustomServer, "queryHidden"> & {
@@ -101,6 +105,8 @@ const PROVIDERS = new Set<T.DatabaseProvider>(["neon", "other", "railway", "rds"
 
 export class FakeConnections {
   servers: FakeMcpServer[] = [];
+  /** The shared connections made with a key: no sign-in to widen, as on the server. */
+  keyed = new Set<string>();
   mail: FakeMailAccount[] = [];
   databases: FakeDatabase[] = [];
   installations: FakeInstallation[] = [];
@@ -122,6 +128,7 @@ export class FakeConnections {
 
   clear(): void {
     this.servers = [];
+    this.keyed = new Set();
     this.mail = [];
     this.databases = [];
     this.installations = [];
@@ -369,6 +376,7 @@ export class FakeConnections {
           scopeRequest: null,
         };
         this.host.shared().push(connection);
+        this.keyed.add(connection.id);
         const { workspaceId: _w, ...rest } = connection;
         return reply(200, rest);
       }, true),
@@ -395,7 +403,8 @@ export class FakeConnections {
           ? can(scope.role, "manage_agents") || own.agent.ownerUserId === scope.user.id
           : can(scope.role, "configure");
         if (!allowed) return fail(403, "forbidden", "Forbidden");
-        if (row.scopeRequest == null) {
+        const keyed = own ? own.keyed : this.keyed.has(row.id);
+        if (keyed || row.scopeRequest == null) {
           return fail(400, "connector.no_scope_request", "This connection is not waiting for permission");
         }
         return reply(200, { consentUrl: `https://${row.connector}.example/authorize?more=1` });

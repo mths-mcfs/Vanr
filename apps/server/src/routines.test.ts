@@ -1042,6 +1042,24 @@ describe("what the screen sees", () => {
   );
 
   test(
+    "a routine running for a channel the person doesn't read doesn't show as running to them",
+    async () => {
+      const privateCh = await seedChannel(server, workspaceId, {
+        name: "running-channel",
+        visibility: "private",
+        members: [ana],
+      });
+      // While it runs, an execution has no run yet: the channel it runs for is what hides it.
+      const routine = await newRoutine({ target: { kind: "file" }, runningSince: new Date() });
+      await execution(routine.id, { status: "running", channelId: privateCh });
+      const [asBob] = await toRoutines(server.deps, { workspaceId, userId: bob.user.id }, [routine]);
+      const [asAna] = await toRoutines(server.deps, { workspaceId, userId: ana.user.id }, [routine]);
+      expect([asBob?.running, asAna?.running]).toEqual([false, true]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "a routine shows as running only through a run the person may read",
     async () => {
       const privateCh = await seedChannel(server, workspaceId, {
