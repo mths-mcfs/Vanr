@@ -319,6 +319,46 @@ describe("a leave retried after its seats weren't let go", () => {
 
 describe("someone removed from the workspace", () => {
   test(
+    "who asked for the debate gets no notice of its conclusion",
+    async () => {
+      const { workspaceId, base, ana } = await team();
+      const caio = await memberOf(server, workspaceId, "Caio", email("caio"));
+      const lia = await seedAgent(server, workspaceId, ana, `lia${n}`);
+      // Caio asks for it (its requester, told of the conclusion); Ana holds a seat, so it waits on her.
+      const made = await call(caio, "POST", base, {
+        title: "Asked",
+        goal: "g",
+        agentIds: [lia.id],
+        rounds: 0,
+        speakers: [
+          { type: "person", id: ana.user.id },
+          { type: "agent", id: lia.id },
+        ],
+      });
+      const id = made.body.id;
+      const seen = async () => (await call(ana, "GET", `${base}/${id}`)).body;
+      await waitFor(async () => (await seen()).phase === "human_turn");
+      expect((await seen()).requesterUserId).toBe(caio.user.id);
+      expect((await call(ana, "DELETE", `${ws(workspaceId)}/members/${caio.user.id}`)).status).toBe(204);
+      expect((await call(ana, "POST", `${base}/${id}/posts`, { body: "Yes", answer: "yes" })).status).toBe(
+        201,
+      );
+      await waitFor(async () => (await seen()).status === "done");
+      const notices = await server.deps.db
+        .select()
+        .from(schema.notifications)
+        .where(
+          and(
+            eq(schema.notifications.workspaceId, workspaceId),
+            eq(schema.notifications.userId, caio.user.id),
+          ),
+        );
+      expect(notices.filter((x) => x.kind === "debate_synthesis")).toEqual([]);
+    },
+    SERVER_TEST_MS,
+  );
+
+  test(
     "gets nothing more of the debate: no event on a socket still open, no turn of the next round",
     async () => {
       const { workspaceId, base, ana } = await team();

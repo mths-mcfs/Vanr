@@ -165,9 +165,12 @@ describe("who sees an assignment and what waits on them", () => {
     ];
     const app = await renderApp({ path: LIST, signedInAs: "usr_jonas", server });
     const row = within(await screen.findByRole("article", { name: "Restock the paper room" }));
-    // They let people in (configure), as the server's waitingFor: the request waits on them.
+    // They let people in (configure), as the server's waitingFor: the request waits on them, and the assignment is
+    // under their "Waiting on you" tab.
     expect(row.getByText("1 thing waits on you")).toBeDefined();
-    await app.user.click(row.getByRole("link", { name: "Restock the paper room" }));
+    await app.user.click(screen.getByRole("tab", { name: "Waiting on you (1)" }));
+    const waiting = within(await screen.findByRole("article", { name: "Restock the paper room" }));
+    await app.user.click(waiting.getByRole("link", { name: "Restock the paper room" }));
     const panel = within(await screen.findByRole("region", { name: "Assignment" }));
     await app.user.click(panel.getByRole("tab", { name: "People" }));
     await panel.findByText(/Ana Beatriz Souza owns it/);
