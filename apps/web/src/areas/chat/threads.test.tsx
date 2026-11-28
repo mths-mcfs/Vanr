@@ -721,6 +721,49 @@ describe("a thread's page against a list it can't trust", () => {
     }
   }, 15_000);
 
+  test("a refusal given while out but arriving once the channel is back doesn't keep the page gone", async () => {
+    const server = newServer();
+    seedBoard(server);
+    const app = await open("/threads/msg_broot", "usr_iris", server);
+    expect(await screen.findByText("Agreed, quietly")).toBeDefined();
+    const relist = relistOf(app);
+    // Read while out (refused), but the answer only reaches the page after the list has the channel.
+    const late = server.delay("getThread");
+    members(server, ["usr_ana"]);
+    await relist();
+    expect(await screen.findByRole("heading", { name: "There's no thread here" })).toBeDefined();
+    await wait(300);
+    members(server, ["usr_ana", "usr_iris"]);
+    await relist();
+    await wait(200);
+    await act(async () => late.release());
+    expect(await screen.findByText("Agreed, quietly", {}, { timeout: 1500 })).toBeDefined();
+  });
+
+  test("a second refusal held in flight while out doesn't keep the page gone either", async () => {
+    const server = newServer();
+    seedBoard(server);
+    const app = await open("/threads/msg_broot", "usr_iris", server);
+    expect(await screen.findByText("Agreed, quietly")).toBeDefined();
+    const relist = relistOf(app);
+    members(server, ["usr_ana"]);
+    await relist();
+    expect(await screen.findByRole("heading", { name: "There's no thread here" })).toBeDefined();
+    await wait(300);
+    const late = server.delay("getThread");
+    await act(async () => {
+      void app.runtime.queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[2] === "getThread",
+      });
+    });
+    await wait(100);
+    members(server, ["usr_ana", "usr_iris"]);
+    await relist();
+    await wait(200);
+    await act(async () => late.release());
+    expect(await screen.findByText("Agreed, quietly", {}, { timeout: 1500 })).toBeDefined();
+  });
+
   test("replies loaded past the record's count are counted", async () => {
     const server = newServer();
     server.state.messages.push(message({ id: "msg_root", body: "Kiln log", replyCount: 3 }));
@@ -735,5 +778,102 @@ describe("a thread's page against a list it can't trust", () => {
     await within(panel).findByText("reply 3");
     const log = within(panel).getByRole("log", { name: "Messages in this thread" });
     expect(within(log).getByText("3 replies")).toBeDefined();
+  });
+});
+
+describe("a thread beside its channel, by what the channel holds", () => {
+  test("a thread of another channel lends the panel none of its record", async () => {
+    const server = newServer();
+    seedBoard(server);
+    // Ana reads both channels and started the board's thread; its id is opened beside #general.
+    await open("/channel/ch_general?thread=msg_broot", "usr_ana", server);
+    const panel = await screen.findByRole("region", { name: "Thread" });
+    expect(
+      await within(panel).findByText("The message that started this thread isn't here anymore."),
+    ).toBeDefined();
+    await waitFor(() => expect(server.calls.some((call) => call.method === "getThread")).toBe(true));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(within(panel).queryAllByText(/Secret pricing|board-room/).length).toBe(0);
+    expect(within(panel).queryByRole("button", { name: "Follow" }) === null).toBe(true);
+    expect(within(panel).queryByRole("button", { name: "Close" }) === null).toBe(true);
+  });
+
+  test("an agent's own message with no replies yet: that agent answers, unless another is named", async () => {
+    const server = newServer();
+    server.state.messages.push(
+      message({ id: "msg_aroot", body: "Kiln B finished", author: { type: "agent", id: "agt_scout" } }),
+    );
+    const app = await open("/channel/ch_general?thread=msg_aroot", "usr_ana", server);
+    const panel = await screen.findByRole("region", { name: "Thread" });
+    const field = await within(panel).findByRole("textbox", { name: "Reply in the thread" });
+    await app.user.type(field, "Thanks");
+    expect(within(panel).getByText("Scout will answer")).toBeDefined();
+    await app.user.clear(field);
+    await app.user.type(field, "@ledger check it");
+    expect(within(panel).getByText("Ledger will answer")).toBeDefined();
+    expect(within(panel).queryByText("Scout will answer") === null).toBe(true);
+  });
+
+  test("the root's count counts too, past what the record says", async () => {
+    const server = newServer();
+    server.state.messages.push(message({ id: "msg_root", body: "Kiln log", replyCount: 101 }));
+    for (let i = 1; i <= 101; i += 1)
+      server.state.messages.push(
+        message({ id: `msg_r${i}`, body: `reply ${i}`, threadId: "msg_root", createdAt: at(-300 + i * 2) }),
+      );
+    // The record was read before the last reply came in.
+    server.chat.thread("msg_root", "usr_jonas", { title: "Kiln log", replyCount: 100 });
+    await open("/channel/ch_general?thread=msg_root", "usr_ana", server);
+    const panel = await screen.findByRole("region", { name: "Thread" });
+    await within(panel).findByText("reply 101");
+    const log = within(panel).getByRole("log", { name: "Messages in this thread" });
+    expect(within(log).getByText("101 replies")).toBeDefined();
+  });
+});
+
+describe("the thread list after a lost channel", () => {
+  test("a first page the loss empties still leads to the next one", async () => {
+    const server = newServer();
+    seedBoard(server);
+    for (let i = 0; i < 30; i += 1)
+      server.chat.thread(`msg_b${i}`, "usr_ana", {
+        title: `Board ${i}`,
+        channelId: "ch_board",
+        channelName: "board-room",
+      });
+    server.chat.thread("msg_g", "usr_jonas", {
+      title: "Lunch run",
+      channelId: "ch_general",
+      channelName: "general",
+    });
+    const app = await open("/threads", "usr_iris", server);
+    const list = await screen.findByRole("list", { name: "Threads" });
+    expect(within(list).getAllByRole("listitem")).toHaveLength(30);
+    // The board's thread page finds the channel gone and clears it from what the list holds.
+    await act(() => app.runtime.router.navigate({ to: `/workspace/${WS}/threads/msg_broot` }));
+    expect(await screen.findByText("Agreed, quietly")).toBeDefined();
+    const board = server.state.channels.find((channel) => channel.id === "ch_board");
+    if (board !== undefined) board.memberIds = ["usr_ana"];
+    await act(async () => {
+      void app.runtime.queryClient.invalidateQueries({
+        predicate: (query) => query.queryKey[2] === "listChannels",
+      });
+    });
+    expect(await screen.findByRole("heading", { name: "There's no thread here" })).toBeDefined();
+    // Back on the list, it can't be read again: only what was cleared shows.
+    server.force("listThreads", { kind: "offline" }, 100);
+    await act(() => app.runtime.router.navigate({ to: `/workspace/${WS}/threads` }));
+    expect(await screen.findByRole("heading", { name: "Threads" })).toBeDefined();
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 50)));
+    expect(screen.queryAllByText(/Board \d+|Secret pricing/).length).toBe(0);
+    expect(screen.queryByText("No threads here") === null).toBe(true);
+    server.unforce("listThreads");
+    await app.user.click(screen.getByRole("button", { name: "Show more threads" }));
+    // The next page is asked for (the fake's cursor is an offset, so it can't stand for what follows).
+    await waitFor(() =>
+      expect(server.calls.some((call) => call.method === "listThreads" && call.params.cursor === "30")).toBe(
+        true,
+      ),
+    );
   });
 });
