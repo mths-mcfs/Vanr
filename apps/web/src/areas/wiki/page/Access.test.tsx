@@ -198,7 +198,7 @@ describe("losing a page", () => {
     await app.user.click(screen.getByRole("button", { name: "Ações da página" }));
     await app.user.click(await screen.findByRole("menuitem", { name: "Quem lê…" }));
     const dialog = await screen.findByRole("dialog", { name: "Quem lê Ink suppliers" });
-    await app.user.click(within(dialog).getByRole("radio", { name: /Só algumas pessoas e agentes/ }));
+    await app.user.click(within(dialog).getByRole("radio", { name: /Só algumas pessoas/ }));
     await app.user.click(within(dialog).getByRole("button", { name: "Salvar" }));
     const alert = await within(dialog).findByRole("alert");
     expect(alert.textContent?.includes("Only who created the page") === true).toBe(false);
