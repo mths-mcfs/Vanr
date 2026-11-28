@@ -749,6 +749,7 @@ export class FakeServer {
     this.chat.runs = [];
     this.chat.threads = [];
     this.chat.feedback = [];
+    this.chat.followers.clear();
     this.notificationSettings.clear();
     this.approvals.clear();
     this.accounts.clear();

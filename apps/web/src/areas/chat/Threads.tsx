@@ -19,6 +19,8 @@ type Tab = (typeof TABS)[number];
 
 /** Threads per page, as the server sends them. */
 const PAGE = 30;
+/** The longest search the server takes. */
+export const SEARCH_MAX = 200;
 /** The search waits this long after the last key. */
 export const SEARCH_WAIT_MS = 250;
 /** The list is read again this often while it is open. */
@@ -133,6 +135,7 @@ export function ThreadsScreen() {
       <div className="chat-threads__tools">
         <Input
           type="search"
+          maxLength={SEARCH_MAX}
           aria-label={t("threads.search")}
           placeholder={t("threads.searchHint")}
           value={typed}

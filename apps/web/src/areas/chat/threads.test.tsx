@@ -87,7 +87,8 @@ describe("a thread beside its channel", () => {
     expect(follow.getAttribute("aria-pressed")).toBe("false");
     await app.user.click(follow);
     expect(await within(panel).findByRole("button", { name: "Following" })).toBeDefined();
-    expect(server.chat.threads.find((each) => each.id === "msg_lone")?.following).toBe(true);
+    expect(server.chat.threads.some((each) => each.id === "msg_lone")).toBe(true);
+    expect(server.chat.followers.get("msg_lone")?.has("usr_ana")).toBe(true);
   });
 
   test("whoever manages the thread closes and reopens it; anyone else gets no such button", async () => {
@@ -407,7 +408,11 @@ describe("a lost thread, and the next one", () => {
     await act(() => app.runtime.router.navigate({ to: `/workspace/${WS}/threads/msg_root` }));
     expect(await screen.findByText("Matte, like last time.")).toBeDefined();
     if (board !== undefined) board.memberIds = ["usr_ana", "usr_iris"];
+    // The thread answers first; the fresh channel list comes only later.
+    const later = server.delay("listChannels");
     await act(() => app.runtime.router.navigate({ to: `/workspace/${WS}/threads/msg_broot` }));
+    await waitFor(() => expect(server.calls.some((call) => call.method === "getThread")).toBe(true));
+    await act(async () => later.release());
     expect(await screen.findByText("Agreed, quietly")).toBeDefined();
   });
 
@@ -426,5 +431,78 @@ describe("a lost thread, and the next one", () => {
     await act(() => app.runtime.router.navigate({ to: `/workspace/${WS}/threads` }));
     expect(await screen.findByRole("heading", { name: "Threads" })).toBeDefined();
     expect(screen.queryAllByText(/Secret pricing|board-room/).length).toBe(0);
+  });
+});
+
+describe("what CodeRabbit found on the thread round", () => {
+  test("following is each person's own", async () => {
+    const server = newServer();
+    seedThread(server);
+    server.chat.followers.set("msg_root", new Set(["usr_iris"]));
+    await open("/channel/ch_general?thread=msg_root", "usr_tomas", server);
+    const panel = await screen.findByRole("region", { name: "Thread" });
+    expect(await within(panel).findByRole("button", { name: "Follow" })).toBeDefined();
+  });
+
+  test("replies far apart keep their own header, even from one author", async () => {
+    const server = newServer();
+    server.state.messages.push(
+      message({ id: "msg_root", body: "Kiln log", replyCount: 2 }),
+      message({ id: "msg_a", body: "First look", threadId: "msg_root", createdAt: at(-3 * 24 * 60) }),
+      message({ id: "msg_b", body: "Second look", threadId: "msg_root", createdAt: at(-62) }),
+      message({ id: "msg_c", body: "Third look", threadId: "msg_root", createdAt: at(-2) }),
+    );
+    await open("/channel/ch_general?thread=msg_root", "usr_ana", server);
+    const panel = await screen.findByRole("region", { name: "Thread" });
+    // Days apart, then an hour apart: each keeps its header and its time.
+    for (const text of ["Second look", "Third look"]) {
+      const item = (await within(panel).findByText(text)).closest("article");
+      expect(item?.getAttribute("data-continued") === null).toBe(true);
+    }
+  });
+
+  test("the panel holds at most a page of replies, live ones pushing the oldest out", async () => {
+    const server = newServer();
+    server.state.messages.push(message({ id: "msg_root", body: "Kiln log", replyCount: 100 }));
+    for (let i = 1; i <= 100; i += 1)
+      server.state.messages.push(
+        message({ id: `msg_r${i}`, body: `reply ${i}`, threadId: "msg_root", createdAt: at(-200 + i) }),
+      );
+    await open("/channel/ch_general?thread=msg_root", "usr_ana", server);
+    const panel = await screen.findByRole("region", { name: "Thread" });
+    await within(panel).findByText("reply 100");
+    const fresh = message({ id: "msg_r101", body: "reply 101", threadId: "msg_root", createdAt: at(-1) });
+    server.state.messages.push(fresh);
+    await act(async () => server.emit(WS, { type: "message.posted", message: fresh }, "ch_general"));
+    expect(await within(panel).findByText("reply 101")).toBeDefined();
+    expect(within(panel).queryByText("reply 1") === null).toBe(true);
+    // The root stays at the top, whatever the cap pushes out.
+    const log = within(panel).getByRole("log", { name: "Messages in this thread" });
+    expect(within(log).getByText("Kiln log")).toBeDefined();
+  });
+
+  test("the search takes no more than the server accepts", async () => {
+    const app = await open("/threads");
+    const search = await screen.findByRole("searchbox", { name: "Search threads" });
+    await app.user.click(search);
+    await app.user.paste("k".repeat(250));
+    expect((search as HTMLInputElement).value.length).toBe(200);
+  });
+
+  test("a person added back opens the thread even when the channel list in cache predates it", async () => {
+    const server = newServer();
+    seedBoard(server);
+    const board = server.state.channels.find((channel) => channel.id === "ch_board");
+    if (board !== undefined) board.memberIds = ["usr_ana"];
+    // The list is read while the person is out of the channel, then they are added back.
+    const app = await open("/channel/ch_general", "usr_iris", server);
+    await screen.findByRole("textbox", { name: "Write in #general" });
+    if (board !== undefined) board.memberIds = ["usr_ana", "usr_iris"];
+    // The thread answers first; the fresh channel list comes only later.
+    const later = server.delay("listChannels");
+    await act(() => app.runtime.router.navigate({ to: `/workspace/${WS}/threads/msg_broot` }));
+    await waitFor(() => expect(server.calls.some((call) => call.method === "getThread")).toBe(true));
+    await act(async () => later.release());
+    expect(await screen.findByText("Agreed, quietly")).toBeDefined();
   });
 });
