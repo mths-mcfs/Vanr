@@ -45,8 +45,8 @@ test("memória, acesso e ambiente, em português", async () => {
     signedInAs: "usr_iris",
     languages,
   });
-  expect(await screen.findByRole("tab", { name: "Fatos e decisões (2)" })).toBeDefined();
-  expect(screen.getByRole("tab", { name: "Arquivadas (1)" })).toBeDefined();
+  expect(await screen.findByRole("tab", { name: "Registradas (2)" })).toBeDefined();
+  expect(screen.getByRole("tab", { name: "Guardadas (1)" })).toBeDefined();
   await app.user.click(screen.getByRole("tab", { name: "Acesso" }));
   expect(await screen.findByRole("list", { name: "Regras por canal" })).toBeDefined();
   expect(screen.getByText("Todas as conexões")).toBeDefined();

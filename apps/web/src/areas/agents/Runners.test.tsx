@@ -51,7 +51,7 @@ describe("a runner's page", () => {
     await app.user.type(name, "Studio");
     await app.user.click(screen.getByRole("button", { name: "Rename" }));
     expect(await screen.findByText("Runner renamed")).toBeDefined();
-    await app.user.click(screen.getByRole("button", { name: "Turn off Commands" }));
+    await app.user.click(screen.getByRole("button", { name: "Disable Commands" }));
     expect(await screen.findByText("Commands is off on this runner")).toBeDefined();
     expect(app.server.runnerWork.runners[0]?.access.tools.commands).toBe(false);
     await app.user.click(screen.getByRole("combobox", { name: "Move every agent to" }));

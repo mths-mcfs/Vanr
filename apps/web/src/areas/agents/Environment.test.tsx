@@ -9,7 +9,7 @@ describe("the agent's environment", () => {
     const app = await renderApp({ path: tab("agt_scout"), signedInAs: "usr_ana" });
     expect(await screen.findByText("Works on Studio Mac, which is online.")).toBeDefined();
     await chooseOption(app, screen.getByRole("combobox", { name: "Runner" }), "Shed box (offline)");
-    expect(await screen.findByText("The agent now works on Shed box")).toBeDefined();
+    expect(await screen.findByText("Its tools now run on Shed box")).toBeDefined();
     expect(app.server.runnerWork.targets.get("agt_scout")).toBe("rnr_shed");
     expect(await screen.findByText("Works on Shed box, which is offline.")).toBeDefined();
   });
@@ -59,10 +59,10 @@ describe("the agent's environment", () => {
     const app = await renderApp({ path: tab("agt_scout"), signedInAs: "usr_ana" });
     await screen.findByText("No sites on the list.");
     await app.user.type(screen.getByLabelText("Site"), "not a site");
-    expect(screen.getByText("Type a site such as example.com or *.example.com.")).toBeDefined();
+    expect(screen.getByText("That is not a domain, with or without *. in front.")).toBeDefined();
     await app.user.clear(screen.getByLabelText("Site"));
     await app.user.type(screen.getByLabelText("Site"), " Docs.Example.com ");
-    await app.user.click(screen.getByRole("button", { name: "Add site" }));
+    await app.user.click(screen.getByRole("button", { name: "Put on the list" }));
     expect(screen.getByRole("list", { name: "Sites" }).textContent).toContain("docs.example.com");
     expect(app.server.runnerWork.browser.get("agt_scout")).toBeUndefined();
     await app.user.type(screen.getByLabelText("Private network ranges"), "8.8.8.8/32");
@@ -111,7 +111,7 @@ describe("the agent's environment", () => {
     expect(await screen.findByText("Nobody is driving the agent's browser.")).toBeDefined();
     await app.user.click(screen.getByRole("button", { name: "Take over the browser" }));
     expect(await screen.findByText("You are driving the agent's browser.")).toBeDefined();
-    await app.user.click(screen.getByRole("button", { name: "Hand it back" }));
+    await app.user.click(screen.getByRole("button", { name: "Give control back" }));
     expect(await screen.findByText("Nobody is driving the agent's browser.")).toBeDefined();
   });
 
