@@ -295,11 +295,16 @@ function ThreadPage({ workspaceId, threadId }: { workspaceId: string; threadId: 
   // remount the clearing, which would forget it again, and loop.
   const forgotten = useRef<string | undefined>(undefined);
   if (missing) forgotten.current ??= unlistedIn.current ?? info.data?.channelId;
-  // A list that has the channel back reads the thread again if its last read failed while gone.
+  // A list that has the channel back reads the thread again, once, if its last read failed while gone;
+  // a read that fails again stays on the error with its retry.
   const listedAgain = unlistedIn.current !== null && !stillUnlisted;
+  const readOnce = useRef(false);
+  if (!listedAgain) readOnce.current = false;
   const readAgain = info.refetch;
   useEffect(() => {
-    if (listedAgain && info.isError) void readAgain();
+    if (!listedAgain || !info.isError || readOnce.current) return;
+    readOnce.current = true;
+    void readAgain();
   }, [listedAgain, info.isError, readAgain]);
   const channelId = missing ? undefined : info.data?.channelId;
   useChannelSubscription(channelId);
