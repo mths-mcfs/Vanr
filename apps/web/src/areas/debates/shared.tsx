@@ -1,10 +1,20 @@
 // What the debate screens share: the server's limits, the names of who sits at a table, who the
 // signed-in person is in a debate (waited on, steering it, part of it), the state a debate is in, and
 // what the person's role lets them see.
-import { useApiQuery } from "@vanr/client/react";
+import { type MutateOptions, useQueryClient } from "@tanstack/react-query";
+import type { ApiError, ArgsOf, MethodName, ResultOf } from "@vanr/client";
+import {
+  type ApiMutationOptions,
+  type KeyPrefix,
+  prefixKey,
+  useApiMutation,
+  useApiQuery,
+  useVanrClient,
+} from "@vanr/client/react";
 import { type ActorRef, can, type Debate, type DebateSpeaker } from "@vanr/contract";
-import type { WorkStatus } from "@vanr/ui";
+import { useToast, type WorkStatus } from "@vanr/ui";
 import { useCallback, useMemo, useRef } from "react";
+import { useErrorMessage } from "../../app/screens.tsx";
 import { useLocale, useMessages } from "../../i18n/react.tsx";
 import { useSession } from "../../session/react.tsx";
 
@@ -177,4 +187,45 @@ export function seatsOf(debate: Pick<Debate, "speakers" | "agentIds" | "userIds"
       .filter((id) => !seen.has(`person:${id}`))
       .map((id) => ({ type: "person" as const, id })),
   ];
+}
+
+/** The reads a change on one debate makes stale: its own and the list it shows in. */
+export function debateKeys(workspaceId: string, debateId: string): KeyPrefix[] {
+  return [
+    { method: "getDebate", args: { workspaceId, debateId } },
+    { method: "listDebates", args: { workspaceId } },
+  ];
+}
+
+/** Says a change went through, or why it didn't, and loads the debate again after a refusal. */
+export function useDebateOutcome(workspaceId: string, debateId: string) {
+  const toast = useToast();
+  const describe = useErrorMessage("debates");
+  const queries = useQueryClient();
+  const client = useVanrClient();
+  const refresh = () => {
+    for (const prefix of debateKeys(workspaceId, debateId))
+      void queries.invalidateQueries({ queryKey: prefixKey(client, prefix) });
+  };
+  return {
+    done: (title: string) => toast.push({ tone: "success", title }),
+    failed: (error: unknown) => {
+      toast.push({ tone: "danger", title: describe(error) });
+      // A 409 means someone else moved the debate first: show it as it is now.
+      refresh();
+    },
+    refresh,
+  };
+}
+
+/**
+ * A mutation that starts once per click: `fire` drops a second call made before the first settles,
+ * even within the same tick, when the pending flag has not reached the screen yet.
+ */
+export function useLatchedMutation<K extends MethodName>(method: K, options?: ApiMutationOptions<K>) {
+  const mutation = useApiMutation(method, options);
+  const once = useOnce();
+  const fire = (args: ArgsOf<K>, callbacks?: MutateOptions<ResultOf<K>, ApiError, ArgsOf<K>>) =>
+    once((done) => mutation.mutate(args, { ...callbacks, onSettled: done }));
+  return { ...mutation, fire };
 }

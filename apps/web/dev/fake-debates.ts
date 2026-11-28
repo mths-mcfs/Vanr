@@ -46,6 +46,17 @@ export class FakeDebates {
     this.picks = new Map();
   }
 
+  /** The blind pair: the synthesis first, then the lead agent's opening answer. */
+  pair(row: StoredDebate, pick: "a" | "b" | "tie" | null): T.DebateBlindReview {
+    const s = row.synthesis?.structured;
+    const opening = row.posts.find((post) => post.round === 0 && post.kind === "turn");
+    return {
+      a: [s?.decision, s?.summary].filter(Boolean).join("\n\n"),
+      b: [opening?.claimData?.answer, opening?.body].filter(Boolean).join("\n\n"),
+      pick,
+    };
+  }
+
   seed(): void {
     this.clear();
     const now = this.host.now().getTime();
@@ -118,8 +129,95 @@ export class FakeDebates {
         updatedAt: ago(24),
       }),
     ];
+    const paper = this.debates[0];
+    if (paper !== undefined) {
+      // The opening round closed: the agents speak under their letters, as an open debate shows them.
+      paper.posts = [
+        this.post("pst_p1", 0, null, "A", "Northpaper delivers in two days.", this.claim("Northpaper", 0.8)),
+        this.post("pst_p2", 0, null, "B", "Mill & Co is cheaper by a tenth.", this.claim("Mill & Co", 0.6)),
+        this.post(
+          "pst_p3",
+          0,
+          { type: "person", id: "usr_ana" },
+          null,
+          "I like the faster one.",
+          this.claim("Northpaper", null),
+        ),
+      ];
+      paper.track = {
+        roundLimit: [
+          {
+            round: 0,
+            posts: ["pst_p1", "pst_p2", "pst_p3"],
+            majority: this.majority([
+              ["Northpaper", 1],
+              ["Mill & Co", 1],
+            ]),
+          },
+        ],
+        synthesis: null,
+      };
+      paper.sealedCount = 1;
+    }
     const logo = this.debates[3];
-    if (logo !== undefined) logo.spent = 0.0123;
+    if (logo !== undefined) {
+      logo.spent = 0.0123;
+      const scout = { type: "agent" as const, id: "agt_scout" };
+      const ledger = { type: "agent" as const, id: "agt_ledger" };
+      logo.posts = [
+        this.post(
+          "pst_l1",
+          0,
+          scout,
+          "A",
+          "The round mark reads at any size.",
+          this.claim("Round mark", 0.7),
+        ),
+        this.post(
+          "pst_l2",
+          0,
+          ledger,
+          "B",
+          "The wordmark is clearer from the street.",
+          this.claim("Wordmark", 0.5),
+        ),
+        this.post("pst_l3", 1, scout, "A", "Still the round mark.", this.claim("Round mark", 0.8)),
+        this.post("pst_l4", 1, ledger, "B", "The street test convinced me.", {
+          ...this.claim("Round mark", 0.7),
+          changed: true,
+          reason: "It reads from across the road",
+        }),
+        this.post("pst_l5", 1, scout, "A", "Both agree on the round mark.", null, "synthesis"),
+      ];
+      const split = this.majority([
+        ["Round mark", 1],
+        ["Wordmark", 1],
+      ]);
+      const both = this.majority([["Round mark", 2]]);
+      logo.track = {
+        roundLimit: [
+          { round: 0, posts: ["pst_l1", "pst_l2"], majority: split },
+          { round: 1, posts: ["pst_l3", "pst_l4"], majority: both },
+        ],
+        synthesis: "pst_l5",
+      };
+      logo.synthesis = {
+        format: "plan",
+        revision: 1,
+        endReason: "unanimous",
+        baseline: split,
+        final: both,
+        structured: {
+          decision: "Use the round mark on the sign.",
+          summary: "Both agents ended on the round mark after the street test.",
+          agreements: ["It reads at any size"],
+          disagreements: [
+            { point: "Colour", sides: [{ position: "Keep it black", mustProve: "that it shows at night" }] },
+          ],
+          items: [{ title: "Order the sign", owner: "Scout" }, { title: "Tell the landlord" }],
+        },
+      };
+    }
   }
 
   /** A debate as the server would keep it, with the defaults of a fresh one. */
@@ -201,6 +299,38 @@ export class FakeDebates {
     return { answer, key: answer.toLowerCase(), confidence, changed: false, evidence: [], reason: "" };
   }
 
+  majority(groups: [string, number][]): T.DebateMajority {
+    const total = groups.reduce((sum, [, count]) => sum + count, 0);
+    const sorted = [...groups].sort((a, b) => b[1] - a[1]);
+    const top = sorted[0];
+    const winner = top !== undefined && (sorted[1] === undefined || sorted[1][1] < top[1]) ? top[0] : null;
+    return {
+      total,
+      tie: winner === null,
+      unanimous: sorted.length === 1,
+      winner,
+      winnerKey: winner?.toLowerCase() ?? null,
+      groups: sorted.map(([answer, count]) => ({
+        answer,
+        count,
+        key: answer.toLowerCase(),
+        meanConfidence: null,
+        members: [],
+      })),
+    };
+  }
+
+  /** Who steers: who opened, asked for or leads the debate, or who sets the workspace up. */
+  steers(scope: Scope, row: StoredDebate): boolean {
+    const me = scope.user.id;
+    return (
+      (row.createdBy.type === "person" && row.createdBy.id === me) ||
+      row.requesterUserId === me ||
+      row.leadUserId === me ||
+      can(scope.role, "configure")
+    );
+  }
+
   /** The server's rule: a debate without a channel, or of a channel the person reads, or one they take part in. */
   sees(scope: Scope, row: StoredDebate): boolean {
     if (row.workspaceId !== scope.workspaceId) return false;
@@ -244,7 +374,125 @@ export class FakeDebates {
       };
     const visible = (scope: Scope) => this.debates.filter((row) => this.sees(scope, row));
 
+    const withOne = (
+      handler: (scope: Scope, row: StoredDebate, params: Record<string, unknown>) => FilesReply,
+      host?: "host",
+    ) =>
+      within((scope, params) => {
+        const row = visible(scope).find((each) => each.id === params.debateId);
+        if (row === undefined) return missing();
+        if (host === "host" && !this.steers(scope, row))
+          return fail(403, "forbidden", "Only who opened the debate or an admin can do that");
+        return handler(scope, row, params);
+      });
+    const closed = (row: StoredDebate) => row.status === "done" || row.status === "canceled";
+    const changed = (scope: Scope, row: StoredDebate, status = 200) => {
+      row.updatedAt = this.host.now().toISOString();
+      this.host.emit(scope.workspaceId, { type: "debate.updated", debateId: row.id });
+      return reply(status, this.detail(scope, row));
+    };
+
     return {
+      createDebatePost: withOne((scope, row, params) => {
+        if (closed(row)) return fail(409, "debate.closed", "This debate is closed");
+        const body = typeof params.body === "string" ? params.body.trim() : "";
+        if (body === "" || body.length > 20_000) return invalid("A post has 1 to 20000 characters");
+        const me = { type: "person" as const, id: scope.user.id };
+        const turn =
+          row.status === "open" && row.phase !== "concluding" && row.waitingUserIds.includes(scope.user.id);
+        const answer = typeof params.answer === "string" ? params.answer : null;
+        const confidence = typeof params.confidence === "number" ? params.confidence : null;
+        const post = this.post(
+          this.host.id("pst"),
+          row.round,
+          me,
+          null,
+          body,
+          turn && answer !== null ? this.claim(answer, confidence) : null,
+          turn ? "speaker" : "comment",
+        );
+        if (turn) {
+          // The position stays sealed until the round closes.
+          row.sealedCount += 1;
+          row.waitingUserIds = row.waitingUserIds.filter((id) => id !== scope.user.id);
+          row.awaitedUserId = row.waitingUserIds[0] ?? null;
+          if (row.waitingUserIds.length === 0 && row.phase === "human_turn") row.phase = "debating";
+        } else row.posts.push(post);
+        this.host.emit(scope.workspaceId, { type: "debate.post_created", debateId: row.id, postId: post.id });
+        row.updatedAt = this.host.now().toISOString();
+        return reply(201, post);
+      }),
+      skipDebate: withOne((scope, row) => {
+        if (!(row.status === "open" && row.waitingUserIds.includes(scope.user.id)))
+          return fail(409, "debate.out_of_turn", "It isn't your round to answer");
+        row.waitingUserIds = row.waitingUserIds.filter((id) => id !== scope.user.id);
+        row.awaitedUserId = row.waitingUserIds[0] ?? null;
+        if (row.waitingUserIds.length === 0 && row.phase === "human_turn") row.phase = "debating";
+        return changed(scope, row);
+      }),
+      concludeDebate: withOne((scope, row) => {
+        if (closed(row)) return fail(409, "debate.closed", "This debate is closed");
+        row.status = "open";
+        row.phase = "concluding";
+        row.waitingUserIds = [];
+        row.awaitedUserId = null;
+        return changed(scope, row);
+      }, "host"),
+      cancelDebate: withOne((scope, row) => {
+        if (closed(row)) return fail(409, "debate.closed", "This debate is closed");
+        Object.assign(row, { status: "canceled", phase: null, waitingUserIds: [], awaitedUserId: null });
+        Object.assign(row, { anonymous: false, pseudonyms: {} });
+        return changed(scope, row);
+      }, "host"),
+      resumeDebate: withOne((scope, row) => {
+        if (row.status !== "stalled") return fail(409, "debate.not_stalled", "This debate is not stalled");
+        Object.assign(row, { status: "open", phase: "debating", stallInfo: null });
+        return changed(scope, row);
+      }, "host"),
+      setDebateVerdict: withOne((scope, row, params) => {
+        if (row.status !== "done") return fail(409, "debate.not_done", "The debate has no verdict yet");
+        const at = this.host.now().toISOString();
+        if (params.action === "accept" && row.verdictState?.state !== "accepted")
+          row.verdictState = { state: "accepted", acceptedAt: at, endorsedBy: scope.user.id };
+        else if (params.action === "revert") {
+          if (row.verdictState === null)
+            return fail(409, "debate.verdict_not_accepted", "Accept the verdict before reverting it");
+          if (row.verdictState.state === "accepted")
+            row.verdictState = {
+              ...row.verdictState,
+              state: "reverted",
+              revertedAt: at,
+              revertedBy: scope.user.id,
+            };
+        }
+        return changed(scope, row);
+      }, "host"),
+      createDebateIssue: withOne((_scope, row, params) => {
+        const items = Array.isArray(params.items) ? (params.items as { title: string }[]) : [];
+        if (items.length < 1 || items.length > 30) return invalid("Send 1 to 30 items");
+        const issues = items.map((item, index) => ({
+          id: this.host.id("iss"),
+          number: 100 + row.issues.length + index,
+          title: item.title,
+        }));
+        row.issues.push(...issues);
+        return reply(201, { numbers: issues.map((issue) => issue.number), issues });
+      }, "host"),
+      reviewDebate: withOne((scope, row) => {
+        if (row.status !== "done") return fail(409, "debate.not_done", "The debate has no verdict yet");
+        const pick = this.picks.get(`${row.id}/${scope.user.id}`) ?? null;
+        this.picks.set(`${row.id}/${scope.user.id}`, pick);
+        return reply(200, this.pair(row, pick));
+      }),
+      reviewDebatePickReview: withOne((scope, row, params) => {
+        const key = `${row.id}/${scope.user.id}`;
+        if (!this.picks.has(key))
+          return fail(409, "debate.review_not_started", "Open the blind review first");
+        const pick = params.pick === "a" || params.pick === "b" || params.pick === "tie" ? params.pick : null;
+        if (pick === null) return invalid("Pick a, b or tie");
+        this.picks.set(key, pick);
+        return reply(200, this.pair(row, pick));
+      }),
       listDebates: within((scope) =>
         reply(200, {
           debates: visible(scope)
