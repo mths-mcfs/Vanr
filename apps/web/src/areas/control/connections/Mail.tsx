@@ -508,6 +508,15 @@ function EditMailbox({
   const outcome = useOutcome();
   const latch = useLatch();
   const forget = useForgetOnLoss(workspaceId, READS);
+  // What the dialog opened with: a reload of the list meanwhile (someone else's change) is not this
+  // person's edit, so only a difference from these goes to the server.
+  const [opened] = useState(() => ({
+    label: account.label,
+    rules: Object.fromEntries(MAIL_ACTIONS.map((action) => [action, ruleOf(account, action)])) as Record<
+      MailAction,
+      Rule
+    >,
+  }));
   const [name, setName] = useState(account.label);
   const [password, setPassword] = useState("");
   const [rules, setRules] = useState<Record<MailAction, Rule>>(
@@ -522,7 +531,10 @@ function EditMailbox({
     invalidates: () => [{ method: "listMailAccounts" as const, args: { workspaceId } }],
   });
   const renewing = account.status === "reauth_required" && account.via === "imap";
-  const rulesChanged = MAIL_ACTIONS.some((action) => rules[action] !== ruleOf(account, action));
+  // A rule the person changed takes their choice; every other one stays as the server has it now.
+  const touched = (action: MailAction) => rules[action] !== opened.rules[action];
+  const rulesChanged = MAIL_ACTIONS.some(touched);
+  const ruleNow = (action: MailAction) => (touched(action) ? rules[action] : ruleOf(account, action));
   const ready = name.trim() !== "" && (!renewing || password !== "");
   return (
     <Dialog
@@ -550,11 +562,11 @@ function EditMailbox({
                   workspaceId,
                   accountId: account.id,
                   body: {
-                    label: name.trim(),
+                    ...(name.trim() !== opened.label && { label: name.trim() }),
                     // Only what changed goes: untouched rules never undo someone else's change.
                     ...(rulesChanged && {
-                      disabledActions: MAIL_ACTIONS.filter((action) => rules[action] === "off"),
-                      confirmActions: MAIL_ACTIONS.filter((action) => rules[action] === "ask"),
+                      disabledActions: MAIL_ACTIONS.filter((action) => ruleNow(action) === "off"),
+                      confirmActions: MAIL_ACTIONS.filter((action) => ruleNow(action) === "ask"),
                     }),
                     ...(password !== "" && { password }),
                   },

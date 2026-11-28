@@ -1,7 +1,7 @@
 // The Data sources section of the settings, against the fake server: Birchwood's mailboxes and
 // databases. Jonas is an admin there, Íris a member.
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { act, screen, within } from "@testing-library/react";
+import { act, fireEvent, screen, within } from "@testing-library/react";
 import type { FakeDatabase, FakeMailAccount } from "../../../../dev/fake-connections.ts";
 import { type App, chooseOption, newServer, renderApp } from "../../../../test/app.tsx";
 
@@ -316,6 +316,105 @@ describe("mailboxes", () => {
     );
   });
 
+  test("a rule another admin set while the dialog was open survives a save of other things", async () => {
+    const server = newServer();
+    server.connections.mail.push(mailbox());
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const list = await within(await boxes()).findByRole("list", { name: "Mailboxes" });
+    await app.user.click(
+      within(row(list, "Orders")).getByRole("button", { name: "Edit orders@birchwood.example" }),
+    );
+    const form = await screen.findByRole("form", { name: "Edit orders@birchwood.example" });
+    // Meanwhile someone else stops agents from sending, and the list reloads with the dialog open.
+    const account = server.connections.mail[0];
+    if (account === undefined) throw new Error("no mailbox");
+    account.disabledActions = ["send"];
+    await act(async () => {
+      await app.runtime.queryClient.refetchQueries();
+    });
+    await app.user.type(within(form).getByLabelText(/^New password/), "fresh-pass");
+    await app.user.click(within(form).getByRole("button", { name: "Save mailbox" }));
+    expect(await screen.findByText("orders@birchwood.example is saved.")).toBeDefined();
+    expect(server.connections.mail[0]?.disabledActions).toEqual(["send"]);
+    // A rule this person changes goes, and the other admin's stays.
+    await app.user.click(
+      within(row(list, "Orders")).getByRole("button", { name: "Edit orders@birchwood.example" }),
+    );
+    const again = await screen.findByRole("form", { name: "Edit orders@birchwood.example" });
+    account.disabledActions = ["send", "forward"];
+    await act(async () => {
+      await app.runtime.queryClient.refetchQueries();
+    });
+    await chooseOption(app, within(again).getByRole("combobox", { name: "Rule for: Delete" }), "Never");
+    await app.user.click(within(again).getByRole("button", { name: "Save mailbox" }));
+    expect((await screen.findAllByText("orders@birchwood.example is saved.")).length).toBeGreaterThan(0);
+    expect([...(server.connections.mail[0]?.disabledActions ?? [])].sort()).toEqual([
+      "delete",
+      "forward",
+      "send",
+    ]);
+  });
+
+  test("a refusal from the mail server's network rule says what it is about", async () => {
+    const server = newServer();
+    server.connections.plaintextAllowed = false;
+    server.connections.blockedHosts.add("imap.internal");
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    await app.user.click(within(await boxes()).getByRole("button", { name: "Connect a mailbox" }));
+    const form = await screen.findByRole("form", { name: "Connect with a password" });
+    await chooseOption(app, within(form).getByRole("combobox", { name: "Provider" }), "Another provider");
+    await app.user.type(within(form).getByLabelText(/^Email address/), "desk@birchwood.example");
+    await app.user.type(within(form).getByLabelText(/^App password/), "secret-1");
+    await app.user.type(within(form).getByLabelText(/^Incoming server/), "imap.birchwood.example");
+    await app.user.type(within(form).getByLabelText(/^Outgoing server/), "smtp.birchwood.example");
+    const imapPort = within(form).getByLabelText(/^IMAP port/);
+    await app.user.clear(imapPort);
+    await app.user.type(imapPort, "143");
+    await app.user.click(within(form).getByRole("button", { name: "Connect" }));
+    expect((await within(form).findByRole("alert")).textContent).toBe(
+      "This server only connects to mail servers over an encrypted (TLS) connection. Use the encrypted ports, such as 993 and 465.",
+    );
+    const imapHost = within(form).getByLabelText(/^Incoming server/);
+    await app.user.clear(imapHost);
+    await app.user.type(imapHost, "imap.internal");
+    await app.user.click(within(form).getByRole("button", { name: "Connect" }));
+    expect(
+      await within(form).findByText(
+        "That mail server is on a private network, which this server does not allow.",
+      ),
+    ).toBeDefined();
+  });
+
+  test("a hosted sign-in that can't start says so", async () => {
+    const server = newServer();
+    server.connections.hostedMailDown = true;
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    await app.user.click(within(await boxes()).getByRole("button", { name: "Connect a mailbox" }));
+    await app.user.click(await screen.findByRole("button", { name: "Sign in with Gmail" }));
+    expect(
+      await screen.findByText("The sign-in with the provider could not start. Try again in a moment."),
+    ).toBeDefined();
+    expect(left).toEqual([]);
+  });
+
+  test("two quick presses on Disconnect remove the mailbox once", async () => {
+    const server = newServer();
+    server.connections.mail.push(mailbox());
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const list = await within(await boxes()).findByRole("list", { name: "Mailboxes" });
+    await app.user.click(
+      within(row(list, "Orders")).getByRole("button", { name: "Disconnect orders@birchwood.example" }),
+    );
+    const confirm = await screen.findByRole("alertdialog", { name: "Disconnect orders@birchwood.example?" });
+    const yes = within(confirm).getByRole("button", { name: "Disconnect" });
+    await act(async () => {
+      fireEvent.click(yes);
+      fireEvent.click(yes);
+    });
+    expect(await screen.findByText("orders@birchwood.example is disconnected.")).toBeDefined();
+    expect(app.server.calls.filter((call) => call.method === "deleteMailAccount").length).toBe(1);
+  });
+
   test("disconnecting asks first", async () => {
     const server = newServer();
     server.connections.mail.push(mailbox());
@@ -455,6 +554,62 @@ describe("databases", () => {
     expect(
       app.server.calls.find((call) => call.method === "updateDatabase")?.params.disabledActions,
     ).toBeUndefined();
+  });
+
+  test("a database action another admin turned off while the dialog was open stays off", async () => {
+    const server = newServer();
+    server.connections.databases.push(database());
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    const list = await within(await block()).findByRole("list", { name: "Databases" });
+    await app.user.click(within(row(list, "Shop")).getByRole("button", { name: "Edit Shop" }));
+    const form = await screen.findByRole("form", { name: "Edit Shop" });
+    const shop = server.connections.databases[0];
+    if (shop === undefined) throw new Error("no database");
+    shop.disabledActions = ["query"];
+    await act(async () => {
+      await app.runtime.queryClient.refetchQueries();
+    });
+    await app.user.click(within(form).getByRole("checkbox", { name: "List the tables" }));
+    await app.user.click(within(form).getByRole("button", { name: "Save database" }));
+    expect(await screen.findByText("Shop is saved.")).toBeDefined();
+    expect([...(server.connections.databases[0]?.disabledActions ?? [])].sort()).toEqual(["query", "tables"]);
+  });
+
+  test("an unencrypted connection the server refuses is explained for a database", async () => {
+    const server = newServer();
+    server.connections.plaintextAllowed = false;
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas", server });
+    await app.user.click(within(await block()).getByRole("button", { name: "Connect a database" }));
+    const form = await screen.findByRole("form", { name: "Connect a database" });
+    await app.user.type(
+      within(form).getByLabelText(/^Connection string/),
+      "postgres://r:p@db.shop.example/shop",
+    );
+    await chooseOption(
+      app,
+      within(form).getByRole("combobox", { name: "Encryption" }),
+      "Not encrypted (only where this server allows it)",
+    );
+    await app.user.click(within(form).getByRole("button", { name: "Connect" }));
+    expect((await within(form).findByRole("alert")).textContent).toBe(
+      "This server only connects to databases over an encrypted (TLS) connection. Pick Encrypted.",
+    );
+  });
+
+  test("two quick presses connect a database once", async () => {
+    const app = await renderApp({ path: PATH, signedInAs: "usr_jonas" });
+    await app.user.click(within(await block()).getByRole("button", { name: "Connect a database" }));
+    const form = await screen.findByRole("form", { name: "Connect a database" });
+    await app.user.type(
+      within(form).getByLabelText(/^Connection string/),
+      "postgres://r:p@db.shop.example/shop",
+    );
+    await act(async () => {
+      fireEvent.submit(form);
+      fireEvent.submit(form);
+    });
+    expect(await screen.findByText("shop @ db.shop.example is connected.")).toBeDefined();
+    expect(app.server.calls.filter((call) => call.method === "createDatabase").length).toBe(1);
   });
 
   test("a refused login says why in the dialog", async () => {

@@ -3,6 +3,7 @@
 // the server's certificate (`verify-full`) is a choice per connection, and no encryption at all only works
 // where this server allows it. Vanr checks the connection when it is saved, says whether the login could
 // change data (agents still only read) and suggests columns to hide. The password is never shown back.
+import { isApiError } from "@vanr/client";
 import { useApiMutation, useApiQuery } from "@vanr/client/react";
 import type { DatabaseConnectInput, DatabaseConnection, DatabaseProvider } from "@vanr/contract";
 import {
@@ -219,6 +220,17 @@ export function Databases({ workspaceId }: { workspaceId: string }) {
   );
 }
 
+/**
+ * The text of a refusal from the database side: the network rule's "TLS only" is about an encrypted
+ * Postgres connection here, not about an https:// address as for connectors.
+ */
+function useDescribeDatabase() {
+  const t = useMessages("control");
+  const describe = useErrorMessage("control");
+  return (error: unknown) =>
+    isApiError(error) && error.rawCode === "tls_required" ? t("db.tlsRefused") : describe(error);
+}
+
 /** The sslmode a connection string asks for, when it names one of the three. */
 export function sslmodeIn(text: string): Tls | undefined {
   const query = text.trim().split("?")[1];
@@ -242,7 +254,7 @@ function AddDatabase({
 }) {
   const t = useMessages("control");
   const common = useMessages("common");
-  const describe = useErrorMessage("control");
+  const describe = useDescribeDatabase();
   const outcome = useOutcome();
   const latch = useLatch();
   const forget = useForgetOnLoss(workspaceId, READS);
@@ -373,7 +385,7 @@ function AddDatabase({
                   type="password"
                   value={url}
                   maxLength={LIMIT.url}
-                  autoComplete="off"
+                  autoComplete="new-password"
                   spellCheck={false}
                   placeholder="postgres://"
                   disabled={connect.isPending}
@@ -494,10 +506,13 @@ function EditDatabase({
 }) {
   const t = useMessages("control");
   const common = useMessages("common");
-  const describe = useErrorMessage("control");
+  const describe = useDescribeDatabase();
   const outcome = useOutcome();
   const latch = useLatch();
   const forget = useForgetOnLoss(workspaceId, READS);
+  // What the dialog opened with: a reload of the list meanwhile (someone else's change) is not this
+  // person's edit, so only a difference from these goes to the server.
+  const [opened] = useState(() => ({ label: connection.label, off: new Set(connection.disabledActions) }));
   const [name, setName] = useState(connection.label);
   const [password, setPassword] = useState("");
   const [off, setOff] = useState<ReadonlySet<string>>(() => new Set(connection.disabledActions));
@@ -507,8 +522,11 @@ function EditDatabase({
   });
   const renewing = connection.status === "reauth_required";
   const ready = name.trim() !== "" && (!renewing || password !== "");
-  const actionsChanged = DB_ACTIONS.some(
-    (action) => off.has(action) !== connection.disabledActions.includes(action),
+  // An action the person toggled takes their choice; every other one stays as the server has it now.
+  const touched = (action: DbAction) => off.has(action) !== opened.off.has(action);
+  const actionsChanged = DB_ACTIONS.some(touched);
+  const nextOff = DB_ACTIONS.filter((action) =>
+    touched(action) ? off.has(action) : connection.disabledActions.includes(action),
   );
   const toggle = (action: DbAction, allowed: boolean) => {
     const next = new Set(off);
@@ -542,11 +560,9 @@ function EditDatabase({
                   workspaceId,
                   databaseId: connection.id,
                   body: {
-                    ...(name.trim() !== connection.label && { label: name.trim() }),
+                    ...(name.trim() !== opened.label && { label: name.trim() }),
                     // Only what changed goes: an untouched list never undoes someone else's change.
-                    ...(actionsChanged && {
-                      disabledActions: DB_ACTIONS.filter((action) => off.has(action)),
-                    }),
+                    ...(actionsChanged && { disabledActions: nextOff }),
                     ...(password !== "" && { password }),
                   },
                 })

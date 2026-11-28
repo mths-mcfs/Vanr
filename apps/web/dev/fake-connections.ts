@@ -85,6 +85,12 @@ export class FakeConnections {
   installations: FakeInstallation[] = [];
   /** Whether this server has a GitHub App set up. */
   githubInstallable = true;
+  /** Like an installation that allows plain-text connections (off in production). */
+  plaintextAllowed = true;
+  /** Hosts on a private network, which the installation refuses. */
+  blockedHosts = new Set<string>();
+  /** The hosted mail provider fails to start a sign-in. */
+  hostedMailDown = false;
   /** Addresses that answer like a server that wants a key, or a sign-in. */
   keyServers = new Set<string>();
   oauthServers = new Set<string>();
@@ -98,6 +104,9 @@ export class FakeConnections {
     this.installations = [];
     this.githubInstallable = true;
     this.keyServers = new Set();
+    this.plaintextAllowed = true;
+    this.blockedHosts = new Set();
+    this.hostedMailDown = false;
     this.oauthServers = new Set();
   }
 
@@ -151,6 +160,16 @@ export class FakeConnections {
         if (preset === "other" && (params.imapHost === undefined || params.smtpHost === undefined)) {
           return fail(400, "mail.servers_required", "Enter the IMAP and SMTP servers");
         }
+        if (
+          this.blockedHosts.has(text(params.imapHost) ?? "") ||
+          this.blockedHosts.has(text(params.smtpHost) ?? "")
+        ) {
+          return fail(400, "mail.blocked_host", "That address is on a private network");
+        }
+        // 143 is IMAP without TLS: refused where the installation only connects over TLS.
+        if (!this.plaintextAllowed && params.imapPort === 143) {
+          return fail(400, "mail.tls_required", "This installation only connects to servers over TLS");
+        }
         if (text(params.password) === "wrong-password") {
           return fail(400, "mail.auth", "The mail server rejected the password");
         }
@@ -178,6 +197,7 @@ export class FakeConnections {
         if (provider === undefined || !FAKE_MAIL_PROVIDERS.composio.some((each) => each === provider)) {
           return fail(400, "mail.composio_unavailable", "Composio is not set up on this server");
         }
+        if (this.hostedMailDown) return fail(502, "mail.composio_failed", "Could not start the connection");
         return reply(200, {
           accountId: this.host.id("mail"),
           redirectUrl: `https://${provider}.example/consent`,
@@ -243,6 +263,11 @@ export class FakeConnections {
         if (!host || !database || !username || password === undefined) {
           return fail(400, "database.fields_required", "Enter host, database, user and password");
         }
+        if (!this.plaintextAllowed && sslmode === "disable") {
+          return fail(400, "tls_required", "This installation only connects to servers over TLS");
+        }
+        if (this.blockedHosts.has(host))
+          return fail(400, "blocked_host", "That address is on a private network");
         if (password === "wrong-password") {
           return fail(400, "database.auth", "The database rejected the user or password");
         }
